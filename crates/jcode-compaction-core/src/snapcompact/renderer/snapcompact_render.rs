@@ -331,7 +331,7 @@ const fn is_wide(cp: u32) -> bool {
 /// for the zero-width dim toggles, two for wide code points when the shape uses
 /// a narrow bitmap cell (so CJK draws full-width through Silver), one
 /// otherwise.
-const fn cell_units(code: u32, wide_cells: bool) -> usize {
+pub(crate) const fn cell_units(code: u32, wide_cells: bool) -> usize {
     match code {
         DIM_ON | DIM_OFF => 0,
         _ if wide_cells && is_wide(code) => 2,

@@ -316,14 +316,14 @@ impl Shape {
         self.name
     }
 
-    /// Approximate characters per frame.
+    /// Number of cells in a single-column frame.
     pub fn chars_per_frame(&self) -> u32 {
-        self.frame_size / self.cell_width.max(1)
+        (self.frame_size / self.cell_width.max(1)).saturating_mul(self.rows_per_frame())
     }
 
     /// Approximate rows per frame.
     pub fn rows_per_frame(&self) -> u32 {
-        self.frame_size / self.cell_height.max(1)
+        self.frame_size / self.cell_height.max(1) / self.line_repeat.max(1)
     }
 }
 
@@ -579,12 +579,10 @@ pub fn compact(
         .shape
         .clone()
         .unwrap_or_else(|| resolve_shape(&options.model_id));
-    let chars_per_frame = shape.chars_per_frame() as usize;
-    let frames = chunk_into_frames(
-        &prep.bounded_text,
-        chars_per_frame,
-        options.max_frames as usize,
-    );
+    if shape.columns != 1 {
+        return Err("snapcompact multi-column pagination is not implemented".into());
+    }
+    let frames = chunk_into_frames(&prep.bounded_text, &shape, options.max_frames as usize);
     if !prep.remaining_text.is_empty()
         || frames.last().map_or(0, |frame| frame.source_end) != prep.bounded_text.chars().count()
     {
@@ -613,23 +611,40 @@ pub fn compact(
     })
 }
 
-fn chunk_into_frames(text: &str, chars_per_frame: usize, max_frames: usize) -> Vec<FrameRange> {
-    let chars: Vec<char> = text.chars().collect();
+fn chunk_into_frames(text: &str, shape: &Shape, max_frames: usize) -> Vec<FrameRange> {
+    let cols = (shape.frame_size / shape.cell_width.max(1)) as usize;
+    let capacity = shape.chars_per_frame() as usize;
     let mut out = Vec::new();
-    if chars_per_frame == 0 || chars.is_empty() || max_frames == 0 {
+    if cols == 0 || capacity == 0 || max_frames == 0 {
         return out;
     }
     let mut start = 0usize;
-    let mut idx: u32 = 0;
-    while start < chars.len() && idx < max_frames as u32 {
-        let end = (start + chars_per_frame).min(chars.len());
+    let mut cursor = 0usize;
+    let mut end = 0usize;
+    for ch in text.chars() {
+        let width = renderer::snapcompact_render::cell_units(ch as u32, shape.font != Font::Silver);
+        let pad = usize::from(width == 2 && cols >= 2 && cursor % cols == cols - 1);
+        if cursor + pad + width > capacity {
+            if end == start || out.len() + 1 >= max_frames {
+                break;
+            }
+            out.push(FrameRange {
+                index: out.len() as u32,
+                source_start: start,
+                source_end: end,
+            });
+            start = end;
+            cursor = 0;
+        }
+        cursor += usize::from(width == 2 && cols >= 2 && cursor % cols == cols - 1) + width;
+        end += 1;
+    }
+    if end > start && out.len() < max_frames {
         out.push(FrameRange {
-            index: idx,
+            index: out.len() as u32,
             source_start: start,
             source_end: end,
         });
-        start = end;
-        idx += 1;
     }
     out
 }
@@ -649,6 +664,27 @@ fn render_lead_in(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shape_capacity_matches_grid_geometry() {
+        let shape = super::resolve_shape("claude");
+        assert_eq!(shape.chars_per_frame(), (1568 / 11) * (1568 / 16));
+        let repeat = super::SHAPES.iter().find(|s| s.name == "8x8r-bw").unwrap();
+        assert_eq!(repeat.chars_per_frame(), (1568 / 8) * (1568 / 8 / 2));
+    }
+
+    #[test]
+    fn pagination_counts_wide_cells_and_row_padding() {
+        let mut shape = super::resolve_shape("claude");
+        shape.frame_size = 32;
+        shape.cell_width = 8;
+        shape.cell_height = 8;
+        let text = "abc界".repeat(4);
+        let ranges = super::chunk_into_frames(&text, &shape, 10);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0].source_end, 12);
+        assert_eq!(ranges[1].source_end, 16);
+    }
+
     #[test]
     fn compact_rejects_unrendered_tail() {
         let prep = super::prepare(&"x".repeat(100), 1000, 1000);
@@ -738,7 +774,7 @@ mod tests {
     fn chars_per_frame_scales_with_frame_size_and_cell() {
         // 11on16-bw: 1568px / 11 cell_width.
         let s = lookup_owned("11on16-bw").unwrap();
-        assert_eq!(s.chars_per_frame(), 1568 / 11);
+        assert_eq!(s.chars_per_frame(), (1568 / 11) * (1568 / 16));
     }
 
     #[test]
