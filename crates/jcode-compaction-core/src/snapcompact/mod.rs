@@ -414,6 +414,29 @@ pub struct CompactPreparation {
     pub remaining_text: String,
 }
 
+/// Prepare structured conversation history, retaining a previous archive when
+/// compacting again. Exceeding the text limit is reported by `compact`.
+pub fn prepare_messages(
+    messages: &[jcode_message_types::Message],
+    previous_archive: Option<&str>,
+    text_limit: usize,
+) -> Result<CompactPreparation, String> {
+    let serialized = serialize::serialize_messages(messages)?;
+    let fresh = normalize(&serialized);
+    let text = match previous_archive.filter(|text| !text.is_empty()) {
+        Some(previous) if !fresh.is_empty() => format!("{previous}█{fresh}"),
+        Some(previous) => previous.to_string(),
+        None => fresh,
+    };
+    let bounded_text = bounded_slice(&text, text_limit);
+    let remaining_text = text.chars().skip(bounded_text.chars().count()).collect();
+    Ok(CompactPreparation {
+        text,
+        bounded_text,
+        remaining_text,
+    })
+}
+
 /// Render the conversation text into a serializable compact envelope.
 pub fn prepare(input: &str, tool_result_max_chars: usize, text_limit: usize) -> CompactPreparation {
     let text = serialize_conversation(input, tool_result_max_chars);
@@ -665,6 +688,28 @@ fn render_lead_in(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn prepare_messages_preserves_previous_archive_and_normalizes_turns() {
+        let messages = [jcode_message_types::Message::user("new\nturn")];
+        let prepared = super::prepare_messages(&messages, Some("old archive"), 100).unwrap();
+        assert_eq!(prepared.text, "old archive█¶user:new█turn");
+        assert_eq!(prepared.bounded_text, prepared.text);
+        assert!(prepared.remaining_text.is_empty());
+    }
+
+    #[test]
+    fn identical_input_produces_identical_png_bytes() {
+        let prep = super::prepare("User: A durable early detail\nAssistant: Noted", 2000, 2000);
+        let options = super::CompactOptions::default();
+        let first = super::compact(&prep, &options).unwrap();
+        let second = super::compact(&prep, &options).unwrap();
+        assert_eq!(first.frames.len(), second.frames.len());
+        assert!(!first.frames.is_empty());
+        for (left, right) in first.frames.iter().zip(&second.frames) {
+            assert_eq!(left.bytes, right.bytes);
+        }
+    }
+
     #[test]
     fn shape_capacity_matches_grid_geometry() {
         let shape = super::resolve_shape("claude");
