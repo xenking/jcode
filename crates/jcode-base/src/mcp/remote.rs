@@ -53,6 +53,9 @@ pub(super) struct RemoteState {
     bearer: std::sync::RwLock<Option<String>>,
     session_id: std::sync::RwLock<Option<String>>,
     protocol_version: std::sync::RwLock<Option<String>>,
+    /// True when speaking a stateless revision (2026-07-28+): every request
+    /// carries `_meta` protocol fields plus mirrored `Mcp-Method`/`Mcp-Name`.
+    stateless: AtomicBool,
     /// Legacy SSE: the POST endpoint announced by the server.
     post_endpoint: std::sync::RwLock<Option<reqwest::Url>>,
     pending: Pending,
@@ -326,6 +329,11 @@ impl RemoteConnection {
             .unwrap_or_else(|p| p.into_inner()) = Some(version.to_string());
     }
 
+    /// Switch between the stateless (2026-07-28+) and initialize-based eras.
+    pub(super) fn set_stateless(&self, stateless: bool) {
+        self.state.stateless.store(stateless, Ordering::SeqCst);
+    }
+
     /// Terminate the session (best effort) and stop background tasks.
     pub(super) async fn shutdown(&mut self) {
         // Stop and reap workers first. Their JoinSets own every HTTP request,
@@ -454,6 +462,7 @@ pub(super) async fn start(
         bearer: std::sync::RwLock::new(bearer),
         session_id: std::sync::RwLock::new(None),
         protocol_version: std::sync::RwLock::new(None),
+        stateless: AtomicBool::new(false),
         post_endpoint: std::sync::RwLock::new(None),
         pending,
         closed,
@@ -593,13 +602,107 @@ async fn post_message(state: Arc<RemoteState>, body: String, info: Outbound, leg
     }
 }
 
+/// Encode a value for `Mcp-Name`/`Mcp-Param-*` per the 2026-07-28 Value
+/// Encoding rules: plain visible ASCII as-is, anything else Base64-wrapped.
+pub(super) fn encode_header_value(value: &str) -> String {
+    use base64::Engine as _;
+    let plain = !value.is_empty()
+        && value.bytes().all(|b| (0x20..=0x7e).contains(&b))
+        && value.trim() == value
+        && !(value.starts_with("=?base64?") && value.ends_with("?="));
+    if plain {
+        value.to_string()
+    } else {
+        format!(
+            "=?base64?{}?=",
+            base64::engine::general_purpose::STANDARD.encode(value)
+        )
+    }
+}
+
+type MirroredHeaders = Vec<(&'static str, String)>;
+
+/// For stateless revisions, add the per-request `_meta` protocol fields to a
+/// JSON-RPC request body and return the mirrored request headers.
+fn stateless_envelope(
+    state: &RemoteState,
+    body: &str,
+) -> std::result::Result<(String, MirroredHeaders), String> {
+    if !state.stateless.load(Ordering::SeqCst) {
+        return Ok((body.to_string(), Vec::new()));
+    }
+    let version = state
+        .protocol_version
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+        .ok_or_else(|| "stateless MCP request without a protocol version".to_string())?;
+    let mut value: Value =
+        serde_json::from_str(body).map_err(|err| format!("invalid outbound JSON-RPC: {err}"))?;
+    let Some(method) = value
+        .get("method")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return Ok((body.to_string(), Vec::new()));
+    };
+    let mut headers = vec![("mcp-method", method.clone())];
+    if value.get("id").is_some() {
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| "outbound JSON-RPC is not an object".to_string())?;
+        let params = object
+            .entry("params")
+            .or_insert_with(|| Value::Object(Default::default()));
+        if params.is_null() {
+            *params = Value::Object(Default::default());
+        }
+        let params = params
+            .as_object_mut()
+            .ok_or_else(|| "outbound JSON-RPC params are not an object".to_string())?;
+        let name_key = match method.as_str() {
+            "tools/call" | "prompts/get" => Some("name"),
+            "resources/read" => Some("uri"),
+            _ => None,
+        };
+        if let Some(name) = name_key
+            .and_then(|key| params.get(key))
+            .and_then(Value::as_str)
+        {
+            headers.push(("mcp-name", encode_header_value(name)));
+        }
+        let meta = params
+            .entry("_meta")
+            .or_insert_with(|| Value::Object(Default::default()));
+        if let Some(meta) = meta.as_object_mut() {
+            meta.insert(
+                "io.modelcontextprotocol/protocolVersion".into(),
+                Value::String(version),
+            );
+            meta.insert(
+                "io.modelcontextprotocol/clientCapabilities".into(),
+                Value::Object(Default::default()),
+            );
+            meta.insert(
+                "io.modelcontextprotocol/clientInfo".into(),
+                serde_json::json!({"name":"jcode","version":jcode_build_meta::pkg_version()}),
+            );
+        }
+    }
+    Ok((value.to_string(), headers))
+}
+
 async fn send_post(
     state: &RemoteState,
     url: reqwest::Url,
     body: &str,
+    extra_headers: &[(&'static str, String)],
 ) -> reqwest::Result<reqwest::Response> {
-    state
-        .request(reqwest::Method::POST, url)
+    let mut builder = state.request(reqwest::Method::POST, url);
+    for (name, value) in extra_headers {
+        builder = builder.header(*name, value);
+    }
+    builder
         .header(CONTENT_TYPE, "application/json")
         .header(ACCEPT, "application/json, text/event-stream")
         .body(body.to_string())
@@ -613,11 +716,14 @@ async fn streamable_post_inner(
     info: &Outbound,
 ) -> std::result::Result<(), String> {
     let is_initialize = info.method.as_deref() == Some("initialize");
+    let (body, extra_headers) = stateless_envelope(state, body)?;
+    let body = body.as_str();
     let send = |state: &Arc<RemoteState>| {
         let url = state.url.clone();
         let body = body.to_string();
         let state = Arc::clone(state);
-        async move { send_post(&state, url, &body).await }
+        let extra = extra_headers.clone();
+        async move { send_post(&state, url, &body, &extra).await }
     };
 
     let failed = state.bearer_token();
@@ -922,13 +1028,13 @@ async fn sse_post_inner(
         .clone()
         .ok_or_else(|| "MCP SSE connection has no endpoint".to_string())?;
     let failed = state.bearer_token();
-    let mut response = send_post(state, endpoint.clone(), body)
+    let mut response = send_post(state, endpoint.clone(), body, &[])
         .await
         .map_err(|err| format!("MCP HTTP request failed: {}", err.without_url()))?;
     if response.status() == StatusCode::UNAUTHORIZED
         && state.recover_from_unauthorized(failed).await
     {
-        response = send_post(state, endpoint, body)
+        response = send_post(state, endpoint, body, &[])
             .await
             .map_err(|err| format!("MCP HTTP request failed: {}", err.without_url()))?;
     }
