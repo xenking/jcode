@@ -2497,12 +2497,43 @@ impl BridgeState {
                         .collect(),
                 }
             }
-            // Compaction is scheduled, not performed inline, and the daemon
-            // reports refusal via `success: false` with a reason rather than
-            // an error frame. Relayed as a real error so a client is not told
-            // "done" about work that never happened.
+            // A completed compaction is a session event, not the request reply.
+            "compaction" => {
+                let before = event["pre_tokens"]
+                    .as_u64()
+                    .map_or_else(|| "unknown".to_string(), |n| n.to_string());
+                let after = event["post_tokens"]
+                    .as_u64()
+                    .map_or_else(|| "unknown".to_string(), |n| n.to_string());
+                vec![ServerFrame::event(ApiEvent::BackgroundProgress {
+                    session_id: session(self),
+                    task_id: "context-compaction".into(),
+                    label: "Context compaction".into(),
+                    percent: Some(100.0),
+                    summary: match event["messages_compacted"].as_u64() {
+                        Some(count) => format!("Completed: {before} → {after} tokens, {count} messages summarized"),
+                        None => format!("Completed: {before} → {after} tokens"),
+                    },
+                    done: true,
+                })]
+            }
+            // Compaction is scheduled asynchronously. Refusal is a request
+            // error; id zero is an unsolicited background failure.
             "compact_result" => {
                 let id = event["id"].as_u64().unwrap_or(0);
+                if id == 0 && event["success"].as_bool() == Some(false) {
+                    return vec![ServerFrame::event(ApiEvent::BackgroundProgress {
+                        session_id: session(self),
+                        task_id: "context-compaction".into(),
+                        label: "Context compaction".into(),
+                        percent: None,
+                        summary: event["message"]
+                            .as_str()
+                            .unwrap_or("Compaction failed")
+                            .to_string(),
+                        done: true,
+                    })];
+                }
                 let Some(api_id) = self.take_simple(id, SimpleKind::Compact) else {
                     return vec![];
                 };

@@ -172,10 +172,25 @@ fn compaction_server_event(event: crate::compaction::CompactionEvent) -> ServerE
 }
 
 async fn poll_agent_compaction_completion(agent: Arc<Mutex<Agent>>) -> Option<ServerEvent> {
-    let mut agent_guard = agent.lock().await;
-    agent_guard
-        .poll_compaction_completion_event()
-        .map(compaction_server_event)
+    // CompactionFinished is published from inside the worker, just before its
+    // JoinHandle becomes finished. The first poll can therefore be too early.
+    loop {
+        let (event, error, pending) = agent.lock().await.poll_compaction_status();
+        if let Some(event) = event {
+            return Some(compaction_server_event(event));
+        }
+        if let Some(error) = error {
+            return Some(ServerEvent::CompactResult {
+                id: 0,
+                success: false,
+                message: format!("Compaction failed: {error}"),
+            });
+        }
+        if !pending {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 async fn refresh_session_control_handle(

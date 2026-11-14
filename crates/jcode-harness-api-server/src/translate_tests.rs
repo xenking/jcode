@@ -1865,6 +1865,31 @@ fn a_scheduled_compaction_reports_its_status() {
     }
 }
 
+#[test]
+fn compaction_completion_is_forwarded_as_progress() {
+    let mut state = state_with_session();
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "compaction", "trigger": "manual", "pre_tokens": 10000,
+        "post_tokens": 4000, "tokens_saved": 6000, "duration_ms": 20,
+        "messages_compacted": 8
+    }));
+    assert!(frames.iter().any(|frame| matches!(&frame.event,
+        ApiEvent::BackgroundProgress { summary, done: true, .. }
+            if summary.contains("10000") && summary.contains("4000"))));
+}
+
+#[test]
+fn background_compaction_error_is_forwarded_as_finished_progress() {
+    let mut state = state_with_session();
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "compact_result", "id": 0, "success": false,
+        "message": "Compaction failed: provider unavailable"
+    }));
+    assert!(frames.iter().any(|frame| matches!(&frame.event,
+        ApiEvent::BackgroundProgress { summary, done: true, .. }
+            if summary.contains("provider unavailable"))));
+}
+
 /// Saving forwards the flag and label so the daemon can title the session.
 #[test]
 fn set_session_saved_forwards_flag_and_label() {

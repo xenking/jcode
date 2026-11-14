@@ -303,12 +303,19 @@ impl App {
         }
         let provider_messages = self.materialized_provider_messages();
         let compaction = self.registry.compaction();
-        if let Ok(mut manager) = compaction.try_write()
-            && let Some(event) = manager.poll_compaction_event_with(&provider_messages)
-        {
-            self.sync_session_compaction_state_from_manager(&manager);
-            self.handle_compaction_event(event);
-            return true;
+        if let Ok(mut manager) = compaction.try_write() {
+            if let Some(event) = manager.poll_compaction_event_with(&provider_messages) {
+                self.sync_session_compaction_state_from_manager(&manager);
+                self.handle_compaction_event(event);
+                return true;
+            }
+            if let Some(error) = manager.take_compaction_error() {
+                self.set_status_notice("Compaction failed");
+                self.push_display_message(DisplayMessage::system(format!(
+                    "Compaction failed: {error}"
+                )));
+                return true;
+            }
         }
         false
     }

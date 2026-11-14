@@ -1351,6 +1351,12 @@ async fn refused_compaction_keeps_original_messages_issue_2089() {
     }
     assert_eq!(manager.compacted_count(), 0);
     assert_eq!(manager.summary_chars(), 0);
+    assert!(
+        manager
+            .take_compaction_error()
+            .expect("failure is reported")
+            .contains("guardrail")
+    );
 }
 
 #[test]

@@ -52,6 +52,21 @@ impl Agent {
         event
     }
 
+    pub(crate) fn poll_compaction_status(
+        &mut self,
+    ) -> (Option<CompactionEvent>, Option<String>, bool) {
+        let event = self.poll_compaction_completion_event();
+        let compaction = self.registry.compaction();
+        match compaction.try_write() {
+            Ok(mut manager) => (
+                event,
+                manager.take_compaction_error(),
+                manager.is_compacting(),
+            ),
+            Err(_) => (event, None, true),
+        }
+    }
+
     pub fn request_manual_compaction(&mut self) -> (String, bool) {
         if !self.provider.supports_compaction() {
             return (

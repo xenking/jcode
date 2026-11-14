@@ -181,6 +181,8 @@ pub struct CompactionManager {
 
     /// Last compaction event (if any)
     last_compaction: Option<CompactionEvent>,
+    /// Error from the last background compaction, for delivery to clients.
+    last_compaction_error: Option<String>,
 
     // ── Mode & strategy ────────────────────────────────────────────────────
     /// Active compaction mode (set from config at construction)
@@ -262,6 +264,7 @@ impl CompactionManager {
             context_cap_override: None,
             observed_input_tokens: None,
             last_compaction: None,
+            last_compaction_error: None,
             mode,
             compaction_config: cfg,
             active_route: (None, None),
@@ -1100,6 +1103,7 @@ impl CompactionManager {
 
         self.pending_cutoff = cutoff;
         self.pending_trigger = Some(mode_label.clone());
+        self.last_compaction_error = None;
 
         // Spawn background task that notifies via Bus when done
         self.pending_task = crate::runtime_activity::spawn(async move {
@@ -1317,6 +1321,7 @@ impl CompactionManager {
 
         self.pending_cutoff = cutoff;
         self.pending_trigger = Some("manual".to_string());
+        self.last_compaction_error = None;
 
         self.pending_task = crate::runtime_activity::spawn(async move {
             let start = std::time::Instant::now();
@@ -1380,6 +1385,10 @@ impl CompactionManager {
                 let leaves_no_healthy_tail =
                     self.pending_cutoff > active_len.saturating_sub(MIN_TURNS_TO_KEEP);
                 if !all_messages.is_empty() && leaves_no_healthy_tail {
+                    self.last_compaction_error = Some(
+                        "Context changed while compacting; the stale summary was discarded"
+                            .to_string(),
+                    );
                     crate::logging::warn(&format!(
                         "[compaction] Discarding stale background compaction result (pending_cutoff={}, active_len={}, trigger={}) — context changed since it started",
                         self.pending_cutoff, active_len, trigger,
@@ -1468,11 +1477,13 @@ impl CompactionManager {
             }
             Ok(Err(e)) => {
                 crate::logging::error(&format!("[compaction] Failed to generate summary: {}", e));
+                self.last_compaction_error = Some(format!("Failed to generate summary: {e}"));
                 self.pending_trigger = None;
                 self.pending_cutoff = 0;
             }
             Err(e) => {
                 crate::logging::error(&format!("[compaction] Task panicked: {}", e));
+                self.last_compaction_error = Some(format!("Compaction task failed: {e}"));
                 self.pending_trigger = None;
                 self.pending_cutoff = 0;
             }
@@ -1488,6 +1499,10 @@ impl CompactionManager {
     /// Take the last compaction event (if any)
     pub fn take_compaction_event(&mut self) -> Option<CompactionEvent> {
         self.last_compaction.take()
+    }
+
+    pub fn take_compaction_error(&mut self) -> Option<String> {
+        self.last_compaction_error.take()
     }
 
     /// Get messages for API call (with summary if compacted).
