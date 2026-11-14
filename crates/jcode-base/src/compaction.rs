@@ -279,7 +279,9 @@ impl CompactionManager {
     /// to the active session model. Model beats provider beats global.
     pub fn set_active_model(&mut self, provider: Option<&str>, model: Option<&str>) {
         self.active_route = (
-            provider.map(str::to_string).filter(|v| !v.trim().is_empty()),
+            provider
+                .map(str::to_string)
+                .filter(|v| !v.trim().is_empty()),
             model.map(str::to_string).filter(|v| !v.trim().is_empty()),
         );
         self.refresh_context_cap();

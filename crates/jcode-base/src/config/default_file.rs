@@ -625,6 +625,10 @@ wake_mode = "internal"
 # Env override: JCODE_SWARM_MODEL
 # swarm_model = "inherit"
 #
+# Ordered fallbacks used when swarm_model's route is not logged in (no
+# available route in the coordinator's catalog). First available wins.
+# swarm_model_fallbacks = ["openai:gpt-6.1-terra", "claude:claude-sonnet-4-6"]
+#
 # Agent-selected worker models are disabled by default, even if an allowlist exists.
 # Enable explicitly and list exact model/route strings to permit selection.
 # A bare model does not authorize a provider-prefixed route (or vice versa).

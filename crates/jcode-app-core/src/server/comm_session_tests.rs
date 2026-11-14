@@ -1304,3 +1304,53 @@ async fn spawn_admission_lock_serializes_per_swarm_only() {
 
 #[path = "comm_session_effort_tests.rs"]
 mod effort;
+
+fn route(model: &str, available: bool) -> crate::provider::ModelRoute {
+    crate::provider::ModelRoute {
+        model: model.to_string(),
+        provider: "p".to_string(),
+        api_method: "m".to_string(),
+        available,
+        detail: String::new(),
+        cheapness: None,
+        usage: None,
+    }
+}
+
+#[test]
+fn swarm_model_fallback_skips_unavailable_primary() {
+    let routes = vec![
+        route("deepseek-v4-flash", false),
+        route("gpt-6.1-terra", true),
+    ];
+    let picked = super::pick_available_swarm_model(
+        Some("opencode-go:deepseek-v4-flash".into()),
+        &["openai-api:gpt-6.1-terra".into()],
+        &routes,
+    );
+    assert_eq!(picked.as_deref(), Some("openai-api:gpt-6.1-terra"));
+}
+
+#[test]
+fn swarm_model_fallback_keeps_available_primary_and_unknown_catalog() {
+    let fb = vec!["gpt-6.1-terra".to_string()];
+    let routes = vec![
+        route("deepseek-v4-flash", true),
+        route("gpt-6.1-terra", true),
+    ];
+    let p = Some("opencode-go:deepseek-v4-flash".to_string());
+    assert_eq!(
+        super::pick_available_swarm_model(p.clone(), &fb, &routes),
+        p
+    );
+    assert_eq!(super::pick_available_swarm_model(p.clone(), &fb, &[]), p);
+    assert_eq!(
+        super::pick_available_swarm_model(Some("inherit".into()), &fb, &routes),
+        None
+    );
+    let none_avail = vec![route("gpt-6.1-terra", false)];
+    assert_eq!(
+        super::pick_available_swarm_model(p.clone(), &fb, &none_avail),
+        p
+    );
+}

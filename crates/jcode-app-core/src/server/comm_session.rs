@@ -176,8 +176,9 @@ fn spawn_visible_session_window_with_context(
 #[path = "spawn_model_selection.rs"]
 mod spawn_model_selection;
 use spawn_model_selection::{
-    CoordinatorSpawnIdentity, SwarmSpawnSelection, provider_key_for_spawn_model,
-    resolve_coordinator_spawn_identity, resolve_swarm_spawn_selection, session_swarm_model,
+    CoordinatorSpawnIdentity, SwarmSpawnSelection, pick_available_swarm_model,
+    provider_key_for_spawn_model, resolve_coordinator_spawn_identity,
+    resolve_swarm_spawn_selection, session_swarm_model,
 };
 
 fn persist_headed_startup_message(session_id: &str, message: &str) {
@@ -409,6 +410,30 @@ pub(super) async fn spawn_swarm_agent(
         client_terminal_env_for_session(req_session_id, client_connections).await;
     let configured_swarm_model =
         session_swarm_model(req_session_id, sessions, agents_config.swarm_model.clone()).await;
+    let configured_swarm_model =
+        if requested_model.is_none() && !agents_config.swarm_model_fallbacks.is_empty() {
+            let routes = match sessions.read().await.get(req_session_id).cloned() {
+                Some(agent) => agent
+                    .try_lock()
+                    .map(|guard| guard.model_routes())
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            };
+            let picked = pick_available_swarm_model(
+                configured_swarm_model.clone(),
+                &agents_config.swarm_model_fallbacks,
+                &routes,
+            );
+            if picked != configured_swarm_model {
+                crate::logging::info(&format!(
+                    "Swarm spawn: configured model {:?} not available, using fallback {:?}",
+                    configured_swarm_model, picked
+                ));
+            }
+            picked
+        } else {
+            configured_swarm_model
+        };
     let resolved_spawn_mode = resolve_swarm_spawn_mode(spawn_mode, agents_config.swarm_spawn_mode);
     let selection = resolve_swarm_spawn_selection(
         requested_model.clone(),

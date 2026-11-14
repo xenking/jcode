@@ -223,3 +223,39 @@ pub(super) fn resolve_swarm_spawn_selection(
         None => inherit_coordinator_selection(coordinator),
     }
 }
+
+/// Pick the first logged-in candidate among `configured` + `fallbacks`.
+///
+/// A candidate is available when `routes` has an available route for its bare
+/// model id (route prefix such as `openai-api:` stripped). With no route data
+/// (catalog unknown, coordinator busy), the configured model is kept.
+pub(super) fn pick_available_swarm_model(
+    configured: Option<String>,
+    fallbacks: &[String],
+    routes: &[crate::provider::ModelRoute],
+) -> Option<String> {
+    let configured = configured.filter(|m| !m.trim().is_empty() && !is_inherit_sentinel(m.trim()));
+    let Some(primary) = configured else {
+        return None;
+    };
+    if fallbacks.is_empty() || routes.is_empty() {
+        return Some(primary);
+    }
+    let available = |candidate: &str| {
+        let bare = crate::provider::explicit_model_provider_prefix(candidate)
+            .map(|(_, _, bare)| bare)
+            .unwrap_or(candidate)
+            .trim();
+        // Generic `provider:model` routes (opencode-go:, deepinfra:, ...).
+        let generic = candidate.split_once(':').map(|(_, m)| m.trim());
+        routes.iter().any(|r| {
+            r.available
+                && (r.model == bare || r.model == candidate || Some(r.model.as_str()) == generic)
+        })
+    };
+    std::iter::once(&primary)
+        .chain(fallbacks.iter())
+        .find(|c| available(c))
+        .cloned()
+        .or(Some(primary))
+}

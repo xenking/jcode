@@ -605,6 +605,10 @@ pub struct AgentsConfig {
     pub swarm_model_selection: bool,
     /// Exact model/route strings the agent may request. Empty denies all overrides.
     pub swarm_model_allowlist: Vec<String>,
+    /// Ordered fallbacks tried when `swarm_model`'s route is not logged in
+    /// (no available route in the coordinator's model catalog). The first
+    /// available entry wins; if none is available, `swarm_model` is used as-is.
+    pub swarm_model_fallbacks: Vec<String>,
     /// Reasoning effort for spawned swarm workers (`"low"`, `"medium"`,
     /// `"high"`, ...). The swarm tool does not let agents choose worker
     /// effort. Unset means `"low"`.
@@ -732,6 +736,7 @@ impl Default for AgentsConfig {
             swarm_model: None,
             swarm_model_selection: false,
             swarm_model_allowlist: Vec::new(),
+            swarm_model_fallbacks: Vec::new(),
             swarm_effort: None,
             swarm_root_effort: None,
             swarm_spawn_mode: SwarmSpawnMode::default(),
@@ -1801,7 +1806,10 @@ mod compaction_override_tests {
             "reactive_threshold = 0.8\n[models.\"claude-opus-5-5\"]\nmax_context_tokens = 500000\n[providers.openai]\nmode = \"proactive\"\n",
         )
         .unwrap();
-        assert_eq!(c.models["claude-opus-5-5"].max_context_tokens, Some(500_000));
+        assert_eq!(
+            c.models["claude-opus-5-5"].max_context_tokens,
+            Some(500_000)
+        );
         assert_eq!(c.providers["openai"].mode, Some(CompactionMode::Proactive));
     }
 }
