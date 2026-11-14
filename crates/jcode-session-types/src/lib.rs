@@ -3,7 +3,9 @@ use jcode_message_types::{ContentBlock, Message, Role, ToolCall};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+mod ask;
 mod title;
+pub use ask::*;
 mod transcription;
 pub use title::prompt_title;
 pub use transcription::{

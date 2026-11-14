@@ -43,3 +43,40 @@ fn user_response_hello_defaults_off_for_older_clients() {
         assert_eq!(supports_user_response, enabled);
     }
 }
+
+#[test]
+fn ask_request_and_response_bridge_both_ways() {
+    let mut state = BridgeState {
+        session_id: Some("s1".into()),
+        ..Default::default()
+    };
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "ask_user_request", "request_id": "ask-c1", "tool_call_id": "c1",
+        "questions": [{"question": "Q?", "options": [{"label": "A"}, {"label": "B"}]}]
+    }));
+    let jcode_harness_api::ApiEvent::AskRequest {
+        session_id,
+        request_id,
+        questions,
+        ..
+    } = &frames[0].event
+    else {
+        panic!("expected AskRequest, got {frames:?}");
+    };
+    assert_eq!((session_id.as_str(), request_id.as_str()), ("s1", "ask-c1"));
+    assert_eq!(questions[0].options[1].label, "B");
+
+    let out = state.api_request_to_legacy(&json!({
+        "req": "ask_response", "id": 9, "session_id": "s1", "request_id": "ask-c1",
+        "response": {"answers": [{"selected": ["A"]}]}
+    }));
+    let legacy = out
+        .iter()
+        .find_map(|o| match o {
+            Outbound::Legacy(v) if v["type"] == "ask_user_response" => Some(v),
+            _ => None,
+        })
+        .expect("ask_user_response forwarded");
+    assert_eq!(legacy["request_id"], "ask-c1");
+    assert_eq!(legacy["response"]["answers"][0]["selected"][0], "A");
+}

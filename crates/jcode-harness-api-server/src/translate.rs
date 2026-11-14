@@ -1368,6 +1368,16 @@ impl BridgeState {
                     json!({"type": "prepare_disconnect", "id": id}),
                 )]
             }
+            "ask_response" => {
+                let id = self.legacy_id();
+                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                vec![Outbound::Legacy(json!({
+                    "type": "ask_user_response",
+                    "id": id,
+                    "request_id": request["request_id"].as_str().unwrap_or(""),
+                    "response": request.get("response").cloned().unwrap_or_else(|| json!({})),
+                }))]
+            }
             "permission_response" => {
                 // The legacy protocol does not surface permission prompts on
                 // this path, so the bridge never emits `permission_request`
@@ -2001,6 +2011,15 @@ impl BridgeState {
                 phase: event["phase"].as_str().unwrap_or("connecting").to_string(),
             })],
             // Argument streaming is not an assistant-message boundary.
+            "ask_user_request" => match serde_json::from_value(event["questions"].clone()) {
+                Ok(questions) => vec![ServerFrame::event(ApiEvent::AskRequest {
+                    session_id: session(self),
+                    request_id: event["request_id"].as_str().unwrap_or("").to_string(),
+                    tool_call_id: event["tool_call_id"].as_str().unwrap_or("").to_string(),
+                    questions,
+                })],
+                Err(_) => vec![],
+            },
             "tool_start" => vec![ServerFrame::event(ApiEvent::ToolStart {
                 session_id: session(self),
                 call_id: event["id"].as_str().unwrap_or("").to_string(),

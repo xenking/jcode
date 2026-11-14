@@ -192,6 +192,13 @@ export type ApiRequest =
   | { req: "clear"; session_id: string }
   | { req: "rewind"; session_id: string; message_index: number }
   | {
+      req: "ask_response";
+      session_id: string;
+      request_id: string;
+      /** Omit answers to decline. */
+      response: AskResponse;
+    }
+  | {
       req: "permission_response";
       session_id: string;
       request_id: string;
@@ -372,6 +379,13 @@ export type ApiEvent =
     }
   | { ev: "message_accepted"; session_id: string }
   | {
+      ev: "ask_request";
+      session_id: string;
+      request_id: string;
+      tool_call_id: string;
+      questions: AskQuestion[];
+    }
+  | {
       ev: "permission_request";
       session_id: string;
       request_id: string;
@@ -499,6 +513,7 @@ export const KNOWN_EVENT_KINDS = [
   "wake_requested",
   "background_progress",
   "message_accepted",
+  "ask_request",
   "permission_request",
   "session_status",
   "session_recovery",
@@ -539,6 +554,7 @@ export const KNOWN_REQUEST_KINDS = [
   "peek_session",
   "clear",
   "rewind",
+  "ask_response",
   "permission_response",
   "list_models",
   "get_runtime_info",
@@ -573,3 +589,22 @@ export function isKnownEvent(frame: AnyApiEvent): frame is ApiEvent {
 
 /** Natural completion has no stop reason. Transport loss is not proof of a crash. */
 export type TurnStopReason = "interrupted" | "failure" | "crash" | "provider_guardrail" | "limit_reached" | "unknown";
+
+/** `ask` tool question. */
+export interface AskQuestion {
+  question: string;
+  header?: string;
+  options: { label: string; description?: string }[];
+  multi_select?: boolean;
+  allow_other?: boolean;
+}
+
+export interface AskAnswer {
+  selected: string[];
+  other?: string;
+}
+
+/** `answers` absent means the user declined. */
+export interface AskResponse {
+  answers?: AskAnswer[];
+}

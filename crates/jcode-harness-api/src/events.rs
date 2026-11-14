@@ -301,6 +301,15 @@ pub enum ApiEvent {
     /// minutes away.
     MessageAccepted { session_id: String },
 
+    /// The `ask` tool is blocked on the user answering these questions.
+    /// Reply with `AskResponse`; an empty response (no answers) declines.
+    AskRequest {
+        session_id: String,
+        request_id: String,
+        tool_call_id: String,
+        questions: Vec<crate::AskQuestion>,
+    },
+
     /// The harness needs a permission decision from the user.
     PermissionRequest {
         session_id: String,

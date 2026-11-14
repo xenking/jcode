@@ -166,6 +166,13 @@ pub enum ApiRequest {
         message_index: usize,
     },
 
+    /// Reply to an `AskRequest` event.
+    AskResponse {
+        session_id: String,
+        request_id: String,
+        response: crate::AskResponse,
+    },
+
     /// Reply to a `PermissionRequest` event.
     PermissionResponse {
         session_id: String,

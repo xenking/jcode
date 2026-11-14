@@ -1029,6 +1029,21 @@ impl JcodeClient {
         .map(drop)
     }
 
+    /// Answer an `AskRequest`. `AskResponse::default()` declines.
+    pub fn respond_to_ask(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        response: jcode_harness_api::AskResponse,
+    ) -> Result<()> {
+        self.request_ok(ApiRequest::AskResponse {
+            session_id: session_id.to_string(),
+            request_id: request_id.to_string(),
+            response,
+        })
+        .map(drop)
+    }
+
     pub fn respond_to_permission(
         &self,
         session_id: &str,
@@ -1812,6 +1827,7 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | TurnStopped { session_id, .. }
         | BackgroundProgress { session_id, .. }
         | MessageAccepted { session_id, .. }
+        | AskRequest { session_id, .. }
         | PermissionRequest { session_id, .. }
         | SessionStatus { session_id, .. }
         | SessionRecovery { session_id, .. }

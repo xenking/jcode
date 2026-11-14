@@ -45,6 +45,7 @@ const LEDGER: &[(&str, Disposition)] = &[
              InvalidateUsage already lets them invalidate that quota cache",
         ),
     ),
+    ("AskUserResponse", Covered),
     ("BackgroundTool", Covered),
     ("Cancel", Covered),
     ("CancelSoftInterrupts", Covered),
