@@ -26,8 +26,12 @@ struct Snapshot {
     fetched_unix_ms: i64,
     five_hour: f32,
     five_hour_resets_at: Option<String>,
+    #[serde(default)]
+    five_observed_ms: Option<i64>,
     seven_day: f32,
     seven_day_resets_at: Option<String>,
+    #[serde(default)]
+    seven_observed_ms: Option<i64>,
     seven_day_opus: Option<f32>,
     #[serde(default)]
     model_scoped: Vec<(String, f32, Option<String>)>,
@@ -272,8 +276,8 @@ pub(super) fn store_success(key: &str, data: &UsageData) -> UsageData {
 /// as newly observed or forgetting learned backoff.
 pub(super) fn store_response_limits(
     key: &str,
-    five: (f32, String),
-    seven: (f32, String),
+    five: Option<(f32, String)>,
+    seven: Option<(f32, String)>,
 ) -> UsageData {
     let entry = update(key, |entry| {
         // Freeze any outstanding probe deadline before replacing last_good.
@@ -282,12 +286,42 @@ pub(super) fn store_response_limits(
             .last_good
             .as_ref()
             .is_some_and(|good| good.extra_usage_enabled);
+        // Retain a separately observed window only briefly. The negative
+        // sentinel represents an unknown ratio and is never displayed.
+        let previous = entry.last_good.as_ref();
+        let five_time = five
+            .as_ref()
+            .map(|_| now_ms())
+            .or_else(|| previous.map(|good| good.five_observed_ms.unwrap_or(good.fetched_unix_ms)));
+        let seven_time = seven.as_ref().map(|_| now_ms()).or_else(|| {
+            previous.map(|good| good.seven_observed_ms.unwrap_or(good.fetched_unix_ms))
+        });
+        let five = five.or_else(|| {
+            previous
+                .filter(|_| five_time.is_some_and(|at| age(at) < ANTHROPIC_CACHE_DURATION))
+                .and_then(|good| {
+                    good.five_hour_resets_at
+                        .clone()
+                        .map(|reset| (good.five_hour, reset))
+                })
+        });
+        let seven = seven.or_else(|| {
+            previous
+                .filter(|_| seven_time.is_some_and(|at| age(at) < ANTHROPIC_CACHE_DURATION))
+                .and_then(|good| {
+                    good.seven_day_resets_at
+                        .clone()
+                        .map(|reset| (good.seven_day, reset))
+                })
+        });
         entry.last_good = Some(Snapshot {
             fetched_unix_ms: now_ms(),
-            five_hour: five.0,
-            five_hour_resets_at: Some(five.1),
-            seven_day: seven.0,
-            seven_day_resets_at: Some(seven.1),
+            five_hour: five.as_ref().map_or(-1.0, |value| value.0),
+            five_hour_resets_at: five.map(|value| value.1),
+            five_observed_ms: five_time,
+            seven_day: seven.as_ref().map_or(-1.0, |value| value.0),
+            seven_day_resets_at: seven.map(|value| value.1),
+            seven_observed_ms: seven_time,
             extra_usage_enabled,
             ..Default::default()
         });
@@ -339,8 +373,10 @@ pub(super) fn store_success_with_reset_status(
         fetched_unix_ms: now_ms(),
         five_hour: data.five_hour,
         five_hour_resets_at: data.five_hour_resets_at.clone(),
+        five_observed_ms: None,
         seven_day: data.seven_day,
         seven_day_resets_at: data.seven_day_resets_at.clone(),
+        seven_observed_ms: None,
         seven_day_opus: data.seven_day_opus,
         model_scoped: data
             .model_scoped

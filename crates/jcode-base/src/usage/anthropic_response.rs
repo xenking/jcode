@@ -33,9 +33,10 @@ pub fn record_anthropic_response_limits(
     account_label: Option<&str>,
     headers: &reqwest::header::HeaderMap,
 ) {
-    let (Some(five), Some(seven)) = (window(headers, "5h"), window(headers, "7d")) else {
+    let (five, seven) = (window(headers, "5h"), window(headers, "7d"));
+    if five.is_none() && seven.is_none() {
         return;
-    };
+    }
     let key = anthropic_usage_cache_key(access_token, account_label);
     let data = disk_cache::store_response_limits(&key, five, seven);
     store_anthropic_usage(key, data);
@@ -163,27 +164,43 @@ mod tests {
     }
 
     #[test]
-    fn partial_invalid_and_expired_headers_never_create_zero_usage() {
+    fn partial_response_preserves_only_observed_windows() {
+        with_home(|_| {
+            let mut partial = headers();
+            partial.remove("anthropic-ratelimit-unified-7d-utilization");
+            record_anthropic_response_limits("fixture", Some("partial"), &partial);
+            let data = disk_cache::fresh("label:partial").unwrap();
+            let snapshot = anthropic_snapshot_from_usage("partial".into(), None, &data);
+            assert_eq!(snapshot.five_hour_ratio, Some(0.37));
+            assert_eq!(snapshot.seven_day_ratio, None);
+            let report = provider_report_from_usage_data("Claude".into(), &data);
+            assert_eq!(report.limits.len(), 1);
+            let restored = usage_data_from_provider_report(&report);
+            let snapshot = anthropic_snapshot_from_usage("partial".into(), None, &restored);
+            assert_eq!(snapshot.seven_day_ratio, None);
+            let mut other = headers();
+            other.remove("anthropic-ratelimit-unified-5h-utilization");
+            record_anthropic_response_limits("fixture", Some("partial"), &other);
+            let data = disk_cache::fresh("label:partial").unwrap();
+            let snapshot = anthropic_snapshot_from_usage("partial".into(), None, &data);
+            assert_eq!(snapshot.five_hour_ratio, Some(0.37));
+            assert_eq!(snapshot.seven_day_ratio, Some(0.62));
+        });
+    }
+
+    #[test]
+    fn invalid_and_expired_headers_never_create_zero_usage() {
         with_home(|_| {
             let name = "anthropic-ratelimit-unified-5h-utilization";
             for value in ["NaN", "inf", "-0.1", "1.01", "garbage"] {
                 let mut headers = headers();
+                headers.remove("anthropic-ratelimit-unified-7d-utilization");
                 headers.insert(name, value.parse().unwrap());
                 record_anthropic_response_limits("fixture", Some("passive-invalid"), &headers);
                 assert!(disk_cache::fresh("label:passive-invalid").is_none());
             }
-            for name in [
-                "anthropic-ratelimit-unified-5h-utilization",
-                "anthropic-ratelimit-unified-7d-utilization",
-                "anthropic-ratelimit-unified-5h-reset",
-                "anthropic-ratelimit-unified-7d-reset",
-            ] {
-                let mut headers = headers();
-                headers.remove(name);
-                record_anthropic_response_limits("fixture", Some("passive-invalid"), &headers);
-                assert!(disk_cache::fresh("label:passive-invalid").is_none());
-            }
             let mut headers = headers();
+            headers.remove("anthropic-ratelimit-unified-5h-utilization");
             headers.insert("anthropic-ratelimit-unified-7d-reset", "1".parse().unwrap());
             record_anthropic_response_limits("fixture", Some("passive-invalid"), &headers);
             assert!(disk_cache::fresh("label:passive-invalid").is_none());

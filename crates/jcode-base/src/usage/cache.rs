@@ -637,16 +637,20 @@ pub(super) fn provider_report_from_usage_data(
     }
 
     let mut limits = Vec::new();
-    limits.push(UsageLimit {
-        name: "5-hour window".to_string(),
-        usage_percent: data.five_hour * 100.0,
-        resets_at: data.five_hour_resets_at.clone(),
-    });
-    limits.push(UsageLimit {
-        name: "7-day window".to_string(),
-        usage_percent: data.seven_day * 100.0,
-        resets_at: data.seven_day_resets_at.clone(),
-    });
+    if (0.0..=1.0).contains(&data.five_hour) {
+        limits.push(UsageLimit {
+            name: "5-hour window".to_string(),
+            usage_percent: data.five_hour * 100.0,
+            resets_at: data.five_hour_resets_at.clone(),
+        });
+    }
+    if (0.0..=1.0).contains(&data.seven_day) {
+        limits.push(UsageLimit {
+            name: "7-day window".to_string(),
+            usage_percent: data.seven_day * 100.0,
+            resets_at: data.seven_day_resets_at.clone(),
+        });
+    }
     if let Some(opus) = data.seven_day_opus {
         limits.push(UsageLimit {
             name: "7-day Opus window".to_string(),
@@ -748,11 +752,11 @@ pub(super) fn usage_data_from_provider_report(report: &ProviderUsage) -> UsageDa
     UsageData {
         five_hour: five_hour
             .map(|limit| usage_percent_to_ratio(limit.usage_percent))
-            .unwrap_or(0.0),
+            .unwrap_or(-1.0),
         five_hour_resets_at: five_hour.and_then(|limit| limit.resets_at.clone()),
         seven_day: seven_day
             .map(|limit| usage_percent_to_ratio(limit.usage_percent))
-            .unwrap_or(0.0),
+            .unwrap_or(-1.0),
         seven_day_resets_at: seven_day.and_then(|limit| limit.resets_at.clone()),
         seven_day_opus: seven_day_opus.map(|limit| usage_percent_to_ratio(limit.usage_percent)),
         model_scoped,
