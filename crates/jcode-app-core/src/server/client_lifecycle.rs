@@ -623,6 +623,22 @@ pub(super) async fn handle_client(
                     .lock()
                     .await
                     .insert(request_id.clone(), req.response_tx);
+                if let Some(questions) = req.ask_questions {
+                    match serde_json::from_value(questions) {
+                        Ok(questions) => {
+                            let _ = client_event_tx.send(ServerEvent::AskUserRequest {
+                                request_id,
+                                questions,
+                                tool_call_id: req.prompt,
+                            });
+                        }
+                        // Dropping the sender fails the waiting tool call.
+                        Err(_) => {
+                            stdin_responses.lock().await.remove(&request_id);
+                        }
+                    }
+                    continue;
+                }
                 let _ = client_event_tx.send(ServerEvent::StdinRequest {
                     request_id,
                     prompt: req.prompt,
@@ -2315,6 +2331,16 @@ pub(super) async fn handle_client(
                 request_id,
                 input,
             } => {
+                handle_stdin_response(id, request_id, input, &stdin_responses, &client_event_tx)
+                    .await;
+            }
+
+            Request::AskUserResponse {
+                id,
+                request_id,
+                response,
+            } => {
+                let input = serde_json::to_string(&response).unwrap_or_default();
                 handle_stdin_response(id, request_id, input, &stdin_responses, &client_event_tx)
                     .await;
             }

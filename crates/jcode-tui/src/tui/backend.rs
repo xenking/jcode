@@ -1314,6 +1314,21 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    /// Answer an `ask` tool request.
+    pub async fn send_ask_response(
+        &mut self,
+        request_id: &str,
+        response: crate::protocol::AskResponse,
+    ) -> Result<()> {
+        let request = Request::AskUserResponse {
+            id: self.next_request_id,
+            request_id: request_id.to_string(),
+            response,
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await
+    }
+
     /// Send stdin input back to a running command
     pub async fn send_stdin_response(&mut self, request_id: &str, input: &str) -> Result<()> {
         let request = Request::StdinResponse {

@@ -3,6 +3,7 @@ pub(crate) const BACKGROUND_WAIT_GUIDANCE: &str = "While this task runs, try to 
 mod agentgrep;
 pub mod ambient;
 mod apply_patch;
+mod ask;
 mod bash;
 mod batch;
 mod bg;
@@ -542,6 +543,7 @@ impl Registry {
                 jcode_docs::JcodeDocsTool::new,
             );
             Self::insert_tool_timed(&mut m, &mut timings, "todo", todo::TodoTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "ask", || ask::AskTool);
             Self::insert_tool_timed(&mut m, &mut timings, "bg", bg::BgTool::new);
             Self::insert_tool_timed(
                 &mut m,

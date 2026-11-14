@@ -55,6 +55,7 @@ pub enum AppRuntimeMode {
     TestHarness,
 }
 
+mod ask_picker;
 mod auth;
 mod auth_account_picker_saved_accounts;
 mod auth_remote;
@@ -1601,6 +1602,8 @@ pub struct App {
     side_panel_native_scrollbar: bool,
     // Passive inline UI (informational blocks shown above input).
     inline_view_state: Option<super::InlineViewState>,
+    // Pending `ask` tool questions; mirrored into inline_view_state for rendering.
+    ask_picker: Option<ask_picker::AskPickerState>,
     // Interactive model/provider picker
     inline_interactive_state: Option<super::InlineInteractiveState>,
     // Cached model picker entries. Building these can require hydrating large provider catalogs.

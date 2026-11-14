@@ -35,9 +35,11 @@ impl std::fmt::Debug for ProviderOAuthEmail {
     }
 }
 
+mod ask;
 mod comm_format;
 mod notifications;
 
+pub use ask::*;
 pub use comm_format::*;
 pub use jcode_session_types::TurnStopReason;
 pub use notifications::{FeatureToggle, NotificationType};
@@ -904,6 +906,7 @@ impl Request {
             Request::InvalidateOpenAiUsage { id, .. } => *id,
             Request::InvalidateAnthropicUsage { id, .. } => *id,
             Request::StdinResponse { id, .. } => *id,
+            Request::AskUserResponse { id, .. } => *id,
             Request::AgentRegister { id, .. } => *id,
             Request::AgentTask { id, .. } => *id,
             Request::AgentCapabilities { id } => *id,

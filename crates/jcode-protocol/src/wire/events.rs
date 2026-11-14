@@ -1084,6 +1084,15 @@ pub enum ServerEvent {
         message: String,
     },
 
+    /// The `ask` tool is blocked on the user answering these questions.
+    /// Reply with `Request::AskUserResponse`.
+    #[serde(rename = "ask_user_request")]
+    AskUserRequest {
+        request_id: String,
+        questions: Vec<AskQuestion>,
+        tool_call_id: String,
+    },
+
     /// A running command is waiting for stdin input from the user
     #[serde(rename = "stdin_request")]
     StdinRequest {

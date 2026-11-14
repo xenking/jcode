@@ -637,3 +637,58 @@ fn test_reload_force_roundtrip() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn test_ask_user_request_and_response_roundtrip() -> Result<()> {
+    let questions = vec![AskQuestion {
+        question: "Which DB?".to_string(),
+        header: Some("DB".to_string()),
+        options: vec![
+            AskOption { label: "Postgres (Recommended)".to_string(), description: Some("default".to_string()) },
+            AskOption { label: "SQLite".to_string(), description: None },
+        ],
+        multi_select: true,
+        allow_other: true,
+    }];
+    let event = ServerEvent::AskUserRequest {
+        request_id: "ask-1".to_string(),
+        questions: questions.clone(),
+        tool_call_id: "call_1".to_string(),
+    };
+    let json = encode_event(&event);
+    assert!(json.contains("\"type\":\"ask_user_request\""));
+    let decoded: ServerEvent = serde_json::from_str(json.trim())?;
+    let ServerEvent::AskUserRequest { request_id, questions: q, .. } = decoded else {
+        return Err(anyhow!("expected AskUserRequest"));
+    };
+    assert_eq!(request_id, "ask-1");
+    assert_eq!(q, questions);
+
+    let response = AskResponse {
+        answers: Some(vec![AskAnswer {
+            selected: vec!["SQLite".to_string()],
+            other: Some("libsql".to_string()),
+        }]),
+    };
+    let req = Request::AskUserResponse { id: 7, request_id: "ask-1".to_string(), response: response.clone() };
+    let json = serde_json::to_string(&req)?;
+    assert!(json.contains("\"type\":\"ask_user_response\""));
+    let decoded = parse_request_json(&json)?;
+    assert_eq!(decoded.id(), 7);
+    let Request::AskUserResponse { response: r, .. } = decoded else {
+        return Err(anyhow!("expected AskUserResponse"));
+    };
+    assert_eq!(r, response);
+    assert_eq!(
+        format_ask_answers(&questions, &r),
+        "User answers:\n1. Which DB? -> SQLite; Other: libsql\n"
+    );
+    let declined: Request = parse_request_json(r#"{"type":"ask_user_response","id":8,"request_id":"ask-1","response":{}}"#)?;
+    let Request::AskUserResponse { response, .. } = declined else {
+        return Err(anyhow!("expected AskUserResponse"));
+    };
+    assert_eq!(format_ask_answers(&questions, &response), ASK_DECLINED_MESSAGE);
+    assert!(validate_ask_questions(&questions).is_ok());
+    assert!(validate_ask_questions(&[]).is_err());
+    Ok(())
+}

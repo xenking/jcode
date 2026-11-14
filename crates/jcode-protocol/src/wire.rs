@@ -568,6 +568,14 @@ pub enum Request {
         account_label: Option<String>,
     },
 
+    /// Answer an `ask_user_request` from the `ask` tool.
+    #[serde(rename = "ask_user_response")]
+    AskUserResponse {
+        id: u64,
+        request_id: String,
+        response: AskResponse,
+    },
+
     /// Send stdin input to a running command that requested it
     #[serde(rename = "stdin_response")]
     StdinResponse {

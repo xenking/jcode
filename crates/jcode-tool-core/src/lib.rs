@@ -74,6 +74,9 @@ pub struct StdinInputRequest {
     pub request_id: String,
     pub prompt: String,
     pub is_password: bool,
+    /// `ask` tool questions (JSON `Vec<AskQuestion>`). When set, the client
+    /// gets an `ask_user_request` and the response is a JSON `AskResponse`.
+    pub ask_questions: Option<Value>,
     pub response_tx: tokio::sync::oneshot::Sender<String>,
 }
 
