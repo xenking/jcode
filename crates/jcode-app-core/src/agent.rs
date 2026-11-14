@@ -951,9 +951,9 @@ impl Agent {
     fn maybe_shake_before_request(&mut self, manager: &mut crate::compaction::CompactionManager) {
         let now = std::time::Instant::now();
         let model = self.provider.model();
-        let ttl = crate::provider::cache_ttl_for_provider_model(self.provider.name(), Some(&model));
+        let ttl =
+            crate::provider::shake_cache_ttl_for_provider_model(self.provider.name(), Some(&model));
         let plan = manager.plan_shake(self.session.provider_messages(), now, ttl);
-        manager.note_provider_request(now);
         let Some((reason, cfg)) = plan else {
             return;
         };
@@ -963,6 +963,15 @@ impl Agent {
         if outcome != crate::compaction::ShakeOutcome::NoChange {
             self.persist_session_best_effort("shake compaction");
         }
+    }
+
+    async fn note_shake_provider_response(&self, cache_read_tokens: Option<u64>) {
+        let now = std::time::Instant::now();
+        self.registry
+            .compaction()
+            .write()
+            .await
+            .note_provider_response(now, cache_read_tokens);
     }
 
     fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {

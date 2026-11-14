@@ -1459,6 +1459,29 @@ fn shake_manager() -> CompactionManager {
 }
 
 #[test]
+fn shake_does_not_expire_during_a_long_provider_response() {
+    let msgs = shake_session(20, 2000);
+    let mut m = shake_manager();
+    let start = Instant::now();
+    let response_end = start + Duration::from_secs(290);
+    m.note_provider_response(response_end, Some(100));
+    assert!(
+        m.plan_shake(&msgs, response_end + Duration::from_secs(20), Some(300))
+            .is_none()
+    );
+    assert!(
+        m.plan_shake(&msgs, response_end + Duration::from_secs(299), Some(300))
+            .is_none()
+    );
+    assert_eq!(
+        m.plan_shake(&msgs, response_end + Duration::from_secs(300), Some(300))
+            .unwrap()
+            .0,
+        ShakeReason::CacheExpiry
+    );
+}
+
+#[test]
 fn shake_never_runs_while_prompt_cache_is_warm() {
     let msgs = shake_session(20, 2000);
     let mut m = shake_manager();
@@ -1467,7 +1490,7 @@ fn shake_never_runs_while_prompt_cache_is_warm() {
         m.plan_shake(&msgs, t0, Some(300)).is_none(),
         "first request: no prior cache to expire"
     );
-    m.note_provider_request(t0);
+    m.note_provider_response(t0, Some(100));
     for secs in [0, 1, 60, 299] {
         assert!(
             m.plan_shake(&msgs, t0 + Duration::from_secs(secs), Some(300))
@@ -1489,6 +1512,26 @@ fn shake_never_runs_while_prompt_cache_is_warm() {
     assert!(
         m.plan_shake(&msgs, t0 + Duration::from_secs(900), Some(300))
             .is_none()
+    );
+}
+
+#[test]
+fn shake_precompact_respects_recent_cache_hit() {
+    let msgs = shake_session(40, 2000);
+    let mut m = shake_manager();
+    m.set_budget(100_000);
+    m.compaction_config.reactive_threshold = 0.5;
+    let now = Instant::now();
+    m.note_provider_response(now, Some(1));
+    assert!(
+        m.plan_shake(&msgs, now + Duration::from_secs(299), Some(300))
+            .is_none()
+    );
+    assert_eq!(
+        m.plan_shake(&msgs, now + Duration::from_secs(300), Some(300))
+            .unwrap()
+            .0,
+        ShakeReason::PreCompact
     );
 }
 

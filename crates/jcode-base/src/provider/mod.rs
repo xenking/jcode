@@ -3081,6 +3081,43 @@ pub fn cache_ttl_for_provider(provider: &str) -> Option<u64> {
     cache_ttl_for_provider_model(provider, None)
 }
 
+/// Conservative expiry threshold for destructive cache-prefix rewrites.
+/// Unlike display estimates, unrecognised providers never expire here.
+pub fn shake_cache_ttl_for_provider_model(provider: &str, model: Option<&str>) -> Option<u64> {
+    if let Some(route) = jcode_provider_core::AuthRoute::parse(provider)
+        && route.provider == jcode_provider_core::DualAuthProvider::OpenAI
+    {
+        // OpenAI documents in-memory entries as typically 5-10m and extended
+        // entries as typically 30m. Allow a further minute of margin.
+        return Some(
+            openai::prompt_cache_ttl_for_model(
+                model,
+                openai::prompt_cache_retention_from_env().as_deref(),
+            )
+            .max(600)
+                + 60,
+        );
+    }
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "anthropic" | "claude" => Some(if anthropic::is_cache_ttl_1h() {
+            3600
+        } else {
+            300
+        }),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn shake_expiry_rejects_unknown_providers_and_uses_openai_margin() {
+    for provider in ["openrouter", "gemini", "jcode subscription", "unknown"] {
+        assert_eq!(shake_cache_ttl_for_provider_model(provider, None), None);
+    }
+    assert!(shake_cache_ttl_for_provider_model("openai", Some("gpt-5.6")).unwrap() >= 1860);
+    assert!(shake_cache_ttl_for_provider_model("openai", None).unwrap() >= 660);
+}
+
 /// Whether a reported cache lifetime is an estimate rather than a hard expiry.
 /// OpenAI documents typical, maximum, or minimum lifetimes depending on model.
 /// The generic OpenRouter/subscription/Gemini values are also only heuristics.

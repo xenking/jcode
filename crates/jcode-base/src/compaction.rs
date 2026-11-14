@@ -23,7 +23,7 @@ use crate::provider::openai_request::{
 use anyhow::Result;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 
 pub use jcode_compaction_core::shake::{ShakeConfig, ShakeOutcome};
@@ -224,9 +224,10 @@ pub struct CompactionManager {
     /// Monotonic recency counter for the semantic embedding cache LRU.
     semantic_embed_cache_counter: u64,
 
-    /// When the previous provider request was built. Drives the cache-expiry
+    /// When the previous successful provider response completed. Drives the cache-expiry
     /// shake: a prefix older than the provider cache TTL is cold anyway.
-    last_request_at: Option<Instant>,
+    last_response_at: Option<Instant>,
+    last_response_cache_read: bool,
 }
 
 /// Why a shake pass is allowed to rewrite the prompt prefix.
@@ -278,7 +279,8 @@ impl CompactionManager {
             embedding_history: VecDeque::with_capacity(EMBEDDING_HISTORY_WINDOW + 1),
             semantic_embed_cache: HashMap::with_capacity(SEMANTIC_EMBED_CACHE_CAPACITY),
             semantic_embed_cache_counter: 0,
-            last_request_at: None,
+            last_response_at: None,
+            last_response_cache_read: false,
         }
     }
 
@@ -940,7 +942,7 @@ impl CompactionManager {
     /// Shake invalidates the prompt cache from the first elided message, so it
     /// only runs when the prefix is cold or about to be rewritten: when LLM
     /// compaction would trigger, or when `cache_ttl_secs` (None = persistent or
-    /// unknown cache, never shake) elapsed since the previous request. Never
+    /// unknown cache, never shake) elapsed since the last successful response. Never
     /// while the cache is warm.
     pub fn plan_shake(
         &self,
@@ -949,19 +951,27 @@ impl CompactionManager {
         cache_ttl_secs: Option<u64>,
     ) -> Option<(ShakeReason, ShakeConfig)> {
         let cfg = self.shake_config()?;
+        if self.last_response_cache_read
+            && let (Some(last), Some(ttl)) =
+                (self.last_response_at, cache_ttl_secs.filter(|t| *t > 0))
+            && now.saturating_duration_since(last) < Duration::from_secs(ttl)
+        {
+            return None;
+        }
         if self.should_compact_with(all_messages) {
             return Some((ShakeReason::PreCompact, cfg));
         }
         let ttl = cache_ttl_secs.filter(|t| *t > 0)?;
-        let last = self.last_request_at?;
+        let last = self.last_response_at?;
         (self.compaction_config.shake_cache_expiry
             && now.saturating_duration_since(last).as_secs() >= ttl)
             .then_some((ShakeReason::CacheExpiry, cfg))
     }
 
-    /// Record that a provider request is being built now.
-    pub fn note_provider_request(&mut self, now: Instant) {
-        self.last_request_at = Some(now);
+    /// Record the end of a successful provider response, the latest cache touch.
+    pub fn note_provider_response(&mut self, now: Instant, cache_read_tokens: Option<u64>) {
+        self.last_response_at = Some(now);
+        self.last_response_cache_read = cache_read_tokens.unwrap_or(0) > 0;
     }
 
     /// Index of the first non-compacted message.

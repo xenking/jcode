@@ -1194,6 +1194,9 @@ impl Agent {
                 }
             }
 
+            if saw_message_end {
+                self.note_shake_provider_response(usage_cache_read).await;
+            }
             // Store usage for debug queries
             self.last_usage = TokenUsage {
                 input_tokens: usage_input.unwrap_or(0),
