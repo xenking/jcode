@@ -1391,7 +1391,7 @@ pub(super) async fn stream_response_websocket_persistent(
     let request_credentials = Arc::clone(&credentials);
     let result = after_authentication(
         &tx,
-        openai_access_token(account_label, &credentials),
+        openai_access_token(account_label.clone(), &credentials),
         |access_token| {
             stream_response_websocket_authenticated(
                 request_credentials,
@@ -1400,6 +1400,7 @@ pub(super) async fn stream_response_websocket_persistent(
                 persistent_ws,
                 input_item_count,
                 access_token,
+                account_label,
             )
         },
     )
@@ -1414,6 +1415,7 @@ async fn stream_response_websocket_authenticated(
     persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
     input_item_count: usize,
     access_token: String,
+    account_label: Option<String>,
 ) -> Result<(), OpenAIStreamFailure> {
     use jcode_message_types::ConnectionPhase;
     let requested_tier = request
@@ -1452,6 +1454,7 @@ async fn stream_response_websocket_authenticated(
         )));
     }
     let mut usage_recorder = OAuthUsageRecorder::capture(&creds, &request);
+    let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
     let catalog_scope = OpenAIProvider::catalog_scope_for(&creds);
     let ws_request = openai_websocket_prewarm::websocket_request(
         &creds,
@@ -1471,8 +1474,10 @@ async fn stream_response_websocket_authenticated(
         "fresh_ws_request_routing_headers",
         routing_header_log_fields(ws_request.headers()),
     );
-    identity.0 = access_token;
+    identity.0 = access_token.clone();
     drop(creds);
+
+    let usage_generation = jcode_base::usage::openai_response_generation();
 
     emit_connection_phase(&tx, ConnectionPhase::Connecting).await;
     let connect_start = std::time::Instant::now();
@@ -1491,6 +1496,14 @@ async fn stream_response_websocket_authenticated(
 
     let (mut ws_stream, _response) = match connect_result {
         Ok((stream, response)) => {
+            if is_chatgpt_mode {
+                jcode_base::usage::record_openai_response_limits(
+                    &access_token,
+                    account_label.as_deref(),
+                    response.headers(),
+                    usage_generation,
+                );
+            }
             let connect_ms = connect_start.elapsed().as_millis();
             jcode_base::logging::info(&format!(
                 "WebSocket connection established in {}ms (persistent mode)",

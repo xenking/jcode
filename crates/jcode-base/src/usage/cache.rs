@@ -500,12 +500,11 @@ pub(super) fn openai_usage_cache_key(access_token: &str, account_label: Option<&
         return format!("label:{}", label);
     }
 
-    let prefix = access_token
-        .get(..20)
-        .unwrap_or(access_token)
-        .trim()
-        .to_string();
-    format!("token:{}", prefix)
+    use sha2::{Digest, Sha256};
+    format!(
+        "token:sha256:{}",
+        hex::encode(Sha256::digest(access_token.as_bytes()))
+    )
 }
 
 pub(super) fn cached_anthropic_usage(cache_key: &str) -> Option<UsageData> {

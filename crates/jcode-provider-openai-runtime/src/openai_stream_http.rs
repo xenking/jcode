@@ -51,6 +51,8 @@ pub(crate) async fn stream_response(
     let account_id = creds.account_id.clone();
     drop(creds);
 
+    let usage_generation = jcode_base::usage::openai_response_generation();
+
     let builder = response_http_request(
         &client,
         &url,
@@ -84,6 +86,15 @@ pub(crate) async fn stream_response(
     let response = response
         .context("Failed to send request to OpenAI API")
         .map_err(OpenAIStreamFailure::Other)?;
+
+    if is_chatgpt_mode && (response.status().is_success() || response.status().as_u16() == 429) {
+        jcode_base::usage::record_openai_response_limits(
+            &access_token,
+            account_label.as_deref(),
+            response.headers(),
+            usage_generation,
+        );
+    }
 
     let connect_ms = connect_start.elapsed().as_millis();
     jcode_base::logging::info(&format!(

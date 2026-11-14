@@ -1,6 +1,56 @@
 use super::*;
 
 #[test]
+fn codex_response_headers_parse_both_windows_without_fabricating_missing_values() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    for (key, value) in [
+        ("x-codex-primary-used-percent", "37"),
+        ("x-codex-primary-window-minutes", "300"),
+        ("x-codex-primary-reset-at", "2000000000"),
+        ("x-codex-secondary-used-percent", "94"),
+        ("x-codex-secondary-window-minutes", "10080"),
+        ("x-codex-secondary-reset-at", "2000100000"),
+    ] {
+        headers.insert(key, value.parse().unwrap());
+    }
+    let windows = super::openai_response::parse_headers(&headers);
+    assert_eq!(windows.len(), 2);
+    assert_eq!(windows[0].name, "5-hour window");
+    assert_eq!(windows[0].usage_percent, 37.0);
+    assert_eq!(windows[1].name, "7-day window");
+    assert_eq!(windows[1].usage_percent, 94.0);
+    headers.remove("x-codex-primary-used-percent");
+    assert_eq!(super::openai_response::parse_headers(&headers).len(), 1);
+    headers.insert("x-codex-secondary-used-percent", "NaN".parse().unwrap());
+    assert!(super::openai_response::parse_headers(&headers).is_empty());
+}
+
+#[test]
+fn codex_cache_key_never_contains_token_prefix() {
+    let token = "fixture-secret-token-never-log";
+    let key = openai_usage_cache_key(token, None);
+    assert!(key.starts_with("token:sha256:"));
+    assert!(!key.contains("fixture-secret"));
+}
+
+#[test]
+fn codex_response_headers_reach_account_cache() {
+    let label = "fixture-codex-response-cache";
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-codex-primary-used-percent", "42".parse().unwrap());
+    headers.insert("x-codex-primary-window-minutes", "300".parse().unwrap());
+    record_openai_response_limits(
+        "fixture",
+        Some(label),
+        &headers,
+        openai_response_generation(),
+    );
+    let snapshot = cached_account_usage_snapshot(MultiAccountProviderKind::OpenAI, label).unwrap();
+    assert_eq!(snapshot.five_hour_ratio, Some(0.42));
+    assert_eq!(snapshot.seven_day_ratio, None);
+}
+
+#[test]
 fn test_usage_data_default() {
     let data = UsageData::default();
     assert!(data.is_stale());

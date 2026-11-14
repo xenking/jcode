@@ -22,6 +22,8 @@ mod flight;
 mod local_activity;
 mod model;
 mod openai_helpers;
+mod openai_response;
+pub use openai_response::{openai_response_generation, record_openai_response_limits};
 mod openai_reset;
 pub(crate) use openai_reset::auto_reset_weekly_usage;
 mod provider_fetch;
