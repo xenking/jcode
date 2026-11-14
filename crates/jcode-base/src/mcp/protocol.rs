@@ -129,6 +129,29 @@ pub struct ServerInfo {
     pub version: Option<String>,
 }
 
+/// The stateless protocol revision (no initialize handshake; per-request `_meta`).
+pub const STATELESS_PROTOCOL_VERSION: &str = "2026-07-28";
+
+/// `server/discover` result (MCP 2026-07-28).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiscoverResult {
+    #[serde(rename = "supportedVersions")]
+    pub supported_versions: Vec<String>,
+    #[serde(default)]
+    pub capabilities: ServerCapabilities,
+    #[serde(rename = "_meta", default)]
+    pub meta: Option<Value>,
+}
+
+impl DiscoverResult {
+    pub fn server_info(&self) -> Option<ServerInfo> {
+        self.meta
+            .as_ref()
+            .and_then(|meta| meta.get("io.modelcontextprotocol/serverInfo"))
+            .and_then(|info| serde_json::from_value(info.clone()).ok())
+    }
+}
+
 /// MCP Tool definition from server
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolDef {

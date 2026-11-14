@@ -315,3 +315,119 @@ fn decode_tool_output_parses_json_only_when_structured() {
     assert_eq!(decode_tool_output("plain"), json!("plain"));
     assert_eq!(decode_tool_output("{not json}"), json!("{not json}"));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn receipts_record_ok_failed_refused_and_in_flight() {
+    let out = exec(
+        "await tools.echo({a:1}); try { await tools.fail({}) } catch (_) {} \
+         try { await tools.nope({}) } catch (_) {} return 1;",
+    )
+    .await;
+    assert_eq!(out.error, None);
+    let statuses: Vec<_> = out
+        .receipts
+        .iter()
+        .map(|r| (r.tool.as_str(), r.status))
+        .collect();
+    assert_eq!(
+        statuses,
+        vec![
+            ("echo", CallStatus::Ok),
+            ("fail", CallStatus::Failed),
+            ("nope", CallStatus::Refused),
+        ]
+    );
+    assert!(out.receipts[0].bytes > 0);
+    assert_eq!(out.receipts[1].note.as_deref(), Some("boom"));
+
+    let limits = Limits {
+        timeout: Duration::from_millis(200),
+        ..Limits::default()
+    };
+    let hung = exec_with("await tools.hang({}); return 1;", Map::new(), limits).await;
+    assert_eq!(hung.receipts.len(), 1);
+    assert_eq!(hung.receipts[0].status, CallStatus::InFlight);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn call_cap_refuses_extra_calls() {
+    let limits = Limits {
+        max_tool_calls: 2,
+        ..Limits::default()
+    };
+    let out = exec_with(
+        "const r = []; for (let i = 0; i < 4; i++) { try { await tools.echo({i}); r.push('ok') } catch (e) { r.push(e.message) } } return r;",
+        Map::new(),
+        limits,
+    )
+    .await;
+    let r = out.result.unwrap();
+    assert_eq!(r[0], "ok");
+    assert_eq!(r[1], "ok");
+    assert!(
+        r[2].as_str().unwrap().contains("tool call limit reached"),
+        "{r}"
+    );
+    assert_eq!(
+        out.receipts
+            .iter()
+            .filter(|r| r.status == CallStatus::Refused)
+            .count(),
+        2
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn types_exposes_typescript_declarations() {
+    let out = exec("return [types('echo'), describeTool('echo').typescript];").await;
+    let r = out.result.unwrap();
+    let all = r[0].as_str().unwrap();
+    assert!(all.contains("declare const tools"), "{all}");
+    assert!(
+        all.contains("echo(args: EchoInput): Promise<any>;"),
+        "{all}"
+    );
+    assert!(!all.contains("slow("), "{all}");
+    assert!(r[1].as_str().unwrap().contains("type EchoInput"));
+}
+
+#[test]
+fn schema_to_ts_covers_common_shapes() {
+    let schema = json!({
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+            "path": {"type": "string", "description": "File path"},
+            "mode": {"enum": ["a", "b"]},
+            "limit": {"type": ["integer", "null"]},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "with-dash": {"type": "boolean"},
+            "nested": {"type": "object", "properties": {"x": {"type": "number"}}, "additionalProperties": false}
+        }
+    });
+    let ts = ts::schema_to_ts(&schema);
+    for needle in [
+        "path: string;",
+        "/**\n   * File path",
+        "mode?: \"a\" | \"b\";",
+        "limit?: number | null;",
+        "tags?: string[];",
+        "\"with-dash\"?: boolean;",
+        "x?: number;",
+    ] {
+        assert!(ts.contains(needle), "missing {needle:?} in\n{ts}");
+    }
+    assert_eq!(
+        ts::input_type_name("mcp__fs__read-file"),
+        "McpFsReadFileInput"
+    );
+    let decl = ts::declarations([&ToolInfo {
+        name: "mcp__fs__read-file".into(),
+        description: "Read".into(),
+        input_schema: json!({"type":"object"}),
+    }]);
+    assert!(
+        decl.contains("\"mcp__fs__read-file\"(args: McpFsReadFileInput)"),
+        "{decl}"
+    );
+}

@@ -385,6 +385,10 @@ persist_memory_injections = false
 # (avoidable) reason: system prompt, tool set, or message prefix changed. These
 # should essentially never happen and indicate a prefix-cache bug.
 kv_cache_miss_notices = true
+# Code Mode: a `codemode` tool where the model writes a JS program that calls
+# jcode and MCP tools as typed async functions. See docs/CODEMODE.md.
+# Env override: JCODE_CODEMODE=0
+code_mode = true
 # Update channel: "stable" (releases only) or "main" (latest commits on push)
 # Set to "main" for bleeding edge updates every time code is pushed
 update_channel = "stable"
@@ -1024,6 +1028,10 @@ mod tests {
     #[test]
     fn codemode_defaults_on_and_can_be_disabled() {
         assert!(ToolConfig::default().codemode);
+        assert!(FeatureConfig::default().code_mode);
+        let off: Config = toml::from_str("[features]\ncode_mode = false\n").unwrap();
+        assert!(!off.features.code_mode);
+        assert!(off.tools.codemode);
         for contents in ["", "[tools]\n", "[tools]\ncodemode = true\n"] {
             let config: Config = toml::from_str(contents).unwrap();
             assert!(config.tools.codemode);

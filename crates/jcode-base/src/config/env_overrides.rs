@@ -162,6 +162,7 @@ impl Config {
             && let Some(parsed) = parse_env_bool(&v)
         {
             self.tools.codemode = parsed;
+            self.features.code_mode = parsed;
         }
 
         // ACP adapter

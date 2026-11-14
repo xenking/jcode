@@ -28,7 +28,7 @@ const MAX_REPORT_CHARS: usize = 60_000;
 
 const DESCRIPTION: &str = "Run sandboxed JavaScript to chain, filter, or parallelize tool calls, including MCP. Supply an async function body using await/return; only returned values and console.log reach the conversation.\n\
 tools.<name>(args) or callTool(name, args) takes normal tool arguments; JSON output becomes objects, and failures throw. Use Promise.all for independent calls.\n\
-listTools(filter?) and describeTool(name) give names and schemas. store(key, value), load(key), storedKeys() persist JSON for the session.\n\
+listTools(filter?) lists names; types(filter?) and describeTool(name) give TypeScript declarations and schemas. store(key, value), load(key), storedKeys() persist JSON for the session.\n\
 No direct filesystem, network, timers, or modules. Limits: 64 MB heap, 300 s, 2000 tool calls.";
 
 pub struct CodemodeTool {
@@ -60,7 +60,15 @@ impl Host for RegistryHost {
         let sub_ctx = self.ctx.for_subcall(format!("codemode-{n}-{name}"));
         Box::pin(async move {
             let args = match args {
-                Value::Object(map) => Value::Object(map),
+                Value::Object(mut map) => {
+                    // Intermediate data stays in the VM and the final report is
+                    // bounded separately, so nested results skip the per-call
+                    // model-context budget (MCP fit_to_budget, context guard).
+                    // Output size only: no extra authority is granted.
+                    map.entry(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY)
+                        .or_insert(Value::Bool(true));
+                    Value::Object(map)
+                }
                 other => return Err(format!("arguments must be an object, got {other}")),
             };
             match registry.execute(&name, args, sub_ctx).await {
@@ -73,7 +81,8 @@ impl Host for RegistryHost {
 
 /// Whether the opt-in codemode tool is enabled in config.
 pub(crate) fn enabled() -> bool {
-    jcode_codemode::AVAILABLE && crate::config::config().tools.codemode
+    let config = crate::config::config();
+    jcode_codemode::AVAILABLE && config.features.code_mode && config.tools.codemode
 }
 
 fn store_path(session_id: &str) -> Option<PathBuf> {
@@ -122,12 +131,57 @@ fn save_store(session_id: &str, store: &Map<String, Value>) {
     }
 }
 
-fn truncate(text: String, max: usize) -> String {
+fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(max).collect();
+    format!("{cut}…")
+}
+
+/// Bound the report. When it is over budget, the full text is spilled to a
+/// file under the jcode dir so nothing is silently lost.
+fn bound_report(text: String, max: usize, spill: Option<PathBuf>) -> String {
     if text.chars().count() <= max {
         return text;
     }
+    let total = text.len();
+    let saved = spill.and_then(|path| {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok()?;
+        }
+        std::fs::write(&path, &text).ok()?;
+        Some(path)
+    });
     let cut: String = text.chars().take(max).collect();
-    format!("{cut}\n...(truncated; return a smaller value or store() the rest)")
+    match saved {
+        Some(path) => format!(
+            "{cut}\n...(truncated {total} bytes; full report at {}. Return a smaller value or store() the rest)",
+            path.display()
+        ),
+        None => format!("{cut}\n...(truncated; return a smaller value or store() the rest)"),
+    }
+}
+
+fn spill_path(session_id: &str, call_id: &str) -> Option<PathBuf> {
+    let clean = |s: &str| -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    };
+    Some(
+        crate::storage::jcode_dir()
+            .ok()?
+            .join("codemode")
+            .join("spill")
+            .join(format!("{}-{}.txt", clean(session_id), clean(call_id))),
+    )
 }
 
 pub(crate) fn render_report(out: &jcode_codemode::RunOutput) -> String {
@@ -160,6 +214,37 @@ pub(crate) fn render_report(out: &jcode_codemode::RunOutput) -> String {
         }
         (None, None) => report.push_str("result: undefined\n"),
     }
+    if !out.receipts.is_empty() {
+        report.push_str("\ncalls:\n");
+        const SHOWN: usize = 40;
+        for r in out.receipts.iter().take(SHOWN) {
+            report.push_str(&format!(
+                "  #{} {} {} {}ms {}B",
+                r.seq,
+                r.tool,
+                r.status.as_str(),
+                r.elapsed_ms,
+                r.bytes
+            ));
+            if let Some(note) = &r.note {
+                report.push_str(" - ");
+                report.push_str(&truncate_chars(note, 160));
+            }
+            report.push('\n');
+        }
+        if out.receipts.len() > SHOWN {
+            let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+            for r in &out.receipts[SHOWN..] {
+                *counts.entry(r.status.as_str()).or_default() += 1;
+            }
+            let summary: Vec<String> = counts.iter().map(|(k, v)| format!("{v} {k}")).collect();
+            report.push_str(&format!(
+                "  ...{} more ({})\n",
+                out.receipts.len() - SHOWN,
+                summary.join(", ")
+            ));
+        }
+    }
     let mut footer = format!(
         "\n[{} tool call{}, {:.1}s",
         out.tool_calls,
@@ -172,7 +257,7 @@ pub(crate) fn render_report(out: &jcode_codemode::RunOutput) -> String {
     }
     footer.push(']');
     report.push_str(&footer);
-    truncate(report, MAX_REPORT_CHARS)
+    report
 }
 
 #[async_trait]
@@ -242,7 +327,11 @@ impl Tool for CodemodeTool {
             out.error.as_deref().unwrap_or("none")
         ));
 
-        let report = render_report(&out);
+        let report = bound_report(
+            render_report(&out),
+            MAX_REPORT_CHARS,
+            spill_path(&ctx.session_id, &ctx.tool_call_id),
+        );
         if out.error.is_some() && out.tool_calls == 0 && out.logs.is_empty() {
             // Nothing happened: surface as a tool error so the model retries.
             anyhow::bail!("{report}");

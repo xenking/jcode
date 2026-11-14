@@ -22,6 +22,43 @@ use std::time::Duration;
 
 #[cfg(not(target_os = "freebsd"))]
 mod engine;
+pub mod ts;
+
+/// Host-recorded outcome of one nested tool call. Recorded by the host, not
+/// the script, so "no failures" is distinguishable from "nothing ran".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallReceipt {
+    pub seq: usize,
+    pub tool: String,
+    pub status: CallStatus,
+    pub elapsed_ms: u64,
+    /// Bytes of the tool's raw output (0 for refusals).
+    pub bytes: usize,
+    /// First line of the error for failed/refused calls.
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallStatus {
+    /// Started but the run ended (timeout/cancel) before it finished, so it
+    /// may have partially run.
+    InFlight,
+    Ok,
+    Failed,
+    /// Never dispatched: unknown tool, call cap, bad arguments, cancelled.
+    Refused,
+}
+
+impl CallStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InFlight => "in_flight",
+            Self::Ok => "ok",
+            Self::Failed => "failed",
+            Self::Refused => "refused",
+        }
+    }
+}
 
 /// Whether this build includes the QuickJS engine. False on FreeBSD, where
 /// rquickjs has no prebuilt bindings.
@@ -80,6 +117,8 @@ pub struct RunOutput {
     pub logs_truncated: bool,
     /// Number of tool calls the script made.
     pub tool_calls: usize,
+    /// One receipt per attempted nested call, in start order.
+    pub receipts: Vec<CallReceipt>,
     /// Session store after the run (persisted by the caller between runs).
     pub store: Map<String, Value>,
     /// Wall-clock duration of the run.
