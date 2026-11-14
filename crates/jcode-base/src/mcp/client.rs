@@ -55,6 +55,10 @@ pub const DEFAULT_MCP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration
 /// A separate budget for the complete remote connection, including OAuth refresh.
 const REMOTE_MCP_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Cap on the stateless-era probe so a silent legacy server leaves time for
+/// the `initialize` fallback inside the handshake budget.
+const DISCOVER_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Resolve the per-request reply timeout for a server config.
 pub fn request_timeout_for(config: &McpServerConfig) -> std::time::Duration {
     config
@@ -488,16 +492,83 @@ impl McpClient {
         self.handle.clone()
     }
 
+    /// Try the stateless 2026-07-28 era via `server/discover`. Returns true
+    /// when the server speaks it; on any failure the connection is reset to
+    /// the initialize-based era so the caller can fall back.
+    async fn try_discover(&mut self) -> bool {
+        let Backend::Remote(connection) = &self.backend else {
+            return false;
+        };
+        connection.set_protocol_version(STATELESS_PROTOCOL_VERSION);
+        connection.set_stateless(true);
+        let discovered = async {
+            let response = tokio::time::timeout(
+                DISCOVER_PROBE_TIMEOUT,
+                self.handle.request("server/discover", None),
+            )
+            .await
+            .context("server/discover timed out")??;
+            let result = response.result.context("server/discover has no result")?;
+            let discover: DiscoverResult = serde_json::from_value(result)?;
+            anyhow::ensure!(
+                discover
+                    .supported_versions
+                    .iter()
+                    .any(|v| v == STATELESS_PROTOCOL_VERSION),
+                "server does not support {STATELESS_PROTOCOL_VERSION}"
+            );
+            Ok::<_, anyhow::Error>(discover)
+        }
+        .await;
+        match discovered {
+            Ok(discover) => {
+                *self
+                    .handle
+                    .server_info
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = discover.server_info();
+                *self
+                    .handle
+                    .capabilities
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = discover.capabilities;
+                true
+            }
+            Err(err) => {
+                crate::logging::debug(&format!(
+                    "MCP [{}]: server/discover failed ({err:#}); using initialize",
+                    self.handle.name
+                ));
+                if let Backend::Remote(connection) = &self.backend {
+                    connection.set_stateless(false);
+                }
+                false
+            }
+        }
+    }
+
     /// Initialize the MCP connection
     async fn initialize(&mut self) -> Result<()> {
-        // Remote servers get the newest revision we speak; older servers
-        // answer with the version they support, which is fine because jcode
-        // only uses methods common to every revision.
+        if matches!(&self.backend, Backend::Remote(c) if !c.is_legacy())
+            && self.try_discover().await
+        {
+            return Ok(());
+        }
+        // Remote servers get the newest initialize-based revision we speak;
+        // older servers answer with the version they support, which is fine
+        // because jcode only uses methods common to every revision.
         let protocol_version = match &self.backend {
             Backend::Stdio(_) => "2024-11-05",
             Backend::Remote(connection) if connection.is_legacy() => "2024-11-05",
             Backend::Remote(_) => "2025-06-18",
         };
+        // Streamable HTTP (2025-06-18+) requires MCP-Protocol-Version on every
+        // POST, including initialize; send the version we request.
+        if let Backend::Remote(connection) = &self.backend
+            && !connection.is_legacy()
+        {
+            connection.set_protocol_version(protocol_version);
+        }
         let params = InitializeParams {
             protocol_version: protocol_version.to_string(),
             capabilities: ClientCapabilities::default(),

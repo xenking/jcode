@@ -2,7 +2,7 @@
 //! No transport mocks or external network services are used.
 use super::*;
 use crate::mcp::client::McpClient;
-use crate::mcp::protocol::ContentBlock;
+use crate::mcp::protocol::{ContentBlock, STATELESS_PROTOCOL_VERSION};
 use serde_json::json;
 use std::sync::atomic::AtomicUsize;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -28,6 +28,10 @@ struct Plan {
     notification_status: u16,
     protocol_version: String,
     get_content_type: String,
+    /// Reject any POST without exactly one MCP-Protocol-Version header.
+    strict_header: bool,
+    /// Behave like a strict stateless (2026-07-28) server.
+    stateless: bool,
 }
 
 impl Default for Plan {
@@ -43,6 +47,8 @@ impl Default for Plan {
             notification_status: 202,
             protocol_version: "2025-06-18".to_string(),
             get_content_type: "text/event-stream".to_string(),
+            stateless: false,
+            strict_header: false,
         }
     }
 }
@@ -121,8 +127,17 @@ impl Fixture {
         .unwrap()
     }
 
+    /// Requests after the client's stateless-era `server/discover` probe,
+    /// which this initialize-era fixture rejects like a pre-2026 server.
     fn requests(&self) -> Vec<HttpRequest> {
-        self.state.requests.lock().unwrap().clone()
+        self.state
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.body.get("method").and_then(Value::as_str) != Some("server/discover"))
+            .cloned()
+            .collect()
     }
 }
 
@@ -141,7 +156,14 @@ async fn parse_request(socket: TcpStream) -> Result<(HttpRequest, TcpStream)> {
             break;
         }
         let (key, value) = line.split_once(':').context("header")?;
-        headers.insert(key.to_ascii_lowercase(), value.trim().to_string());
+        // Keep duplicates visible so tests can require exactly one value.
+        headers
+            .entry(key.to_ascii_lowercase())
+            .and_modify(|existing: &mut String| {
+                existing.push_str(", ");
+                existing.push_str(value.trim());
+            })
+            .or_insert_with(|| value.trim().to_string());
     }
     let size = headers
         .get("content-length")
@@ -271,6 +293,29 @@ async fn serve(socket: TcpStream, state: Arc<FixtureState>) -> Result<()> {
         )
         .await;
     }
+    if plan.stateless {
+        return serve_stateless(&mut socket, &request, method).await;
+    }
+    if plan.strict_header
+        && request.method == "POST"
+        && method != "server/discover"
+        && request
+            .headers
+            .get(PROTOCOL_HEADER)
+            .is_none_or(|v| v.contains(','))
+    {
+        return response(
+            &mut socket,
+            400,
+            "application/json",
+            r#"{"jsonrpc":"2.0","error":{"code":-32020,"message":"Exactly one MCP-Protocol-Version header is required"}}"#,
+            "",
+        )
+        .await;
+    }
+    if method == "server/discover" {
+        return response(&mut socket, 400, "text/plain", "unknown method", "").await;
+    }
     if method == "initialize"
         && let Some(status) = plan.initialize_status
     {
@@ -399,6 +444,72 @@ async fn serve(socket: TcpStream, state: Arc<FixtureState>) -> Result<()> {
     .await
 }
 
+/// Mirrors social-research-hub's strict 2026-07-28 gate: exactly one
+/// MCP-Protocol-Version header matching `_meta`, Mcp-Method/Mcp-Name mirrors,
+/// and only stateless methods.
+async fn serve_stateless(
+    socket: &mut TcpStream,
+    request: &HttpRequest,
+    method: &str,
+) -> Result<()> {
+    let id = request.body.get("id").cloned().unwrap_or(Value::Null);
+    let reject = |status: u16, code: i64, message: &str| {
+        (
+            status,
+            json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}}).to_string(),
+        )
+    };
+    let header = request.headers.get(PROTOCOL_HEADER);
+    let meta = request
+        .body
+        .pointer("/params/_meta/io.modelcontextprotocol~1protocolVersion")
+        .and_then(Value::as_str);
+    let name = match method {
+        "tools/call" => request.body.pointer("/params/name").and_then(Value::as_str),
+        _ => None,
+    };
+    let (status, body) = if header.is_none_or(|v| v.contains(',')) {
+        reject(
+            400,
+            -32020,
+            "Exactly one MCP-Protocol-Version header is required",
+        )
+    } else if meta.is_none() {
+        reject(
+            400,
+            -32602,
+            "Namespaced protocolVersion metadata is required",
+        )
+    } else if header.map(String::as_str) != meta {
+        reject(400, -32020, "Protocol version header/body mismatch")
+    } else if meta != Some(STATELESS_PROTOCOL_VERSION) {
+        reject(400, -32022, "Unsupported protocol version")
+    } else if request.headers.get("mcp-method").map(String::as_str) != Some(method) {
+        reject(400, -32020, "Mcp-Method mismatch")
+    } else if name.is_some() && request.headers.get("mcp-name").map(String::as_str) != name {
+        reject(400, -32020, "Mcp-Name mismatch")
+    } else {
+        let result = match method {
+            "server/discover" => {
+                json!({"supportedVersions":[STATELESS_PROTOCOL_VERSION],"capabilities":{"tools":{}},"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"strict","version":"1"}}})
+            }
+            "tools/list" => json!({"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}),
+            "tools/call" => {
+                json!({"content":[{"type":"text","text":request.body.pointer("/params/arguments").map(Value::to_string).unwrap_or_default()}]})
+            }
+            _ => {
+                let (status, body) = reject(404, -32601, "Method not found");
+                return response(socket, status, "application/json", &body, "").await;
+            }
+        };
+        (
+            200,
+            json!({"jsonrpc":"2.0","id":id,"result":result}).to_string(),
+        )
+    };
+    response(socket, status, "application/json", &body, "").await
+}
+
 async fn wait_until(predicate: impl Fn() -> bool) {
     tokio::time::timeout(Duration::from_secs(3), async {
         while !predicate() {
@@ -463,6 +574,73 @@ async fn public_json_connect_list_call_refresh_and_shutdown() {
         );
     }
     assert_eq!(requests.last().unwrap().method, "DELETE");
+}
+
+#[tokio::test]
+async fn strict_server_requires_protocol_header_on_initialize() {
+    let fixture = Fixture::start(Plan {
+        strict_header: true,
+        ..Plan::default()
+    })
+    .await;
+    let mut client = fixture.connect("http").await;
+    assert_eq!(client.tools()[0].name, "echo");
+    client.call_tool("echo", json!({})).await.unwrap();
+    client.shutdown().await;
+    let requests = fixture.requests();
+    assert_eq!(requests[0].body["method"], "initialize");
+    for request in requests.iter().filter(|r| r.method == "POST") {
+        assert_eq!(
+            request.headers.get(PROTOCOL_HEADER).map(String::as_str),
+            Some("2025-06-18"),
+            "{}",
+            request.body
+        );
+    }
+}
+
+#[tokio::test]
+async fn strict_stateless_server_uses_discover_meta_and_mirrored_headers() {
+    let fixture = Fixture::start(Plan {
+        stateless: true,
+        ..Plan::default()
+    })
+    .await;
+    let mut client = fixture.connect("http").await;
+    assert_eq!(client.server_info().unwrap().name, "strict");
+    assert_eq!(client.tools()[0].name, "echo");
+    assert_eq!(
+        text(client.call_tool("echo", json!({"a":1})).await.unwrap()),
+        "{\"a\":1}"
+    );
+    client.shutdown().await;
+    let requests = fixture.state.requests.lock().unwrap().clone();
+    let methods: Vec<_> = requests
+        .iter()
+        .filter_map(|r| r.body["method"].as_str())
+        .collect();
+    assert_eq!(methods, ["server/discover", "tools/list", "tools/call"]);
+    for request in &requests {
+        assert_eq!(
+            request.headers.get(PROTOCOL_HEADER).map(String::as_str),
+            Some(STATELESS_PROTOCOL_VERSION)
+        );
+        assert!(!request.headers.contains_key(SESSION_HEADER));
+    }
+}
+
+#[test]
+fn header_value_encoding_follows_value_encoding_rules() {
+    assert_eq!(encode_header_value("get_weather"), "get_weather");
+    assert_eq!(encode_header_value(" padded "), "=?base64?IHBhZGRlZCA=?=");
+    assert_eq!(
+        encode_header_value("Hello, 世界"),
+        "=?base64?SGVsbG8sIOS4lueVjA==?="
+    );
+    assert_eq!(
+        encode_header_value("=?base64?literal?="),
+        "=?base64?PT9iYXNlNjQ/bGl0ZXJhbD89?="
+    );
 }
 
 #[tokio::test]
@@ -757,7 +935,8 @@ async fn remote_handshake_deadline_is_independent_of_long_tool_timeout() {
     let server = tokio::spawn(async move {
         let (socket, _) = listener.accept().await.unwrap();
         let (request, mut socket) = parse_request(socket).await.unwrap();
-        assert_eq!(request.body["method"], "initialize");
+        // The handshake starts with the stateless-era probe.
+        assert_eq!(request.body["method"], "server/discover");
         open_stream(&mut socket, "text/event-stream").await.unwrap();
         started_tx.send(()).unwrap();
         // Never send a response. The client must close the socket on deadline.
