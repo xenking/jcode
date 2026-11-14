@@ -343,6 +343,10 @@ pub struct CompactionConfig {
     /// not the final request size when recent messages cannot be compacted.
     pub max_context_tokens: usize,
 
+    /// Use bitmap snapcompact for vision-capable models at compaction time.
+    /// Models without vision fall back to normal compaction.
+    pub snapcompact: bool,
+
     /// Enable LLM-free "shake" elision of stale large tool outputs and code
     /// blocks. Runs only when the prompt prefix is being rewritten anyway:
     /// before LLM compaction, after the provider cache TTL expired, and on
@@ -391,6 +395,7 @@ pub struct CompactionOverride {
     pub relevance_keep_threshold: Option<f32>,
     pub goal_window_turns: Option<usize>,
     pub max_context_tokens: Option<usize>,
+    pub snapcompact: Option<bool>,
     pub shake: Option<bool>,
     pub shake_protect_tokens: Option<usize>,
     pub shake_min_region_tokens: Option<usize>,
@@ -419,6 +424,7 @@ impl CompactionOverride {
             relevance_keep_threshold,
             goal_window_turns,
             max_context_tokens,
+            snapcompact,
             shake,
             shake_protect_tokens,
             shake_min_region_tokens,
@@ -477,6 +483,7 @@ impl Default for CompactionConfig {
             relevance_keep_threshold: 0.65,
             goal_window_turns: 5,
             max_context_tokens: 0,
+            snapcompact: true,
             shake: false,
             shake_protect_tokens: 16_384,
             shake_min_region_tokens: 400,
@@ -1776,6 +1783,34 @@ mod exhausted_usage_failover_tests {
 #[cfg(test)]
 mod compaction_override_tests {
     use super::*;
+
+    #[test]
+    fn snapcompact_defaults_on_and_model_override_wins() {
+        let mut config = CompactionConfig::default();
+        assert!(config.snapcompact);
+        config.providers.insert(
+            "openai".into(),
+            CompactionOverride {
+                snapcompact: Some(false),
+                ..Default::default()
+            },
+        );
+        config.models.insert(
+            "gpt-6.1-terra".into(),
+            CompactionOverride {
+                snapcompact: Some(true),
+                ..Default::default()
+            },
+        );
+        assert!(!config.resolve(Some("openai"), Some("other")).snapcompact);
+        assert!(
+            config
+                .resolve(Some("openai"), Some("openai-api:gpt-6.1-terra"))
+                .snapcompact
+        );
+        let disabled: CompactionConfig = serde_json::from_str(r#"{"snapcompact":false}"#).unwrap();
+        assert!(!disabled.resolve(None, None).snapcompact);
+    }
 
     fn cfg() -> CompactionConfig {
         let mut c = CompactionConfig::default();
