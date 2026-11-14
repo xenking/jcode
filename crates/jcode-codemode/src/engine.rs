@@ -1,7 +1,7 @@
 //! QuickJS engine behind [`crate::run`]. Not built on FreeBSD, where
 //! rquickjs-sys has no prebuilt bindings.
 
-use super::{Host, Limits, RunOutput, ToolInfo};
+use super::{CallReceipt, CallStatus, Host, Limits, RunOutput, ToolInfo};
 use rquickjs::{
     AsyncContext, AsyncRuntime, CatchResultExt, Function, Promise, Value as JsValue, prelude::Async,
 };
@@ -44,6 +44,7 @@ const PRELUDE: &str = r#"
     const f = String(filter).toLowerCase();
     return all.filter((t) => t.name.toLowerCase().includes(f) || t.description.toLowerCase().includes(f));
   };
+  globalThis.types = (filter) => __types(filter === undefined || filter === null ? "" : String(filter));
   globalThis.describeTool = (name) => {
     const raw = __describeTool(String(name));
     return raw === "" ? undefined : JSON.parse(raw);
@@ -61,11 +62,50 @@ struct Shared {
     store: Mutex<Map<String, Value>>,
     logs: Mutex<(Vec<String>, usize, bool)>,
     calls: AtomicUsize,
+    receipts: Mutex<Vec<CallReceipt>>,
     cancelled: Arc<AtomicBool>,
     limits: Limits,
 }
 
 impl Shared {
+    fn record(
+        &self,
+        tool: &str,
+        status: CallStatus,
+        elapsed_ms: u64,
+        bytes: usize,
+        note: Option<String>,
+    ) -> usize {
+        let mut receipts = self.receipts.lock().unwrap_or_else(|e| e.into_inner());
+        let seq = receipts.len() + 1;
+        receipts.push(CallReceipt {
+            seq,
+            tool: tool.to_string(),
+            status,
+            elapsed_ms,
+            bytes,
+            note: note.map(|n| first_line(&n)),
+        });
+        seq
+    }
+
+    fn finish(
+        &self,
+        seq: usize,
+        status: CallStatus,
+        elapsed_ms: u64,
+        bytes: usize,
+        note: Option<String>,
+    ) {
+        let mut receipts = self.receipts.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(r) = receipts.iter_mut().find(|r| r.seq == seq) {
+            r.status = status;
+            r.elapsed_ms = elapsed_ms;
+            r.bytes = bytes;
+            r.note = note.map(|n| first_line(&n));
+        }
+    }
+
     fn push_log(&self, level: &str, line: String) {
         let mut guard = self.logs.lock().unwrap_or_else(|e| e.into_inner());
         let (lines, bytes, truncated) = &mut *guard;
@@ -110,6 +150,7 @@ pub(crate) async fn run(
         store: Mutex::new(store),
         logs: Mutex::new((Vec::new(), 0, false)),
         calls: AtomicUsize::new(0),
+        receipts: Mutex::new(Vec::new()),
         cancelled,
         limits,
     });
@@ -153,6 +194,7 @@ pub(crate) async fn run(
         logs,
         logs_truncated,
         tool_calls: shared.calls.load(Ordering::SeqCst),
+        receipts: std::mem::take(&mut *shared.receipts.lock().unwrap_or_else(|e| e.into_inner())),
         store,
         elapsed,
     }
@@ -286,10 +328,24 @@ fn install_globals<'js>(ctx: &rquickjs::Ctx<'js>, shared: &Arc<Shared>) -> rquic
                         "name": t.name,
                         "description": t.description,
                         "input_schema": t.input_schema,
+                        "typescript": crate::ts::declarations(std::iter::once(t)),
                     })
                     .to_string()
                 })
                 .unwrap_or_default()
+        })?,
+    )?;
+
+    let s = shared.clone();
+    globals.set(
+        "__types",
+        Function::new(ctx.clone(), move |filter: String| -> String {
+            let f = filter.to_lowercase();
+            crate::ts::declarations(s.tools.iter().filter(|t| {
+                f.is_empty()
+                    || t.name.to_lowercase().contains(&f)
+                    || t.description.to_lowercase().contains(&f)
+            }))
         })?,
     )?;
 
@@ -354,8 +410,12 @@ async fn call_tool(shared: &Arc<Shared>, name: String, raw_args: String) -> Stri
         Ok(value) => json!({ "ok": true, "value": value }).to_string(),
         Err(error) => json!({ "ok": false, "error": error }).to_string(),
     };
+    let refuse = |name: &str, msg: String| {
+        shared.record(name, CallStatus::Refused, 0, 0, Some(msg.clone()));
+        envelope(Err(msg))
+    };
     if shared.cancelled.load(Ordering::Relaxed) {
-        return envelope(Err("cancelled".into()));
+        return refuse(&name, "cancelled".into());
     }
     if !shared.tools.iter().any(|t| t.name == name) {
         let mut hint = String::new();
@@ -372,22 +432,24 @@ async fn call_tool(shared: &Arc<Shared>, name: String, raw_args: String) -> Stri
         if !similar.is_empty() {
             hint = format!(" Did you mean: {}?", similar.join(", "));
         }
-        return envelope(Err(format!(
-            "unknown tool '{name}'.{hint} Use listTools() to see available tools."
-        )));
+        let msg = format!("unknown tool '{name}'.{hint} Use listTools() to see available tools.");
+        return refuse(&name, msg);
     }
     let count = shared.calls.fetch_add(1, Ordering::SeqCst) + 1;
     if count > shared.limits.max_tool_calls {
-        return envelope(Err(format!(
+        let msg = format!(
             "tool call limit reached ({} per run)",
             shared.limits.max_tool_calls
-        )));
+        );
+        return refuse(&name, msg);
     }
     let args: Value = match serde_json::from_str(&raw_args) {
         Ok(Value::Null) => Value::Object(Map::new()),
         Ok(value) => value,
-        Err(err) => return envelope(Err(format!("arguments are not JSON: {err}"))),
+        Err(err) => return refuse(&name, format!("arguments are not JSON: {err}")),
     };
+    let seq = shared.record(&name, CallStatus::InFlight, 0, 0, None);
+    let started = Instant::now();
     let fut = shared.host.call_tool(name, args);
     // Abort the host call if the script is torn down (timeout or cancel)
     // while this call is still in flight.
@@ -398,10 +460,22 @@ async fn call_tool(shared: &Arc<Shared>, name: String, raw_args: String) -> Stri
         }
     }
     let mut handle = AbortOnDrop(shared.outer.spawn(fut));
-    match (&mut handle.0).await {
-        Ok(result) => envelope(result),
-        Err(err) => envelope(Err(format!("tool task failed: {err}"))),
+    let result = match (&mut handle.0).await {
+        Ok(result) => result,
+        Err(err) => Err(format!("tool task failed: {err}")),
+    };
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    match &result {
+        Ok(value) => {
+            let bytes = match value {
+                Value::String(s) => s.len(),
+                other => other.to_string().len(),
+            };
+            shared.finish(seq, CallStatus::Ok, elapsed_ms, bytes, None);
+        }
+        Err(err) => shared.finish(seq, CallStatus::Failed, elapsed_ms, 0, Some(err.clone())),
     }
+    envelope(result)
 }
 
 fn first_line(text: &str) -> String {
