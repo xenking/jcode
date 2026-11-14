@@ -3,3 +3,13 @@ Shake compaction (crates/jcode-compaction-core/src/shake.rs) is adapted from
 oxicode (https://github.com/project-oxi/oxicode), Copyright (c) oxicode
 contributors, MIT License, itself ported from oh-my-pi
 (https://github.com/can1357/oh-my-pi), Copyright (c) Can Bölük, MIT License.
+
+Snapcompact (crates/jcode-compaction-core/src/snapcompact) is adapted from
+oxicode (https://github.com/project-oxi/oxicode), copyright oxicode contributors,
+MIT License, itself ported from oh-my-pi (https://github.com/can1357/oh-my-pi),
+copyright Can Bölük, MIT License.
+
+The bundled Silver.ttf font is by Poppy Works, licensed under CC BY 4.0:
+https://poppyworks.itch.io/silver. Its license is included as Silver.LICENSE.
+The bundled X.org misc BDF fonts are public domain. The bundled unscii-8.hex
+font by Viznut is public domain under CC0: https://github.com/viznut/unscii.

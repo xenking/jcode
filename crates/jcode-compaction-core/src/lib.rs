@@ -1,4 +1,5 @@
 pub mod shake;
+pub mod snapcompact;
 
 use jcode_message_types::{ContentBlock, Message, Role};
 use std::collections::HashSet;
