@@ -24,6 +24,7 @@
 //! cannot represent the source. Callers must fall back without discarding it.
 use serde::{Deserialize, Serialize};
 pub mod renderer;
+pub mod serialize;
 
 // ── Shape system ──────────────────────────────────────────────────────
 
