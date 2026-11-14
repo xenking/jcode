@@ -171,7 +171,8 @@ pub use diagnostics::{SocketState, Stage, describe_disconnect, explain, human_du
 pub use errors::{Error, ErrorKind, Result};
 pub use jcode_applet_types as applet;
 pub use jcode_harness_api::{
-    SessionEditStats, enrich_sessions_from_edit_stats, enrich_sessions_from_local_edit_stats,
+    AskAnswer, AskOption, AskQuestion, AskResponse, SessionEditStats,
+    enrich_sessions_from_edit_stats, enrich_sessions_from_local_edit_stats,
     enrich_sessions_from_local_swarm_state, enrich_sessions_from_swarm_state,
 };
 /// Auto-poke and todo quality-gate policy, identical to the TUI's. Fetch a
