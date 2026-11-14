@@ -115,7 +115,8 @@ reactive_threshold_tokens = 400000
 
 For OAuth/ChatGPT subscriptions the 400k trigger is a usage-policy choice, not
 an API token-pricing cliff. API-key billing doubles above 272k input tokens, so
-consider a 250k trigger for that route. The model window is 1,050,000 tokens.
+consider a 250k trigger for that route. The example configures a 1,050,000-token
+ceiling, but the active provider catalog can report a different model window.
 
 Overrides re-resolve whenever the session model changes (model switch,
 session restore). `/compact mode` choices made at runtime survive re-resolve.
