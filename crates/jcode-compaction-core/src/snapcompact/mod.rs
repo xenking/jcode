@@ -607,16 +607,19 @@ pub fn compact(
         return Err("snapcompact multi-column pagination is not implemented".into());
     }
     let frames = chunk_into_frames(&prep.bounded_text, &shape, options.max_frames as usize);
-    if !prep.remaining_text.is_empty()
+    if prep.bounded_text.is_empty()
+        || !prep.remaining_text.is_empty()
         || frames.last().map_or(0, |frame| frame.source_end) != prep.bounded_text.chars().count()
     {
         return Err("snapcompact frame budget cannot represent all source text".into());
     }
     let render_opts = shape_to_render_options(&shape);
+    let mut dim_open = false;
     let rendered: Vec<FrameRef> = frames
         .iter()
         .map(|range| -> Result<FrameRef, String> {
             let slice = slice_char_range(&prep.bounded_text, range.source_start, range.source_end);
+            let slice = finish_frame_text(&slice, &mut dim_open);
             let bytes = self::renderer::render_snapcompact_png(slice, render_opts.clone())
                 .map_err(|error| format!("snapcompact frame {}: {error}", range.index))?;
             Ok(FrameRef {
@@ -633,6 +636,22 @@ pub fn compact(
         frames: rendered,
         shape,
     })
+}
+
+fn finish_frame_text(text: &str, dim_open: &mut bool) -> String {
+    let mut output = String::with_capacity(text.len() + usize::from(*dim_open));
+    if *dim_open {
+        output.push('\u{e}');
+    }
+    for ch in text.chars() {
+        match ch {
+            '\u{e}' => *dim_open = true,
+            '\u{f}' => *dim_open = false,
+            _ => {}
+        }
+        output.push(ch);
+    }
+    output
 }
 
 fn chunk_into_frames(text: &str, shape: &Shape, max_frames: usize) -> Vec<FrameRange> {
@@ -688,6 +707,21 @@ fn render_lead_in(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn frame_boundary_restores_dim_state() {
+        let mut open = false;
+        assert_eq!(
+            super::finish_frame_text("a\u{e}dim", &mut open),
+            "a\u{e}dim"
+        );
+        assert!(open);
+        assert_eq!(
+            super::finish_frame_text("continued\u{f}b", &mut open),
+            "\u{e}continued\u{f}b"
+        );
+        assert!(!open);
+    }
+
     #[test]
     fn prepare_messages_preserves_previous_archive_and_normalizes_turns() {
         let messages = [jcode_message_types::Message::user("new\nturn")];
