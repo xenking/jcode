@@ -174,6 +174,15 @@ impl Agent {
         Ok(())
     }
 
+    /// Compaction settings resolved for the active provider/model.
+    pub async fn effective_compaction_config(&self) -> crate::config::CompactionConfig {
+        let compaction = self.registry.compaction();
+        let mut manager = compaction.write().await;
+        manager.set_active_model(Some(self.provider.name()), Some(&self.provider.model()));
+        manager.set_budget(self.provider.context_window());
+        manager.effective_config().clone()
+    }
+
     /// Resolve the current model window and live global/session ceiling.
     pub async fn effective_context_budget(&self) -> usize {
         let compaction = self.registry.compaction();
