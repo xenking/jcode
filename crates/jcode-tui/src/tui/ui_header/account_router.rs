@@ -74,6 +74,62 @@ fn cached_inventory() -> Arc<Inventory> {
     inventory
 }
 
+pub(super) fn status_usage_accounts(
+    remote: bool,
+) -> Vec<(&'static str, crate::usage::AccountUsageSnapshot)> {
+    if let Some((claude, openai)) = crate::usage::remote_account_list() {
+        return [
+            (
+                "Claude",
+                crate::usage::MultiAccountProviderKind::Anthropic,
+                claude,
+            ),
+            (
+                "Codex",
+                crate::usage::MultiAccountProviderKind::OpenAI,
+                openai,
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(name, kind, accounts)| {
+            accounts
+                .first()
+                .and_then(|account| {
+                    crate::usage::cached_account_usage_snapshot(kind, &account.label)
+                })
+                .map(|snapshot| (name, snapshot))
+        })
+        .collect();
+    }
+    if remote || crate::usage::remote_account_usage_received() {
+        return Vec::new();
+    }
+    let inventory = cached_inventory();
+    [
+        (
+            "claude",
+            "Claude",
+            crate::usage::MultiAccountProviderKind::Anthropic,
+        ),
+        (
+            "openai",
+            "Codex",
+            crate::usage::MultiAccountProviderKind::OpenAI,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(provider, name, kind)| {
+        let login = inventory
+            .logins
+            .iter()
+            .find(|a| a.provider == provider && a.active)
+            .or_else(|| inventory.logins.iter().find(|a| a.provider == provider))?;
+        crate::usage::cached_account_usage_snapshot(kind, &login.label)
+            .map(|snapshot| (name, snapshot))
+    })
+    .collect()
+}
+
 fn load_inventory() -> Inventory {
     // Local auth files only. Retain metadata, never access/refresh tokens.
     let now = chrono::Utc::now().timestamp_millis();

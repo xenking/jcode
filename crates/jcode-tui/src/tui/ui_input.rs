@@ -1531,7 +1531,16 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
         git: overscroll_git_info(&data).cloned(),
         context: overscroll_context_usage(&data),
         account_remaining: overscroll_account_remaining(&data),
-        account_windows: overscroll_usage_windows(&data),
+        account_windows: if app.remote_machine().is_some()
+            && !crate::usage::remote_account_usage_received()
+        {
+            None
+        } else {
+            overscroll_multi_usage_windows(&super::header::status_usage_accounts(
+                app.remote_machine().is_some(),
+            ))
+            .or_else(|| overscroll_usage_windows(&data))
+        },
         auth: overscroll_auth_label(data.auth_method),
         provider: (!provider.is_empty() && !overscroll_is_runtime_placeholder(&provider))
             .then(|| overscroll_provider_display(&provider)),
@@ -2145,6 +2154,39 @@ fn overscroll_usage_windows(data: &crate::tui::info_widget::InfoWidgetData) -> O
         })
         .collect();
     (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+fn overscroll_multi_usage_windows(
+    accounts: &[(&str, crate::usage::AccountUsageSnapshot)],
+) -> Option<String> {
+    let providers: Vec<String> = accounts
+        .iter()
+        .filter_map(|(provider, account)| {
+            if account.error.is_some() {
+                return None;
+            }
+            let windows = [
+                (&account.primary_label, account.five_hour_ratio),
+                (&account.secondary_label, account.seven_day_ratio),
+            ];
+            let parts: Vec<_> = windows
+                .into_iter()
+                .filter_map(|(label, ratio)| {
+                    let ratio =
+                        ratio.filter(|ratio| ratio.is_finite() && (0.0..=1.0).contains(ratio))?;
+                    Some(format!("{} {:.0}%", label.as_deref()?, ratio * 100.0))
+                })
+                .collect();
+            let reset = (parts.len() == 1)
+                .then_some(account.resets_at.as_deref())
+                .flatten()
+                .map(crate::usage::format_reset_time)
+                .map(|reset| format!(" {reset}"))
+                .unwrap_or_default();
+            (!parts.is_empty()).then(|| format!("{provider} {}{reset}", parts.join(" ")))
+        })
+        .collect();
+    (!providers.is_empty()).then(|| providers.join(" · "))
 }
 
 /// Format context counts compactly while retaining useful precision.

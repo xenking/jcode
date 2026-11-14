@@ -1,6 +1,30 @@
 use super::*;
 use ratatui::style::Modifier;
 
+#[test]
+fn overscroll_multi_provider_windows_ignore_unknown_values() {
+    let make = |primary, secondary| crate::usage::AccountUsageSnapshot {
+        additional_windows: vec![],
+        label: "account".into(),
+        email: None,
+        exhausted: false,
+        primary_label: Some("5h".into()),
+        five_hour_ratio: primary,
+        secondary_label: Some("7d".into()),
+        seven_day_ratio: secondary,
+        resets_at: None,
+        error: None,
+    };
+    let accounts = [
+        ("Claude", make(None, Some(0.27))),
+        ("Codex", make(None, Some(0.95))),
+    ];
+    assert_eq!(
+        overscroll_multi_usage_windows(&accounts).as_deref(),
+        Some("Claude 7d 27% · Codex 7d 95%")
+    );
+}
+
 fn background_row(
     label: &str,
     status: crate::tui::BackgroundTaskRowStatus,

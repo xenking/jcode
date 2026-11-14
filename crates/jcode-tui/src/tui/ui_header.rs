@@ -10,6 +10,12 @@ use ratatui::prelude::*;
 #[path = "ui_header/account_router.rs"]
 mod account_router;
 
+pub(super) fn status_usage_accounts(
+    remote: bool,
+) -> Vec<(&'static str, crate::usage::AccountUsageSnapshot)> {
+    account_router::status_usage_accounts(remote)
+}
+
 /// UI chrome is single-line. Budget the same trailing cell as the transcript
 /// preparer so even an exactly-full header cannot acquire a continuation row.
 fn fit_header_lines(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
