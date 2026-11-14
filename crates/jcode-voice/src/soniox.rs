@@ -28,7 +28,7 @@ use tokio_tungstenite::{
 /// Public Soniox realtime endpoint.
 pub const SONIOX_URL: &str = "wss://stt-rt.soniox.com/transcribe-websocket";
 /// Realtime model requested in the session configuration.
-pub const SONIOX_MODEL: &str = "stt-rt-v5";
+pub const SONIOX_MODEL: &str = "stt-rt-v6";
 /// Same chunk bound as Nari so capture code can feed either backend.
 pub const SONIOX_PCM_CHUNK_SAMPLES: usize = super::nari::NARI_PCM_CHUNK_SAMPLES;
 const SAMPLE_RATE: u32 = 16000;
@@ -50,7 +50,7 @@ pub enum SonioxEvent {
     Finished(Result<String, VoiceError>),
 }
 
-/// `SONIOX_API_KEY`, else `~/.config/jcode/soniox.env`.
+/// `SONIOX_API_KEY`, else `<jcode config dir>/soniox.env`.
 pub fn soniox_api_key() -> Option<String> {
     jcode_provider_env::load_api_key_from_env_or_config("SONIOX_API_KEY", "soniox.env")
         .filter(|key| !key.trim().is_empty())

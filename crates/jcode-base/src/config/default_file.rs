@@ -144,7 +144,7 @@ timeout_secs = 90
 
 # Built-in voice backend: auto|nari|soniox|subscription|command.
 # auto keeps the default selection. soniox reads SONIOX_API_KEY or
-# ~/.config/jcode/soniox.env.
+# <jcode config dir>/soniox.env.
 # backend = "auto"
 # Optional streaming WebSocket URL override for nari/soniox.
 # base_url = ""

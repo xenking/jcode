@@ -110,7 +110,7 @@ impl fmt::Display for VoiceError {
             Self::CaptureFailed => f.write_str("Microphone recording failed"),
             Self::Cancelled => f.write_str("Microphone recording was cancelled"),
             Self::SonioxNotConfigured => f.write_str(
-                "Configure a valid Soniox API key (SONIOX_API_KEY or ~/.config/jcode/soniox.env)",
+                "Configure a valid Soniox API key (SONIOX_API_KEY or <jcode config dir>/soniox.env)",
             ),
             Self::SonioxRejected => f.write_str(
                 "Soniox rejected the voice session. Check your key, balance, and settings",
