@@ -142,6 +142,13 @@ key = "off"
 # Max seconds to wait for the dictation command to finish (0 = no timeout)
 timeout_secs = 90
 
+# Built-in voice backend: auto|nari|soniox|subscription|command.
+# auto keeps the default selection. soniox reads SONIOX_API_KEY or
+# ~/.config/jcode/soniox.env.
+# backend = "auto"
+# Optional streaming WebSocket URL override for nari/soniox.
+# base_url = ""
+
 # Extra names or terms to help built-in voice transcription recognize them.
 # Jcode's own product names are always included.
 # vocabulary = ["Kubernetes", "Alice Zhang"]

@@ -1067,6 +1067,24 @@ pub struct DictationConfig {
     /// Show live voice input (waveform and streaming transcript) inside the
     /// input box. False puts it in the status line instead.
     pub composer_preview: bool,
+    /// Speech-to-text backend for built-in voice input. `auto` keeps the
+    /// historical selection (Jcode subscription, else Nari key, else command).
+    pub backend: DictationBackend,
+    /// Optional WebSocket URL override for the selected streaming backend
+    /// (Nari or Soniox). Empty uses the provider's public endpoint.
+    pub base_url: String,
+}
+
+/// Built-in voice transcription backend selected by `[dictation] backend`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DictationBackend {
+    #[default]
+    Auto,
+    Nari,
+    Soniox,
+    Subscription,
+    Command,
 }
 
 impl Default for DictationConfig {
@@ -1080,6 +1098,8 @@ impl Default for DictationConfig {
             recorder: String::new(),
             global_devices: Vec::new(),
             composer_preview: true,
+            backend: DictationBackend::Auto,
+            base_url: String::new(),
         }
     }
 }

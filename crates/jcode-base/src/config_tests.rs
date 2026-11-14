@@ -1783,6 +1783,28 @@ fn global_voice_devices_fall_back_to_desktop_selection() {
 #[path = "config_tests/default_provider.rs"]
 mod default_provider;
 
+#[test]
+fn dictation_backend_defaults_to_auto_and_parses() {
+    use super::DictationBackend;
+    let config = Config::default();
+    assert_eq!(config.dictation.backend, DictationBackend::Auto);
+    assert!(config.dictation.base_url.is_empty());
+    let parsed: Config =
+        toml::from_str("[dictation]\nbackend = \"soniox\"\nbase_url = \"ws://127.0.0.1:9/x\"\n")
+            .unwrap();
+    assert_eq!(parsed.dictation.backend, DictationBackend::Soniox);
+    assert_eq!(parsed.dictation.base_url, "ws://127.0.0.1:9/x");
+    for (name, want) in [
+        ("nari", DictationBackend::Nari),
+        ("subscription", DictationBackend::Subscription),
+        ("command", DictationBackend::Command),
+    ] {
+        let parsed: Config =
+            toml::from_str(&format!("[dictation]\nbackend = \"{name}\"\n")).unwrap();
+        assert_eq!(parsed.dictation.backend, want);
+    }
+}
+
 /// `display.overscroll_status` was removed; configs that still set it (users
 /// had `"on"` written by older versions) must load without losing settings.
 #[test]
