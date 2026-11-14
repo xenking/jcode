@@ -216,6 +216,47 @@ fn index_of(role: Role) -> usize {
 }
 
 impl Palette {
+    /// Soft Monokai Pro Ristretto, based on the user's terminal palette.
+    pub fn monokai_pro_ristretto() -> Self {
+        let mut palette = Self::default();
+        for (role, rgb) in [
+            (Role::User, (137, 214, 201)),
+            (Role::Ai, (173, 213, 125)),
+            (Role::Tool, (192, 181, 182)),
+            (Role::FileLink, (142, 176, 212)),
+            (Role::Dim, (148, 138, 139)),
+            (Role::Accent, (246, 111, 136)),
+            (Role::System, (171, 172, 232)),
+            (Role::Queued, (242, 201, 115)),
+            (Role::Asap, (236, 145, 119)),
+            (Role::Pending, (148, 138, 139)),
+            (Role::UserText, (255, 241, 243)),
+            (Role::UserBg, (44, 37, 37)),
+            (Role::AiText, (255, 241, 243)),
+            (Role::HeaderIcon, (137, 214, 201)),
+            (Role::HeaderName, (214, 203, 204)),
+            (Role::HeaderSession, (255, 241, 243)),
+            (Role::Success, (173, 213, 125)),
+            (Role::Warning, (242, 201, 115)),
+            (Role::Error, (246, 111, 136)),
+            (Role::Info, (137, 214, 201)),
+            (Role::Border, (114, 105, 106)),
+            (Role::SelectionBg, (64, 56, 56)),
+        ] {
+            palette.set(role, rgb);
+        }
+        palette
+    }
+
+    /// Apply explicit overrides over a preset.
+    pub fn overlay(&mut self, overrides: &Self) {
+        for &role in ALL_ROLES {
+            if overrides.is_overridden(role) {
+                self.set(role, overrides.rgb(role));
+            }
+        }
+    }
+
     /// RGB for `role`.
     pub fn rgb(&self, role: Role) -> (u8, u8, u8) {
         self.entries[index_of(role)]
@@ -585,6 +626,21 @@ mod buffer_tests {
         crate::color::pin_truecolor_for_tests();
         set_palette(palette);
         body();
+    }
+
+    #[test]
+    fn ristretto_renders_and_explicit_overrides_win() {
+        let mut palette = Palette::monokai_pro_ristretto();
+        assert!(ALL_ROLES.iter().all(|role| palette.is_overridden(*role)));
+        let (overrides, errors) = Palette::from_pairs([("accent", "#123456")]);
+        assert!(errors.is_empty());
+        palette.overlay(&overrides);
+        assert_eq!(palette.rgb(Role::Accent), (0x12, 0x34, 0x56));
+        with_palette(palette, || {
+            let mut buffer = buffer_with(&[Color::Rgb(255, 100, 100)]);
+            crate::theme_mode::adapt_buffer_for_display(&mut buffer);
+            assert_eq!(buffer.content[0].fg, crate::color::rgb(246, 111, 136));
+        });
     }
 
     fn buffer_with(colors: &[Color]) -> Buffer {

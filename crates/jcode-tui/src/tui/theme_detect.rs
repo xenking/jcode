@@ -4,7 +4,7 @@
 //! refreshed by `terminal_events` during the session using the existing reader:
 //!
 //! 1. `JCODE_THEME=dark|light` env override (also accepts `auto`).
-//! 2. `display.theme` config: "dark", "light", or "auto"/empty.
+//! 2. `display.theme` config: "dark", "light", "monokai-pro-ristretto", or "auto"/empty.
 //! 3. Auto: query the terminal's background color (OSC 11 via
 //!    `terminal-colorsaurus`) and classify by perceived lightness. Terminals
 //!    known not to support OSC queries are rejected before the bounded query so
@@ -84,7 +84,7 @@ pub fn init_theme_mode_for_resume(inherited_theme: Option<&str>) -> ThemeMode {
         return jcode_tui_style::theme_mode();
     }
     let inherited_theme = inherited_theme.and_then(|value| match value {
-        "dark" => Some(ThemeMode::Dark),
+        "dark" | "monokai-pro-ristretto" => Some(ThemeMode::Dark),
         "light" => Some(ThemeMode::Light),
         _ => None,
     });
@@ -108,7 +108,7 @@ pub fn init_theme_mode_for_resume(inherited_theme: Option<&str>) -> ThemeMode {
 /// calls it again after `/colors` edits so changes apply without a restart.
 pub fn init_palette() {
     let configured = &crate::config::config().display.colors;
-    let (palette, errors) = jcode_tui_style::Palette::from_pairs(
+    let (overrides, errors) = jcode_tui_style::Palette::from_pairs(
         configured
             .iter()
             .map(|(key, value)| (key.as_str(), value.as_str())),
@@ -116,10 +116,25 @@ pub fn init_palette() {
     for error in errors {
         crate::logging::warn(&format!("display.colors: {error}"));
     }
+    let mut palette = if configured_theme()
+        .trim()
+        .eq_ignore_ascii_case("monokai-pro-ristretto")
+    {
+        jcode_tui_style::Palette::monokai_pro_ristretto()
+    } else {
+        jcode_tui_style::Palette::default()
+    };
+    palette.overlay(&overrides);
     jcode_tui_style::set_palette(palette);
 }
 
 pub fn current_theme_label() -> &'static str {
+    if configured_theme()
+        .trim()
+        .eq_ignore_ascii_case("monokai-pro-ristretto")
+    {
+        return "monokai-pro-ristretto";
+    }
     match jcode_tui_style::theme_mode() {
         ThemeMode::Dark => "dark",
         ThemeMode::Light => "light",
@@ -144,7 +159,7 @@ fn configured_theme() -> String {
 fn is_auto_theme(configured: &str) -> bool {
     !matches!(
         configured.trim().to_ascii_lowercase().as_str(),
-        "dark" | "light"
+        "dark" | "light" | "monokai-pro-ristretto"
     )
 }
 
@@ -173,12 +188,12 @@ pub(super) fn runtime_queries_enabled() -> bool {
 
 fn resolve_configured_theme(query_terminal: bool) -> ThemeMode {
     match configured_theme().trim().to_ascii_lowercase().as_str() {
-        "dark" => return ThemeMode::Dark,
+        "dark" | "monokai-pro-ristretto" => return ThemeMode::Dark,
         "light" => return ThemeMode::Light,
         "" | "auto" => {}
         other => {
             crate::logging::info(&format!(
-                "Unknown theme '{other}' (expected auto/dark/light); using auto detection"
+                "Unknown theme '{other}' (expected auto/dark/light/monokai-pro-ristretto); using auto detection"
             ));
         }
     }
@@ -375,7 +390,7 @@ mod tests {
 
     #[test]
     fn explicit_theme_overrides_disable_runtime_detection() {
-        for value in ["dark", "light", " LIGHT ", "Dark"] {
+        for value in ["dark", "light", " LIGHT ", "Dark", "monokai-pro-ristretto"] {
             assert!(!super::is_auto_theme(value), "{value}");
         }
         for value in ["", "auto", " AUTO ", "unknown"] {

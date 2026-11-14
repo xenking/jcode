@@ -732,6 +732,14 @@ fn test_configured_palette_recolors_a_real_rendered_frame() {
         "recoloring must not change any rendered text"
     );
 
+    jcode_tui_style::set_palette(jcode_tui_style::Palette::monokai_pro_ristretto());
+    let ristretto = render();
+    assert_eq!(text_of(&baseline), text_of(&ristretto));
+    assert_ne!(
+        baseline, ristretto,
+        "Ristretto must recolor the rendered frame"
+    );
+
     // And the default palette must render identically to no palette at all,
     // which is what keeps existing users' terminals looking the same.
     jcode_tui_style::set_palette(jcode_tui_style::Palette::default());

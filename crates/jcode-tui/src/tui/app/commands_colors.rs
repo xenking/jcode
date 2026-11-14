@@ -49,13 +49,7 @@ pub(super) fn handle_colors_command(app: &mut App, trimmed: &str) -> bool {
 }
 
 fn configured_palette() -> Palette {
-    let configured = &crate::config::config().display.colors;
-    Palette::from_pairs(
-        configured
-            .iter()
-            .map(|(key, value)| (key.as_str(), value.as_str())),
-    )
-    .0
+    jcode_tui_style::palette::palette()
 }
 
 fn list_colors(app: &mut App) {

@@ -317,7 +317,8 @@ prompt_entry_animation = true
 # Empty = auto ("⌥" on macOS, "Alt" elsewhere). Examples: "Option", "Alt", "⌥".
 # copy_badge_alt_label = ""
 
-# Color theme: "auto" (query the terminal background), "dark", or "light".
+# Color theme: "auto" (query the terminal background), "dark", "light",
+# or "monokai-pro-ristretto".
 # Auto follows light/dark changes during the session (refreshes every 5 seconds).
 # theme = "auto"
 
