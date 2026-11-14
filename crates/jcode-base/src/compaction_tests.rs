@@ -1349,3 +1349,22 @@ async fn refused_compaction_keeps_original_messages_issue_2089() {
     assert_eq!(manager.compacted_count(), 0);
     assert_eq!(manager.summary_chars(), 0);
 }
+
+#[test]
+fn set_active_model_without_overrides_keeps_global_settings() {
+    let mut manager = CompactionManager::new();
+    let before = manager.effective_config().clone();
+    manager.set_active_model(Some("openai"), Some("gpt-6.1-terra"));
+    manager.set_budget(1_000_000);
+    let after = manager.effective_config();
+    assert_eq!(after.reactive_threshold, before.reactive_threshold);
+    assert_eq!(after.max_context_tokens, before.max_context_tokens);
+}
+
+#[test]
+fn set_mode_survives_active_model_rebind() {
+    let mut manager = CompactionManager::new();
+    manager.set_mode(crate::config::CompactionMode::Semantic);
+    manager.set_active_model(Some("claude"), Some("claude-opus-5-5"));
+    assert_eq!(manager.mode(), crate::config::CompactionMode::Semantic);
+}

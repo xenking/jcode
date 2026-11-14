@@ -178,6 +178,7 @@ impl Agent {
     pub async fn effective_context_budget(&self) -> usize {
         let compaction = self.registry.compaction();
         let mut manager = compaction.write().await;
+        manager.set_active_model(Some(self.provider.name()), Some(&self.provider.model()));
         manager.set_budget(self.provider.context_window());
         manager.token_budget()
     }
@@ -194,6 +195,7 @@ impl Agent {
             return Err(error);
         }
         manager.set_context_cap_override(cap);
+        manager.set_active_model(Some(self.provider.name()), Some(&self.provider.model()));
         manager.set_budget(self.provider.context_window());
         Ok(manager.token_budget())
     }
@@ -201,7 +203,22 @@ impl Agent {
     fn refresh_compaction_budget(&self) {
         let compaction = self.registry.compaction();
         match compaction.try_write() {
-            Ok(mut manager) => manager.set_budget(self.provider.context_window()),
+            Ok(mut manager) => {
+                let model = self.provider.model();
+                manager.set_active_model(Some(self.provider.name()), Some(&model));
+                manager.set_budget(self.provider.context_window());
+                let cfg = manager.effective_config();
+                crate::logging::info(&format!(
+                    "compaction effective: provider={} model={} mode={} reactive_threshold={} reactive_threshold_tokens={} max_context_tokens={} budget={}",
+                    self.provider.name(),
+                    model,
+                    cfg.mode.as_str(),
+                    cfg.reactive_threshold,
+                    cfg.reactive_threshold_tokens,
+                    cfg.max_context_tokens,
+                    manager.token_budget()
+                ));
+            }
             Err(_) => crate::logging::warn(
                 "Could not refresh compaction token budget after provider change: compaction manager is busy",
             ),

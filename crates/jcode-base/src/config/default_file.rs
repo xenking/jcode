@@ -504,6 +504,13 @@ reactive_threshold_tokens = 400000
 proactive_floor = 0.40
 proactive_floor_tokens = 150000
 # Set proactive_floor_tokens = 0 to use only the percentage floor.
+# Per-provider and per-model overrides merge over this section for the active
+# session model (model beats provider beats global). Any [compaction] key works.
+# Model keys match the bare id; route prefixes like "openai-api:" are ignored.
+# [compaction.providers.openai]
+# max_context_tokens = 272000
+# [compaction.models."claude-opus-5-5"]
+# reactive_threshold_tokens = 500000
 
 [acp]
 # Agent Client Protocol adapter compatibility profile: standard, extended, or full.

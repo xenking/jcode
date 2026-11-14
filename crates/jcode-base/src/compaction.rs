@@ -188,6 +188,12 @@ pub struct CompactionManager {
     /// Config snapshot for mode-specific parameters
     compaction_config: crate::config::CompactionConfig,
 
+    /// Active (provider, model) used to resolve per-model/provider overrides.
+    active_route: (Option<String>, Option<String>),
+
+    /// True once `set_mode` was called, so re-resolving keeps the user's choice.
+    mode_overridden: bool,
+
     // ── Proactive mode state ───────────────────────────────────────────────
     /// Rolling window of observed token counts, one entry per turn snapshot.
     /// Used to compute EWMA growth rate for proactive compaction.
@@ -232,6 +238,8 @@ impl CompactionManager {
             last_compaction: None,
             mode,
             compaction_config: cfg,
+            active_route: (None, None),
+            mode_overridden: false,
             token_history: VecDeque::with_capacity(TOKEN_HISTORY_WINDOW + 1),
             turns_since_last_compact: 0,
             embedding_history: VecDeque::with_capacity(EMBEDDING_HISTORY_WINDOW + 1),
@@ -267,9 +275,42 @@ impl CompactionManager {
         self.context_cap_override
     }
 
+    /// Bind overrides from `[compaction.providers.*]` / `[compaction.models.*]`
+    /// to the active session model. Model beats provider beats global.
+    pub fn set_active_model(&mut self, provider: Option<&str>, model: Option<&str>) {
+        self.active_route = (
+            provider.map(str::to_string).filter(|v| !v.trim().is_empty()),
+            model.map(str::to_string).filter(|v| !v.trim().is_empty()),
+        );
+        self.refresh_context_cap();
+    }
+
+    /// Effective compaction settings for the active model.
+    pub fn effective_config(&self) -> &crate::config::CompactionConfig {
+        &self.compaction_config
+    }
+
+    fn resolved_config(&self) -> crate::config::CompactionConfig {
+        crate::config::config().compaction.resolve(
+            self.active_route.0.as_deref(),
+            self.active_route.1.as_deref(),
+        )
+    }
+
     fn refresh_context_cap(&mut self) {
-        self.compaction_config.max_context_tokens =
-            crate::config::config().compaction.max_context_tokens;
+        let resolved = self.resolved_config();
+        if self.active_route.0.is_some() || self.active_route.1.is_some() {
+            let mode = if self.mode_overridden {
+                self.mode.clone()
+            } else {
+                resolved.mode.clone()
+            };
+            self.compaction_config = resolved;
+            self.compaction_config.mode = mode.clone();
+            self.mode = mode;
+        } else {
+            self.compaction_config.max_context_tokens = resolved.max_context_tokens;
+        }
         let cap = self
             .context_cap_override
             .unwrap_or(self.compaction_config.max_context_tokens);
@@ -1391,6 +1432,7 @@ impl CompactionManager {
     pub fn set_mode(&mut self, mode: crate::config::CompactionMode) {
         self.mode = mode.clone();
         self.compaction_config.mode = mode;
+        self.mode_overridden = true;
     }
 
     fn mode_trigger_label(&self) -> &'static str {

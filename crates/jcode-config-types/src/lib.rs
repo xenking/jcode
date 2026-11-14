@@ -342,6 +342,92 @@ pub struct CompactionConfig {
     /// on large-window providers. This bounds the compaction trigger budget,
     /// not the final request size when recent messages cannot be compacted.
     pub max_context_tokens: usize,
+
+    /// Per-provider overrides (`[compaction.providers.openai]`). Merged over
+    /// the global section; model overrides win over provider overrides.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub providers: std::collections::BTreeMap<String, CompactionOverride>,
+
+    /// Per-model overrides (`[compaction.models."claude-opus-5-5"]`). Keys match
+    /// the bare model id case-insensitively; a route prefix such as
+    /// `openai-api:` on the active model is ignored when matching.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub models: std::collections::BTreeMap<String, CompactionOverride>,
+}
+
+/// Partial compaction settings. Unset fields inherit from the outer layer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct CompactionOverride {
+    pub mode: Option<CompactionMode>,
+    pub reactive_threshold: Option<f32>,
+    pub reactive_threshold_tokens: Option<usize>,
+    pub lookahead_turns: Option<usize>,
+    pub ewma_alpha: Option<f32>,
+    pub proactive_floor: Option<f32>,
+    pub proactive_floor_tokens: Option<usize>,
+    pub min_samples: Option<usize>,
+    pub stall_window: Option<usize>,
+    pub min_turns_between_compactions: Option<usize>,
+    pub topic_shift_threshold: Option<f32>,
+    pub relevance_keep_threshold: Option<f32>,
+    pub goal_window_turns: Option<usize>,
+    pub max_context_tokens: Option<usize>,
+}
+
+impl CompactionOverride {
+    fn apply(&self, cfg: &mut CompactionConfig) {
+        macro_rules! merge {
+            ($($f:ident),*) => { $( if let Some(v) = self.$f.clone() { cfg.$f = v; } )* };
+        }
+        merge!(
+            mode,
+            reactive_threshold,
+            reactive_threshold_tokens,
+            lookahead_turns,
+            ewma_alpha,
+            proactive_floor,
+            proactive_floor_tokens,
+            min_samples,
+            stall_window,
+            min_turns_between_compactions,
+            topic_shift_threshold,
+            relevance_keep_threshold,
+            goal_window_turns,
+            max_context_tokens
+        );
+    }
+}
+
+fn compaction_key_matches(key: &str, value: &str) -> bool {
+    let value = value.trim();
+    key.trim().eq_ignore_ascii_case(value)
+        || value
+            .split_once(':')
+            .is_some_and(|(_, bare)| key.trim().eq_ignore_ascii_case(bare.trim()))
+}
+
+impl CompactionConfig {
+    /// Effective settings for a session: model beats provider beats global.
+    /// The returned config carries no nested overrides.
+    pub fn resolve(&self, provider: Option<&str>, model: Option<&str>) -> CompactionConfig {
+        let mut cfg = self.clone();
+        cfg.providers.clear();
+        cfg.models.clear();
+        let lookup = |map: &std::collections::BTreeMap<String, CompactionOverride>, v: &str| {
+            map.iter()
+                .find(|(k, _)| k.trim().eq_ignore_ascii_case(v.trim()))
+                .or_else(|| map.iter().find(|(k, _)| compaction_key_matches(k, v)))
+                .map(|(_, o)| o.clone())
+        };
+        if let Some(o) = provider.and_then(|p| lookup(&self.providers, p)) {
+            o.apply(&mut cfg);
+        }
+        if let Some(o) = model.and_then(|m| lookup(&self.models, m)) {
+            o.apply(&mut cfg);
+        }
+        cfg
+    }
 }
 
 impl Default for CompactionConfig {
@@ -361,6 +447,8 @@ impl Default for CompactionConfig {
             relevance_keep_threshold: 0.65,
             goal_window_turns: 5,
             max_context_tokens: 0,
+            providers: Default::default(),
+            models: Default::default(),
         }
     }
 }
@@ -1641,5 +1729,79 @@ mod exhausted_usage_failover_tests {
             manual.cross_provider_failover,
             CrossProviderFailoverMode::Manual
         );
+    }
+}
+
+#[cfg(test)]
+mod compaction_override_tests {
+    use super::*;
+
+    fn cfg() -> CompactionConfig {
+        let mut c = CompactionConfig::default();
+        c.providers.insert(
+            "openai".into(),
+            CompactionOverride {
+                reactive_threshold: Some(0.7),
+                max_context_tokens: Some(272_000),
+                ..Default::default()
+            },
+        );
+        c.models.insert(
+            "claude-opus-5-5".into(),
+            CompactionOverride {
+                reactive_threshold_tokens: Some(600_000),
+                max_context_tokens: Some(700_000),
+                ..Default::default()
+            },
+        );
+        c.models.insert(
+            "gpt-6.1-terra".into(),
+            CompactionOverride {
+                max_context_tokens: Some(200_000),
+                ..Default::default()
+            },
+        );
+        c
+    }
+
+    #[test]
+    fn no_overrides_keeps_global() {
+        let c = CompactionConfig::default();
+        let r = c.resolve(Some("openai"), Some("gpt-6.1-terra"));
+        assert_eq!(r.reactive_threshold, 0.80);
+        assert_eq!(r.max_context_tokens, 0);
+        assert_eq!(r.reactive_threshold_tokens, 400_000);
+    }
+
+    #[test]
+    fn model_beats_provider_beats_global() {
+        let c = cfg();
+        let r = c.resolve(Some("openai"), Some("gpt-6.1-terra"));
+        assert_eq!(r.reactive_threshold, 0.7);
+        assert_eq!(r.max_context_tokens, 200_000);
+        assert_eq!(r.reactive_threshold_tokens, 400_000);
+        assert!(r.models.is_empty() && r.providers.is_empty());
+        let r = c.resolve(Some("OpenAI"), Some("gpt-6.1-luna"));
+        assert_eq!(r.max_context_tokens, 272_000);
+        let r = c.resolve(Some("claude"), Some("claude-opus-5-5"));
+        assert_eq!(r.reactive_threshold, 0.80);
+        assert_eq!(r.max_context_tokens, 700_000);
+        assert_eq!(r.reactive_threshold_tokens, 600_000);
+    }
+
+    #[test]
+    fn route_prefixed_model_matches_bare_key() {
+        let r = cfg().resolve(None, Some("openai-api:gpt-6.1-terra"));
+        assert_eq!(r.max_context_tokens, 200_000);
+    }
+
+    #[test]
+    fn parses_toml_tables() {
+        let c: CompactionConfig = toml::from_str(
+            "reactive_threshold = 0.8\n[models.\"claude-opus-5-5\"]\nmax_context_tokens = 500000\n[providers.openai]\nmode = \"proactive\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.models["claude-opus-5-5"].max_context_tokens, Some(500_000));
+        assert_eq!(c.providers["openai"].mode, Some(CompactionMode::Proactive));
     }
 }
