@@ -1531,6 +1531,7 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
         git: overscroll_git_info(&data).cloned(),
         context: overscroll_context_usage(&data),
         account_remaining: overscroll_account_remaining(&data),
+        account_windows: overscroll_usage_windows(&data),
         auth: overscroll_auth_label(data.auth_method),
         provider: (!provider.is_empty() && !overscroll_is_runtime_placeholder(&provider))
             .then(|| overscroll_provider_display(&provider)),
@@ -1585,6 +1586,7 @@ pub(crate) fn preview_overscroll_line_for_host(
         git: overscroll_git_info(data).cloned(),
         context: overscroll_context_usage(data),
         account_remaining: overscroll_account_remaining(data),
+        account_windows: overscroll_usage_windows(data),
         auth: overscroll_auth_label(data.auth_method),
         provider: data
             .provider_name
@@ -1627,6 +1629,7 @@ struct OverscrollFacts {
     git: Option<crate::tui::info_widget::GitInfo>,
     context: Option<(usize, usize)>,
     account_remaining: Option<u8>,
+    account_windows: Option<String>,
     auth: Option<(&'static str, Color)>,
     provider: Option<String>,
     model: Option<String>,
@@ -1643,6 +1646,7 @@ struct OverscrollLevels {
     git: u8,
     context: u8,
     account_bar: u8,
+    account_windows: u8,
     context_bar: u8,
     auth: u8,
     provider: u8,
@@ -1657,6 +1661,7 @@ struct OverscrollLevels {
 /// only shortened, so the line always answers "where am I, what am I running,
 /// how full is the context".
 const OVERSCROLL_LADDER: &[fn(&mut OverscrollLevels)] = &[
+    |l| l.account_windows = 1,
     |l| l.account_bar = 1, // drop account bar before shortening other facts
     |l| l.context_bar = 1, // keep token counts when the context bar cannot fit
     |l| l.auth = 1,        // hide auth ("OAuth"/"API key")
@@ -1773,6 +1778,11 @@ fn overscroll_fact_spans(
         && let Some(provider) = &facts.provider
     {
         let mut group = vec![Span::styled(provider.clone(), muted)];
+        if levels.account_windows == 0
+            && let Some(windows) = &facts.account_windows
+        {
+            group.push(Span::styled(format!(" {windows}"), muted));
+        }
         if let Some(remaining) = facts.account_remaining {
             let cells = if levels.account_bar == 0 { 4 } else { 0 };
             if cells > 0 {
@@ -2099,6 +2109,42 @@ fn overscroll_account_remaining(data: &crate::tui::info_widget::InfoWidgetData) 
         return None;
     }
     Some(100u8.saturating_sub(info.max_usage_pct()))
+}
+
+fn overscroll_usage_windows(data: &crate::tui::info_widget::InfoWidgetData) -> Option<String> {
+    overscroll_account_remaining(data)?;
+    let info = data.usage_info.as_ref()?;
+    if !info.available {
+        return None;
+    }
+    let windows = [
+        (
+            &info.primary_limit_label,
+            info.five_hour,
+            &info.five_hour_resets_at,
+        ),
+        (
+            &info.secondary_limit_label,
+            info.seven_day,
+            &info.seven_day_resets_at,
+        ),
+    ];
+    let parts: Vec<String> = windows
+        .into_iter()
+        .filter_map(|(label, ratio, reset)| {
+            let label = label.as_deref()?;
+            if !ratio.is_finite() {
+                return None;
+            }
+            let reset = reset
+                .as_deref()
+                .map(crate::usage::format_reset_time)
+                .map(|value| format!(" {value}"))
+                .unwrap_or_default();
+            Some(format!("{label} {:.0}%{reset}", ratio.clamp(0., 1.) * 100.))
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" "))
 }
 
 /// Format context counts compactly while retaining useful precision.

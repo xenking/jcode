@@ -229,6 +229,7 @@ fn overscroll_merges_cloud_machine_with_dir_and_fits_narrow() {
         git: None,
         context: None,
         account_remaining: None,
+        account_windows: None,
         auth: None,
         provider: None,
         model: Some("Opus".into()),
@@ -257,6 +258,7 @@ fn overscroll_context_shows_small_bar_and_counts_and_compacts_when_narrow() {
         git: None,
         context: Some((74_000, 256_000)),
         account_remaining: None,
+        account_windows: None,
         auth: None,
         provider: None,
         model: Some("Opus".into()),
@@ -284,6 +286,39 @@ fn overscroll_context_shows_small_bar_and_counts_and_compacts_when_narrow() {
         assert_eq!(span.content, expected);
         assert_eq!(span.style.fg, Some(color));
     }
+}
+
+#[test]
+fn overscroll_window_labels_show_reported_usage_without_inventing_windows() {
+    use crate::tui::info_widget::{AuthMethod, InfoWidgetData, UsageInfo, UsageProvider};
+    let data = InfoWidgetData {
+        auth_method: AuthMethod::OpenAIOAuth,
+        provider_name: Some("openai".into()),
+        model: Some("gpt-test".into()),
+        usage_info: Some(UsageInfo {
+            provider: UsageProvider::OpenAI,
+            available: true,
+            primary_limit_label: Some("7-day".into()),
+            five_hour: 0.94,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert_eq!(overscroll_usage_windows(&data), Some("7-day 94%".into()));
+    let line = preview_overscroll_line(&data, 160);
+    let text: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(text.contains("7-day 94%"), "{text}");
+    let line = preview_overscroll_line(&data, 16);
+    let text: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(!text.contains("7-day 94%"), "{text}");
 }
 
 #[test]
