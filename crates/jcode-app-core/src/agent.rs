@@ -913,6 +913,7 @@ impl Agent {
         let state = crate::session::StoredCompactionState {
             summary_text,
             openai_encrypted_content,
+            snapcompact: None,
             covers_up_to_turn: compacted_count,
             original_turn_count: compacted_count,
             compacted_count,
@@ -1007,7 +1008,10 @@ impl Agent {
                                 crate::compaction::CompactionAction::None => {}
                             }
                         }
-                        manager.messages_for_api_with(all_messages)
+                        manager.messages_for_api_with_vision(
+                            all_messages,
+                            self.provider.supports_image_input(),
+                        )
                     };
                     let event = manager.take_compaction_event();
                     if event.is_some() || discarded_oversized_native {

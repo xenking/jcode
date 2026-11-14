@@ -21,6 +21,7 @@ use crate::provider::openai_request::{
     openai_encrypted_content_fallback_summary, openai_encrypted_content_is_sendable,
 };
 use anyhow::Result;
+use base64::Engine as _;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -53,6 +54,7 @@ const MANUAL_RECENT_TAIL_TOKENS: usize = 40_000;
 struct CompactionResult {
     summary_text: String,
     openai_encrypted_content: Option<String>,
+    snapcompact: Option<jcode_message_types::SnapcompactArchive>,
     covers_up_to_turn: usize,
     duration_ms: u64,
     summarized_messages: usize,
@@ -462,6 +464,7 @@ impl CompactionManager {
         self.active_summary = Some(Summary {
             text: state.summary_text.clone(),
             openai_encrypted_content: state.openai_encrypted_content.clone(),
+            snapcompact: state.snapcompact.clone(),
             covers_up_to_turn: state.covers_up_to_turn,
             original_turn_count: state.original_turn_count,
         });
@@ -506,6 +509,7 @@ impl CompactionManager {
             .map(|summary| crate::session::StoredCompactionState {
                 summary_text: summary.text.clone(),
                 openai_encrypted_content: summary.openai_encrypted_content.clone(),
+                snapcompact: summary.snapcompact.clone(),
                 covers_up_to_turn: summary.covers_up_to_turn,
                 original_turn_count: summary.original_turn_count,
                 compacted_count: self.compacted_count,
@@ -1104,6 +1108,7 @@ impl CompactionManager {
         let messages_to_summarize: Vec<Message> = active[..cutoff].to_vec();
         let msg_count = messages_to_summarize.len();
         let existing_summary = self.active_summary.clone();
+        let snapcompact_enabled = self.compaction_config.snapcompact;
         let mode_label = self.mode_trigger_label().to_string();
         let estimated_tokens = self.effective_token_count_with(all_messages);
         crate::logging::info(&format!(
@@ -1122,9 +1127,13 @@ impl CompactionManager {
         // Spawn background task that notifies via Bus when done
         self.pending_task = crate::runtime_activity::spawn(async move {
             let start = std::time::Instant::now();
-            let result =
-                generate_compaction_artifact(provider, messages_to_summarize, existing_summary)
-                    .await;
+            let result = generate_compaction_artifact(
+                provider,
+                messages_to_summarize,
+                existing_summary,
+                snapcompact_enabled,
+            )
+            .await;
             let duration_ms = start.elapsed().as_millis() as u64;
             crate::logging::info(&format!(
                 "Compaction ({}) finished in {:.2}s ({} messages summarized)",
@@ -1345,6 +1354,7 @@ impl CompactionManager {
         let messages_to_summarize: Vec<Message> = active[..cutoff].to_vec();
         let msg_count = messages_to_summarize.len();
         let existing_summary = self.active_summary.clone();
+        let snapcompact_enabled = self.compaction_config.snapcompact;
 
         self.pending_cutoff = cutoff;
         self.pending_trigger = Some("manual".to_string());
@@ -1352,9 +1362,13 @@ impl CompactionManager {
 
         self.pending_task = crate::runtime_activity::spawn(async move {
             let start = std::time::Instant::now();
-            let result =
-                generate_compaction_artifact(provider, messages_to_summarize, existing_summary)
-                    .await;
+            let result = generate_compaction_artifact(
+                provider,
+                messages_to_summarize,
+                existing_summary,
+                snapcompact_enabled,
+            )
+            .await;
             let duration_ms = start.elapsed().as_millis() as u64;
             crate::logging::info(&format!(
                 "Compaction finished in {:.2}s ({} messages summarized)",
@@ -1442,6 +1456,7 @@ impl CompactionManager {
                 let summary = Summary {
                     text: result.summary_text,
                     openai_encrypted_content: result.openai_encrypted_content,
+                    snapcompact: result.snapcompact,
                     covers_up_to_turn: result.covers_up_to_turn,
                     original_turn_count: self.pending_cutoff,
                 };
@@ -1539,6 +1554,14 @@ impl CompactionManager {
     /// Get messages for API call (with summary if compacted).
     /// Takes the full message list from the caller.
     pub fn messages_for_api_with(&mut self, all_messages: &[Message]) -> Vec<Message> {
+        self.messages_for_api_with_vision(all_messages, true)
+    }
+
+    pub fn messages_for_api_with_vision(
+        &mut self,
+        all_messages: &[Message],
+        supports_image_input: bool,
+    ) -> Vec<Message> {
         self.check_and_apply_compaction_with(all_messages);
         self.discard_oversized_openai_native_compaction();
 
@@ -1557,11 +1580,24 @@ impl CompactionManager {
                         cache_control: None,
                     });
 
+                let mut content = vec![summary_block];
+                if let Some(archive) = &summary.snapcompact {
+                    if supports_image_input {
+                        content.push(ContentBlock::Text {
+                            text: "The following PNG pages contain earlier conversation history in chronological order.".to_string(),
+                            cache_control: None,
+                        });
+                        content.extend(archive.pages.iter().map(|data| ContentBlock::Image {
+                            media_type: "image/png".to_string(),
+                            data: data.clone(),
+                        }));
+                    }
+                }
                 let mut result = Vec::with_capacity(active.len() + 1);
 
                 result.push(Message {
                     role: Role::User,
-                    content: vec![summary_block],
+                    content,
                     timestamp: None,
                     tool_duration_ms: None,
                 });
@@ -1771,6 +1807,10 @@ impl CompactionManager {
         let summary = Summary {
             text: summary_text,
             openai_encrypted_content: None,
+            snapcompact: self
+                .active_summary
+                .as_ref()
+                .and_then(|s| s.snapcompact.clone()),
             covers_up_to_turn: cutoff,
             original_turn_count: cutoff,
         };
@@ -1946,6 +1986,7 @@ async fn generate_compaction_artifact(
     provider: Arc<dyn Provider>,
     messages: Vec<Message>,
     mut existing_summary: Option<Summary>,
+    snapcompact_enabled: bool,
 ) -> Result<CompactionResult> {
     let start = Instant::now();
     if let Some(summary) = existing_summary.as_mut()
@@ -1970,17 +2011,21 @@ async fn generate_compaction_artifact(
         }
     }
 
-    if let Ok(native) = provider
-        .native_compact(
-            &messages,
-            existing_summary
-                .as_ref()
-                .map(|summary| summary.text.as_str()),
-            existing_summary
-                .as_ref()
-                .and_then(|summary| summary.openai_encrypted_content.as_deref()),
-        )
-        .await
+    if !(snapcompact_enabled && provider.supports_image_input())
+        && existing_summary
+            .as_ref()
+            .is_none_or(|s| s.snapcompact.is_none())
+        && let Ok(native) = provider
+            .native_compact(
+                &messages,
+                existing_summary
+                    .as_ref()
+                    .map(|summary| summary.text.as_str()),
+                existing_summary
+                    .as_ref()
+                    .and_then(|summary| summary.openai_encrypted_content.as_deref()),
+            )
+            .await
     {
         if let Some(usage) = native.usage {
             crate::telemetry::record_simple_completion_usage(
@@ -2002,11 +2047,72 @@ async fn generate_compaction_artifact(
             return Ok(CompactionResult {
                 summary_text: native.summary_text.unwrap_or_default(),
                 openai_encrypted_content: native.openai_encrypted_content,
+                snapcompact: None,
                 covers_up_to_turn: messages.len(),
                 duration_ms: start.elapsed().as_millis() as u64,
                 summarized_messages: messages.len(),
             });
         }
+    }
+
+    let mut snapcompact = None;
+    if snapcompact_enabled
+        && provider.supports_image_input()
+        && existing_summary
+            .as_ref()
+            .is_none_or(|s| s.openai_encrypted_content.is_none())
+    {
+        let input = messages.clone();
+        let previous = existing_summary.as_ref().map(|summary| {
+            summary
+                .snapcompact
+                .as_ref()
+                .map(|archive| archive.source.clone())
+                .unwrap_or_else(|| jcode_compaction_core::snapcompact::normalize(&summary.text))
+        });
+        let model_id = provider.model();
+        let rendered = tokio::task::spawn_blocking(move || {
+            use jcode_compaction_core::snapcompact::{CompactOptions, compact, prepare_messages};
+            let preparation = prepare_messages(&input, previous.as_deref(), usize::MAX)?;
+            compact(
+                &preparation,
+                &CompactOptions {
+                    model_id,
+                    ..Default::default()
+                },
+            )
+        })
+        .await;
+        match rendered {
+            Ok(Ok(result)) => {
+                let pages = result
+                    .frames
+                    .into_iter()
+                    .map(|frame| base64::engine::general_purpose::STANDARD.encode(frame.bytes))
+                    .collect();
+                snapcompact = Some(jcode_message_types::SnapcompactArchive {
+                    source: result.source_text,
+                    pages,
+                });
+            }
+            Ok(Err(error)) => crate::logging::warn(&format!(
+                "[compaction] Snapcompact failed; falling back to LLM: {error}"
+            )),
+            Err(error) => crate::logging::warn(&format!(
+                "[compaction] Snapcompact worker failed; falling back to LLM: {error}"
+            )),
+        }
+    }
+
+    // Include the archive source when falling back to text-only compaction.
+    if snapcompact.is_none()
+        && let Some(summary) = existing_summary.as_mut()
+        && let Some(archive) = summary.snapcompact.take()
+    {
+        summary.text = archive
+            .source
+            .replace('\u{2588}', "\n")
+            .replace(['\u{e}', '\u{f}'], "");
     }
 
     let max_prompt_chars = provider.context_window().saturating_sub(4000) * CHARS_PER_TOKEN;
@@ -2037,6 +2143,7 @@ async fn generate_compaction_artifact(
     Ok(CompactionResult {
         summary_text: validate_compaction_summary(summary)?,
         openai_encrypted_content: None,
+        snapcompact,
         covers_up_to_turn: messages.len(),
         duration_ms: start.elapsed().as_millis() as u64,
         summarized_messages: messages.len(),

@@ -17,6 +17,7 @@ fn stripped_metadata_save_preserves_authoritative_compaction() -> anyhow::Result
     let compaction = StoredCompactionState {
         summary_text: "Keep this summary".to_string(),
         openai_encrypted_content: None,
+        snapcompact: None,
         covers_up_to_turn: 1,
         original_turn_count: 1,
         compacted_count: 1,

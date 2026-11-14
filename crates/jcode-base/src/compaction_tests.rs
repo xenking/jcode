@@ -838,6 +838,7 @@ fn test_hard_compact_clamps_pathological_compacted_count() {
     manager.active_summary = Some(Summary {
         text: "# Existing summary".to_string(),
         openai_encrypted_content: None,
+        snapcompact: None,
         covers_up_to_turn: 100,
         original_turn_count: 100,
     });
@@ -931,6 +932,7 @@ fn test_invalid_compacted_count_does_not_resurrect_full_transcript_after_new_tur
     manager.active_summary = Some(Summary {
         text: "# Existing summary".to_string(),
         openai_encrypted_content: None,
+        snapcompact: None,
         covers_up_to_turn: 500,
         original_turn_count: 500,
     });
@@ -1372,11 +1374,15 @@ async fn refused_compaction_keeps_original_messages_issue_2089() {
             )
         })
         .collect();
-    let err =
-        generate_compaction_artifact(Arc::new(RefusingSummaryProvider), messages.clone(), None)
-            .await
-            .err()
-            .expect("refused summary must fail");
+    let err = generate_compaction_artifact(
+        Arc::new(RefusingSummaryProvider),
+        messages.clone(),
+        None,
+        false,
+    )
+    .await
+    .err()
+    .expect("refused summary must fail");
     assert!(format!("{err:#}").contains("guardrail"), "{err:#}");
 
     let mut manager = CompactionManager::new().with_budget(1_000);
@@ -1402,7 +1408,7 @@ async fn refused_compaction_keeps_original_messages_issue_2089() {
 fn set_active_model_without_overrides_keeps_global_settings() {
     let mut manager = CompactionManager::new();
     let before = manager.effective_config().clone();
-    manager.set_active_model(Some("openai"), Some("gpt-6.1-terra"));
+    manager.set_active_model(Some("no-overrides-provider"), Some("no-overrides-model"));
     manager.set_budget(1_000_000);
     let after = manager.effective_config();
     assert_eq!(after.reactive_threshold, before.reactive_threshold);
@@ -1571,4 +1577,114 @@ fn emergency_recovery_shakes_before_dropping_turns() {
     assert_eq!(r.dropped, None);
     assert_eq!(msgs.len(), n);
     assert!(r.did_anything());
+}
+struct VisionSummaryProvider;
+
+#[async_trait::async_trait]
+impl Provider for VisionSummaryProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[crate::message::ToolDefinition],
+        system: &str,
+        resume: Option<&str>,
+    ) -> Result<EventStream> {
+        MockSummaryProvider
+            .complete(messages, tools, system, resume)
+            .await
+    }
+    fn name(&self) -> &str {
+        "vision-test"
+    }
+    fn model(&self) -> String {
+        "claude-opus-4-6".to_string()
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+    fn supports_image_input(&self) -> bool {
+        true
+    }
+    async fn complete_simple_with_usage(
+        &self,
+        prompt: &str,
+        system: &str,
+    ) -> Result<(String, jcode_provider_core::SimpleCompletionUsage)> {
+        MockSummaryProvider
+            .complete_simple_with_usage(prompt, system)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn snapcompact_generates_summary_and_preserves_previous_archive() {
+    let messages = vec![make_text_message(Role::User, "early codeword ZEBRA-ORCHID")];
+    let first = generate_compaction_artifact(Arc::new(VisionSummaryProvider), messages, None, true)
+        .await
+        .unwrap();
+    assert!(first.summary_text.starts_with("summary("));
+    let archive = first.snapcompact.unwrap();
+    assert!(!archive.pages.is_empty());
+    assert!(archive.source.contains("ZEBRA-ORCHID"));
+    let previous = Summary {
+        text: first.summary_text,
+        openai_encrypted_content: None,
+        snapcompact: Some(archive),
+        covers_up_to_turn: 1,
+        original_turn_count: 1,
+    };
+    let second = generate_compaction_artifact(
+        Arc::new(VisionSummaryProvider),
+        vec![make_text_message(Role::User, "later turn")],
+        Some(previous),
+        true,
+    )
+    .await
+    .unwrap();
+    let archive = second.snapcompact.unwrap();
+    assert!(archive.source.contains("ZEBRA-ORCHID"));
+    assert!(archive.source.contains("later turn"));
+    let plain = generate_compaction_artifact(
+        Arc::new(MockSummaryProvider),
+        vec![make_text_message(Role::User, "no vision")],
+        None,
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(plain.snapcompact.is_none());
+}
+
+#[test]
+fn snapcompact_pages_survive_persistence_and_follow_vision_capability() {
+    let mut manager = CompactionManager::new();
+    manager.active_summary = Some(Summary {
+        text: "archive".into(),
+        openai_encrypted_content: None,
+        snapcompact: Some(jcode_message_types::SnapcompactArchive {
+            source: "early█detail".into(),
+            pages: vec!["cG5n".into()],
+        }),
+        covers_up_to_turn: 0,
+        original_turn_count: 0,
+    });
+    let state = manager.persisted_state().unwrap();
+    let serialized = serde_json::to_string(&state).unwrap();
+    let decoded = serde_json::from_str(&serialized).unwrap();
+    let mut restored = CompactionManager::new();
+    restored.restore_persisted_state(&decoded, 0);
+    let vision = restored.messages_for_api_with_vision(&[], true);
+    assert!(vision[0].content.iter().any(|b| matches!(b, ContentBlock::Image { media_type, data } if media_type == "image/png" && data == "cG5n")));
+    let plain = restored.messages_for_api_with_vision(&[], false);
+    assert!(
+        !plain[0]
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Image { .. }))
+    );
+    assert!(
+        plain[0].content.iter().any(
+            |b| matches!(b, ContentBlock::Text { text, .. } if text.contains("archive"))
+        )
+    );
 }

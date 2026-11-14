@@ -100,6 +100,7 @@ Be concise but preserve important details. You can search the full conversation 
 pub struct Summary {
     pub text: String,
     pub openai_encrypted_content: Option<String>,
+    pub snapcompact: Option<jcode_message_types::SnapcompactArchive>,
     pub covers_up_to_turn: usize,
     pub original_turn_count: usize,
 }
@@ -375,11 +376,17 @@ pub fn content_char_count(content: &[ContentBlock]) -> usize {
 }
 
 pub fn summary_payload_char_count(summary: &Summary) -> usize {
-    summary
+    let text = summary
         .openai_encrypted_content
         .as_ref()
         .map(|_| OPENAI_COMPACTION_TOKEN_COST * CHARS_PER_TOKEN)
-        .unwrap_or_else(|| summary.text.len())
+        .unwrap_or_else(|| summary.text.len());
+    text.saturating_add(summary.snapcompact.as_ref().map_or(0, |archive| {
+        archive
+            .pages
+            .len()
+            .saturating_mul(IMAGE_TOKEN_COST * CHARS_PER_TOKEN)
+    }))
 }
 
 pub fn estimate_compaction_tokens(

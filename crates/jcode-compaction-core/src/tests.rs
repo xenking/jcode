@@ -109,6 +109,7 @@ fn builds_compaction_prompt_with_summary_and_truncated_tool_result() {
     let summary = Summary {
         text: "prior work".to_string(),
         openai_encrypted_content: None,
+        snapcompact: None,
         covers_up_to_turn: 1,
         original_turn_count: 1,
     };
@@ -173,6 +174,7 @@ fn estimates_tokens_with_large_budget_overhead() {
     let summary = Summary {
         text: "abcd".repeat(100),
         openai_encrypted_content: None,
+        snapcompact: None,
         covers_up_to_turn: 1,
         original_turn_count: 1,
     };
@@ -222,6 +224,7 @@ fn openai_native_compaction_cost_is_bounded_not_ciphertext_length() {
     let summary = Summary {
         text: String::new(),
         openai_encrypted_content: Some("x".repeat(1_141_900)),
+        snapcompact: None,
         covers_up_to_turn: 229,
         original_turn_count: 229,
     };

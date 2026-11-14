@@ -310,6 +310,8 @@ pub struct StoredCompactionState {
     pub summary_text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openai_encrypted_content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapcompact: Option<jcode_message_types::SnapcompactArchive>,
     pub covers_up_to_turn: usize,
     pub original_turn_count: usize,
     pub compacted_count: usize,

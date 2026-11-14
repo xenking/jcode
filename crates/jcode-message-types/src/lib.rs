@@ -114,6 +114,14 @@ pub enum Role {
     Assistant,
 }
 
+/// Re-renderable snapcompact history and its deterministic PNG pages.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct SnapcompactArchive {
+    pub source: String,
+    /// Base64-encoded PNG images in chronological order.
+    pub pages: Vec<String>,
+}
+
 /// A message in the conversation
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Message {

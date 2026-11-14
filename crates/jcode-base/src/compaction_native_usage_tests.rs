@@ -83,10 +83,14 @@ async fn usage_only_native_compaction_accounts_attempt_then_falls_back() {
     let provider = Arc::new(UsageOnlyNativeProvider {
         accounting_attributions: attributions.clone(),
     });
-    let result =
-        generate_compaction_artifact(provider, vec![make_text_message(Role::User, "hello")], None)
-            .await
-            .unwrap();
+    let result = generate_compaction_artifact(
+        provider,
+        vec![make_text_message(Role::User, "hello")],
+        None,
+        false,
+    )
+    .await
+    .unwrap();
     assert_eq!(result.summary_text, "fallback summary");
     assert!(result.openai_encrypted_content.is_none());
     assert_eq!(attributions.load(std::sync::atomic::Ordering::SeqCst), 2);
