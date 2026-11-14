@@ -1,5 +1,55 @@
 use super::*;
 
+struct VisionNativeProvider;
+
+#[async_trait::async_trait]
+impl Provider for VisionNativeProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[crate::message::ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        unreachable!()
+    }
+    fn name(&self) -> &str {
+        "vision-native-test"
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+    fn supports_image_input(&self) -> bool {
+        true
+    }
+    async fn native_compact(
+        &self,
+        _: &[Message],
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<jcode_provider_core::NativeCompactionResult> {
+        Ok(jcode_provider_core::NativeCompactionResult {
+            summary_text: Some("native wins".into()),
+            openai_encrypted_content: None,
+            usage: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn native_compaction_precedes_snapcompact_for_vision_provider() {
+    let result = generate_compaction_artifact(
+        Arc::new(VisionNativeProvider),
+        vec![make_text_message(Role::User, "hello")],
+        None,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.summary_text, "native wins");
+    assert!(result.snapcompact.is_none());
+}
+
 struct UsageOnlyNativeProvider {
     accounting_attributions: Arc<std::sync::atomic::AtomicUsize>,
 }

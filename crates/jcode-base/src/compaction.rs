@@ -2011,10 +2011,9 @@ async fn generate_compaction_artifact(
         }
     }
 
-    if !(snapcompact_enabled && provider.supports_image_input())
-        && existing_summary
-            .as_ref()
-            .is_none_or(|s| s.snapcompact.is_none())
+    if existing_summary
+        .as_ref()
+        .is_none_or(|s| s.snapcompact.is_none())
         && let Ok(native) = provider
             .native_compact(
                 &messages,
