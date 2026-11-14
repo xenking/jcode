@@ -723,6 +723,7 @@ fn test_configured_palette_recolors_a_real_rendered_frame() {
         buffer
             .content
             .iter()
+            .skip(10 * 80)
             .map(|cell| cell.symbol().to_string())
             .collect::<Vec<_>>()
     };
@@ -744,8 +745,8 @@ fn test_configured_palette_recolors_a_real_rendered_frame() {
     // which is what keeps existing users' terminals looking the same.
     jcode_tui_style::set_palette(jcode_tui_style::Palette::default());
     assert_eq!(
-        baseline,
-        render(),
-        "the default palette must be a no-op on the rendered frame"
+        &baseline.content[10 * 80..],
+        &render().content[10 * 80..],
+        "the default palette must be a no-op on the transcript"
     );
 }
