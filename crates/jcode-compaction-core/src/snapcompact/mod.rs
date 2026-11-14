@@ -20,10 +20,8 @@
 //! Silver TrueType font for non-Latin glyphs, all under permissive
 //! licenses (see `NOTICE.md`).
 //!
-//! [`compact()`] always returns real PNG-encoded bytes — there is no
-//! "no-op renderer" path. When a frame fails to render, the error is
-//! logged via `tracing` and that frame's bytes are empty; the caller
-//! can decide whether to drop or surface partial results.
+//! [`compact()`] returns an error if rendering fails or the frame budget
+//! cannot represent the source. Callers must fall back without discarding it.
 use serde::{Deserialize, Serialize};
 pub mod renderer;
 
@@ -572,13 +570,11 @@ fn shape_to_render_options(shape: &Shape) -> self::renderer::SnapcompactRenderOp
 /// pi-natives ported renderer (`render_snapcompact_png`) so the
 /// returned bytes are real PNG-encoded image data.
 ///
-/// Errors propagate as `Vec::new()` for the offending frame (so the
-/// caller still gets partial results) and the failure is logged via
-/// `tracing`. This is the only [`compact`] surface — the old
-/// `NoopRenderer` / `FrameRenderer` / `compact_with` indirection has
-/// been removed: there is one renderer, and it always returns real
-/// bytes.
-pub fn compact(prep: &CompactPreparation, options: &CompactOptions) -> CompactResult {
+/// Errors and insufficient frame budgets are returned to the caller.
+pub fn compact(
+    prep: &CompactPreparation,
+    options: &CompactOptions,
+) -> Result<CompactResult, String> {
     let shape: Shape = options
         .shape
         .clone()
@@ -589,37 +585,32 @@ pub fn compact(prep: &CompactPreparation, options: &CompactOptions) -> CompactRe
         chars_per_frame,
         options.max_frames as usize,
     );
+    if !prep.remaining_text.is_empty()
+        || frames.last().map_or(0, |frame| frame.source_end) != prep.bounded_text.chars().count()
+    {
+        return Err("snapcompact frame budget cannot represent all source text".into());
+    }
     let render_opts = shape_to_render_options(&shape);
     let rendered: Vec<FrameRef> = frames
         .iter()
-        .map(|range| {
+        .map(|range| -> Result<FrameRef, String> {
             let slice = slice_char_range(&prep.bounded_text, range.source_start, range.source_end);
-            let bytes = match self::renderer::render_snapcompact_png(slice, render_opts.clone()) {
-                Ok(b) => b,
-                Err(e) => {
-                    tracing::warn!(
-                        frame = range.index,
-                        shape = %shape.name,
-                        error = %e,
-                        "snapcompact render failed; emitting empty frame"
-                    );
-                    Vec::new()
-                }
-            };
-            FrameRef {
+            let bytes = self::renderer::render_snapcompact_png(slice, render_opts.clone())
+                .map_err(|error| format!("snapcompact frame {}: {error}", range.index))?;
+            Ok(FrameRef {
                 index: range.index,
                 source_start: range.source_start,
                 source_end: range.source_end,
                 bytes,
-            }
+            })
         })
-        .collect();
-    CompactResult {
+        .collect::<Result<_, _>>()?;
+    Ok(CompactResult {
         summary: render_lead_in(&prep.text),
         source_text: prep.bounded_text.clone(),
         frames: rendered,
         shape,
-    }
+    })
 }
 
 fn chunk_into_frames(text: &str, chars_per_frame: usize, max_frames: usize) -> Vec<FrameRange> {
@@ -658,6 +649,30 @@ fn render_lead_in(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn compact_rejects_unrendered_tail() {
+        let prep = super::prepare(&"x".repeat(100), 1000, 1000);
+        let mut shape = super::resolve_shape("claude");
+        shape.frame_size = 32;
+        let options = super::CompactOptions {
+            shape: Some(shape),
+            max_frames: 1,
+            ..Default::default()
+        };
+        assert!(super::compact(&prep, &options).is_err());
+    }
+
+    #[test]
+    fn compact_rejects_invalid_render_options() {
+        let prep = super::prepare("hello", 1000, 1000);
+        let mut shape = super::resolve_shape("claude");
+        shape.columns = 3;
+        let options = super::CompactOptions {
+            shape: Some(shape),
+            ..Default::default()
+        };
+        assert!(super::compact(&prep, &options).is_err());
+    }
     use super::*;
 
     #[test]
@@ -791,12 +806,12 @@ mod tests {
         // PNG magic header. The `frames.len() <= max_frames`
         // invariant is preserved.
         let long: String = "a".repeat(800);
-        let prep = prepare(&long, 2000, 800);
+        let prep = prepare(&long, 2000, 801);
         let opts = CompactOptions {
             model_id: "claude-3-5-sonnet".into(),
             ..Default::default()
         };
-        let result = compact(&prep, &opts);
+        let result = compact(&prep, &opts).unwrap();
         assert!(!result.frames.is_empty());
         assert!(result.frames.len() <= opts.max_frames as usize);
         for f in &result.frames {
@@ -822,7 +837,7 @@ mod tests {
             model_id: "claude".into(),
             ..Default::default()
         };
-        let result = compact(&prep, &opts);
+        let result = compact(&prep, &opts).unwrap();
         assert!(result.summary.starts_with("Resume prior conversation."));
     }
     #[test]
@@ -830,14 +845,14 @@ mod tests {
         // Each frame holds `chars_per_frame` characters; with max_frames=5
         // and an unbounded text the frames cover exactly the first
         // `max_frames * chars_per_frame` characters.
-        let long: String = (0..200).map(|i| format!("x{i}\n")).collect();
+        let long: String = (0..50).map(|i| format!("x{i}\n")).collect();
         let prep = prepare(&long, 5000, 5000);
         let opts = CompactOptions {
             model_id: "claude".into(),
             max_frames: 5,
             ..Default::default()
         };
-        let result = compact(&prep, &opts);
+        let result = compact(&prep, &opts).unwrap();
         assert!(!result.frames.is_empty());
         // Frame 0 starts at 0; frames are contiguous and disjoint.
         let mut prev_end = 0;
@@ -851,18 +866,19 @@ mod tests {
         // characters of the bounded text — less than the full length
         // when `max_frames * chars_per_frame` is small.
         let chars_per_frame = result.shape.chars_per_frame() as usize;
-        assert_eq!(prev_end, (opts.max_frames as usize) * chars_per_frame);
+        assert_eq!(prev_end, prep.bounded_text.chars().count());
+        assert!(prev_end <= (opts.max_frames as usize) * chars_per_frame);
     }
 
     #[test]
     fn bounded_source_drop_is_lossless() {
         let text = "x".repeat(2000);
-        let prep = prepare(&text, 5000, 2000);
+        let prep = prepare(&text, 5000, 2001);
         let opts = CompactOptions {
             model_id: "claude".into(),
             ..Default::default()
         };
-        let result = compact(&prep, &opts);
+        let result = compact(&prep, &opts).unwrap();
         let bounded = result.into_bounded_source();
         assert_eq!(bounded.text, prep.bounded_text);
     }
@@ -874,13 +890,13 @@ mod tests {
         // that fake-success path by asserting each frame carries a
         // non-empty PNG payload.
         let long: String = "a".repeat(500);
-        let prep = prepare(&long, 2000, 500);
+        let prep = prepare(&long, 2000, 501);
         let opts = CompactOptions {
             model_id: "claude".into(),
-            max_frames: 3,
+            max_frames: 5,
             ..Default::default()
         };
-        let result = compact(&prep, &opts);
+        let result = compact(&prep, &opts).unwrap();
         assert!(!result.frames.is_empty(), "compact must produce ≥1 frame");
         for f in &result.frames {
             assert!(!f.bytes.is_empty(), "frame {} has empty bytes", f.index);
