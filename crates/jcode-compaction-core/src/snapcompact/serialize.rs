@@ -13,7 +13,7 @@ pub fn serialize_messages(messages: &[Message]) -> Result<String, String> {
                     content,
                     ..
                 } => {
-                    if content.to_ascii_lowercase().contains(";base64,") {
+                    if contains_data_url(content) {
                         return Err("snapcompact data URL elision is not implemented".into());
                     }
                     results.insert(tool_use_id.as_str(), content.as_str());
@@ -23,9 +23,7 @@ pub fn serialize_messages(messages: &[Message]) -> Result<String, String> {
                 | ContentBlock::OpenAICompaction { .. } => {
                     return Err("snapcompact cannot preserve a non-text history block".into());
                 }
-                ContentBlock::Text { text, .. }
-                    if text.to_ascii_lowercase().contains(";base64,") =>
-                {
+                ContentBlock::Text { text, .. } if contains_data_url(text) => {
                     return Err("snapcompact data URL elision is not implemented".into());
                 }
                 _ => {}
@@ -76,7 +74,7 @@ pub fn serialize_messages(messages: &[Message]) -> Result<String, String> {
                         .map(|(key, value)| format!("{key}={}", truncate(&value.to_string(), 500)))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    if arg_string.to_ascii_lowercase().contains(";base64,") {
+                    if contains_data_url(&arg_string) {
                         return Err("snapcompact data URL elision is not implemented".into());
                     }
                     let mut call = format!("{}({})", clean(name), truncate(&arg_string, 2000));
@@ -111,6 +109,19 @@ pub fn serialize_messages(messages: &[Message]) -> Result<String, String> {
         .map(|(prefix, text)| prefix + &text)
         .collect::<Vec<_>>()
         .join("\n\n"))
+}
+
+fn contains_data_url(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.match_indices("data:").any(|(start, _)| {
+        let candidate = &lower[start + 5..];
+        candidate.find(";base64,").is_some_and(|end| {
+            end > 0
+                && candidate[..end]
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'+' | b'-' | b'.'))
+        })
+    })
 }
 
 fn clean(text: &str) -> String {
@@ -200,6 +211,15 @@ mod tests {
         assert_eq!(
             serialize_messages(&messages).unwrap(),
             "¶user:early detail\nsecond line\n\n¶call:read(path=\"a.rs\")\n<out>\n\u{e}output\u{f}\n</out>\n\n¶ai:finished"
+        );
+    }
+
+    #[test]
+    fn source_code_mentioning_base64_is_not_a_data_url() {
+        let message = Message::user("if content.contains(\";base64,\") { return Err(); }");
+        assert!(serialize_messages(&[message]).is_ok());
+        assert!(
+            serialize_messages(&[Message::user("data:image/png;base64,iVBORw0KGgo=")]).is_err()
         );
     }
 
