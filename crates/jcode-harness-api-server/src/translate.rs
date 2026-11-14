@@ -2511,8 +2511,10 @@ impl BridgeState {
                     label: "Context compaction".into(),
                     percent: Some(100.0),
                     summary: match event["messages_compacted"].as_u64() {
-                        Some(count) => format!("Completed: {before} → {after} tokens, {count} messages summarized"),
-                        None => format!("Completed: {before} → {after} tokens"),
+                        Some(count) => format!(
+                            "Completed: {before} → ~{after} tokens (estimated), {count} messages summarized"
+                        ),
+                        None => format!("Completed: {before} → ~{after} tokens (estimated)"),
                     },
                     done: true,
                 })]

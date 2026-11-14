@@ -53,6 +53,45 @@ fn make_text_message(role: Role, text: &str) -> Message {
     }
 }
 
+#[tokio::test]
+async fn manual_compaction_bounds_large_recent_tail() {
+    let mut manager = CompactionManager::new().with_budget(1_000_000);
+    let messages: Vec<_> = (0..13)
+        .map(|i| {
+            make_text_message(
+                if i % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                &"x".repeat(120_000),
+            )
+        })
+        .collect();
+    manager.seed_restored_messages(messages.len());
+    manager.update_observed_input_tokens(350_000);
+    manager
+        .force_compact_with(&messages, Arc::new(MockSummaryProvider))
+        .unwrap();
+    while manager.is_compacting() {
+        tokio::task::yield_now().await;
+        manager.check_and_apply_compaction_with(&messages);
+    }
+    assert_eq!(manager.active_message_chars_with(&messages), 240_000);
+    assert_eq!(manager.compacted_count(), 11);
+    let event = manager.take_compaction_event().unwrap();
+    assert_eq!(event.pre_tokens, Some(350_000));
+    assert_eq!(
+        event.post_tokens,
+        Some(manager.token_estimate_with(&messages) as u64)
+    );
+    assert!(
+        manager.token_estimate_with(&messages) < 100_000,
+        "tail remains too large: {}",
+        manager.token_estimate_with(&messages)
+    );
+}
+
 #[test]
 fn test_new_manager() {
     let manager = CompactionManager::new();

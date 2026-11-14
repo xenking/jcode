@@ -105,8 +105,17 @@ reactive_threshold_tokens = 500000
 max_context_tokens = 600000
 
 [compaction.models."gpt-6.1-terra"]
-max_context_tokens = 272000
+max_context_tokens = 1050000
+reactive_threshold_tokens = 400000
+
+[compaction.models."gpt-6.1-sol"]
+max_context_tokens = 1050000
+reactive_threshold_tokens = 400000
 ```
+
+For OAuth/ChatGPT subscriptions the 400k trigger is a usage-policy choice, not
+an API token-pricing cliff. API-key billing doubles above 272k input tokens, so
+consider a 250k trigger for that route. The model window is 1,050,000 tokens.
 
 Overrides re-resolve whenever the session model changes (model switch,
 session restore). `/compact mode` choices made at runtime survive re-resolve.

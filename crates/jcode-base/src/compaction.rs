@@ -44,6 +44,10 @@ pub use jcode_compaction_core::{
 
 const HARD_THRESHOLD_PENDING_WAIT_MS: u64 = 15_000;
 const HARD_THRESHOLD_PENDING_POLL_MS: u64 = 50;
+/// Manual compaction should not retain hundreds of thousands of tokens merely
+/// because a few recent tool results are large. The minimum pair is protected
+/// even if it alone exceeds this target.
+const MANUAL_RECENT_TAIL_TOKENS: usize = 40_000;
 
 /// Result from background compaction task
 struct CompactionResult {
@@ -1290,10 +1294,10 @@ impl CompactionManager {
 
         let active = self.active_messages(all_messages);
 
-        if active.len() <= RECENT_TURNS_TO_KEEP {
+        if active.len() <= MIN_TURNS_TO_KEEP {
             return Err(format!(
                 "Not enough messages to compact (need more than {}, have {})",
-                RECENT_TURNS_TO_KEEP,
+                MIN_TURNS_TO_KEEP,
                 active.len()
             ));
         }
@@ -1305,7 +1309,20 @@ impl CompactionManager {
             ));
         }
 
-        let mut cutoff = active.len().saturating_sub(RECENT_TURNS_TO_KEEP);
+        let mut keep = MIN_TURNS_TO_KEEP;
+        let mut tail_chars: usize = active[active.len() - keep..]
+            .iter()
+            .map(message_char_count)
+            .sum();
+        while keep < RECENT_TURNS_TO_KEEP && keep < active.len().saturating_sub(1) {
+            let next = message_char_count(&active[active.len() - keep - 1]);
+            if tail_chars.saturating_add(next) / CHARS_PER_TOKEN > MANUAL_RECENT_TAIL_TOKENS {
+                break;
+            }
+            tail_chars = tail_chars.saturating_add(next);
+            keep += 1;
+        }
+        let mut cutoff = active.len().saturating_sub(keep);
         if cutoff == 0 {
             return Err("No messages available to compact after keeping recent turns".to_string());
         }
@@ -1398,13 +1415,20 @@ impl CompactionManager {
                     return;
                 }
 
-                let pre_tokens = self.effective_token_count_with(all_messages) as u64;
+                // The UI context pill displays the last provider-observed input,
+                // not the conservative max of observed and estimated tokens.
+                let pre_tokens = self
+                    .observed_input_tokens
+                    .unwrap_or_else(|| self.token_estimate_with(all_messages) as u64);
                 let compacted_chars: usize = self
                     .active_messages(all_messages)
                     .iter()
                     .take(self.pending_cutoff)
                     .map(message_char_count)
                     .sum();
+                let remaining_chars = self
+                    .active_message_chars_with(all_messages)
+                    .saturating_sub(compacted_chars);
                 let summary = Summary {
                     text: result.summary_text,
                     openai_encrypted_content: result.openai_encrypted_content,
@@ -1417,10 +1441,7 @@ impl CompactionManager {
                 if !all_messages.is_empty() {
                     self.compacted_count = self.compacted_count.min(all_messages.len());
                 }
-                self.active_chars.set_exact(
-                    self.active_message_chars_with(all_messages)
-                        .saturating_sub(compacted_chars),
-                );
+                self.active_chars.set_exact(remaining_chars);
 
                 // Store summary
                 self.active_summary = Some(summary);
