@@ -48,9 +48,7 @@ pub fn serialize_messages(messages: &[Message]) -> Result<String, String> {
                         &clean(text),
                     );
                 }
-                ContentBlock::Reasoning { text } | ContentBlock::ReasoningTrace { text }
-                    if !text.trim().is_empty() =>
-                {
+                ContentBlock::Reasoning { text } if !text.trim().is_empty() => {
                     push(&mut parts, "¶think:", &clean(text));
                 }
                 ContentBlock::AnthropicThinking { thinking, .. } if !thinking.trim().is_empty() => {
@@ -154,6 +152,23 @@ fn push(parts: &mut Vec<(String, String)>, prefix: &str, content: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_only_reasoning_is_not_replayed() {
+        let message = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ReasoningTrace {
+                text: "local-only".into(),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        };
+        assert!(
+            !serialize_messages(&[message])
+                .unwrap()
+                .contains("local-only")
+        );
+    }
 
     #[test]
     fn serializes_tool_call_with_its_result_and_preserves_turns() {
