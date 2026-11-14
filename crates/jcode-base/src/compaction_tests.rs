@@ -1129,6 +1129,7 @@ fn test_recover_within_budget_summary_line_variants() {
         pre_usage: 1.6,
         dropped: Some(7),
         truncated: 0,
+        shaken_tokens: 0,
     };
     let line = dropped_only.summary_line(dropped_only.pre_usage);
     assert!(line.contains("dropped 7 old messages"));
@@ -1139,6 +1140,7 @@ fn test_recover_within_budget_summary_line_variants() {
         pre_usage: 2.0,
         dropped: Some(3),
         truncated: 2,
+        shaken_tokens: 0,
     };
     let line = dropped_and_truncated.summary_line(dropped_and_truncated.pre_usage);
     assert!(line.contains("dropped 3 old messages"));
@@ -1148,6 +1150,7 @@ fn test_recover_within_budget_summary_line_variants() {
         pre_usage: 1.2,
         dropped: None,
         truncated: 5,
+        shaken_tokens: 0,
     };
     let line = truncate_only.summary_line(truncate_only.pre_usage);
     assert!(line.contains("shortened 5 large tool result(s)"));
@@ -1367,4 +1370,117 @@ fn set_mode_survives_active_model_rebind() {
     manager.set_mode(crate::config::CompactionMode::Semantic);
     manager.set_active_model(Some("claude"), Some("claude-opus-5-5"));
     assert_eq!(manager.mode(), crate::config::CompactionMode::Semantic);
+}
+
+fn shake_session(pairs: usize, tokens_each: usize) -> Vec<Message> {
+    let mut m = vec![Message::user("start")];
+    for i in 0..pairs {
+        m.push(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: format!("t{i}"),
+                name: "read".into(),
+                input: serde_json::json!({}),
+                thought_signature: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        });
+        m.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: format!("t{i}"),
+                content: "x".repeat(tokens_each * 4),
+                is_error: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        });
+    }
+    m.push(Message::user(&"tail ".repeat(20_000)));
+    m
+}
+
+fn shake_manager() -> CompactionManager {
+    // Isolate from global config mutated by parallel tests.
+    let mut m = CompactionManager::new().with_budget(1_000_000);
+    m.set_context_cap_override(Some(usize::MAX));
+    m.mode = crate::config::CompactionMode::Reactive;
+    m.compaction_config.shake = true;
+    m.compaction_config.shake_cache_expiry = true;
+    m.compaction_config.reactive_threshold = 0.99;
+    m.compaction_config.reactive_threshold_tokens = 0;
+    m
+}
+
+#[test]
+fn shake_never_runs_while_prompt_cache_is_warm() {
+    let msgs = shake_session(20, 2000);
+    let mut m = shake_manager();
+    let t0 = Instant::now();
+    assert!(
+        m.plan_shake(&msgs, t0, Some(300)).is_none(),
+        "first request: no prior cache to expire"
+    );
+    m.note_provider_request(t0);
+    for secs in [0, 1, 60, 299] {
+        assert!(
+            m.plan_shake(&msgs, t0 + Duration::from_secs(secs), Some(300))
+                .is_none(),
+            "warm cache at +{secs}s must not shake"
+        );
+    }
+    let (reason, _) = m
+        .plan_shake(&msgs, t0 + Duration::from_secs(300), Some(300))
+        .expect("expired cache shakes");
+    assert_eq!(reason, ShakeReason::CacheExpiry);
+    // Persistent/unknown cache (no TTL): never cache-expiry shake.
+    assert!(
+        m.plan_shake(&msgs, t0 + Duration::from_secs(86_400), None)
+            .is_none()
+    );
+    // Disabled config: never.
+    m.compaction_config.shake = false;
+    assert!(
+        m.plan_shake(&msgs, t0 + Duration::from_secs(900), Some(300))
+            .is_none()
+    );
+}
+
+#[test]
+fn shake_runs_before_llm_compaction_and_reduces_tokens() {
+    let mut msgs = shake_session(40, 2000);
+    let mut m = shake_manager();
+    m.set_budget(100_000);
+    m.compaction_config.reactive_threshold = 0.5;
+    let before = m.token_estimate_with(&msgs);
+    let (reason, cfg) = m
+        .plan_shake(&msgs, Instant::now(), None)
+        .expect("pre-compact");
+    assert_eq!(reason, ShakeReason::PreCompact);
+    let out = m.shake_with(&mut msgs, reason, &cfg);
+    assert!(out.tokens_saved() > 50_000, "{out:?}");
+    let after = m.token_estimate_with(&msgs);
+    assert!(after * 2 < before, "before={before} after={after}");
+    assert!(
+        !m.should_compact_with(&msgs),
+        "shake postponed LLM compaction"
+    );
+    assert_eq!(
+        m.shake_with(&mut msgs, reason, &cfg),
+        ShakeOutcome::NoChange
+    );
+}
+
+#[test]
+fn emergency_recovery_shakes_before_dropping_turns() {
+    let mut msgs = shake_session(40, 2000);
+    let mut m = shake_manager();
+    m.set_budget(60_000);
+    let n = msgs.len();
+    let r = m.recover_within_budget(&mut msgs);
+    assert!(r.shaken_tokens > 50_000, "{r:?}");
+    assert_eq!(r.dropped, None);
+    assert_eq!(msgs.len(), n);
+    assert!(r.did_anything());
 }

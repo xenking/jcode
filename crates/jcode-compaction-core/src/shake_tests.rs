@@ -43,7 +43,13 @@ fn tool_pair(id: &str, name: &str, output: &str) -> [Message; 2] {
 fn session(n: usize, tokens: usize, tail_tokens: usize) -> Vec<Message> {
     let mut m = vec![text(Role::User, "start")];
     for i in 0..n {
-        m.extend(tool_pair(&format!("t{i}"), "read", &char::from(b'a' + (i % 26) as u8).to_string().repeat(tokens * 4)));
+        m.extend(tool_pair(
+            &format!("t{i}"),
+            "read",
+            &char::from(b'a' + (i % 26) as u8)
+                .to_string()
+                .repeat(tokens * 4),
+        ));
     }
     m.push(text(Role::User, &"z".repeat(tail_tokens * 4)));
     m
@@ -142,7 +148,10 @@ fn tool_use_result_pairing_preserved() {
                     },
                 ) => assert_eq!((i1, e1), (i2, e2)),
                 (ContentBlock::ToolUse { .. }, ContentBlock::ToolUse { .. }) => {
-                    assert_eq!(serde_json::to_string(x).unwrap(), serde_json::to_string(y).unwrap())
+                    assert_eq!(
+                        serde_json::to_string(x).unwrap(),
+                        serde_json::to_string(y).unwrap()
+                    )
                 }
                 (ContentBlock::Text { .. }, ContentBlock::Text { .. }) => {}
                 _ => panic!("block kind changed"),
@@ -155,7 +164,10 @@ fn tool_use_result_pairing_preserved() {
 fn elides_code_blocks_but_keeps_prose_and_images() {
     let body = "fn x() {}\n".repeat(2000);
     let mut m = vec![
-        text(Role::Assistant, &format!("before\n```rust\n{body}```\nafter")),
+        text(
+            Role::Assistant,
+            &format!("before\n```rust\n{body}```\nafter"),
+        ),
         Message {
             role: Role::User,
             content: vec![ContentBlock::Image {

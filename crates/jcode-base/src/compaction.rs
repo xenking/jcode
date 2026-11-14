@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::task::JoinHandle;
 
+pub use jcode_compaction_core::shake::{ShakeConfig, ShakeOutcome};
 pub use jcode_compaction_core::{
     CHARS_PER_TOKEN, COMPACTION_THRESHOLD, CRITICAL_THRESHOLD, CompactionAction, CompactionEvent,
     CompactionStats, DEFAULT_TOKEN_BUDGET, EMBED_MAX_CHARS_PER_MSG, EMBEDDING_HISTORY_WINDOW,
@@ -216,6 +217,31 @@ pub struct CompactionManager {
 
     /// Monotonic recency counter for the semantic embedding cache LRU.
     semantic_embed_cache_counter: u64,
+
+    /// When the previous provider request was built. Drives the cache-expiry
+    /// shake: a prefix older than the provider cache TTL is cold anyway.
+    last_request_at: Option<Instant>,
+}
+
+/// Why a shake pass is allowed to rewrite the prompt prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShakeReason {
+    /// LLM compaction is about to rewrite the prefix anyway.
+    PreCompact,
+    /// The provider prompt cache TTL has expired since the last request.
+    CacheExpiry,
+    /// Context overflow recovery.
+    Emergency,
+}
+
+impl ShakeReason {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PreCompact => "shake_pre_compact",
+            Self::CacheExpiry => "shake_cache_expiry",
+            Self::Emergency => "shake_emergency",
+        }
+    }
 }
 
 impl CompactionManager {
@@ -245,6 +271,7 @@ impl CompactionManager {
             embedding_history: VecDeque::with_capacity(EMBEDDING_HISTORY_WINDOW + 1),
             semantic_embed_cache: HashMap::with_capacity(SEMANTIC_EMBED_CACHE_CAPACITY),
             semantic_embed_cache_counter: 0,
+            last_request_at: None,
         }
     }
 
@@ -883,6 +910,88 @@ impl CompactionManager {
     /// Get current token estimate (backward compat — uses 0 messages, only summary + observed)
     pub fn token_estimate(&self) -> usize {
         estimate_compaction_tokens(self.active_summary.as_ref(), 0, self.token_budget)
+    }
+
+    /// Effective shake thresholds, or `None` when shake is disabled.
+    /// `JCODE_COMPACTION_SHAKE=1|0` overrides `[compaction] shake`.
+    pub fn shake_config(&self) -> Option<ShakeConfig> {
+        let cfg = &self.compaction_config;
+        let enabled = match std::env::var("JCODE_COMPACTION_SHAKE") {
+            Ok(v) => matches!(v.trim(), "1" | "true" | "on" | "yes"),
+            Err(_) => cfg.shake,
+        };
+        enabled.then_some(ShakeConfig {
+            protect_window_tokens: cfg.shake_protect_tokens,
+            min_elidable_tokens: cfg.shake_min_region_tokens,
+            min_savings_tokens: cfg.shake_min_savings_tokens,
+            code_blocks: cfg.shake_code_blocks,
+        })
+    }
+
+    /// Decide whether shake may rewrite history before this request.
+    ///
+    /// Shake invalidates the prompt cache from the first elided message, so it
+    /// only runs when the prefix is cold or about to be rewritten: when LLM
+    /// compaction would trigger, or when `cache_ttl_secs` (None = persistent or
+    /// unknown cache, never shake) elapsed since the previous request. Never
+    /// while the cache is warm.
+    pub fn plan_shake(
+        &self,
+        all_messages: &[Message],
+        now: Instant,
+        cache_ttl_secs: Option<u64>,
+    ) -> Option<(ShakeReason, ShakeConfig)> {
+        let cfg = self.shake_config()?;
+        if self.should_compact_with(all_messages) {
+            return Some((ShakeReason::PreCompact, cfg));
+        }
+        let ttl = cache_ttl_secs.filter(|t| *t > 0)?;
+        let last = self.last_request_at?;
+        (self.compaction_config.shake_cache_expiry
+            && now.saturating_duration_since(last).as_secs() >= ttl)
+            .then_some((ShakeReason::CacheExpiry, cfg))
+    }
+
+    /// Record that a provider request is being built now.
+    pub fn note_provider_request(&mut self, now: Instant) {
+        self.last_request_at = Some(now);
+    }
+
+    /// Index of the first non-compacted message.
+    pub fn active_start(&self, all_messages: &[Message]) -> usize {
+        self.compacted_count.min(all_messages.len())
+    }
+
+    /// Account for a shake applied to the caller's history.
+    pub fn record_shake(&mut self, reason: ShakeReason, outcome: ShakeOutcome) {
+        let ShakeOutcome::Shaken {
+            regions_elided,
+            tokens_saved,
+        } = outcome
+        else {
+            return;
+        };
+        self.observed_input_tokens = None;
+        self.active_chars.invalidate();
+        crate::logging::info(&format!(
+            "[compaction] {}: elided {} regions, ~{} tokens saved",
+            reason.label(),
+            regions_elided,
+            tokens_saved
+        ));
+    }
+
+    /// Shake the active window of `all_messages` in place.
+    pub fn shake_with(
+        &mut self,
+        all_messages: &mut [Message],
+        reason: ShakeReason,
+        cfg: &ShakeConfig,
+    ) -> ShakeOutcome {
+        let start = self.active_start(all_messages);
+        let outcome = jcode_compaction_core::shake::shake(&mut all_messages[start..], cfg);
+        self.record_shake(reason, outcome);
+        outcome
     }
 
     /// Store provider-reported input token usage for compaction decisions.
@@ -1695,6 +1804,20 @@ impl CompactionManager {
     pub fn recover_within_budget(&mut self, all_messages: &mut [Message]) -> EmergencyRecovery {
         let pre_usage = self.context_usage_with(all_messages);
 
+        // Mechanical elision first: cheaper than dropping turns.
+        let shaken = self
+            .shake_config()
+            .map(|cfg| self.shake_with(all_messages, ShakeReason::Emergency, &cfg))
+            .map_or(0, |o| o.tokens_saved());
+        if shaken > 0 && self.context_usage_with(all_messages) <= 1.0 {
+            return EmergencyRecovery {
+                pre_usage,
+                dropped: None,
+                truncated: 0,
+                shaken_tokens: shaken,
+            };
+        }
+
         let dropped = match self.hard_compact_with(all_messages) {
             Ok(dropped) => Some(dropped),
             Err(reason) => {
@@ -1718,6 +1841,7 @@ impl CompactionManager {
             pre_usage,
             dropped,
             truncated,
+            shaken_tokens: shaken,
         }
     }
 }
@@ -1731,12 +1855,14 @@ pub struct EmergencyRecovery {
     pub dropped: Option<usize>,
     /// Number of oversized tool results that were truncated as a fallback.
     pub truncated: usize,
+    /// Approximate tokens recovered by shake before any turns were dropped.
+    pub shaken_tokens: usize,
 }
 
 impl EmergencyRecovery {
     /// Whether any space-reclaiming action actually happened.
     pub fn did_anything(&self) -> bool {
-        self.dropped.unwrap_or(0) > 0 || self.truncated > 0
+        self.dropped.unwrap_or(0) > 0 || self.truncated > 0 || self.shaken_tokens > 0
     }
 
     /// A user-facing description of what recovery did, without a trailing
@@ -1746,6 +1872,10 @@ impl EmergencyRecovery {
     pub fn summary_line(&self, trigger_usage: f32) -> String {
         let pct = trigger_usage * 100.0;
         match (self.dropped, self.truncated) {
+            (None, 0) if self.shaken_tokens > 0 => format!(
+                "⚡ Emergency shake: elided ~{} tokens of stale tool output (context was at {pct:.0}%).",
+                self.shaken_tokens
+            ),
             (Some(dropped), 0) => format!(
                 "⚡ Emergency compaction: dropped {dropped} old messages (context was at {pct:.0}%).",
             ),

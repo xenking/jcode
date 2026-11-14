@@ -1649,6 +1649,29 @@ request in this new forked session, using the inherited conversation only as con
         self.mark_replay_events_append_dirty();
     }
 
+    /// Apply shake elision to stored messages `[start..]` persistently, so
+    /// later requests reuse byte-identical shaken prefixes.
+    pub fn shake_stored_messages(
+        &mut self,
+        start: usize,
+        cfg: &jcode_compaction_core::shake::ShakeConfig,
+    ) -> jcode_compaction_core::shake::ShakeOutcome {
+        let start = start.min(self.messages.len());
+        let mut view: Vec<Message> = self.messages[start..]
+            .iter()
+            .map(StoredMessage::to_message)
+            .collect();
+        let outcome = jcode_compaction_core::shake::shake(&mut view, cfg);
+        if outcome != jcode_compaction_core::shake::ShakeOutcome::NoChange {
+            for (stored, shaken) in self.messages[start..].iter_mut().zip(view) {
+                stored.content = shaken.content;
+            }
+            self.mark_messages_full_dirty();
+            self.rebuild_memory_profile_cache();
+        }
+        outcome
+    }
+
     pub fn provider_messages(&mut self) -> &[Message] {
         let needs_full_rebuild = self.provider_messages_cache_mode == PersistVectorMode::Full
             || self.provider_messages_cache_len > self.messages.len();

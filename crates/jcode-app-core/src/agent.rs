@@ -946,6 +946,25 @@ impl Agent {
         Ok((pre_tokens, post_tokens))
     }
 
+    /// Shake hook: before LLM compaction or on the first request after the
+    /// provider prompt cache expired. Never while the cache is warm.
+    fn maybe_shake_before_request(&mut self, manager: &mut crate::compaction::CompactionManager) {
+        let now = std::time::Instant::now();
+        let model = self.provider.model();
+        let ttl = crate::provider::cache_ttl_for_provider_model(self.provider.name(), Some(&model));
+        let plan = manager.plan_shake(self.session.provider_messages(), now, ttl);
+        manager.note_provider_request(now);
+        let Some((reason, cfg)) = plan else {
+            return;
+        };
+        let start = manager.active_start(self.session.provider_messages());
+        let outcome = self.session.shake_stored_messages(start, &cfg);
+        manager.record_shake(reason, outcome);
+        if outcome != crate::compaction::ShakeOutcome::NoChange {
+            self.persist_session_best_effort("shake compaction");
+        }
+    }
+
     fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
         if self.provider.supports_compaction() || self.session.compaction.is_some() {
             let compaction = self.registry.compaction();
@@ -953,6 +972,9 @@ impl Agent {
                 Ok(mut manager) => {
                     let discarded_oversized_native =
                         manager.discard_oversized_openai_native_compaction();
+                    if self.provider.uses_jcode_compaction() {
+                        self.maybe_shake_before_request(&mut manager);
+                    }
                     let messages = {
                         let all_messages = self.session.provider_messages();
                         if self.provider.uses_jcode_compaction() {

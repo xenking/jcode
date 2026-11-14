@@ -206,7 +206,10 @@ fn collect_candidates(
                     if tokens < config.min_elidable_tokens {
                         continue;
                     }
-                    let tool = tool_names.get(tool_use_id.as_str()).copied().unwrap_or("tool");
+                    let tool = tool_names
+                        .get(tool_use_id.as_str())
+                        .copied()
+                        .unwrap_or("tool");
                     let placeholder = tool_result_placeholder(tool, content);
                     let s = tokens.saturating_sub(estimate_tokens(&placeholder));
                     if s == 0 {

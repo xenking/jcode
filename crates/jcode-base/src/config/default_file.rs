@@ -504,6 +504,15 @@ reactive_threshold_tokens = 400000
 proactive_floor = 0.40
 proactive_floor_tokens = 150000
 # Set proactive_floor_tokens = 0 to use only the percentage floor.
+# Shake: LLM-free elision of stale large tool outputs/code blocks, run only
+# before LLM compaction, after the prompt cache TTL expired, or on overflow.
+# Env override: JCODE_COMPACTION_SHAKE=1.
+shake = false
+# shake_protect_tokens = 16384
+# shake_min_region_tokens = 400
+# shake_min_savings_tokens = 4096
+# shake_code_blocks = true
+# shake_cache_expiry = true
 # Per-provider and per-model overrides merge over this section for the active
 # session model (model beats provider beats global). Any [compaction] key works.
 # Model keys match the bare id; route prefixes like "openai-api:" are ignored.

@@ -343,6 +343,24 @@ pub struct CompactionConfig {
     /// not the final request size when recent messages cannot be compacted.
     pub max_context_tokens: usize,
 
+    /// Enable LLM-free "shake" elision of stale large tool outputs and code
+    /// blocks. Runs only when the prompt prefix is being rewritten anyway:
+    /// before LLM compaction, after the provider cache TTL expired, and on
+    /// context overflow. Env override: `JCODE_COMPACTION_SHAKE=1|0`.
+    pub shake: bool,
+    /// Newest tokens shake never touches.
+    pub shake_protect_tokens: usize,
+    /// Minimum size of a single region to elide.
+    pub shake_min_region_tokens: usize,
+    /// Minimum aggregate savings, otherwise shake is a no-op.
+    pub shake_min_savings_tokens: usize,
+    /// Also elide large fenced code blocks inside text.
+    pub shake_code_blocks: bool,
+    /// Shake on the first request after the provider prompt-cache TTL expired
+    /// (prefix is cold anyway). Skipped for providers with no TTL estimate,
+    /// i.e. persistent or unknown caches.
+    pub shake_cache_expiry: bool,
+
     /// Per-provider overrides (`[compaction.providers.openai]`). Merged over
     /// the global section; model overrides win over provider overrides.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -373,6 +391,12 @@ pub struct CompactionOverride {
     pub relevance_keep_threshold: Option<f32>,
     pub goal_window_turns: Option<usize>,
     pub max_context_tokens: Option<usize>,
+    pub shake: Option<bool>,
+    pub shake_protect_tokens: Option<usize>,
+    pub shake_min_region_tokens: Option<usize>,
+    pub shake_min_savings_tokens: Option<usize>,
+    pub shake_code_blocks: Option<bool>,
+    pub shake_cache_expiry: Option<bool>,
 }
 
 impl CompactionOverride {
@@ -394,7 +418,13 @@ impl CompactionOverride {
             topic_shift_threshold,
             relevance_keep_threshold,
             goal_window_turns,
-            max_context_tokens
+            max_context_tokens,
+            shake,
+            shake_protect_tokens,
+            shake_min_region_tokens,
+            shake_min_savings_tokens,
+            shake_code_blocks,
+            shake_cache_expiry
         );
     }
 }
@@ -447,6 +477,12 @@ impl Default for CompactionConfig {
             relevance_keep_threshold: 0.65,
             goal_window_turns: 5,
             max_context_tokens: 0,
+            shake: false,
+            shake_protect_tokens: 16_384,
+            shake_min_region_tokens: 400,
+            shake_min_savings_tokens: 4_096,
+            shake_code_blocks: true,
+            shake_cache_expiry: true,
             providers: Default::default(),
             models: Default::default(),
         }
