@@ -89,3 +89,7 @@ Two things that waste time otherwise:
 - Confirm which binary you are actually inspecting. `strings` on
   `builds/shared-server/jcode` reads a 70-byte symlink, not a program; resolve it
   with `readlink -f` first.
+
+## Fork notes (xenking/jcode, keep at end for clean upstream merges)
+- Fork-only features: codemode (`crates/jcode-codemode`, docs `CODEMODE.md`, `[features] code_mode`), MCP `MCP-Protocol-Version` header on initialize, Soniox realtime `stt-rt-v6` in `crates/jcode-voice` (`[dictation] backend`), native `ask` tool (`crates/jcode-app-core/src/tool/ask.rs`, exposed on harness API), self-update source defaults to `xenking/jcode` branch `master`.
+- Verify a slice: `justrust check -p jcode-codemode -p jcode-voice`. Upstream merges: keep this section last.
