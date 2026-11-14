@@ -1201,6 +1201,10 @@ pub struct FeatureConfig {
     /// classified as misses. Harness changes without a documented cause raise a
     /// warning, while explained misses are informational (default: true).
     pub kv_cache_miss_notices: bool,
+    /// Register the `codemode` tool: model-written JavaScript that calls every
+    /// jcode and MCP tool as typed async functions in a QuickJS sandbox
+    /// (default: true). `[tools] codemode = false` also disables it.
+    pub code_mode: bool,
     /// Update channel: "stable" (default), "preview" (v1 previews), or "main" (latest commits).
     pub update_channel: UpdateChannel,
 }
@@ -1218,6 +1222,7 @@ impl Default for FeatureConfig {
             message_timestamps: true,
             persist_memory_injections: false,
             kv_cache_miss_notices: true,
+            code_mode: true,
             update_channel: UpdateChannel::default(),
         }
     }

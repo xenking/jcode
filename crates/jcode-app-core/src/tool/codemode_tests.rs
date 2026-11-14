@@ -247,3 +247,206 @@ fn report_renders_strings_raw_and_lists_store_keys() {
     assert!(report.contains("[1 tool call, "), "{report}");
     assert!(report.contains("stored: k]"), "{report}");
 }
+
+/// Nested calls go through `Registry::execute`, so the user's pre_tool gate
+/// sees (and can block) each call by its real tool name. Codemode adds no
+/// authority: a blocked call is a thrown error plus a `failed` receipt.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn pre_tool_hook_gates_each_nested_call() {
+    use std::os::unix::fs::PermissionsExt;
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let policy = temp.path().join("policy.sh");
+    let seen = temp.path().join("seen.log");
+    std::fs::write(
+        &policy,
+        format!(
+            "#!/bin/sh\ninput=$(cat)\necho \"$JCODE_HOOK_SESSION_ID $JCODE_HOOK_TOOL_NAME\" >> '{}'\ncase \"$input\" in\n  *forbidden*) echo 'shout is gated' >&2; exit 2 ;;\nesac\nexit 0\n",
+            seen.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let prev = std::env::var_os("JCODE_HOOK_PRE_TOOL");
+    crate::env::set_var("JCODE_HOOK_PRE_TOOL", policy.to_string_lossy().to_string());
+    crate::config::invalidate_config_cache();
+
+    let registry = registry().await;
+    let out = registry
+        .execute(
+            "codemode",
+            json!({ "code": r#"
+                const a = await tools.shout({ text: "fine" });
+                let b;
+                try { b = await tools.shout({ text: "forb" + "idden" }); } catch (e) { b = "blocked: " + e.message; }
+                return { a, b };
+            "# }),
+            ctx("codemode-hook-gate"),
+        )
+        .await;
+
+    match prev {
+        Some(value) => crate::env::set_var("JCODE_HOOK_PRE_TOOL", value),
+        None => crate::env::remove_var("JCODE_HOOK_PRE_TOOL"),
+    }
+    crate::config::invalidate_config_cache();
+
+    let out = out.expect("codemode runs").output;
+    assert!(out.contains("\"a\": \"FINE\""), "{out}");
+    assert!(out.contains("blocked: shout:"), "{out}");
+    assert!(out.contains("shout is gated"), "{out}");
+    assert!(out.contains("#1 shout ok"), "{out}");
+    assert!(out.contains("#2 shout failed"), "{out}");
+    let seen = std::fs::read_to_string(seen).unwrap();
+    // The gate saw the codemode call itself plus both nested calls, each by
+    // its real tool name.
+    let mine: Vec<&str> = seen
+        .lines()
+        .filter_map(|l| l.strip_prefix("codemode-hook-gate "))
+        .collect();
+    assert_eq!(mine, vec!["codemode", "shout", "shout"], "{seen}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn oversized_report_is_bounded_and_spilled() {
+    let registry = registry().await;
+    let out = registry
+        .execute(
+            "codemode",
+            json!({ "code": "return 'x'.repeat(200000);" }),
+            ctx("codemode-spill"),
+        )
+        .await
+        .unwrap()
+        .output;
+    assert!(out.len() < 70_000, "{}", out.len());
+    assert!(out.contains("...(truncated"), "{}", &out[out.len() - 300..]);
+}
+
+// Minimal MCP stdio server (newline-delimited JSON-RPC).
+const MCP_SERVER: &str = r#"
+import json, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get('method')
+    if method == 'shutdown':
+        break
+    if 'id' not in req:
+        continue
+    reply = {'jsonrpc': '2.0', 'id': req['id']}
+    if method == 'initialize':
+        reply['result'] = {'protocolVersion': '2024-11-05', 'capabilities': {'tools': {}},
+                           'serverInfo': {'name': 'fake', 'version': '1'}}
+    elif method == 'tools/list':
+        reply['result'] = {'tools': [
+            {'name': 'add', 'description': 'Add two numbers',
+             'inputSchema': {'type': 'object', 'required': ['a', 'b'],
+                             'properties': {'a': {'type': 'number'}, 'b': {'type': 'number'}}}},
+            {'name': 'list-items', 'description': 'List items',
+             'inputSchema': {'type': 'object', 'properties': {'n': {'type': 'integer'}}}}]}
+    elif method == 'tools/call':
+        p = req['params']; args = p.get('arguments') or {}
+        if p['name'] == 'add':
+            text = json.dumps({'sum': args['a'] + args['b']})
+        else:
+            text = json.dumps([{'id': i, 'big': 'y' * 1000} for i in range(args.get('n', 3))])
+        reply['result'] = {'content': [{'type': 'text', 'text': text}], 'isError': False}
+    else:
+        reply['error'] = {'code': -32601, 'message': 'no'}
+    print(json.dumps(reply), flush=True)
+"#;
+
+/// End to end through a real MCP stdio server: tools come from the cached
+/// catalog (no connection until first call, i.e. lazy), appear with typed
+/// declarations, and a script composes them with Promise.all while the bulky
+/// intermediate data never reaches the report.
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_fake_server_end_to_end() {
+    if !std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+    {
+        eprintln!("SKIP: python3 unavailable");
+        return;
+    }
+    let server: crate::mcp::McpServerConfig = serde_json::from_value(json!({
+        "command": "python3",
+        "args": ["-I", "-S", "-u", "-c", MCP_SERVER],
+        "shared": false,
+        "timeout_secs": 10,
+    }))
+    .unwrap();
+    let mut config = crate::mcp::McpConfig::default();
+    config.servers.insert("fake".into(), server);
+    let manager = Arc::new(tokio::sync::RwLock::new(
+        crate::mcp::McpManager::with_config(config),
+    ));
+    let catalog: Vec<(String, crate::mcp::McpToolDef)> = vec![
+        (
+            "fake".into(),
+            crate::mcp::McpToolDef {
+                name: "add".into(),
+                description: Some("Add two numbers".into()),
+                input_schema: json!({"type": "object", "required": ["a", "b"],
+                    "properties": {"a": {"type": "number"}, "b": {"type": "number"}}}),
+            },
+        ),
+        (
+            "fake".into(),
+            crate::mcp::McpToolDef {
+                name: "list-items".into(),
+                description: Some("List items".into()),
+                input_schema: json!({"type": "object", "properties": {"n": {"type": "integer"}}}),
+            },
+        ),
+    ];
+    let registry = registry().await;
+    registry
+        .reconcile_mcp_tools(crate::mcp::create_mcp_tools_from_cached_many(
+            &catalog,
+            manager.clone(),
+        ))
+        .await;
+    assert!(
+        !manager.read().await.has_connections().await,
+        "schema must be lazy"
+    );
+
+    let out = registry
+        .execute(
+            "codemode",
+            json!({ "code": r#"
+                const names = listTools('mcp__fake').map(t => t.name).sort();
+                const decl = types('mcp__fake');
+                const [items, s1, s2] = await Promise.all([
+                    tools.mcp__fake__list_items({ n: 50 }),
+                    tools.mcp__fake__add({ a: 2, b: 3 }),
+                    tools.mcp__fake__add({ a: 10, b: 20 }),
+                ]);
+                const local = await tools.lookup({ id: s1.sum });
+                return {
+                    names,
+                    typed: decl.includes("mcp__fake__add(args: McpFakeAddInput)") && decl.includes("a: number;"),
+                    count: items.length,
+                    total: s1.sum + s2.sum,
+                    square: local.square,
+                };
+            "# }),
+            ctx("codemode-mcp-e2e"),
+        )
+        .await
+        .expect("codemode runs")
+        .output;
+    manager.read().await.disconnect_all().await;
+    assert!(out.contains("\"typed\": true"), "{out}");
+    assert!(out.contains("\"count\": 50"), "{out}");
+    assert!(out.contains("\"total\": 35"), "{out}");
+    assert!(out.contains("\"square\": 25"), "{out}");
+    assert!(out.contains("mcp__fake__add ok"), "{out}");
+    assert!(out.contains("[4 tool calls"), "{out}");
+    // 50KB of item payload stayed inside the VM.
+    assert!(!out.contains("yyyyyyyyyy"), "{out}");
+    assert!(out.len() < 4_000, "{}", out.len());
+}
