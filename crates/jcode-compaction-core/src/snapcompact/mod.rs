@@ -355,6 +355,8 @@ pub fn normalize(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = String::with_capacity(input.len());
     let mut i = 0;
+    let mut whitespace = false;
+    let mut line_break = false;
     while i < bytes.len() {
         if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
             i += 2;
@@ -365,41 +367,23 @@ pub fn normalize(input: &str) -> String {
             continue;
         }
         let c = input[i..].chars().next().unwrap_or(' ');
-        match c {
-            '─' | '━' | '│' | '┃' | '┌' | '┍' | '┎' | '┏' | '┐' | '┑' | '┒' | '┓' | '└' | '┕'
-            | '┖' | '┗' | '┘' | '┙' | '┚' | '┛' | '├' | '┝' | '┞' | '┟' | '┠' | '┡' | '┢' | '┣'
-            | '┤' | '┥' | '┦' | '┧' | '┨' | '┩' | '┪' | '┫' | '┬' | '┭' | '┮' | '┯' | '┰' | '┱'
-            | '┲' | '┳' | '┴' | '┵' | '┶' | '┷' | '┸' | '┹' | '┺' | '┻' | '┼' | '┽' | '┾' | '┿' =>
-            {
-                out.push('-');
-                i += c.len_utf8();
-            }
-            '═' => {
-                out.push('=');
-                i += c.len_utf8();
-            }
-            '║' => {
-                out.push('|');
-                i += c.len_utf8();
-            }
-            '\n' => {
-                out.push('\u{2588}');
-                i += 1;
-                while i < bytes.len() && bytes[i] == b'\n' {
-                    i += 1;
-                }
-            }
-            ' ' | '\t' => {
-                if !out.ends_with(' ') {
-                    out.push(' ');
-                }
-                i += c.len_utf8();
-            }
-            _ => {
-                out.push(c);
-                i += c.len_utf8();
-            }
+        i += c.len_utf8();
+        if c.is_whitespace() {
+            whitespace = true;
+            line_break |= matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}');
+            continue;
         }
+        if whitespace && !out.is_empty() {
+            out.push(if line_break { '\u{2588}' } else { ' ' });
+        }
+        whitespace = false;
+        line_break = false;
+        out.push(match c {
+            '─' | '━' => '-',
+            '│' | '┃' => '|',
+            '\u{2500}'..='\u{257f}' => '+',
+            _ => c,
+        });
     }
     out
 }
@@ -707,6 +691,14 @@ fn render_lead_in(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn normalize_collapses_whitespace_and_folds_box_drawing() {
+        assert_eq!(
+            super::normalize(" \talpha  \n \tbeta │─┌\r\ngamma  "),
+            "alpha█beta |-+█gamma"
+        );
+    }
+
     #[test]
     fn frame_boundary_restores_dim_state() {
         let mut open = false;
