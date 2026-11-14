@@ -126,7 +126,7 @@ impl SelfDevTool {
                     "no local jcode checkout found",
                     format!(
                         "Clone the source manually: `git clone {} {}`.",
-                        super::JCODE_REPO_URL,
+                        super::jcode_repo_url(),
                         target
                     ),
                 ));
@@ -336,7 +336,7 @@ impl SelfDevTool {
 
         let status = Command::new("git")
             .arg("clone")
-            .arg(super::JCODE_REPO_URL)
+            .arg(super::jcode_repo_url())
             .arg(&repo_dir)
             .status()
             .map_err(|e| anyhow::anyhow!("failed to run git clone: {e}"))?;

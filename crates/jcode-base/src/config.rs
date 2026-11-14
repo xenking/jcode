@@ -6,14 +6,14 @@
 pub use jcode_config_types::{
     AgentsConfig, AmbientConfig, AuthConfig, AutoJudgeConfig, AutoReviewConfig, CompactionConfig,
     CompactionMode, CrossProviderFailoverMode, CustomWebSearchConfig, CustomWebSearchMethod,
-    DiagramDisplayMode, DiagramPanePosition, DiffDisplayMode, DisplayConfig, FeatureConfig,
-    GatewayConfig, HookCommands, HooksConfig, KeybindingsConfig, LatexRenderingMode,
-    LaunchHotkeyEntry, LaunchHotkeysConfig, MarkdownSpacingMode, MenubarConfig, NamedProviderAuth,
-    NamedProviderConfig, NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig,
-    NotificationsConfig, PowerConfig, ProviderConfig, ReasoningDisplayMode, ResumeOpenElsewhere,
-    ResumeTimeMode, SafetyConfig, SessionConfig, SessionPickerResumeAction, SponsorsConfig,
-    SwarmSpawnMode, SwarmStripLayout, TerminalConfig, UpdateChannel, WebSearchConfig,
-    WebSearchEngine,
+    DEFAULT_UPDATE_BRANCH, DEFAULT_UPDATE_REPO, DiagramDisplayMode, DiagramPanePosition,
+    DiffDisplayMode, DisplayConfig, FeatureConfig, GatewayConfig, HookCommands, HooksConfig,
+    KeybindingsConfig, LatexRenderingMode, LaunchHotkeyEntry, LaunchHotkeysConfig,
+    MarkdownSpacingMode, MenubarConfig, NamedProviderAuth, NamedProviderConfig,
+    NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig, NotificationsConfig,
+    PowerConfig, ProviderConfig, ReasoningDisplayMode, ResumeOpenElsewhere, ResumeTimeMode,
+    SafetyConfig, SessionConfig, SessionPickerResumeAction, SponsorsConfig, SwarmSpawnMode,
+    SwarmStripLayout, TerminalConfig, UpdateChannel, WebSearchConfig, WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -307,6 +307,8 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES",
     "JCODE_TYPING_SCROLL_LOCK_TOGGLE_KEY",
     "JCODE_UPDATE_CHANNEL",
+    "JCODE_UPDATE_REPO",
+    "JCODE_UPDATE_BRANCH",
     "JCODE_VOICE_INPUT_KEY",
     "JCODE_WEBSEARCH_ENGINE",
     "JCODE_WEBSEARCH_FALLBACK_ENGINES",

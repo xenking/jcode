@@ -33,7 +33,10 @@ pub use reload::{ReloadRecoveryDirective, persisted_background_tasks_note};
 pub use status::selfdev_status_output;
 
 /// Public GitHub source used when cloning the jcode repository for self-dev.
-pub const JCODE_REPO_URL: &str = "https://github.com/1jehuang/jcode.git";
+/// Clone URL for self-dev sources (`[features] update_repo`, env `JCODE_UPDATE_REPO`).
+pub fn jcode_repo_url() -> String {
+    format!("https://github.com/{}.git", crate::update::github_repo())
+}
 
 #[derive(Debug, Deserialize)]
 struct SelfDevInput {

@@ -68,8 +68,10 @@ pub fn fetch_latest_preview_blocking() -> Result<Option<GitHubRelease>> {
     // Paginate because stable releases may otherwise bury preview releases.
     // Bound work to avoid an unbounded automatic network check.
     for page in 1..=20 {
-        let url =
-            format!("https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=100&page={page}");
+        let url = format!(
+            "https://api.github.com/repos/{}/releases?per_page=100&page={page}",
+            super::github_repo()
+        );
         let response = github_api_request(&client, &url)
             .send()
             .context("Failed to fetch preview releases")?;

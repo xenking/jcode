@@ -1207,7 +1207,16 @@ pub struct FeatureConfig {
     pub code_mode: bool,
     /// Update channel: "stable" (default), "preview" (v1 previews), or "main" (latest commits).
     pub update_channel: UpdateChannel,
+    /// GitHub `owner/name` that updates, releases and self-dev clones come from
+    /// (default: "xenking/jcode"). Env: `JCODE_UPDATE_REPO`.
+    pub update_repo: String,
+    /// Branch the "main" (source-build) channel tracks (default: "master").
+    /// Env: `JCODE_UPDATE_BRANCH`.
+    pub update_branch: String,
 }
+
+pub const DEFAULT_UPDATE_REPO: &str = "xenking/jcode";
+pub const DEFAULT_UPDATE_BRANCH: &str = "master";
 
 impl Default for FeatureConfig {
     fn default() -> Self {
@@ -1224,6 +1233,8 @@ impl Default for FeatureConfig {
             kv_cache_miss_notices: true,
             code_mode: true,
             update_channel: UpdateChannel::default(),
+            update_repo: DEFAULT_UPDATE_REPO.to_string(),
+            update_branch: DEFAULT_UPDATE_BRANCH.to_string(),
         }
     }
 }

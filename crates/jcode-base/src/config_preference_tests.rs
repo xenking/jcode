@@ -142,3 +142,14 @@ impl Config {
             .any(|value| value.trim().eq_ignore_ascii_case(&entry))
     }
 }
+
+#[test]
+fn update_repo_defaults_to_fork_and_parses_override() {
+    let cfg: Config = toml::from_str("[features]\nmemory = true\n").unwrap();
+    assert_eq!(cfg.features.update_repo, "xenking/jcode");
+    assert_eq!(cfg.features.update_branch, "master");
+    let cfg: Config =
+        toml::from_str("[features]\nupdate_repo = \"me/jc\"\nupdate_branch = \"dev\"\n").unwrap();
+    assert_eq!(cfg.features.update_repo, "me/jc");
+    assert_eq!(cfg.features.update_branch, "dev");
+}

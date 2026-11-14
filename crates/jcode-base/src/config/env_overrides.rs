@@ -407,6 +407,16 @@ impl Config {
         {
             self.features.update_channel = channel;
         }
+        if let Ok(v) = std::env::var("JCODE_UPDATE_REPO")
+            && !v.trim().is_empty()
+        {
+            self.features.update_repo = v.trim().to_string();
+        }
+        if let Ok(v) = std::env::var("JCODE_UPDATE_BRANCH")
+            && !v.trim().is_empty()
+        {
+            self.features.update_branch = v.trim().to_string();
+        }
 
         // Agents (spawned helper sessions)
         if let Ok(v) = std::env::var("JCODE_SWARM_MODEL") {

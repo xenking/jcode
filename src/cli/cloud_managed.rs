@@ -771,12 +771,14 @@ if [ -x "$managed_updater" ]; then
 elif ! capable "$cli" || ! capable "$backend" || {{ [ -n "$want" ] && {{ ! version_at_least "$cli" || ! version_at_least "$backend"; }}; }} || [ "${{JCODE_CLOUD_FORCE_UPGRADE:-}}" = 1 ]; then
   # Cached evidence describes the old install, never the candidate.
   warm=0
+  # Published Linux artifacts only exist upstream; override for a fork with releases.
+  release_repo=${{JCODE_CLOUD_RELEASE_REPO:-1jehuang/jcode}}
   if [ -z "$want" ] && [ -z "$development_candidate" ]; then
     # Development builds have no corresponding published tag. Resolve the
     # canonical latest redirect, then pin and validate that exact release.
     latest=$(curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSLI --retry 3 \
-      -o /dev/null -w '%{{url_effective}}' https://github.com/1jehuang/jcode/releases/latest)
-    want=${{latest#https://github.com/1jehuang/jcode/releases/tag/}}
+      -o /dev/null -w '%{{url_effective}}' https://github.com/$release_repo/releases/latest)
+    want=${{latest#https://github.com/$release_repo/releases/tag/}}
     printf '%s\n' "$want" | LC_ALL=C awk '
       NR != 1 || $0 !~ /^v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$/ {{ bad=1 }}
       END {{ exit (bad || NR != 1) }}' || {{
@@ -806,7 +808,7 @@ elif ! capable "$cli" || ! capable "$backend" || {{ [ -n "$want" ] && {{ ! versi
     chmod 755 "$candidate"
   else
   echo "[cloud prepare] installing verified $want CLI (live sessions are unchanged)" >&2
-  base="https://github.com/1jehuang/jcode/releases/download/$want"
+  base="https://github.com/$release_repo/releases/download/$want"
   asset=jcode-linux-x86_64.tar.gz
   curl --proto '=https' --tlsv1.2 -fsSL --retry 3 "$base/$asset" -o "$stage/$asset"
   curl --proto '=https' --tlsv1.2 -fsSL --retry 3 "$base/SHA256SUMS" -o "$stage/SHA256SUMS"

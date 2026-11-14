@@ -28,7 +28,34 @@ use update_metadata::{record_release_update_duration, record_source_update_durat
 pub use update_rate_limit::{RATE_LIMIT_ERROR_PREFIX, is_rate_limit_error};
 use update_rate_limit::{clear_rate_limit_backoff, rate_limit_error};
 
-const GITHUB_REPO: &str = "1jehuang/jcode";
+/// GitHub `owner/name` updates come from (`[features] update_repo`, env
+/// `JCODE_UPDATE_REPO`). Defaults to the xenking fork.
+pub fn github_repo() -> String {
+    let repo = crate::config::config()
+        .features
+        .update_repo
+        .trim()
+        .to_string();
+    if repo.is_empty() {
+        crate::config::DEFAULT_UPDATE_REPO.to_string()
+    } else {
+        repo
+    }
+}
+
+/// Branch the main (source) channel tracks (`[features] update_branch`).
+pub fn update_branch() -> String {
+    let branch = crate::config::config()
+        .features
+        .update_branch
+        .trim()
+        .to_string();
+    if branch.is_empty() {
+        crate::config::DEFAULT_UPDATE_BRANCH.to_string()
+    } else {
+        branch
+    }
+}
 /// Minimum gap between *automatic* update checks.
 ///
 /// Every automatic check costs one or two unauthenticated `api.github.com`
@@ -205,7 +232,7 @@ pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
     let url = override_url.clone().unwrap_or_else(|| {
         format!(
             "https://api.github.com/repos/{}/releases/latest",
-            GITHUB_REPO
+            github_repo()
         )
     });
 
@@ -267,7 +294,11 @@ fn github_api_request(
 }
 
 fn latest_main_sha_blocking() -> Result<String> {
-    let url = format!("https://api.github.com/repos/{}/commits/main", GITHUB_REPO);
+    let url = format!(
+        "https://api.github.com/repos/{}/commits/{}",
+        github_repo(),
+        update_branch()
+    );
     let client = reqwest::blocking::Client::builder()
         .timeout(UPDATE_CHECK_TIMEOUT)
         .user_agent("jcode-updater")
@@ -347,7 +378,7 @@ fn synthetic_main_release(latest_sha: &str) -> GitHubRelease {
     GitHubRelease {
         tag_name: format!("main-{}", latest_sha),
         _name: Some(format!("Built from main ({})", latest_sha)),
-        _html_url: format!("https://github.com/{}/commit/{}", GITHUB_REPO, latest_sha),
+        _html_url: format!("https://github.com/{}/commit/{}", github_repo(), latest_sha),
         _published_at: None,
         assets: vec![],
         _target_commitish: latest_sha.to_string(),
@@ -686,11 +717,13 @@ fn build_from_source() -> Result<PathBuf> {
 
     let repo_dir = build_dir.join("jcode");
 
+    let branch = update_branch();
+    let remote_ref = format!("origin/{branch}");
     if repo_dir.join(".git").exists() {
         // Pull latest
         crate::logging::info("Main channel: pulling latest from main...");
         let output = std::process::Command::new("git")
-            .args(["pull", "--ff-only", "origin", "main"])
+            .args(["pull", "--ff-only", "origin", branch.as_str()])
             .current_dir(&repo_dir)
             .output()
             .context("Failed to run git pull")?;
@@ -700,7 +733,7 @@ fn build_from_source() -> Result<PathBuf> {
             let summary = summarize_git_pull_failure(&output.stderr);
             crate::logging::warn(&format!("{}, trying reset", summary));
             let output = std::process::Command::new("git")
-                .args(["fetch", "origin", "main"])
+                .args(["fetch", "origin", branch.as_str()])
                 .current_dir(&repo_dir)
                 .output()
                 .context("Failed to run git fetch")?;
@@ -711,7 +744,7 @@ fn build_from_source() -> Result<PathBuf> {
                 );
             }
             let output = std::process::Command::new("git")
-                .args(["reset", "--hard", "origin/main"])
+                .args(["reset", "--hard", remote_ref.as_str()])
                 .current_dir(&repo_dir)
                 .output()
                 .context("Failed to run git reset")?;
@@ -725,10 +758,16 @@ fn build_from_source() -> Result<PathBuf> {
     } else {
         // Clone
         crate::logging::info("Main channel: cloning repository...");
-        let clone_url = format!("https://github.com/{}.git", GITHUB_REPO);
+        let clone_url = format!("https://github.com/{}.git", github_repo());
         let output = std::process::Command::new("git")
             .args([
-                "clone", "--depth", "1", "--branch", "main", &clone_url, "jcode",
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                branch.as_str(),
+                &clone_url,
+                "jcode",
             ])
             .current_dir(&build_dir)
             .output()

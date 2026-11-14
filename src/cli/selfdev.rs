@@ -12,7 +12,9 @@ use super::provider_init::ProviderChoice;
 pub use jcode_selfdev_types::CLIENT_SELFDEV_ENV;
 pub use jcode_selfdev_types::client_selfdev_requested;
 
-const JCODE_REPO_URL: &str = "https://github.com/1jehuang/jcode.git";
+fn jcode_repo_url() -> String {
+    format!("https://github.com/{}.git", crate::update::github_repo())
+}
 
 fn selfdev_clone_dir() -> Result<PathBuf> {
     Ok(crate::storage::jcode_dir()?.join("source").join("jcode"))
@@ -33,7 +35,7 @@ fn resolve_or_clone_repo_dir() -> Result<PathBuf> {
             "Self-dev source directory exists but is not a jcode repository: {}\n\
              Move it aside or clone {} there, then retry.",
             repo_dir.display(),
-            JCODE_REPO_URL
+            jcode_repo_url()
         );
     }
 
@@ -49,7 +51,7 @@ fn resolve_or_clone_repo_dir() -> Result<PathBuf> {
 
     let status = Command::new("git")
         .arg("clone")
-        .arg(JCODE_REPO_URL)
+        .arg(jcode_repo_url())
         .arg(&repo_dir)
         .status()
         .map_err(|e| anyhow::anyhow!("Failed to run git clone for self-dev source: {e}"))?;
@@ -58,10 +60,10 @@ fn resolve_or_clone_repo_dir() -> Result<PathBuf> {
         anyhow::bail!(
             "Failed to clone self-dev source from {} into {} (git exited with {}).\n\
              Clone it manually with: git clone {} {}",
-            JCODE_REPO_URL,
+            jcode_repo_url(),
             repo_dir.display(),
             status,
-            JCODE_REPO_URL,
+            jcode_repo_url(),
             repo_dir.display()
         );
     }

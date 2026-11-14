@@ -126,7 +126,7 @@ fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Option<bool> {
 fn github_comparison(release_tag: &str, current_hash: &str) -> Result<bool> {
     let url = format!(
         "https://api.github.com/repos/{}/compare/{release_tag}...{current_hash}",
-        super::GITHUB_REPO
+        super::github_repo()
     );
     let client = reqwest::blocking::Client::builder()
         .timeout(super::UPDATE_CHECK_TIMEOUT)
