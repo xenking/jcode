@@ -320,7 +320,7 @@ fn bundled_root_store() -> rustls::RootCertStore {
 /// its Unix filesystem loader there, not the Apple trust store. An explicit
 /// connector also avoids Cargo feature unification selecting native roots or
 /// another TLS backend. Keep rustls's default chain, time and hostname checks.
-fn tls_connector() -> tokio_tungstenite::Connector {
+pub(super) fn tls_connector() -> tokio_tungstenite::Connector {
     tokio_tungstenite::Connector::Rustls(Arc::new(
         rustls::ClientConfig::builder()
             .with_root_certificates(bundled_root_store())
@@ -566,7 +566,7 @@ fn handshake_error(error: tokio_tungstenite::tungstenite::Error) -> VoiceError {
     }
 }
 
-async fn send<S>(socket: &mut S, value: Value) -> Result<(), VoiceError>
+pub(super) async fn send<S>(socket: &mut S, value: Value) -> Result<(), VoiceError>
 where
     S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
 {
@@ -575,7 +575,7 @@ where
         .map_err(|_| VoiceError::Timeout)?
         .map_err(|_| VoiceError::Network)
 }
-async fn receive<S>(socket: &mut S) -> Result<Value, VoiceError>
+pub(super) async fn receive<S>(socket: &mut S) -> Result<Value, VoiceError>
 where
     S: futures::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {

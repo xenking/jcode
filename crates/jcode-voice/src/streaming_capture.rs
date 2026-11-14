@@ -397,6 +397,11 @@ fn capture(
     }
 }
 
+enum Session {
+    Nari(NariSession),
+    Soniox(super::SonioxSession),
+}
+
 #[derive(Default)]
 struct Events {
     queue: VecDeque<NariEvent>,
@@ -483,8 +488,88 @@ impl NariRecording {
         }
         Self::start_with_recorders(cancel, key, super::detect_recorders(custom))
     }
+    /// Push-to-talk for the configured `[dictation] backend` / `base_url` /
+    /// `recorder`. `Auto` uses a Nari key if present, else a Soniox key, else
+    /// `NariNotConfigured`. A missing key returns `NariNotConfigured` or
+    /// `SonioxNotConfigured`. `Subscription`/`Command` are not streaming
+    /// backends here and return `Unavailable`.
+    pub fn start_configured(cancel: Arc<AtomicBool>) -> Result<Self, VoiceError> {
+        use jcode_base::config::DictationBackend as B;
+        let (backend, url) = super::configured_backend();
+        let recorder = jcode_base::config::config().dictation.recorder.clone();
+        let (backend, key) = match backend {
+            B::Nari => (
+                super::StreamingBackend::Nari,
+                super::nari_api_key().ok_or(VoiceError::NariNotConfigured)?,
+            ),
+            B::Soniox => (
+                super::StreamingBackend::Soniox,
+                super::soniox_api_key().ok_or(VoiceError::SonioxNotConfigured)?,
+            ),
+            B::Auto => {
+                if let Some(key) = super::nari_api_key() {
+                    (super::StreamingBackend::Nari, key)
+                } else if let Some(key) = super::soniox_api_key() {
+                    (super::StreamingBackend::Soniox, key)
+                } else {
+                    return Err(VoiceError::NariNotConfigured);
+                }
+            }
+            B::Subscription | B::Command => return Err(VoiceError::Unavailable),
+        };
+        Self::start_streaming(cancel, backend, &key, url.as_deref(), &recorder)
+    }
+    /// Backend-selectable push-to-talk. Same handle, events and semantics as
+    /// `start_auto`; `url` overrides the backend's public endpoint when set.
+    /// Soniox `Partial` revisions arrive as `NariEvent::Transcript`.
+    pub fn start_streaming(
+        cancel: Arc<AtomicBool>,
+        backend: super::StreamingBackend,
+        key: &str,
+        url: Option<&str>,
+        recorder: &str,
+    ) -> Result<Self, VoiceError> {
+        let url = url
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .unwrap_or(backend.default_url())
+            .to_owned();
+        let custom = recorder.trim().to_owned();
+        #[cfg(feature = "voice-capture")]
+        if custom.is_empty() {
+            return Self::start_backend(
+                cancel,
+                backend,
+                key,
+                &url,
+                MicrophoneRecording::start_pcm_cancellable,
+            );
+        }
+        let recorders = super::detect_recorders(&custom);
+        if recorders.is_empty() {
+            return Err(VoiceError::MicrophoneUnavailable);
+        }
+        Self::start_backend(cancel, backend, key, &url, move |c| {
+            super::command_capture::start_pcm(c, recorders)
+        })
+    }
     fn start_with(
         cancel: Arc<AtomicBool>,
+        key: &str,
+        url: &str,
+        factory: impl FnOnce(
+            Arc<AtomicBool>,
+        ) -> Result<
+            (PcmRecording, tokio::sync::mpsc::Receiver<Vec<i16>>),
+            VoiceError,
+        > + Send
+        + 'static,
+    ) -> Result<Self, VoiceError> {
+        Self::start_backend(cancel, super::StreamingBackend::Nari, key, url, factory)
+    }
+    pub(super) fn start_backend(
+        cancel: Arc<AtomicBool>,
+        backend: super::StreamingBackend,
         key: &str,
         url: &str,
         factory: impl FnOnce(
@@ -525,7 +610,16 @@ impl NariRecording {
                         // until it is configured, so the first words are never lost.
                         let connect = tokio::spawn({
                             let c = c.clone();
-                            async move { NariSession::connect_to(&url, &key, c).await }
+                            async move {
+                                Ok::<_, VoiceError>(match backend {
+                                    super::StreamingBackend::Nari => Session::Nari(
+                                        NariSession::connect_to(&url, &key, c).await?,
+                                    ),
+                                    super::StreamingBackend::Soniox => Session::Soniox(
+                                        super::SonioxSession::connect_to(&url, &key, c).await?,
+                                    ),
+                                })
+                            }
                         });
                         let setup_cancel = Arc::new(AtomicBool::new(false));
                         let factory_cancel = setup_cancel.clone();
@@ -549,12 +643,15 @@ impl NariRecording {
                         }
                         // Dropping `mic` on failure cancels the unfinished capture.
                         let session = connect.await.map_err(|_| VoiceError::CaptureFailed)??;
-                        let stream = session.run(pcm, |event| {
+                        let sink = |event: NariEvent| {
                             if !matches!(event, NariEvent::Finished(_)) {
                                 Events::lock(&e).push(event);
                             }
-                        });
-                        let result = stream.await;
+                        };
+                        let result = match session {
+                            Session::Nari(s) => s.run(pcm, sink).await,
+                            Session::Soniox(s) => s.run_nari_events(pcm, sink).await,
+                        };
                         super::timing::mark("nari stream finished");
                         mic.stop();
                         // Native stream is owned by its capture thread, never the UI.

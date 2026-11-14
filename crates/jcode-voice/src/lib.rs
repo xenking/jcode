@@ -16,15 +16,26 @@ use jcode_base::{subscription_api, subscription_catalog};
 use serde::Deserialize;
 use std::{fmt, time::Duration};
 
+mod backend;
 #[cfg(feature = "desktop-config")]
 pub mod dictation;
 #[cfg(feature = "desktop-config")]
 pub mod global;
 mod nari;
+mod soniox;
+pub use backend::StreamingBackend;
+#[cfg(feature = "desktop-config")]
+pub use backend::configured_backend;
+#[cfg(feature = "desktop-config")]
+pub use jcode_base::config::DictationBackend;
 pub mod timing;
 pub use nari::{
     NARI_PCM_CHUNK_SAMPLES, NARI_USD_PER_AUDIO_HOUR, NariEvent, NariSession, correct_transcript,
     estimated_transcription_usd, nari_api_key, nari_pcm_channel, recognition_prompt,
+};
+pub use soniox::{
+    SONIOX_MODEL, SONIOX_PCM_CHUNK_SAMPLES, SONIOX_URL, SonioxEvent, SonioxSession, soniox_api_key,
+    soniox_pcm_channel,
 };
 #[cfg(feature = "desktop-config")]
 mod command_capture;
@@ -63,6 +74,8 @@ pub enum VoiceError {
     MicrophoneUnavailable,
     CaptureFailed,
     Cancelled,
+    SonioxNotConfigured,
+    SonioxRejected,
 }
 impl fmt::Display for VoiceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -96,6 +109,12 @@ impl fmt::Display for VoiceError {
             }
             Self::CaptureFailed => f.write_str("Microphone recording failed"),
             Self::Cancelled => f.write_str("Microphone recording was cancelled"),
+            Self::SonioxNotConfigured => f.write_str(
+                "Configure a valid Soniox API key (SONIOX_API_KEY or ~/.config/jcode/soniox.env)",
+            ),
+            Self::SonioxRejected => f.write_str(
+                "Soniox rejected the voice session. Check your key, balance, and settings",
+            ),
         }
     }
 }
