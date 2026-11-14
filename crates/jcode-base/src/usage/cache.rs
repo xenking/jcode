@@ -627,7 +627,9 @@ pub(super) fn provider_report_from_usage_data(
     display_name: String,
     data: &UsageData,
 ) -> ProviderUsage {
-    if let Some(error) = &data.last_error {
+    if let Some(error) = &data.last_error
+        && !(error.contains("429") && data.last_success_at.is_some())
+    {
         return ProviderUsage {
             provider_name: display_name,
             error: Some(error.clone()),
@@ -661,7 +663,20 @@ pub(super) fn provider_report_from_usage_data(
         });
     }
 
+    if data.last_error.is_some() {
+        limits.retain(|limit| !super::display::reset_timestamp_passed(limit.resets_at.as_deref()));
+    }
+
     let mut extra_info = Vec::new();
+    if data.last_error.is_some()
+        && let Some(last_success) = data.last_success_at
+    {
+        let minutes = last_success.elapsed().as_secs() / 60;
+        extra_info.push((
+            "Last updated".to_string(),
+            format!("{minutes}m ago (cached; usage API rate limited)"),
+        ));
+    }
     extra_info.push((
         "Extra usage (long context)".to_string(),
         if data.extra_usage_enabled {
@@ -691,6 +706,10 @@ pub(super) fn usage_data_from_provider_report(report: &ProviderUsage) -> UsageDa
             ..Default::default()
         };
     }
+
+    let stale = report.extra_info.iter().any(|(key, value)| {
+        key == "Last updated" && value.contains("cached; usage API rate limited")
+    });
 
     let five_hour = report
         .limits
@@ -742,9 +761,10 @@ pub(super) fn usage_data_from_provider_report(report: &ProviderUsage) -> UsageDa
         fetched_at: Some(Instant::now()),
         // Reports do not carry the original probe timestamp or retry deadline.
         // Only a successful report with actual limits proves last-good quota.
-        last_success_at: (report.error.is_none() && !report.limits.is_empty()).then(Instant::now),
+        last_success_at: (!stale && report.error.is_none() && !report.limits.is_empty())
+            .then(Instant::now),
         refresh_after: None,
-        last_error: report.error.clone(),
+        last_error: stale.then(|| "Usage API error (429): cached report".to_string()),
     }
 }
 

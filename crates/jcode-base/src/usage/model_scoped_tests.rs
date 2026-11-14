@@ -1,6 +1,46 @@
 use super::*;
 
 #[test]
+fn anthropic_report_shows_last_good_limits_with_age_after_throttling() {
+    let usage = UsageData {
+        five_hour: 0.37,
+        seven_day: 0.62,
+        last_success_at: Some(Instant::now() - Duration::from_secs(180)),
+        last_error: Some("Usage API error (429)".into()),
+        ..Default::default()
+    };
+    let report = provider_report_from_usage_data("Anthropic".into(), &usage);
+    assert_eq!(report.limits.len(), 2);
+    assert_eq!(report.limits[0].usage_percent, 37.0);
+    assert!(report.error.is_none());
+    assert!(
+        report
+            .extra_info
+            .iter()
+            .any(|(name, value)| name == "Last updated" && value.contains("3m"))
+    );
+    let restored = usage_data_from_provider_report(&report);
+    assert!(restored.last_error.is_some());
+    assert!(!restored.model_scoped_exhausted("claude-fable-5"));
+}
+
+#[test]
+fn throttled_anthropic_report_omits_windows_past_reset() {
+    let usage = UsageData {
+        five_hour: 0.37,
+        five_hour_resets_at: Some("2020-01-01T00:00:00Z".into()),
+        seven_day: 0.62,
+        seven_day_resets_at: Some("2999-01-01T00:00:00Z".into()),
+        last_success_at: Some(Instant::now()),
+        last_error: Some("Usage API error (429)".into()),
+        ..Default::default()
+    };
+    let report = provider_report_from_usage_data("Anthropic".into(), &usage);
+    assert_eq!(report.limits.len(), 1);
+    assert_eq!(report.limits[0].name, "7-day window");
+}
+
+#[test]
 fn anthropic_model_scoped_fable_limit_survives_report_cache_roundtrip() {
     let usage = UsageData {
         five_hour: 0.1,

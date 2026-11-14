@@ -752,7 +752,7 @@ async fn sync_active_anthropic_usage_from_reports(results: &[ProviderUsage]) {
                 store_anthropic_usage(cache_key, usage_data.clone());
             }
             *cached = usage_data;
-            if report.error.is_none() {
+            if report.error.is_none() && cached.last_error.is_none() {
                 crate::provider::clear_provider_unavailable_for_account("claude");
             }
         }
