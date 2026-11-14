@@ -1,0 +1,5 @@
+
+Shake compaction (crates/jcode-compaction-core/src/shake.rs) is adapted from
+oxicode (https://github.com/project-oxi/oxicode), Copyright (c) oxicode
+contributors, MIT License, itself ported from oh-my-pi
+(https://github.com/can1357/oh-my-pi), Copyright (c) Can Bölük, MIT License.
