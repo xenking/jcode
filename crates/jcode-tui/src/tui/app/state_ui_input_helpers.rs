@@ -840,7 +840,7 @@ impl App {
                 input,
                 efforts
                     .iter()
-                    .map(|e| (format!("/effort {}", e), effort_display_label(e)))
+                    .map(|e| (format!("/effort {}", e), effort_menu_label(e)))
                     .collect(),
             );
         }

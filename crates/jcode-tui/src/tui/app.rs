@@ -31,8 +31,10 @@ use crossterm::event::{
 };
 use debug::DebugTrace;
 use futures::StreamExt;
-pub(crate) use helpers::effort_display_label;
 use helpers::*;
+pub(crate) use helpers::{
+    effort_compact, effort_display_label, effort_glyph_label, effort_menu_label,
+};
 use jcode_tui_messages::DisplayMessage;
 use ratatui::DefaultTerminal;
 use std::cell::RefCell;

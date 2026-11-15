@@ -166,6 +166,14 @@ pub fn blend_color(from: Color, to: Color, t: f32) -> Color {
     )
 }
 
+/// Ink for a reasoning-effort glyph: `t` runs from quiet chrome ink (0) to
+/// the brand accent (1), so a stronger level reads brighter at a glance.
+/// Callers derive `t` from the level's position on the shared ladder; swarm
+/// modes pass 0 and keep the quiet tint.
+pub fn effort_ramp(t: f32) -> Color {
+    blend_color(dim_color(), accent_color(), t.clamp(0.0, 1.0))
+}
+
 pub fn rainbow_prompt_color(distance: usize) -> Color {
     // Rainbow colors (hue progression): red -> orange -> yellow -> green -> cyan -> blue -> violet
     const RAINBOW: [(u8, u8, u8); 7] = [

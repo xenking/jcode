@@ -438,7 +438,9 @@ fn overscroll_line_orders_dir_git_context_then_model_on_the_right() {
     let context = row
         .find("29%")
         .expect("context percentage shown when roomy");
-    let model = row.find("GPT-5.6 Sol high").expect("model shown");
+    let model = row
+        .find("GPT-5.6 Sol ◒")
+        .expect("model shown with effort glyph");
     assert!(
         dir < branch && branch < git && git < context && context < model,
         "{row}"

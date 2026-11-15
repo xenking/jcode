@@ -42,10 +42,11 @@ pub(super) fn opens_effort_step(entry: &PickerEntry) -> bool {
         .is_some_and(|route| !route_efforts(&entry.name, &route.api_method).is_empty())
 }
 
-/// The row title for a level, e.g. `Claude Opus 5.5 (high)`.
+/// The row title for a level, e.g. `Claude Opus 5.5 (◒ high)`.
 ///
 /// The parent name is reused verbatim so the filtered text of step two still
-/// matches the model the user just chose.
+/// matches the model the user just chose; the ramp glyph leads the level so
+/// the step reads as the same ladder everywhere else in the UI.
 pub(super) fn effort_entry_name(model: &str, effort: &str) -> String {
     let label = match effort {
         "xhigh" => "xhigh",
@@ -56,7 +57,10 @@ pub(super) fn effort_entry_name(model: &str, effort: &str) -> String {
         "none" => "none",
         other => other,
     };
-    format!("{model} ({label})")
+    match jcode_provider_core::reasoning_effort_glyph(effort) {
+        Some(glyph) => format!("{model} ({glyph} {label})"),
+        None => format!("{model} ({label})"),
+    }
 }
 
 /// Step-two rows for one model row: the same route, one row per level.
@@ -203,17 +207,17 @@ mod tests {
     }
 
     #[test]
-    fn level_rows_read_as_name_and_level() {
+    fn level_rows_read_as_glyph_and_level() {
         assert_eq!(
             effort_entry_name("gpt-5.6-sol", "medium"),
-            "gpt-5.6-sol (med)"
+            "gpt-5.6-sol (◑ med)"
         );
         assert_eq!(
             effort_entry_name("gpt-5.6-sol", "xhigh"),
-            "gpt-5.6-sol (xhigh)"
+            "gpt-5.6-sol (◕ xhigh)"
         );
         assert_eq!(
-            model_name_without_effort("gpt-5.6-sol (med)"),
+            model_name_without_effort("gpt-5.6-sol (◑ med)"),
             "gpt-5.6-sol"
         );
         assert_eq!(model_name_without_effort("gpt-5.6-sol"), "gpt-5.6-sol");

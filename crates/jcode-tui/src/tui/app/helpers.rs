@@ -749,6 +749,40 @@ pub(super) fn inferred_reasoning_efforts(
     jcode_provider_core::inferred_reasoning_efforts(provider_name, model_name)
 }
 
+/// Menu and notice label for an effort rung: the ramp glyph (the ladder every
+/// surface draws) plus the level name, because a TUI row and a one-line notice
+/// have no hover to carry the name. Static, so autocomplete can share it.
+pub(crate) fn effort_menu_label(effort: &'static str) -> &'static str {
+    match effort {
+        "none" => "⦸ None",
+        "minimal" => "○ Minimal",
+        "low" => "◔ Low",
+        "medium" => "◑ Medium",
+        "high" => "◒ High",
+        "xhigh" => "◕ xHigh",
+        "max" => "◉ Max",
+        other => effort_display_label(other),
+    }
+}
+
+/// [`effort_menu_label`] for copy whose level is known only at runtime (the
+/// provider's current effort), where a static table cannot reach.
+pub(crate) fn effort_glyph_label(effort: &str) -> String {
+    match jcode_provider_core::reasoning_effort_glyph(effort) {
+        Some(glyph) => format!("{glyph} {}", effort_display_label(effort)),
+        None => effort_display_label(effort).to_string(),
+    }
+}
+
+/// Glyph alone, for compact chrome (status line, cards, badges). Modes keep
+/// their word because a circle would claim a rung they do not have.
+pub(crate) fn effort_compact(effort: &str) -> String {
+    match jcode_provider_core::reasoning_effort_glyph(effort) {
+        Some(glyph) => glyph.to_string(),
+        None => effort_display_label(effort).to_string(),
+    }
+}
+
 pub(super) fn effort_bar(index: usize, total: usize) -> String {
     let mut bar = String::new();
     for i in 0..total {

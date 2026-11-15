@@ -7,8 +7,8 @@ use super::selection_highlight::highlight_line_selection;
 use super::tools_ui::{get_tool_activity_detail, summarize_batch_running_tools_compact};
 use super::visual_debug::{self, FrameCaptureBuilder};
 use super::{
-    ProcessingStatus, TuiState, accent_color, ai_color, asap_color, dim_color, pending_color,
-    queued_color, rainbow_prompt_color, user_color,
+    ProcessingStatus, TuiState, accent_color, ai_color, asap_color, dim_color, effort_ramp,
+    pending_color, queued_color, rainbow_prompt_color, user_color,
 };
 use crate::message::ConnectionPhase;
 use crate::tui::app;
@@ -1549,7 +1549,8 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
         effort: data
             .reasoning_effort
             .as_deref()
-            .and_then(overscroll_short_reasoning)
+            .map(str::trim)
+            .filter(|effort| !effort.is_empty())
             .map(str::to_string),
     };
 
@@ -1610,7 +1611,8 @@ pub(crate) fn preview_overscroll_line_for_host(
         effort: data
             .reasoning_effort
             .as_deref()
-            .and_then(overscroll_short_reasoning)
+            .map(str::trim)
+            .filter(|effort| !effort.is_empty())
             .map(str::to_string),
     };
     let label = if data.historical_context {
@@ -1812,7 +1814,11 @@ fn overscroll_fact_spans(
         if levels.model == 0
             && let Some(effort) = &facts.effort
         {
-            group.push(Span::styled(format!(" {effort}"), muted));
+            let text = overscroll_short_reasoning(effort).unwrap_or_default();
+            group.push(Span::styled(
+                format!(" {text}"),
+                Style::default().fg(effort_ink(effort)),
+            ));
         }
         out.push(group);
     }
@@ -2059,21 +2065,32 @@ fn overscroll_auth_label(
     }
 }
 
+/// One glyph for the pinned status line's reasoning level, the ladder every
+/// other surface draws. Swarm is an orchestration mode rather than a rung, so
+/// it keeps its word.
 fn overscroll_short_reasoning(effort: &str) -> Option<&str> {
     let effort = effort.trim();
     if effort.is_empty() {
         return None;
     }
-    Some(match effort {
-        "swarm" => crate::tui::app::effort_display_label(effort),
-        "max" => "max",
-        "xhigh" => "xhigh",
-        "high" => "high",
-        "medium" => "medium",
-        "low" => "low",
-        "none" => "none",
-        other => other,
-    })
+    if crate::prompt::is_swarm_mode_effort(effort) {
+        return Some(crate::tui::app::effort_display_label(effort));
+    }
+    match jcode_provider_core::reasoning_effort_glyph(effort) {
+        Some(glyph) => Some(glyph),
+        // An unknown value still beats silence: show what the provider said.
+        None => Some(effort),
+    }
+}
+
+/// Glyph ink: the level's position on the shared ladder blends quiet chrome
+/// ink toward the accent, so a stronger level reads brighter.
+fn effort_ink(effort: &str) -> Color {
+    let top = jcode_provider_core::REASONING_EFFORT_MAX_RANK.max(1) as f32;
+    let t = jcode_provider_core::reasoning_effort_rank(effort)
+        .map(|rank| rank as f32 / top)
+        .unwrap_or(0.0);
+    effort_ramp(t)
 }
 
 fn overscroll_context_usage(

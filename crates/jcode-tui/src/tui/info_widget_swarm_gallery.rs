@@ -8,6 +8,7 @@
 //! [`GalleryMember`] (label + body lines).
 
 use crate::protocol::SwarmMemberStatus;
+use crate::tui::app::effort_compact;
 use jcode_tui_core::keybind::alt_chord_lower;
 use jcode_tui_render::swarm_gallery::{
     GalleryMember, SwarmStripHint, display_order, humanize_age, is_active_status, render_gallery,
@@ -115,7 +116,7 @@ pub(crate) fn members_to_gallery(members: &[SwarmMemberStatus]) -> Vec<GalleryMe
             model: member.runtime.model.clone(),
             provider: member.runtime.provider.clone(),
             auth_method: member.runtime.auth_method.clone(),
-            effort: member.runtime.effort.clone(),
+            effort: member.runtime.effort.as_deref().map(effort_compact),
             elapsed_secs: member.runtime.elapsed_secs,
             context_tokens: member.runtime.context_tokens,
             context_limit: member.runtime.context_limit,

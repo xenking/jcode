@@ -1137,7 +1137,7 @@ impl App {
 
         let next_effort = efforts[next_index];
         if Some(next_effort.to_string()) == current {
-            let label = effort_display_label(next_effort);
+            let label = effort_menu_label(next_effort);
             self.set_status_notice(format!(
                 "Effort: {} (already at {})",
                 label,
@@ -1148,7 +1148,7 @@ impl App {
 
         match self.provider.set_reasoning_effort(next_effort) {
             Ok(()) => {
-                let label = effort_display_label(next_effort);
+                let label = effort_menu_label(next_effort);
                 let bar = effort_bar(next_index, len);
                 self.set_status_notice(format!("Effort: {} {}", label, bar));
             }

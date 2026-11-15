@@ -483,8 +483,19 @@ fn swarm_effort_model_status_uses_shared_label() {
         overscroll_short_reasoning("swarm"),
         Some(crate::tui::app::effort_display_label("swarm"))
     );
-    assert_eq!(overscroll_short_reasoning(" high "), Some("high"));
+    // Rungs are glyphs on the pinned line; the name lives in /effort and /model.
+    assert_eq!(overscroll_short_reasoning(" high "), Some("◒"));
+    assert_eq!(overscroll_short_reasoning("max"), Some("◉"));
+    assert_eq!(overscroll_short_reasoning("future"), Some("future"));
     assert_eq!(overscroll_short_reasoning(" "), None);
+}
+
+#[test]
+fn effort_glyph_ink_ramps_with_the_ladder() {
+    assert_eq!(effort_ink("none"), effort_ramp(0.0));
+    assert_eq!(effort_ink("max"), effort_ramp(1.0));
+    assert_eq!(effort_ink("swarm"), effort_ramp(0.0));
+    assert_ne!(effort_ink("high"), effort_ink("low"));
 }
 
 #[test]

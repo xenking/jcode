@@ -95,15 +95,15 @@ pub(in crate::tui::app) fn handle_model_command(app: &mut App, trimmed: &str) ->
         } else {
             let current_label = current
                 .as_deref()
-                .map(effort_display_label)
-                .unwrap_or("default");
+                .map(effort_glyph_label)
+                .unwrap_or_else(|| "default".to_string());
             let list: Vec<String> = efforts
                 .iter()
                 .map(|e| {
                     if Some(e.to_string()) == current {
-                        format!("{} <- current", effort_display_label(e))
+                        format!("{} <- current", effort_menu_label(e))
                     } else {
-                        effort_display_label(e).to_string()
+                        effort_menu_label(e).to_string()
                     }
                 })
                 .collect();
@@ -125,8 +125,8 @@ pub(in crate::tui::app) fn handle_model_command(app: &mut App, trimmed: &str) ->
                 let new_effort = app.provider.reasoning_effort();
                 let label = new_effort
                     .as_deref()
-                    .map(effort_display_label)
-                    .unwrap_or("default");
+                    .map(effort_glyph_label)
+                    .unwrap_or_else(|| "default".to_string());
                 app.push_display_message(DisplayMessage::system(format!(
                     "✓ Reasoning effort → {}",
                     label
