@@ -31,7 +31,7 @@ impl Agent {
         // a cancel routed through *any* control handle for this session (even a
         // stale one built for a different agent object, e.g. after a
         // reattach/reload) aborts this in-flight stream immediately (issue #428).
-        let _turn_cancel_guard = crate::turn_cancel_registry::register_active_turn(
+        let turn_cancel_guard = crate::turn_cancel_registry::register_active_turn(
             &self.session.id,
             self.graceful_shutdown.clone(),
         );
@@ -641,11 +641,17 @@ impl Agent {
                             logging::info(
                                 "Graceful shutdown during streaming - checkpointing partial response",
                             );
+                            let marker = if turn_cancel_guard.interruption_reason()
+                                == Some(crate::turn_cancel_registry::TurnInterruptionReason::Reload)
+                            {
+                                "\n\n[generation interrupted - server reloading]"
+                            } else {
+                                "\n\n[generation cancelled by the user]"
+                            };
                             let _ = event_tx.send(ServerEvent::TextDelta {
-                                text: "\n\n[generation interrupted - server reloading]".to_string(),
+                                text: marker.to_string(),
                             });
-                            text_content
-                                .push_str("\n\n[generation interrupted - server reloading]");
+                            text_content.push_str(marker);
                             break;
                         }
                     }
@@ -1448,7 +1454,14 @@ impl Agent {
                         Role::User,
                         vec![ContentBlock::ToolResult {
                             tool_use_id: tc.id.clone(),
-                            content: "[Skipped - server reloading]".to_string(),
+                            content: if turn_cancel_guard.interruption_reason()
+                                == Some(crate::turn_cancel_registry::TurnInterruptionReason::Reload)
+                            {
+                                "[Skipped - server reloading]"
+                            } else {
+                                "[Skipped - cancelled by the user]"
+                            }
+                            .to_string(),
                             is_error: Some(true),
                         }],
                     );
@@ -1643,7 +1656,7 @@ impl Agent {
                     }
                     automatic = wait_for_tool_handoff(&bg_signal, &shutdown_signal, auto_background_allowed(&tc.name, &tc.input), foreground_budget) => {
                         automatic_background = automatic;
-                        if self.is_graceful_shutdown() && allow_reload_handoff {
+                        if turn_cancel_guard.interruption_reason() == Some(crate::turn_cancel_registry::TurnInterruptionReason::Reload) && allow_reload_handoff {
                             tool_result = match tokio::time::timeout(
                                 Duration::from_millis(750),
                                 &mut tool_handle,
@@ -1736,10 +1749,16 @@ impl Agent {
                         }
                     }
                 } else if self.is_graceful_shutdown() {
-                    // Server reload - abort tool and save interrupted result
+                    let is_reload = turn_cancel_guard.interruption_reason()
+                        == Some(crate::turn_cancel_registry::TurnInterruptionReason::Reload);
                     logging::info(&format!(
-                        "Tool '{}' interrupted by server reload after {:.1}s",
+                        "Tool '{}' interrupted by {} after {:.1}s",
                         tc.name,
+                        if is_reload {
+                            "server reload"
+                        } else {
+                            "user cancellation"
+                        },
                         tool_elapsed.as_secs_f64()
                     ));
                     tool_handle.abort();
@@ -1747,15 +1766,32 @@ impl Agent {
                     // For selfdev reload and wait-like tools, the interruption is expected:
                     // selfdev initiated the restart, while wait-like tools should be resumed
                     // after reload rather than treated as failed work.
-                    let (interrupted_msg, is_error) =
-                        reload_interrupted_tool_result(tc, tool_elapsed.as_secs_f64());
+                    let (interrupted_msg, is_error) = if is_reload {
+                        reload_interrupted_tool_result(tc, tool_elapsed.as_secs_f64())
+                    } else {
+                        (
+                            format!(
+                                "[Tool '{}' cancelled by the user after {:.1}s]",
+                                tc.name,
+                                tool_elapsed.as_secs_f64()
+                            ),
+                            true,
+                        )
+                    };
 
                     let _ = event_tx.send(ServerEvent::ToolDone {
                         id: tc.id.clone(),
                         name: tc.name.clone(),
                         output: interrupted_msg.clone(),
                         error: if is_error {
-                            Some("interrupted by reload".to_string())
+                            Some(
+                                if is_reload {
+                                    "interrupted by reload"
+                                } else {
+                                    "cancelled by the user"
+                                }
+                                .to_string(),
+                            )
                         } else {
                             None
                         },
@@ -1778,7 +1814,12 @@ impl Agent {
                             Role::User,
                             vec![ContentBlock::ToolResult {
                                 tool_use_id: remaining_tc.id.clone(),
-                                content: "[Skipped - server reloading]".to_string(),
+                                content: if is_reload {
+                                    "[Skipped - server reloading]"
+                                } else {
+                                    "[Skipped - cancelled by the user]"
+                                }
+                                .to_string(),
                                 is_error: Some(true),
                             }],
                         );

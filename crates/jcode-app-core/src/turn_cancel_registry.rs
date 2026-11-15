@@ -25,12 +25,12 @@
 
 use jcode_agent_runtime::InterruptSignal;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 /// All interrupt signals registered for one session's in-flight turns.
-type SessionTurnSignals = Vec<(u64, InterruptSignal)>;
+type SessionTurnSignals = Vec<(u64, InterruptSignal, Arc<AtomicU8>)>;
 static ACTIVE_TURNS: LazyLock<Mutex<HashMap<String, SessionTurnSignals>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -46,16 +46,45 @@ pub struct ActiveTurnGuard {
     session_id: String,
     token: u64,
     signal: InterruptSignal,
+    reason: Arc<AtomicU8>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TurnInterruptionReason {
+    Cancel = 1,
+    Reload = 2,
+}
+
+impl ActiveTurnGuard {
+    pub fn interruption_reason(&self) -> Option<TurnInterruptionReason> {
+        match self.reason.load(Ordering::Acquire) {
+            1 => Some(TurnInterruptionReason::Cancel),
+            2 => Some(TurnInterruptionReason::Reload),
+            _ => None,
+        }
+    }
+}
+
+/// Record the first interruption before firing the shared wake-up signal.
+pub fn mark_interruption(session_id: &str, reason: TurnInterruptionReason) {
+    if let Ok(map) = ACTIVE_TURNS.lock()
+        && let Some(entries) = map.get(session_id)
+    {
+        for (_, _, stored) in entries {
+            let _ = stored.compare_exchange(0, reason as u8, Ordering::Release, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Register `signal` as the cancel signal for a turn running in `session_id`.
 /// Call at turn start; keep the guard alive for the duration of the turn.
 pub fn register_active_turn(session_id: &str, signal: InterruptSignal) -> ActiveTurnGuard {
     let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
+    let reason = Arc::new(AtomicU8::new(0));
     let active = match ACTIVE_TURNS.lock() {
         Ok(mut map) => {
             let entry = map.entry(session_id.to_string()).or_default();
-            entry.push((token, signal.clone()));
+            entry.push((token, signal.clone(), Arc::clone(&reason)));
             entry.len()
         }
         Err(_) => 0,
@@ -68,6 +97,7 @@ pub fn register_active_turn(session_id: &str, signal: InterruptSignal) -> Active
         session_id: session_id.to_string(),
         token,
         signal,
+        reason,
     }
 }
 
@@ -77,8 +107,12 @@ pub fn active_turn_signals(session_id: &str) -> Vec<InterruptSignal> {
         .lock()
         .ok()
         .and_then(|map| {
-            map.get(session_id)
-                .map(|entries| entries.iter().map(|(_, signal)| signal.clone()).collect())
+            map.get(session_id).map(|entries| {
+                entries
+                    .iter()
+                    .map(|(_, signal, _)| signal.clone())
+                    .collect()
+            })
         })
         .unwrap_or_default()
 }
@@ -145,7 +179,7 @@ impl Drop for ActiveTurnGuard {
                 // a later cancel.
                 let mut remaining = 0usize;
                 map.retain(|_, entries| {
-                    entries.retain(|(token, _)| *token != self.token);
+                    entries.retain(|(token, _, _)| *token != self.token);
                     !entries.is_empty()
                 });
                 if let Some(entries) = map.get(&self.session_id) {
@@ -186,6 +220,21 @@ pub fn has_active_turn(session_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interruption_reason_is_per_turn_and_first_signal_wins() {
+        let id = "turn_reason_first_wins";
+        let first = register_active_turn(id, InterruptSignal::new());
+        mark_interruption(id, TurnInterruptionReason::Cancel);
+        mark_interruption(id, TurnInterruptionReason::Reload);
+        assert!(first.interruption_reason() == Some(TurnInterruptionReason::Cancel));
+        drop(first);
+        let second = register_active_turn(id, InterruptSignal::new());
+        assert!(second.interruption_reason().is_none());
+        mark_interruption(id, TurnInterruptionReason::Reload);
+        mark_interruption(id, TurnInterruptionReason::Cancel);
+        assert!(second.interruption_reason() == Some(TurnInterruptionReason::Reload));
+    }
 
     #[test]
     fn active_session_snapshot_tracks_unique_ids_rename_and_drop() {

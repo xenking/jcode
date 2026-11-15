@@ -925,6 +925,10 @@ impl SessionControlHandle {
             self.session_id
         ));
         crate::mobile_push::mark_cancelled(&self.session_id);
+        crate::turn_cancel_registry::mark_interruption(
+            &self.session_id,
+            crate::turn_cancel_registry::TurnInterruptionReason::Cancel,
+        );
         self.stop_current_turn_signal.fire();
         let active_turn_signals =
             crate::turn_cancel_registry::active_turn_signals(&self.session_id);

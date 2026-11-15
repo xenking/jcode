@@ -492,6 +492,14 @@ async fn persist_reload_recovery_intents(
     }
 }
 
+pub(super) fn signal_session_for_reload(session_id: &str, signal: &InterruptSignal) {
+    crate::turn_cancel_registry::mark_interruption(
+        session_id,
+        crate::turn_cancel_registry::TurnInterruptionReason::Reload,
+    );
+    signal.fire();
+}
+
 pub(super) async fn graceful_shutdown_sessions(
     reload_id: &str,
     _sessions: &SessionAgents,
@@ -575,7 +583,7 @@ async fn graceful_shutdown_sessions_with_timeout(
                 ));
                 continue;
             };
-            signal.fire();
+            signal_session_for_reload(session_id, signal);
             super::reload_trace::record_value(
                 reload_id,
                 "shutdown_signal_sent",

@@ -119,6 +119,10 @@ pub(super) async fn cancel_spawned_descendant_turns(
         if signals.is_empty() {
             continue;
         }
+        crate::turn_cancel_registry::mark_interruption(
+            &descendant,
+            crate::turn_cancel_registry::TurnInterruptionReason::Cancel,
+        );
         for signal in &signals {
             signal.fire();
         }

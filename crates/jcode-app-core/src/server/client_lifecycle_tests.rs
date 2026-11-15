@@ -134,6 +134,139 @@ impl Drop for IsolatedRuntimeDir {
     }
 }
 
+#[derive(Clone)]
+struct AskCancelProvider;
+
+#[async_trait]
+impl Provider for AskCancelProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> anyhow::Result<EventStream> {
+        Ok(Box::pin(stream::iter(vec![
+            Ok(StreamEvent::ToolUseStart {
+                id: "ask-1".into(),
+                name: "ask".into(),
+            }),
+            Ok(StreamEvent::ToolInputDelta(
+                r#"{"questions":[{"question":"Which?","options":[{"label":"A"},{"label":"B"}]}]}"#
+                    .into(),
+            )),
+            Ok(StreamEvent::ToolUseEnd),
+            Ok(StreamEvent::MessageEnd {
+                stop_reason: Some("tool_use".into()),
+            }),
+        ])))
+    }
+    fn name(&self) -> &str {
+        "ask-cancel-test"
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[test]
+fn detached_cancel_and_reload_during_ask_have_distinct_labels() -> anyhow::Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        for is_reload in [false, true] {
+            let session_id = if is_reload {
+                "reload-ask-label"
+            } else {
+                "cancel-ask-label"
+            };
+            let provider: Arc<dyn Provider> = Arc::new(AskCancelProvider);
+            let registry = Registry::new(provider.clone()).await;
+            let session = crate::session::Session::create_with_id(session_id.into(), None, None);
+            let mut agent = Agent::new_with_session(provider, registry, session, None);
+            let shutdown = agent.graceful_shutdown_signal();
+            let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+            agent.set_stdin_request_tx(input_tx);
+            let agent = Arc::new(Mutex::new(agent));
+            let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+            let task = tokio::spawn(process_message_streaming_mpsc(
+                agent.clone(),
+                "ask",
+                Vec::new(),
+                None,
+                event_tx,
+            ));
+            let _pending_question = tokio::time::timeout(Duration::from_secs(5), input_rx.recv())
+                .await?
+                .expect("ask must be waiting");
+            let control = SessionControlHandle::cancel_only(
+                session_id,
+                Arc::new(std::sync::Mutex::new(Vec::new())),
+                InterruptSignal::new(),
+            );
+            if is_reload {
+                crate::server::reload::signal_session_for_reload(session_id, &shutdown);
+            } else {
+                let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel();
+                let members = Arc::new(RwLock::new(HashMap::new()));
+                let swarms = Arc::new(RwLock::new(HashMap::new()));
+                let history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+                let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+                let (swarm_tx, _) = broadcast::channel(8);
+                let mut processing = false;
+                let mut message_id = None;
+                let mut cancel_session = None;
+                let mut local_task = None;
+                cancel_processing_message(
+                    &mut ProcessingState {
+                        client_is_processing: &mut processing,
+                        message_id: &mut message_id,
+                        session_id: &mut cancel_session,
+                        task: &mut local_task,
+                    },
+                    &control,
+                    &client_event_tx,
+                    &SwarmStatusRefs {
+                        members: &members,
+                        swarms_by_id: &swarms,
+                        event_history: &history,
+                        event_counter: &counter,
+                        event_tx: &swarm_tx,
+                    },
+                    Some(1),
+                    None,
+                    None,
+                )
+                .await;
+            }
+            tokio::time::timeout(Duration::from_secs(5), task).await???;
+            let mut result = None;
+            while let Ok(event) = event_rx.try_recv() {
+                if let ServerEvent::ToolDone { name, output, .. } = event
+                    && name == "ask"
+                {
+                    result = Some(output);
+                }
+            }
+            let result = result.expect("ask result");
+            if is_reload {
+                assert!(result.contains("interrupted by server reload"), "{result}");
+                assert!(!result.contains("cancelled by the user"), "{result}");
+            } else {
+                assert!(result.contains("cancelled by the user"), "{result}");
+                assert!(!result.contains("server reload"), "{result}");
+            }
+            let guard = agent.lock().await;
+            assert_eq!(
+                crate::server::client_session::session_was_interrupted_by_reload(&guard),
+                is_reload
+            );
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
 /// Regression for issue #428: a turn actively streaming in this session but
 /// NOT owned by the cancelling connection (no local task handle: post-reload
 /// reattach, server-initiated wake turns, headless recovery) must abort
