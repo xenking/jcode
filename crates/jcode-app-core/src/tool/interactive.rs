@@ -133,6 +133,7 @@ type Route = (
 );
 static ROUTES: LazyLock<Mutex<HashMap<String, Vec<Route>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static ROUTES_CHANGED: LazyLock<tokio::sync::Notify> = LazyLock::new(tokio::sync::Notify::new);
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) struct Attachment {
@@ -170,6 +171,7 @@ pub(crate) fn attach(session_id: &str, sender: UnboundedSender<StdinInputRequest
         .entry(session_id.to_owned())
         .or_default()
         .push((id, route_tx, sender.clone()));
+    ROUTES_CHANGED.notify_waiters();
     if let Some(requests) = PENDING
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -197,6 +199,18 @@ pub(crate) fn sender(session_id: &str) -> Option<UnboundedSender<StdinInputReque
         .rev()
         .find(|(_, sender, target)| !sender.is_closed() && !target.is_closed())
         .map(|(_, sender, _)| sender.clone())
+}
+
+/// Wait without losing a concurrent attachment notification.
+pub(crate) async fn wait_for_sender(session_id: &str) -> UnboundedSender<StdinInputRequest> {
+    loop {
+        let mut notified = std::pin::pin!(ROUTES_CHANGED.notified());
+        notified.as_mut().enable();
+        if let Some(sender) = sender(session_id) {
+            return sender;
+        }
+        notified.await;
+    }
 }
 
 impl Drop for Attachment {
