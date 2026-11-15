@@ -2775,6 +2775,12 @@ pub(crate) fn inline_image_expand_target_from_screen(column: u16, row: u16) -> O
 /// than a trailing token.
 pub(crate) fn chat_message_index_from_screen(column: u16, row: u16) -> Option<usize> {
     let point = copy_point_from_screen(column, row)?;
+    chat_message_index_from_copy_point(point)
+}
+
+pub(crate) fn chat_message_index_from_copy_point(
+    point: crate::tui::CopySelectionPoint,
+) -> Option<usize> {
     if point.pane != crate::tui::CopySelectionPane::Chat {
         return None;
     }

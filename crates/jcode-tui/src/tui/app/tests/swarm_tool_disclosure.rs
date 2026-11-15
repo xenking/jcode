@@ -69,6 +69,48 @@ fn swarm_tool_real_frame_click_expands_message() {
 }
 
 #[test]
+fn swarm_tool_copy_mode_e_toggles_row() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.push_display_message(DisplayMessage::tool(
+        "sent",
+        crate::message::ToolCall {
+            id: "keyboard-dm".into(), name: "swarm".into(),
+            input: serde_json::json!({"action":"message","to_session":"session_fox_123_abc","message":"first line\nsecond line"}),
+            intent: None, thought_signature: None,
+        },
+    ));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 36)).unwrap();
+    let _ = render_and_snap(&app, &mut terminal);
+    let buf = terminal.backend().buffer();
+    let (column, row) = (0..buf.area().height)
+        .find_map(|row| {
+            let line = (0..buf.area().width)
+                .map(|col| buf[(col, row)].symbol())
+                .collect::<String>();
+            line.find('⊞').map(|byte| {
+                (
+                    unicode_width::UnicodeWidthStr::width(&line[..byte]) as u16,
+                    row,
+                )
+            })
+        })
+        .expect("swarm badge");
+    app.enter_copy_selection_mode();
+    app.copy_selection_cursor = crate::tui::ui::copy_point_from_screen(column, row);
+    assert!(
+        app.handle_key(KeyCode::Char('e'), KeyModifiers::empty())
+            .is_ok()
+    );
+    assert!(render_and_snap(&app, &mut terminal).contains("second line"));
+    assert!(
+        app.handle_key(KeyCode::Char('e'), KeyModifiers::empty())
+            .is_ok()
+    );
+    assert!(!render_and_snap(&app, &mut terminal).contains("second line"));
+}
+
+#[test]
 fn short_swarm_dm_is_expandable() {
     let mut app = create_test_app();
     app.push_display_message(DisplayMessage::swarm("DM from fox", "hello"));
