@@ -1,5 +1,43 @@
 use super::*;
 
+/// Suppress the machine's configured hooks for the duration of a timing test,
+/// holding the test env lock so a concurrent hook test cannot see them off.
+///
+/// These tests read the *paused* clock around a full tool call, and a tool call
+/// runs the hooks in `~/.jcode/config.toml`. Each hook's timeout is a timer on
+/// that same paused runtime, so an idle runtime auto-advances the clock by the
+/// timeout while the hook process actually runs. Measured on a machine with two
+/// `pre_tool` commands and a 10s `post_tool_feedback` timeout:
+/// `ask_user_waits_past_budget_and_returns_its_answer` took 28s of virtual time
+/// instead of the tool's 8s wait, and the same test passed with
+/// `JCODE_HOOKS_DISABLED=1`. Handoff timing is what these tests measure, so hooks
+/// are off while they measure it.
+struct HooksOff {
+    _env_lock: std::sync::MutexGuard<'static, ()>,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl HooksOff {
+    fn new() -> Self {
+        let env_lock = crate::storage::lock_test_env();
+        let previous = std::env::var_os("JCODE_HOOKS_DISABLED");
+        crate::env::set_var("JCODE_HOOKS_DISABLED", "1");
+        Self {
+            _env_lock: env_lock,
+            previous,
+        }
+    }
+}
+
+impl Drop for HooksOff {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => crate::env::set_var("JCODE_HOOKS_DISABLED", value),
+            None => crate::env::remove_var("JCODE_HOOKS_DISABLED"),
+        }
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn configured_streaming_budget_and_disabled_handoff() {
     for budget in [Duration::from_millis(25), Duration::from_secs(12)] {
@@ -28,8 +66,10 @@ async fn configured_streaming_budget_and_disabled_handoff() {
     }
 }
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test(start_paused = true)]
 async fn callback_paths_honor_custom_and_disabled_budgets() {
+    let _hooks_off = HooksOff::new();
     // SDK and nonstreaming calls share execute_with_background_budget.
     for (budget, action, backgrounded) in [
         (Duration::from_millis(1250), "status", true),
@@ -96,8 +136,10 @@ async fn callback_paths_honor_custom_and_disabled_budgets() {
 
 struct WaitProbe;
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test(start_paused = true)]
 async fn ask_user_waits_past_budget_and_returns_its_answer() {
+    let _hooks_off = HooksOff::new();
     let registry = Registry::empty();
     registry
         .register("ask_user".into(), Arc::new(WaitProbe))
@@ -184,8 +226,10 @@ impl crate::tool::Tool for WaitProbe {
     }
 }
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test(start_paused = true)]
 async fn nonstreaming_background_wait_returns_original_result_after_budget() {
+    let _hooks_off = HooksOff::new();
     let registry = Registry::empty();
     registry.register("bg".into(), Arc::new(WaitProbe)).await;
     let ctx = ToolContext {
