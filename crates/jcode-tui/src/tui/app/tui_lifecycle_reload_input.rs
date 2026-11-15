@@ -12,6 +12,7 @@ impl App {
         restored: RestoredReloadInput,
     ) {
         self.input = restored.input;
+        self.stashed_input = restored.stashed_input;
         self.cursor_pos = restored.cursor;
         self.pending_images = restored.pending_images;
         self.submit_input_on_startup = restored.submit_on_restore

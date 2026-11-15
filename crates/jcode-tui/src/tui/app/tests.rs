@@ -1,5 +1,43 @@
 #![cfg_attr(test, allow(clippy::clone_on_copy))]
 #[test]
+fn prompt_stash_survives_reload_handoff() {
+    let mut app = create_test_app();
+    let session_id = format!("stash-test-{}", std::process::id());
+    app.input = "saved [paste 1] [image 1]".into();
+    app.cursor_pos = 5;
+    app.pasted_contents.push("large paste".into());
+    app.pending_images.push(("image/png".into(), "data".into()));
+    app.toggle_input_stash();
+    app.save_input_for_reload(&session_id);
+    let restored = App::restore_input_for_reload(&session_id).expect("stash handoff");
+    let mut restarted = create_test_app();
+    restarted.apply_restored_reload_input(restored);
+    assert!(restarted.stashed_input.is_some());
+    assert!(crate::tui::TuiState::has_stashed_input(&restarted));
+    let other_id = format!("{session_id}-other");
+    assert!(App::restore_input_for_reload(&other_id).is_none());
+    restarted.input = "current draft".into();
+    restarted.cursor_pos = restarted.input.len();
+    restarted.save_input_for_reload(&session_id);
+    let restored_again = App::restore_input_for_reload(&session_id).unwrap();
+    let mut restarted = create_test_app();
+    restarted.apply_restored_reload_input(restored_again);
+    assert_eq!(restarted.input, "current draft");
+    restarted.toggle_input_stash();
+    assert_eq!(restarted.input, "saved [paste 1] [image 1]");
+    assert_eq!(restarted.cursor_pos, 5);
+    assert_eq!(restarted.pasted_contents, ["large paste"]);
+    assert_eq!(
+        restarted.stashed_input.as_ref().unwrap().text,
+        "current draft"
+    );
+    assert_eq!(
+        restarted.pending_images,
+        [("image/png".into(), "data".into())]
+    );
+}
+
+#[test]
 fn prompt_stash_returns_after_send() {
     let mut app = create_test_app();
     app.input = "saved draft".into();

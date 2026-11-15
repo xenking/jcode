@@ -895,6 +895,10 @@ impl App {
 
         self.extract_session_memories().await;
 
+        if self.stashed_input.is_some() {
+            self.save_input_for_reload(&self.session.id);
+        }
+
         Ok(RunResult {
             reload_session: self.reload_requested.take(),
             rebuild_session: self.rebuild_requested.take(),
@@ -1337,6 +1341,11 @@ impl App {
             }
         }
 
+        if self.stashed_input.is_some()
+            && let Some(session_id) = self.remote_session_id.as_deref()
+        {
+            self.save_input_for_reload(session_id);
+        }
         Ok(RunResult {
             reload_session: self.reload_requested.take(),
             rebuild_session: self.rebuild_requested.take(),

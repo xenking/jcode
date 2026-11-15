@@ -8,6 +8,7 @@ use count_format::*;
 
 pub(super) struct RestoredReloadInput {
     pub input: String,
+    pub stashed_input: Option<StashedInput>,
     pub cursor: usize,
     pub pending_images: Vec<(String, String)>,
     pub submit_on_restore: bool,
@@ -335,6 +336,7 @@ impl App {
                 && (!pending.content.trim().is_empty() || pending.system_reminder.is_some())
         });
         if self.input.is_empty()
+            && self.stashed_input.is_none()
             && self.pending_images.is_empty()
             && self.queued_messages.is_empty()
             && self.queued_commands.is_empty()
@@ -421,6 +423,7 @@ impl App {
                 .map(|(_, content)| content.clone())
                 .collect::<Vec<_>>();
             let data = serde_json::json!({
+                "stashed_input": self.stashed_input,
                 "cursor": resume_input.map(|input| input.len()).unwrap_or(self.cursor_pos),
                 "input": resume_input.unwrap_or(self.input.as_str()),
                 "pending_images": resume_images.unwrap_or(self.pending_images.as_slice()).iter().map(|(media_type, data)| serde_json::json!({
@@ -679,6 +682,9 @@ impl App {
             let cursor = cursor.min(input.len());
             return Some(RestoredReloadInput {
                 input,
+                stashed_input: value
+                    .get("stashed_input")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok()),
                 cursor,
                 pending_images,
                 submit_on_restore,
@@ -723,6 +729,7 @@ impl App {
         let cursor = cursor.min(input.len());
         Some(RestoredReloadInput {
             input: input.to_string(),
+            stashed_input: None,
             cursor,
             pending_images: Vec::new(),
             submit_on_restore: false,

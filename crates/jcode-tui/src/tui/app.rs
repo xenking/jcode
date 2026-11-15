@@ -1943,7 +1943,7 @@ pub struct App {
     persisted_prompt_history: Option<Vec<String>>,
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct StashedInput {
     text: String,
     cursor: usize,
