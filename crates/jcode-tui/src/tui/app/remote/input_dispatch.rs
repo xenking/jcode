@@ -520,6 +520,13 @@ pub(in crate::tui::app) fn apply_transcript_event(
         }
         TranscriptMode::Append => {
             let mut combined = app.input.clone();
+            // Separate words from the draft so "fix this" + "bug" is not one token.
+            if !combined.is_empty()
+                && !combined.ends_with(char::is_whitespace)
+                && !text.starts_with(char::is_whitespace)
+            {
+                combined.push(' ');
+            }
             combined.push_str(&text);
             set_transcript_input(app, combined);
             app.set_status_notice("Transcript appended");
@@ -536,6 +543,28 @@ pub(in crate::tui::app) fn apply_transcript_event(
     }
 
     app.follow_chat_bottom_for_typing();
+}
+
+/// `[dictation] mode`, read per finished utterance so a config edit applies to
+/// the next one without restarting.
+pub(in crate::tui::app) fn voice_transcript_mode() -> TranscriptMode {
+    crate::config::config().dictation.mode
+}
+
+/// Where a finished built-in voice transcript (Ctrl+Space, `/voice`, companion
+/// push-to-talk) goes. Voice is an input method, so the default is the composer:
+/// the words land at the caret, the user edits them and presses Enter. Only an
+/// explicit `[dictation] mode = "send"` submits.
+pub(in crate::tui::app) fn apply_voice_transcript(
+    app: &mut App,
+    transcript: &str,
+    mode: TranscriptMode,
+) {
+    if mode == TranscriptMode::Send {
+        submit_voice_transcript(app, transcript);
+        return;
+    }
+    apply_transcript_event(app, transcript.to_string(), mode);
 }
 
 /// Composer state set aside while a voice transcript is sent as its own

@@ -222,13 +222,22 @@ fn finish(mut capture: Capture) {
                     if !block_on(jcode_voice::global::session::permitted()) {
                         "Voice denied (session locked)".to_string()
                     } else {
+                        // Voice is an input method: the default inserts the words
+                        // into the composer for editing, and only an explicit
+                        // `mode = "send"` submits them.
+                        let mode = jcode_base::config::config().dictation.mode;
+                        let sent = mode == jcode_base::protocol::TranscriptMode::Send;
                         match jcode_voice::dictation::send_transcript_blocking(
                             text.trim(),
-                            jcode_base::protocol::TranscriptMode::Send,
+                            mode,
                             Some(capture.session.clone()),
                             SEND_TIMEOUT,
                         ) {
-                            Ok(()) => "Sent to Jcode".to_string(),
+                            Ok(()) => if sent {
+                                "Sent to Jcode".to_string()
+                            } else {
+                                "Inserted into Jcode".to_string()
+                            },
                             Err(error) => {
                                 eprintln!("jcode companion: voice delivery failed: {error:#}");
                                 "Couldn't reach Jcode".to_string()

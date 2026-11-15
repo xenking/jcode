@@ -1,12 +1,13 @@
 //! Built-in voice input for the terminal UI, matching Jcode Desktop.
 //!
 //! Press the voice key (Ctrl+Space by default) or run `/voice`, speak, then
-//! press again to send. On terminals that report key releases (Kitty keyboard
-//! protocol), holding the key and letting go also sends, like Desktop's
-//! hold-to-talk. Esc cancels. Audio streams to Nari while recording, the live
-//! transcript and a level meter show in the status line, and the final text is
-//! sent to the agent wrapped in `<transcription>` tags. Whatever is already
-//! typed in the composer stays there, untouched.
+//! press again to stop. On terminals that report key releases (Kitty keyboard
+//! protocol), holding the key and letting go also stops, like Desktop's
+//! hold-to-talk. Esc cancels. Audio streams to the configured provider
+//! (`[dictation] backend`: Nari or Soniox) while recording, the live partial
+//! transcript and a level meter show in the composer, and the final text is
+//! applied per `[dictation] mode`. The default `insert` puts it at the caret in
+//! the composer for editing and never sends; the typed draft stays where it is.
 use super::*;
 use crossterm::event::KeyEvent;
 use jcode_voice::{self as voice, NariEvent, NariRecording, VoiceError};
@@ -139,15 +140,9 @@ impl App {
     }
 
     fn start_voice_input(&mut self) {
-        let Some(key) = voice::nari_api_key() else {
-            self.push_display_message(DisplayMessage::error(
-                "Voice input needs a Nari API key. Set `NARI_API_KEY`, or add \
-                 `NARI_API_KEY=...` to `~/.config/jcode/nari.env`."
-                    .to_string(),
-            ));
-            self.set_status_notice("Voice input not configured");
-            return;
-        };
+        // `[dictation] backend` picks the provider: auto uses a Nari key when
+        // present, else a Soniox one. Missing keys fail as a provider-specific
+        // error from `start_configured`, so the message names the right key.
         let recorder = crate::config::config().dictation.recorder.clone();
         if !voice::NATIVE_CAPTURE
             && recorder.trim().is_empty()
@@ -165,9 +160,9 @@ impl App {
         }
         voice::timing::begin();
         let cancel = Arc::new(AtomicBool::new(false));
-        // Nonblocking: the microphone opens and the Nari handshake runs in the
-        // background while audio buffers, so the first words are kept.
-        let recording = match NariRecording::start_auto(cancel, &key, &recorder) {
+        // Nonblocking: the microphone opens and the provider handshake runs in
+        // the background while audio buffers, so the first words are kept.
+        let recording = match NariRecording::start_configured(cancel) {
             Ok(recording) => recording,
             Err(error) => {
                 self.report_voice_error(&error);
@@ -211,6 +206,10 @@ impl App {
         let hint = match error {
             VoiceError::MicrophoneUnavailable if !voice::NATIVE_CAPTURE => {
                 " Check that a microphone is connected, or set `[dictation] recorder`."
+            }
+            VoiceError::NariNotConfigured | VoiceError::SonioxNotConfigured => {
+                " Set `[dictation] backend` and its key in `~/.jcode/config.toml` \
+                 (soniox.env or nari.env in the jcode config dir)."
             }
             _ => "",
         };
@@ -268,7 +267,10 @@ impl App {
             VoicePoll::Idle => false,
             VoicePoll::Changed => true,
             VoicePoll::Transcript(text) => {
-                super::remote::submit_voice_transcript(self, &text);
+                // `[dictation] mode` decides: the default `insert` drops the
+                // words at the caret for editing, `send` submits immediately.
+                let mode = super::remote::voice_transcript_mode();
+                super::remote::apply_voice_transcript(self, &text, mode);
                 true
             }
         }

@@ -1049,7 +1049,9 @@ impl Default for CompanionConfig {
 pub struct DictationConfig {
     /// Shell command to run. Must print the transcript to stdout.
     pub command: String,
-    /// How to apply the resulting transcript.
+    /// How to apply the resulting transcript. `insert` (the default) puts it
+    /// at the composer caret and never sends: voice is an input method, so the
+    /// user edits and sends the words themselves. `send` is opt-in.
     pub mode: crate::protocol::TranscriptMode,
     /// Optional in-app hotkey to trigger dictation.
     pub key: String,
@@ -1094,7 +1096,7 @@ impl Default for DictationConfig {
     fn default() -> Self {
         Self {
             command: String::new(),
-            mode: crate::protocol::TranscriptMode::Send,
+            mode: crate::protocol::TranscriptMode::Insert,
             key: "off".to_string(),
             timeout_secs: 90,
             vocabulary: Vec::new(),

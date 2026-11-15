@@ -133,7 +133,9 @@ session_picker_enter = "current-terminal"
 command = ""
 
 # How to apply the transcript inside jcode: insert|append|replace|send
-mode = "send"
+# insert (the default) puts the words at the composer caret so you can edit
+# and send them yourself. send submits the transcript as a prompt immediately.
+mode = "insert"
 
 # Optional in-app hotkey to trigger dictation. Set to "off" to disable.
 # Example: "alt+;"

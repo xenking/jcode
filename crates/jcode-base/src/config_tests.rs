@@ -1783,6 +1783,23 @@ fn global_voice_devices_fall_back_to_desktop_selection() {
 #[path = "config_tests/default_provider.rs"]
 mod default_provider;
 
+/// Voice transcription lands in the composer for editing, never in the chat.
+/// `send` stays available, but only when a user asks for it explicitly.
+#[test]
+fn dictation_mode_defaults_to_insert_and_parses_every_mode() {
+    use crate::protocol::TranscriptMode;
+    assert_eq!(Config::default().dictation.mode, TranscriptMode::Insert);
+    for (name, want) in [
+        ("insert", TranscriptMode::Insert),
+        ("append", TranscriptMode::Append),
+        ("replace", TranscriptMode::Replace),
+        ("send", TranscriptMode::Send),
+    ] {
+        let parsed: Config = toml::from_str(&format!("[dictation]\nmode = \"{name}\"\n")).unwrap();
+        assert_eq!(parsed.dictation.mode, want);
+    }
+}
+
 #[test]
 fn dictation_backend_defaults_to_auto_and_parses() {
     use super::DictationBackend;

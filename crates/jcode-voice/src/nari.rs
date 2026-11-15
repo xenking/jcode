@@ -281,6 +281,51 @@ fn build_prompt(extra: &[String]) -> String {
     format!("{NAME_CONTEXT}{prompt}.")
 }
 
+/// Plain term list for providers that take recognition context as a term array
+/// (Soniox `context.terms`). Same built-in names plus `[dictation] vocabulary`
+/// as the Nari prompt, without the prose only Qwen3-ASR uses for biasing.
+/// Bounded, deduplicated case-insensitively, and never splitting a term.
+pub fn recognition_terms() -> Vec<String> {
+    #[cfg(feature = "desktop-config")]
+    {
+        collect_terms(&jcode_base::config::config().dictation.vocabulary)
+    }
+    #[cfg(not(feature = "desktop-config"))]
+    {
+        collect_terms(&[])
+    }
+}
+
+/// Terms only. `Jev` stays in this list: unlike the Nari prompt there is no
+/// surrounding sentence to carry it.
+fn collect_terms(extra: &[String]) -> Vec<String> {
+    /// Soniox accepts 8000 context tokens; keep the array far below that.
+    const MAX_TERMS: usize = 200;
+    let mut seen = HashSet::new();
+    let mut terms: Vec<String> = Vec::new();
+    let mut used = 0;
+    let candidates = BUILTIN_VOCABULARY
+        .iter()
+        .copied()
+        .chain(extra.iter().map(String::as_str));
+    for term in candidates {
+        if term.chars().any(char::is_control) {
+            continue;
+        }
+        let term = term.split_whitespace().collect::<Vec<_>>().join(" ");
+        let term = term.trim_matches(',').trim();
+        if term.is_empty() || !seen.insert(term.to_lowercase()) {
+            continue;
+        }
+        if terms.len() >= MAX_TERMS || used + term.chars().count() + 2 > MAX_PROMPT_CHARS {
+            break;
+        }
+        used += term.chars().count() + 2;
+        terms.push(term.to_string());
+    }
+    terms
+}
+
 pub fn nari_api_key() -> Option<String> {
     jcode_provider_env::load_api_key_from_env_or_config("NARI_API_KEY", "nari.env")
         .filter(|key| !key.trim().is_empty())
@@ -947,6 +992,36 @@ mod tests {
     fn lightweight_prompt_uses_builtin_vocabulary() {
         assert_eq!(recognition_prompt(), build_prompt(&[]));
         assert!(recognition_prompt().contains("Jcode"));
+    }
+
+    /// Soniox takes context as a term array, so the same names come out of
+    /// `collect_terms` without the Qwen3-ASR prose, still bounded and deduped.
+    #[test]
+    fn recognition_terms_are_a_plain_bounded_term_list() {
+        let terms = collect_terms(&[
+            "  Alice   Zhang ".into(),
+            "jcode".into(),
+            "".into(),
+            "bad\nterm".into(),
+            ",Kubernetes,".into(),
+        ]);
+        assert!(terms.iter().any(|term| term == "Jcode"), "{terms:?}");
+        assert!(terms.iter().any(|term| term == "Alice Zhang"), "{terms:?}");
+        assert!(terms.iter().any(|term| term == "Kubernetes"), "{terms:?}");
+        assert_eq!(
+            terms
+                .iter()
+                .filter(|term| term.eq_ignore_ascii_case("jcode"))
+                .count(),
+            1,
+            "user duplicates of built-in terms are dropped: {terms:?}"
+        );
+        assert!(!terms.iter().any(|term| term.contains('\n') || term.is_empty()));
+        assert!(!terms.iter().any(|term| term.starts_with(',') || term.ends_with(',')));
+        let long = collect_terms(&(0..500).map(|i| format!("term{i}")).collect::<Vec<_>>());
+        assert!(long.len() <= 200, "{} terms", long.len());
+        let size: usize = long.iter().map(|term| term.chars().count() + 2).sum();
+        assert!(size <= MAX_PROMPT_CHARS, "{size} chars");
     }
 
     #[test]

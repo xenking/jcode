@@ -29,6 +29,11 @@ use tokio_tungstenite::{
 pub const SONIOX_URL: &str = "wss://stt-rt.soniox.com/transcribe-websocket";
 /// Realtime model requested in the session configuration.
 pub const SONIOX_MODEL: &str = "stt-rt-v6";
+/// Languages to hint per session. Soniox treats these as hints, not a filter:
+/// other languages are still transcribed, and a short list recognises better
+/// than a long one. This fork is used in Russian and English, often mixed in
+/// one sentence, which the model handles without `language_hints_strict`.
+pub const SONIOX_LANGUAGE_HINTS: &[&str] = &["ru", "en"];
 /// Same chunk bound as Nari so capture code can feed either backend.
 pub const SONIOX_PCM_CHUNK_SAMPLES: usize = super::nari::NARI_PCM_CHUNK_SAMPLES;
 const SAMPLE_RATE: u32 = 16000;
@@ -237,12 +242,38 @@ impl SonioxSession {
 }
 
 fn session_config() -> Value {
-    json!({
+    session_config_with(
+        SONIOX_LANGUAGE_HINTS,
+        &super::nari::recognition_terms(),
+    )
+}
+
+/// The start message for a realtime session. `language_hints` steers mixed
+/// Russian/English speech and `context.terms` carries the built-in names plus
+/// `[dictation] vocabulary`, which is what Soniox uses to spell unusual words
+/// the way the user writes them. Both are omitted when empty, so an
+/// unconfigured install sends exactly the audio fields.
+fn session_config_with(hints: &[&str], terms: &[String]) -> Value {
+    let mut config = json!({
         "model": SONIOX_MODEL,
         "audio_format": "pcm_s16le",
         "sample_rate": SAMPLE_RATE,
         "num_channels": 1,
-    })
+    });
+    if !hints.is_empty() {
+        // Soniox rejects duplicate hints rather than deduplicating them.
+        let mut unique: Vec<&str> = Vec::with_capacity(hints.len());
+        for hint in hints {
+            if !unique.contains(hint) {
+                unique.push(hint);
+            }
+        }
+        config["language_hints"] = json!(unique);
+    }
+    if !terms.is_empty() {
+        config["context"] = json!({ "terms": terms });
+    }
+    config
 }
 
 async fn send_message<S>(socket: &mut S, message: Message) -> Result<(), VoiceError>
@@ -625,5 +656,56 @@ mod tests {
             .unwrap();
         assert_eq!(state.text(), "b");
         assert!(state.apply(&json!({"tokens":"x"})).is_err());
+    }
+
+    /// The start message must carry the audio fields Soniox requires plus the
+    /// two accuracy levers: mixed-language hints and vocabulary terms.
+    #[test]
+    fn session_config_carries_language_hints_and_vocabulary_terms() {
+        let terms = vec!["Jcode".to_string(), "Kubernetes".to_string()];
+        let config = session_config_with(SONIOX_LANGUAGE_HINTS, &terms);
+        assert_eq!(config["model"], SONIOX_MODEL);
+        assert_eq!(config["model"], "stt-rt-v6");
+        assert_eq!(config["audio_format"], "pcm_s16le");
+        assert_eq!(config["sample_rate"], 16_000);
+        assert_eq!(config["num_channels"], 1);
+        assert_eq!(config["language_hints"], json!(["ru", "en"]));
+        assert_eq!(config["context"]["terms"], json!(["Jcode", "Kubernetes"]));
+        assert!(config.get("api_key").is_none(), "the key stays in the header");
+        assert!(
+            config.get("language_hints_strict").is_none(),
+            "hints must not reject a language outside the list"
+        );
+    }
+
+    /// Every field is optional: an install with no vocabulary or hints sends
+    /// exactly the audio configuration and nothing empty.
+    #[test]
+    fn session_config_omits_empty_optional_context() {
+        let bare = session_config_with(&[], &[]);
+        assert!(bare.get("language_hints").is_none(), "{bare}");
+        assert!(bare.get("context").is_none(), "{bare}");
+        assert_eq!(bare["model"], SONIOX_MODEL);
+    }
+
+    /// Soniox rejects the request when hints repeat, so they are deduplicated
+    /// before they reach the wire.
+    #[test]
+    fn session_config_deduplicates_language_hints() {
+        let config = session_config_with(&["ru", "en", "ru"], &[]);
+        assert_eq!(config["language_hints"], json!(["ru", "en"]));
+    }
+
+    /// The live config reads `[dictation] vocabulary` on top of the built-in
+    /// names every install recognizes.
+    #[test]
+    fn live_session_config_sends_builtin_terms_and_hints() {
+        let config = session_config();
+        let terms = config["context"]["terms"]
+            .as_array()
+            .expect("recognition terms");
+        assert!(terms.iter().any(|term| term == "Jcode"), "{terms:?}");
+        assert!(terms.iter().any(|term| term == "Cargo"), "{terms:?}");
+        assert_eq!(config["language_hints"], json!(SONIOX_LANGUAGE_HINTS));
     }
 }
