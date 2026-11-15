@@ -421,6 +421,62 @@ fn headless_member_should_restore(status: &str, is_headless: bool) -> bool {
         )
 }
 
+/// Startup changes previously ready/running members to stopped/crashed. Use
+/// the persisted status, load boundary and fresh recovery note together. Old
+/// notes alone are not evidence that the owner was live at this restart.
+fn coordinator_was_live_at_restart(
+    member: &SwarmMember,
+    live_before_restart: &HashSet<String>,
+    swarm_restore_completed_at: Instant,
+) -> bool {
+    matches!(member.status.as_str(), "ready" | "running")
+        || (live_before_restart.contains(&member.session_id)
+            && matches!(member.status.as_str(), "stopped" | "crashed")
+            && member.last_status_change <= swarm_restore_completed_at
+            && member.detail.as_deref().is_some_and(|detail| {
+                let note = if member.status == "crashed" {
+                    "recovered after reload while running"
+                } else if member.is_headless {
+                    "idle worker not restored after server restart"
+                } else {
+                    "client not attached after server restart"
+                };
+                detail == note || detail.ends_with(&format!(" ({note})"))
+            }))
+}
+
+fn worker_has_live_coordinator(
+    member: &SwarmMember,
+    members: &HashMap<String, SwarmMember>,
+    coordinators: &HashMap<String, String>,
+    live_before_restart: &HashSet<String>,
+    swarm_restore_completed_at: Instant,
+) -> bool {
+    member
+        .report_back_to_session_id
+        .as_deref()
+        .or_else(|| {
+            member
+                .swarm_id
+                .as_ref()
+                .and_then(|id| coordinators.get(id).map(String::as_str))
+        })
+        .and_then(|id| members.get(id))
+        .is_some_and(|owner| {
+            coordinator_was_live_at_restart(owner, live_before_restart, swarm_restore_completed_at)
+        })
+}
+
+fn pending_headless_recovery_for_reload(session_id: &str, reload_id: Option<&str>) -> bool {
+    reload_recovery::peek_for_session(session_id)
+        .ok()
+        .flatten()
+        .is_some_and(|record| {
+            record.status == reload_recovery::ReloadRecoveryStatus::Pending
+                && reload_id.is_none_or(|id| record.reload_id == id)
+        })
+}
+
 fn headless_reload_continuation_message(reload_ctx: Option<ReloadContext>) -> Option<String> {
     ReloadContext::recovery_directive(reload_ctx.as_ref(), true, "", None)
         .map(|directive| directive.continuation_message)
@@ -605,6 +661,9 @@ pub struct Server {
     await_members_runtime: AwaitMembersRuntime,
     /// Persisted dedupe registry for mutating swarm coordinator operations.
     swarm_mutation_runtime: SwarmMutationRuntime,
+    live_before_restart: HashSet<String>,
+    running_before_restart: HashSet<String>,
+    swarm_restore_completed_at: Instant,
 }
 
 impl Server {
@@ -655,7 +714,10 @@ impl Server {
             coordinators: restored_swarm_coordinators,
             members: restored_swarm_members,
             swarms_by_id: restored_swarms_by_id,
+            live_before_restart,
+            running_before_restart,
         } = load_persisted_swarm_runtime_state();
+        let swarm_restore_completed_at = Instant::now();
 
         Self {
             provider,
@@ -691,6 +753,9 @@ impl Server {
             soft_interrupt_queues: Arc::new(RwLock::new(HashMap::new())),
             await_members_runtime: AwaitMembersRuntime::default(),
             swarm_mutation_runtime: SwarmMutationRuntime::default(),
+            live_before_restart,
+            running_before_restart,
+            swarm_restore_completed_at,
         }
     }
 
@@ -748,7 +813,11 @@ impl Server {
     }
 
     async fn recover_headless_sessions_on_startup(&self) {
+        let current_reload_id = recent_reload_state(Duration::from_secs(600))
+            .filter(|state| state.pid == std::process::id())
+            .map(|state| state.request_id);
         let sessions_to_restore = {
+            let coordinators = self.swarm_state.coordinators.read().await.clone();
             let members = self.swarm_state.members.read().await;
             members
                 .values()
@@ -758,10 +827,27 @@ impl Server {
                     // continuation must still take priority over that status.
                     // A worker that still owns open todos had work in
                     // flight even if its last turn ended before shutdown.
+                    let owner_live = worker_has_live_coordinator(
+                        member,
+                        &members,
+                        &coordinators,
+                        &self.live_before_restart,
+                        self.swarm_restore_completed_at,
+                    );
                     member.is_headless
-                        && (headless_member_should_restore(&member.status, true)
-                            || reload_recovery::has_pending_for_session(&member.session_id)
-                            || worker_revive::open_lane_continuation(&member.session_id).is_some())
+                        && ((owner_live
+                            || current_reload_id.is_some()
+                            || self.running_before_restart.contains(&member.session_id))
+                            && pending_headless_recovery_for_reload(
+                                &member.session_id,
+                                current_reload_id.as_deref(),
+                            )
+                            || ((owner_live
+                                || self.running_before_restart.contains(&member.session_id))
+                                && headless_member_should_restore(&member.status, true))
+                            || (owner_live
+                                && worker_revive::open_lane_continuation(&member.session_id)
+                                    .is_some()))
                 })
                 .map(|member| member.session_id.clone())
                 .collect::<Vec<_>>()
@@ -874,19 +960,42 @@ impl Server {
             let stored_recovery_record = reload_recovery::peek_for_session(&session_id)
                 .ok()
                 .flatten();
-            let has_stored_recovery_intent = stored_recovery_record
-                .as_ref()
-                .map(|record| record.status == reload_recovery::ReloadRecoveryStatus::Pending)
-                .unwrap_or(false);
-            let open_lane = worker_revive::open_lane_continuation(&session_id);
-            let should_resume = has_stored_recovery_intent || open_lane.is_some() || {
-                let agent_guard = agent.lock().await;
-                self::client_session::restored_session_was_interrupted(
-                    &session_id,
-                    &previous_status,
-                    &agent_guard,
-                )
+            let owner_live = {
+                let coordinators = self.swarm_state.coordinators.read().await.clone();
+                let members = self.swarm_state.members.read().await;
+                members.get(&session_id).is_some_and(|member| {
+                    worker_has_live_coordinator(
+                        member,
+                        &members,
+                        &coordinators,
+                        &self.live_before_restart,
+                        self.swarm_restore_completed_at,
+                    )
+                })
             };
+            let has_stored_recovery_intent = (owner_live
+                || current_reload_id.is_some()
+                || self.running_before_restart.contains(&session_id))
+                && stored_recovery_record.as_ref().is_some_and(|record| {
+                    record.status == reload_recovery::ReloadRecoveryStatus::Pending
+                        && current_reload_id
+                            .as_deref()
+                            .is_none_or(|id| record.reload_id == id)
+                });
+            let open_lane = owner_live
+                .then(|| worker_revive::open_lane_continuation(&session_id))
+                .flatten();
+            let was_interrupted = (owner_live || self.running_before_restart.contains(&session_id))
+                && {
+                    let agent_guard = agent.lock().await;
+                    self::client_session::restored_session_was_interrupted(
+                        &session_id,
+                        &previous_status,
+                        &agent_guard,
+                    )
+                };
+            let should_resume =
+                has_stored_recovery_intent || open_lane.is_some() || was_interrupted;
             if let Some(record) = stored_recovery_record.as_ref() {
                 reload_trace::record_value(
                     &record.reload_id,
@@ -931,17 +1040,27 @@ impl Server {
                 continue;
             }
 
-            let stored_directive = reload_recovery::pending_directive_for_session(&session_id)
-                .ok()
-                .flatten();
-            let reload_ctx = if stored_directive.is_none() {
+            let stored_directive = if has_stored_recovery_intent {
+                reload_recovery::pending_directive_for_session(&session_id)
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
+            let reload_ctx = if stored_directive.is_none() && was_interrupted {
                 ReloadContext::load_for_session(&session_id).ok().flatten()
             } else {
                 None
             };
             let reminder = stored_directive
                 .map(|directive| directive.continuation_message)
-                .or_else(|| headless_reload_continuation_message(reload_ctx))
+                .or_else(|| {
+                    if was_interrupted {
+                        headless_reload_continuation_message(reload_ctx)
+                    } else {
+                        None
+                    }
+                })
                 .or(open_lane);
             let Some(reminder) = reminder else {
                 ReloadContext::log_recovery_outcome(
@@ -965,7 +1084,9 @@ impl Server {
             let recover_event_counter = Arc::clone(&self.event_counter);
             let recover_swarm_event_tx = self.swarm_event_tx.clone();
             let recover_swarm_state = self.swarm_state.clone();
-            let recovery_reload_id = stored_recovery_record.map(|record| record.reload_id);
+            let recovery_reload_id = stored_recovery_record
+                .filter(|_| has_stored_recovery_intent)
+                .map(|record| record.reload_id);
 
             tokio::spawn(async move {
                 let lease = match agent.lock().await.claim_server_turn() {

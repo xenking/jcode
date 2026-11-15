@@ -94,6 +94,8 @@ pub(super) struct LoadedSwarmRuntimeState {
     pub coordinators: HashMap<String, String>,
     pub members: HashMap<String, SwarmMember>,
     pub swarms_by_id: HashMap<String, HashSet<String>>,
+    pub live_before_restart: HashSet<String>,
+    pub running_before_restart: HashSet<String>,
 }
 
 /// Recovery note on an idle headless worker that a server restart stopped.
@@ -506,12 +508,16 @@ pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
             coordinators: HashMap::new(),
             members: HashMap::new(),
             swarms_by_id: HashMap::new(),
+            live_before_restart: HashSet::new(),
+            running_before_restart: HashSet::new(),
         };
     };
 
     let mut plans = HashMap::new();
     let mut coordinators = HashMap::new();
     let mut members = HashMap::new();
+    let mut live_before_restart = HashSet::new();
+    let mut running_before_restart = HashSet::new();
     let mut swarms_by_id: HashMap<String, HashSet<String>> = HashMap::new();
     let loaded_at_unix_ms = now_unix_ms();
     let terminal_retention = super::swarm::swarm_terminal_member_retention();
@@ -588,12 +594,19 @@ pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
                     }
                 }
                 members.remove(&member_session_id);
+                live_before_restart.remove(&member_session_id);
+                running_before_restart.remove(&member_session_id);
                 superseded_member_swarms.insert(existing_swarm_id);
             }
             member_source.insert(
                 member_session_id.clone(),
                 (state.updated_at_unix_ms, member_swarm_id.clone()),
             );
+            let was_live = matches!(
+                member.record.status,
+                SwarmLifecycleStatus::Running | SwarmLifecycleStatus::Ready
+            );
+            let was_running = member.record.status == SwarmLifecycleStatus::Running;
             let Some(member) = from_persisted_member(
                 member,
                 state.updated_at_unix_ms,
@@ -607,6 +620,12 @@ pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
                     .insert(member_session_id);
                 continue;
             };
+            if was_live {
+                live_before_restart.insert(member_session_id.clone());
+            }
+            if was_running {
+                running_before_restart.insert(member_session_id.clone());
+            }
             swarms_by_id
                 .entry(member_swarm_id.clone())
                 .or_default()
@@ -663,6 +682,8 @@ pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
         coordinators,
         members,
         swarms_by_id,
+        live_before_restart,
+        running_before_restart,
     }
 }
 

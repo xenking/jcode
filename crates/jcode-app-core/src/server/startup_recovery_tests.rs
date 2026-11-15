@@ -1,6 +1,141 @@
 use super::*;
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn startup_recovery_rechecks_coordinator_stopped_after_load() -> Result<()> {
+    let _storage_guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new()?;
+    let _env = configure_test_env(&temp);
+    let provider = Arc::new(StreamingMockProvider::default());
+    let mut worker = crate::session::Session::create(None, Some("worker".into()));
+    worker.save()?;
+    crate::todo::save_todos(
+        &worker.id,
+        &[crate::todo::TodoItem {
+            content: "open".into(),
+            status: "in_progress".into(),
+            priority: "high".into(),
+            id: "open".into(),
+            ..Default::default()
+        }],
+    )?;
+    let swarm = "stopped-after-load";
+    let mut member = persisted_headless_member(&worker.id, swarm, "ready", "idle");
+    member.report_back_to_session_id = Some("owner".into());
+    let mut owner = persisted_headless_member("owner", swarm, "ready", "live");
+    owner.is_headless = false;
+    persist_swarm_state_snapshot(swarm, None, None, &[member, owner]);
+    let server = Server::new(provider);
+    crate::server::update_member_status(
+        "owner",
+        "stopped",
+        Some("stopped by user".into()),
+        &server.swarm_state.members,
+        &server.swarm_state.swarms_by_id,
+        None,
+        None,
+        None,
+    )
+    .await;
+    server.recover_headless_sessions_on_startup().await;
+    assert!(!server.sessions.read().await.contains_key(&worker.id));
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn startup_recovery_does_not_resume_open_lane_of_stopped_coordinator() -> Result<()> {
+    let _storage_guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new()?;
+    let _env = configure_test_env(&temp);
+    let provider = Arc::new(StreamingMockProvider::default());
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("incorrect revival".into()),
+        StreamEvent::MessageEnd { stop_reason: None },
+    ]);
+    let mut worker = crate::session::Session::create(None, Some("old worker".into()));
+    worker.save()?;
+    crate::todo::save_todos(
+        &worker.id,
+        &[crate::todo::TodoItem {
+            content: "old probe".into(),
+            status: "in_progress".into(),
+            priority: "high".into(),
+            id: "probe".into(),
+            ..Default::default()
+        }],
+    )?;
+    let mut coordinator = crate::session::Session::create(None, Some("old coordinator".into()));
+    coordinator.save()?;
+    let swarm_id = "old-coordinator-swarm";
+    let mut member = persisted_headless_member(&worker.id, swarm_id, "ready", "idle");
+    member.report_back_to_session_id = Some(coordinator.id.clone());
+    let mut stale_crashed =
+        crate::session::Session::create(None, Some("old crashed worker".into()));
+    stale_crashed.save()?;
+    crate::todo::save_todos(
+        &stale_crashed.id,
+        &[crate::todo::TodoItem {
+            content: "old crashed probe".into(),
+            status: "in_progress".into(),
+            priority: "high".into(),
+            id: "crashed-probe".into(),
+            ..Default::default()
+        }],
+    )?;
+    let mut stale_crashed_member = persisted_headless_member(
+        &stale_crashed.id,
+        swarm_id,
+        "crashed",
+        "crashed before reload",
+    );
+    stale_crashed_member.report_back_to_session_id = Some(coordinator.id.clone());
+    super::super::reload_recovery::persist_intent(
+        "earlier-reload",
+        &worker.id,
+        super::super::reload_recovery::ReloadRecoveryRole::Headless,
+        crate::tool::selfdev::ReloadRecoveryDirective {
+            reconnect_notice: None,
+            continuation_message: "stale continuation".into(),
+        },
+        "previous reload",
+    )?;
+    crate::server::write_reload_state(
+        "current-reload",
+        "test",
+        crate::server::ReloadPhase::Starting,
+        None,
+    );
+    let mut owner = persisted_headless_member(
+        &coordinator.id,
+        swarm_id,
+        "stopped",
+        "client not attached after server restart",
+    );
+    owner.is_headless = false;
+    owner.role = "coordinator".into();
+    persist_swarm_state_snapshot(swarm_id, None, None, &[member, stale_crashed_member, owner]);
+    let server = Server::new(provider);
+    server.recover_headless_sessions_on_startup().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !server.sessions.read().await.contains_key(&worker.id),
+        "old worker must not be revived"
+    );
+    assert!(
+        !server.sessions.read().await.contains_key(&stale_crashed.id),
+        "old crashed worker must not be revived"
+    );
+    crate::server::clear_reload_marker();
+    server.recover_headless_sessions_on_startup().await;
+    assert!(
+        !server.sessions.read().await.contains_key(&worker.id),
+        "stale intent without a current reload must not revive an orphan"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 #[allow(
     clippy::await_holding_lock,
     reason = "test intentionally serializes process-wide JCODE_HOME/env state across async recovery assertions"
@@ -185,16 +320,29 @@ async fn startup_recovery_honors_pending_intent_for_stopped_worker() -> Result<(
         )?
     );
     let swarm_id = "swarm-stopped-recovery";
+    crate::server::write_reload_state(
+        "reload-stopped-worker",
+        "test",
+        crate::server::ReloadPhase::Starting,
+        None,
+    );
     let mut headed_member = persisted_headless_member(&headed.id, swarm_id, "ready", "attached");
     headed_member.is_headless = false;
+    let mut interrupted_worker =
+        persisted_headless_member(&worker.id, swarm_id, "ready", "aborted turn");
+    interrupted_worker.report_back_to_session_id = Some("stopped-owner".into());
+    let mut stopped_owner =
+        persisted_headless_member("stopped-owner", swarm_id, "stopped", "stopped earlier");
+    stopped_owner.is_headless = false;
     persist_swarm_state_snapshot(
         swarm_id,
         None,
         None,
         &[
-            persisted_headless_member(&worker.id, swarm_id, "ready", "aborted turn"),
+            interrupted_worker,
             persisted_headless_member(&idle.id, swarm_id, "ready", "genuinely idle"),
             headed_member,
+            stopped_owner,
         ],
     );
     let server = Server::new(provider);
@@ -368,7 +516,10 @@ async fn startup_ready_signal_is_not_blocked_by_headless_recovery_delay() -> Res
     );
 
     let provider = Arc::new(StreamingMockProvider::default());
-    provider.queue_response(vec![StreamEvent::MessageEnd { stop_reason: None }]);
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("recovery complete".into()),
+        StreamEvent::MessageEnd { stop_reason: None },
+    ]);
     let server = Server::new(provider);
 
     let mut ready_fds = [0; 2];
@@ -465,11 +616,18 @@ async fn startup_recovery_resumes_idle_worker_with_open_todo_lane() -> Result<()
     crate::todo::save_todos(&done.id, &[todo("everything", "completed")])?;
 
     let swarm_id = "swarm-open-lane";
-    let mut busy_member = persisted_headless_member(&busy.id, swarm_id, "ready", "between turns");
-    busy_member.report_back_to_session_id = Some("coordinator".to_string());
+    let busy_member = persisted_headless_member(&busy.id, swarm_id, "ready", "between turns");
+    let mut owner = persisted_headless_member("coordinator", swarm_id, "ready", "coordinating");
+    owner.is_headless = false;
+    owner.role = "coordinator".to_string();
     let mut done_member = persisted_headless_member(&done.id, swarm_id, "ready", "finished");
     done_member.report_back_to_session_id = Some("coordinator".to_string());
-    persist_swarm_state_snapshot(swarm_id, None, None, &[busy_member, done_member]);
+    persist_swarm_state_snapshot(
+        swarm_id,
+        None,
+        Some("coordinator"),
+        &[busy_member, done_member, owner],
+    );
 
     let server = Server::new(provider);
     server.recover_headless_sessions_on_startup().await;
@@ -492,6 +650,22 @@ async fn startup_recovery_resumes_idle_worker_with_open_todo_lane() -> Result<()
     })
     .await
     .expect("a worker with an open todo lane must resume after restart");
+    let agent = server
+        .sessions
+        .read()
+        .await
+        .get(&busy.id)
+        .cloned()
+        .expect("worker agent");
+    assert!(
+        agent
+            .lock()
+            .await
+            .messages()
+            .iter()
+            .any(|message| message.content_preview().contains("run the tests")),
+        "the continuation must include actionable todo details"
+    );
     assert!(
         !server.sessions.read().await.contains_key(&done.id),
         "a worker with no open todos is idle and is not resurrected"
