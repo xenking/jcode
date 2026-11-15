@@ -191,7 +191,7 @@ pub(super) async fn start_next_queued_prompt(
             queued_client_id: prompt.client_id.clone(),
             content: prompt.content.clone(),
             images: prompt.images.clone(),
-            system_reminder: None,
+            system_reminder: prompt.system_reminder.clone(),
             active_skill: None,
             server_failover,
         },

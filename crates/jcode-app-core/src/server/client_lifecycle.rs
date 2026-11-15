@@ -1210,13 +1210,13 @@ pub(super) async fn handle_client(
             let mut dispatch_if_idle = false;
             let mut already_delivered = None;
             let (id, result) = match request {
-                Request::QueuePrompt { id, client_id, content, images, mode } => {
+                Request::QueuePrompt { id, client_id, content, images, mode, system_reminder } => {
                     let mode = match mode {
                         crate::protocol::QueuedPromptMode::Steer => jcode_agent_runtime::QueuedMessageMode::Steer,
                         crate::protocol::QueuedPromptMode::AfterYield => jcode_agent_runtime::QueuedMessageMode::AfterYield,
                     };
                     dispatch_if_idle = true;
-                    let result = session_control.enqueue_user_prompt(client_id.clone(), content.clone(), images, mode).map(|delivered| {
+                    let result = session_control.enqueue_user_prompt(client_id.clone(), content.clone(), images, mode, system_reminder).map(|delivered| {
                         if delivered { already_delivered = Some((client_id, content)); }
                     });
                     (id, result)
@@ -3812,7 +3812,15 @@ pub(super) async fn process_reserved_message_streaming_mpsc(
     agent.validate_server_turn(lease)?;
     let session_id = agent.session_id().to_string();
     let result = agent
-        .run_reserved_streaming_mpsc(lease, content, images, system_reminder, event_tx, None, queued_client_id)
+        .run_reserved_streaming_mpsc(
+            lease,
+            content,
+            images,
+            system_reminder,
+            event_tx,
+            None,
+            queued_client_id,
+        )
         .await;
     if result.is_ok() {
         crate::runtime_memory_log::emit_event(

@@ -14,6 +14,8 @@ pub enum QueuedMessageMode {
 #[derive(Debug, Clone)]
 pub struct SoftInterruptMessage {
     pub content: String,
+    /// Hidden instruction delivered when this prompt starts its own turn.
+    pub system_reminder: Option<String>,
     pub images: Vec<(String, String)>,
     /// If true, can skip remaining tools when injected at point C.
     pub urgent: bool,

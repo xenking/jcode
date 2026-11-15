@@ -202,6 +202,7 @@ mod tests {
         agent.pending_alerts.clear();
         let queue = agent.soft_interrupt_queue();
         queue.lock().unwrap().push(SoftInterruptMessage {
+            system_reminder: None,
             content: "scheduled wake".into(),
             images: Vec::new(),
             urgent: false,

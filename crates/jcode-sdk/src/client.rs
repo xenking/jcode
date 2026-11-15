@@ -1014,12 +1014,23 @@ impl JcodeClient {
         session_id: &str,
         prompt: jcode_harness_api::QueuedPrompt,
     ) -> Result<()> {
+        self.queue_prompt_with_reminder(session_id, prompt, None)
+    }
+
+    /// Queue a prompt with a hidden instruction for the next standalone turn.
+    pub fn queue_prompt_with_reminder(
+        &self,
+        session_id: &str,
+        prompt: jcode_harness_api::QueuedPrompt,
+        system_reminder: Option<&str>,
+    ) -> Result<()> {
         self.request_ok(ApiRequest::QueuePrompt {
             session_id: session_id.into(),
             client_id: prompt.client_id,
             content: prompt.content,
             images: prompt.images,
             mode: prompt.mode,
+            system_reminder: system_reminder.map(str::to_owned),
         })
         .map(drop)
     }

@@ -181,6 +181,8 @@ pub enum ApiRequest {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<(String, String)>,
         mode: QueuedPromptMode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_reminder: Option<String>,
     },
     SetQueuedPromptMode {
         session_id: String,

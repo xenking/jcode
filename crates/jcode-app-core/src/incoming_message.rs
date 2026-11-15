@@ -127,6 +127,7 @@ mod tests {
 
     fn user_message() -> SoftInterruptMessage {
         SoftInterruptMessage {
+            system_reminder: None,
             content: "hello".into(),
             images: Vec::new(),
             urgent: false,

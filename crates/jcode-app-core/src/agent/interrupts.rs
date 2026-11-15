@@ -194,6 +194,7 @@ impl Agent {
         if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
             let pending_before = queue.len();
             queue.push(SoftInterruptMessage {
+                system_reminder: None,
                 content,
                 images,
                 urgent,

@@ -19,6 +19,7 @@ fn append_take_and_clear_round_trip() {
     append(
         session_id,
         SoftInterruptMessage {
+            system_reminder: None,
             content: "hello".to_string(),
             images: Vec::new(),
             urgent: true,
@@ -31,6 +32,7 @@ fn append_take_and_clear_round_trip() {
     append(
         session_id,
         SoftInterruptMessage {
+            system_reminder: None,
             content: "world".to_string(),
             images: Vec::new(),
             urgent: false,
@@ -62,6 +64,7 @@ fn append_take_and_clear_round_trip() {
     append(
         session_id,
         SoftInterruptMessage {
+            system_reminder: None,
             content: "later".to_string(),
             images: Vec::new(),
             urgent: false,
@@ -78,6 +81,7 @@ fn append_take_and_clear_round_trip() {
         append(
             session_id,
             SoftInterruptMessage {
+                system_reminder: None,
                 content: content.to_string(),
                 images: Vec::new(),
                 urgent: false,

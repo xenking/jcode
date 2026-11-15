@@ -703,6 +703,7 @@ pub(super) fn enqueue_soft_interrupt_with_id(
     if let Ok(mut pending) = queue.lock() {
         let pending_before = pending.len();
         pending.push(SoftInterruptMessage {
+            system_reminder: None,
             content,
             images,
             urgent,
@@ -839,6 +840,7 @@ impl SessionControlHandle {
         content: String,
         images: Vec<(String, String)>,
         mode: jcode_agent_runtime::QueuedMessageMode,
+        system_reminder: Option<String>,
     ) -> anyhow::Result<bool> {
         anyhow::ensure!(!client_id.trim().is_empty(), "client_id must not be empty");
         let mut queue = self
@@ -876,6 +878,7 @@ impl SessionControlHandle {
             return Ok(true);
         }
         queue.push(SoftInterruptMessage {
+            system_reminder,
             content,
             images,
             urgent: false,
@@ -1293,6 +1296,7 @@ pub(super) async fn queue_soft_interrupt_with_images_for_session(
         crate::soft_interrupt_store::append(
             session_id,
             SoftInterruptMessage {
+                system_reminder: None,
                 content,
                 images,
                 urgent,
