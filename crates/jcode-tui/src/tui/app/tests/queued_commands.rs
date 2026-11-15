@@ -2,6 +2,46 @@
 // and runs it as a real command once the turn ends, instead of running it now
 // or sending its text to the model.
 
+#[tokio::test]
+async fn send_modes_use_server_queue_for_both_modes() {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    for (queue_mode, expected_mode) in [(false, "steer"), (true, "after_yield")] {
+        let mut app = create_test_app();
+        app.is_processing = true;
+        app.queue_mode = queue_mode;
+        app.input = "follow up".into();
+        app.cursor_pos = app.input.len();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let peer = remote.take_dummy_peer().unwrap();
+        let (reader, _writer) = peer.into_split();
+        app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote)
+            .await.unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(1), BufReader::new(reader).read_line(&mut line))
+            .await.expect("queue request not sent").unwrap();
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["type"], "queue_prompt");
+        assert_eq!(request["mode"], expected_mode);
+        assert_eq!(request["content"], "follow up");
+    }
+}
+
+#[test]
+fn send_modes_restore_server_snapshot_without_duplicates() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.is_processing = true;
+    let json = r#"{"type":"queued_prompts","id":1,"prompts":[{"client_id":"p1","content":"first","mode":"steer"},{"client_id":"p2","content":"second","mode":"after_yield"}]}"#;
+    for _ in 0..2 {
+        let event: crate::protocol::ServerEvent = serde_json::from_str(json).unwrap();
+        app.handle_server_event(event, &mut remote);
+    }
+    assert_eq!(app.pending_soft_interrupts, ["first", "second"]);
+}
+
 fn type_text(app: &mut App, text: &str) {
     for c in text.chars() {
         app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
