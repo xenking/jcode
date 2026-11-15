@@ -114,6 +114,10 @@ async fn socket_resume_replays_reload_interrupted_ask_before_provider() {
     .await;
     writer.write_all(format!("{}\n", json!({"type":"message","id":2,"content":"","system_reminder":"Continue interrupted work."})).as_bytes()).await.unwrap();
     let event = until(&mut reader, |event| {
+        assert!(
+            !matches!(event, ServerEvent::TextDelta { .. }),
+            "provider ran before the pending ask"
+        );
         matches!(event, ServerEvent::AskUserRequest { .. })
     })
     .await;
