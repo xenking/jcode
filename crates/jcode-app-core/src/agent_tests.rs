@@ -921,9 +921,9 @@ async fn run_turn_streaming_mpsc_emits_keepalive_while_provider_is_quiet() {
 
 #[test]
 fn compaction_usage_event_is_a_plain_post_compaction_report() {
-    assert_eq!(
-        crate::agent::compaction_context_usage_event(None, Some(1)),
-        None
+    assert!(
+        crate::agent::compaction_context_usage_event(None, Some(1)).is_none(),
+        "no post-compaction count means no usage refresh"
     );
     match crate::agent::compaction_context_usage_event(Some(58_400), Some(1_000_000)) {
         Some(ServerEvent::TokenUsage {

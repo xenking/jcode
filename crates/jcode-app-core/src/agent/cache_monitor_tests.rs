@@ -19,8 +19,11 @@ impl Provider for CompactionCacheProvider {
         _: Option<&str>,
     ) -> Result<crate::provider::EventStream> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        // The second request does not shrink: a request that carries fewer
+        // tokens than the baseline is a content drop, not a cache miss, so the
+        // fixture keeps the prefix size while still reading nothing.
         let mut events = vec![Ok(StreamEvent::TokenUsage {
-            input_tokens: Some(if call == 0 { 216_517 } else { 204_393 }),
+            input_tokens: Some(if call == 0 { 216_517 } else { 216_000 }),
             output_tokens: Some(5),
             cache_read_input_tokens: Some(if call == 0 { 216_064 } else { 0 }),
             cache_creation_input_tokens: None,
@@ -37,9 +40,12 @@ impl Provider for CompactionCacheProvider {
                 events.insert(0, compaction);
             }
             if self.discard_compaction {
-                events.push(Ok(StreamEvent::RetryRollback { attempt: 1, max: 2 }));
+                events.push(Ok(StreamEvent::RetryRollback {
+                    attempt: 1,
+                    max: 2,
+                }));
                 events.push(Ok(StreamEvent::TokenUsage {
-                    input_tokens: Some(204_393),
+                    input_tokens: Some(216_000),
                     output_tokens: Some(5),
                     cache_read_input_tokens: Some(0),
                     cache_creation_input_tokens: None,
@@ -146,7 +152,7 @@ async fn native_compaction_cache_refresh_is_classified_before_compaction_is_anno
                     // response's input usage is not a pre-compaction count.
                     let pre = pre_tokens.expect("local pre-compaction estimate");
                     let post = post_tokens.expect("local post-compaction estimate");
-                    assert_ne!(pre, 204_393, "response input is not a pre-compaction count");
+                    assert_ne!(pre, 216_000, "response input is not a pre-compaction count");
                     assert_eq!(tokens_saved, Some(pre.saturating_sub(post)));
                     assert_eq!(summary_chars, None);
                     assert!(
