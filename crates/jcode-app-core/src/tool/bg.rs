@@ -1229,6 +1229,7 @@ mod tests {
                 images: Vec::new(),
                 urgent: false,
                 source: jcode_agent_runtime::SoftInterruptSource::User,
+                mode: jcode_agent_runtime::QueuedMessageMode::Steer,
                 client_id: None,
             });
         let task = background::global()

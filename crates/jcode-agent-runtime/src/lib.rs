@@ -1,6 +1,14 @@
 use std::sync::Arc;
 
-/// A soft interrupt message queued for injection at the next safe point.
+/// Delivery phase for a user message in the existing interrupt queue.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum QueuedMessageMode {
+    #[default]
+    Steer,
+    AfterYield,
+}
+
+/// A message queued for delivery at a safe point or after the active turn.
 #[derive(Debug, Clone)]
 pub struct SoftInterruptMessage {
     pub content: String,
@@ -8,6 +16,7 @@ pub struct SoftInterruptMessage {
     /// If true, can skip remaining tools when injected at point C.
     pub urgent: bool,
     pub source: SoftInterruptSource,
+    pub mode: QueuedMessageMode,
     /// Opaque caller-supplied id. Echoed in the injection event and used to
     /// cancel this one message while it is still queued.
     pub client_id: Option<String>,

@@ -77,9 +77,10 @@ fn queue_has_user_message(entry: &Entry) -> bool {
         queue
             .lock()
             .map(|queue| {
-                queue
-                    .iter()
-                    .any(|message| message.source == SoftInterruptSource::User)
+                queue.iter().any(|message| {
+                    message.source == SoftInterruptSource::User
+                        && message.mode == jcode_agent_runtime::QueuedMessageMode::Steer
+                })
             })
             .unwrap_or(false)
     })
@@ -130,6 +131,7 @@ mod tests {
             images: Vec::new(),
             urgent: false,
             source: SoftInterruptSource::User,
+            mode: jcode_agent_runtime::QueuedMessageMode::Steer,
             client_id: None,
         }
     }

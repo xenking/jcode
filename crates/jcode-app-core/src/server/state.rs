@@ -707,6 +707,7 @@ pub(super) fn enqueue_soft_interrupt_with_id(
             images,
             urgent,
             source,
+            mode: jcode_agent_runtime::QueuedMessageMode::Steer,
             client_id,
         });
         crate::logging::info(&format!(
@@ -1106,6 +1107,7 @@ pub(super) async fn queue_soft_interrupt_with_images_for_session(
                 images,
                 urgent,
                 source,
+                mode: jcode_agent_runtime::QueuedMessageMode::Steer,
                 client_id: None,
             },
         )

@@ -775,6 +775,42 @@ async fn queued_soft_interrupt_images_are_injected_as_image_blocks() {
 }
 
 #[tokio::test]
+async fn steering_injection_preserves_after_yield_messages_in_order() {
+    use jcode_agent_runtime::{QueuedMessageMode, SoftInterruptMessage};
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = Agent::new(provider, registry);
+    let queue = agent.soft_interrupt_queue();
+    for (content, mode) in [
+        ("later one", QueuedMessageMode::AfterYield),
+        ("steer", QueuedMessageMode::Steer),
+        ("later two", QueuedMessageMode::AfterYield),
+    ] {
+        queue.lock().unwrap().push(SoftInterruptMessage {
+            content: content.into(),
+            images: vec![],
+            urgent: false,
+            source: SoftInterruptSource::User,
+            mode,
+            client_id: None,
+        });
+    }
+    let injected = agent.inject_soft_interrupts();
+    assert_eq!(injected.len(), 1);
+    assert_eq!(injected[0].content, "steer");
+    assert!(!agent.has_soft_interrupts());
+    let queue = queue.lock().unwrap();
+    assert_eq!(
+        queue
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["later one", "later two"]
+    );
+}
+
+#[tokio::test]
 async fn injected_soft_interrupts_report_client_ids_per_group_in_queue_order() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let registry = Registry::new(provider.clone()).await;

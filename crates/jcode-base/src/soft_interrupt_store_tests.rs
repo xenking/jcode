@@ -1,6 +1,14 @@
 use super::*;
 
 #[test]
+fn legacy_messages_default_to_steering() {
+    let persisted: PersistedSoftInterrupt =
+        serde_json::from_str(r#"{"content":"old","urgent":false,"source":"user"}"#).unwrap();
+    let message = SoftInterruptMessage::from(persisted);
+    assert_eq!(message.mode, jcode_agent_runtime::QueuedMessageMode::Steer);
+}
+
+#[test]
 fn append_take_and_clear_round_trip() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("temp dir");
@@ -15,6 +23,7 @@ fn append_take_and_clear_round_trip() {
             images: Vec::new(),
             urgent: true,
             source: SoftInterruptSource::System,
+            mode: jcode_agent_runtime::QueuedMessageMode::Steer,
             client_id: None,
         },
     )
@@ -26,6 +35,7 @@ fn append_take_and_clear_round_trip() {
             images: Vec::new(),
             urgent: false,
             source: SoftInterruptSource::BackgroundTask,
+            mode: jcode_agent_runtime::QueuedMessageMode::AfterYield,
             client_id: None,
         },
     )
@@ -36,6 +46,14 @@ fn append_take_and_clear_round_trip() {
     assert_eq!(loaded[0].content, "hello");
     assert!(loaded[0].urgent);
     assert_eq!(loaded[1].content, "world");
+    assert_eq!(
+        loaded[0].mode,
+        jcode_agent_runtime::QueuedMessageMode::Steer
+    );
+    assert_eq!(
+        loaded[1].mode,
+        jcode_agent_runtime::QueuedMessageMode::AfterYield
+    );
 
     let taken = take(session_id).expect("take interrupts");
     assert_eq!(taken.len(), 2);
@@ -48,6 +66,7 @@ fn append_take_and_clear_round_trip() {
             images: Vec::new(),
             urgent: false,
             source: SoftInterruptSource::User,
+            mode: jcode_agent_runtime::QueuedMessageMode::Steer,
             client_id: None,
         },
     )
@@ -63,6 +82,7 @@ fn append_take_and_clear_round_trip() {
                 images: Vec::new(),
                 urgent: false,
                 source: SoftInterruptSource::User,
+                mode: jcode_agent_runtime::QueuedMessageMode::Steer,
                 client_id: client_id.map(str::to_string),
             },
         )

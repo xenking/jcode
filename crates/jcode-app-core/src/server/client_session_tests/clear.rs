@@ -329,6 +329,7 @@ async fn exercise_clear_session(shared_source: bool) -> Result<()> {
             images: Vec::new(),
             urgent: false,
             source: jcode_agent_runtime::SoftInterruptSource::User,
+            mode: jcode_agent_runtime::QueuedMessageMode::Steer,
             client_id: None,
         });
     old_background_signal.fire();

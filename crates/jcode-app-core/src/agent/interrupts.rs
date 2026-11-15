@@ -171,6 +171,7 @@ impl Agent {
                 images,
                 urgent,
                 source,
+                mode: jcode_agent_runtime::QueuedMessageMode::Steer,
                 client_id,
             });
             logging::info(&format!(
@@ -228,7 +229,10 @@ impl Agent {
     pub fn has_soft_interrupts(&self) -> bool {
         self.soft_interrupt_queue
             .lock()
-            .map(|q| !q.is_empty())
+            .map(|q| {
+                q.iter()
+                    .any(|message| message.mode == jcode_agent_runtime::QueuedMessageMode::Steer)
+            })
             .unwrap_or(false)
     }
 
@@ -236,7 +240,10 @@ impl Agent {
     pub fn has_urgent_interrupt(&self) -> bool {
         self.soft_interrupt_queue
             .lock()
-            .map(|q| q.iter().any(|m| m.urgent))
+            .map(|q| {
+                q.iter()
+                    .any(|m| m.mode == jcode_agent_runtime::QueuedMessageMode::Steer && m.urgent)
+            })
             .unwrap_or(false)
     }
 
@@ -411,7 +418,11 @@ impl Agent {
                     .map(|message| message.content.len())
                     .sum::<usize>()
             ));
-            queue.drain(..).collect()
+            let (steering, waiting): (Vec<_>, Vec<_>) = queue
+                .drain(..)
+                .partition(|message| message.mode == jcode_agent_runtime::QueuedMessageMode::Steer);
+            *queue = waiting;
+            steering
         };
 
         let mut injected = Vec::new();

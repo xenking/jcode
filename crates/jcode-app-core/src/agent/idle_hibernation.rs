@@ -206,6 +206,7 @@ mod tests {
             images: Vec::new(),
             urgent: false,
             source: SoftInterruptSource::User,
+            mode: jcode_agent_runtime::QueuedMessageMode::Steer,
             client_id: None,
         });
         assert!(agent.hibernate_idle_caches().is_none());

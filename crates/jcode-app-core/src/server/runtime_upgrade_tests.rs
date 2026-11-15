@@ -69,6 +69,7 @@ fn checkpoint_preserves_blank_session_ids_overrides_and_queued_input() {
             images: Vec::new(),
             urgent: false,
             source: jcode_agent_runtime::SoftInterruptSource::User,
+            mode: jcode_agent_runtime::QueuedMessageMode::Steer,
             client_id: Some("follow-up-7".into()),
         });
     configured.checkpoint_idle_runtime_upgrade().unwrap();
@@ -97,6 +98,7 @@ fn checkpoint_refuses_queue_write_failure_instead_of_losing_accepted_input() {
             images: Vec::new(),
             urgent: false,
             source: jcode_agent_runtime::SoftInterruptSource::User,
+            mode: jcode_agent_runtime::QueuedMessageMode::Steer,
             client_id: None,
         });
     std::fs::write(

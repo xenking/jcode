@@ -115,6 +115,7 @@ impl AmbientRunnerHandle {
                 images: Vec::new(),
                 urgent: false,
                 source: SoftInterruptSource::User,
+                mode: jcode_agent_runtime::QueuedMessageMode::Steer,
                 client_id: None,
             });
             logging::info(&format!(

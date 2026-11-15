@@ -10,6 +10,8 @@ struct PersistedSoftInterrupt {
     images: Vec<(String, String)>,
     urgent: bool,
     source: PersistedSoftInterruptSource,
+    #[serde(default)]
+    after_yield: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_id: Option<String>,
 }
@@ -49,6 +51,7 @@ impl From<SoftInterruptMessage> for PersistedSoftInterrupt {
             images: value.images,
             urgent: value.urgent,
             source: value.source.into(),
+            after_yield: value.mode == jcode_agent_runtime::QueuedMessageMode::AfterYield,
             client_id: value.client_id,
         }
     }
@@ -61,6 +64,11 @@ impl From<PersistedSoftInterrupt> for SoftInterruptMessage {
             images: value.images,
             urgent: value.urgent,
             source: value.source.into(),
+            mode: if value.after_yield {
+                jcode_agent_runtime::QueuedMessageMode::AfterYield
+            } else {
+                jcode_agent_runtime::QueuedMessageMode::Steer
+            },
             client_id: value.client_id,
         }
     }
