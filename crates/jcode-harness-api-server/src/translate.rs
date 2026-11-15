@@ -2546,25 +2546,50 @@ impl BridgeState {
                 }
             }
             // A completed compaction is a session event, not the request reply.
+            // The divider body is formatted by the daemon with the same builder
+            // the stored-session renderer uses, so the live row and the row that
+            // comes back after a reload are identical. This bridge deliberately
+            // links no application foundation, so it must not re-derive the text.
             "compaction" => {
-                let before = event["pre_tokens"]
-                    .as_u64()
-                    .map_or_else(|| "unknown".to_string(), |n| n.to_string());
-                let after = event["post_tokens"]
-                    .as_u64()
-                    .map_or_else(|| "unknown".to_string(), |n| n.to_string());
-                vec![ServerFrame::event(ApiEvent::BackgroundProgress {
+                let content = event["divider"].as_str().map(str::to_string).unwrap_or_else(|| {
+                    let before = event["pre_tokens"]
+                        .as_u64()
+                        .map_or_else(|| "unknown".to_string(), |n| n.to_string());
+                    let after = event["post_tokens"]
+                        .as_u64()
+                        .map_or_else(|| "unknown".to_string(), |n| n.to_string());
+                    format!("compacted · {before}→{after}")
+                });
+                vec![ServerFrame::event(ApiEvent::CompactionDivider {
                     session_id: session(self),
-                    task_id: "context-compaction".into(),
-                    label: "Context compaction".into(),
-                    percent: Some(100.0),
-                    summary: match event["messages_compacted"].as_u64() {
-                        Some(count) => format!(
-                            "Completed: {before} → ~{after} tokens (estimated), {count} messages summarized"
-                        ),
-                        None => format!("Completed: {before} → ~{after} tokens (estimated)"),
-                    },
-                    done: true,
+                    content,
+                    running: false,
+                    method: event["method"].as_str().map(str::to_string),
+                    trigger: event["trigger"].as_str().map(str::to_string),
+                    pre_tokens: event["pre_tokens"].as_u64(),
+                    post_tokens: event["post_tokens"].as_u64(),
+                })]
+            }
+            // The summary is being generated. Clients show the running divider
+            // instead of leaving the transcript looking idle.
+            "compaction_started" => {
+                let trigger = event["trigger"].as_str().map(str::to_string);
+                let pre_tokens = event["pre_tokens"].as_u64().filter(|tokens| *tokens > 0);
+                let label = match (trigger.as_deref(), pre_tokens) {
+                    (Some(trigger), Some(tokens)) => {
+                        format!("compacting… · {trigger} · {tokens} tokens")
+                    }
+                    (Some(trigger), None) => format!("compacting… · {trigger}"),
+                    (None, _) => "compacting…".to_string(),
+                };
+                vec![ServerFrame::event(ApiEvent::CompactionDivider {
+                    session_id: session(self),
+                    content: label,
+                    running: true,
+                    method: None,
+                    trigger,
+                    pre_tokens,
+                    post_tokens: None,
                 })]
             }
             // Compaction is scheduled asynchronously. Refusal is a request

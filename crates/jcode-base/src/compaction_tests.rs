@@ -2014,3 +2014,143 @@ async fn cache_expiry_snapcompact_runs_on_first_turn_after_ttl_once() {
     assert!(!m.plan_cache_expiry_compaction(&msgs, t1 + Duration::from_secs(10), Some(300)));
     assert!(m.plan_cache_expiry_compaction(&msgs, t1 + Duration::from_secs(300), Some(300)));
 }
+
+/// Idle pre-compaction: a waiting session folds its context early instead of
+/// waiting for the next user message to cross the reactive threshold.
+///
+/// The window is only worth taking when nobody can send a turn that would have
+/// done it anyway, so the trigger is (a) the configured fraction of the resolved
+/// per-model threshold and (b) a cold prompt cache.
+struct IdleCase {
+    manager: CompactionManager,
+    messages: Vec<Message>,
+}
+
+/// Manager whose resolved reactive threshold is 800 tokens (1000-token window at
+/// the default 0.8, capped by the lower 400k token alternative), so idle
+/// pre-compaction arms at 760 tokens.
+fn idle_case(payload_repeat: usize) -> IdleCase {
+    let mut manager = CompactionManager::new().with_budget(1_000);
+    let mut messages = Vec::new();
+    for i in 0..14 {
+        messages.push(make_text_message(
+            Role::User,
+            &format!("turn {i} {}", "payload ".repeat(payload_repeat)),
+        ));
+        manager.notify_message_added();
+    }
+    IdleCase { manager, messages }
+}
+
+#[test]
+fn idle_precompaction_arms_at_the_configured_ratio_of_the_threshold() {
+    let case = idle_case(80);
+    let threshold = case
+        .manager
+        .resolved_compaction_threshold_tokens()
+        .expect("reactive threshold is known for a 1k window");
+    let tokens = case.manager.effective_token_count_with(&case.messages);
+    let target = case
+        .manager
+        .idle_precompaction_tokens()
+        .expect("idle pre-compaction is on by default");
+    assert_eq!(
+        target,
+        threshold * 9_500 / 10_000,
+        "ratio must be 0.95 of {threshold}"
+    );
+    assert!(
+        tokens >= target,
+        "fixture must sit above the idle target: tokens={tokens} target={target}"
+    );
+    let now = Instant::now();
+    assert!(case.manager.plan_idle_precompaction_with(&case.messages, now, None));
+}
+
+#[test]
+fn idle_precompaction_stays_off_below_the_ratio() {
+    // A tiny transcript cannot be below 0.95 of the threshold and still have a
+    // summarizable tail, so assert the arithmetic directly: one token under the
+    // target must not arm, one token over must.
+    let case = idle_case(80);
+    let target = case.manager.idle_precompaction_tokens().unwrap();
+    let tokens = case.manager.effective_token_count_with(&case.messages) as u64;
+    assert!(tokens >= target as u64);
+
+    let mut short = idle_case(0);
+    short.manager.update_observed_input_tokens(1);
+    assert!(
+        (short.manager.effective_token_count_with(&short.messages) as u64) < target as u64,
+        "small transcript must be under the idle target"
+    );
+    assert!(
+        !short
+            .manager
+            .plan_idle_precompaction_with(&short.messages, Instant::now(), None),
+        "idle pre-compaction must not fire under the ratio"
+    );
+}
+
+#[test]
+fn idle_precompaction_respects_the_warm_cache_guard() {
+    let case = idle_case(80);
+    let mut manager = case.manager;
+    let messages = case.messages;
+    let now = Instant::now();
+    manager.note_provider_response(now, Some(0));
+
+    assert!(
+        !manager.plan_idle_precompaction_with(&messages, now + Duration::from_secs(30), Some(300)),
+        "a warm prompt cache must block idle pre-compaction: the prefix is about to be reused"
+    );
+    assert!(
+        manager.plan_idle_precompaction_with(&messages, now + Duration::from_secs(301), Some(300)),
+        "once the cache TTL lapses (a long wait) idle pre-compaction arms"
+    );
+    assert!(
+        manager.plan_idle_precompaction_with(&messages, now + Duration::from_secs(30), None),
+        "a provider with no cache estimate loses nothing by folding now"
+    );
+}
+
+#[test]
+fn idle_precompaction_can_be_disabled() {
+    let case = idle_case(80);
+    let mut manager = case.manager;
+    manager.compaction_config.idle_precompact = false;
+    assert!(manager.idle_precompaction_tokens().is_none());
+    assert!(!manager.plan_idle_precompaction_with(&case.messages, Instant::now(), None));
+}
+
+/// Restoring history suppresses compaction so the restore itself cannot trigger
+/// a fold. Idle pre-compaction must ignore that flag: its whole purpose is to run
+/// before the next user message, so waiting for one would defeat it.
+#[test]
+fn idle_precompaction_ignores_the_restore_suppression() {
+    let case = idle_case(80);
+    let mut manager = case.manager;
+    manager.suppress_compaction_until_new_message = true;
+    assert!(
+        manager.plan_idle_precompaction_with(&case.messages, Instant::now(), None),
+        "a resumed, waiting, nearly-full session must still fold on the idle tick"
+    );
+}
+
+/// The token target, not the suppression flag, is what stops a second idle fold:
+/// once the transcript is compacted it sits far below the ratio.
+#[test]
+fn idle_precompaction_stops_once_the_fold_drops_the_context() {
+    let case = idle_case(80);
+    let mut manager = case.manager;
+    // A fold that keeps only the verbatim tail leaves a small transcript.
+    let folded = vec![make_text_message(Role::User, "small tail")];
+    manager.seed_restored_messages_with(&folded);
+    assert!(
+        manager.idle_precompaction_tokens().is_some(),
+        "the feature stays armed"
+    );
+    assert!(
+        !manager.plan_idle_precompaction_with(&folded, Instant::now(), None),
+        "a compacted transcript must not compact again"
+    );
+}

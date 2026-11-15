@@ -4,6 +4,14 @@ use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
+/// Collapse state for a completed-compaction divider, held in `title` so it
+/// survives transcript rebuilds without a side table keyed by row index.
+pub const COMPACTION_COLLAPSED_TITLE: &str = "compaction:collapsed";
+/// Expanded state for a completed-compaction divider.
+pub const COMPACTION_EXPANDED_TITLE: &str = "compaction:expanded";
+/// Marks the transient divider shown while a compaction is running.
+pub const COMPACTION_RUNNING_TITLE: &str = "compaction:running";
+
 /// A message in the conversation for TUI display.
 #[derive(Clone, Debug)]
 pub struct DisplayMessage {
@@ -92,6 +100,66 @@ impl DisplayMessage {
             title: Some("Todos".to_string()),
             tool_data: None,
         }
+    }
+
+    /// Create a completed-compaction divider row.
+    ///
+    /// `content` is the shared divider body (`label` + blank line + detail) the
+    /// server also renders into stored history. The title carries the collapse
+    /// state so a reload cannot lose it: `compaction:collapsed` by default.
+    pub fn compaction(content: impl Into<String>) -> Self {
+        Self {
+            role: "compaction".to_string(),
+            content: content.into(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: Some(COMPACTION_COLLAPSED_TITLE.to_string()),
+            tool_data: None,
+        }
+    }
+
+    /// Create the running divider shown while a compaction summarizes.
+    pub fn compaction_running(content: impl Into<String>) -> Self {
+        Self {
+            role: "compaction".to_string(),
+            content: content.into(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: Some(COMPACTION_RUNNING_TITLE.to_string()),
+            tool_data: None,
+        }
+    }
+
+    /// Whether this row is a compaction divider rather than a chat message.
+    pub fn is_compaction(&self) -> bool {
+        self.role == "compaction"
+    }
+
+    /// Whether the divider is expanded to show its detail.
+    pub fn compaction_is_expanded(&self) -> bool {
+        self.is_compaction()
+            && self.title.as_deref() == Some(COMPACTION_EXPANDED_TITLE)
+    }
+
+    /// Whether this divider represents a compaction still in progress.
+    pub fn compaction_is_running(&self) -> bool {
+        self.is_compaction() && self.title.as_deref() == Some(COMPACTION_RUNNING_TITLE)
+    }
+
+    /// Flip a completion divider between collapsed and expanded.
+    pub fn toggle_compaction_expanded(&mut self) -> bool {
+        if !self.is_compaction() || self.compaction_is_running() {
+            return false;
+        }
+        self.title = Some(
+            if self.compaction_is_expanded() {
+                COMPACTION_COLLAPSED_TITLE
+            } else {
+                COMPACTION_EXPANDED_TITLE
+            }
+            .to_string(),
+        );
+        true
     }
 
     /// Create a memory injection message (bordered box display).
@@ -228,12 +296,16 @@ impl DisplayMessage {
                     .or_else(|| Self::tool_duration_from_output(&item.content))
             })
             .flatten();
+        // Stored compaction rows carry no title; the collapse state lives in the
+        // title, so rehydrated dividers start collapsed like live ones.
+        let title = (item.role == "compaction")
+            .then(|| COMPACTION_COLLAPSED_TITLE.to_string());
         Self {
             role: item.role,
             content: item.content,
             tool_calls: item.tool_calls,
             duration_secs,
-            title: None,
+            title,
             tool_data: item.tool_data,
         }
     }

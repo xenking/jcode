@@ -303,6 +303,7 @@ fn test_handle_server_event_compaction_shows_completion_message_in_remote_mode()
     app.handle_server_event(
         crate::protocol::ServerEvent::Compaction {
             trigger: "semantic".to_string(),
+            method: Some("summary".to_string()),
             pre_tokens: Some(12_345),
             post_tokens: Some(4_321),
             tokens_saved: Some(8_024),
@@ -311,6 +312,9 @@ fn test_handle_server_event_compaction_shows_completion_message_in_remote_mode()
             messages_compacted: Some(24),
             summary_chars: Some(987),
             active_messages: Some(10),
+            divider: Some(
+                "compacted · summary · 12k→4k · 1.5s\n\ntrigger: semantic".to_string(),
+            ),
         },
         &mut remote,
     );
@@ -320,15 +324,21 @@ fn test_handle_server_event_compaction_shows_completion_message_in_remote_mode()
     assert!(!app.context_warning_shown);
     assert_eq!(app.status_notice(), Some("Context compacted".to_string()));
 
+    // The compaction lands as a transcript divider, not a prose notice, and it
+    // uses the body the daemon formatted so a reload renders the same row.
     let last = app
         .display_messages()
         .last()
-        .expect("missing compaction message");
-    assert_eq!(last.role, "system");
+        .expect("missing compaction divider");
+    assert_eq!(last.role, "compaction");
+    assert!(last.compaction_is_expanded() || !last.compaction_is_running());
+    let mut divider = last.clone();
     assert_eq!(
-        last.content,
-        "📦 Compacted (semantic): ~12,345 tokens (6.2%) → ~4,321 tokens (2.2%)"
+        divider.content.lines().next().unwrap_or_default(),
+        "compacted · summary · 12k→4k · 1.5s"
     );
+    assert!(divider.toggle_compaction_expanded());
+    assert!(divider.compaction_is_expanded());
 }
 
 #[test]

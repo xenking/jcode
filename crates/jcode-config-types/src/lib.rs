@@ -381,6 +381,17 @@ pub struct CompactionConfig {
     /// for testing; a value below the real TTL compacts a still-warm cache.
     pub cache_ttl_secs: u64,
 
+    /// Compact opportunistically while the session is idle but still waiting on
+    /// something (swarm members, a `bg` wait, an `await_members` dependency)
+    /// instead of waiting for the next user message to hit the reactive
+    /// threshold. Requires `idle_precompact_ratio` of the resolved per-model
+    /// compaction threshold and a cold prompt cache (a warm cache means a turn
+    /// was just served, so the prefix is about to be reused).
+    pub idle_precompact: bool,
+    /// Fraction of the resolved compaction threshold that arms idle
+    /// pre-compaction. 0.95 means a 400k threshold compacts at 380k.
+    pub idle_precompact_ratio: f32,
+
     /// Per-provider overrides (`[compaction.providers.openai]`). Merged over
     /// the global section; model overrides win over provider overrides.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -422,6 +433,8 @@ pub struct CompactionOverride {
     pub snapcompact_cache_expiry: Option<bool>,
     pub cache_expiry_threshold_tokens: Option<usize>,
     pub cache_ttl_secs: Option<u64>,
+    pub idle_precompact: Option<bool>,
+    pub idle_precompact_ratio: Option<f32>,
 }
 
 impl CompactionOverride {
@@ -454,7 +467,9 @@ impl CompactionOverride {
             shake_cache_expiry,
             snapcompact_cache_expiry,
             cache_expiry_threshold_tokens,
-            cache_ttl_secs
+            cache_ttl_secs,
+            idle_precompact,
+            idle_precompact_ratio
         );
     }
 }
@@ -546,6 +561,8 @@ impl Default for CompactionConfig {
             snapcompact_cache_expiry: false,
             cache_expiry_threshold_tokens: 200_000,
             cache_ttl_secs: 0,
+            idle_precompact: true,
+            idle_precompact_ratio: 0.95,
             providers: Default::default(),
             models: Default::default(),
         }

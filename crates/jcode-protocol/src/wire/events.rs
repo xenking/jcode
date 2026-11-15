@@ -522,6 +522,10 @@ pub enum ServerEvent {
     Compaction {
         /// What triggered it: "background", "hard_compact", "auto_recovery"
         trigger: String,
+        /// What replaced the folded history: `summary`, `snapcompact`, `native`,
+        /// or `drop` (emergency hard compaction). Absent from older daemons.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        method: Option<String>,
         /// Token count before compaction
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pre_tokens: Option<u64>,
@@ -546,6 +550,27 @@ pub enum ServerEvent {
         /// Count of recent messages still kept verbatim after compaction
         #[serde(default, skip_serializing_if = "Option::is_none")]
         active_messages: Option<usize>,
+        /// Ready-to-render transcript divider body (`label`, blank line, detail).
+        ///
+        /// Formatted by the daemon so every client, including the harness bridge
+        /// that has no application foundation linked in, draws the exact same
+        /// row as the one stored in history. Absent from older daemons.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        divider: Option<String>,
+    },
+
+    /// Background compaction started summarizing.
+    ///
+    /// Carries no result: clients render a running divider from it and replace
+    /// it when the matching [`Self::Compaction`] arrives.
+    #[serde(rename = "compaction_started")]
+    CompactionStarted {
+        /// Compaction trigger label, e.g. `reactive` or `idle_precompact`
+        #[serde(default)]
+        trigger: String,
+        /// Estimated context tokens when the summary started
+        #[serde(default)]
+        pre_tokens: u64,
     },
 
     /// Message/turn completed

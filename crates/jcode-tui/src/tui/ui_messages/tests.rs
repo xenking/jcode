@@ -3746,3 +3746,90 @@ fn provider_card_status_uses_shared_limit_colors() {
         assert!(header.contains("9% left"), "{header}");
     }
 }
+
+fn compaction_divider_message(expanded: bool) -> DisplayMessage {
+    let mut message = DisplayMessage::compaction(
+        "compacted · snapcompact · 180k→26k · 12s\n\n\
+         trigger: reactive\n\
+         messages summarized: 84\n\
+         The user asked for a compaction divider.",
+    );
+    if expanded {
+        message.toggle_compaction_expanded();
+    }
+    message
+}
+
+#[test]
+fn compaction_divider_is_one_centered_rule_line_when_collapsed() {
+    let message = compaction_divider_message(false);
+    let lines = render_compaction_divider(&message, 100);
+    assert_eq!(lines.len(), 1, "a collapsed divider is one line");
+    let text = lines[0].to_string();
+    assert!(
+        text.contains("compacted · snapcompact · 180k→26k · 12s"),
+        "the label must name method, tokens and duration: {text}"
+    );
+    assert!(text.starts_with('─'), "the rule starts at the left edge");
+    assert!(text.trim_end().ends_with('─'), "and runs to the right edge");
+    assert!(
+        !text.contains("trigger: reactive"),
+        "the detail stays hidden until expanded"
+    );
+    let label_at = text.find("compacted").expect("label present");
+    let _ = label_at;
+    // Three spans: left rule, ` label `, right rule. Centering means the two
+    // rule runs differ by at most one cell.
+    let spans = &lines[0].spans;
+    assert_eq!(spans.len(), 3, "rule, label, rule");
+    let left = spans[0].content.chars().count();
+    let right = spans[2].content.chars().count();
+    assert!(
+        left.abs_diff(right) <= 1,
+        "the label must be centered in the rule: left={left} right={right}"
+    );
+}
+
+#[test]
+fn compaction_divider_fits_every_width_without_wrapping() {
+    for width in [12u16, 20, 40, 80, 200] {
+        let lines = render_compaction_divider(&compaction_divider_message(false), width);
+        assert_eq!(lines.len(), 1, "width {width} must stay one line");
+        assert!(
+            lines[0].width() <= width as usize,
+            "width {width} must not overflow: {}",
+            lines[0].width()
+        );
+    }
+}
+
+#[test]
+fn compaction_divider_shows_the_summary_and_elided_details_when_expanded() {
+    let message = compaction_divider_message(true);
+    let lines = render_compaction_divider(&message, 100);
+    assert!(lines.len() > 1, "expanding reveals the detail rows");
+    let body: String = lines
+        .iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(body.contains("trigger: reactive"), "{body}");
+    assert!(body.contains("messages summarized: 84"), "{body}");
+    assert!(body.contains("The user asked for a compaction divider."), "{body}");
+}
+
+#[test]
+fn compaction_running_divider_says_compacting_without_a_badge() {
+    let message = DisplayMessage::compaction_running("compacting… · reactive · 476000 tokens");
+    let lines = render_compaction_divider(&message, 100);
+    assert_eq!(lines.len(), 1);
+    let text = lines[0].to_string();
+    assert!(text.contains("compacting…"), "{text}");
+    assert!(
+        !text.contains(SWARM_EXPAND_BADGE),
+        "a running compaction has nothing to expand yet: {text}"
+    );
+    // A running divider cannot be expanded, so a click leaves it alone.
+    let mut message = message;
+    assert!(!message.toggle_compaction_expanded());
+}

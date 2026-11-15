@@ -3353,6 +3353,7 @@ fn handle_server_event_inner(
         }
         ServerEvent::Compaction {
             trigger,
+            method,
             pre_tokens,
             post_tokens,
             tokens_saved,
@@ -3361,18 +3362,27 @@ fn handle_server_event_inner(
             messages_compacted,
             summary_chars,
             active_messages,
+            divider,
         } => {
-            app.handle_compaction_event(crate::compaction::CompactionEvent {
-                trigger,
-                pre_tokens,
-                post_tokens,
-                tokens_saved,
-                duration_ms,
-                messages_dropped,
-                messages_compacted,
-                summary_chars,
-                active_messages,
-            });
+            app.handle_compaction_event(
+                crate::compaction::CompactionEvent {
+                    trigger,
+                    method,
+                    pre_tokens,
+                    post_tokens,
+                    tokens_saved,
+                    duration_ms,
+                    messages_dropped,
+                    messages_compacted,
+                    summary_chars,
+                    active_messages,
+                },
+                divider,
+            );
+            false
+        }
+        ServerEvent::CompactionStarted { trigger, pre_tokens } => {
+            app.show_compaction_running(trigger, pre_tokens);
             false
         }
         ServerEvent::SplitResponse {

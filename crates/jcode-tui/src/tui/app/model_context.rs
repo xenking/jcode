@@ -1706,7 +1706,7 @@ impl App {
                 let provider_messages = self.materialized_provider_messages();
                 if let Some(event) = manager.poll_compaction_event_with(&provider_messages) {
                     self.sync_session_compaction_state_from_manager(&manager);
-                    self.handle_compaction_event(event);
+                    self.handle_compaction_event(event, None);
                     true
                 } else {
                     false

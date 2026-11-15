@@ -238,6 +238,36 @@ impl App {
         self.toggle_swarm_message_expand(msg_idx)
     }
 
+    /// Toggle a compaction divider at transcript index `msg_idx`.
+    ///
+    /// The divider is a single rule line until it is opened; opening it reveals
+    /// the summary and the elided-message detail. Same interaction as the swarm
+    /// cards: click the row.
+    pub(super) fn toggle_compaction_message_expand(&mut self, msg_idx: usize) -> bool {
+        let Some(message) = self.display_messages.get_mut(msg_idx) else {
+            return false;
+        };
+        if !message.toggle_compaction_expanded() {
+            return false;
+        }
+        let expanded = message.compaction_is_expanded();
+        self.set_status_notice(if expanded {
+            "Compaction details expanded"
+        } else {
+            "Compaction details collapsed"
+        });
+        true
+    }
+
+    /// Toggle the compaction divider under a click. Returns `false` when the
+    /// click landed on something else.
+    pub(super) fn try_toggle_compaction_expand_at(&mut self, column: u16, row: u16) -> bool {
+        let Some(msg_idx) = super::super::ui::chat_message_index_from_screen(column, row) else {
+            return false;
+        };
+        self.toggle_compaction_message_expand(msg_idx)
+    }
+
     /// Toggle the collapsed/expanded state of the swarm notification at
     /// transcript index `msg_idx`. Returns `true` when the message was a
     /// collapsible swarm card and its state changed.
@@ -1732,6 +1762,12 @@ impl App {
             && self.try_cycle_image_expand_at(mouse.column, mouse.row)
         {
             finish_mouse_event!(false, "cycle_image_expand");
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+            && self.try_toggle_compaction_expand_at(mouse.column, mouse.row)
+        {
+            finish_mouse_event!(false, "toggle_compaction_expand");
         }
 
         if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))

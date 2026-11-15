@@ -260,6 +260,45 @@ pub struct CompactionManager {
 /// Trigger label for snapcompact started by an expired prompt cache.
 pub const CACHE_EXPIRY_COMPACTION_TRIGGER: &str = "snapcompact_cache_expiry";
 
+/// Trigger label for compaction started while the session was idle but still
+/// waiting (swarm members, `bg` wait, `await_members` dependency).
+pub const IDLE_PRECOMPACTION_TRIGGER: &str = "idle_precompact";
+
+/// Protocol event for a completed compaction.
+///
+/// The divider body is formatted here, next to the compaction state that knows
+/// the method and token counts, so every client and every stored row renders the
+/// same label; the harness bridge has no application foundation linked in and
+/// must therefore not re-derive it.
+pub fn compaction_server_event(event: &CompactionEvent) -> crate::protocol::ServerEvent {
+    let idle = event.trigger == IDLE_PRECOMPACTION_TRIGGER;
+    let divider = crate::session::compaction_divider_content(
+        event.method.as_deref(),
+        Some(event.trigger.as_str()),
+        event.pre_tokens,
+        event.post_tokens,
+        event.duration_ms,
+        event.messages_compacted,
+        event.messages_dropped,
+        event.active_messages,
+        None,
+        idle,
+    );
+    crate::protocol::ServerEvent::Compaction {
+        trigger: event.trigger.clone(),
+        method: event.method.clone(),
+        pre_tokens: event.pre_tokens,
+        post_tokens: event.post_tokens,
+        tokens_saved: event.tokens_saved,
+        duration_ms: event.duration_ms,
+        messages_dropped: event.messages_dropped,
+        messages_compacted: event.messages_compacted,
+        summary_chars: event.summary_chars,
+        active_messages: event.active_messages,
+        divider: Some(divider),
+    }
+}
+
 /// Token count at which reactive compaction fires for `model` with a
 /// `context_window`-token window, after per-provider/per-model overrides.
 /// Context indicators show this as the denominator (e.g. `233k/500k`).
@@ -277,7 +316,22 @@ fn threshold_tokens_for(
     cfg: &crate::config::CompactionConfig,
     context_window: usize,
 ) -> Option<usize> {
-    if context_window == 0 || cfg.mode != crate::config::CompactionMode::Reactive {
+    if cfg.mode != crate::config::CompactionMode::Reactive {
+        return None;
+    }
+    threshold_tokens_after_overrides(cfg, context_window)
+}
+
+/// The reactive trigger arithmetic, independent of the configured mode.
+///
+/// Idle pre-compaction asks "how full is full enough" even in proactive or
+/// semantic mode, so the per-model threshold must be available without the
+/// reactive-only gate.
+fn threshold_tokens_after_overrides(
+    cfg: &crate::config::CompactionConfig,
+    context_window: usize,
+) -> Option<usize> {
+    if context_window == 0 {
         return None;
     }
     let budget = if cfg.max_context_tokens > 0 {
@@ -1311,6 +1365,92 @@ impl CompactionManager {
         self.pending_task.is_some()
     }
 
+    /// Resolved reactive trigger in tokens for the active model, regardless of
+    /// the configured compaction mode.
+    pub fn resolved_compaction_threshold_tokens(&self) -> Option<usize> {
+        threshold_tokens_after_overrides(&self.compaction_config, self.model_token_budget)
+    }
+
+    /// Token count at which idle pre-compaction fires: `idle_precompact_ratio`
+    /// of the resolved per-model compaction threshold. `None` when the feature
+    /// is disabled or the model window is unknown.
+    ///
+    /// The ratio is applied in basis points so the trigger is an exact integer:
+    /// a threshold of 400_000 at 0.95 arms at 380_000, not 379_999.
+    pub fn idle_precompaction_tokens(&self) -> Option<usize> {
+        let cfg = &self.compaction_config;
+        if !cfg.idle_precompact {
+            return None;
+        }
+        let basis_points = (f64::from(cfg.idle_precompact_ratio.clamp(0.0, 1.0)) * 10_000.0)
+            .round() as u128;
+        self.resolved_compaction_threshold_tokens()
+            .map(|threshold| (threshold as u128 * basis_points / 10_000) as usize)
+    }
+
+    /// Whether the prompt cache is still warm enough that rewriting the prefix
+    /// would throw away a cache we are about to reuse.
+    ///
+    /// Idle pre-compaction is the one trigger that runs while the agent has
+    /// nothing else to do, so it must not pay the cache loss a live turn would
+    /// avoid. It waits the TTL out instead: a cold cache (a long wait) or a
+    /// provider without a cache estimate (nothing to lose) both arm it.
+    fn prompt_cache_is_warm(&self, now: Instant, cache_ttl_secs: Option<u64>) -> bool {
+        let Some(ttl) = cache_ttl_secs.filter(|ttl| *ttl > 0) else {
+            return false;
+        };
+        let Some(last) = self.last_response_at else {
+            return false;
+        };
+        now.saturating_duration_since(last) < Duration::from_secs(ttl)
+    }
+
+    /// Whether an idle-waiting session should compact right now.
+    ///
+    /// `waiting` is the caller's verdict that the session is parked on
+    /// something external (a swarm member, a background task, an await
+    /// dependency), which is the only window where compacting early costs
+    /// nothing: the user cannot send a message that would have done it anyway.
+    pub fn plan_idle_precompaction_with(
+        &self,
+        all_messages: &[Message],
+        now: Instant,
+        cache_ttl_secs: Option<u64>,
+    ) -> bool {
+        // `suppress_compaction_until_new_message` is deliberately NOT consulted.
+        // It exists so restoring history, or finishing a compaction, cannot
+        // re-trigger compaction on the same content. Idle pre-compaction is the
+        // one trigger whose whole purpose is to run before the next message, so
+        // waiting for that message would defeat it. The token target below is the
+        // real guard: once a fold lands, the transcript drops under the ratio and
+        // this returns false until the context fills again.
+        if self.pending_task.is_some() {
+            return false;
+        }
+        let Some(target) = self.idle_precompaction_tokens() else {
+            return false;
+        };
+        if self.prompt_cache_is_warm(now, cache_ttl_secs) {
+            return false;
+        }
+        self.active_messages(all_messages).len() > RECENT_TURNS_TO_KEEP
+            && self.effective_token_count_with(all_messages) >= target
+    }
+
+    /// Start the idle pre-compaction. Returns whether a background task started.
+    pub fn start_idle_precompaction(
+        &mut self,
+        all_messages: &[Message],
+        provider: Arc<dyn Provider>,
+    ) -> bool {
+        self.start_background_compaction(
+            all_messages,
+            provider,
+            IDLE_PRECOMPACTION_TRIGGER.to_string(),
+        );
+        self.pending_task.is_some()
+    }
+
     fn start_background_compaction(
         &mut self,
         all_messages: &[Message],
@@ -1356,6 +1496,14 @@ impl CompactionManager {
         self.pending_cutoff = cutoff;
         self.pending_trigger = Some(mode_label.clone());
         self.last_compaction_error = None;
+
+        // Clients render a running divider from this event and replace it with
+        // the persisted completion row, so the transcript never looks idle
+        // while a summary is being generated.
+        crate::bus::Bus::global().publish(crate::bus::BusEvent::CompactionStarted {
+            trigger: mode_label.clone(),
+            pre_tokens: estimated_tokens as u64,
+        });
 
         // Spawn background task that notifies via Bus when done
         self.pending_task = crate::runtime_activity::spawn(async move {
@@ -1700,6 +1848,16 @@ impl CompactionManager {
                     covers_up_to_turn: result.covers_up_to_turn,
                     original_turn_count: self.pending_cutoff,
                 };
+                // The artifact kind is what a reader of the transcript divider
+                // needs: a folded summary, a bitmap snapcompact archive, or a
+                // provider-native compaction item.
+                let method = if summary.snapcompact.is_some() {
+                    "snapcompact"
+                } else if summary.openai_encrypted_content.is_some() {
+                    "native"
+                } else {
+                    "summary"
+                };
 
                 // Advance the compacted count — these messages are now summarized
                 self.compacted_count = self.compacted_count.saturating_add(self.pending_cutoff);
@@ -1716,6 +1874,7 @@ impl CompactionManager {
                 let post_tokens = self.effective_token_count_with(all_messages) as u64;
                 self.last_compaction = Some(CompactionEvent {
                     trigger: trigger.clone(),
+                    method: Some(method.to_string()),
                     pre_tokens: Some(pre_tokens),
                     post_tokens: Some(post_tokens),
                     tokens_saved: Some(pre_tokens.saturating_sub(post_tokens)),
@@ -2067,6 +2226,7 @@ impl CompactionManager {
         let post_tokens = self.effective_token_count_with(all_messages) as u64;
         self.last_compaction = Some(CompactionEvent {
             trigger: "hard_compact".to_string(),
+            method: Some("drop".to_string()),
             pre_tokens: Some(pre_tokens),
             post_tokens: Some(post_tokens),
             tokens_saved: Some(pre_tokens.saturating_sub(post_tokens)),

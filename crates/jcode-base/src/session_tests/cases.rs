@@ -3316,3 +3316,153 @@ mod provider_identity;
 
 #[path = "memory_profile_tests.rs"]
 mod memory_profile;
+
+/// A compaction divider is a stored transcript row, not a transient client
+/// notice: it must render from the session file alone after a reload.
+#[test]
+fn compaction_divider_renders_from_a_stored_session() {
+    let mut session = Session::create_with_id(
+        "session_compaction_divider_render".to_string(),
+        None,
+        Some("Divider".to_string()),
+    );
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "hello".into(),
+            cache_control: None,
+        }],
+    );
+    session.record_compaction_event(
+        &crate::compaction::CompactionEvent {
+            trigger: "reactive".to_string(),
+            method: Some("snapcompact".to_string()),
+            pre_tokens: Some(180_000),
+            post_tokens: Some(26_000),
+            tokens_saved: Some(154_000),
+            duration_ms: Some(12_300),
+            messages_dropped: None,
+            messages_compacted: Some(84),
+            summary_chars: Some(1_200),
+            active_messages: Some(12),
+        },
+        Some("snapcompact"),
+        Some("## Summary\nThe user asked for a compaction divider."),
+    );
+
+    let rows = render_messages(&session);
+    let divider = rows
+        .iter()
+        .find(|row| row.role == "compaction")
+        .expect("the stored compaction must render a divider row");
+    let (label, detail) = divider
+        .content
+        .split_once("\n\n")
+        .expect("a divider body is label plus detail");
+    assert_eq!(label, "compacted · snapcompact · 180k→26k · 12s");
+    assert!(
+        detail.contains("messages summarized: 84"),
+        "detail must name the elided messages: {detail}"
+    );
+    assert!(
+        detail.contains("The user asked for a compaction divider."),
+        "detail must carry the summary: {detail}"
+    );
+
+    // Reload from the stored JSON, exactly as Desktop's provisional history and
+    // a resumed TUI do, and the divider must still be there.
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "jcode-compaction-divider-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&tmp_dir).expect("temp dir");
+    let path = tmp_dir.join("session.json");
+    crate::storage::write_json_fast(&path, &session).expect("write stored session");
+    let reloaded = Session::load_from_path(&path).expect("reload stored session");
+    std::fs::remove_dir_all(&tmp_dir).ok();
+
+    let rows = render_messages(&reloaded);
+    let divider = rows
+        .iter()
+        .find(|row| row.role == "compaction")
+        .expect("the divider must survive a reload");
+    assert_eq!(
+        divider.content.split_once("\n\n").map(|(label, _)| label),
+        Some("compacted · snapcompact · 180k→26k · 12s")
+    );
+}
+
+/// An idle pre-compaction says so, so the reader knows why the fold happened
+/// while nothing was running.
+#[test]
+fn idle_compaction_divider_says_it_compacted_while_waiting() {
+    let mut session = Session::create_with_id(
+        "session_compaction_divider_idle".to_string(),
+        None,
+        None,
+    );
+    session.record_compaction_event(
+        &crate::compaction::CompactionEvent {
+            trigger: crate::compaction::IDLE_PRECOMPACTION_TRIGGER.to_string(),
+            method: Some("summary".to_string()),
+            pre_tokens: Some(476_000),
+            post_tokens: Some(58_400),
+            tokens_saved: Some(417_600),
+            duration_ms: Some(48_000),
+            messages_dropped: None,
+            messages_compacted: Some(120),
+            summary_chars: Some(900),
+            active_messages: Some(10),
+        },
+        Some("summary"),
+        None,
+    );
+
+    let rows = render_messages(&session);
+    let divider = rows
+        .iter()
+        .find(|row| row.role == "compaction")
+        .expect("divider row");
+    let label = divider.content.lines().next().unwrap_or_default();
+    assert_eq!(label, "compacted while waiting · summary · 476k→58k · 48s");
+}
+
+/// Emergency hard compaction drops messages instead of summarizing; the label
+/// must not claim a summary happened.
+#[test]
+fn hard_compaction_divider_labels_the_drop() {
+    let mut session = Session::create_with_id(
+        "session_compaction_divider_drop".to_string(),
+        None,
+        None,
+    );
+    session.record_compaction_event(
+        &crate::compaction::CompactionEvent {
+            trigger: "hard_compact".to_string(),
+            method: Some("drop".to_string()),
+            pre_tokens: Some(500_000),
+            post_tokens: Some(120_000),
+            tokens_saved: Some(380_000),
+            duration_ms: Some(0),
+            messages_dropped: Some(210),
+            messages_compacted: Some(210),
+            summary_chars: None,
+            active_messages: Some(4),
+        },
+        Some("drop"),
+        None,
+    );
+    let rows = render_messages(&session);
+    let divider = rows
+        .iter()
+        .find(|row| row.role == "compaction")
+        .expect("divider row");
+    assert_eq!(
+        divider.content.lines().next().unwrap_or_default(),
+        "compacted · drop · 500k→120k · 0.0s"
+    );
+    assert!(divider.content.contains("messages dropped: 210"));
+}

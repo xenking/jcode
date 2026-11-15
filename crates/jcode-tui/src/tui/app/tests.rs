@@ -788,8 +788,10 @@ fn compaction_invalidates_kv_cache_baseline_and_stale_completion_cannot_restore_
     // finished. Its completion must not re-establish a pre-compaction baseline.
     app.begin_remote_kv_cache_request(old_signature);
     let old_generation = app.kv_cache.cache_generation;
-    app.handle_compaction_event(crate::compaction::CompactionEvent {
+    app.handle_compaction_event(
+        crate::compaction::CompactionEvent {
         trigger: "semantic".to_string(),
+        method: Some("snapcompact".to_string()),
         pre_tokens: Some(80_169),
         post_tokens: Some(27_641),
         tokens_saved: Some(52_528),
@@ -798,7 +800,9 @@ fn compaction_invalidates_kv_cache_baseline_and_stale_completion_cannot_restore_
         messages_compacted: Some(173),
         summary_chars: Some(10_000),
         active_messages: Some(3),
-    });
+        },
+        None,
+    );
     assert_ne!(app.kv_cache.cache_generation, old_generation);
     assert!(app.kv_cache.kv_cache_baseline.is_none());
 

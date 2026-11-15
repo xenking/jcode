@@ -161,17 +161,54 @@ fn server_reload_starting() -> bool {
 }
 
 fn compaction_server_event(event: crate::compaction::CompactionEvent) -> ServerEvent {
-    ServerEvent::Compaction {
-        trigger: event.trigger,
-        pre_tokens: event.pre_tokens,
-        post_tokens: event.post_tokens,
-        tokens_saved: event.tokens_saved,
-        duration_ms: event.duration_ms,
-        messages_dropped: event.messages_dropped,
-        messages_compacted: event.messages_compacted,
-        summary_chars: event.summary_chars,
-        active_messages: event.active_messages,
+    crate::compaction::compaction_server_event(&event)
+}
+
+/// How often a waiting session re-checks its context level for compaction.
+const IDLE_PRECOMPACT_TICK: Duration = Duration::from_secs(15);
+
+/// Whether the session is idle but still waiting on work of its own.
+///
+/// This is the only window where compacting before the next user message costs
+/// nothing: nobody is about to send a turn that would have triggered it anyway.
+/// The three cases are the ones that produce a long park: a coordinator awaiting
+/// swarm members, an `await_members` dependency, and a `bg` wait.
+async fn session_is_idle_waiting(session_id: &str) -> bool {
+    if !super::pending_await_members_for_session(session_id).is_empty() {
+        return true;
     }
+    if !super::lane_dispatch::running_members_for(session_id)
+        .await
+        .is_empty()
+    {
+        return true;
+    }
+    crate::background::global()
+        .list()
+        .await
+        .into_iter()
+        .any(|task| {
+            task.session_id == session_id
+                && matches!(task.status, crate::bus::BackgroundTaskStatus::Running)
+        })
+}
+
+/// Compact opportunistically while a session is parked on external work.
+async fn maybe_idle_precompact(
+    agent: &Arc<Mutex<Agent>>,
+    session_id: &str,
+    processing: bool,
+) {
+    if processing {
+        return;
+    }
+    if !session_is_idle_waiting(session_id).await {
+        return;
+    }
+    let Ok(mut agent) = agent.try_lock() else {
+        return;
+    };
+    agent.maybe_idle_precompact();
 }
 
 async fn poll_agent_compaction_completion(agent: Arc<Mutex<Agent>>) -> Option<ServerEvent> {
@@ -671,6 +708,12 @@ pub(super) async fn handle_client(
     // subscribe. Under heavy swarm file-activity load, ignored bus frames can
     // otherwise monopolize the select loop before the initial subscribe/read.
     let mut client_subscribed = false;
+    // A waiting session produces no requests, so nothing else would ever trigger
+    // an opportunistic compaction. Slow on purpose: the check reads persisted
+    // await state and the background registry.
+    let mut idle_precompact_tick = tokio::time::interval(IDLE_PRECOMPACT_TICK);
+    idle_precompact_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    idle_precompact_tick.reset();
     // Session and payload of the last todo snapshot sent on this connection.
     let mut last_pushed_todos: Option<(String, String)> = None;
     let mut provisional_session = true;
@@ -818,12 +861,51 @@ pub(super) async fn handle_client(
                         let tx = client_event_tx.clone();
                         tokio::spawn(async move {
                             if let Some(event) = poll_agent_compaction_completion(agent).await {
+                                let post_tokens = match &event {
+                                    ServerEvent::Compaction { post_tokens, .. } => *post_tokens,
+                                    _ => None,
+                                };
                                 let _ = tx.send(event);
+                                // Clients derive the context percentage from the last
+                                // usage report, so publish the post-compaction size at
+                                // completion. Without it the composer keeps showing the
+                                // pre-compaction figure until the next turn, which in a
+                                // waiting session can be many minutes.
+                                if let Some(usage) =
+                                    crate::agent::compaction_context_usage_event(post_tokens, None)
+                                {
+                                    let _ = tx.send(usage);
+                                }
                             }
                         });
                     }
+                    Ok(BusEvent::CompactionStarted {
+                        trigger,
+                        pre_tokens,
+                    }) => {
+                        // The bus is process-global, so only forward the start
+                        // when it belongs to this connection's agent: otherwise
+                        // one compacting session would paint a running divider
+                        // in every other session's transcript.
+                        let ours = {
+                            let agent = agent.lock().await;
+                            agent.is_compacting_now()
+                        };
+                        if ours {
+                            let _ = client_event_tx
+                                .send(ServerEvent::CompactionStarted { trigger, pre_tokens });
+                        }
+                    }
                     _ => {}
                 }
+                continue;
+            }
+            // Opportunistic pre-compaction for an idle but still-waiting
+            // session (swarm members running, a bg wait, an await_members
+            // dependency). Without this timer the compaction would only happen
+            // on the next user message, inside that message's own turn.
+            _ = idle_precompact_tick.tick(), if client_subscribed => {
+                maybe_idle_precompact(&agent, &client_session_id, client_is_processing).await;
                 continue;
             }
             // Handle client debug commands from debug socket

@@ -918,6 +918,25 @@ impl Agent {
         }
     }
 
+    /// Append the transcript divider for a compaction that was just applied.
+    ///
+    /// The row lives in the persisted replay log, so it survives reloads and is
+    /// delivered to every client instead of only the connection that happened to
+    /// witness the completion. `method` names what replaced the folded history:
+    /// the artifact kind is what a reader needs to know, not the trigger label.
+    fn record_compaction_divider(&mut self, event: &crate::compaction::CompactionEvent) {
+        let summary = self
+            .session
+            .compaction
+            .as_ref()
+            .map(|state| state.summary_text.clone());
+        self.session.record_compaction_event(
+            event,
+            event.method.as_deref(),
+            summary.as_deref(),
+        );
+    }
+
     fn apply_openai_native_compaction(
         &mut self,
         encrypted_content: String,
@@ -1106,8 +1125,9 @@ impl Agent {
                     if event.is_some() || discarded_oversized_native {
                         self.sync_session_compaction_state_from_manager(&manager);
                     }
-                    if event.is_some() {
+                    if let Some(event) = event.as_ref() {
                         self.note_compaction_applied();
+                        self.record_compaction_divider(event);
                         self.persist_session_best_effort("compaction completion");
                     }
                     let user_count = messages

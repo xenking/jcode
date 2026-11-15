@@ -441,6 +441,10 @@ pub fn render_messages_and_images_with_compacted_history(
     // Error replay records are display-only: never turn provider diagnostics
     // into assistant/user context. Merge them at their original turn boundary
     // so a reconnect shows the failure beneath its wake, not at the latest turn.
+    //
+    // Completed compactions ride the same channel: they are transcript rows for
+    // humans only, and deriving them from the stored session is what makes the
+    // divider survive reloads instead of living in one client's memory.
     let mut errors: Vec<_> = session
         .replay_events
         .iter()
@@ -448,7 +452,7 @@ pub fn render_messages_and_images_with_compacted_history(
             super::StoredReplayEventKind::DisplayMessage { role, content, .. }
                 if role == "error" =>
             {
-                Some((event.timestamp, content))
+                Some((event.timestamp, content.clone()))
             }
             _ => None,
         })
@@ -463,7 +467,7 @@ pub fn render_messages_and_images_with_compacted_history(
         .collect();
     errors.sort_by_key(|(timestamp, _)| *timestamp);
     let mut errors = errors.into_iter().peekable();
-    let render_error = |content: &String| RenderedMessage {
+    let render_error = |content: String| RenderedMessage {
         response_stats: None,
         tool_duration_ms: None,
         role: "error".to_string(),
@@ -727,6 +731,205 @@ pub fn render_messages_and_images_with_compacted_history(
     }
 
     rendered.extend(errors.map(|(_, content)| render_error(content)));
+    insert_compaction_rows(session, &mut rendered, render_start_idx);
     response_stats::attach(&session.messages, &mut rendered);
     (rendered, images, compacted_info)
+}
+
+/// The transcript divider body for a compaction: `label` + blank line + detail.
+///
+/// The label is what a collapsed divider shows (`compacted · snapcompact ·
+/// 180k→26k · 12s`); the detail is what a click or expand reveals. Live clients
+/// call this for the divider they paint when a compaction completes, and the
+/// stored-session renderer calls it for the row that survives reload, so the two
+/// can never drift apart.
+#[allow(clippy::too_many_arguments)]
+pub fn compaction_divider_content(
+    method: Option<&str>,
+    trigger: Option<&str>,
+    pre_tokens: Option<u64>,
+    post_tokens: Option<u64>,
+    duration_ms: Option<u64>,
+    messages_compacted: Option<usize>,
+    messages_dropped: Option<usize>,
+    active_messages: Option<usize>,
+    summary: Option<&str>,
+    idle: bool,
+) -> String {
+    use std::fmt::Write as _;
+    let method = method.unwrap_or("summary");
+    let mut parts: Vec<String> = Vec::new();
+    if idle {
+        parts.push("compacted while waiting".to_string());
+    } else {
+        parts.push("compacted".to_string());
+    }
+    parts.push(method.replace('_', " "));
+    match (pre_tokens, post_tokens) {
+        (Some(pre), Some(post)) => parts.push(format!(
+            "{}→{}",
+            compact_token_count(pre),
+            compact_token_count(post)
+        )),
+        (Some(pre), None) => parts.push(format!("{}→?", compact_token_count(pre))),
+        _ => {}
+    }
+    if let Some(duration_ms) = duration_ms {
+        parts.push(compaction_duration_label(duration_ms));
+    }
+    let label = parts.join(" · ");
+
+    let mut detail = String::new();
+    if let Some(trigger) = trigger {
+        let _ = writeln!(detail, "trigger: {trigger}");
+    }
+    let _ = writeln!(detail, "method: {method}");
+    if let Some(pre) = pre_tokens {
+        let _ = writeln!(detail, "tokens: {pre} before");
+    }
+    if let Some(post) = post_tokens {
+        let _ = writeln!(detail, "tokens: {post} after");
+    }
+    if let Some(count) = messages_compacted {
+        let _ = writeln!(detail, "messages summarized: {count}");
+    }
+    if let Some(count) = messages_dropped {
+        let _ = writeln!(detail, "messages dropped: {count}");
+    }
+    if let Some(count) = active_messages {
+        let _ = writeln!(detail, "messages kept verbatim: {count}");
+    }
+    if let Some(summary) = summary.map(str::trim).filter(|summary| !summary.is_empty()) {
+        detail.push('\n');
+        detail.push_str(summary);
+    }
+    if detail.trim().is_empty() {
+        label
+    } else {
+        format!("{label}\n\n{detail}")
+    }
+}
+
+/// Insert one divider row per persisted compaction at its original timestamp.
+///
+/// The row body is `label` + blank line + `detail`, the same split both clients
+/// use: the label is what a collapsed divider shows, and the detail is what a
+/// click reveals. Keeping the composition here means the TUI and Desktop can
+/// never disagree about what a compaction says.
+fn insert_compaction_rows(
+    session: &Session,
+    rendered: &mut Vec<RenderedMessage>,
+    render_start_idx: usize,
+) {
+    let window_start = session
+        .messages
+        .get(render_start_idx)
+        .and_then(|msg| msg.timestamp);
+    let mut rows: Vec<(i64, RenderedMessage)> = session
+        .replay_events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            super::StoredReplayEventKind::Compaction {
+                method,
+                trigger,
+                pre_tokens,
+                post_tokens,
+                duration_ms,
+                messages_compacted,
+                messages_dropped,
+                active_messages,
+                summary,
+                idle,
+            } => {
+                if window_start.is_some_and(|start| event.timestamp < start) {
+                    return None;
+                }
+                Some((
+                    event.timestamp.timestamp_millis(),
+                    compaction_divider_row(
+                        method.as_deref(),
+                        trigger.as_deref(),
+                        *pre_tokens,
+                        *post_tokens,
+                        *duration_ms,
+                        *messages_compacted,
+                        *messages_dropped,
+                        *active_messages,
+                        summary.as_deref(),
+                        *idle,
+                    ),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+    rows.sort_by_key(|(at, _)| *at);
+    for (at, mut row) in rows {
+        // Divider rows carry the compaction's own time so the meta line and the
+        // insertion point agree.
+        row.timestamp_ms = Some(at);
+        let index = rendered
+            .iter()
+            .position(|existing| existing.timestamp_ms.is_some_and(|other| other > at))
+            .unwrap_or(rendered.len());
+        rendered.insert(index, row);
+    }
+}
+
+/// One transcript divider row for a completed compaction.
+fn compaction_divider_row(
+    method: Option<&str>,
+    trigger: Option<&str>,
+    pre_tokens: Option<u64>,
+    post_tokens: Option<u64>,
+    duration_ms: Option<u64>,
+    messages_compacted: Option<usize>,
+    messages_dropped: Option<usize>,
+    active_messages: Option<usize>,
+    summary: Option<&str>,
+    idle: bool,
+) -> RenderedMessage {
+    RenderedMessage {
+        response_stats: None,
+        tool_duration_ms: None,
+        role: "compaction".to_string(),
+        content: compaction_divider_content(
+            method,
+            trigger,
+            pre_tokens,
+            post_tokens,
+            duration_ms,
+            messages_compacted,
+            messages_dropped,
+            active_messages,
+            summary,
+            idle,
+        ),
+        tool_calls: Vec::new(),
+        tool_data: None,
+        stored_index: None,
+        timestamp_ms: Some(0),
+    }
+}
+
+/// `180k`-style token count for compact labels.
+fn compact_token_count(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{}k", tokens / 1_000)
+    } else {
+        tokens.to_string()
+    }
+}
+
+/// `12s` / `12.4s` / `2m14s` for compact labels.
+fn compaction_duration_label(duration_ms: u64) -> String {
+    if duration_ms >= 60_000 {
+        format!("{}m{}s", duration_ms / 60_000, (duration_ms % 60_000) / 1_000)
+    } else if duration_ms >= 10_000 {
+        format!("{}s", duration_ms / 1_000)
+    } else {
+        format!("{:.1}s", duration_ms as f64 / 1_000.0)
+    }
 }

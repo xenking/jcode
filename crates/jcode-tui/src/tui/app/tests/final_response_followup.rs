@@ -24,6 +24,7 @@ fn completed_response_test_app() -> App {
 fn response_test_compaction() -> crate::protocol::ServerEvent {
     crate::protocol::ServerEvent::Compaction {
         trigger: "automatic".into(),
+        method: None,
         pre_tokens: Some(245_992),
         post_tokens: Some(33_478),
         tokens_saved: None,
@@ -32,6 +33,7 @@ fn response_test_compaction() -> crate::protocol::ServerEvent {
         messages_compacted: None,
         summary_chars: None,
         active_messages: None,
+        divider: None,
     }
 }
 

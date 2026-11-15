@@ -66,64 +66,6 @@ impl App {
         format!("Compacting context [{}] {:.0}s", bar, elapsed.as_secs_f32())
     }
 
-    pub(super) fn format_compaction_complete_message(
-        event: &crate::compaction::CompactionEvent,
-        context_limit: u64,
-    ) -> String {
-        if event.trigger == "hard_compact" {
-            return Self::format_emergency_compaction_message(event, context_limit);
-        }
-
-        let strategy = Self::format_compaction_strategy_label(&event.trigger);
-        Self::format_compaction_usage_message(event, context_limit, strategy)
-    }
-
-    pub(super) fn format_emergency_compaction_message(
-        event: &crate::compaction::CompactionEvent,
-        context_limit: u64,
-    ) -> String {
-        Self::format_compaction_usage_message(event, context_limit, "emergency")
-    }
-
-    fn format_compaction_usage_message(
-        event: &crate::compaction::CompactionEvent,
-        context_limit: u64,
-        strategy: &str,
-    ) -> String {
-        let usage = |tokens: u64| {
-            if context_limit > 0 {
-                format!(
-                    "~{} tokens ({:.1}%)",
-                    Self::format_compaction_number(tokens),
-                    tokens as f64 / context_limit as f64 * 100.0,
-                )
-            } else {
-                format!("~{} tokens", Self::format_compaction_number(tokens))
-            }
-        };
-        // Show whatever is known. Never print "unavailable": a missing side is
-        // simply omitted, and with no counts at all the message count is used.
-        match (event.pre_tokens, event.post_tokens) {
-            (Some(pre), Some(post)) => {
-                format!(
-                    "📦 Compacted ({strategy}): {} → {}",
-                    usage(pre),
-                    usage(post)
-                )
-            }
-            (Some(pre), None) => format!("📦 Compacted ({strategy}): from {}", usage(pre)),
-            (None, Some(post)) => format!("📦 Compacted ({strategy}): now {}", usage(post)),
-            (None, None) => match event.messages_compacted.filter(|count| *count > 0) {
-                Some(count) => format!(
-                    "📦 Compacted ({strategy}): {} older message{} summarized",
-                    Self::format_compaction_number(count as u64),
-                    if count == 1 { "" } else { "s" },
-                ),
-                None => format!("📦 Compacted ({strategy})"),
-            },
-        }
-    }
-
     pub(super) fn format_compaction_number(value: u64) -> String {
         let digits = value.to_string();
         let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
@@ -307,7 +249,7 @@ impl App {
         if let Ok(mut manager) = compaction.try_write() {
             if let Some(event) = manager.poll_compaction_event_with(&provider_messages) {
                 self.sync_session_compaction_state_from_manager(&manager);
-                self.handle_compaction_event(event);
+                self.handle_compaction_event(event, None);
                 return true;
             }
             if let Some(error) = manager.take_compaction_error() {
@@ -321,7 +263,16 @@ impl App {
         false
     }
 
-    pub(super) fn handle_compaction_event(&mut self, event: CompactionEvent) {
+    /// Apply a completed compaction to the local transcript.
+    ///
+    /// `divider` is the daemon-formatted divider body when the event came over
+    /// the wire. A local agent has no such string, so it formats the same body
+    /// from the event with the shared builder.
+    pub(super) fn handle_compaction_event(
+        &mut self,
+        event: CompactionEvent,
+        divider: Option<String>,
+    ) {
         self.commit_pending_streaming_assistant_message();
         self.invalidate_kv_cache_after_compaction();
         // Remote clients hold a transcript-stripped stub; the server owns the
@@ -334,14 +285,60 @@ impl App {
                 self.session.id, err
             ));
         }
-        let message = if event.messages_dropped.is_some() {
+        if event.messages_dropped.is_some() {
             self.set_status_notice("Emergency compaction");
-            Self::format_emergency_compaction_message(&event, self.context_limit)
         } else {
             self.set_status_notice("Context compacted");
-            Self::format_compaction_complete_message(&event, self.context_limit)
+        }
+        // The transcript divider is the lasting record. It carries the method,
+        // the token drop, and the duration, and collapses to one line, so the
+        // old prose system notice only duplicates it.
+        let divider = divider.unwrap_or_else(|| {
+            crate::session::compaction_divider_content(
+                event.method.as_deref(),
+                Some(event.trigger.as_str()),
+                event.pre_tokens,
+                event.post_tokens,
+                event.duration_ms,
+                event.messages_compacted,
+                event.messages_dropped,
+                event.active_messages,
+                None,
+                event.trigger == crate::compaction::IDLE_PRECOMPACTION_TRIGGER,
+            )
+        });
+        self.push_compaction_divider(divider);
+    }
+
+    /// Show the running divider while a compaction summarizes.
+    ///
+    /// Only one running row exists at a time: a repeated start replaces the
+    /// previous one instead of stacking empty dividers.
+    pub fn show_compaction_running(&mut self, trigger: String, pre_tokens: u64) {
+        let content = if pre_tokens > 0 {
+            format!("compacting… · {trigger} · {pre_tokens} tokens")
+        } else {
+            format!("compacting… · {trigger}")
         };
-        self.push_display_message(DisplayMessage::system(message));
+        if let Some(existing) = self
+            .display_messages
+            .iter_mut()
+            .rev()
+            .find(|message| message.compaction_is_running())
+        {
+            existing.content = content;
+            return;
+        }
+        let message = DisplayMessage::compaction_running(content);
+        self.push_display_message(message);
+    }
+
+    /// Finishing/replacing the running divider, then append the completed one.
+    fn push_compaction_divider(&mut self, content: String) {
+        self.display_messages
+            .retain(|message| !message.compaction_is_running());
+        let message = DisplayMessage::compaction(content);
+        self.push_display_message(message);
     }
 
     fn invalidate_kv_cache_after_compaction(&mut self) {
@@ -866,66 +863,61 @@ impl App {
 mod tests {
     use super::*;
     use crate::message::ToolCall;
+    use crate::tui::app::tests::create_test_app;
 
+    /// The compaction lands as a transcript divider, not a prose notice: one
+    /// rule line with the method, the token drop and the duration, and the
+    /// summary behind an expand.
     #[test]
-    fn compaction_message_is_one_line_with_method_and_usage() {
-        let mut event = crate::compaction::CompactionEvent {
+    fn compaction_event_appends_an_expandable_divider() {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_session_id = Some("session_compact_divider".to_string());
+        let event = crate::compaction::CompactionEvent {
             trigger: "reactive".to_string(),
+            method: Some("snapcompact".to_string()),
             pre_tokens: Some(180_000),
             post_tokens: Some(40_000),
             tokens_saved: Some(140_000),
-            duration_ms: Some(1500),
+            duration_ms: Some(12_300),
             messages_dropped: None,
             messages_compacted: Some(100),
             summary_chars: Some(500),
             active_messages: Some(10),
         };
-        for method in ["reactive", "proactive", "semantic", "manual", "automatic"] {
-            event.trigger = method.to_string();
-            assert_eq!(
-                App::format_compaction_complete_message(&event, 200_000),
-                format!(
-                    "📦 Compacted ({method}): ~180,000 tokens (90.0%) → ~40,000 tokens (20.0%)"
-                )
-            );
-        }
-        event.trigger = "hard_compact".to_string();
+        app.handle_compaction_event(event.clone(), None);
+
+        let divider = app
+            .display_messages()
+            .last()
+            .expect("the compaction must append a divider");
+        assert_eq!(divider.role, "compaction");
+        assert!(!divider.compaction_is_running());
         assert_eq!(
-            App::format_compaction_complete_message(&event, 200_000),
-            "📦 Compacted (emergency): ~180,000 tokens (90.0%) → ~40,000 tokens (20.0%)"
+            divider.content.lines().next().unwrap_or_default(),
+            "compacted · snapcompact · 180k→40k · 12s"
         );
-        assert_eq!(
-            App::format_compaction_complete_message(&event, 0),
-            "📦 Compacted (emergency): ~180,000 tokens → ~40,000 tokens"
-        );
-        event.pre_tokens = None;
-        event.post_tokens = None;
-        assert_eq!(
-            App::format_compaction_complete_message(&event, 200_000),
-            "📦 Compacted (emergency): 100 older messages summarized"
-        );
-        event.messages_compacted = None;
-        assert_eq!(
-            App::format_compaction_complete_message(&event, 200_000),
-            "📦 Compacted (emergency)"
-        );
-        event.post_tokens = Some(40_000);
-        assert_eq!(
-            App::format_compaction_complete_message(&event, 200_000),
-            "📦 Compacted (emergency): now ~40,000 tokens (20.0%)"
-        );
-        event.pre_tokens = Some(180_000);
-        event.post_tokens = None;
-        assert_eq!(
-            App::format_compaction_complete_message(&event, 200_000),
-            "📦 Compacted (emergency): from ~180,000 tokens (90.0%)"
-        );
-        event.pre_tokens = Some(0);
-        event.post_tokens = Some(0);
-        assert_eq!(
-            App::format_compaction_complete_message(&event, 200_000),
-            "📦 Compacted (emergency): ~0 tokens (0.0%) → ~0 tokens (0.0%)"
-        );
+        let detail = divider
+            .content
+            .split_once("\n\n")
+            .map(|(_, detail)| detail)
+            .unwrap_or_default();
+        assert!(detail.contains("trigger: reactive"), "{detail}");
+        assert!(detail.contains("messages summarized: 100"), "{detail}");
+
+        // A running divider exists for the same compaction and is then replaced.
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.show_compaction_running("idle_precompact".to_string(), 476_000);
+        assert!(app.display_messages().last().unwrap().compaction_is_running());
+        app.handle_compaction_event(event, None);
+        let rows: Vec<_> = app
+            .display_messages()
+            .iter()
+            .filter(|message| message.is_compaction())
+            .collect();
+        assert_eq!(rows.len(), 1, "the running row is replaced, not stacked");
+        assert!(!rows[0].compaction_is_running());
     }
 
     #[test]

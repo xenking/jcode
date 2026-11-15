@@ -118,7 +118,13 @@ fn default_message_alignment(role: &str, centered: bool) -> ratatui::layout::Ali
     if centered
         && !matches!(
             role,
-            "tool" | "system" | "swarm" | "background_task" | "overnight" | "todos"
+            "tool"
+                | "system"
+                | "swarm"
+                | "background_task"
+                | "overnight"
+                | "todos"
+                | "compaction"
         )
     {
         ratatui::layout::Alignment::Center
@@ -1676,6 +1682,14 @@ fn render_message_into(
                 render_background_task_message,
             );
             for line in cached {
+                acc.push_auto(align_if_unset(line, align));
+            }
+        }
+        // A compaction divider spans the full transcript width with a centered
+        // label, so it never uses the centered-mode content block or the line
+        // cache: its collapse state is what decides its height.
+        "compaction" => {
+            for line in messages::render_compaction_divider(msg, width) {
                 acc.push_auto(align_if_unset(line, align));
             }
         }

@@ -88,20 +88,10 @@ impl Agent {
                         .map(|t| format!(" {} tokens", t))
                         .unwrap_or_default()
                 ));
-                let _ = event_tx.send(ServerEvent::Compaction {
-                    trigger: event.trigger.clone(),
-                    pre_tokens: event.pre_tokens,
-                    post_tokens: event.post_tokens,
-                    tokens_saved: event.tokens_saved,
-                    duration_ms: event.duration_ms,
-                    messages_dropped: event.messages_dropped,
-                    messages_compacted: event.messages_compacted,
-                    summary_chars: event.summary_chars,
-                    active_messages: event.active_messages,
-                });
+                let _ = event_tx.send(crate::compaction::compaction_server_event(&event));
                 // The last usage report described the transcript that was just
                 // summarized. Publish the new size or every client keeps showing
-                // the pre-compaction context percentage.
+                // the pre-compaction context percentage until the next turn.
                 if let Some(usage) = crate::agent::compaction_context_usage_event(
                     event.post_tokens,
                     Some(self.effective_context_budget().await),
@@ -1323,19 +1313,22 @@ impl Agent {
                 // which is not the pre-compaction context size (#1178).
                 let pre_tokens = native_pre_tokens.or(estimated_pre_tokens);
                 let post_tokens = estimated_post_tokens;
-                let _ = event_tx.send(ServerEvent::Compaction {
-                    trigger: native_trigger,
-                    pre_tokens,
-                    post_tokens,
-                    tokens_saved: pre_tokens
-                        .zip(post_tokens)
-                        .map(|(pre, post)| pre.saturating_sub(post)),
-                    duration_ms: None,
-                    messages_dropped: None,
-                    messages_compacted: Some(compacted_count),
-                    summary_chars: None,
-                    active_messages: None,
-                });
+                let _ = event_tx.send(crate::compaction::compaction_server_event(
+                    &crate::compaction::CompactionEvent {
+                        trigger: native_trigger,
+                        method: Some("native".to_string()),
+                        pre_tokens,
+                        post_tokens,
+                        tokens_saved: pre_tokens
+                            .zip(post_tokens)
+                            .map(|(pre, post)| pre.saturating_sub(post)),
+                        duration_ms: None,
+                        messages_dropped: None,
+                        messages_compacted: Some(compacted_count),
+                        summary_chars: None,
+                        active_messages: None,
+                    },
+                ));
                 // The last usage report described the transcript that was just
                 // replaced; publish the new size so clients stop showing the
                 // pre-compaction context percentage.

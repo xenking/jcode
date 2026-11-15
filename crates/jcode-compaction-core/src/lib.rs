@@ -109,6 +109,10 @@ pub struct Summary {
 #[derive(Debug, Clone)]
 pub struct CompactionEvent {
     pub trigger: String,
+    /// What replaced the folded history: `summary`, `snapcompact`, `native`,
+    /// or `drop` for emergency hard compaction. `None` for callers that do not
+    /// know the artifact kind.
+    pub method: Option<String>,
     pub pre_tokens: Option<u64>,
     pub post_tokens: Option<u64>,
     pub tokens_saved: Option<u64>,

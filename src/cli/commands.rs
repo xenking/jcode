@@ -3595,6 +3595,7 @@ fn emit_ndjson_event(
         }
         ServerEvent::Compaction {
             trigger,
+            method,
             pre_tokens,
             messages_dropped,
             post_tokens,
@@ -3603,11 +3604,13 @@ fn emit_ndjson_event(
             messages_compacted,
             summary_chars,
             active_messages,
+            divider,
         } => write_json_line(
             stdout,
             &serde_json::json!({
                 "type": "compaction",
                 "trigger": trigger,
+                "method": method,
                 "pre_tokens": pre_tokens,
                 "messages_dropped": messages_dropped,
                 "post_tokens": post_tokens,
@@ -3616,6 +3619,18 @@ fn emit_ndjson_event(
                 "messages_compacted": messages_compacted,
                 "summary_chars": summary_chars,
                 "active_messages": active_messages,
+                "divider": divider,
+            }),
+        ),
+        ServerEvent::CompactionStarted {
+            trigger,
+            pre_tokens,
+        } => write_json_line(
+            stdout,
+            &serde_json::json!({
+                "type": "compaction_started",
+                "trigger": trigger,
+                "pre_tokens": pre_tokens,
             }),
         ),
         ServerEvent::MemoryInjected {

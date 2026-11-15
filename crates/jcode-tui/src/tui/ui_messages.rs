@@ -3608,6 +3608,108 @@ fn render_compact_plan_update(
     Some(lines)
 }
 
+pub(crate) fn render_compaction_divider(
+    msg: &DisplayMessage,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let running = msg.compaction_is_running();
+    let expanded = msg.compaction_is_expanded();
+    let (label, detail) = match msg.content.split_once("\n\n") {
+        Some((label, detail)) => (label.trim(), Some(detail.trim_end())),
+        None => (msg.content.trim(), None),
+    };
+    let label = if label.is_empty() {
+        if running { "compacting…" } else { "compacted" }
+    } else {
+        label
+    };
+    let rule_style = Style::default().fg(dim_color());
+    let label_style = if running {
+        Style::default().fg(warning_color())
+    } else {
+        Style::default().fg(system_message_color())
+    };
+
+    let badge = if running {
+        ""
+    } else if expanded {
+        SWARM_COLLAPSE_BADGE
+    } else {
+        SWARM_EXPAND_BADGE
+    };
+    let label = if badge.is_empty() {
+        label.to_string()
+    } else {
+        format!("{label} {badge}")
+    };
+    lines.push(compaction_divider_line(
+        &label,
+        width as usize,
+        rule_style,
+        label_style,
+    ));
+
+    if expanded
+        && let Some(detail) = detail.filter(|detail| !detail.is_empty())
+    {
+        let indent = 2usize;
+        for line in detail.lines() {
+            let text = truncate_to_width(line, (width as usize).saturating_sub(indent + 2));
+            lines.push(Line::from(vec![
+                Span::raw(" ".repeat(indent)),
+                Span::styled(text, Style::default().fg(dim_color())),
+            ]));
+        }
+    }
+    lines
+}
+
+/// A full-width rule with a centered label, e.g.
+/// `──── compacted · snapcompact · 180k→26k · 12s ────`.
+fn compaction_divider_line(
+    label: &str,
+    width: usize,
+    rule_style: Style,
+    label_style: Style,
+) -> Line<'static> {
+    if width == 0 {
+        return Line::from(Span::styled(label.to_string(), label_style));
+    }
+    // One space on each side of the label keeps the rule readable at any width.
+    let label = truncate_to_width(label, width.saturating_sub(4));
+    let label_width = UnicodeWidthStr::width(label.as_str());
+    let remaining = width.saturating_sub(label_width + 2);
+    let left = remaining / 2;
+    let right = remaining.saturating_sub(left);
+    Line::from(vec![
+        Span::styled("─".repeat(left), rule_style),
+        Span::styled(format!(" {label} "), label_style),
+        Span::styled("─".repeat(right), rule_style),
+    ])
+}
+
+/// Truncate `text` to at most `width` display columns, appending an ellipsis when
+/// characters had to be dropped.
+fn truncate_to_width(text: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(text) <= width {
+        return text.to_string();
+    }
+    let budget = width.saturating_sub(1);
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + ch_width > budget {
+            break;
+        }
+        used += ch_width;
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
 pub(crate) fn render_swarm_message(
     msg: &DisplayMessage,
     width: u16,

@@ -278,6 +278,34 @@ pub enum ApiEvent {
         from_name: Option<String>,
     },
 
+    /// A context compaction started or finished.
+    ///
+    /// `content` is the finished divider body (label, blank line, detail) the
+    /// daemon also stores into session history, so a live divider and the one
+    /// that comes back after a reload cannot disagree. `running` marks the
+    /// in-progress state, where only the label is meaningful.
+    CompactionDivider {
+        session_id: String,
+        /// Divider body: `label` then, after a blank line, the expandable detail.
+        content: String,
+        /// The compaction is still summarizing: show the running divider.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        running: bool,
+        /// How the transcript art was compacted: `summary`, `snapcompact`,
+        /// `native`, or `drop`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        method: Option<String>,
+        /// Trigger label, e.g. `reactive` or `idle_precompact`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger: Option<String>,
+        /// Context tokens before the fold.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pre_tokens: Option<u64>,
+        /// Context tokens after the fold, when the daemon reported them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        post_tokens: Option<u64>,
+    },
+
     /// A background task the agent is waiting on reported progress, or
     /// finished.
     ///

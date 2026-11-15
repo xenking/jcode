@@ -315,6 +315,7 @@ fn remote_compaction_notice_follows_buffered_response() {
         &mut app,
         ServerEvent::Compaction {
             trigger: "automatic".into(),
+            method: None,
             pre_tokens: Some(216_517),
             post_tokens: None,
             tokens_saved: None,
@@ -323,6 +324,7 @@ fn remote_compaction_notice_follows_buffered_response() {
             messages_compacted: None,
             summary_chars: None,
             active_messages: None,
+            divider: None,
         },
         &mut remote,
     );
@@ -331,17 +333,16 @@ fn remote_compaction_notice_follows_buffered_response() {
         app.display_messages[count - 2].content,
         "response before compaction"
     );
-    assert!(
-        app.display_messages[count - 1]
-            .content
-            .starts_with("📦 Compacted (automatic): from ~216,517 tokens")
+    // The notice is now the transcript divider: automatic trigger, no method
+    // reported, pre-compaction size known and post size unknown.
+    let divider = &app.display_messages[count - 1];
+    assert_eq!(divider.role, "compaction");
+    assert_eq!(
+        divider.content.lines().next().unwrap_or_default(),
+        "compacted · summary · 216k→?"
     );
-    assert!(!app.display_messages[count - 1].content.contains("unknown"));
-    assert!(
-        !app.display_messages[count - 1]
-            .content
-            .contains("unavailable")
-    );
+    assert!(!divider.content.contains("unknown"));
+    assert!(!divider.content.contains("unavailable"));
     assert!(app.streaming.streaming_text.is_empty());
 }
 

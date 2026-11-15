@@ -118,8 +118,10 @@ fn cache_accounting_remote_late_claude_usage_keeps_reusable_boundary() {
     assert_eq!(app.token_accounting.cache_next_optimal_input_tokens, Some(617_004));
     assert_eq!(app.last_turn_input_tokens, Some(619_486));
     // A late correction after compaction must not resurrect an old expectation.
-    app.handle_compaction_event(crate::compaction::CompactionEvent {
+    app.handle_compaction_event(
+        crate::compaction::CompactionEvent {
         trigger: "semantic".to_string(),
+        method: Some("snapcompact".to_string()),
         pre_tokens: Some(619_486),
         post_tokens: Some(20_000),
         tokens_saved: None,
@@ -128,7 +130,9 @@ fn cache_accounting_remote_late_claude_usage_keeps_reusable_boundary() {
         messages_compacted: Some(10),
         summary_chars: Some(100),
         active_messages: Some(3),
-    });
+        },
+        None,
+    );
     app.handle_server_event(crate::protocol::ServerEvent::TokenUsage {
         effective_budget: None,
         input: 2_482, output: 101,

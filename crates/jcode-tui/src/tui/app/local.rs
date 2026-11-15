@@ -338,6 +338,13 @@ pub(super) fn handle_bus_event(
         }
         Ok(BusEvent::VoiceInputWake) => app.handle_voice_input_wake_local(),
         Ok(BusEvent::CompactionFinished) => app.poll_compaction_completion(),
+        Ok(BusEvent::CompactionStarted {
+            trigger,
+            pre_tokens,
+        }) => {
+            app.show_compaction_running(trigger, pre_tokens);
+            true
+        }
         Ok(BusEvent::SidePanelUpdated(update)) => {
             if update.session_id == app.session.id {
                 app.set_side_panel_snapshot(update.snapshot);

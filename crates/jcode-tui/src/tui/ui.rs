@@ -2766,6 +2766,24 @@ pub(crate) fn inline_image_expand_target_from_screen(column: u16, row: u16) -> O
     snapshot.inline_image_id_for_label_line(point.abs_line)
 }
 
+/// The transcript message index under a click anywhere in the chat pane.
+///
+/// Compaction dividers are clickable along their whole width (the rule is the
+/// affordance), so unlike the swarm badge hit-test this resolves the row rather
+/// than a trailing token.
+pub(crate) fn chat_message_index_from_screen(column: u16, row: u16) -> Option<usize> {
+    let point = copy_point_from_screen(column, row)?;
+    if point.pane != crate::tui::CopySelectionPane::Chat {
+        return None;
+    }
+    let snapshot = copy_snapshot_for_pane(point.pane)?;
+    let prepared = match &snapshot.data {
+        CopyViewportData::ChatFrame { prepared } => prepared.clone(),
+        CopyViewportData::Dense { .. } => return None,
+    };
+    prepared.message_index_at_line(point.abs_line)
+}
+
 /// If a screen click landed on a collapsed/expanded swarm notification's
 /// `▸ expand` / `▾ collapse` badge, return the transcript message index so the
 /// caller can toggle that notification. Only clicks on the trailing badge

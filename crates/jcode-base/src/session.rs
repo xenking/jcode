@@ -47,9 +47,9 @@ use model::SESSION_CONTEXT_PREFIX;
 pub use model::{StoredReplayEvent, StoredReplayEventKind};
 pub use render::{
     RenderedCompactedHistoryInfo, RenderedImage, RenderedImageAnchor, RenderedImageSource,
-    RenderedMessage, has_rendered_images, is_attached_image_label_text, render_images,
-    render_messages, render_messages_and_images, render_messages_and_images_with_compacted_history,
-    summarize_tool_calls,
+    RenderedMessage, compaction_divider_content, has_rendered_images,
+    is_attached_image_label_text, render_images, render_messages, render_messages_and_images,
+    render_messages_and_images_with_compacted_history, summarize_tool_calls,
 };
 pub use storage_paths::session_journal_path_from_snapshot;
 pub(crate) mod resume_cache;
@@ -1288,6 +1288,13 @@ request in this new forked session, using the inherited conversation only as con
                         item.content = crate::message::redact_secrets(&item.content);
                     }
                 }
+                StoredReplayEventKind::Compaction { summary, .. } => {
+                    // A folded conversation summary can quote anything the user
+                    // pasted earlier, including credentials.
+                    if let Some(summary) = summary.as_mut() {
+                        *summary = crate::message::redact_secrets(summary);
+                    }
+                }
             }
         }
         redacted
@@ -1591,6 +1598,43 @@ request in this new forked session, using the inherited conversation only as con
                 title,
                 content: content.into(),
             },
+        };
+        self.memory_profile_cache.replay_events_count += 1;
+        self.memory_profile_cache.replay_events_json_bytes += estimate_json_bytes(&event);
+        self.replay_events.push(event);
+        self.mark_replay_events_append_dirty();
+    }
+
+    /// Record a completed compaction in the persisted replay log.
+    ///
+    /// This is what makes the transcript divider survive reloads and reach
+    /// every client: the row is derived from the stored session, not from a
+    /// transient event a single connection happened to witness.
+    pub fn record_compaction_event(
+        &mut self,
+        event: &crate::compaction::CompactionEvent,
+        method: Option<&str>,
+        summary: Option<&str>,
+    ) {
+        let summary = summary
+            .map(str::trim)
+            .filter(|summary| !summary.is_empty())
+            .map(|summary| crate::util::truncate_str(summary, 20_000).to_string());
+        let kind = StoredReplayEventKind::Compaction {
+            method: method.map(str::to_string),
+            trigger: Some(event.trigger.clone()),
+            pre_tokens: event.pre_tokens,
+            post_tokens: event.post_tokens,
+            duration_ms: event.duration_ms,
+            messages_compacted: event.messages_compacted,
+            messages_dropped: event.messages_dropped,
+            active_messages: event.active_messages,
+            summary,
+            idle: event.trigger == crate::compaction::IDLE_PRECOMPACTION_TRIGGER,
+        };
+        let event = StoredReplayEvent {
+            timestamp: Utc::now(),
+            kind,
         };
         self.memory_profile_cache.replay_events_count += 1;
         self.memory_profile_cache.replay_events_json_bytes += estimate_json_bytes(&event);

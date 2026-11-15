@@ -487,6 +487,9 @@ pub enum BusEvent {
     VoiceInputWake,
     /// Background compaction task finished (check_and_apply should be called)
     CompactionFinished,
+    /// A background compaction task started summarizing. Carries the trigger
+    /// label so attached clients can render a running divider without polling.
+    CompactionStarted { trigger: String, pre_tokens: u64 },
     /// Provider's available models list may have changed
     ModelsUpdated,
     /// A single route's usage changed. Carries its snapshot so busy agents do

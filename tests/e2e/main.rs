@@ -10,6 +10,7 @@ mod ambient;
 mod binary_integration;
 mod burst_spawn;
 mod disconnect;
+mod idle_precompact;
 mod poke_swarm;
 mod provider_behavior;
 mod reload_multiclient;
