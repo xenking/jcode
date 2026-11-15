@@ -175,6 +175,7 @@ pub use jcode_harness_api::{
     enrich_sessions_from_edit_stats, enrich_sessions_from_local_edit_stats,
     enrich_sessions_from_local_swarm_state, enrich_sessions_from_swarm_state,
     local_worker_meta, worker_ids, worker_meta, worker_meta_for,
+    PendingAwait, pending_awaits_for_session, pending_awaits_in,
 };
 /// Auto-poke and todo quality-gate policy, identical to the TUI's. Fetch a
 /// snapshot with [`JcodeClient::todo_state`], run

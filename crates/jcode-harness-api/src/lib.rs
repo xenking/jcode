@@ -16,6 +16,7 @@
 use serde::{Deserialize, Serialize};
 
 mod client;
+mod await_state;
 mod edit_stats;
 mod events;
 pub use edit_stats::{
@@ -34,6 +35,9 @@ mod swarm_metadata;
 mod worker_meta;
 
 pub use client::{FrameError, HarnessClient, read_frame, write_frame};
+pub use await_state::{
+    PendingAwait, pending_awaits_for_session, pending_awaits_in,
+};
 pub use events::*;
 pub use jcode_applet_types;
 pub use jcode_session_types::TurnStopReason;
