@@ -130,6 +130,22 @@ async fn socket_resume_replays_reload_interrupted_ask_before_provider() {
         unreachable!()
     };
     assert_eq!(request_id, "ask-reload-call");
+    // A follow-up arriving while the question is open must not silently
+    // cancel the pending ask or allow the provider to continue.
+    writer.write_all(format!("{}\n", json!({"type":"queue_prompt","id":41,"client_id":"followup","content":"follow up","mode":"steer"})).as_bytes()).await.unwrap();
+    until(&mut reader, |event| {
+        assert!(
+            !matches!(event, ServerEvent::ToolDone { name, .. } if name == "ask"),
+            "queued follow-up cancelled the ask"
+        );
+        assert!(
+            !matches!(event, ServerEvent::TextDelta { .. }),
+            "provider resumed before answer"
+        );
+        matches!(event, ServerEvent::Ack { id: 41 })
+    })
+    .await;
+    assert_eq!(provider.0.load(Ordering::SeqCst), 0);
     writer.write_all(format!("{}\n", json!({"type":"ask_user_response","id":42,"request_id":request_id,"response":{"answers":[{"selected":["B"],"other":"custom","comments":{"B":"reason"}}]}})).as_bytes()).await.unwrap();
     let ack = std::cell::Cell::new(false);
     let tool_done = std::cell::Cell::new(false);
