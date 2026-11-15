@@ -367,6 +367,30 @@ fn resolve_optional_target_session(target: Option<String>, current_session: &str
     resolve_optional_comm_target_session(target, current_session)
 }
 
+/// Sessions a `status` call reports on. `target_session` (or its `to_session`
+/// alias) wins, then each of `session_ids`, and only with neither given does it
+/// fall back to the caller's own session.
+fn status_target_sessions(
+    target: Option<String>,
+    session_ids: Option<&[String]>,
+    current_session: &str,
+) -> Vec<String> {
+    if target.is_some() {
+        return vec![resolve_optional_target_session(target, current_session)];
+    }
+    let mut targets: Vec<String> = Vec::new();
+    for id in session_ids.unwrap_or_default() {
+        let id = resolve_optional_target_session(Some(id.clone()), current_session);
+        if !targets.contains(&id) {
+            targets.push(id);
+        }
+    }
+    if targets.is_empty() {
+        targets.push(current_session.to_string());
+    }
+    targets
+}
+
 fn format_awaited_members_with_reports(
     completed: bool,
     summary: &str,
@@ -1446,25 +1470,32 @@ impl Tool for CommunicateTool {
             }
 
             "status" => {
-                let target =
-                    resolve_optional_target_session(params.target_session, &ctx.session_id);
-
-                let request = Request::CommStatus {
-                    id: REQUEST_ID,
-                    session_id: ctx.session_id.clone(),
-                    target_session: target.clone(),
-                };
-
-                match send_request(request).await {
-                    Ok(ServerEvent::CommStatusResponse { snapshot, .. }) => {
-                        Ok(format_status_snapshot(&snapshot))
+                let targets = status_target_sessions(
+                    params.target_session,
+                    params.session_ids.as_deref(),
+                    &ctx.session_id,
+                );
+                let mut sections = Vec::new();
+                for target in targets {
+                    let request = Request::CommStatus {
+                        id: REQUEST_ID,
+                        session_id: ctx.session_id.clone(),
+                        target_session: target,
+                    };
+                    match send_request(request).await {
+                        Ok(ServerEvent::CommStatusResponse { snapshot, .. }) => {
+                            sections.push(format_status_snapshot(&snapshot).output);
+                        }
+                        Ok(response) => {
+                            ensure_success(&response)?;
+                            sections.push("No status snapshot returned.".to_string());
+                        }
+                        Err(e) => {
+                            return Err(anyhow::anyhow!("Failed to get status snapshot: {}", e));
+                        }
                     }
-                    Ok(response) => {
-                        ensure_success(&response)?;
-                        Ok(ToolOutput::new("No status snapshot returned."))
-                    }
-                    Err(e) => Err(anyhow::anyhow!("Failed to get status snapshot: {}", e)),
                 }
+                Ok(ToolOutput::new(sections.join("\n\n---\n\n")))
             }
 
             // Compatibility for old transcripts and scripts only. Worker output is
@@ -1886,3 +1917,7 @@ impl Tool for CommunicateTool {
 #[cfg(test)]
 #[path = "communicate_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "communicate_status_target_tests.rs"]
+mod status_target_tests;

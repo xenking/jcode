@@ -623,6 +623,13 @@ impl Tool for BgTool {
                 let mut tasks = Vec::new();
                 let mut output = String::new();
                 for task_id in task_ids {
+                    if is_await_dependency_id(&task_id) {
+                        if !output.is_empty() {
+                            output.push_str("\n---\n");
+                        }
+                        output.push_str(&await_dependency_status_text(&task_id)?);
+                        continue;
+                    }
                     let task = manager
                         .status(&task_id)
                         .await
@@ -768,6 +775,14 @@ impl Tool for BgTool {
                 let wait_duration = Duration::from_secs(capped_wait);
                 // watch/delivery only updates notification settings and does not
                 // block. Only the actual wait action owns foreground metadata.
+
+                // `swarm await_members` returns a durable `await-...` dependency
+                // id, not a process-backed background task. Wait on its state.
+                if let [task_id] = task_ids.as_slice()
+                    && is_await_dependency_id(task_id)
+                {
+                    return wait_on_await_dependency(&ctx, task_id, wait_duration).await;
+                }
 
                 if task_ids.len() > 1 {
                     let mode = params.wait_mode.as_deref().unwrap_or("any");
@@ -1241,3 +1256,98 @@ mod tests {
         Ok(())
     }
 }
+
+/// `swarm await_members` hands back an `await-<key>-<generation>` dependency id.
+/// It lives in the durable await state, so `bg` must not look for it among
+/// process-backed background tasks.
+fn is_await_dependency_id(id: &str) -> bool {
+    id.starts_with(crate::todo::await_dependency::ID_PREFIX)
+}
+
+fn load_await_dependency(id: &str) -> Result<crate::todo::await_dependency::AwaitDependency> {
+    crate::todo::await_dependency::load(&crate::storage::runtime_dir(), id).ok_or_else(|| {
+        anyhow::anyhow!("Await dependency not found: {id}. It may have expired or never existed.")
+    })
+}
+
+fn await_dependency_summary(
+    dependency: &crate::todo::await_dependency::AwaitDependency,
+) -> Option<String> {
+    let result = dependency.final_response.as_ref()?;
+    let completed = result
+        .get("completed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let summary = result
+        .get("summary")
+        .and_then(Value::as_str)
+        .unwrap_or("(no summary)");
+    Some(format!(
+        "{}: {summary}",
+        if completed { "completed" } else { "timed out" }
+    ))
+}
+
+fn await_dependency_status_text(id: &str) -> Result<String> {
+    let dependency = load_await_dependency(id)?;
+    Ok(match await_dependency_summary(&dependency) {
+        Some(summary) => format!("Await dependency {id}\nStatus: {summary}"),
+        None if dependency.is_running() => {
+            format!("Await dependency {id}\nStatus: running (waiting on swarm members)")
+        }
+        None => format!("Await dependency {id}\nStatus: expired before resolving"),
+    })
+}
+
+async fn wait_on_await_dependency(
+    ctx: &ToolContext,
+    id: &str,
+    wait_duration: Duration,
+) -> Result<ToolOutput> {
+    let deadline = Instant::now() + wait_duration;
+    let incoming = crate::incoming_message::watch(&ctx.session_id);
+    let _wait_guard = crate::wait_registry::register(&ctx.session_id, "Waiting for swarm members");
+    let metadata = |reason: &str| {
+        json!({
+            "task_id": id,
+            "wait_reason": reason,
+            "timed_out": reason == "timeout",
+        })
+    };
+    loop {
+        let dependency = load_await_dependency(id)?;
+        if let Some(summary) = await_dependency_summary(&dependency) {
+            return Ok(
+                ToolOutput::new(format!("Await dependency {id} resolved.\n{summary}"))
+                    .with_title(format!("bg wait {id}"))
+                    .with_metadata(metadata("completed")),
+            );
+        }
+        if !dependency.is_running() {
+            return Ok(
+                ToolOutput::new(format!("Await dependency {id} expired before resolving."))
+                    .with_title(format!("bg wait {id}"))
+                    .with_metadata(metadata("expired")),
+            );
+        }
+        if incoming.is_pending() {
+            return Ok(ToolOutput::new(format!(
+                "{USER_MESSAGE_NOTE}\n\nAwait dependency {id} is still running."
+            ))
+            .with_title(format!("bg wait {id}"))
+            .with_metadata(metadata("user_message")));
+        }
+        if Instant::now() >= deadline {
+            return Ok(ToolOutput::new(format!(
+                "Await dependency {id} is still running after the wait window."
+            ))
+            .with_title(format!("bg wait {id}"))
+            .with_metadata(metadata("timeout")));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+#[cfg(test)]
+#[path = "bg_await_dependency_tests.rs"]
+mod await_dependency_tests;
