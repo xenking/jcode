@@ -119,6 +119,7 @@ mod tests {
     #[test]
     fn response_limits_recover_bars_without_bypassing_endpoint_backoff() {
         with_home(|runtime| {
+            let _shared = cache::lock_usage_cache_tests();
             runtime.block_on(async {
                 let key = "label:passive-recovery";
                 let before =
@@ -166,6 +167,7 @@ mod tests {
     #[test]
     fn partial_response_preserves_only_observed_windows() {
         with_home(|_| {
+            let _shared = cache::lock_usage_cache_tests();
             let mut partial = headers();
             partial.remove("anthropic-ratelimit-unified-7d-utilization");
             record_anthropic_response_limits("fixture", Some("partial"), &partial);
@@ -191,6 +193,7 @@ mod tests {
     #[test]
     fn invalid_and_expired_headers_never_create_zero_usage() {
         with_home(|_| {
+            let _shared = cache::lock_usage_cache_tests();
             let name = "anthropic-ratelimit-unified-5h-utilization";
             for value in ["NaN", "inf", "-0.1", "1.01", "garbage"] {
                 let mut headers = headers();
@@ -253,6 +256,7 @@ mod tests {
     #[test]
     fn expired_rejected_account_stops_refreshing_and_relogin_clears_auth_cache() {
         with_home(|runtime| {
+            let _shared = cache::lock_usage_cache_tests();
             runtime.block_on(async {
                 let label = auth::claude::primary_account_label();
                 store_anthropic_usage(format!("label:{label}"), UsageData::default());

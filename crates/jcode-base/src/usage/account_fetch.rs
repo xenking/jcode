@@ -184,6 +184,7 @@ mod tests {
 
     #[tokio::test]
     async fn cached_usage_does_not_clear_runtime_quota_failures() {
+        let _shared = super::cache::lock_usage_cache_tests();
         let label = "usage-recovery-cache-hit-test";
         let key = format!("label:{label}");
         let data = UsageData {

@@ -54,6 +54,7 @@ fn codex_cache_key_never_contains_token_prefix() {
 
 #[test]
 fn codex_response_headers_reach_account_cache() {
+    let _shared = super::cache::lock_usage_cache_tests();
     let label = "fixture-codex-response-cache";
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert("x-codex-primary-used-percent", "42".parse().unwrap());
@@ -1323,6 +1324,7 @@ fn test_openai_transport_error_retries_sooner_than_api_errors() {
 
 #[test]
 fn test_openai_transport_failure_keeps_recent_last_good_only() {
+    let _shared = super::cache::lock_usage_cache_tests();
     let key = "label:transport-last-good-test".to_string();
     let window = OpenAIUsageWindow {
         name: "5-hour window".into(),
@@ -1362,6 +1364,7 @@ fn test_openai_transport_failure_keeps_recent_last_good_only() {
 
 #[test]
 fn cached_anthropic_usage_for_label_returns_stale_entries_without_probing() {
+    let _shared = super::cache::lock_usage_cache_tests();
     let label = "cached-label-accessor-test";
     assert!(super::cached_anthropic_usage_for_label(label).is_none());
     super::anthropic_usage_cache().lock().unwrap().insert(

@@ -101,6 +101,7 @@ fn response_diagnostics_capture_only_bounded_printable_retry_hints() {
 #[test]
 fn concurrent_callers_make_one_probe() {
     with_home(|runtime| {
+        let _shared = cache::lock_usage_cache_tests();
         runtime.block_on(async {
             let probes = AtomicUsize::new(0);
             let key = "label:flight-concurrent";
@@ -123,6 +124,7 @@ fn concurrent_callers_make_one_probe() {
 #[test]
 fn different_accounts_can_probe_concurrently() {
     with_home(|runtime| {
+        let _shared = cache::lock_usage_cache_tests();
         runtime.block_on(async {
             let barrier = tokio::sync::Barrier::new(2);
             let probes = (0..2).map(|index| {

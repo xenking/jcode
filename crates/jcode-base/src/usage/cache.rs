@@ -31,6 +31,26 @@ pub(super) fn openai_usage_cache() -> &'static std::sync::Mutex<HashMap<String, 
     OPENAI_ACCOUNT_USAGE_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// Serializes the tests that read or write the process-global usage caches.
+///
+/// The two caches and [`OPENAI_USAGE_GENERATION`] are shared by every test in
+/// this binary. Without taking turns, one test's store lands between another
+/// test's generation capture and its write, or simply holds a lock when the
+/// other test's non-blocking reader runs: [`OPENAI_USAGE_GENERATION`] silently
+/// drops the write and the reader's `.unwrap()` panics on `None`. Production
+/// paths stay deliberately non-blocking; only tests serialize.
+///
+/// Lock order, when a test needs both: this lock is taken *after*
+/// [`crate::storage::lock_test_env`], never before it, so two tests cannot wait
+/// on each other.
+#[cfg(test)]
+pub(super) fn lock_usage_cache_tests() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Last in-memory Claude usage for a saved login, stale or not. Never blocks or
 /// probes. Callers judge freshness from `fetched_at`/`last_error`.
 pub fn cached_anthropic_usage_for_label(label: &str) -> Option<UsageData> {
@@ -277,6 +297,7 @@ mod account_snapshot_tests {
 
     #[test]
     fn cached_account_snapshot_is_scoped_fresh_and_nonblocking() {
+        let _shared = lock_usage_cache_tests();
         let label = "router-cache-only-test";
         let key = format!("label:{label}");
         let provider = MultiAccountProviderKind::Anthropic;
@@ -332,6 +353,7 @@ mod account_snapshot_tests {
 
     #[test]
     fn pool_prefers_fresh_quota_within_priority_tier() {
+        let _shared = lock_usage_cache_tests();
         use crate::auth::account_pool::AccountPool;
         let unknown = "claude:quota-order-unknown".to_string();
         let healthy = "claude:quota-order-healthy".to_string();
