@@ -1236,10 +1236,20 @@ pub(super) async fn handle_stdin_response(
     stdin_responses: &Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
-    if let Some(tx) = stdin_responses.lock().await.remove(&request_id) {
-        let _ = tx.send(input);
-    }
-    let _ = client_event_tx.send(ServerEvent::Done { id });
+    let accepted = match stdin_responses.lock().await.remove(&request_id) {
+        Some(tx) => tx.send(input).is_ok(),
+        None => false,
+    };
+    let event = if accepted {
+        ServerEvent::Done { id }
+    } else {
+        ServerEvent::Error {
+            id,
+            message: "The input request is no longer pending on this connection; your answer was not accepted".into(),
+            retry_after_secs: None,
+        }
+    };
+    let _ = client_event_tx.send(event);
 }
 
 pub(super) struct AgentTaskContext<'a> {

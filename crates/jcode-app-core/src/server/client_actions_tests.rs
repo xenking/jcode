@@ -21,6 +21,33 @@ use std::time::Instant;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::time::{Duration, timeout};
 
+#[tokio::test]
+async fn stdin_response_requires_a_live_matching_request() {
+    let pending = Arc::new(Mutex::new(HashMap::new()));
+    let (events, mut received) = mpsc::unbounded_channel();
+    super::handle_stdin_response(1, "missing".into(), "answer".into(), &pending, &events).await;
+    assert!(matches!(
+        received.recv().await,
+        Some(ServerEvent::Error { id: 1, .. })
+    ));
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    drop(rx);
+    pending.lock().await.insert("closed".into(), tx);
+    super::handle_stdin_response(2, "closed".into(), "answer".into(), &pending, &events).await;
+    assert!(matches!(
+        received.recv().await,
+        Some(ServerEvent::Error { id: 2, .. })
+    ));
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    pending.lock().await.insert("live".into(), tx);
+    super::handle_stdin_response(3, "live".into(), "answer".into(), &pending, &events).await;
+    assert_eq!(rx.await.unwrap(), "answer");
+    assert!(matches!(
+        received.recv().await,
+        Some(ServerEvent::Done { id: 3 })
+    ));
+}
+
 fn unwrap_test_turn_event(mut event: ServerEvent) -> ServerEvent {
     while let ServerEvent::TurnEvent { event: inner, .. } = event {
         event = *inner;
