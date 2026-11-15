@@ -1254,6 +1254,7 @@ impl CompactionManager {
         let snapcompact_enabled = self.compaction_config.snapcompact;
         let snapcompact_shape = Some(self.compaction_config.snapcompact_shape.clone())
             .filter(|shape| !shape.trim().is_empty() && !shape.trim().eq_ignore_ascii_case("auto"));
+        let shake_config = self.shake_config();
         let estimated_tokens = self.effective_token_count_with(all_messages);
         crate::logging::info(&format!(
             "[TIMING] compaction_start: trigger={}, active_messages={}, cutoff={}, estimated_tokens={}, has_existing_summary={}",
@@ -1277,6 +1278,7 @@ impl CompactionManager {
                 existing_summary,
                 snapcompact_enabled,
                 snapcompact_shape,
+                shake_config,
             )
             .await;
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -1502,6 +1504,7 @@ impl CompactionManager {
         let snapcompact_enabled = self.compaction_config.snapcompact;
         let snapcompact_shape = Some(self.compaction_config.snapcompact_shape.clone())
             .filter(|shape| !shape.trim().is_empty() && !shape.trim().eq_ignore_ascii_case("auto"));
+        let shake_config = self.shake_config();
 
         self.pending_cutoff = cutoff;
         self.pending_trigger = Some("manual".to_string());
@@ -1515,6 +1518,7 @@ impl CompactionManager {
                 existing_summary,
                 snapcompact_enabled,
                 snapcompact_shape,
+                shake_config,
             )
             .await;
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -2136,6 +2140,7 @@ async fn generate_compaction_artifact(
     mut existing_summary: Option<Summary>,
     snapcompact_enabled: bool,
     snapcompact_shape: Option<String>,
+    shake_config: Option<ShakeConfig>,
 ) -> Result<CompactionResult> {
     let start = Instant::now();
     if let Some(summary) = existing_summary.as_mut()
@@ -2269,16 +2274,20 @@ async fn generate_compaction_artifact(
                 ));
                 // omp advances to its `shake` method after snapcompact fails, so
                 // the text summarizer at least sees a mechanically reduced
-                // prompt instead of the raw full history.
-                let outcome = jcode_compaction_core::shake::shake(
-                    &mut messages,
-                    &jcode_compaction_core::shake::ShakeConfig::default(),
-                );
-                if outcome != jcode_compaction_core::shake::ShakeOutcome::NoChange {
-                    crate::logging::info(&format!(
-                        "[compaction] post-snapcompact shake saved ~{} tokens",
-                        outcome.tokens_saved()
-                    ));
+                // prompt instead of the raw full history. The configured shake
+                // settings decide: `[compaction] shake = false` (or
+                // `JCODE_COMPACTION_SHAKE=0`) means the user disabled shake, and
+                // the thresholds are the configured ones, not the defaults. The
+                // warm-cache guard does not apply — snapcompact already gave up
+                // on this prefix.
+                if let Some(shake) = shake_config {
+                    let outcome = jcode_compaction_core::shake::shake(&mut messages, &shake);
+                    if outcome != jcode_compaction_core::shake::ShakeOutcome::NoChange {
+                        crate::logging::info(&format!(
+                            "[compaction] post-snapcompact shake saved ~{} tokens",
+                            outcome.tokens_saved()
+                        ));
+                    }
                 }
             }
             Err(error) => crate::logging::warn(&format!(

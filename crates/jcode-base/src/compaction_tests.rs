@@ -1380,6 +1380,7 @@ async fn refused_compaction_keeps_original_messages_issue_2089() {
         None,
         false,
         None,
+        None,
     )
     .await
     .err()
@@ -1751,6 +1752,7 @@ async fn snapcompact_skips_the_llm_summarizer() {
         None,
         true,
         None,
+        None,
     )
     .await
     .unwrap();
@@ -1777,12 +1779,66 @@ async fn snapcompact_skips_the_llm_summarizer() {
         None,
         true,
         None,
+        None,
     )
     .await
     .unwrap();
     assert!(text_only.summary_text.starts_with("summary("));
     assert!(text_only.snapcompact.is_none());
     drop(calls);
+}
+
+/// The post-snapcompact fallback must obey the configured shake settings:
+/// `[compaction] shake = false` (`shake_config == None`) means no history
+/// rewrite, and the configured thresholds decide what is elidable — the same
+/// rules the pre-request path applies.
+#[tokio::test]
+async fn snapcompact_fallback_shake_obeys_the_configured_settings() {
+    // A two-column shape makes snapcompact fail deterministically, so the
+    // fallback path runs against a history full of elidable tool output.
+    let forced_failure = Some("doc-8on16-bw".to_string());
+    let messages = shake_session(40, 2000);
+    let prompt_chars = |summary: &str| -> usize {
+        summary
+            .trim_start_matches("summary(")
+            .trim_end_matches(" chars)")
+            .parse()
+            .expect("mock summary reports its prompt length")
+    };
+    let run = |shake: Option<ShakeConfig>| {
+        generate_compaction_artifact(
+            Arc::new(VisionSummaryProvider),
+            messages.clone(),
+            None,
+            true,
+            forced_failure.clone(),
+            shake,
+        )
+    };
+    let disabled = run(None).await.unwrap();
+    let enabled = run(Some(ShakeConfig::default())).await.unwrap();
+    let gated = run(Some(ShakeConfig {
+        min_savings_tokens: usize::MAX,
+        ..ShakeConfig::default()
+    }))
+    .await
+    .unwrap();
+
+    assert!(
+        disabled.snapcompact.is_none(),
+        "snapcompact must have failed"
+    );
+    assert!(
+        prompt_chars(&enabled.summary_text) < prompt_chars(&disabled.summary_text),
+        "configured shake must reduce the fallback prompt: enabled={} disabled={}",
+        prompt_chars(&enabled.summary_text),
+        prompt_chars(&disabled.summary_text)
+    );
+    assert_eq!(
+        prompt_chars(&gated.summary_text),
+        prompt_chars(&disabled.summary_text),
+        "configured thresholds must be honoured, not the defaults"
+    );
 }
 
 /// omp advances to the next method when snapcompact fails; jcode must still
@@ -1797,10 +1853,16 @@ async fn snapcompact_failure_still_produces_a_text_summary() {
         timestamp: None,
         tool_duration_ms: None,
     }];
-    let result =
-        generate_compaction_artifact(Arc::new(VisionSummaryProvider), messages, None, true, None)
-            .await
-            .unwrap();
+    let result = generate_compaction_artifact(
+        Arc::new(VisionSummaryProvider),
+        messages,
+        None,
+        true,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     assert!(result.snapcompact.is_none());
     assert!(result.summary_text.starts_with("summary("));
     assert!(!result.summary_text.trim().is_empty());
@@ -1809,10 +1871,16 @@ async fn snapcompact_failure_still_produces_a_text_summary() {
 #[tokio::test]
 async fn snapcompact_generates_summary_and_preserves_previous_archive() {
     let messages = vec![make_text_message(Role::User, "early codeword ZEBRA-ORCHID")];
-    let first =
-        generate_compaction_artifact(Arc::new(VisionSummaryProvider), messages, None, true, None)
-            .await
-            .unwrap();
+    let first = generate_compaction_artifact(
+        Arc::new(VisionSummaryProvider),
+        messages,
+        None,
+        true,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     assert!(
         first.summary_text.starts_with("Resume prior conversation."),
         "{}",
@@ -1834,6 +1902,7 @@ async fn snapcompact_generates_summary_and_preserves_previous_archive() {
         Some(previous),
         true,
         None,
+        None,
     )
     .await
     .unwrap();
@@ -1845,6 +1914,7 @@ async fn snapcompact_generates_summary_and_preserves_previous_archive() {
         vec![make_text_message(Role::User, "no vision")],
         None,
         true,
+        None,
         None,
     )
     .await

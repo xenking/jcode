@@ -44,6 +44,7 @@ async fn native_compaction_precedes_snapcompact_for_vision_provider() {
         None,
         true,
         None,
+        None,
     )
     .await
     .unwrap();
@@ -139,6 +140,7 @@ async fn usage_only_native_compaction_accounts_attempt_then_falls_back() {
         vec![make_text_message(Role::User, "hello")],
         None,
         false,
+        None,
         None,
     )
     .await
