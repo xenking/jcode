@@ -56,7 +56,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::hidden("/todo", "Alias for /todos"),
     RegisteredCommand::public("/splitview", "Mirror the current chat in the side panel"),
     RegisteredCommand::public("/split-view", "Alias for /splitview"),
-    RegisteredCommand::public("/btw", "Ask a side question in the side panel"),
+    RegisteredCommand::public("/btw", "Ask a side question in a forked window"),
     RegisteredCommand::public("/ssh", "Connect to a remote machine using system SSH"),
     RegisteredCommand::public("/git", "Show git status for the session working directory"),
     RegisteredCommand::public("/colors", "List, configure, and score every TUI color"),

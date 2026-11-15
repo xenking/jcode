@@ -62,7 +62,7 @@ impl App {
                 "/splitview\nToggle a transient split view that mirrors the current chat in the side panel.\n\n/splitview on\nEnable split view and focus the mirrored chat page.\n\n/splitview off\nDisable split view.\n\n/splitview status\nShow whether split view is enabled.\n\nThis gives the side panel its own scroll position for the same conversation so you can read older context while keeping the main composer active."
             }
             "btw" => {
-                "/btw <question>\nAsk a side question without derailing the current session.\n\nForks (splits) the session into a new window with the full conversation cloned, and the forked session starts by answering the question. The original session keeps working uninterrupted."
+                "/btw <question>\nAsk a side question without derailing the current session.\n\nForks (splits) the session into a new window with the full conversation cloned, and the forked session starts by answering the question. The original session keeps working uninterrupted.\n\nThis terminal has no side card, so the question opens in its own window. Jcode Desktop answers /btw in a compact card beside the current chat instead, without opening a tab."
             }
             "git" => {
                 "/git\nShow git status --short --branch for the current session working directory.\n\n/git status\nAlias for /git."
