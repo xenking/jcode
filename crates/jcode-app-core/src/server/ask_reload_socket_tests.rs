@@ -1,0 +1,160 @@
+use super::*;
+use serde_json::json;
+
+#[derive(Clone, Default)]
+struct RecoveryProvider(Arc<std::sync::atomic::AtomicUsize>);
+
+#[async_trait]
+impl Provider for RecoveryProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::pin(stream::iter(vec![
+            Ok(StreamEvent::TextDelta("continued".into())),
+            Ok(StreamEvent::MessageEnd {
+                stop_reason: Some("end_turn".into()),
+            }),
+        ])))
+    }
+    fn name(&self) -> &str {
+        "ask-reload-socket"
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[tokio::test]
+async fn socket_resume_replays_reload_interrupted_ask_before_provider() {
+    let _lock = crate::storage::lock_test_env();
+    let home = IsolatedReloadRecoveryEnv::new();
+    let session_id = "ask-socket-reload";
+    let mut persisted = crate::session::Session::create_with_id(session_id.into(), None, None);
+    persisted.add_message(crate::message::Role::Assistant, vec![ContentBlock::ToolUse {
+        id: "reload-call".into(), name: "ask".into(),
+        input: json!({"questions":[{"question":"Which?","options":[{"label":"A"},{"label":"B"}]}]}),
+        thought_signature: None,
+    }]);
+    persisted.add_message(
+        crate::message::Role::User,
+        vec![ContentBlock::ToolResult {
+            tool_use_id: "reload-call".into(),
+            content: "[Tool 'ask' interrupted by server reload after 0.2s]".into(),
+            is_error: Some(true),
+        }],
+    );
+    persisted.save().unwrap();
+    let provider = RecoveryProvider::default();
+    let provider_template: Arc<dyn Provider> = Arc::new(provider.clone());
+    let sessions: SessionAgents =
+        Arc::new(crate::server::SessionManager::from_agents(HashMap::new()));
+    let (server_stream, client_stream) = crate::transport::Stream::pair().unwrap();
+    let (global_event_tx, _) = broadcast::channel(8);
+    let (debug_response_tx, _) = broadcast::channel(8);
+    let (swarm_event_tx, _) = broadcast::channel(8);
+    let server_task = tokio::spawn(handle_client(
+        server_stream,
+        sessions.clone(),
+        global_event_tx,
+        provider_template,
+        Arc::new(RwLock::new(false)),
+        Arc::new(RwLock::new(String::new())),
+        Arc::new(RwLock::new(0usize)),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        FileTouchService::new(),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(ClientDebugState::default())),
+        debug_response_tx,
+        Arc::new(RwLock::new(std::collections::VecDeque::new())),
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        swarm_event_tx,
+        "jcode-test".into(),
+        "test".into(),
+        Arc::new(crate::mcp::SharedMcpPool::from_default_config()),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        AwaitMembersRuntime::default(),
+        SwarmMutationRuntime::default(),
+    ));
+    let (reader, mut writer) = client_stream.into_split();
+    let mut reader = BufReader::new(reader);
+    writer.write_all(format!("{}\n", json!({"type":"subscribe","id":1,"target_session_id":session_id,"working_dir":home._home.path(),"continue_on_disconnect":true})).as_bytes()).await.unwrap();
+    async fn until(
+        reader: &mut BufReader<crate::transport::ReadHalf>,
+        predicate: impl Fn(&ServerEvent) -> bool,
+    ) -> ServerEvent {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                let event: ServerEvent = serde_json::from_str(&line).unwrap();
+                if predicate(&event) {
+                    return event;
+                }
+            }
+        })
+        .await
+        .expect("socket event timeout")
+    }
+    // Desktop sends this continuation after the restored History recovery directive.
+    until(&mut reader, |event| {
+        matches!(event, ServerEvent::Done { id: 1 })
+    })
+    .await;
+    writer.write_all(format!("{}\n", json!({"type":"message","id":2,"content":"","system_reminder":"Continue interrupted work."})).as_bytes()).await.unwrap();
+    let event = until(&mut reader, |event| {
+        matches!(event, ServerEvent::AskUserRequest { .. })
+    })
+    .await;
+    assert_eq!(
+        provider.0.load(Ordering::SeqCst),
+        0,
+        "model must wait for the user"
+    );
+    let ServerEvent::AskUserRequest { request_id, .. } = event else {
+        unreachable!()
+    };
+    assert_eq!(request_id, "ask-reload-call");
+    writer.write_all(format!("{}\n", json!({"type":"ask_user_response","id":42,"request_id":request_id,"response":{"answers":[{"selected":["B"],"other":"custom","comments":{"B":"reason"}}]}})).as_bytes()).await.unwrap();
+    let ack = std::cell::Cell::new(false);
+    let tool_done = std::cell::Cell::new(false);
+    until(&mut reader, |event| {
+        if matches!(event, ServerEvent::Done { id: 42 }) {
+            ack.set(true);
+        }
+        if matches!(event, ServerEvent::ToolDone { name, .. } if name == "ask") {
+            tool_done.set(true);
+        }
+        ack.get() && tool_done.get()
+    })
+    .await;
+    let restored = crate::session::Session::load(session_id).unwrap();
+    let journal = serde_json::to_string(&restored.messages).unwrap();
+    assert!(
+        journal.contains("comment: reason") && journal.contains("Other: custom"),
+        "{journal}"
+    );
+    assert!(
+        !journal.contains("interrupted by server reload"),
+        "{journal}"
+    );
+    drop(writer);
+    drop(reader);
+    sessions.clear_for_test().await;
+    tokio::time::timeout(Duration::from_secs(5), server_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
