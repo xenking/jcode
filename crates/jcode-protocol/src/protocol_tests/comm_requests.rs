@@ -668,6 +668,7 @@ fn test_ask_user_request_and_response_roundtrip() -> Result<()> {
         answers: Some(vec![AskAnswer {
             selected: vec!["SQLite".to_string()],
             other: Some("libsql".to_string()),
+            comments: Default::default(),
         }]),
     };
     let req = Request::AskUserResponse { id: 7, request_id: "ask-1".to_string(), response: response.clone() };

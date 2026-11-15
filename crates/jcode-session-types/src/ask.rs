@@ -36,6 +36,9 @@ pub struct AskAnswer {
     pub selected: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub other: Option<String>,
+    /// Optional notes keyed by the selected option label. Older clients omit this.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub comments: std::collections::BTreeMap<String, String>,
 }
 
 /// Client reply. `answers` is `None` when the user declined (Esc/cancel).
@@ -48,6 +51,29 @@ pub struct AskResponse {
 impl AskResponse {
     pub fn declined() -> Self {
         Self { answers: None }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selected_comments_are_rendered_for_the_model() {
+        let questions = vec![AskQuestion {
+            question: "Which?".into(),
+            header: None,
+            options: vec![AskOption {
+                label: "A".into(),
+                description: None,
+            }],
+            multi_select: false,
+            allow_other: false,
+        }];
+        let response: AskResponse =
+            serde_json::from_str(r#"{"answers":[{"selected":["A"],"comments":{"A":"because"}}]}"#)
+                .unwrap();
+        assert!(format_ask_answers(&questions, &response).contains("because"));
     }
 }
 
@@ -95,7 +121,21 @@ pub fn format_ask_answers(questions: &[AskQuestion], response: &AskResponse) -> 
     let mut out = String::from("User answers:\n");
     for (i, q) in questions.iter().enumerate() {
         let answer = answers.get(i).cloned().unwrap_or_default();
-        let mut parts: Vec<String> = answer.selected.clone();
+        let mut parts: Vec<String> = answer
+            .selected
+            .iter()
+            .map(|label| {
+                match answer
+                    .comments
+                    .get(label)
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                {
+                    Some(comment) => format!("{label} (comment: {comment})"),
+                    None => label.clone(),
+                }
+            })
+            .collect();
         if let Some(other) = answer
             .other
             .as_deref()

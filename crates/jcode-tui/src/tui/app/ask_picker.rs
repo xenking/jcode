@@ -86,6 +86,7 @@ impl AskPickerState {
                         .filter_map(|i| question.options.get(i).map(|o| o.label.clone()))
                         .collect(),
                     other: Some(self.other[q].trim().to_string()).filter(|s| !s.is_empty()),
+                    comments: Default::default(),
                 }
             })
             .collect();

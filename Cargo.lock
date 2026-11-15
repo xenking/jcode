@@ -4616,6 +4616,7 @@ dependencies = [
  "jcode-message-types",
  "memchr",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

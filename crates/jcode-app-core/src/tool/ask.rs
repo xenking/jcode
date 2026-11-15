@@ -160,6 +160,7 @@ mod tests {
                     answers: Some(vec![AskAnswer {
                         selected: vec!["B".into()],
                         other: None,
+                        comments: Default::default(),
                     }]),
                 },
                 "1. Which? -> B",
