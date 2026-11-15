@@ -1465,6 +1465,10 @@ async fn execute_big_output(input: Value) -> String {
 }
 
 async fn execute_big_output_in(session_id: &str, input: Value) -> String {
+    // Every call gets its own invocation id, like the model issuing a fresh tool
+    // call. A repeat is a *later* invocation: if two calls shared an id they would
+    // be one invocation retried, which is not what "repeat the same call" means.
+    static CALL_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
     {
@@ -1481,7 +1485,10 @@ async fn execute_big_output_in(session_id: &str, input: Value) -> String {
     let ctx = ToolContext {
         session_id: session_id.to_string(),
         message_id: "test".to_string(),
-        tool_call_id: "test".to_string(),
+        tool_call_id: format!(
+            "test-call-{}",
+            CALL_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ),
         working_dir: Some(std::env::temp_dir()),
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
