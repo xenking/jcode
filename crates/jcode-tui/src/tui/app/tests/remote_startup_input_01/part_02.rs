@@ -520,8 +520,11 @@ fn test_model_picker_remote_bedrock_model_has_bedrock_route_when_configured() {
     );
 }
 
+/// The picker order is deterministic and independent of usage: the running
+/// model first, then provider group, then releases newest first, with variants
+/// behind their base. Defaults stay marked as recommended wherever they sort.
 #[test]
-fn test_model_picker_preserves_recommendation_priority_order() {
+fn test_model_picker_orders_catalog_deterministically() {
     let _env_guard = crate::storage::lock_test_env();
     let _restore = EnvRestoreGuard::capture(["JCODE_HOME"]);
     let home = tempfile::tempdir().unwrap();
@@ -535,66 +538,54 @@ fn test_model_picker_preserves_recommendation_priority_order() {
         .inline_interactive_state
         .as_ref()
         .expect("model picker should be open");
-
     let model_names: Vec<&str> = picker.entries.iter().map(|m| m.name.as_str()).collect();
-    let openai_default = jcode_provider_core::DEFAULT_OPENAI_MODEL;
-    let claude_default = jcode_provider_core::DEFAULT_CLAUDE_MODEL;
-    let position = |prefix: &str, api_method: Option<&str>| {
+    let position = |name: &str| {
         picker
             .entries
             .iter()
-            .position(|model| {
-                (model.name == prefix || model.name.starts_with(&format!("{prefix} (")))
-                    && api_method.is_none_or(|method| {
-                        model
-                            .active_option()
-                            .is_some_and(|route| route.api_method == method)
-                    })
-            })
-            .unwrap_or_else(|| panic!("{prefix} {api_method:?} missing from {model_names:?}"))
+            .position(|model| model.name == name)
+            .unwrap_or_else(|| panic!("{name} missing from {model_names:?}"))
     };
 
-    let openai_rec = position(openai_default, Some("openai-oauth"));
-    let claude_oauth = position(claude_default, Some("claude-oauth"));
-    let claude_api = position(claude_default, Some("claude-api"));
-    let stale_gpt = position("gpt-5.5", None);
-    let stale_opus = position("claude-opus-4-8", None);
-    let gpt54 = position("gpt-5.4", None);
-    let codex = position("gpt-5.3-codex", None);
-
+    // The running model is offered first; the catalog below it is fixed order.
     assert!(
-        openai_rec < claude_oauth,
-        "OpenAI default should rank ahead of Claude default, got {model_names:?}"
+        picker.entries[0].is_current,
+        "the running model leads: {model_names:?}"
     );
-    for (index, label) in [
-        (stale_gpt, "gpt-5.5"),
-        (stale_opus, "claude-opus-4-8"),
-        (gpt54, "gpt-5.4"),
-        (codex, "gpt-5.3-codex"),
-    ] {
-        assert!(
-            claude_oauth < index && claude_api < index,
-            "current defaults should rank ahead of {label}, got {model_names:?}"
-        );
-        assert!(
-            !picker.entries[index].recommended,
-            "{label} is no longer a default and should not be recommended"
-        );
-    }
-    for index in [openai_rec, claude_oauth, claude_api] {
-        assert!(
-            picker.entries[index].recommended,
-            "{} should be recommended",
-            picker.entries[index].name
-        );
-    }
-    let recommended = picker
+    let newest = jcode_provider_core::DEFAULT_OPENAI_MODEL;
+    assert!(
+        position(newest) < position("gpt-5.5"),
+        "the newest default release sorts above gpt-5.5: {model_names:?}"
+    );
+    assert!(
+        position("gpt-5.5") < position("gpt-5.4"),
+        "5.5 above 5.4: {model_names:?}"
+    );
+    assert!(
+        position("gpt-5.4") + 1 == position("gpt-5.4-pro"),
+        "a variant follows its base release: {model_names:?}"
+    );
+    assert!(
+        position("gpt-5.3-codex") < position("gpt-5.3-codex-spark"),
+        "a family stays together, base before its variant: {model_names:?}"
+    );
+
+    // Usage is not part of the order, so the defaults keep their flag without
+    // moving.
+    let recommended: Vec<&str> = picker
         .entries
         .iter()
         .filter(|entry| entry.recommended)
-        .count();
-    assert_eq!(
-        recommended, 3,
-        "only the default routes should be recommended, got {model_names:?}"
+        .map(|entry| entry.name.as_str())
+        .collect();
+    assert!(
+        recommended.contains(&newest),
+        "the OpenAI default is recommended: {recommended:?}"
     );
+    for not_default in ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex"] {
+        assert!(
+            !recommended.contains(&not_default),
+            "{not_default} is not a default and must not be recommended: {recommended:?}"
+        );
+    }
 }

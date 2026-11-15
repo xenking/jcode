@@ -9,6 +9,8 @@ pub mod model_id;
 pub mod model_names;
 pub mod models;
 pub mod openai_schema;
+pub mod picker_hidden;
+pub mod picker_order;
 pub mod pricing;
 pub mod reasoning;
 pub mod request_compression;

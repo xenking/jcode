@@ -484,7 +484,7 @@ fn test_model_picker_preview_stays_open_and_updates_filter() {
         picker
             .filtered
             .iter()
-            .any(|&i| picker.entries[i].name.starts_with("gpt-5.2-codex ("))
+            .any(|&i| picker.entries[i].name == "gpt-5.2-codex")
     );
     assert_eq!(app.input(), "/model g52c");
 }
@@ -492,17 +492,59 @@ fn test_model_picker_preview_stays_open_and_updates_filter() {
 #[test]
 fn test_model_picker_preview_enter_selects_model() {
     let mut app = create_test_app();
-    configure_test_remote_models(&mut app);
+    app.is_remote = true;
+    app.remote_provider_name = Some("OpenAI".to_string());
+    app.remote_provider_model = Some("gpt-5.3-codex".to_string());
+    app.remote_available_entries =
+        vec!["gpt-5.2-codex".to_string(), "gpt-5.3-codex".to_string()];
+    app.remote_model_options = app
+        .remote_available_entries
+        .iter()
+        .cloned()
+        .map(|model| crate::provider::ModelRoute {
+            model,
+            provider: "OpenAI".to_string(),
+            api_method: "openai-oauth".to_string(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        })
+        .collect();
 
     for c in "/model g52c".chars() {
         app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
             .unwrap();
     }
+    // Enter from preview mode focuses the picker on the chosen model and opens
+    // its reasoning levels: the picker stays open for the second step.
     app.handle_key(KeyCode::Enter, KeyModifiers::empty())
         .unwrap();
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("preview Enter opens the level step");
+    assert!(!picker.preview, "the picker is focused now");
+    let rows: Vec<(&str, Option<&str>)> = picker
+        .entries
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry.effort.as_deref()))
+        .collect();
+    assert!(
+        rows.iter().all(|(name, effort)| effort.is_some() && name.starts_with("gpt-5.2-codex (")),
+        "the level step lists the chosen model's levels: {rows:?}"
+    );
+    assert!(app.input().is_empty());
+    assert_eq!(app.cursor_pos(), 0);
 
-    // Enter from preview mode selects the model and closes the picker
+    // The second Enter applies the model and its level, and closes the picker.
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
     assert!(app.inline_interactive_state.is_none());
+    assert_eq!(
+        app.pending_model_switch.as_deref(),
+        Some("openai-oauth:gpt-5.2-codex")
+    );
     assert!(app.input().is_empty());
     assert_eq!(app.cursor_pos(), 0);
 }

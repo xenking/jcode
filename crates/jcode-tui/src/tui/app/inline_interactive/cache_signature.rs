@@ -26,6 +26,7 @@ impl App {
                 self.provider.name().to_string()
             },
             current_model: current_model.to_string(),
+            hidden_models: crate::config::desktop_hidden_models(),
             config_default_model,
             config_default_provider,
             reasoning_effort: current_effort,

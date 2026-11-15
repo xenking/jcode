@@ -91,6 +91,7 @@ mod input_help;
 mod local;
 mod misc_ui;
 mod model_context;
+mod model_picker_stage;
 mod navigation;
 pub(crate) mod oauth_telemetry;
 mod observe;
@@ -370,6 +371,9 @@ struct ModelPickerCacheSignature {
     is_remote: bool,
     provider_name: String,
     current_model: String,
+    /// `[desktop.models] hidden`, so hiding a model in Desktop rebuilds the
+    /// terminal picker instead of serving a cached list that still shows it.
+    hidden_models: Vec<String>,
     config_default_model: Option<String>,
     config_default_provider: Option<String>,
     reasoning_effort: Option<String>,
@@ -1611,6 +1615,9 @@ pub struct App {
     ask_picker: Option<ask_picker::AskPickerState>,
     // Interactive model/provider picker
     inline_interactive_state: Option<super::InlineInteractiveState>,
+    /// The model list the picker's effort step came from, kept so Esc can go
+    /// back to it instead of closing the picker.
+    model_picker_effort_parent: Option<Box<super::InlineInteractiveState>>,
     // Cached model picker entries. Building these can require hydrating large provider catalogs.
     model_picker_cache: Option<ModelPickerCache>,
     model_picker_catalog_revision: u64,

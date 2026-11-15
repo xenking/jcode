@@ -13,6 +13,63 @@ static TRUSTED_EXTERNAL_AUTH_MEMO: std::sync::Mutex<
     Option<(TrustedExternalAuthKey, TrustedExternalAuthLists)>,
 > = std::sync::Mutex::new(None);
 
+/// Root of the shared config, as far as this module cares.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DesktopRoot {
+    desktop: DesktopSection,
+}
+
+/// `[desktop]` tables written by the Desktop client.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DesktopSection {
+    models: DesktopModelsSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DesktopModelsSection {
+    /// Routed model specs (`openai-oauth:gpt-5.6-sol`) the Desktop picker hides.
+    hidden: Vec<String>,
+}
+
+/// Route specs the Desktop model picker hides.
+///
+/// Desktop owns `[desktop.models] hidden` and writes it to the shared config
+/// file, so the terminal `/model` picker reads the list from the same file
+/// rather than from [`Config`]: one setting hides a model in every client, and
+/// a `Config::save` never rewrites a section this crate does not own.
+///
+/// A missing, malformed, or Desktop-less config hides nothing.
+pub fn desktop_hidden_models() -> Vec<String> {
+    let Some(path) = Config::path() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    desktop_hidden_models_from(&text)
+}
+
+/// Parse the hidden list out of one config document.
+fn desktop_hidden_models_from(text: &str) -> Vec<String> {
+    let Ok(section) = toml::from_str::<DesktopRoot>(text) else {
+        return Vec::new();
+    };
+    let mut hidden: Vec<String> = section
+        .desktop
+        .models
+        .hidden
+        .into_iter()
+        .map(|spec| spec.trim().to_string())
+        .filter(|spec| !spec.is_empty())
+        .collect();
+    hidden.sort();
+    hidden.dedup();
+    hidden
+}
+
 impl Config {
     /// Persist only the update preference, without baking in environment overrides.
     pub fn set_update_channel(channel: UpdateChannel) -> anyhow::Result<()> {
@@ -816,7 +873,7 @@ impl Config {
 
 #[cfg(test)]
 mod issue_1056_tests {
-    use super::Config;
+    use super::{Config, desktop_hidden_models, desktop_hidden_models_from};
 
     struct EnvGuard {
         key: &'static str,
@@ -920,5 +977,38 @@ reasoning_effort = "max"
 
         assert!(error.to_string().contains("Failed to parse config file"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    /// Desktop owns `[desktop.models] hidden`; the terminal picker reads the
+    /// same section out of the same file.
+    #[test]
+    fn desktop_hidden_models_reads_the_section_desktop_writes() {
+        assert_eq!(
+            desktop_hidden_models_from(
+                "# my settings\nmodel = \"openai:gpt-5\"\n\n[provider]\ndefault_provider = \"openai\"\n\n[desktop.models]\nhidden = [\"openai-oauth:gpt-5.6-sol\", \" b:y \", \"b:y\"]\n\n[desktop.appearance]\ntheme = \"dark\"\n"
+            ),
+            ["b:y", "openai-oauth:gpt-5.6-sol"]
+        );
+        // Nothing hidden: no section, an empty list, or a config we cannot read.
+        assert!(desktop_hidden_models_from("model = \"x\"\n").is_empty());
+        assert!(desktop_hidden_models_from("[desktop.models]\nhidden = []\n").is_empty());
+        assert!(desktop_hidden_models_from("[desktop.models]\nhidden = [").is_empty());
+    }
+
+    #[test]
+    fn desktop_hidden_models_follow_the_config_file() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("JCODE_HOME", home.path());
+        let path = home.path().join("config.toml");
+        assert!(desktop_hidden_models().is_empty());
+        std::fs::write(
+            &path,
+            "[desktop.models]\nhidden = [\"claude-oauth:claude-opus-5-5\"]\n",
+        )
+        .unwrap();
+        assert_eq!(desktop_hidden_models(), ["claude-oauth:claude-opus-5-5"]);
+        std::fs::remove_file(&path).unwrap();
+        assert!(desktop_hidden_models().is_empty());
     }
 }

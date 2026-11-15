@@ -1340,14 +1340,14 @@ fn test_model_picker_state_space_preserves_provider_labels_after_route_hydration
         );
     }
 
-    // Models with reasoning-effort support expand into effort rows (issue
-    // #458); the hydrated route must be preserved on each variant.
+    // A model is listed once, with the hydrated route of that row; the
+    // reasoning levels it accepts are the picker's second step.
     assert_eq!(
-        routes_by_model.get("gpt-5.5 (high)"),
+        routes_by_model.get("gpt-5.5"),
         Some(&("OpenAI".to_string(), "openai-oauth".to_string()))
     );
     assert_eq!(
-        routes_by_model.get("claude-opus-4-6 (high)"),
+        routes_by_model.get("claude-opus-4-6"),
         Some(&("Anthropic".to_string(), "claude-oauth".to_string()))
     );
     assert_eq!(
@@ -1355,7 +1355,7 @@ fn test_model_picker_state_space_preserves_provider_labels_after_route_hydration
         Some(&("Chutes".to_string(), "openai-compatible:chutes".to_string()))
     );
     assert_eq!(
-        routes_by_model.get("deepseek/deepseek-v4-pro (high)"),
+        routes_by_model.get("deepseek/deepseek-v4-pro"),
         Some(&("auto".to_string(), "openrouter".to_string()))
     );
 
@@ -1849,8 +1849,8 @@ fn test_local_model_picker_openrouter_bare_openai_route_uses_openai_catalog_pref
     let model_idx = picker
         .entries
         .iter()
-        .position(|entry| entry.name == "gpt-5.4 (high)")
-        .expect("openrouter-backed OpenAI effort entry should be in picker");
+        .position(|entry| entry.name == "gpt-5.4")
+        .expect("openrouter-backed OpenAI model should be in picker");
     let filtered_pos = picker
         .filtered
         .iter()
@@ -1858,8 +1858,17 @@ fn test_local_model_picker_openrouter_bare_openai_route_uses_openai_catalog_pref
         .expect("entry should be in filtered list");
 
     app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
+    // Step one opens the level list; step two sends the switch.
     app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-        .expect("model picker selection should succeed");
+        .expect("model picker selection should open the effort step");
+    assert!(
+        app.inline_interactive_state
+            .as_ref()
+            .is_some_and(|picker| picker.entries.iter().all(|row| row.effort.is_some())),
+        "the effort step lists levels for the chosen route"
+    );
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .expect("effort selection should succeed");
 
     assert_eq!(
         set_model_calls.lock().unwrap().as_slice(),
@@ -1882,8 +1891,8 @@ fn test_agent_model_picker_openrouter_bare_openai_route_saves_openai_catalog_pre
         let model_idx = picker
             .entries
             .iter()
-            .position(|entry| entry.name == "gpt-5.4 (high)")
-            .expect("openrouter-backed OpenAI effort entry should be in picker");
+            .position(|entry| entry.name == "gpt-5.4")
+            .expect("openrouter-backed OpenAI model should be in picker");
         let filtered_pos = picker
             .filtered
             .iter()

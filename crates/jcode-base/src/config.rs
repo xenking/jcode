@@ -1112,6 +1112,7 @@ impl Default for DictationConfig {
 
 pub mod change_report;
 mod config_file;
+pub use config_file::desktop_hidden_models;
 mod default_file;
 mod display_summary;
 mod env_overrides;
