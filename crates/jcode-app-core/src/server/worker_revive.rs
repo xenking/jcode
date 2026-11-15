@@ -141,3 +141,29 @@ pub(super) async fn live_or_revived_agent(
     ));
     Some(agent)
 }
+
+/// The continuation for a headless worker that still owns open todos.
+///
+/// A worker's turn can end just before a restart (its snapshot says `ready`)
+/// while its lane is still open: it was waiting on a build, or between steps.
+/// That is work in flight, so startup recovery resumes it with the same
+/// actionable-todo prompt auto-poke uses. `None` when every todo is closed,
+/// handed to another worker, or waiting on the user.
+pub(super) fn open_lane_continuation(session_id: &str) -> Option<String> {
+    let todos = crate::todo::load_todos(session_id).ok()?;
+    let actionable: Vec<crate::todo::TodoItem> = todos
+        .into_iter()
+        .filter(|todo| {
+            crate::todo::is_incomplete_todo(todo)
+                && !crate::todo::todo_assigned_elsewhere(todo, session_id)
+                && !crate::todo::todo_requires_user_auth(todo)
+        })
+        .collect();
+    if actionable.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "The server restarted while you still had open todos. Continue exactly where you left off and do not ask the user what to do next.\n{}",
+        crate::todo::build_actionable_poke_message(&actionable)
+    ))
+}

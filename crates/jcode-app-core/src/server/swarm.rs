@@ -1427,6 +1427,8 @@ fn member_awaits_unrestored_notice(member: &SwarmMember) -> bool {
         // continuation. Startup will restore that worker, so don't tell its
         // coordinator it had no work in flight and needs replacing.
         && !super::reload_recovery::has_pending_for_session(&member.session_id)
+        // An open todo lane is work in flight: startup recovery resumes it.
+        && super::worker_revive::open_lane_continuation(&member.session_id).is_none()
 }
 
 /// Tell `owner_session_id` about idle headless workers that the last server

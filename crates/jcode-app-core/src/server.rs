@@ -756,9 +756,12 @@ impl Server {
                     // Shutdown can persist `ready` after recording recovery
                     // intent. On load that becomes `stopped`, but the durable
                     // continuation must still take priority over that status.
+                    // A worker that still owns open todos had work in
+                    // flight even if its last turn ended before shutdown.
                     member.is_headless
                         && (headless_member_should_restore(&member.status, true)
-                            || reload_recovery::has_pending_for_session(&member.session_id))
+                            || reload_recovery::has_pending_for_session(&member.session_id)
+                            || worker_revive::open_lane_continuation(&member.session_id).is_some())
                 })
                 .map(|member| member.session_id.clone())
                 .collect::<Vec<_>>()
@@ -875,7 +878,8 @@ impl Server {
                 .as_ref()
                 .map(|record| record.status == reload_recovery::ReloadRecoveryStatus::Pending)
                 .unwrap_or(false);
-            let should_resume = has_stored_recovery_intent || {
+            let open_lane = worker_revive::open_lane_continuation(&session_id);
+            let should_resume = has_stored_recovery_intent || open_lane.is_some() || {
                 let agent_guard = agent.lock().await;
                 self::client_session::restored_session_was_interrupted(
                     &session_id,
@@ -937,7 +941,8 @@ impl Server {
             };
             let reminder = stored_directive
                 .map(|directive| directive.continuation_message)
-                .or_else(|| headless_reload_continuation_message(reload_ctx));
+                .or_else(|| headless_reload_continuation_message(reload_ctx))
+                .or(open_lane);
             let Some(reminder) = reminder else {
                 ReloadContext::log_recovery_outcome(
                     "server_startup_headless",

@@ -417,3 +417,84 @@ async fn startup_ready_signal_is_not_blocked_by_headless_recovery_delay() -> Res
 
     Ok(())
 }
+
+/// A headless worker whose turn ended just before the restart (snapshot says
+/// `ready`) but whose todo lane is still open had work in flight: the restart
+/// must resume it, not report it as "idle, not restored" to its coordinator.
+/// A worker with every todo closed is genuinely idle and stays down.
+#[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test intentionally serializes process-wide JCODE_HOME/env state across async recovery assertions"
+)]
+async fn startup_recovery_resumes_idle_worker_with_open_todo_lane() -> Result<()> {
+    let _storage_guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new()?;
+    let _env = configure_test_env(&temp);
+    let provider = Arc::new(StreamingMockProvider::default());
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("picked the lane back up".to_string()),
+        StreamEvent::MessageEnd { stop_reason: None },
+    ]);
+
+    let todo = |content: &str, status: &str| crate::todo::TodoItem {
+        content: content.to_string(),
+        status: status.to_string(),
+        priority: "high".to_string(),
+        id: content.to_string(),
+        ..Default::default()
+    };
+    let mut busy = crate::session::Session::create(None, Some("busy".to_string()));
+    busy.add_message(
+        Role::Assistant,
+        vec![crate::message::ContentBlock::Text {
+            text: "Build is running, checking again shortly".to_string(),
+            cache_control: None,
+        }],
+    );
+    busy.save()?;
+    crate::todo::save_todos(
+        &busy.id,
+        &[
+            todo("wire the fix", "completed"),
+            todo("run the tests", "in_progress"),
+        ],
+    )?;
+    let mut done = crate::session::Session::create(None, Some("done".to_string()));
+    done.save()?;
+    crate::todo::save_todos(&done.id, &[todo("everything", "completed")])?;
+
+    let swarm_id = "swarm-open-lane";
+    let mut busy_member = persisted_headless_member(&busy.id, swarm_id, "ready", "between turns");
+    busy_member.report_back_to_session_id = Some("coordinator".to_string());
+    let mut done_member = persisted_headless_member(&done.id, swarm_id, "ready", "finished");
+    done_member.report_back_to_session_id = Some("coordinator".to_string());
+    persist_swarm_state_snapshot(swarm_id, None, None, &[busy_member, done_member]);
+
+    let server = Server::new(provider);
+    server.recover_headless_sessions_on_startup().await;
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let agent = server.sessions.read().await.get(&busy.id).cloned();
+            if let Some(agent) = agent {
+                let resumed = agent.lock().await.messages().iter().any(|message| {
+                    message.role == Role::Assistant
+                        && message
+                            .content_preview()
+                            .contains("picked the lane back up")
+                });
+                if resumed {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("a worker with an open todo lane must resume after restart");
+    assert!(
+        !server.sessions.read().await.contains_key(&done.id),
+        "a worker with no open todos is idle and is not resurrected"
+    );
+    Ok(())
+}
