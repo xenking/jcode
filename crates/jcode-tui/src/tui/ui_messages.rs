@@ -2766,17 +2766,38 @@ pub(crate) fn render_background_task_message(
     width: u16,
     diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
-    if msg
-        .content
+    let await_state = jcode_tui_messages::parse_collapsible_swarm_content(&msg.content);
+    let await_content = await_state.map_or(msg.content.as_str(), |state| state.body);
+    if await_content
         .trim_start()
         .starts_with("🐝 **Swarm await finished**")
     {
-        return render_compact_swarm_await(
+        let mut lines = render_compact_swarm_await(
             "🐝 Swarm await",
-            &compact_swarm_await_summary(&msg.content),
+            &compact_swarm_await_summary(await_content),
             width,
         )
         .unwrap_or_default();
+        if let Some(line) = lines.first_mut() {
+            line.spans.push(Span::styled(
+                format!(
+                    "  {}",
+                    if await_state.is_some_and(|state| state.expanded) {
+                        SWARM_COLLAPSE_BADGE
+                    } else {
+                        SWARM_EXPAND_BADGE
+                    }
+                ),
+                Style::default().fg(dim_color()),
+            ));
+        }
+        if await_state.is_some_and(|state| state.expanded) {
+            lines.extend(markdown::render_markdown_with_width(
+                await_content,
+                Some(width.max(1) as usize),
+            ));
+        }
+        return lines;
     }
     if let Some(progress) = parse_background_task_progress_notification_markdown(&msg.content) {
         if progress.tool_name == "swarm" {
@@ -3357,18 +3378,33 @@ fn render_compact_agent_notification(
     if width == 0 {
         return Some(Vec::new());
     }
+    let named_notice = title.starts_with("DM from ") || title.starts_with("Swarm · ");
     let icon = if notification.sender.is_empty() {
         String::new()
+    } else if named_notice {
+        format!(
+            "{} {} · ",
+            crate::id::session_icon(notification.sender),
+            notification.sender
+        )
     } else {
         format!("{} ", crate::id::session_icon(notification.sender))
     };
     // Plain (legacy or unencoded) long content renders as a collapsed preview
     // too, so nothing agent-authored is ever dumped inline by default.
-    let normalized = jcode_tui_messages::collapse_long_swarm_content(content);
+    let mut normalized = jcode_tui_messages::collapse_long_swarm_content(content);
+    if named_notice && jcode_tui_messages::parse_collapsible_swarm_content(&normalized).is_none() {
+        normalized =
+            jcode_tui_messages::encode_collapsible_swarm_content(content.trim(), content.trim());
+    }
     let collapsible = jcode_tui_messages::parse_collapsible_swarm_content(&normalized);
     let (body, badge) = match collapsible {
         Some(parsed) if parsed.expanded => (
-            format!("{}\n{}", parsed.tldr, parsed.body.trim()),
+            if parsed.tldr.trim() == parsed.body.trim() {
+                parsed.body.trim().to_owned()
+            } else {
+                format!("{}\n{}", parsed.tldr, parsed.body.trim())
+            },
             Some(if notification.file_activity {
                 SWARM_DIFF_COLLAPSE_BADGE
             } else {
@@ -3608,10 +3644,7 @@ fn render_compact_plan_update(
     Some(lines)
 }
 
-pub(crate) fn render_compaction_divider(
-    msg: &DisplayMessage,
-    width: u16,
-) -> Vec<Line<'static>> {
+pub(crate) fn render_compaction_divider(msg: &DisplayMessage, width: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let running = msg.compaction_is_running();
     let expanded = msg.compaction_is_expanded();
@@ -3620,7 +3653,11 @@ pub(crate) fn render_compaction_divider(
         None => (msg.content.trim(), None),
     };
     let label = if label.is_empty() {
-        if running { "compacting…" } else { "compacted" }
+        if running {
+            "compacting…"
+        } else {
+            "compacted"
+        }
     } else {
         label
     };
@@ -3650,9 +3687,7 @@ pub(crate) fn render_compaction_divider(
         label_style,
     ));
 
-    if expanded
-        && let Some(detail) = detail.filter(|detail| !detail.is_empty())
-    {
+    if expanded && let Some(detail) = detail.filter(|detail| !detail.is_empty()) {
         let indent = 2usize;
         for line in detail.lines() {
             let text = truncate_to_width(line, (width as usize).saturating_sub(indent + 2));
@@ -4060,11 +4095,151 @@ fn render_tool_failure_reason(content: &str, width: usize, indent: usize) -> Lin
     )
 }
 
+fn render_swarm_tool(msg: &DisplayMessage, width: u16) -> Option<Vec<Line<'static>>> {
+    let tool = msg.tool_data.as_ref()?;
+    if tools_ui::canonical_tool_name(&tool.name) != "swarm" {
+        return None;
+    }
+    let get = |key: &str| {
+        tool.input
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+    };
+    let action = get("action").unwrap_or("status");
+    let icon = match action {
+        "message" | "dm" => "✉",
+        "spawn" | "resume" => "+",
+        "stop" => "■",
+        "await_members" => "⌛",
+        "list" => "☷",
+        "focus" => "◎",
+        _ => "·",
+    };
+    fn friendly(id: &str) -> &str {
+        id.strip_prefix("session_")
+            .and_then(|s| s.split_once('_').map(|(name, _)| name))
+            .unwrap_or(id)
+    }
+    fn friendly_preview(text: &str) -> String {
+        let mut rest = text;
+        let mut result = String::new();
+        while let Some(start) = rest.find("session_") {
+            result.push_str(&rest[..start]);
+            rest = &rest[start..];
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+                .unwrap_or(rest.len());
+            result.push_str(friendly(&rest[..end]));
+            rest = &rest[end..];
+        }
+        result.push_str(rest);
+        result
+    }
+    let mut ids: Vec<&str> = tool
+        .input
+        .get("session_ids")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .collect();
+    ids.extend(
+        [get("to_session"), get("target_session"), get("session_id")]
+            .into_iter()
+            .flatten(),
+    );
+    let target = if action == "spawn" {
+        get("label").unwrap_or("worker").to_owned()
+    } else if ids.is_empty() {
+        get("channel")
+            .or_else(|| get("to_swarm"))
+            .unwrap_or("all")
+            .to_owned()
+    } else {
+        ids.iter()
+            .map(|id| {
+                let name = friendly(id);
+                format!("{} {name}", crate::id::session_icon(name))
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let text = get("message").or_else(|| get("prompt")).unwrap_or("");
+    let state = jcode_tui_messages::parse_collapsible_swarm_content(&msg.content);
+    let expanded = state.is_some_and(|state| state.expanded);
+    let output = state.map_or(msg.content.as_str(), |state| state.body);
+    let failed = tools_ui::tool_output_looks_failed(output);
+    let preview = if text.is_empty() {
+        action.to_owned()
+    } else {
+        let mut preview =
+            friendly_preview(&jcode_tui_messages::swarm_preview_line(text, usize::MAX));
+        if text.trim().contains('\n') {
+            preview.push('…');
+        }
+        preview
+    };
+    let marker = if expanded {
+        SWARM_COLLAPSE_BADGE
+    } else {
+        SWARM_EXPAND_BADGE
+    };
+    let mut line = super::truncate_line_with_ellipsis_to_width(
+        &Line::from(vec![
+            Span::styled(
+                if failed { "  ✗ 🐝 " } else { "  🐝 " },
+                Style::default().fg(if failed {
+                    rgb(240, 90, 90)
+                } else {
+                    rgb(255, 200, 100)
+                }),
+            ),
+            Span::styled(
+                format!("{icon} → {target} · {preview}"),
+                Style::default().fg(dim_color()),
+            ),
+        ]),
+        width.saturating_sub(3) as usize,
+    );
+    line.spans.push(Span::styled(
+        format!("  {marker}"),
+        Style::default().fg(dim_color()),
+    ));
+    let mut lines = vec![line];
+    if expanded {
+        let body = if !text.is_empty() { text } else { output };
+        lines.extend(markdown::render_markdown_with_width(
+            body,
+            Some(width.saturating_sub(4).max(1) as usize),
+        ));
+        if failed && !text.is_empty() {
+            lines.extend(markdown::render_markdown_with_width(
+                output,
+                Some(width.saturating_sub(4).max(1) as usize),
+            ));
+        } else if action != "message"
+            && action != "dm"
+            && !text.is_empty()
+            && !output.trim().is_empty()
+        {
+            lines.extend(markdown::render_markdown_with_width(
+                output,
+                Some(width.saturating_sub(4).max(1) as usize),
+            ));
+        }
+    }
+    Some(lines)
+}
+
 pub(crate) fn render_tool_message(
     msg: &DisplayMessage,
     width: u16,
     diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
+    if let Some(lines) = render_swarm_tool(msg, width) {
+        return lines;
+    }
     if let Some(lines) = render_scheduled_tool_message(msg, width) {
         return lines;
     }

@@ -2,6 +2,37 @@
 use super::*;
 
 #[test]
+fn swarm_message_is_a_single_compact_buffer_row() {
+    use ratatui::{
+        buffer::Buffer,
+        layout::Rect,
+        widgets::{Paragraph, Widget},
+    };
+    let msg = DisplayMessage::tool(
+        "Direct message sent to session_fox_123_abc: first line\nsecond line",
+        crate::message::ToolCall {
+            id: "swarm-dm".into(),
+            name: "swarm".into(),
+            input: serde_json::json!({"action":"message", "to_session":"session_fox_123_abc", "message":"first line\nsecond line", "intent":"hidden intent"}),
+            intent: Some("hidden intent".into()),
+            thought_signature: None,
+        },
+    );
+    let lines = render_tool_message(&msg, 70, crate::config::DiffDisplayMode::Off);
+    assert_eq!(lines.len(), 1);
+    let area = Rect::new(0, 0, 70, 2);
+    let mut buffer = Buffer::empty(area);
+    Paragraph::new(lines).render(area, &mut buffer);
+    let row = (0..70).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
+    assert!(row.contains("fox") && row.contains("first line"), "{row}");
+    assert!(
+        !row.contains("session_") && !row.contains("hidden intent"),
+        "{row}"
+    );
+    assert!((0..70).all(|x| buffer[(x, 1)].symbol() == " "));
+}
+
+#[test]
 fn render_tool_message_groups_duration_and_tokens() {
     for name in [
         "bash",
@@ -686,7 +717,10 @@ fn render_tool_message_shows_swarm_spawn_prompt_summary() {
         .map(|span| span.content.as_ref())
         .collect();
 
-    assert!(rendered.contains("swarm spawn"), "rendered={rendered}");
+    assert!(
+        rendered.contains("🐝") && rendered.contains('+'),
+        "rendered={rendered}"
+    );
     assert!(
         rendered.contains("Extract the restart command cluster"),
         "rendered={rendered}"

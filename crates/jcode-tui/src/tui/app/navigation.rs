@@ -276,10 +276,35 @@ impl App {
             return false;
         };
         let oauth = message.role == "system" && message.title.as_deref() == Some("OpenAI login");
-        if message.role != "swarm" && !oauth {
+        let swarm_tool = message.role == "tool"
+            && message.tool_data.as_ref().is_some_and(|tool| {
+                super::super::ui::tools_ui::canonical_tool_name(&tool.name) == "swarm"
+            });
+        let await_body = jcode_tui_messages::parse_collapsible_swarm_content(&message.content)
+            .map_or(message.content.as_str(), |state| state.body);
+        let swarm_await = message.role == "background_task"
+            && await_body
+                .trim_start()
+                .starts_with("🐝 **Swarm await finished**");
+        let named_notice = message.role == "swarm"
+            && message.title.as_deref().is_some_and(|title| {
+                title.starts_with("DM from ") || title.starts_with("Swarm · ")
+            });
+        if message.role != "swarm" && !oauth && !swarm_tool && !swarm_await {
             return false;
         }
-        let normalized = jcode_tui_messages::collapse_long_swarm_content(&message.content);
+        let normalized = if (swarm_tool || swarm_await || named_notice)
+            && jcode_tui_messages::parse_collapsible_swarm_content(&message.content).is_none()
+        {
+            let title = if named_notice {
+                jcode_tui_messages::swarm_preview_line(&message.content, 120)
+            } else {
+                String::new()
+            };
+            jcode_tui_messages::encode_collapsible_swarm_content(&title, &message.content)
+        } else {
+            jcode_tui_messages::collapse_long_swarm_content(&message.content)
+        };
         let Some(toggled) = jcode_tui_messages::toggle_collapsible_swarm_content(&normalized)
         else {
             return false;

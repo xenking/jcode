@@ -1566,7 +1566,7 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
 
     let expanded = render_and_snap(&app, &mut terminal);
     assert!(
-        expanded.contains("race in the setup helper"),
+        expanded.split_whitespace().collect::<Vec<_>>().join(" ").contains("race in the setup helper"),
         "expanded card must show the body:\n{expanded}"
     );
     assert!(

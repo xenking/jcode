@@ -136,6 +136,7 @@ include!("tests/final_response_followup.rs");
 include!("tests/reload_recovery_replay.rs");
 include!("tests/issue_496_input_routing.rs");
 include!("tests/oauth_login_progress.rs");
+include!("tests/swarm_tool_disclosure.rs");
 include!("tests/issue_544_paste_enter.rs");
 include!("tests/keybinding_hot_reload.rs");
 include!("tests/latex_command.rs");

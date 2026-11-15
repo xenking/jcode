@@ -134,27 +134,14 @@ fn test_prepare_messages_places_live_swarm_card_beneath_matching_spawn_tool_call
         .iter()
         .map(extract_line_text)
         .collect::<Vec<_>>();
-    let tool_row = rendered
-        .iter()
-        .position(|line| line.contains("Spawn an authentication reviewer"))
-        .expect("missing swarm tool row");
-    let card_row = rendered
-        .iter()
-        .position(|line| line.contains("🐄 ● API reviewer"))
-        .expect("missing live member card");
     let all = rendered.join("\n");
-
-    assert_eq!(
-        card_row,
-        tool_row + 1,
-        "card must directly follow tool: {all}"
-    );
-    // Transcript cards are deliberately stable one-liners: no elapsed time,
-    // todos, or tool progress (those live on the dedicated swarm page), so
-    // old chat rows do not move while the user is reading them.
     assert!(
-        rendered[card_row].contains("🐄 ● API reviewer · Working"),
-        "stable card line missing: {all}"
+        all.contains("API reviewer") && all.contains("Review the authentication flow"),
+        "{all}"
+    );
+    assert!(
+        !all.contains("Spawn an authentication reviewer") && !all.contains("🐄 ●"),
+        "{all}"
     );
     assert!(
         !all.contains("00:18"),
@@ -232,17 +219,8 @@ fn test_prepare_messages_keeps_transcript_card_stable_with_nested_descendants() 
         .map(extract_line_text)
         .collect::<Vec<_>>();
     let all = rendered.join("\n");
-    // The transcript deliberately renders only the spawned member's stable
-    // one-line card. Descendant trees, todos, and current work live on the
-    // dedicated live swarm page so chat rows do not churn.
-    let root = rendered
-        .iter()
-        .position(|line| line.contains("🐄 ● API reviewer"))
-        .unwrap_or_else(|| panic!("missing root card: {all}"));
-    assert!(
-        rendered[root].contains("Working"),
-        "root card should show status: {all}"
-    );
+    assert!(all.contains("API reviewer"), "missing spawn row: {all}");
+    assert!(!all.contains("🐄 ●"), "extra card: {all}");
     assert!(
         !all.contains("Auth tests") && !all.contains("Token audit"),
         "descendants must not render in the transcript: {all}"
@@ -288,7 +266,7 @@ fn test_prepare_messages_uses_exact_spawn_member_outside_gallery_subtree() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        rendered.contains("🐄 ● API reviewer"),
+        rendered.contains("API reviewer") && !rendered.contains("🐄 ●"),
         "rendered={rendered}"
     );
 }
@@ -322,7 +300,7 @@ fn test_prepare_messages_matches_real_prefixed_spawn_result_without_input_metada
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        rendered.contains("🐄 ● API reviewer"),
+        !rendered.contains("🐄 ● API reviewer"),
         "rendered={rendered}"
     );
 }
@@ -390,7 +368,7 @@ fn test_prepare_messages_matches_spawn_member_by_unique_label_when_result_is_ref
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        rendered.contains("🐄 ● API reviewer"),
+        rendered.contains("API reviewer") && !rendered.contains("🐄 ●"),
         "rendered={rendered}"
     );
 }

@@ -90,7 +90,11 @@ fn test_render_direct_message_as_compact_agent_row() {
     let lines = render_swarm_message(&msg, 80, crate::config::DiffDisplayMode::Off);
     let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
 
-    assert_eq!(rendered, vec!["🦊 Can you take parser tests?"]);
+    assert_eq!(rendered.len(), 1);
+    assert!(
+        rendered[0].contains("🦊 fox · Can you take parser tests?") && rendered[0].contains('⊞'),
+        "{rendered:?}"
+    );
     assert!(
         rendered
             .iter()
@@ -137,7 +141,7 @@ fn test_render_swarm_await_wake_message_as_compact_rail_free_summary() {
     let lines = render_background_task_message(&msg, 80, crate::config::DiffDisplayMode::Off);
     let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
 
-    assert_eq!(rendered, vec!["🐝 ✓ 1/1"]);
+    assert_eq!(rendered, vec!["🐝 ✓ 1/1  ⊞"]);
     assert!(rendered.iter().all(|line| !line.contains('│')));
     assert!(!rendered.join("\n").contains("sabertooth"));
 }
