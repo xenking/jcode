@@ -182,6 +182,8 @@ pub struct ModelScopedUsageWindow {
 pub(super) struct UsageResponse {
     /// Read reset eligibility with the quota response, never a second poll.
     pub juniper_tide: Option<serde_json::Value>,
+    /// Saved limit resets, evaluated only when `cedar_ember=1` is requested.
+    pub cedar_ember: Option<serde_json::Value>,
     pub(super) five_hour: Option<UsageWindow>,
     pub(super) seven_day: Option<UsageWindow>,
     pub(super) seven_day_opus: Option<UsageWindow>,

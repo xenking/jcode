@@ -612,19 +612,29 @@ fn banked_reset_report(provider: &crate::usage::ProviderUsage) -> Option<UsageBa
             next_available_at: None,
         });
     }
-    provider
-        .anthropic_limit_reset
-        .as_ref()
-        .map(|offer| UsageBankedResetReport {
-            provider: "claude",
-            account_label: offer.account_label.clone(),
-            available_count: u64::from(offer.available),
-            limit_reached: provider
+    let offer = provider.anthropic_limit_reset.as_ref();
+    let banked = provider.anthropic_banked_resets.as_ref();
+    if offer.is_none() && banked.is_none() {
+        return None;
+    }
+    let session = offer.is_some_and(|offer| offer.available);
+    let available_count = banked.map_or(0, |b| b.available_count) + u64::from(session);
+    Some(UsageBankedResetReport {
+        provider: "claude",
+        account_label: offer
+            .and_then(|offer| offer.account_label.clone())
+            .or_else(|| banked.and_then(|b| b.account_label.clone())),
+        available_count,
+        // Only the session offer is claimable from here, at the five-hour wall.
+        limit_reached: session
+            && provider
                 .limits
                 .iter()
                 .any(|limit| limit.name == "5-hour window" && limit.usage_percent >= 100.0),
-            next_available_at: offer.next_available_at.clone(),
-        })
+        next_available_at: (available_count == 0)
+            .then(|| offer.and_then(|offer| offer.next_available_at.clone()))
+            .flatten(),
+    })
 }
 
 pub(super) fn list_cli_providers() -> Vec<ProviderListEntry> {
@@ -759,6 +769,16 @@ mod tests {
         let spent = banked_reset_report(&claude(false)).unwrap();
         assert_eq!(spent.available_count, 0);
         assert!(spent.next_available_at.is_some());
+        let mut saved = claude(false);
+        saved.anthropic_banked_resets = Some(crate::usage::AnthropicBankedResets {
+            account_label: Some("claude-otter".into()),
+            available_count: 2,
+            usable_count: 1,
+            expires_at: None,
+        });
+        let saved = banked_reset_report(&saved).unwrap();
+        assert_eq!((saved.available_count, saved.limit_reached), (2, false));
+        assert!(saved.next_available_at.is_none());
         let json = serde_json::to_value(usage_provider_report(&claude(true))).unwrap();
         assert_eq!(json["banked_reset"]["provider"], "claude");
         let plain = serde_json::to_value(usage_provider_report(&ProviderUsage::default())).unwrap();

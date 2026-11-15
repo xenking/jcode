@@ -22,6 +22,19 @@ pub struct AnthropicLimitResetOffer {
     pub resets_per_week: u64,
 }
 
+/// Read-only Claude saved limit resets (the `cedar_ember` program, shown by
+/// Claude Code as banked resets), pinned to the login whose usage was fetched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnthropicBankedResets {
+    pub account_label: Option<String>,
+    /// Unexpired resets left across all grants, usable now or not.
+    pub available_count: u64,
+    /// Resets the server says can be spent right now.
+    pub usable_count: u64,
+    /// RFC3339 expiry of the soonest-expiring unexpired grant.
+    pub expires_at: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ProviderUsage {
     pub provider_name: String,
@@ -30,6 +43,7 @@ pub struct ProviderUsage {
     pub hard_limit_reached: bool,
     pub openai_reset_credits: Option<OpenAiResetCredits>,
     pub anthropic_limit_reset: Option<AnthropicLimitResetOffer>,
+    pub anthropic_banked_resets: Option<AnthropicBankedResets>,
     pub error: Option<String>,
     /// When jcode last successfully used this login/credential (unix seconds).
     /// Drives most-recently-used-first ordering in `/usage`. `None` sorts last.

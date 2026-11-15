@@ -1952,6 +1952,13 @@ impl App {
                 credits.available_count
             ));
         }
+        if let Some(banked) = &provider.anthropic_banked_resets {
+            let marker = if banked.available_count > 0 { '+' } else { ':' };
+            details.push(format!(
+                "{marker} Banked resets\t{} available",
+                banked.available_count
+            ));
+        }
         if let Some(offer) = &provider.anthropic_limit_reset {
             let next = offer
                 .next_available_at
@@ -2003,6 +2010,7 @@ impl App {
         } else if provider.extra_info.is_empty()
             && provider.openai_reset_credits.is_none()
             && provider.anthropic_limit_reset.is_none()
+            && provider.anthropic_banked_resets.is_none()
         {
             "*none\tno data".to_string()
         } else {

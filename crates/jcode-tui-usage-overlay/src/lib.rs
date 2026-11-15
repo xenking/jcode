@@ -919,6 +919,7 @@ mod tests {
                 hard_limit_reached: false,
                 openai_reset_credits: None,
                 anthropic_limit_reset: None,
+                anthropic_banked_resets: None,
                 error: None,
                 last_used_unix_secs: None,
             }],

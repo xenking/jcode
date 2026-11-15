@@ -73,8 +73,17 @@ pub(super) async fn fetch_anthropic_usage_for_token(
                     &access_token,
                     stored.then_some(account_label.as_str()),
                 );
-                super::banked::record_anthropic_offer(&account_label, offer.as_ref());
+                let banked = super::anthropic_banked::cached_banked_resets(
+                    &access_token,
+                    stored.then_some(account_label.as_str()),
+                );
+                super::banked::record_anthropic_offer(
+                    &account_label,
+                    offer.as_ref(),
+                    banked.as_ref(),
+                );
                 report.anthropic_limit_reset = offer;
+                report.anthropic_banked_resets = banked;
                 if ineligible {
                     report
                         .extra_info
@@ -364,6 +373,7 @@ pub(super) async fn fetch_openai_usage_for_account(
             }
         }),
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
     };
@@ -475,6 +485,7 @@ pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
         hard_limit_reached: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
     })
@@ -574,6 +585,7 @@ pub(super) async fn fetch_antigravity_usage_report() -> Option<ProviderUsage> {
         hard_limit_reached: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
     })
@@ -616,6 +628,7 @@ pub(super) async fn fetch_gemini_usage_report() -> Option<ProviderUsage> {
         hard_limit_reached: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
     })
@@ -711,6 +724,7 @@ pub(super) fn cursor_plan_usage_report(json: &serde_json::Value) -> ProviderUsag
         hard_limit_reached: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
     }
@@ -784,6 +798,7 @@ async fn cursor_key_status_report() -> ProviderUsage {
         hard_limit_reached: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
     }
@@ -907,6 +922,7 @@ pub(super) async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
         hard_limit_reached: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
     })

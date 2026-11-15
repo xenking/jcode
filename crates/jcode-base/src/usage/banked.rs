@@ -41,35 +41,46 @@ fn anthropic_offers() -> &'static Mutex<HashMap<String, AccountBankedResets>> {
     OFFERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Remember the latest Claude reset offer for a login. `None` means the login
-/// is not in the reset program, which clears any earlier observation.
+/// Remember the latest Claude resets for a login: saved `cedar_ember` grants
+/// plus the weekly session-limit offer. `None` for both means neither program
+/// answered, which clears any earlier observation.
 pub(super) fn record_anthropic_offer(
     label: &str,
     offer: Option<&jcode_usage_types::AnthropicLimitResetOffer>,
+    banked: Option<&jcode_usage_types::AnthropicBankedResets>,
 ) {
     let label = label.trim();
     if label.is_empty() {
         return;
     }
     if let Ok(mut map) = anthropic_offers().lock() {
-        match offer {
-            Some(offer) => {
-                map.insert(
-                    label.to_string(),
-                    AccountBankedResets {
-                        available: u64::from(offer.available),
-                        next_available_at: (!offer.available)
-                            .then(|| offer.next_available_at.clone())
-                            .flatten(),
-                        expires_at: None,
-                    },
-                );
+        match anthropic_account_resets(offer, banked) {
+            Some(resets) => {
+                map.insert(label.to_string(), resets);
             }
             None => {
                 map.remove(label);
             }
         }
     }
+}
+
+fn anthropic_account_resets(
+    offer: Option<&jcode_usage_types::AnthropicLimitResetOffer>,
+    banked: Option<&jcode_usage_types::AnthropicBankedResets>,
+) -> Option<AccountBankedResets> {
+    if offer.is_none() && banked.is_none() {
+        return None;
+    }
+    let session = offer.is_some_and(|offer| offer.available);
+    let available = banked.map_or(0, |b| b.available_count) + u64::from(session);
+    Some(AccountBankedResets {
+        available,
+        next_available_at: (available == 0)
+            .then(|| offer.and_then(|offer| offer.next_available_at.clone()))
+            .flatten(),
+        expires_at: banked.and_then(|b| b.expires_at.clone()),
+    })
 }
 
 /// Cached banked resets for a saved account. Never probes or blocks.
@@ -154,7 +165,7 @@ mod tests {
             next_available_at: Some("2099-01-01T00:00:00Z".into()),
             resets_per_week: 1,
         };
-        record_anthropic_offer(label, Some(&offer));
+        record_anthropic_offer(label, Some(&offer), None);
         let got =
             cached_account_banked_resets(super::super::MultiAccountProviderKind::Anthropic, label)
                 .unwrap();
@@ -163,7 +174,20 @@ mod tests {
             got.next_available_at.as_deref(),
             Some("2099-01-01T00:00:00Z")
         );
-        record_anthropic_offer(label, None);
+        let banked = jcode_usage_types::AnthropicBankedResets {
+            account_label: Some(label.into()),
+            available_count: 2,
+            usable_count: 1,
+            expires_at: Some("2099-02-01T00:00:00Z".into()),
+        };
+        record_anthropic_offer(label, Some(&offer), Some(&banked));
+        let got =
+            cached_account_banked_resets(super::super::MultiAccountProviderKind::Anthropic, label)
+                .unwrap();
+        assert_eq!(got.available, 2);
+        assert!(got.next_available_at.is_none());
+        assert_eq!(got.expires_at.as_deref(), Some("2099-02-01T00:00:00Z"));
+        record_anthropic_offer(label, None, None);
         assert!(
             cached_account_banked_resets(super::super::MultiAccountProviderKind::Anthropic, label)
                 .is_none()

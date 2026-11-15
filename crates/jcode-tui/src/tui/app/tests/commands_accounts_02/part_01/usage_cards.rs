@@ -195,6 +195,7 @@ fn test_usage_report_updates_display_only_card_without_system_message() {
         hard_limit_reached: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
     }]);
@@ -233,6 +234,7 @@ fn test_usage_progress_updates_card_incrementally() {
             hard_limit_reached: false,
             openai_reset_credits: None,
             anthropic_limit_reset: None,
+            anthropic_banked_resets: None,
             error: None,
             last_used_unix_secs: None,
         }],

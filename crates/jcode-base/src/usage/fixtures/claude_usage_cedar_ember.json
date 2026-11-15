@@ -1,0 +1,47 @@
+{
+  "five_hour": null,
+  "seven_day": {"utilization": 29.0, "resets_at": "2026-11-17T22:00:01.245Z"},
+  "seven_day_opus": null,
+  "extra_usage": {"is_enabled": false},
+  "juniper_tide": null,
+  "cedar_ember": {
+    "eligible": true,
+    "ineligible_reason": null,
+    "at_limit": false,
+    "exhausted": [],
+    "cooldown_until": null,
+    "next_grant_id": "grant_monthly",
+    "grants": [
+      {
+        "id": "grant_monthly",
+        "label": "One full limit reset (November 2026)",
+        "resets_left": 1,
+        "resets_total": 1,
+        "starts_at": "2026-11-10T21:30:00Z",
+        "ends_at": "2026-12-10T22:00:00Z",
+        "clears": ["seven_day", "seven_day_overage_included"],
+        "blocking": [],
+        "percent_used": {"seven_day": 29, "seven_day_overage_included": 0},
+        "paused": false,
+        "usable_now": true,
+        "use_requires_limit": false,
+        "gives_back_weekly": true
+      },
+      {
+        "id": "grant_fable_launch",
+        "label": "New model launch: one Fable reset for Max, Team Premium and Enterprise Premium",
+        "resets_left": 1,
+        "resets_total": 1,
+        "starts_at": "2026-11-09T18:00:00Z",
+        "ends_at": "2027-03-09T07:59:00Z",
+        "clears": ["seven_day_overage_included"],
+        "blocking": [],
+        "percent_used": {"seven_day_overage_included": 0},
+        "paused": false,
+        "usable_now": false,
+        "use_requires_limit": false,
+        "gives_back_weekly": true
+      }
+    ]
+  }
+}

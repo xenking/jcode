@@ -696,6 +696,7 @@ pub(super) fn provider_report_from_usage_data(
         hard_limit_reached: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
     }
@@ -826,6 +827,7 @@ pub(super) fn provider_report_from_openai_usage_data(
         hard_limit_reached: data.hard_limit_reached,
         openai_reset_credits: data.openai_reset_credits.clone(),
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
     }
