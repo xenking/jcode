@@ -1,6 +1,46 @@
 use super::*;
 
 #[test]
+fn test_usage_card_shows_every_opencode_go_quota_window() {
+    let mut app = create_test_app();
+    app.handle_usage_report(vec![crate::usage::ProviderUsage {
+        provider_name: "OpenCode Go (API key)".into(),
+        limits: vec![
+            crate::usage::UsageLimit {
+                name: "Rolling window".into(),
+                usage_percent: 23.0,
+                resets_at: Some("2026-11-15T11:08:23Z".into()),
+            },
+            crate::usage::UsageLimit {
+                name: "Weekly window".into(),
+                usage_percent: 9.0,
+                resets_at: Some("2026-11-16T00:00:00Z".into()),
+            },
+            crate::usage::UsageLimit {
+                name: "Monthly window".into(),
+                usage_percent: 4.0,
+                resets_at: Some("2026-12-15T05:54:05Z".into()),
+            },
+        ],
+        extra_info: vec![("Key status".into(), "valid".into())],
+        ..Default::default()
+    }]);
+    let content = &app.display_messages().last().unwrap().content;
+    // The card header reports the tightest window, and each window is a gauge.
+    assert!(content.contains("*%\t23"), "{content}");
+    for (window, percent) in [
+        ("Rolling window", 23),
+        ("Weekly window", 9),
+        ("Monthly window", 4),
+    ] {
+        assert!(
+            content.contains(&format!("= {window}\t{percent}%")),
+            "{window} missing: {content}"
+        );
+    }
+}
+
+#[test]
 fn test_usage_card_reset_balances() {
     let mut app = create_test_app();
     for count in [0, 3] {
@@ -35,7 +75,10 @@ fn test_usage_card_reset_balances() {
         }]);
         let content = &app.display_messages().last().unwrap().content;
         assert!(
-            content.contains(&format!("Session resets\t{} available", u64::from(available))),
+            content.contains(&format!(
+                "Session resets\t{} available",
+                u64::from(available)
+            )),
             "{content}"
         );
         assert_eq!(content.contains("next in"), !available, "{content}");
