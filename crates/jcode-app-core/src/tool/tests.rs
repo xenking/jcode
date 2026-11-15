@@ -717,6 +717,14 @@ async fn tool_descriptions_stay_under_token_cap() {
     // applet carries the whole view-node vocabulary inline, since the model has
     // no other way to learn which node types and props the host renders.
     // codemode documents its sandbox API.
+    // ask is the only blocking question tool: its one sentence carries the
+    // trigger (a genuine owner decision you cannot research) and the two habits
+    // that make a batch of questions usable, so it is not boilerplate. The full
+    // rubric lives in the base system prompt; the question shape lives in the
+    // schema. Pinned by `blocking_and_desktop_tools_keep_their_steering`.
+    // macos_computer_use carries the only always-on guard for a tool that moves
+    // the user's cursor and focus: run in the background and act only on the
+    // requested task. Its action vocabulary is behind action='discover'.
     const EXEMPT: &[&str] = &[
         "integration_tools",
         "swarm",
@@ -725,6 +733,8 @@ async fn tool_descriptions_stay_under_token_cap() {
         "todo",
         "applet",
         "codemode",
+        "ask",
+        "macos_computer_use",
     ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
@@ -748,6 +758,50 @@ async fn tool_descriptions_stay_under_token_cap() {
         over_cap.is_empty(),
         "tool descriptions over the {DESCRIPTION_TOKEN_CAP}-token cap:\n{}",
         over_cap.join("\n")
+    );
+}
+
+/// The two tools exempted from the 20-token description cap must still carry
+/// the steering that earns the exemption. Without this, a later trim can strip
+/// the trigger from `ask` (and the tool stops being called) or the safety
+/// restraint from `macos_computer_use` (and it starts moving the user's cursor
+/// on its own initiative) while the cap test stays green.
+#[tokio::test]
+async fn blocking_and_desktop_tools_keep_their_steering() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let definitions = registry.definitions(None).await;
+    let description = |name: &str| {
+        definitions
+            .iter()
+            .find(|def| def.name == name)
+            .map(|def| def.description.as_str())
+            .unwrap_or_else(|| panic!("{name} is not registered"))
+    };
+
+    let ask = description("ask");
+    assert!(
+        ask.contains("genuine owner decision"),
+        "ask keeps its trigger: {ask}"
+    );
+    assert!(ask.contains("blocking"), "ask says it blocks: {ask}");
+    assert!(
+        ask.contains("batch pending decisions into one call"),
+        "ask keeps the batching habit: {ask}"
+    );
+    assert!(
+        ask.contains("(Recommended)"),
+        "ask keeps the recommendation habit: {ask}"
+    );
+
+    let desktop = description("macos_computer_use");
+    assert!(
+        desktop.contains("act only on the requested task"),
+        "desktop control keeps the restraint: {desktop}"
+    );
+    assert!(
+        desktop.contains("background"),
+        "desktop control keeps the background-first rule: {desktop}"
     );
 }
 
@@ -2089,6 +2143,70 @@ fn touched_paths_include_patch_headers_and_path_keys() {
     assert_eq!(Registry::patch_paths(diff), vec!["src/x.rs", "new.md"]);
 }
 
+/// Set a `JCODE_HOOK_*` override and make it visible immediately.
+///
+/// The hook command list comes from `crate::config::config()`, a throttled
+/// reloadable cache, and hook env overrides are only read during a load. A test
+/// that sets the variable and executes right away therefore races every other
+/// test in the binary: whichever one loaded config first decides whether the
+/// override exists. That is why a hook test passes under a single-test filter
+/// and fails in a full `--lib` run. Restores the previous value (and reloads
+/// again) on drop.
+struct HookEnvGuard {
+    name: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+fn set_hook_env(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> HookEnvGuard {
+    let previous = std::env::var_os(name);
+    crate::env::set_var(name, value);
+    crate::config::invalidate_config_cache();
+    HookEnvGuard { name, previous }
+}
+
+impl Drop for HookEnvGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => crate::env::set_var(self.name, value),
+            None => crate::env::remove_var(self.name),
+        }
+        crate::config::invalidate_config_cache();
+    }
+}
+
+/// A hook override applies even when config was already loaded.
+///
+/// This is the contract the feedback test depends on. Reproduced here without a
+/// tool call so the failure names the cause: a cached config keeps the old hook
+/// list until something invalidates it.
+#[test]
+fn hook_env_override_applies_after_config_is_already_loaded() {
+    let _env_lock = crate::storage::lock_test_env();
+    // Load config before the override exists, as any earlier test would.
+    let _ = crate::config::config();
+    let baseline = jcode_base::hooks::hook_commands("post_tool_feedback");
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let script = dir.path().join("hook.sh");
+    std::fs::write(&script, "#!/bin/sh\nexit 0\n").expect("write hook");
+    let expected = script.to_string_lossy().to_string();
+
+    {
+        let _env = set_hook_env("JCODE_HOOK_POST_TOOL_FEEDBACK", &script);
+        assert_eq!(
+            jcode_base::hooks::hook_commands("post_tool_feedback"),
+            vec![expected],
+            "an env override must take effect on an already-loaded config"
+        );
+    }
+
+    assert_eq!(
+        jcode_base::hooks::hook_commands("post_tool_feedback"),
+        baseline,
+        "dropping the guard restores the previous hook list"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn post_tool_feedback_hook_appends_stdout_to_tool_result() {
@@ -2104,8 +2222,7 @@ async fn post_tool_feedback_hook_appends_stdout_to_tool_result() {
     )
     .expect("write script");
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    let previous = std::env::var_os("JCODE_HOOK_POST_TOOL_FEEDBACK");
-    crate::env::set_var("JCODE_HOOK_POST_TOOL_FEEDBACK", &script);
+    let _env = set_hook_env("JCODE_HOOK_POST_TOOL_FEEDBACK", &script);
 
     let registry = Registry::new(Arc::new(MockProvider) as Arc<dyn Provider>).await;
     let mut ctx = mcp_test_context(dir.path());
@@ -2114,10 +2231,7 @@ async fn post_tool_feedback_hook_appends_stdout_to_tool_result() {
         .execute("read", serde_json::json!({"file_path": "prose.md"}), ctx)
         .await;
 
-    match previous {
-        Some(value) => crate::env::set_var("JCODE_HOOK_POST_TOOL_FEEDBACK", value),
-        None => crate::env::remove_var("JCODE_HOOK_POST_TOOL_FEEDBACK"),
-    }
+    drop(_env);
     let output = result.expect("read should succeed").output;
     assert!(output.contains("hello"), "{output}");
     assert!(output.contains("[post_tool_feedback]"), "{output}");
