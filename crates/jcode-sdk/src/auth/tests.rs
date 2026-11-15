@@ -58,6 +58,23 @@ fn catalog_is_capability_filtered_and_uses_shared_aliases() {
     assert!(client.begin("jcode", None).is_err());
 }
 
+/// Desktop builds its account picker from this list. A key-based catalog
+/// provider that is missing here (OpenCode Go) leaves the user pasting its key
+/// under the nearest listed provider (OpenRouter), where it silently breaks.
+#[test]
+fn key_based_catalog_providers_are_offered_with_their_own_id() {
+    let client = AuthClient::default();
+    for id in ["opencode-go", "opencode", "deepseek", "zai"] {
+        let provider = client
+            .resolve_provider(id)
+            .unwrap_or_else(|| panic!("{id} must be offered as a native login provider"));
+        assert_eq!(provider.id, id);
+        assert_eq!(provider.method, LoginMethod::ApiKey, "{id}");
+    }
+    let listed: Vec<_> = client.providers().into_iter().map(|p| p.id).collect();
+    assert!(listed.contains(&"opencode-go"), "{listed:?}");
+}
+
 #[test]
 fn legacy_validation_report_is_only_accepted_after_authenticated_completion() {
     let success = br#"{"status":"authenticated","provider":"openai"}"#;
