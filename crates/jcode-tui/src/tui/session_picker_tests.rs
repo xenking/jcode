@@ -1882,6 +1882,8 @@ fn preview_transcript_hash_ignores_picker_metadata() {
 #[test]
 fn test_preview_is_left_aligned_independently_of_chat_markdown_context() {
     let _env_lock = crate::storage::lock_test_env();
+    // Renders share process-global layout and markdown caches.
+    let _render_state = crate::tui::ui::render_state_test_lock();
     for width in [60, 100] {
         let mut reference = None;
         for centered in [false, true] {

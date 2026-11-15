@@ -1173,19 +1173,22 @@ fn test_account_switch_shorthand_switches_openai_account_by_label() {
 
 #[test]
 fn test_account_picker_prompt_new_openai_label_cancel_clears_prompt() {
-    let mut app = create_test_app();
-    app.prompt_new_account_label(crate::tui::account_picker::AccountProviderKind::OpenAi);
+    // Shared env, config and catalog caches: run hermetically.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.prompt_new_account_label(crate::tui::account_picker::AccountProviderKind::OpenAi);
 
-    assert!(matches!(
-        app.pending_account_input,
-        Some(super::auth::PendingAccountInput::NewAccountLabel { ref provider_id, .. }) if provider_id == "openai"
-    ));
+        assert!(matches!(
+            app.pending_account_input,
+            Some(super::auth::PendingAccountInput::NewAccountLabel { ref provider_id, .. }) if provider_id == "openai"
+        ));
 
-    app.input = "/cancel".to_string();
-    app.submit_input();
+        app.input = "/cancel".to_string();
+        app.submit_input();
 
-    assert!(app.pending_account_input.is_none());
-    assert!(app.pending_login.is_none());
+        assert!(app.pending_account_input.is_none());
+        assert!(app.pending_login.is_none());
+    });
 }
 
 #[test]

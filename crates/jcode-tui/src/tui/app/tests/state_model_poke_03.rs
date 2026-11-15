@@ -525,65 +525,68 @@ impl Provider for CountingModelRoutesProvider {
 
 #[test]
 fn test_subagent_model_large_catalog_uses_cached_searchable_picker() {
-    ensure_test_jcode_home_if_unset();
-    clear_persisted_test_ui_state();
-    crate::tui::ui::clear_test_render_state_for_tests();
+    // Shared env, config and catalog caches: run hermetically.
+    with_temp_jcode_home(|| {
+        ensure_test_jcode_home_if_unset();
+        clear_persisted_test_ui_state();
+        crate::tui::ui::clear_test_render_state_for_tests();
 
-    let calls = StdArc::new(AtomicUsize::new(0));
-    let provider: Arc<dyn Provider> = Arc::new(CountingModelRoutesProvider {
-        calls: StdArc::clone(&calls),
-        route_count: 400,
-        delay: Duration::from_millis(25),
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(CountingModelRoutesProvider {
+            calls: StdArc::clone(&calls),
+            route_count: 400,
+            delay: Duration::from_millis(25),
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        let mut app = App::new_for_test_harness(provider, registry);
+        app.queue_mode = false;
+        app.diff_mode = crate::config::DiffDisplayMode::Inline;
+
+        for c in "/subagent-model".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+                .unwrap();
+        }
+        wait_for_model_picker_load(&mut app);
+
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("subagent model picker should be open");
+        assert!(picker.preview);
+        assert_eq!(picker.entries.len(), 401, "400 models plus inherit");
+        assert!(matches!(
+            picker.entries[0].action,
+            crate::tui::PickerAction::SubagentModelChoice { inherit: true }
+        ));
+        let calls_after_load = calls.load(Ordering::SeqCst);
+
+        for _ in 0..10 {
+            app.handle_key(KeyCode::Down, KeyModifiers::empty())
+                .unwrap();
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            calls_after_load,
+            "navigation must not rebuild or re-query the model catalog"
+        );
+
+        app.handle_key(KeyCode::Char('3'), KeyModifiers::empty())
+            .unwrap();
+        let picker = app.inline_interactive_state.as_ref().unwrap();
+        assert!(
+            !picker.filtered.is_empty(),
+            "typed input should filter models"
+        );
+        assert!(picker.filtered.len() < picker.entries.len());
+
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
+        assert!(app.session.subagent_model.is_some());
+        assert_eq!(app.provider.model(), "counting-a");
     });
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
-    let mut app = App::new_for_test_harness(provider, registry);
-    app.queue_mode = false;
-    app.diff_mode = crate::config::DiffDisplayMode::Inline;
-
-    for c in "/subagent-model".chars() {
-        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
-            .unwrap();
-    }
-    wait_for_model_picker_load(&mut app);
-
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("subagent model picker should be open");
-    assert!(picker.preview);
-    assert_eq!(picker.entries.len(), 401, "400 models plus inherit");
-    assert!(matches!(
-        picker.entries[0].action,
-        crate::tui::PickerAction::SubagentModelChoice { inherit: true }
-    ));
-    let calls_after_load = calls.load(Ordering::SeqCst);
-
-    for _ in 0..10 {
-        app.handle_key(KeyCode::Down, KeyModifiers::empty())
-            .unwrap();
-    }
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        calls_after_load,
-        "navigation must not rebuild or re-query the model catalog"
-    );
-
-    app.handle_key(KeyCode::Char('3'), KeyModifiers::empty())
-        .unwrap();
-    let picker = app.inline_interactive_state.as_ref().unwrap();
-    assert!(
-        !picker.filtered.is_empty(),
-        "typed input should filter models"
-    );
-    assert!(picker.filtered.len() < picker.entries.len());
-
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-        .unwrap();
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-        .unwrap();
-    assert!(app.session.subagent_model.is_some());
-    assert_eq!(app.provider.model(), "counting-a");
 }
 
 #[test]
@@ -1130,62 +1133,65 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
 
 #[test]
 fn test_tui_openai_compatible_empty_catalog_does_not_switch_to_profile_default() {
-    ensure_test_jcode_home_if_unset();
-    clear_persisted_test_ui_state();
-    crate::tui::ui::clear_test_render_state_for_tests();
+    // Shared env, config and catalog caches: run hermetically.
+    with_temp_jcode_home(|| {
+        ensure_test_jcode_home_if_unset();
+        clear_persisted_test_ui_state();
+        crate::tui::ui::clear_test_render_state_for_tests();
 
-    let refreshes = StdArc::new(AtomicUsize::new(0));
-    let set_model_attempts = StdArc::new(AtomicUsize::new(0));
-    let provider: Arc<dyn Provider> = Arc::new(EmptyPostLoginCatalogProvider {
-        refreshes: StdArc::clone(&refreshes),
-        set_model_attempts: StdArc::clone(&set_model_attempts),
-    });
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
-    let mut app = App::new_for_test_harness(provider, registry);
-    app.queue_mode = false;
-    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+        let refreshes = StdArc::new(AtomicUsize::new(0));
+        let set_model_attempts = StdArc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(EmptyPostLoginCatalogProvider {
+            refreshes: StdArc::clone(&refreshes),
+            set_model_attempts: StdArc::clone(&set_model_attempts),
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        let mut app = App::new_for_test_harness(provider, registry);
+        app.queue_mode = false;
+        app.diff_mode = crate::config::DiffDisplayMode::Inline;
 
-    let mut bus_rx = crate::bus::Bus::global().subscribe();
-    while bus_rx.try_recv().is_ok() {}
+        let mut bus_rx = crate::bus::Bus::global().subscribe();
+        while bus_rx.try_recv().is_ok() {}
 
-    let _guard = rt.enter();
-    app.start_openai_compatible_post_login_activation(
-        "cerebras".to_string(),
-        "Cerebras".to_string(),
-    );
+        let _guard = rt.enter();
+        app.start_openai_compatible_post_login_activation(
+            "cerebras".to_string(),
+            "Cerebras".to_string(),
+        );
 
-    let activity = rt.block_on(async {
-        loop {
-            match tokio::time::timeout(Duration::from_secs(2), bus_rx.recv()).await {
-                Ok(Ok(crate::bus::BusEvent::ProviderModelActivated { .. })) => {
-                    panic!("empty catalog must not activate a provider model")
+        let activity = rt.block_on(async {
+            loop {
+                match tokio::time::timeout(Duration::from_secs(2), bus_rx.recv()).await {
+                    Ok(Ok(crate::bus::BusEvent::ProviderModelActivated { .. })) => {
+                        panic!("empty catalog must not activate a provider model")
+                    }
+                    Ok(Ok(crate::bus::BusEvent::LoginCompleted(login))) => {
+                        panic!("empty local catalog must not publish final login failure: {login:?}")
+                    }
+                    Ok(Ok(crate::bus::BusEvent::UiActivity(activity)))
+                        if activity.message.contains("Model Discovery Still Updating") =>
+                    {
+                        break activity;
+                    }
+                    Ok(Ok(_)) => continue,
+                    other => panic!("expected pending catalog activity, got {other:?}"),
                 }
-                Ok(Ok(crate::bus::BusEvent::LoginCompleted(login))) => {
-                    panic!("empty local catalog must not publish final login failure: {login:?}")
-                }
-                Ok(Ok(crate::bus::BusEvent::UiActivity(activity)))
-                    if activity.message.contains("Model Discovery Still Updating") =>
-                {
-                    break activity;
-                }
-                Ok(Ok(_)) => continue,
-                other => panic!("expected pending catalog activity, got {other:?}"),
             }
-        }
-    });
+        });
 
-    assert_eq!(refreshes.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        set_model_attempts.load(Ordering::SeqCst),
-        0,
-        "post-login activation must not try the metadata default when the catalog has no selectable route"
-    );
-    assert!(activity.message.contains("Saved credentials are active"));
-    assert!(activity.message.contains("Jcode is still processing"));
-    assert!(!activity.message.contains("did not switch models"));
-    assert!(!activity.message.contains("documented default"));
-    assert!(!activity.message.contains("qwen-3-coder-480b"));
+        assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            set_model_attempts.load(Ordering::SeqCst),
+            0,
+            "post-login activation must not try the metadata default when the catalog has no selectable route"
+        );
+        assert!(activity.message.contains("Saved credentials are active"));
+        assert!(activity.message.contains("Jcode is still processing"));
+        assert!(!activity.message.contains("did not switch models"));
+        assert!(!activity.message.contains("documented default"));
+        assert!(!activity.message.contains("qwen-3-coder-480b"));
+    });
 }
 
 #[test]
@@ -1257,44 +1263,47 @@ fn test_tui_openai_compatible_local_refresh_failure_is_pending_not_final_failure
 
 #[test]
 fn test_model_picker_opens_simplified_state_before_async_routes_complete() {
-    ensure_test_jcode_home_if_unset();
-    clear_persisted_test_ui_state();
-    crate::tui::ui::clear_test_render_state_for_tests();
+    // Shared env, config and catalog caches: run hermetically.
+    with_temp_jcode_home(|| {
+        ensure_test_jcode_home_if_unset();
+        clear_persisted_test_ui_state();
+        crate::tui::ui::clear_test_render_state_for_tests();
 
-    let calls = StdArc::new(AtomicUsize::new(0));
-    let provider: Arc<dyn Provider> = Arc::new(CountingModelRoutesProvider {
-        calls: StdArc::clone(&calls),
-        route_count: 2,
-        delay: Duration::from_millis(75),
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(CountingModelRoutesProvider {
+            calls: StdArc::clone(&calls),
+            route_count: 2,
+            delay: Duration::from_millis(75),
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        let mut app = App::new_for_test_harness(provider, registry);
+        app.queue_mode = false;
+        app.diff_mode = crate::config::DiffDisplayMode::Inline;
+
+        app.open_model_picker();
+
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("loading picker should open immediately");
+        assert_eq!(picker.entries.len(), 1);
+        assert_eq!(picker.entries[0].name, "counting-a");
+        assert_eq!(picker.entries[0].options[0].detail, "simplified catalog");
+        assert!(app.pending_model_picker_load.is_some());
+        assert_eq!(
+            app.status_notice(),
+            Some("Updating model routes…".to_string())
+        );
+
+        wait_for_model_picker_load(&mut app);
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("hydrated picker should still be open");
+        assert!(picker.entries.len() >= 2);
+        assert_eq!(app.status_notice(), Some("Model list updated".to_string()));
     });
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
-    let mut app = App::new_for_test_harness(provider, registry);
-    app.queue_mode = false;
-    app.diff_mode = crate::config::DiffDisplayMode::Inline;
-
-    app.open_model_picker();
-
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("loading picker should open immediately");
-    assert_eq!(picker.entries.len(), 1);
-    assert_eq!(picker.entries[0].name, "counting-a");
-    assert_eq!(picker.entries[0].options[0].detail, "simplified catalog");
-    assert!(app.pending_model_picker_load.is_some());
-    assert_eq!(
-        app.status_notice(),
-        Some("Updating model routes…".to_string())
-    );
-
-    wait_for_model_picker_load(&mut app);
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("hydrated picker should still be open");
-    assert!(picker.entries.len() >= 2);
-    assert_eq!(app.status_notice(), Some("Model list updated".to_string()));
 }
 
 #[test]

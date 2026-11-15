@@ -39,26 +39,29 @@ fn preparing_recent_project_review_finishes_onboarding_and_seeds_the_first_turn(
 
 #[test]
 fn starting_recent_project_review_runs_as_a_visible_local_turn() {
-    let mut app = onboarding_test_app();
-    let _repository = seed_onboarding_git_project(&mut app);
-    let repository = app
-        .onboarding_recent_project_path()
-        .expect("test session should start in a Git repository");
-    let expected = App::onboarding_recent_project_review_prompt(&repository);
+    // Shared env, config and catalog caches: run hermetically.
+    with_temp_jcode_home(|| {
+        let mut app = onboarding_test_app();
+        let _repository = seed_onboarding_git_project(&mut app);
+        let repository = app
+            .onboarding_recent_project_path()
+            .expect("test session should start in a Git repository");
+        let expected = App::onboarding_recent_project_review_prompt(&repository);
 
-    app.onboarding_start_recent_project_review();
+        app.onboarding_start_recent_project_review();
 
-    assert!(!app.onboarding_flow_active());
-    assert!(app.pending_turn, "local review should start a local turn");
-    assert!(app.is_processing, "local review should enter Sending");
-    assert!(app.queued_messages.is_empty());
-    assert_eq!(
-        app.session.messages.last().and_then(|message| {
-            message.content.iter().find_map(|block| match block {
-                crate::message::ContentBlock::Text { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-        }),
-        Some(expected.as_str())
-    );
+        assert!(!app.onboarding_flow_active());
+        assert!(app.pending_turn, "local review should start a local turn");
+        assert!(app.is_processing, "local review should enter Sending");
+        assert!(app.queued_messages.is_empty());
+        assert_eq!(
+            app.session.messages.last().and_then(|message| {
+                message.content.iter().find_map(|block| match block {
+                    crate::message::ContentBlock::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+            }),
+            Some(expected.as_str())
+        );
+    });
 }

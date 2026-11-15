@@ -1224,22 +1224,25 @@ fn test_save_and_restore_reload_state_preserves_split_view_mode() {
 
 #[test]
 fn test_new_for_remote_restores_observe_mode_from_reload_state() {
-    let mut app = create_test_app();
-    let session_id = format!("test-remote-observe-{}", std::process::id());
+    // Shared env, config and catalog caches: run hermetically.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-remote-observe-{}", std::process::id());
 
-    app.set_observe_mode_enabled(true, true);
-    app.observe_page_markdown = "# Observe\n\nRestored after reload.".to_string();
-    app.observe_page_updated_at_ms = 99;
-    app.save_input_for_reload(&session_id);
+        app.set_observe_mode_enabled(true, true);
+        app.observe_page_markdown = "# Observe\n\nRestored after reload.".to_string();
+        app.observe_page_updated_at_ms = 99;
+        app.save_input_for_reload(&session_id);
 
-    let restored = App::new_for_remote(Some(session_id));
-    assert!(restored.observe_mode_enabled());
-    let page = restored
-        .side_panel()
-        .focused_page()
-        .expect("observe page should be focused");
-    assert_eq!(page.id, "observe");
-    assert!(page.content.contains("Restored after reload."));
+        let restored = App::new_for_remote(Some(session_id));
+        assert!(restored.observe_mode_enabled());
+        let page = restored
+            .side_panel()
+            .focused_page()
+            .expect("observe page should be focused");
+        assert_eq!(page.id, "observe");
+        assert!(page.content.contains("Restored after reload."));
+    });
 }
 
 #[test]
