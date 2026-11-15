@@ -1,6 +1,25 @@
 use super::*;
 
 #[test]
+fn openrouter_rejected_key_is_reported_but_rate_limits_are_not_credentials() {
+    use reqwest::StatusCode;
+    let rejected =
+        super::provider_fetch::openrouter_rejected_key([StatusCode::OK, StatusCode::UNAUTHORIZED])
+            .expect("a 401 names the rejected key");
+    assert!(rejected.contains("rejected"), "{rejected}");
+    assert!(
+        super::provider_fetch::openrouter_rejected_key([StatusCode::FORBIDDEN, StatusCode::OK])
+            .is_some()
+    );
+    for status in [StatusCode::OK, StatusCode::TOO_MANY_REQUESTS] {
+        assert!(
+            super::provider_fetch::openrouter_rejected_key([status]).is_none(),
+            "{status}"
+        );
+    }
+}
+
+#[test]
 fn codex_response_headers_parse_both_windows_without_fabricating_missing_values() {
     let mut headers = reqwest::header::HeaderMap::new();
     for (key, value) in [

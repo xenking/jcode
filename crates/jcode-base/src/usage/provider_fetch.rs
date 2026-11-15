@@ -403,6 +403,13 @@ pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
 
     let mut limits = Vec::new();
     let mut extra_info = Vec::new();
+    // A configured but rejected key must not vanish from /usage: the account
+    // row needs to say why it has no balance instead of looking untested.
+    let auth_error = openrouter_rejected_key(
+        [&key_resp, &credits_resp]
+            .into_iter()
+            .filter_map(|response| response.as_ref().ok().map(|response| response.status())),
+    );
 
     if let Ok(resp) = credits_resp
         && resp.status().is_success()
@@ -475,7 +482,13 @@ pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
     }
 
     if limits.is_empty() && extra_info.is_empty() {
-        return None;
+        return Some(ProviderUsage {
+            provider_name: "OpenRouter".to_string(),
+            error: Some(
+                auth_error.unwrap_or_else(|| "no usage data returned by OpenRouter".to_string()),
+            ),
+            ..Default::default()
+        });
     }
 
     Some(ProviderUsage {
@@ -489,6 +502,18 @@ pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
         error: None,
         last_used_unix_secs: None,
     })
+}
+
+/// A configured OpenRouter key the service refuses to authenticate. Rate
+/// limits and transport failures are not credential problems, so they stay
+/// ordinary errors rather than telling the user to sign in again.
+pub(super) fn openrouter_rejected_key(
+    statuses: impl IntoIterator<Item = reqwest::StatusCode>,
+) -> Option<String> {
+    statuses
+        .into_iter()
+        .find(|status| matches!(status.as_u16(), 401 | 403))
+        .map(|status| format!("OpenRouter rejected the API key ({status})"))
 }
 
 pub(super) fn openrouter_api_key() -> Option<String> {
