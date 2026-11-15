@@ -455,7 +455,9 @@ async fn ensure_client_swarm_member(
                 .event_txs
                 .insert(client_connection_id.to_string(), client_event_tx.clone());
             member.swarm_enabled = swarm_enabled;
-            member.is_headless = false;
+            // A viewer attaching to a headless worker does not take it over:
+            // the server keeps driving it, and the viewer's disconnect must
+            // not tear it down. `is_headless` therefore stays as spawned.
             if member_name.is_some() {
                 member.friendly_name = member_name.clone();
             }

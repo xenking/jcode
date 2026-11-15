@@ -156,7 +156,14 @@ pub(super) async fn cleanup_client_connection(
     if disposition == DisconnectDisposition::Closed {
         crate::agents_status::session_closed(client_session_id);
     }
-    let originally_registered = swarm_members.read().await.contains_key(client_session_id);
+    let (originally_registered, server_owned_worker) = {
+        let members = swarm_members.read().await;
+        let member = members.get(client_session_id);
+        (
+            member.is_some(),
+            member.is_some_and(|member| member.is_headless),
+        )
+    };
 
     record_transport_closed(client_session_id, client_connection_id, client_connections).await;
 
@@ -170,7 +177,11 @@ pub(super) async fn cleanup_client_connection(
     )
     .await;
 
-    if continue_on_disconnect {
+    // A headless swarm worker is driven by the server, not by whoever is
+    // viewing it. A Desktop/TUI viewer closing must only release its own
+    // transport; tearing the worker down here stopped it mid-turn and dropped
+    // it from its swarm, so the coordinator lost the worker for good.
+    if continue_on_disconnect || server_owned_worker {
         // Remote continuation is a session lifetime policy, not merely a
         // promise to finish the current turn. Idle coordinators must remain
         // addressable for worker reports and future wake turns after EOF.

@@ -627,7 +627,8 @@ pub(super) fn apply_history_images_base(
 
 fn rendered_to_history_message(msg: crate::session::RenderedMessage) -> HistoryMessage {
     HistoryMessage {
-        response_stats: msg.response_stats, timestamp_ms: msg.timestamp_ms,
+        response_stats: msg.response_stats,
+        timestamp_ms: msg.timestamp_ms,
         role: msg.role,
         content: msg.content,
         tool_calls: if msg.tool_calls.is_empty() {

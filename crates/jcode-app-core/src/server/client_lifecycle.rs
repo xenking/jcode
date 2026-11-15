@@ -194,11 +194,7 @@ async fn session_is_idle_waiting(session_id: &str) -> bool {
 }
 
 /// Compact opportunistically while a session is parked on external work.
-async fn maybe_idle_precompact(
-    agent: &Arc<Mutex<Agent>>,
-    session_id: &str,
-    processing: bool,
-) {
+async fn maybe_idle_precompact(agent: &Arc<Mutex<Agent>>, session_id: &str, processing: bool) {
     if processing {
         return;
     }

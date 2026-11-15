@@ -786,10 +786,7 @@ async fn blocking_and_desktop_tools_keep_their_steering() {
         ask_lower.contains("genuine owner decision"),
         "ask keeps its trigger: {ask}"
     );
-    assert!(
-        ask_lower.contains("blocking"),
-        "ask says it blocks: {ask}"
-    );
+    assert!(ask_lower.contains("blocking"), "ask says it blocks: {ask}");
     assert!(
         ask_lower.contains("batch pending decisions into one call"),
         "ask keeps the batching habit: {ask}"

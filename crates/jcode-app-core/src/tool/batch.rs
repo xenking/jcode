@@ -234,9 +234,7 @@ impl Tool for BatchTool {
             .enumerate()
             .map(|(i, tc)| {
                 let (tool_name, mut parameters) = tc.resolved_parameters();
-                if batch_opt_in
-                    && let Some(object) = parameters.as_object_mut()
-                {
+                if batch_opt_in && let Some(object) = parameters.as_object_mut() {
                     object
                         .entry(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY)
                         .or_insert(Value::Bool(true));

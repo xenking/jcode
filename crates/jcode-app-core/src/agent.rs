@@ -930,11 +930,8 @@ impl Agent {
             .compaction
             .as_ref()
             .map(|state| state.summary_text.clone());
-        self.session.record_compaction_event(
-            event,
-            event.method.as_deref(),
-            summary.as_deref(),
-        );
+        self.session
+            .record_compaction_event(event, event.method.as_deref(), summary.as_deref());
     }
 
     fn apply_openai_native_compaction(

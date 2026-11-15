@@ -3,7 +3,8 @@ fn delta_test_messages() -> Vec<crate::protocol::HistoryMessage> {
         .into_iter()
         .enumerate()
         .map(|(index, content)| crate::protocol::HistoryMessage {
-            response_stats: None, timestamp_ms: None,
+            response_stats: None,
+            timestamp_ms: None,
             role: if index % 2 == 0 { "user" } else { "assistant" }.to_string(),
             content: content.to_string(),
             tool_calls: None,
@@ -99,7 +100,8 @@ fn history_images_base_omits_only_matching_image_sets() {
 fn recent_history_bounds_seven_thousand_message_bootstrap() {
     let messages: Vec<_> = (0..7000)
         .map(|index| crate::protocol::HistoryMessage {
-            response_stats: None, timestamp_ms: None,
+            response_stats: None,
+            timestamp_ms: None,
             role: if index % 2 == 0 { "user" } else { "assistant" }.to_owned(),
             content: format!("{index}: {}", "x".repeat(2000)),
             tool_calls: None,
