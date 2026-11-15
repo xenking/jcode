@@ -35,6 +35,9 @@ impl Agent {
             &self.session.id,
             self.graceful_shutdown.clone(),
         );
+        if !self.resume_interrupted_ask(&event_tx, &turn_cancel_guard).await? {
+            return Ok(());
+        }
         let trace = trace_enabled();
         let mut context_limit_retries = 0u32;
         let mut incomplete_continuations = 0u32;
