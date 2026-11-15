@@ -350,6 +350,20 @@ fn session_has_pending_await(session_id: &str) -> bool {
         .any(|state| state.background && state.wake && state.is_pending())
 }
 
+/// Whether the turn that appended `messages[before..]` called any tool. A
+/// shrunken transcript (compaction) is treated as progress, never as a stall.
+fn turn_had_tool_calls(messages: &[crate::session::StoredMessage], before: usize) -> bool {
+    let Some(new) = messages.get(before..) else {
+        return true;
+    };
+    new.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, crate::message::ContentBlock::ToolUse { .. }))
+    })
+}
+
 fn apply_effects(session_id: &str, effects: &todo::followup::TodoEffects) -> Result<()> {
     if effects.clear_gate_observations {
         todo::clear_gate_observations(session_id)?;
@@ -422,6 +436,8 @@ pub(super) async fn run_reserved_followups(
             .map(|task| task.task_id)
             .collect();
         merge_live_background_tasks(&mut snapshot, live);
+        snapshot.running_swarm_members =
+            super::lane_dispatch::running_members_for(&session_id).await;
         if session_has_pending_await(&session_id) {
             crate::logging::info(&format!(
                 "Remote continuation deferred for session {session_id}: await_members in flight"
@@ -454,6 +470,7 @@ pub(super) async fn run_reserved_followups(
         };
         // Persisted budgets are committed before the request. A daemon restart
         // cannot turn a failing continuation into an unlimited retry loop.
+        let messages_before = agent.messages().len();
         let result = super::client_lifecycle::process_reserved_message_streaming_mpsc(
             agent,
             lease,
@@ -471,6 +488,15 @@ pub(super) async fn run_reserved_followups(
             event_tx.clone(),
         )
         .await;
+        if result.is_ok() {
+            // A poke that made no tool calls changed nothing. Block repeats of
+            // the same open state instead of looping on "nothing to do".
+            let had_tool_calls = turn_had_tool_calls(agent.messages(), messages_before);
+            update_state(&session_id, |state| {
+                state.policy.record_turn(had_tool_calls);
+                Ok(())
+            })?;
+        }
         if let Err(error) = &result {
             update_state(&session_id, |state| {
                 state.policy.disable();

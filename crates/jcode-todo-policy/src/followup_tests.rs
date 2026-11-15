@@ -748,3 +748,121 @@ fn delivered_final_preserves_gate_breaker_and_disabled_policy() {
     policy.disable();
     assert_eq!(policy.decide_after_turn(&state, true), Decision::default());
 }
+
+fn assigned(content: &str, owner: &str) -> TodoItem {
+    TodoItem {
+        assigned_to: Some(owner.into()),
+        ..todo(content, "in_progress")
+    }
+}
+
+#[test]
+fn todo_assigned_to_another_session_is_not_actionable() {
+    let mut policy = FollowUpPolicy::new(true);
+    let mut state = snapshot(vec![assigned("worker lane", "swarm-worker")]);
+    state.session_id = "coordinator".into();
+    for _ in 0..4 {
+        assert_eq!(policy.decide(&state), Decision::default());
+    }
+    // Own work in the same list is still poked, and names only that work.
+    state.todos.push(todo("mine", "pending"));
+    let message = policy.decide(&state).follow_up.unwrap().message;
+    assert!(message.contains("mine"));
+    assert!(!message.contains("worker lane"));
+    // `@self`, empty and the session's own id are this session's work.
+    for owner in ["@self", "", "coordinator"] {
+        let mut own = snapshot(vec![assigned("own lane", owner)]);
+        own.session_id = "coordinator".into();
+        assert_eq!(
+            kind(&FollowUpPolicy::new(true).decide(&own)),
+            Some(FollowUpKind::IncompleteTodos),
+            "{owner:?}"
+        );
+    }
+}
+
+#[test]
+fn assigned_elsewhere_todo_does_not_reach_final_response_gates() {
+    let mut policy = FollowUpPolicy::new(true);
+    let mut state = snapshot(vec![assigned("worker lane", "swarm-worker")]);
+    state.session_id = "coordinator".into();
+    state
+        .todos
+        .push(done("finished", ConfidenceState::Verified));
+    assert_eq!(policy.decide(&state), Decision::default());
+}
+
+#[test]
+fn running_swarm_members_suppress_poke_without_spending_budget() {
+    let mut policy = FollowUpPolicy::new(true);
+    let mut state = snapshot(vec![todo("own work", "pending")]);
+    state.session_id = "coordinator".into();
+    state.running_swarm_members = vec!["worker-1".into()];
+    for _ in 0..10 {
+        assert_eq!(policy.decide(&state), Decision::default());
+    }
+    // Members finishing wakes the session with a fresh budget.
+    state.running_swarm_members.clear();
+    for _ in 0..INCOMPLETE_TODO_MAX_ATTEMPTS {
+        assert_eq!(
+            kind(&policy.decide(&state)),
+            Some(FollowUpKind::IncompleteTodos)
+        );
+    }
+    assert_eq!(policy.decide(&state), Decision::default());
+}
+
+#[test]
+fn swarm_member_status_classification() {
+    for status in [
+        "queued",
+        "running",
+        "running_stale",
+        "streaming",
+        "thinking",
+    ] {
+        assert!(swarm_member_is_working(status), "{status}");
+    }
+    for status in ["ready", "completed", "failed", "stopped", "crashed", "done"] {
+        assert!(!swarm_member_is_working(status), "{status}");
+    }
+}
+
+#[test]
+fn poke_turn_without_tool_calls_blocks_repeat_until_todos_change() {
+    let mut policy = FollowUpPolicy::new(true);
+    let state = snapshot(vec![todo("stuck", "pending")]);
+    assert_eq!(
+        kind(&policy.decide(&state)),
+        Some(FollowUpKind::IncompleteTodos)
+    );
+    policy.record_turn(false);
+    for _ in 0..5 {
+        assert_eq!(policy.decide(&state), Decision::default());
+    }
+    // A changed todo set is a new situation.
+    let changed = snapshot(vec![todo("stuck", "in_progress")]);
+    assert_eq!(
+        kind(&policy.decide(&changed)),
+        Some(FollowUpKind::IncompleteTodos)
+    );
+}
+
+#[test]
+fn poke_turn_with_tool_calls_keeps_normal_budget() {
+    let mut policy = FollowUpPolicy::new(true);
+    let state = snapshot(vec![todo("busy", "pending")]);
+    for _ in 0..INCOMPLETE_TODO_MAX_ATTEMPTS {
+        assert!(policy.decide(&state).follow_up.is_some());
+        policy.record_turn(true);
+    }
+    assert_eq!(policy.decide(&state), Decision::default());
+}
+
+#[test]
+fn record_turn_without_a_poke_is_a_no_op() {
+    let mut policy = FollowUpPolicy::new(true);
+    policy.record_turn(false);
+    let state = snapshot(vec![todo("fresh", "pending")]);
+    assert!(policy.decide(&state).follow_up.is_some());
+}

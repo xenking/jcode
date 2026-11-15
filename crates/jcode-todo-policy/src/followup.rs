@@ -33,6 +33,9 @@ pub const INCOMPLETE_TODO_MAX_ATTEMPTS: u8 = 3;
 pub struct IncompleteTodoBudget {
     fingerprint: Option<Vec<TodoItem>>,
     attempts: u8,
+    /// A follow-up was granted and the turn it started has not been reported.
+    #[serde(default)]
+    awaiting_outcome: bool,
 }
 
 impl IncompleteTodoBudget {
@@ -57,8 +60,28 @@ impl IncompleteTodoBudget {
             return false;
         }
         self.attempts += 1;
+        self.awaiting_outcome = true;
         true
     }
+
+    /// Report the turn the last granted follow-up started. One that made no
+    /// tool calls changed nothing, so asking again for the same open state only
+    /// loops on "nothing to do" replies. Spend the rest of the budget: a
+    /// different todo set (or a wait, which clears the budget) pokes again.
+    pub fn record_turn(&mut self, had_tool_calls: bool) {
+        if std::mem::take(&mut self.awaiting_outcome) && !had_tool_calls {
+            self.attempts = INCOMPLETE_TODO_MAX_ATTEMPTS;
+        }
+    }
+}
+
+/// A swarm member that will still report back: its completion wakes the
+/// session that spawned it, so that session has nothing to poke about.
+pub fn swarm_member_is_working(status: &str) -> bool {
+    matches!(
+        status,
+        "queued" | "running" | "running_stale" | "streaming" | "thinking"
+    )
 }
 
 /// Everything the policy reads about a session's todo state at turn end.
@@ -80,6 +103,24 @@ pub struct TodoSnapshot {
     /// or terminal task IDs must not suppress actionable work.
     #[serde(default)]
     pub running_background_tasks: Vec<String>,
+    /// The session these todos belong to. A todo assigned to any other session
+    /// is that session's work and is never actionable here.
+    #[serde(default)]
+    pub session_id: String,
+    /// Swarm members spawned by this session that are still working. Their
+    /// completion wakes the session, so poking meanwhile only burns turns.
+    #[serde(default)]
+    pub running_swarm_members: Vec<String>,
+}
+
+/// A todo handed to another session (a swarm worker). The owner works it and
+/// reports back, so it is not this session's to continue. `@self`, an empty
+/// owner and this session's own id are this session's work.
+pub fn todo_assigned_elsewhere(todo: &TodoItem, session_id: &str) -> bool {
+    todo.assigned_to
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|owner| !owner.is_empty() && owner != "@self" && owner != session_id)
 }
 
 /// A dependency blocks a todo only while the referenced task is running.
@@ -255,6 +296,14 @@ impl FollowUpPolicy {
         self.gate_digest_enabled = gate_digest_enabled;
     }
 
+    /// Report how the turn after the last decision went. A poke that produced
+    /// no tool calls achieved nothing, so asking again for the same open state
+    /// would only loop ("nothing to do" replies). Callers that can observe tool
+    /// calls should call this before the next [`Self::decide`].
+    pub fn record_turn(&mut self, had_tool_calls: bool) {
+        self.incomplete_budget.record_turn(had_tool_calls);
+    }
+
     /// Decide the next follow-up after a turn ended. The caller must already
     /// have checked that no user prompt or other follow-up is pending.
     pub fn decide(&mut self, snapshot: &TodoSnapshot) -> Decision {
@@ -301,6 +350,7 @@ impl FollowUpPolicy {
             .copied()
             .filter(|todo| {
                 !todo_requires_user_auth(todo)
+                    && !todo_assigned_elsewhere(todo, &snapshot.session_id)
                     && !todo_goal_cannot_complete(todo, goals)
                     && !todo_waits_on_running_task(todo, |id| {
                         snapshot
@@ -310,7 +360,9 @@ impl FollowUpPolicy {
                     })
             })
             .collect();
-        if !incomplete.is_empty() && actionable.is_empty() {
+        if !incomplete.is_empty()
+            && (actionable.is_empty() || !snapshot.running_swarm_members.is_empty())
+        {
             // Waiting is not resistance or completion. A completion wake will
             // re-enter the policy with fresh runtime facts and a fresh budget.
             self.incomplete_budget = IncompleteTodoBudget::default();

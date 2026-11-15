@@ -15,8 +15,9 @@ pub mod store;
 pub use followup::{
     ConfidenceSummary, Decision, FollowUp, FollowUpKind, FollowUpPolicy,
     INCOMPLETE_TODO_MAX_ATTEMPTS, IncompleteTodoBudget, MAX_GATE_ATTEMPTS, TodoEffects,
-    TodoSnapshot, goal_cannot_complete, is_incomplete_todo, todo_cannot_complete_reason,
-    todo_goal_cannot_complete, todo_requires_user_auth, todo_waits_on_running_task,
+    TodoSnapshot, goal_cannot_complete, is_incomplete_todo, swarm_member_is_working,
+    todo_assigned_elsewhere, todo_cannot_complete_reason, todo_goal_cannot_complete,
+    todo_requires_user_auth, todo_waits_on_running_task,
 };
 
 /// Generic mid-task reassessment prompt. The elapsed-time policy that triggers

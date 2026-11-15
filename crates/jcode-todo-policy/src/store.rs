@@ -181,6 +181,8 @@ fn load_snapshot_with_background_dir(
         gate_observations: read_or_default(&path(TodoFile::GateObservations)),
         long_session_review_due: review.is_some_and(|state| state.is_due(chrono::Utc::now())),
         running_background_tasks,
+        session_id: session_id.to_string(),
+        running_swarm_members: Vec::new(),
     }
 }
 
@@ -516,7 +518,13 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(load_snapshot(&dir, "missing"), TodoSnapshot::default());
+        assert_eq!(
+            load_snapshot(&dir, "missing"),
+            TodoSnapshot {
+                session_id: "missing".into(),
+                ..TodoSnapshot::default()
+            }
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

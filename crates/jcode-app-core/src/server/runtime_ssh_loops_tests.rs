@@ -229,15 +229,16 @@ async fn productive_remote_campaign_exceeds_old_turn_cap_then_stops_on_no_progre
     let (tx, rx) = mpsc::unbounded_channel();
     drop(rx);
     run_followups(&mut agent, tx.clone()).await.unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst), 43);
+    // 40 productive pokes, then one tool-less reply ends the cycle at once.
+    assert_eq!(calls.load(Ordering::SeqCst), 41);
     let state = read_state(&state_path(&session_id).unwrap()).unwrap();
     assert!(state.poke_enabled, "productive work must not disable poke");
-    assert_eq!(state.turns, 43);
+    assert_eq!(state.turns, 41);
     initialize_remote_session(&session_id, true).unwrap();
     run_followups(&mut agent, tx).await.unwrap();
     assert_eq!(
         calls.load(Ordering::SeqCst),
-        43,
+        41,
         "no-progress budget survives reattach"
     );
 }
@@ -263,7 +264,7 @@ async fn remote_subscription_enables_real_followups_without_manual_poke() {
     // enqueue work for a live laptop client to dispatch.
     drop(rx);
     run_followups(&mut agent, tx.clone()).await.unwrap();
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     let persisted = std::fs::read(state_path(&session_id).unwrap()).unwrap();
     initialize_remote_session(&session_id, true).unwrap();
     assert_eq!(
@@ -273,7 +274,7 @@ async fn remote_subscription_enables_real_followups_without_manual_poke() {
     run_followups(&mut agent, tx.clone()).await.unwrap();
     assert_eq!(
         provider.calls.load(Ordering::SeqCst),
-        3,
+        1,
         "reattaching must not reset retry budgets"
     );
 
@@ -287,7 +288,7 @@ async fn remote_subscription_enables_real_followups_without_manual_poke() {
             .poke_enabled
     );
     run_followups(&mut agent, tx.clone()).await.unwrap();
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 
     // Arming needs no Agent lock and does not launch an overlapping turn.
     let (data, _) = control(&session_id, "poke", &["on".into()])
@@ -296,7 +297,7 @@ async fn remote_subscription_enables_real_followups_without_manual_poke() {
     assert_eq!(data["poke_enabled"], true);
     assert!(data.get("next_prompt").is_none());
     run_followups(&mut agent, tx).await.unwrap();
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 6);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
 
     initialize_remote_session("remote-disabled", false).unwrap();
     initialize_remote_session("remote-disabled", true).unwrap();
@@ -346,12 +347,12 @@ async fn remote_loop_runtime_executes_turns_persists_controls_and_recovers_actua
     )
     .await
     .unwrap();
-    // One launch plus three bounded real follow-up turns.
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    // One launch plus one follow-up: a tool-less reply blocks further pokes.
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
     run_followups(&mut agent, tx.clone()).await.unwrap();
     assert_eq!(
         provider.calls.load(Ordering::SeqCst),
-        4,
+        2,
         "persisted budget cannot reset at each turn"
     );
 
@@ -374,7 +375,7 @@ async fn remote_loop_runtime_executes_turns_persists_controls_and_recovers_actua
             .active
     );
     run_followups(&mut guard, tx.clone()).await.unwrap();
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
     let (resumed, _) = execute(&mut guard, "improve", &["resume".into()])
         .await
         .unwrap();
@@ -398,7 +399,7 @@ async fn remote_loop_runtime_executes_turns_persists_controls_and_recovers_actua
             .contains("Do not edit files")
     );
     run_followups(&mut guard, tx.clone()).await.unwrap();
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
     // Stopping an unrelated workflow must not clobber the active refactor.
     control(&session_id, "improve", &["stop".into()])
         .unwrap()
@@ -465,4 +466,85 @@ fn live_background_merge_keeps_running_await_dependencies() {
     );
     let mut state = enabled_state();
     assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
+}
+
+fn assigned_snapshot(owner: &str) -> todo::followup::TodoSnapshot {
+    let mut snapshot = open_snapshot();
+    snapshot.session_id = "coordinator".into();
+    snapshot.todos[0].assigned_to = Some(owner.into());
+    snapshot
+}
+
+#[test]
+fn todo_assigned_to_a_worker_is_never_poked_by_the_server_loop() {
+    let mut state = enabled_state();
+    let snapshot = assigned_snapshot("swarm-worker");
+    for _ in 0..10 {
+        assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
+    }
+    assert!(
+        next_followup(&mut enabled_state(), &assigned_snapshot("coordinator"))
+            .follow_up
+            .is_some()
+    );
+}
+
+#[test]
+fn running_swarm_members_defer_the_server_loop_poke() {
+    let mut state = enabled_state();
+    let mut snapshot = open_snapshot();
+    snapshot.running_swarm_members = vec!["worker".into()];
+    for _ in 0..10 {
+        assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
+    }
+    snapshot.running_swarm_members.clear();
+    assert!(next_followup(&mut state, &snapshot).follow_up.is_some());
+}
+
+#[test]
+fn server_loop_stops_after_a_poke_turn_without_tool_calls() {
+    let mut state = enabled_state();
+    let snapshot = open_snapshot();
+    assert!(next_followup(&mut state, &snapshot).follow_up.is_some());
+    state.policy.record_turn(false);
+    // The record must survive the persisted state round trip.
+    state = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+    for _ in 0..5 {
+        assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
+    }
+}
+
+fn stored(content: Vec<ContentBlock>) -> crate::session::StoredMessage {
+    crate::session::StoredMessage {
+        id: "m".into(),
+        role: Role::Assistant,
+        content,
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    }
+}
+
+#[test]
+fn turn_tool_call_detection_only_looks_at_new_messages() {
+    let text = || ContentBlock::Text {
+        text: "nothing to do".into(),
+        cache_control: None,
+    };
+    let tool = || ContentBlock::ToolUse {
+        id: "t".into(),
+        name: "bash".into(),
+        input: json!({}),
+        thought_signature: None,
+    };
+    let history = vec![stored(vec![tool()]), stored(vec![text()])];
+    assert!(!turn_had_tool_calls(&history, 2), "no new messages");
+    let mut with_text = history.clone();
+    with_text.push(stored(vec![text()]));
+    assert!(!turn_had_tool_calls(&with_text, 2), "old tool use ignored");
+    let mut with_tool = with_text.clone();
+    with_tool.push(stored(vec![tool()]));
+    assert!(turn_had_tool_calls(&with_tool, 2));
+    assert!(turn_had_tool_calls(&history, 5), "compaction is progress");
 }
