@@ -294,8 +294,13 @@ impl Provider for OpenRouterProvider {
             ],
         );
 
-        // OpenRouter uses HTTPS/SSE transport only
-        jcode_base::logging::info("OpenRouter transport: HTTPS (SSE)");
+        // The shared transport serves OpenRouter and direct OpenAI-compatible
+        // endpoints. Name the one in use, never OpenRouter for OpenCode Go.
+        jcode_base::logging::info(if self.supports_provider_features {
+            "OpenRouter transport: HTTPS (SSE)"
+        } else {
+            "OpenAI-compatible transport: HTTPS (SSE)"
+        });
 
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
         let client = self.client.clone();
