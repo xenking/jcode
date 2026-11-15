@@ -43,6 +43,8 @@ struct Entry {
     /// Reset metadata from the same coordinated usage response. Contains no credentials.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reset_status: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reset_observed_ms: Option<i64>,
     last_good: Option<Snapshot>,
     /// Latest failure and when it happened, for cross-process backoff.
     error: Option<String>,
@@ -198,10 +200,17 @@ fn interval(entry: &Entry) -> Duration {
 }
 
 fn deadline(entry: &Entry) -> Option<i64> {
-    let success = entry.last_good.as_ref().map(|good| {
-        good.fetched_unix_ms
-            .saturating_add(interval(entry).as_millis() as i64)
-    });
+    let success = entry
+        .last_good
+        .as_ref()
+        .filter(|good| {
+            // Model response headers do not constitute a new usage API probe.
+            good.five_observed_ms.is_none() && good.seven_observed_ms.is_none()
+        })
+        .map(|good| {
+            good.fetched_unix_ms
+                .saturating_add(interval(entry).as_millis() as i64)
+        });
     let failure = entry
         .error
         .as_ref()
@@ -247,7 +256,13 @@ fn entry_usage(entry: &Entry) -> UsageData {
 
 pub(super) fn reset_status(key: &str) -> Option<serde_json::Value> {
     let entry = load().remove(key)?;
-    if entry.error.is_some() || deadline(&entry)? <= now_ms() {
+    let observed = entry.reset_observed_ms.or_else(|| {
+        entry.last_good.as_ref().and_then(|good| {
+            (good.five_observed_ms.is_none() && good.seven_observed_ms.is_none())
+                .then_some(good.fetched_unix_ms)
+        })
+    })?;
+    if entry.error.is_some() || age(observed) >= interval(&entry) {
         return None;
     }
     entry.last_good.as_ref()?;
@@ -282,6 +297,12 @@ pub(super) fn store_response_limits(
     let entry = update(key, |entry| {
         // Freeze any outstanding probe deadline before replacing last_good.
         entry.retry_not_before_ms = deadline(entry);
+        if entry.reset_status.is_some() && entry.reset_observed_ms.is_none() {
+            entry.reset_observed_ms = entry.last_good.as_ref().and_then(|good| {
+                (good.five_observed_ms.is_none() && good.seven_observed_ms.is_none())
+                    .then_some(good.fetched_unix_ms)
+            });
+        }
         let extra_usage_enabled = entry
             .last_good
             .as_ref()
@@ -327,8 +348,7 @@ pub(super) fn store_response_limits(
         });
         entry.error = None;
         entry.error_unix_ms = None;
-        // These headers did not observe reset eligibility or availability.
-        entry.reset_status = None;
+        // Headers neither observe nor refresh reset eligibility.
     });
     entry_usage(&entry)
 }
@@ -360,6 +380,7 @@ pub(super) fn clear_auth_failure(key: &str) {
             // A new login must not inherit the rejected login's quotas.
             entry.last_good = None;
             entry.reset_status = None;
+            entry.reset_observed_ms = None;
         }
     });
 }
@@ -391,6 +412,7 @@ pub(super) fn store_success_with_reset_status(
             entry.adaptive_interval_secs = RATE_LIMIT_BACKOFF.as_secs() * 2;
         }
         entry.last_good = Some(snapshot);
+        entry.reset_observed_ms = reset_status.as_ref().map(|_| now_ms());
         entry.reset_status = reset_status;
         entry.error = None;
         entry.error_unix_ms = None;
@@ -516,6 +538,28 @@ pub(super) fn invalidate(matches: impl Fn(&str) -> bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_headers_preserve_recent_reset_status_without_extending_its_age() {
+        with_home(|| {
+            let key = "label:reset-header";
+            let status = serde_json::json!({"cedar_ember": {"eligible": true, "grants": []}});
+            store_success_with_reset_status(key, &sample(), Some(status.clone()));
+            update(key, |entry| entry.reset_observed_ms = None); // Legacy cache.
+            store_response_limits(key, Some((0.2, "2099-01-01T00:00:00Z".into())), None);
+            assert_eq!(reset_status(key), Some(status));
+            update(key, |entry| {
+                entry.reset_observed_ms = Some(now_ms() - 3_600_000);
+                entry.retry_not_before_ms = Some(now_ms() - 1);
+            });
+            store_response_limits(key, Some((0.3, "2099-01-01T00:00:00Z".into())), None);
+            assert_eq!(reset_status(key), None);
+            assert!(
+                fresh(key).is_none(),
+                "headers must not postpone a probe forever"
+            );
+        });
+    }
 
     const WORKER_ENV: &str = "JCODE_USAGE_CACHE_TEST_WORKER";
 
