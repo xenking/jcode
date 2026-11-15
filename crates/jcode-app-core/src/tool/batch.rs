@@ -1,4 +1,4 @@
-use super::{Registry, Tool, ToolContext, ToolOutput, WeakRegistry};
+use super::{Registry, Tool, ToolContext, ToolOutput, WeakRegistry, accepts_large_output};
 use crate::bus::{BatchSubcallProgress, BatchSubcallState};
 use crate::message::ToolCall;
 use anyhow::Result;
@@ -200,6 +200,11 @@ impl Tool for BatchTool {
             .upgrade()
             .ok_or_else(|| anyhow::anyhow!("Batch tool registry is no longer available"))?;
         let input = normalize_batch_input(input);
+        // A batch-level opt-in covers the calls it contains. Without this, a model
+        // that accepted the cost once was still refused by every sub-call, and
+        // only a flag typed inside an individual entry (or a repeat after a
+        // refusal) had any effect.
+        let batch_opt_in = accepts_large_output(&input);
         let params: BatchInput = serde_json::from_value(input)?;
 
         if params.tool_calls.is_empty() {
@@ -228,7 +233,14 @@ impl Tool for BatchTool {
             .into_iter()
             .enumerate()
             .map(|(i, tc)| {
-                let (tool_name, parameters) = tc.resolved_parameters();
+                let (tool_name, mut parameters) = tc.resolved_parameters();
+                if batch_opt_in
+                    && let Some(object) = parameters.as_object_mut()
+                {
+                    object
+                        .entry(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY)
+                        .or_insert(Value::Bool(true));
+                }
                 // Display and dispatch the canonical name (e.g. `functions.bash`
                 // -> `bash`) while keeping SDK custom tool names intact.
                 let tool_name =
