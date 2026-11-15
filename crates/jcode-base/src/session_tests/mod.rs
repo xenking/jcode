@@ -1,6 +1,8 @@
 use super::*;
 use std::ffi::OsString;
 
+mod home_isolation;
+
 fn lock_env() -> std::sync::MutexGuard<'static, ()> {
     crate::storage::lock_test_env()
 }

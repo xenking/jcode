@@ -1,5 +1,28 @@
 use super::*;
 use crate::bus::{BackgroundTaskProgressSource, BackgroundTaskStatus};
+
+/// Restores an environment variable when the test ends.
+struct EnvVarGuard {
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let prev = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match self.prev.take() {
+            Some(prev) => crate::env::set_var(self.key, prev),
+            None => crate::env::remove_var(self.key),
+        }
+    }
+}
 use crate::tool::StdinInputRequest;
 use crate::tool::bash::{
     BashTool, ProgressLineUpdate, parse_heuristic_progress, parse_progress_line,
@@ -999,9 +1022,10 @@ async fn bash_refuses_to_delete_the_home_directory() {
     // The #604 incident, at the real tool boundary.
     let temp = tempfile::tempdir().expect("temp home");
     let home = temp.path().to_string_lossy().to_string();
-    let previous = std::env::var("HOME").ok();
-    // SAFETY: single-threaded test setup; restored below.
-    unsafe { std::env::set_var("HOME", &home) };
+    // The gate reads HOME from the process environment at execute time, so this
+    // must hold the same lock the other env-mutating tests hold.
+    let _env_lock = crate::storage::lock_test_env();
+    let _home = EnvVarGuard::set("HOME", &home);
 
     let canary = temp.path().join("precious.txt");
     std::fs::write(&canary, "user data").expect("write canary");
@@ -1012,11 +1036,6 @@ async fn bash_refuses_to_delete_the_home_directory() {
             gate_ctx("/tmp"),
         )
         .await;
-
-    match previous {
-        Some(value) => unsafe { std::env::set_var("HOME", value) },
-        None => unsafe { std::env::remove_var("HOME") },
-    }
 
     let error = result.expect_err("deleting HOME must be refused");
     assert!(

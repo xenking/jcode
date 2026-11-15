@@ -609,6 +609,7 @@ impl Session {
     /// replayed journal state, so the journal is removed instead of being
     /// extended.
     pub fn save_snapshot_to(&mut self, snapshot_path: &Path) -> Result<()> {
+        crate::storage::assert_not_real_home(snapshot_path);
         let journal_path = session_journal_path_from_snapshot(snapshot_path);
         self.checkpoint_snapshot(snapshot_path, &journal_path)
     }
@@ -653,6 +654,9 @@ impl Session {
         }
         self.updated_at = Utc::now();
         let path = session_path(&self.id)?;
+        // Last gate: a test build must never persist into the developer's real
+        // home, however the path was computed.
+        crate::storage::assert_not_real_home(&path);
         let journal_path = session_journal_path_from_snapshot(&path);
 
         // A newly opened panel contains only its hidden session-context message.

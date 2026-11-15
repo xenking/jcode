@@ -253,11 +253,11 @@ mod runtime_context_tests {
             assert_eq!(value(&context, "JCODE_API_SOCKET"), None);
             assert_eq!(value(&context, "JCODE_NO_AUTO_UPDATE"), None);
         } else {
-            let expected_home = std::path::Path::new(&home).join(".jcode");
-            assert_eq!(
-                value(&context, "JCODE_HOME"),
-                Some(expected_home.to_str().unwrap())
-            );
+            // The default context must name the home the process really uses;
+            // a test build keeps that outside the developer's real ~/.jcode.
+            let expected_home = crate::storage::jcode_dir().expect("jcode home");
+            let expected_home = expected_home.to_str().expect("utf-8 jcode home");
+            assert_eq!(value(&context, "JCODE_HOME"), Some(expected_home));
             assert_eq!(
                 value(&context, "JCODE_RUNTIME_DIR"),
                 Some(xdg_runtime_dir.as_str())
