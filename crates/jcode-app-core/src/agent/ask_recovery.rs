@@ -21,19 +21,20 @@ fn interrupted_ask(messages: &[StoredMessage]) -> Option<InterruptedAsk> {
         if name != "ask" {
             continue;
         }
-        for (index, message) in messages.iter().enumerate().skip(assistant_index + 1) {
-            if message.content.iter().any(|block| {
-                matches!(block,
-                    ContentBlock::ToolResult { tool_use_id, content, is_error }
-                        if tool_use_id == id && is_error.unwrap_or(false)
-                        && content.starts_with("[Tool 'ask' interrupted by server reload after ")
-                )
+        for (index, message) in messages.iter().enumerate().skip(assistant_index + 1).rev() {
+            if let Some(ContentBlock::ToolResult { content, is_error, .. }) = message.content.iter().rev().find(|block| {
+                matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id)
             }) {
-                return Some(InterruptedAsk {
-                    id: id.clone(),
-                    input: input.clone(),
-                    result_index: index,
-                });
+                if is_error.unwrap_or(false)
+                    && content.starts_with("[Tool 'ask' interrupted by server reload after ")
+                {
+                    return Some(InterruptedAsk {
+                        id: id.clone(),
+                        input: input.clone(),
+                        result_index: index,
+                    });
+                }
+                break;
             }
         }
     }
@@ -59,13 +60,13 @@ impl Agent {
                 graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
                 execution_mode: ToolExecutionMode::AgentTurn,
             };
-            let result = tokio::select! {
+            let (output, is_error) = tokio::select! {
                 biased;
                 _ = self.graceful_shutdown.notified() => {
                     if turn.interruption_reason() == Some(crate::turn_cancel_registry::TurnInterruptionReason::Reload) {
                         return Ok(false);
                     }
-                    Some(("[Tool 'ask' cancelled by the user]".to_string(), true))
+                    ("[Tool 'ask' cancelled by the user]".to_string(), true)
                 }
                 result = async {
                     let mut ctx = ctx;
@@ -75,16 +76,14 @@ impl Agent {
                     // No attached user or another transient failure is not an answer.
                     // Leave the durable marker intact for the next recovery attempt.
                     let output = result?;
-                    Some((output.output, false))
+                    (output.output, false)
                 }
-            };
-            let Some((output, is_error)) = result else {
-                unreachable!()
             };
             let mut messages = self.session.messages.clone();
             let result = messages[ask.result_index]
                 .content
                 .iter_mut()
+                .rev()
                 .find(|block| {
                     matches!(block,
                         ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == &ask.id
@@ -198,6 +197,37 @@ mod tests {
                 result_index: 1
             })
         );
+    }
+
+    #[test]
+    fn a_later_answer_supersedes_an_interrupted_marker() {
+        let mut session = Session::create_with_id("ask-superseded".into(), None, None);
+        session.add_message(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "call".into(),
+                name: "ask".into(),
+                input: json!({}),
+                thought_signature: None,
+            }],
+        );
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "call".into(),
+                content: "[Tool 'ask' interrupted by server reload after 0.2s]".into(),
+                is_error: Some(true),
+            }],
+        );
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "call".into(),
+                content: "User answers: B".into(),
+                is_error: None,
+            }],
+        );
+        assert!(interrupted_ask(&session.messages).is_none());
     }
 
     #[tokio::test]
