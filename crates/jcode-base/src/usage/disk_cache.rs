@@ -200,17 +200,20 @@ fn interval(entry: &Entry) -> Duration {
 }
 
 fn deadline(entry: &Entry) -> Option<i64> {
-    let success = entry
-        .last_good
-        .as_ref()
-        .filter(|good| {
-            // Model response headers do not constitute a new usage API probe.
-            good.five_observed_ms.is_none() && good.seven_observed_ms.is_none()
-        })
-        .map(|good| {
-            good.fetched_unix_ms
-                .saturating_add(interval(entry).as_millis() as i64)
-        });
+    // A usage-API snapshot is fresh for one interval. A snapshot built only
+    // from model response headers is fresh for one interval from the first
+    // observation, then rides the frozen `retry_not_before_ms`, so a steady
+    // stream of headers can never postpone the next real probe forever.
+    let success = entry.last_good.as_ref().and_then(|good| {
+        let header_only = good.five_observed_ms.is_some() || good.seven_observed_ms.is_some();
+        let own = good
+            .fetched_unix_ms
+            .saturating_add(interval(entry).as_millis() as i64);
+        match (header_only, entry.retry_not_before_ms) {
+            (true, Some(_)) => None,
+            _ => Some(own),
+        }
+    });
     let failure = entry
         .error
         .as_ref()
