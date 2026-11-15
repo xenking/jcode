@@ -3,7 +3,7 @@ use super::swarm_mutation_state::{
     PersistedSwarmMutationResponse, SwarmMutationRuntime, begin_or_replay, finish_request,
     request_key,
 };
-use super::turn_failover::process_reserved_locked_message_with_server_failover;
+use super::turn_failover::process_reserved_locked_message_with_swarm_fallbacks;
 use super::{
     SessionInterruptQueues, SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan,
     broadcast_swarm_plan, broadcast_swarm_status, create_headless_session, fanout_session_event,
@@ -435,6 +435,13 @@ pub(super) async fn spawn_swarm_agent(
             configured_swarm_model
         };
     let resolved_spawn_mode = resolve_swarm_spawn_mode(spawn_mode, agents_config.swarm_spawn_mode);
+    // Only a worker running on the configured default model gets the configured
+    // fallbacks at runtime. An explicit per-spawn model choice is honoured as-is.
+    let worker_fallbacks: Vec<String> = if requested_model.is_none() {
+        agents_config.swarm_model_fallbacks.clone()
+    } else {
+        Vec::new()
+    };
     let selection = resolve_swarm_spawn_selection(
         requested_model.clone(),
         configured_swarm_model.clone(),
@@ -637,6 +644,7 @@ pub(super) async fn spawn_swarm_agent(
         };
         if let Some(agent_arc) = agent_arc {
             let sid_clone = new_session_id.clone();
+            let worker_fallbacks = worker_fallbacks.clone();
             let swarm_members2 = Arc::clone(swarm_members);
             let swarms_by_id2 = Arc::clone(swarms_by_id);
             let event_history2 = Arc::clone(event_history);
@@ -666,13 +674,14 @@ pub(super) async fn spawn_swarm_agent(
                     &lease,
                 );
                 let start_message_index = agent.message_count();
-                let result = process_reserved_locked_message_with_server_failover(
+                let result = process_reserved_locked_message_with_swarm_fallbacks(
                     &mut agent,
                     &lease,
                     &initial_msg,
                     vec![],
                     None,
                     events.sender(),
+                    &worker_fallbacks,
                 )
                 .await;
                 let completion_report =

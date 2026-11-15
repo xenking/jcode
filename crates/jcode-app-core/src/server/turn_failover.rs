@@ -234,6 +234,32 @@ pub(super) async fn process_reserved_locked_message_with_server_failover(
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> anyhow::Result<()> {
+    process_reserved_locked_message_with_swarm_fallbacks(
+        agent,
+        lease,
+        content,
+        images,
+        system_reminder,
+        event_tx,
+        &[],
+    )
+    .await
+}
+
+/// [`process_reserved_locked_message_with_server_failover`] for swarm workers
+/// that also honor `agents.swarm_model_fallbacks`. After the account router has
+/// had its chance, any remaining failure of the turn (region/entitlement 400,
+/// auth, transport) moves the worker to the next configured fallback model and
+/// retries the same turn, instead of leaving a dead worker on the primary.
+pub(super) async fn process_reserved_locked_message_with_swarm_fallbacks(
+    agent: &mut Agent,
+    lease: &crate::agent::TurnLease,
+    content: &str,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+    fallbacks: &[String],
+) -> anyhow::Result<()> {
     agent.validate_server_turn(lease)?;
     let reminder = system_reminder.clone();
     let result = super::client_lifecycle::process_reserved_message_streaming_mpsc(
@@ -245,8 +271,63 @@ pub(super) async fn process_reserved_locked_message_with_server_failover(
         event_tx.clone(),
     )
     .await;
-    retry_turn_with_server_failover(agent, lease, result, reminder, event_tx.clone()).await?;
+    let result =
+        retry_turn_with_server_failover(agent, lease, result, reminder.clone(), event_tx.clone())
+            .await;
+    retry_turn_with_model_fallbacks(agent, lease, result, reminder, event_tx.clone(), fallbacks)
+        .await?;
     super::runtime_ssh_loops::run_reserved_followups(agent, lease, event_tx).await
+}
+
+/// Bare model id of a `route:model` spec.
+fn bare_model(spec: &str) -> &str {
+    spec.split_once(':').map_or(spec, |(_, bare)| bare).trim()
+}
+
+/// While the turn keeps failing, switch to each configured fallback model in
+/// order (skipping the model already in use) and retry the same turn.
+async fn retry_turn_with_model_fallbacks(
+    agent: &mut Agent,
+    lease: &crate::agent::TurnLease,
+    mut result: anyhow::Result<()>,
+    reminder: Option<String>,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+    fallbacks: &[String],
+) -> anyhow::Result<()> {
+    let mut tried: Vec<String> = vec![agent.provider_model()];
+    for fallback in fallbacks {
+        let Err(error) = &result else {
+            break;
+        };
+        // Never re-ask after the model already produced a partial reply.
+        if agent.last_message_role() != Some(crate::message::Role::User) {
+            break;
+        }
+        let bare = bare_model(fallback);
+        if bare.is_empty() || tried.iter().any(|model| model == bare) {
+            continue;
+        }
+        tried.push(bare.to_string());
+        crate::logging::warn(&format!(
+            "Swarm worker turn failed on {}: {}; falling back to {fallback}",
+            agent.provider_model(),
+            crate::util::format_error_chain(error)
+        ));
+        if let Err(switch_error) = agent.set_model(fallback) {
+            crate::logging::warn(&format!(
+                "Swarm fallback model {fallback} unavailable: {switch_error}"
+            ));
+            continue;
+        }
+        agent.reset_provider_session();
+        let _ = event_tx.send(ServerEvent::ConnectionPhase {
+            phase: format!("retrying on fallback {fallback}"),
+        });
+        result = agent
+            .continue_turn_after_failover(lease, reminder.clone(), event_tx.clone())
+            .await;
+    }
+    result
 }
 
 /// A server wake has no local user echo. Persist it as a context entry and
@@ -596,6 +677,100 @@ mod tests {
                 assert_eq!(
                     calls.iter().map(|(openai, _)| *openai).collect::<Vec<_>>(),
                     vec![false, true]
+                );
+            });
+    }
+
+    /// Primary model rejects every request with a plain HTTP 400 (region or
+    /// entitlement error, not a rate limit); the fallback model answers.
+    #[derive(Clone)]
+    struct RejectingPrimaryProvider {
+        model: Arc<StdMutex<String>>,
+        calls: Arc<StdMutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Provider for RejectingPrimaryProvider {
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<EventStream> {
+            let model = self.model.lock().unwrap().clone();
+            self.calls.lock().unwrap().push(model.clone());
+            if model.contains("deepseek") {
+                anyhow::bail!(
+                    "OpenAI-compatible chat request failed status: 400 Bad Request: \
+                     This OpenCode Go model is hosted outside Europe and the United States"
+                );
+            }
+            let events = vec![
+                Ok(StreamEvent::TextDelta("answered on fallback".into())),
+                Ok(StreamEvent::MessageEnd { stop_reason: None }),
+            ];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+        fn name(&self) -> &str {
+            "test"
+        }
+        fn model(&self) -> String {
+            self.model.lock().unwrap().clone()
+        }
+        fn set_model(&self, model: &str) -> anyhow::Result<()> {
+            let bare = model.split_once(':').map_or(model, |(_, bare)| bare);
+            *self.model.lock().unwrap() = bare.to_string();
+            Ok(())
+        }
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(self.clone())
+        }
+    }
+
+    #[test]
+    fn swarm_worker_turn_falls_back_when_primary_fails_with_non_rate_limit_error() {
+        let _guard = crate::storage::lock_test_env();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let provider = RejectingPrimaryProvider {
+                    model: Arc::new(StdMutex::new("deepseek-v4.1-flash".into())),
+                    calls: Arc::new(StdMutex::new(Vec::new())),
+                };
+                let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+                let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+                let session = crate::session::Session::create_with_id(
+                    "session_swarm_model_fallback".into(),
+                    None,
+                    None,
+                );
+                let mut agent = Agent::new_with_session(provider_dyn, registry, session, None);
+                let lease = agent.claim_server_turn().unwrap();
+                let (tx, _rx) = mpsc::unbounded_channel();
+                let fallbacks = vec![
+                    "opencode-go:deepseek-v4.1-flash".to_string(),
+                    "claude:claude-sonnet-5-5".to_string(),
+                ];
+
+                let result = process_reserved_locked_message_with_swarm_fallbacks(
+                    &mut agent,
+                    &lease,
+                    "swarm task",
+                    Vec::new(),
+                    None,
+                    tx,
+                    &fallbacks,
+                )
+                .await;
+
+                assert!(result.is_ok(), "worker should fall back: {result:?}");
+                assert_eq!(
+                    provider.calls.lock().unwrap().clone(),
+                    vec!["deepseek-v4.1-flash", "claude-sonnet-5-5"],
+                    "primary fails once, then exactly one retry on the first distinct fallback"
                 );
             });
     }
