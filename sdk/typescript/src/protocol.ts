@@ -490,6 +490,20 @@ export type ApiEvent =
     }
   | { ev: "compacted"; session_id: string; message: string }
   | {
+      ev: "compaction_divider";
+      session_id: string;
+      /** Divider body: the label, then the expandable detail after a blank line. */
+      content: string;
+      /** The compaction is still summarizing: show the running divider. */
+      running?: boolean;
+      /** summary | snapcompact | native | drop */
+      method?: string;
+      /** Trigger label, e.g. reactive or idle_precompact. */
+      trigger?: string;
+      pre_tokens?: number;
+      post_tokens?: number;
+    }
+  | {
       ev: "session_renamed";
       session_id: string;
       title?: string;
@@ -579,6 +593,7 @@ export const KNOWN_EVENT_KINDS = [
   "todo_state",
   "session_search",
   "compacted",
+  "compaction_divider",
   "session_renamed",
 ] as const;
 
