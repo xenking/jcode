@@ -1697,9 +1697,131 @@ async fn test_batch_guards_both_its_subcalls_and_its_own_aggregate() {
         "aggregate should contain per-subcall sections, got: {}",
         &accepted[..accepted.len().min(300)]
     );
+    // The batch-level opt-in is forwarded to the sub-calls, so they return
+    // truncated payloads instead of refusals, and no sub-call is withheld.
+    // Sub-call-level guarding is pinned by
+    // `batch_subcalls_are_guarded_with_the_session_budget`.
+    assert_eq!(
+        accepted.matches("OUTPUT WITHHELD").count(),
+        0,
+        "a batch-level opt-in covers its sub-calls: {}",
+        &accepted[..accepted.len().min(300)]
+    );
     assert!(
-        accepted.matches("OUTPUT WITHHELD").count() >= 1,
-        "each sub-call is guarded on its own; neither opted in"
+        accepted.contains("OUTPUT TRUNCATED"),
+        "opt-in returns truncated sub-call payloads, got tail: {}",
+        &accepted[accepted.len().saturating_sub(300)..]
+    );
+}
+
+/// Sub-calls are guarded against the *session's* context, not a default one.
+/// This used to be decided by a fresh `CompactionManager` per sub-call, so a
+/// batch admitted outputs that the session could not afford, and the outcome
+/// depended on the default budget rather than the caller's.
+#[tokio::test]
+async fn batch_subcalls_are_guarded_with_the_session_budget() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    {
+        let mut mgr = registry.compaction.write().await;
+        *mgr = CompactionManager::new().with_budget(20_000);
+    }
+    // ~7.5k tokens: affordable for a 200k default budget, too big for this
+    // session's 20k budget (single-output cap 6k tokens).
+    registry
+        .register(
+            "big_output".to_string(),
+            Arc::new(BigOutputTool { chars: 30_000 }),
+        )
+        .await;
+
+    let output = registry
+        .execute(
+            "batch",
+            serde_json::json!({
+                "intent": "test",
+                "tool_calls": [
+                    { "tool": "big_output", "intent": "one" },
+                    { "tool": "big_output", "intent": "two" },
+                ],
+            }),
+            ToolContext {
+                session_id: "test-batch-session-budget".to_string(),
+                message_id: "test".to_string(),
+                tool_call_id: "test".to_string(),
+                working_dir: Some(std::env::temp_dir()),
+                stdin_request_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: ToolExecutionMode::Direct,
+            },
+        )
+        .await
+        .expect("batch should succeed")
+        .output;
+
+    assert_eq!(
+        output.matches("OUTPUT WITHHELD").count(),
+        2,
+        "both sub-calls must be judged against the session budget, got: {}",
+        &output[..output.len().min(400)]
+    );
+    assert!(
+        !output.contains(&"x".repeat(100)),
+        "no payload may survive a refused sub-call"
+    );
+}
+
+/// Two identical sub-calls in one batch are two calls, not a refusal plus its
+/// accepted repeat. They share a repeat key (only `intent` differs, which is not
+/// identifying), so the second one used to spend the first one's record and slip
+/// through as an opt-in. Which one lost that race depended on completion order,
+/// which is what made the aggregate test flaky.
+#[tokio::test]
+async fn a_sibling_subcall_is_not_a_repeated_withheld_call() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    {
+        let mut mgr = registry.compaction.write().await;
+        *mgr = CompactionManager::new().with_budget(10_000);
+    }
+    registry
+        .register(
+            "big_output".to_string(),
+            Arc::new(BigOutputTool { chars: 400_000 }),
+        )
+        .await;
+
+    let mut counts = Vec::new();
+    for attempt in 0..8 {
+        let output = registry
+            .execute(
+                "batch",
+                serde_json::json!({
+                    "intent": "test",
+                    "tool_calls": [
+                        { "tool": "big_output", "intent": "one" },
+                        { "tool": "big_output", "intent": "two" },
+                    ],
+                }),
+                ToolContext {
+                    session_id: format!("test-batch-sibling-repeat-{attempt}"),
+                    message_id: "test".to_string(),
+                    tool_call_id: format!("call-{attempt}"),
+                    working_dir: Some(std::env::temp_dir()),
+                    stdin_request_tx: None,
+                    graceful_shutdown_signal: None,
+                    execution_mode: ToolExecutionMode::Direct,
+                },
+            )
+            .await
+            .expect("batch should succeed")
+            .output;
+        counts.push(output.matches("OUTPUT WITHHELD").count());
+    }
+
+    assert!(
+        counts.iter().all(|count| *count == 2),
+        "both siblings must be withheld on every run, got {counts:?}"
     );
 }
 

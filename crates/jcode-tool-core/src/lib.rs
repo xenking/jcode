@@ -119,6 +119,23 @@ impl ToolContext {
         }
     }
 
+    /// The top-level tool invocation this call belongs to.
+    ///
+    /// [`Self::for_subcall`] composes ids as `"{parent_len}:{parent}:{child}"`,
+    /// so the outermost id is recoverable without a second field. A direct model
+    /// call is its own root; every sub-call of one `batch` or `codemode`
+    /// invocation resolves to the same root. Callers that need "did the model
+    /// issue a new call, or is this a sibling inside the one it already made?"
+    /// compare roots, not ids: sibling sub-calls of one invocation have
+    /// different ids but one root.
+    pub fn root_invocation_id(&self) -> &str {
+        let mut root = self.tool_call_id.as_str();
+        while let Some(parent) = parent_tool_call_id(root) {
+            root = parent;
+        }
+        root
+    }
+
     pub fn resolve_path(&self, path: &Path) -> PathBuf {
         if path.is_absolute() {
             path.to_path_buf()
@@ -128,6 +145,24 @@ impl ToolContext {
             path.to_path_buf()
         }
     }
+}
+
+/// Decode `"{parent_len}:{parent}:{child}"` back to its parent, if the id has
+/// the shape [`ToolContext::for_subcall`] produces.
+fn parent_tool_call_id(tool_call_id: &str) -> Option<&str> {
+    let (digits, rest) = tool_call_id.split_at(
+        tool_call_id
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(tool_call_id.len()),
+    );
+    let parent_len: usize = digits.parse().ok()?;
+    let rest = rest.strip_prefix(':')?;
+    if rest.len() < parent_len + 1 {
+        return None;
+    }
+    let (parent, tail) = rest.split_at(parent_len);
+    tail.strip_prefix(':')?;
+    Some(parent)
 }
 
 /// A tool that can be executed by the agent.
@@ -199,6 +234,39 @@ mod tests {
         assert_ne!(first.tool_call_id, second.tool_call_id);
         assert_eq!(first.session_id, second.session_id);
         assert_eq!(first.message_id, second.message_id);
+    }
+
+    #[test]
+    fn root_invocation_id_collapses_subcall_chains() {
+        let context = ToolContext {
+            session_id: "same-session".into(),
+            message_id: "same-message".into(),
+            tool_call_id: "model-call".into(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: ToolExecutionMode::AgentTurn,
+        };
+        // A direct call is its own root.
+        assert_eq!(context.root_invocation_id(), "model-call");
+
+        // Siblings of one invocation share a root even though their ids differ.
+        let first = context.for_subcall("batch-1-tool".into());
+        let second = context.for_subcall("batch-2-tool".into());
+        assert_ne!(first.tool_call_id, second.tool_call_id);
+        assert_eq!(first.root_invocation_id(), "model-call");
+        assert_eq!(second.root_invocation_id(), "model-call");
+
+        // Nested sub-calls still resolve to the model's call.
+        let nested = first.for_subcall("codemode-1-tool".into());
+        assert_eq!(nested.root_invocation_id(), "model-call");
+
+        // An id that is not in the composed shape is left alone.
+        let mut plain = context.clone();
+        plain.tool_call_id = "call_1".into();
+        assert_eq!(plain.root_invocation_id(), "call_1");
+        plain.tool_call_id = "3:abc".into();
+        assert_eq!(plain.root_invocation_id(), "3:abc");
     }
 
     #[test]

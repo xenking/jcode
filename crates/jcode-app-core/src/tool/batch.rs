@@ -269,7 +269,10 @@ impl Tool for BatchTool {
         let mut stream: futures::stream::FuturesUnordered<_> = subcalls
             .iter()
             .map(|(i, tool_name, parameters)| {
-                let registry = registry.clone();
+                // Share compaction with the caller: the context guard inside the
+                // sub-call must see the session's budget and usage, not a fresh
+                // default manager.
+                let registry = registry.for_tool_subcall();
                 let i = *i;
                 let tool_name = tool_name.clone();
                 let parameters = parameters.clone();

@@ -293,7 +293,7 @@ const OUTPUT_WITHHELD_MARKER: &str = "⚠️ OUTPUT WITHHELD";
 /// Strict-schema providers cannot send a key the schema does not declare, so
 /// the flag alone would leave them with no way to opt in. An immediate,
 /// identical repeat is an equally unambiguous yes and needs no schema.
-static WITHHELD_CALLS: LazyLock<StdRwLock<HashMap<String, Vec<u64>>>> =
+static WITHHELD_CALLS: LazyLock<StdRwLock<HashMap<String, Vec<(u64, String)>>>> =
     LazyLock::new(|| StdRwLock::new(HashMap::new()));
 
 /// Withheld calls remembered per session. A batch can have several sub-calls
@@ -318,24 +318,34 @@ fn withheld_call_key(tool: &str, input: &Value) -> u64 {
 
 /// True when this call repeats one that was withheld for the session. The
 /// record is consumed, so each refusal buys exactly one accepted repeat.
-fn take_repeated_withheld_call(session_id: &str, key: u64) -> bool {
+///
+/// A record only counts for a *later* invocation than the one that earned it.
+/// Sibling sub-calls of one `batch` or `codemode` call share a root invocation
+/// and an identical key (`intent` is not identifying), so without this check the
+/// second of two identical sub-calls would spend the first one's refusal and be
+/// accepted instead of withheld. Which of the two ran second is a race, which
+/// made the outcome of a batch depend on sub-call completion order.
+fn take_repeated_withheld_call(session_id: &str, key: u64, invocation: &str) -> bool {
     let mut calls = WITHHELD_CALLS
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let Some(keys) = calls.get_mut(session_id) else {
+    let Some(records) = calls.get_mut(session_id) else {
         return false;
     };
-    let Some(position) = keys.iter().position(|seen| *seen == key) else {
+    let Some(position) = records
+        .iter()
+        .position(|(seen, earned_by)| *seen == key && earned_by != invocation)
+    else {
         return false;
     };
-    keys.remove(position);
-    if keys.is_empty() {
+    records.remove(position);
+    if records.is_empty() {
         calls.remove(session_id);
     }
     true
 }
 
-fn remember_withheld_call(session_id: &str, key: u64) {
+fn remember_withheld_call(session_id: &str, key: u64, invocation: &str) {
     let mut calls = WITHHELD_CALLS
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -343,12 +353,12 @@ fn remember_withheld_call(session_id: &str, key: u64) {
     if calls.len() >= 4096 && !calls.contains_key(session_id) {
         calls.clear();
     }
-    let keys = calls.entry(session_id.to_string()).or_default();
-    keys.retain(|seen| *seen != key);
-    if keys.len() >= WITHHELD_CALLS_PER_SESSION {
-        keys.remove(0);
+    let records = calls.entry(session_id.to_string()).or_default();
+    records.retain(|(seen, _)| *seen != key);
+    if records.len() >= WITHHELD_CALLS_PER_SESSION {
+        records.remove(0);
     }
-    keys.push(key);
+    records.push((key, invocation.to_string()));
 }
 
 /// Aliases are surface-dependent, but policy follows original identities for
@@ -423,6 +433,25 @@ impl Registry {
         } else {
             self.unregister("user_response").await;
             self.unregister("applet").await;
+        }
+    }
+
+    /// A view for a *tool* sub-call (`batch`, `codemode`): same tool map, same
+    /// session compaction state.
+    ///
+    /// [`Clone`] deliberately starts a fresh `CompactionManager`, because a
+    /// parallel *agent* must not share a parent's message history. A tool
+    /// sub-call is not an agent: it reports into the caller's transcript, so the
+    /// context guard has to judge it against the caller's budget and usage.
+    /// Cloning there made every sub-call see a default budget and a synthetic
+    /// usage count, so a batch could refuse or admit outputs on numbers that had
+    /// nothing to do with the session.
+    fn for_tool_subcall(&self) -> Self {
+        Self {
+            tools: self.tools.clone(),
+            mcp_policy: Arc::clone(&self.mcp_policy),
+            skills: Arc::clone(&self.skills),
+            compaction: Arc::clone(&self.compaction),
         }
     }
 
@@ -1227,12 +1256,13 @@ impl Registry {
         // Context overflow guard: check if this output would push us over the limit
         // Opt in with the flag, or by repeating a call that was just withheld.
         let call_key = withheld_call_key(resolved_name, &input);
-        let accepted =
-            accepts_large_output(&input) | take_repeated_withheld_call(&ctx.session_id, call_key);
+        let invocation = ctx.root_invocation_id();
+        let accepted = accepts_large_output(&input)
+            | take_repeated_withheld_call(&ctx.session_id, call_key, invocation);
         let already_marked = output.output.starts_with(OUTPUT_WITHHELD_MARKER);
         output = self.guard_context_overflow(name, output, accepted).await;
         if !already_marked && output.output.starts_with(OUTPUT_WITHHELD_MARKER) {
-            remember_withheld_call(&ctx.session_id, call_key);
+            remember_withheld_call(&ctx.session_id, call_key, invocation);
         }
 
         let mut fields = Self::tool_lifecycle_fields("done", name, resolved_name, &input, &ctx);
