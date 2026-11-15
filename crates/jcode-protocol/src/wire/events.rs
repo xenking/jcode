@@ -168,6 +168,17 @@ pub enum ServerEvent {
         notification: String,
     },
 
+    /// Another session asked the user-facing client attached to this session to
+    /// raise it (select the tab, bring the window forward). Best effort.
+    #[serde(rename = "focus_requested")]
+    FocusRequested {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_session: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_name: Option<String>,
+    },
+
     /// Acknowledgment of request
     #[serde(rename = "ack")]
     Ack { id: u64 },

@@ -673,6 +673,22 @@ pub enum Request {
     #[serde(rename = "comm_list_swarms")]
     CommListSwarms { id: u64, session_id: String },
 
+    /// List every live root session on the daemon (any swarm), so an agent can
+    /// find sessions to message or raise. Answered with `comm_members`.
+    #[serde(rename = "comm_list_sessions")]
+    CommListSessions { id: u64, session_id: String },
+
+    /// Ask the clients attached to another live session to raise/focus it
+    /// (Desktop selects the tab, TUI rings the bell, and the server runs the
+    /// configured terminal focus hook). `target_session` is an exact session
+    /// id or unique friendly name.
+    #[serde(rename = "comm_focus_session")]
+    CommFocusSession {
+        id: u64,
+        session_id: String,
+        target_session: String,
+    },
+
     /// Set (or clear, with an empty label) the human-readable label of the
     /// caller's swarm. Labels are unique across swarms.
     #[serde(rename = "comm_set_swarm_label")]

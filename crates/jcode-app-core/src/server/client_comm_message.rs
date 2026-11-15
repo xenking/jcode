@@ -78,6 +78,64 @@ async fn resolve_dm_target_session(
     }
 }
 
+/// Resolve a DM target across every live session on the daemon, not just the
+/// sender's swarm. Accepts an exact session id or a unique friendly name.
+/// Returns the session id and the swarm it currently belongs to.
+pub(super) async fn resolve_global_session_target(
+    target: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> anyhow::Result<(String, String)> {
+    let target = target.trim();
+    let members = swarm_members.read().await;
+    if let Some(member) = members.get(target) {
+        if member.report_back_to_session_id.is_some() {
+            return Err(anyhow::anyhow!(
+                "Session '{target}' is a spawned worker of another swarm. Message its owner, or use to_swarm."
+            ));
+        }
+        return match member.swarm_id.clone() {
+            Some(swarm_id) => Ok((member.session_id.clone(), swarm_id)),
+            None => Err(anyhow::anyhow!("Session '{target}' is not in a swarm.")),
+        };
+    }
+    let mut matches: Vec<(String, String, String)> = members
+        .values()
+        .filter(|member| member.friendly_name.as_deref() == Some(target))
+        .filter(|member| member.report_back_to_session_id.is_none())
+        .filter_map(|member| {
+            Some((
+                member.session_id.clone(),
+                member.swarm_id.clone()?,
+                target.to_string(),
+            ))
+        })
+        .collect();
+    matches.sort();
+    match matches.len() {
+        1 => {
+            let (session_id, swarm_id, _) = matches.remove(0);
+            Ok((session_id, swarm_id))
+        }
+        0 => Err(anyhow::anyhow!(
+            "Unknown session '{target}' - use an exact live session_id or a unique friendly name (see swarm action=sessions)."
+        )),
+        _ => {
+            let list = matches
+                .iter()
+                .map(|(session_id, _, name)| format!("{name} [{session_id}]"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(anyhow::anyhow!(
+                "Friendly name '{target}' is ambiguous across live sessions. Use an exact session id. Matches: {list}"
+            ))
+        }
+    }
+}
+
+fn non_blank_str(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
 fn resolve_comm_delivery_mode(
     scope: &str,
     delivery: Option<CommDeliveryMode>,
@@ -195,6 +253,62 @@ pub(super) async fn handle_comm_message(
             });
             return;
         }
+        // Root (user-driven) sessions may DM any live session on the daemon by
+        // exact id or unique friendly name even when it lives in another swarm.
+        // Spawned workers stay confined to their own swarm.
+        let mut global_dm = false;
+        let cross_swarm_id = if cross_swarm_id.is_none()
+            && channel.is_none()
+            && non_blank_str(to_swarm.as_deref()).is_none()
+        {
+            match to_session.as_deref() {
+                Some(target) => {
+                    let sender_is_root = swarm_members
+                        .read()
+                        .await
+                        .get(&from_session)
+                        .is_some_and(|member| member.report_back_to_session_id.is_none());
+                    let local_ids: Vec<String> = {
+                        let swarms = swarms_by_id.read().await;
+                        swarms
+                            .get(&swarm_id)
+                            .map(|sessions| sessions.iter().cloned().collect())
+                            .unwrap_or_default()
+                    };
+                    let local_hit = {
+                        let members = swarm_members.read().await;
+                        local_ids.iter().any(|local| {
+                            local == target
+                                || members
+                                    .get(local)
+                                    .is_some_and(|m| m.friendly_name.as_deref() == Some(target))
+                        })
+                    };
+                    if sender_is_root && !local_hit {
+                        match resolve_global_session_target(target, swarm_members).await {
+                            Ok((_, target_swarm)) if target_swarm != swarm_id => {
+                                global_dm = true;
+                                Some(target_swarm)
+                            }
+                            Ok(_) => None,
+                            Err(err) => {
+                                let _ = client_event_tx.send(ServerEvent::Error {
+                                    id,
+                                    message: err.to_string(),
+                                    retry_after_secs: None,
+                                });
+                                return;
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            }
+        } else {
+            cross_swarm_id
+        };
         let delivery_swarm_id = cross_swarm_id.clone().unwrap_or_else(|| swarm_id.clone());
 
         let swarm_session_ids: Vec<String> = {
@@ -383,12 +497,12 @@ pub(super) async fn handle_comm_message(
                     .clone()
                     .unwrap_or_else(|| from_session[..8.min(from_session.len())].to_string());
                 let scope_label = match (scope, channel.as_deref()) {
-                    _ if cross_swarm_id.is_some() => "Cross-swarm DM".to_string(),
+                    _ if cross_swarm_id.is_some() && !global_dm => "Cross-swarm DM".to_string(),
                     ("channel", Some(channel_name)) => format!("#{}", channel_name),
                     ("dm", _) => "DM".to_string(),
                     _ => "broadcast".to_string(),
                 };
-                let from_label = if cross_swarm_id.is_some() {
+                let from_label = if cross_swarm_id.is_some() && !global_dm {
                     format!("{} (swarm '{}')", from_label, sender_swarm_display)
                 } else {
                     from_label
@@ -415,6 +529,10 @@ pub(super) async fn handle_comm_message(
                     .clone()
                     .unwrap_or_else(|| from_session.clone());
                 let reminder = match scope {
+                    "dm" if global_dm => Some(format!(
+                        "You just received a direct message from another session, {}. To reply, use swarm action=dm with to_session='{}'. Review it and respond or act if useful.",
+                        sender_name, from_session
+                    )),
                     _ if cross_swarm_id.is_some() => Some(format!(
                         "You just received a cross-swarm direct message from {} in swarm '{}'. To reply, use swarm action=dm with to_swarm='{}' and to_session='{}'.",
                         sender_name, sender_swarm_display, sender_swarm_display, from_session

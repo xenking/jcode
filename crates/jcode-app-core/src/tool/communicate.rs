@@ -471,6 +471,34 @@ pub(super) fn format_swarm_directory(swarms: &[crate::protocol::SwarmInfo]) -> S
     out
 }
 
+/// Render the `sessions` directory: live root sessions on the daemon (any
+/// swarm) with the id/name to pass to `message` or `focus`.
+pub(super) fn format_session_directory(sessions: &[AgentInfo]) -> ToolOutput {
+    if sessions.is_empty() {
+        return ToolOutput::new("No other live sessions.");
+    }
+    let mut out = String::from("Live sessions (any swarm):\n\n");
+    for session in sessions {
+        let name = session.friendly_name.as_deref().unwrap_or("(unnamed)");
+        let status = session.status.as_deref().unwrap_or("unknown");
+        let attached = match session.live_attachments {
+            Some(0) => " [no client attached]",
+            _ => "",
+        };
+        out.push_str(&format!(
+            "- {name} [{}] {status}{attached}\n",
+            session.session_id
+        ));
+        if let Some(detail) = session.detail.as_deref().filter(|d| !d.is_empty()) {
+            out.push_str(&format!("  {detail}\n"));
+        }
+    }
+    out.push_str(
+        "\nMessage one: action=message with to_session=<id or unique name>. Raise it in its TUI/Desktop: action=focus with to_session.",
+    );
+    ToolOutput::new(out)
+}
+
 fn format_channels(channels: &[SwarmChannelInfo]) -> ToolOutput {
     ToolOutput::new(format_comm_channels(channels))
 }
@@ -567,6 +595,8 @@ const ADVERTISED_SWARM_ACTIONS: &[&str] = &[
     "retry",
     "list_models",
     "list_swarms",
+    "sessions",
+    "focus",
 ];
 
 #[derive(Clone, Deserialize)]
@@ -696,6 +726,8 @@ fn canonical_swarm_action(action: &str) -> &str {
         "broadcast_all" | "announce" => "broadcast",
         "agents" | "members" | "list_agents" | "list_members" | "roster" => "list",
         "swarms" | "list_swarm" | "swarm_list" => "list_swarms",
+        "list_sessions" | "all_sessions" | "other_sessions" => "sessions",
+        "raise" | "raise_session" | "focus_session" | "show_session" | "open_session" => "focus",
         "label_swarm" | "name_swarm" | "rename_swarm" | "set_label" => "set_swarm_label",
         "models" | "model_list" | "list_model" | "list_providers" | "list_routes" => "list_models",
         "plan" | "status_plan" => "plan_status",
@@ -1129,6 +1161,49 @@ impl Tool for CommunicateTool {
                         Ok(ToolOutput::new("No agents found."))
                     }
                     Err(e) => Err(anyhow::anyhow!("Failed to list agents: {}", e)),
+                }
+            }
+
+            "sessions" => {
+                let request = Request::CommListSessions {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                };
+                match send_request(request).await {
+                    Ok(ServerEvent::CommMembers { members, .. }) => {
+                        Ok(format_session_directory(&members))
+                    }
+                    Ok(response) => {
+                        ensure_success(&response)?;
+                        Ok(ToolOutput::new("No other live sessions."))
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to list sessions: {}", e)),
+                }
+            }
+
+            "focus" => {
+                let target = params
+                    .to_session
+                    .clone()
+                    .or_else(|| params.target_session.clone())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "'to_session' (or 'target_session') is required for focus action"
+                        )
+                    })?;
+                let request = Request::CommFocusSession {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    target_session: target.clone(),
+                };
+                match send_request(request).await {
+                    Ok(response) => {
+                        ensure_success(&response)?;
+                        Ok(ToolOutput::new(format!(
+                            "Asked the clients attached to {target} to raise it (Desktop selects the tab, terminal sessions use the configured focus hook)."
+                        )))
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to focus session: {}", e)),
                 }
             }
 

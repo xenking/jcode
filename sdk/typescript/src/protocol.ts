@@ -362,6 +362,7 @@ export type ApiEvent =
   | { ev: "soft_interrupts_cancelled"; cancelled: string[]; not_queued: string[] }
   /** Reply to `background_tool`. */
   | { ev: "background_tool_result"; moved: boolean; tool_call_id?: string; tool_name?: string }
+  | { ev: "focus_requested"; session_id: string; from_session?: string; from_name?: string }
   | {
       ev: "wake_requested";
       session_id: string;
@@ -511,6 +512,7 @@ export const KNOWN_EVENT_KINDS = [
   "background_tool_result",
   "turn_stopped",
   "wake_requested",
+  "focus_requested",
   "background_progress",
   "message_accepted",
   "ask_request",

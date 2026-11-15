@@ -474,6 +474,26 @@ fn wake_request_is_forwarded_with_explicit_session_and_payload() {
 }
 
 #[test]
+fn focus_request_is_forwarded_with_sender() {
+    let mut state = state_with_session();
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "focus_requested",
+        "session_id": "target",
+        "from_session": "session_other_1",
+        "from_name": "other",
+    }));
+    assert_eq!(frames.len(), 1);
+    assert_eq!(
+        frames[0].event,
+        ApiEvent::FocusRequested {
+            session_id: "target".into(),
+            from_session: Some("session_other_1".into()),
+            from_name: Some("other".into()),
+        }
+    );
+}
+
+#[test]
 fn api_sessions_enable_server_account_routing_on_create_attach_and_reconnect() {
     let mut state = BridgeState::default();
     for request in [

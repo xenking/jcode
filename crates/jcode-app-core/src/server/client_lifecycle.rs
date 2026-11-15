@@ -9,7 +9,10 @@ use super::client_comm::{
     handle_comm_read, handle_comm_share, handle_comm_subscribe_channel,
     handle_comm_unsubscribe_channel,
 };
-use super::client_comm_swarms::{handle_comm_list_swarms, handle_comm_set_swarm_label};
+use super::client_comm_swarms::{
+    handle_comm_focus_session, handle_comm_list_sessions, handle_comm_list_swarms,
+    handle_comm_set_swarm_label,
+};
 use super::client_disconnect_cleanup::{cleanup_client_connection, detach_client_attachment};
 use super::client_lifecycle_logging::{
     ServerRequestLifecycleFields, interrupt_request_log_fields, request_payload_summary,
@@ -2741,6 +2744,34 @@ pub(super) async fn handle_client(
                     &file_touch,
                     &sessions,
                     &client_connections,
+                )
+                .await;
+            }
+
+            Request::CommListSessions {
+                id,
+                session_id: req_session_id,
+            } => {
+                handle_comm_list_sessions(
+                    id,
+                    req_session_id,
+                    &client_event_tx,
+                    &swarm_members,
+                )
+                .await;
+            }
+
+            Request::CommFocusSession {
+                id,
+                session_id: req_session_id,
+                target_session,
+            } => {
+                handle_comm_focus_session(
+                    id,
+                    req_session_id,
+                    target_session,
+                    &client_event_tx,
+                    &swarm_members,
                 )
                 .await;
             }

@@ -3124,6 +3124,22 @@ fn handle_server_event_inner(
             }
             false
         }
+        ServerEvent::FocusRequested {
+            from_name,
+            from_session,
+            ..
+        } => {
+            // The server already ran the terminal focus hook. Mark the request
+            // visibly so the user can find this session if the hook is not set.
+            let who = from_name
+                .or_else(|| {
+                    crate::id::extract_session_name(&from_session.unwrap_or_default())
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| "another session".to_string());
+            app.set_status_notice(format!("{who} asked you to look at this session"));
+            false
+        }
         ServerEvent::Notification {
             from_session,
             from_name,

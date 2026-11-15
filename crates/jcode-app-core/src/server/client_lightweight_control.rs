@@ -6,7 +6,10 @@ use super::client_comm::{
     handle_comm_read, handle_comm_share, handle_comm_subscribe_channel,
     handle_comm_unsubscribe_channel,
 };
-use super::client_comm_swarms::{handle_comm_list_swarms, handle_comm_set_swarm_label};
+use super::client_comm_swarms::{
+    handle_comm_focus_session, handle_comm_list_sessions, handle_comm_list_swarms,
+    handle_comm_set_swarm_label,
+};
 use super::client_writer::write_direct_event;
 use super::comm_await::{CommAwaitMembersContext, handle_comm_await_members};
 use super::comm_control::{
@@ -73,6 +76,8 @@ fn comm_request_session_id(request: &Request) -> Option<&str> {
         | Request::CommList { session_id, .. }
         | Request::CommListChannels { session_id, .. }
         | Request::CommListSwarms { session_id, .. }
+        | Request::CommListSessions { session_id, .. }
+        | Request::CommFocusSession { session_id, .. }
         | Request::CommSetSwarmLabel { session_id, .. }
         | Request::CommChannelMembers { session_id, .. }
         | Request::CommProposePlan { session_id, .. }
@@ -503,6 +508,26 @@ pub(super) async fn handle_lightweight_control_request(
                 file_touch,
                 sessions,
                 client_connections,
+            )
+            .await;
+        }
+        Request::CommListSessions {
+            id,
+            session_id: req_session_id,
+        } => {
+            handle_comm_list_sessions(id, req_session_id, &client_event_tx, swarm_members).await;
+        }
+        Request::CommFocusSession {
+            id,
+            session_id: req_session_id,
+            target_session,
+        } => {
+            handle_comm_focus_session(
+                id,
+                req_session_id,
+                target_session,
+                &client_event_tx,
+                swarm_members,
             )
             .await;
         }

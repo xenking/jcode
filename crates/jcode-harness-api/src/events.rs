@@ -267,6 +267,16 @@ pub enum ApiEvent {
         notification: String,
     },
 
+    /// Another session asked for this session to be raised (selected, brought
+    /// to the front). Best effort: clients that cannot raise a window ignore it.
+    FocusRequested {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_session: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_name: Option<String>,
+    },
+
     /// A background task the agent is waiting on reported progress, or
     /// finished.
     ///

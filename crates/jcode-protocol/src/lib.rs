@@ -923,6 +923,8 @@ impl Request {
             Request::CommList { id, .. } => *id,
             Request::CommListChannels { id, .. } => *id,
             Request::CommListSwarms { id, .. } => *id,
+            Request::CommListSessions { id, .. } => *id,
+            Request::CommFocusSession { id, .. } => *id,
             Request::CommSetSwarmLabel { id, .. } => *id,
             Request::CommChannelMembers { id, .. } => *id,
             Request::CommProposePlan { id, .. } => *id,
@@ -970,6 +972,8 @@ impl Request {
                 | Request::CommList { .. }
                 | Request::CommListChannels { .. }
                 | Request::CommListSwarms { .. }
+                | Request::CommListSessions { .. }
+                | Request::CommFocusSession { .. }
                 | Request::CommSetSwarmLabel { .. }
                 | Request::CommChannelMembers { .. }
                 | Request::CommProposePlan { .. }

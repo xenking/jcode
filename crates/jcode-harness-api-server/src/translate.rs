@@ -2197,6 +2197,14 @@ impl BridgeState {
                 reason: event["reason"].as_str().unwrap_or("").to_string(),
                 notification: event["notification"].as_str().unwrap_or("").to_string(),
             })],
+            "focus_requested" => vec![ServerFrame::event(ApiEvent::FocusRequested {
+                session_id: event["session_id"]
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| session(self)),
+                from_session: event["from_session"].as_str().map(str::to_string),
+                from_name: event["from_name"].as_str().map(str::to_string),
+            })],
             "context_message_added" => {
                 let id = event["id"].as_u64().unwrap_or(0);
                 if self
