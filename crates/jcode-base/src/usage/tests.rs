@@ -1341,5 +1341,30 @@ fn test_openai_transport_failure_keeps_recent_last_good_only() {
     assert!(recent_good_openai_usage(&key).is_none());
 }
 
+#[test]
+fn cached_anthropic_usage_for_label_returns_stale_entries_without_probing() {
+    let label = "cached-label-accessor-test";
+    assert!(super::cached_anthropic_usage_for_label(label).is_none());
+    super::anthropic_usage_cache().lock().unwrap().insert(
+        format!("label:{label}"),
+        UsageData {
+            seven_day: 0.3,
+            seven_day_resets_at: Some("2099-01-01T00:00:00Z".into()),
+            last_error: Some("Usage API error (429)".into()),
+            ..Default::default()
+        },
+    );
+    let data = super::cached_anthropic_usage_for_label(&format!(" {label} ")).unwrap();
+    assert_eq!(
+        data.seven_day_resets_at.as_deref(),
+        Some("2099-01-01T00:00:00Z")
+    );
+    assert!(data.last_error.is_some());
+    super::anthropic_usage_cache()
+        .lock()
+        .unwrap()
+        .remove(&format!("label:{label}"));
+}
+
 #[path = "model_scoped_tests.rs"]
 mod model_scoped;
