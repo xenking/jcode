@@ -48,6 +48,23 @@ export interface SessionInfo {
   archived_at_ms?: number;
 }
 
+/** What a session's own record says: model, effort, spend and live phase. */
+export interface WorkerMeta {
+  model?: string;
+  provider?: string;
+  effort?: string;
+  /** Provider-reported prompt tokens, summed over the session. */
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_tokens?: number;
+  cache_creation_tokens?: number;
+  phase?: "thinking" | "tool" | "waiting" | "idle";
+  /** Tool the worker is running, when `phase` is "tool". */
+  tool?: string;
+  /** Unix epoch millis of the newest message. */
+  last_activity_ms?: number;
+}
+
 /** Tracked turns with a persisted response, separate from historical picker selections. */
 export interface ModelUsage {
   count: number;
@@ -317,7 +334,7 @@ export type ApiEvent =
   | { ev: "ok" }
   | { ev: "runtime_command_result"; session_id: string; command: RuntimeCommand; data: unknown; message: string }
   | { ev: "error"; code: ErrorCode; message: string }
-  | { ev: "sessions"; sessions: SessionInfo[] }
+  | { ev: "sessions"; sessions: SessionInfo[]; workers?: Record<string, WorkerMeta> }
   | { ev: "attached"; session: SessionInfo }
   | { ev: "session_forked"; session: SessionInfo }
   | { ev: "history"; session_id: string; messages: HistoryMessage[]; images?: RenderedImage[] }

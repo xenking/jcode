@@ -897,6 +897,10 @@ impl BridgeState {
                     .collect();
                 jcode_harness_api::enrich_sessions_from_local_swarm_state(&mut sessions);
                 jcode_harness_api::enrich_sessions_from_local_edit_stats(&mut sessions);
+                // Swarm workers are other sessions. Their model, effort and
+                // spend live in their own records, so the catalog carries them
+                // rather than making every client re-read transcripts.
+                let workers = jcode_harness_api::local_worker_meta(&sessions);
                 let completed = list_started.elapsed();
                 eprintln!(
                     "harness API bridge: list_sessions ids={:.1}ms metadata={:.1}ms total={:.1}ms count={}",
@@ -907,7 +911,7 @@ impl BridgeState {
                 );
                 vec![Outbound::Reply(ServerFrame::reply(
                     api_id,
-                    ApiEvent::Sessions { sessions },
+                    ApiEvent::Sessions { sessions, workers },
                 ))]
             }
             // Answered from the cached catalog. The daemon pushes it on attach

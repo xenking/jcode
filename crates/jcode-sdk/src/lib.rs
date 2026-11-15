@@ -174,6 +174,7 @@ pub use jcode_harness_api::{
     AskAnswer, AskOption, AskQuestion, AskResponse, SessionEditStats,
     enrich_sessions_from_edit_stats, enrich_sessions_from_local_edit_stats,
     enrich_sessions_from_local_swarm_state, enrich_sessions_from_swarm_state,
+    local_worker_meta, worker_ids, worker_meta, worker_meta_for,
 };
 /// Auto-poke and todo quality-gate policy, identical to the TUI's. Fetch a
 /// snapshot with [`JcodeClient::todo_state`], run
@@ -203,7 +204,8 @@ pub use jcode_harness_api::{
     RenderedImage, RenderedImageAnchor, RenderedImageSource, ResponseStats, SessionInfo,
     SessionSearchHighlight, SessionSearchHit, SessionSearchResults, SessionSearchRole,
     SessionToolDefinition, SidePanelPage, SidePanelPageFormat, SidePanelPageSource,
-    SidePanelSnapshot, TextMatch, ToolConfiguration, TurnStopReason, api_socket_path,
+    SidePanelSnapshot, TextMatch, ToolConfiguration, TurnStopReason, WorkerMeta, WorkerPhase,
+    api_socket_path,
 };
 pub use jcode_harness_api::{
     ModelUsage, RuntimeCommand, RuntimeCommandOutput, compare_model_usage,

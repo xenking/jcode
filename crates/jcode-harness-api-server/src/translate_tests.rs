@@ -2275,7 +2275,10 @@ fn unattached_list_sessions_handles_no_session_candidates() {
             let event = only_reply_event(state.api_request_to_legacy(&json!({
                 "req": "list_sessions", "id": 1, "limit": limit,
             })));
-            assert_eq!(event, ApiEvent::Sessions { sessions: vec![] });
+            assert_eq!(event, ApiEvent::Sessions {
+                sessions: vec![],
+                workers: Default::default(),
+            });
             assert_eq!(
                 only_reply_event(state.api_request_to_legacy(&json!({"req": "ping", "id": 2}))),
                 ApiEvent::Pong,
@@ -2285,6 +2288,78 @@ fn unattached_list_sessions_handles_no_session_candidates() {
 
     write_session_record(&home.path, "first_session", &home.path);
     assert_eq!(BridgeState::stored_session_ids(None), ["first_session"]);
+}
+
+/// A swarm worker's model, effort and spend live in its own record, so the
+/// catalog carries them: the sidebar shows a model and a token count for a
+/// worker it never opened.
+#[test]
+fn list_sessions_carries_each_workers_own_record_facts() {
+    let home = ScopedJcodeHome::new("worker-facts");
+    let sessions = home.path.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::write(
+        sessions.join("session_lead_1_a.json"),
+        json!({"working_dir": home.path, "messages": []}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        sessions.join("session_fox_2_b.json"),
+        json!({
+            "working_dir": home.path,
+            "model": "deepseek-v4.1-flash",
+            "provider_key": "opencode-go",
+            "reasoning_effort": "high",
+            "messages": [{
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "c1", "name": "bash", "input": {}}],
+                "token_usage": {"prompt_tokens": 12000, "output_tokens": 3000},
+            }],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let swarm = home.path.join("state/swarm");
+    std::fs::create_dir_all(&swarm).unwrap();
+    std::fs::write(
+        swarm.join("s.json"),
+        json!({
+            "updated_at_unix_ms": 2,
+            "members": [{
+                "session_id": "session_fox_2_b",
+                "report_back_to_session_id": "session_lead_1_a",
+                "task_label": "compact rows",
+                "status": "running",
+            }],
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let event = only_reply_event(
+        BridgeState::default()
+            .api_request_to_legacy(&json!({"req": "list_sessions", "id": 1})),
+    );
+    let ApiEvent::Sessions { sessions, workers } = event else {
+        panic!("expected sessions reply, got {event:?}");
+    };
+    let fox = sessions
+        .iter()
+        .find(|session| session.session_id == "session_fox_2_b")
+        .expect("the worker is listed");
+    assert_eq!(fox.parent_session_id.as_deref(), Some("session_lead_1_a"));
+    assert_eq!(fox.agent_label.as_deref(), Some("compact rows"));
+    let meta = workers.get("session_fox_2_b").expect("worker facts");
+    assert_eq!(meta.model.as_deref(), Some("deepseek-v4.1-flash"));
+    assert_eq!(meta.provider.as_deref(), Some("opencode-go"));
+    assert_eq!(meta.effort.as_deref(), Some("high"));
+    assert_eq!(meta.input_tokens, Some(12_000));
+    assert_eq!(meta.output_tokens, Some(3_000));
+    assert_eq!(meta.phase, Some(jcode_harness_api::WorkerPhase::Tool));
+    assert_eq!(meta.tool.as_deref(), Some("bash"));
+    // A coordinator is not a worker; reading its record would only duplicate
+    // what the session catalog already knows.
+    assert!(!workers.contains_key("session_lead_1_a"));
 }
 
 #[test]
@@ -2304,7 +2379,7 @@ fn user_connections_are_global_independent_and_fresh_in_list_metadata() {
             .collect(),
         ..Default::default()
     };
-    let ApiEvent::Sessions { sessions } =
+    let ApiEvent::Sessions { sessions, .. } =
         only_reply_event(state.api_request_to_legacy(&json!({"req":"list_sessions","id":7})))
     else {
         panic!("expected list");
@@ -2319,7 +2394,7 @@ fn user_connections_are_global_independent_and_fresh_in_list_metadata() {
             "connection truth must not overwrite lifecycle/attachment status"
         );
     }
-    let ApiEvent::Sessions { sessions: limited } = only_reply_event(
+    let ApiEvent::Sessions { sessions: limited, .. } = only_reply_event(
         state.api_request_to_legacy(&json!({"req":"list_sessions","id":9,"limit":0})),
     ) else {
         panic!("expected list");
@@ -2331,7 +2406,7 @@ fn user_connections_are_global_independent_and_fresh_in_list_metadata() {
     );
     assert!(limited.iter().all(|session| session.user_connected));
     state.user_connected_sessions.clear();
-    let ApiEvent::Sessions { sessions } =
+    let ApiEvent::Sessions { sessions, .. } =
         only_reply_event(state.api_request_to_legacy(&json!({"req":"list_sessions","id":8})))
     else {
         panic!("expected list");
@@ -2368,7 +2443,7 @@ fn unattached_list_sessions_discovers_all_persisted_records() {
     let event = only_reply_event(
         BridgeState::default().api_request_to_legacy(&json!({"req": "list_sessions", "id": 1})),
     );
-    let ApiEvent::Sessions { sessions } = event else {
+    let ApiEvent::Sessions { sessions, .. } = event else {
         panic!("expected sessions reply, got {event:?}");
     };
     assert_eq!(
@@ -2413,7 +2488,7 @@ fn limited_session_list_reads_compact_index_without_transcript_records() {
         BridgeState::default()
             .api_request_to_legacy(&json!({"req": "list_sessions", "id": 1, "limit": 100})),
     );
-    let ApiEvent::Sessions { sessions } = event else {
+    let ApiEvent::Sessions { sessions, .. } = event else {
         panic!("expected sessions reply, got {event:?}");
     };
     assert_eq!(sessions.len(), 100);
@@ -2517,7 +2592,7 @@ fn retention_never_archives_users_connected_in_other_windows() {
     only_reply_event(state.api_request_to_legacy(
         &json!({"req":"set_retention_policy","id":1,"archive_after_days":1}),
     ));
-    let ApiEvent::Sessions { sessions } = only_reply_event(
+    let ApiEvent::Sessions { sessions, .. } = only_reply_event(
         state.api_request_to_legacy(&json!({"req":"list_sessions","id":2,"include_archived":true})),
     ) else {
         panic!("expected list");
@@ -2561,7 +2636,7 @@ fn archive_restore_and_retention_are_reversible_and_owner_only() {
         }))),
         ApiEvent::Ok
     ));
-    let ApiEvent::Sessions { sessions } =
+    let ApiEvent::Sessions { sessions, .. } =
         only_reply_event(state.api_request_to_legacy(&json!({"req": "list_sessions", "id": 2})))
     else {
         panic!("expected sessions");
@@ -2586,7 +2661,7 @@ fn archive_restore_and_retention_are_reversible_and_owner_only() {
         ApiEvent::Ok
     ));
 
-    let ApiEvent::Sessions { sessions } = only_reply_event(state.api_request_to_legacy(&json!({
+    let ApiEvent::Sessions { sessions, .. } = only_reply_event(state.api_request_to_legacy(&json!({
         "req": "list_sessions",
         "id": 5,
         "include_archived": true
@@ -3260,7 +3335,7 @@ fn list_and_attach_expose_swarm_ownership_without_nesting_forks() {
     std::fs::write(fork_path, fork.to_string()).unwrap();
     let mut state = BridgeState::default();
     let list = |state: &mut BridgeState| {
-        let ApiEvent::Sessions { sessions } = only_reply_event(
+        let ApiEvent::Sessions { sessions, .. } = only_reply_event(
             state.api_request_to_legacy(&json!({"req": "list_sessions", "id": 1})),
         ) else {
             panic!("expected sessions")
@@ -3662,7 +3737,7 @@ fn session_list_exposes_durable_edit_stats_without_phantom_sidecar_sessions() {
     let Outbound::Reply(frame) = &out[0] else {
         panic!("expected direct reply")
     };
-    let ApiEvent::Sessions { sessions } = &frame.event else {
+    let ApiEvent::Sessions { sessions, .. } = &frame.event else {
         panic!("expected sessions")
     };
     assert_eq!(sessions.len(), 1);
@@ -3675,7 +3750,7 @@ fn session_list_exposes_durable_edit_stats_without_phantom_sidecar_sessions() {
     let Outbound::Reply(frame) = &out[0] else {
         panic!("expected direct reply")
     };
-    let ApiEvent::Sessions { sessions } = &frame.event else {
+    let ApiEvent::Sessions { sessions, .. } = &frame.event else {
         panic!("expected sessions")
     };
     assert_eq!(sessions[0].edit_stats.unwrap().added, 84);
@@ -3871,7 +3946,7 @@ fn session_list_recovers_save_label_missing_from_older_index_rows() {
     let event = only_reply_event(
         BridgeState::default().api_request_to_legacy(&json!({"req": "list_sessions", "id": 1})),
     );
-    let ApiEvent::Sessions { sessions } = event else {
+    let ApiEvent::Sessions { sessions, .. } = event else {
         panic!("expected sessions reply, got {event:?}");
     };
     let labelled = sessions
@@ -3909,7 +3984,7 @@ fn limited_session_list_always_includes_saved_sessions() {
         BridgeState::default()
             .api_request_to_legacy(&json!({"req": "list_sessions", "id": 1, "limit": 2})),
     );
-    let ApiEvent::Sessions { sessions } = event else {
+    let ApiEvent::Sessions { sessions, .. } = event else {
         panic!("expected sessions reply, got {event:?}");
     };
     let saved = sessions
@@ -3999,7 +4074,7 @@ fn untitled_indexed_sessions_are_named_after_their_first_prompt_once() {
             BridgeState::default()
                 .api_request_to_legacy(&json!({"req": "list_sessions", "id": 1, "limit": 10})),
         );
-        let ApiEvent::Sessions { sessions } = event else {
+        let ApiEvent::Sessions { sessions, .. } = event else {
             panic!("expected sessions reply, got {event:?}");
         };
         sessions

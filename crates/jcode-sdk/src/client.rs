@@ -747,7 +747,7 @@ impl JcodeClient {
             })?
             .event
         {
-            ApiEvent::Sessions { sessions } => Ok(sessions),
+            ApiEvent::Sessions { sessions, .. } => Ok(sessions),
             other => Err(unexpected("sessions", &other)),
         }
     }
@@ -794,7 +794,7 @@ impl JcodeClient {
             })?
             .event
         {
-            ApiEvent::Sessions { sessions } => Ok(sessions),
+            ApiEvent::Sessions { sessions, .. } => Ok(sessions),
             other => Err(unexpected("sessions", &other)),
         }
     }

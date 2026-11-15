@@ -32,7 +32,15 @@ pub enum ApiEvent {
     Error { code: ErrorCode, message: String },
 
     /// Reply to `ListSessions`.
-    Sessions { sessions: Vec<SessionInfo> },
+    Sessions {
+        sessions: Vec<SessionInfo>,
+        /// Facts from each session's own record, keyed by session id. Only
+        /// sessions whose record could be read appear here; a client shows
+        /// what it knows and nothing more. Workers read their model, effort
+        /// and spend from this table rather than guessing.
+        #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+        workers: std::collections::HashMap<String, WorkerMeta>,
+    },
 
     /// Reply to `CreateSession` / `AttachSession`.
     Attached { session: SessionInfo },
@@ -596,6 +604,59 @@ pub struct SessionInfo {
     pub archived: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at_ms: Option<u64>,
+}
+
+/// What a session's own record says about it: the model and effort it runs
+/// on, what it has spent, and what its newest message says it is doing.
+///
+/// A swarm worker is another session: its coordinator only ever sees a status
+/// string, so the model, the effort and the spend have to come from the
+/// worker's record. Absent fields are unknown, never zero.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct WorkerMeta {
+    /// Model id the session runs on, e.g. `deepseek-v4.1-flash`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Provider key serving it, e.g. `claude-oauth` or `opencode-go`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Reasoning effort the session was started with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// Provider-reported prompt tokens, summed over the session. Cache reads
+    /// are included only where the provider folds them into the prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    /// Provider-reported output tokens, summed over the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens: Option<u64>,
+    /// What the newest message says the session is doing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<WorkerPhase>,
+    /// Tool the session is running, when `phase` is [`WorkerPhase::Tool`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// Unix epoch millis of the newest message, so a client can age it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_ms: Option<i64>,
+}
+
+/// The tail of a session record, read as "what is it doing right now".
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerPhase {
+    /// Waiting on the model: reasoning, streaming, or about to call it.
+    Thinking,
+    /// Running a tool call that has not returned yet.
+    Tool,
+    /// Turn finished, or paused on a dependency: not producing anything.
+    Waiting,
+    /// Nothing recorded, so nothing claimed.
+    Idle,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
