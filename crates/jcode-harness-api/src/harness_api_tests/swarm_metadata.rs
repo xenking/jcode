@@ -126,3 +126,47 @@ fn malformed_missing_and_legacy_snapshots_degrade_per_record() {
     assert_eq!(sessions[1], session("self"));
     assert_eq!(sessions[2], session("ignored"));
 }
+
+/// Regression from live acceptance: Desktop starts the bridge with
+/// `JCODE_RUNTIME_DIR=$TMPDIR` (to reach the shared daemon socket) while the
+/// daemon persists swarm snapshots to `~/.jcode/state/swarm`. Enrichment only
+/// read `$JCODE_RUNTIME_DIR/durable-state/swarm`, so 0 of 124 listed sessions
+/// carried `parent_session_id` and the coordinator showed no workers.
+/// Fixture: the coordinator's real snapshot, `detail` redacted.
+#[test]
+fn live_coordinator_snapshot_under_jcode_home_nests_workers_despite_runtime_dir() {
+    let runtime = TempDir::new();
+    let home = TempDir::new();
+    let swarm = home.0.join("state/swarm");
+    std::fs::create_dir_all(&swarm).unwrap();
+    std::fs::write(
+        swarm.join("session_session_microbe_1794670947943_2648f3bbec7c7e5e.json"),
+        include_str!("fixtures/live_coordinator_swarm.json"),
+    )
+    .unwrap();
+    let coordinator = "session_microbe_1794670947943_2648f3bbec7c7e5e";
+    let mut sessions = vec![
+        session(coordinator),
+        session("session_hamster_1794718698462_fa6bdd5a9eec4f73"),
+        session("session_fish_1794718668083_01dd7767afb8aa44"),
+        session("session_fox_1794718668160_87674d9271df588d"),
+    ];
+    for dir in swarm_state_dirs(Some(runtime.0.clone()), Some(home.0.clone())) {
+        enrich_sessions_from_swarm_state(&mut sessions, dir);
+    }
+    assert_eq!(sessions[0].parent_session_id, None);
+    for worker in &sessions[1..] {
+        assert_eq!(
+            worker.parent_session_id.as_deref(),
+            Some(coordinator),
+            "{}",
+            worker.session_id
+        );
+        assert!(worker.swarm_status.is_some());
+    }
+    assert_eq!(sessions[2].agent_label.as_deref(), Some("desktop-compact"));
+    // Before the fix only the runtime dir was read: nothing nests.
+    let mut before = vec![session("session_fish_1794718668083_01dd7767afb8aa44")];
+    enrich_sessions_from_swarm_state(&mut before, runtime.0.join("durable-state/swarm"));
+    assert_eq!(before[0].parent_session_id, None);
+}

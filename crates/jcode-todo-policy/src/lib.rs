@@ -899,17 +899,27 @@ pub fn derive_session_title(todos: &[TodoItem], plan: &TodoPlan) -> Option<Strin
         return Some(title);
     }
 
-    let current = todos
+    // A lane handed to a swarm worker is named after the worker's task, not
+    // this session's work: it must never rename the coordinator.
+    let own = todos
+        .iter()
+        .filter(|todo| {
+            todo.assigned_to
+                .as_deref()
+                .is_none_or(|owner| owner == "@self" || owner.trim().is_empty())
+        })
+        .collect::<Vec<_>>();
+    let current = own
         .iter()
         .rev()
         .find(|todo| todo.status.eq_ignore_ascii_case("in_progress"))
         .or_else(|| {
-            todos
-                .iter()
+            own.iter()
                 .rev()
                 .find(|todo| !todo.status.eq_ignore_ascii_case("completed"))
         })
-        .or_else(|| todos.last());
+        .or_else(|| own.last())
+        .copied();
 
     if let Some(todo) = current {
         if let Some(group) = non_empty(todo.group.as_deref()) {

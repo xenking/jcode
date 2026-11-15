@@ -29,26 +29,45 @@ struct Member {
 /// yet return these fields. This is opt-in: never use local metadata to enrich
 /// a remote daemon's session list.
 ///
-/// Respects `JCODE_RUNTIME_DIR` (isolated `durable-state/swarm`), then
-/// `JCODE_HOME` (or the default `~/.jcode`) under `state/swarm`. Missing or
+/// Reads `JCODE_RUNTIME_DIR/durable-state/swarm` and `JCODE_HOME` (or the
+/// default `~/.jcode`) `state/swarm`; the first source to set a field wins. Missing or
 /// malformed snapshots are harmless. Values already supplied by the API win.
 /// Only swarm ownership is used, never a transcript's ordinary fork parent.
 /// Statuses describe the last persisted snapshot, not a live liveness probe.
 pub fn enrich_sessions_from_local_swarm_state(sessions: &mut [SessionInfo]) {
-    let dir = if let Ok(runtime) = std::env::var("JCODE_RUNTIME_DIR") {
-        std::path::PathBuf::from(runtime).join("durable-state")
-    } else {
-        let home = std::env::var_os("JCODE_HOME")
-            .map(std::path::PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("HOME")
-                    .or_else(|| std::env::var_os("USERPROFILE"))
-                    .map(|home| std::path::PathBuf::from(home).join(".jcode"))
-            });
-        let Some(home) = home else { return };
-        home.join("state")
-    };
-    enrich_sessions_from_swarm_state(sessions, dir.join("swarm"));
+    for dir in local_swarm_state_dirs() {
+        enrich_sessions_from_swarm_state(sessions, dir);
+    }
+}
+
+/// Every directory a local daemon may persist swarm snapshots in.
+/// `JCODE_RUNTIME_DIR` is not only a test isolation knob: Desktop sets it on
+/// the bridge to line up with the shared daemon's socket, while that daemon
+/// (started without it) persists to `$JCODE_HOME/state/swarm`. Reading only
+/// `$JCODE_RUNTIME_DIR/durable-state` there hid every worker.
+pub(crate) fn local_swarm_state_dirs() -> Vec<std::path::PathBuf> {
+    let home = std::env::var_os("JCODE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|home| std::path::PathBuf::from(home).join(".jcode"))
+        });
+    swarm_state_dirs(
+        std::env::var_os("JCODE_RUNTIME_DIR").map(std::path::PathBuf::from),
+        home,
+    )
+}
+
+fn swarm_state_dirs(
+    runtime: Option<std::path::PathBuf>,
+    jcode_home: Option<std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    runtime
+        .map(|runtime| runtime.join("durable-state/swarm"))
+        .into_iter()
+        .chain(jcode_home.map(|home| home.join("state/swarm")))
+        .collect()
 }
 
 /// Like [`enrich_sessions_from_local_swarm_state`], but reads an explicit

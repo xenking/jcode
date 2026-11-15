@@ -1683,8 +1683,9 @@ fn snapcompact_pages_survive_persistence_and_follow_vision_capability() {
             .any(|b| matches!(b, ContentBlock::Image { .. }))
     );
     assert!(
-        plain[0].content.iter().any(
-            |b| matches!(b, ContentBlock::Text { text, .. } if text.contains("archive"))
-        )
+        plain[0]
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { text, .. } if text.contains("archive")))
     );
 }

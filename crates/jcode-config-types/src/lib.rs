@@ -435,12 +435,35 @@ impl CompactionOverride {
     }
 }
 
+/// Canonical model id for override matching: drops route prefixes
+/// (`claude:`, `anthropic/`), effort suffixes (`:high`), and window variants
+/// (`[1m]`), so all aliases of one model hit the same key.
+fn canonical_compaction_model_id(value: &str) -> String {
+    let mut v = value.trim().to_ascii_lowercase();
+    if let Some(idx) = v.find('[') {
+        v.truncate(idx);
+    }
+    if let Some((_, rest)) = v.rsplit_once('/') {
+        v = rest.to_string();
+    }
+    // `route:model` or `model:effort`; keep the part that looks like a model id.
+    let parts: Vec<&str> = v.split(':').map(str::trim).filter(|p| !p.is_empty()).collect();
+    const EFFORTS: [&str; 7] = ["minimal", "low", "medium", "high", "xhigh", "max", "none"];
+    let kept: Vec<&str> = parts
+        .iter()
+        .copied()
+        .filter(|p| !EFFORTS.contains(p))
+        .collect();
+    kept.last().map(|s| s.to_string()).unwrap_or(v)
+}
+
 fn compaction_key_matches(key: &str, value: &str) -> bool {
     let value = value.trim();
     key.trim().eq_ignore_ascii_case(value)
         || value
             .split_once(':')
             .is_some_and(|(_, bare)| key.trim().eq_ignore_ascii_case(bare.trim()))
+        || canonical_compaction_model_id(key) == canonical_compaction_model_id(value)
 }
 
 impl CompactionConfig {
@@ -1810,6 +1833,38 @@ mod compaction_override_tests {
         );
         let disabled: CompactionConfig = serde_json::from_str(r#"{"snapcompact":false}"#).unwrap();
         assert!(!disabled.resolve(None, None).snapcompact);
+    }
+
+    #[test]
+    fn model_override_matches_prefixed_suffixed_and_aliased_ids() {
+        let mut config = CompactionConfig::default();
+        config.models.insert(
+            "claude-opus-5-5".into(),
+            CompactionOverride {
+                reactive_threshold_tokens: Some(500_000),
+                ..Default::default()
+            },
+        );
+        for id in [
+            "claude-opus-5-5",
+            "claude:claude-opus-5-5",
+            "claude-opus-5-5[1m]",
+            "anthropic/claude-opus-5-5",
+            "anthropic/claude-opus-5-5:high",
+            " CLAUDE-OPUS-5-5[1M] ",
+        ] {
+            assert_eq!(
+                config.resolve(Some("Claude"), Some(id)).reactive_threshold_tokens,
+                500_000,
+                "{id}"
+            );
+        }
+        assert_eq!(
+            config
+                .resolve(Some("Claude"), Some("claude-opus-5-5-fast"))
+                .reactive_threshold_tokens,
+            400_000
+        );
     }
 
     fn cfg() -> CompactionConfig {
