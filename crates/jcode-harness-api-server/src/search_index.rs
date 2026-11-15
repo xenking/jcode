@@ -11,6 +11,11 @@
 //!   they are the least interesting thing to recall, and indexing them would
 //!   bury the sentence the user actually remembers under a hundred `bash`
 //!   invocations.
+//! - only text the *human* wrote. The harness itself appends user-role messages
+//!   (auto-pokes, swarm await reports, background-task notices, reload
+//!   continuations, session reminders). They are model instructions, not the
+//!   user's words, and attributing them to the user makes search lie about who
+//!   said what, so [`is_harness_injection`] drops them at index time.
 //! - session titles, in their own FTS table so the UI can show a "Titles"
 //!   section whose ranking never competes with transcript hits.
 //!
@@ -38,7 +43,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// Bumped when a schema change makes existing rows wrong. The index is a cache
 /// of the session files, so the fix for a mismatch is to drop and rebuild.
-const SCHEMA_VERSION: i64 = 1;
+///
+/// v2: messages carry the model that produced them, and harness-injected
+/// user-role text is no longer indexed as a user prompt.
+const SCHEMA_VERSION: i64 = 2;
 
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 200;
@@ -122,6 +130,9 @@ fn file_fingerprint(path: &Path) -> Option<(u64, i64)> {
 struct MessageRow {
     message_id: String,
     role: SessionSearchRole,
+    /// The model behind an assistant row; `None` for prompts and for sessions
+    /// stored before the runtime recorded a model.
+    model: Option<String>,
     ts_ms: i64,
     text: String,
 }
@@ -191,6 +202,7 @@ impl SearchIndex {
                  message_id UNINDEXED,
                  role UNINDEXED,
                  ts_ms UNINDEXED,
+                 model UNINDEXED,
                  text,
                  tokenize = 'unicode61 remove_diacritics 2'
              );
@@ -351,6 +363,7 @@ impl SearchIndex {
                     session_id: row.get(0)?,
                     title: row.get(1)?,
                     role: SessionSearchRole::Title,
+                    model: None,
                     snippet,
                     highlights,
                     timestamp_ms: row.get(2)?,
@@ -374,13 +387,14 @@ impl SearchIndex {
                     m.message_id,
                     m.role,
                     m.ts_ms,
+                    m.model,
                     s.title,
-                    snippet(search_messages, 4, ?2, ?3, '…', ?4),
-                    bm25(search_messages, 0.0, 0.0, 0.0, 0.0, 1.0)
+                    snippet(search_messages, 5, ?2, ?3, '…', ?4),
+                    bm25(search_messages, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
              FROM search_messages m
              LEFT JOIN search_sessions s ON s.session_id = m.session_id
              WHERE search_messages MATCH ?1
-             ORDER BY bm25(search_messages, 0.0, 0.0, 0.0, 0.0, 1.0)
+             ORDER BY bm25(search_messages, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
              LIMIT ?5",
         )?;
         let rows = statement.query_map(
@@ -395,8 +409,8 @@ impl SearchIndex {
             ],
             |row| {
                 let role: String = row.get(2)?;
-                let raw: String = row.get(5)?;
-                let rank: f64 = row.get(6)?;
+                let raw: String = row.get(6)?;
+                let rank: f64 = row.get(7)?;
                 let (snippet, highlights) = split_highlights(&raw);
                 let role = match role.as_str() {
                     "user" => SessionSearchRole::User,
@@ -405,8 +419,9 @@ impl SearchIndex {
                 Ok((
                     SessionSearchHit {
                         session_id: row.get(0)?,
-                        title: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                        title: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
                         role,
+                        model: row.get(4)?,
                         snippet,
                         highlights,
                         timestamp_ms: row.get(3)?,
@@ -470,8 +485,8 @@ impl SearchIndex {
         }
         {
             let mut insert = transaction.prepare(
-                "INSERT INTO search_messages (session_id, message_id, role, ts_ms, text)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO search_messages (session_id, message_id, role, ts_ms, model, text)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
             for message in &payload.messages {
                 insert.execute(params![
@@ -479,6 +494,7 @@ impl SearchIndex {
                     message.message_id,
                     message.role.as_str(),
                     message.ts_ms,
+                    message.model,
                     message.text
                 ])?;
             }
@@ -722,6 +738,10 @@ struct SessionSnapshot {
     custom_title: Option<String>,
     #[serde(default)]
     updated_at: Option<String>,
+    /// The model the session is (or was last) running, recorded next to its
+    /// messages; a hit can then say which model wrote the answer.
+    #[serde(default)]
+    model: Option<String>,
     #[serde(default)]
     messages: Vec<StoredMessage>,
 }
@@ -770,6 +790,11 @@ struct JournalMeta {
     custom_title: Option<String>,
     #[serde(default)]
     updated_at: Option<String>,
+    /// The model in force when these appends were written. A session can move
+    /// between models mid-conversation, so this is per journal line, not
+    /// per session.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 /// Read one session from its snapshot plus any journal appends the snapshot
@@ -786,8 +811,15 @@ fn read_session(source: &SessionSource) -> anyhow::Result<IndexedSession> {
     };
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut latest_ms = 0;
+    let mut model = snapshot.model.clone();
     for message in &snapshot.messages {
-        push_message(&mut indexed.messages, &mut seen, &mut latest_ms, message);
+        push_message(
+            &mut indexed.messages,
+            &mut seen,
+            &mut latest_ms,
+            message,
+            model.as_deref(),
+        );
     }
     if let Some(updated_at) = snapshot.updated_at.as_deref() {
         latest_ms = latest_ms.max(parse_timestamp_ms(updated_at).unwrap_or_default());
@@ -803,6 +835,9 @@ fn read_session(source: &SessionSource) -> anyhow::Result<IndexedSession> {
                 continue;
             };
             if let Some(meta) = line.meta {
+                if meta.model.is_some() {
+                    model = meta.model;
+                }
                 if let Some(title) = meta.custom_title.or(meta.title)
                     && !title.trim().is_empty()
                 {
@@ -813,7 +848,13 @@ fn read_session(source: &SessionSource) -> anyhow::Result<IndexedSession> {
                 }
             }
             for message in &line.append_messages {
-                push_message(&mut indexed.messages, &mut seen, &mut latest_ms, message);
+                push_message(
+                    &mut indexed.messages,
+                    &mut seen,
+                    &mut latest_ms,
+                    message,
+                    model.as_deref(),
+                );
             }
         }
     }
@@ -831,6 +872,7 @@ fn push_message(
     seen: &mut std::collections::HashSet<String>,
     latest_ms: &mut i64,
     message: &StoredMessage,
+    model: Option<&str>,
 ) {
     // System prompts, reminders and other display-only rows are scaffolding,
     // not something worth recalling.
@@ -852,7 +894,12 @@ fn push_message(
         .collect::<Vec<_>>()
         .join("\n");
     let text = text.trim();
-    if text.is_empty() || text.starts_with("<system-reminder>") {
+    if text.is_empty() {
+        return;
+    }
+    // A user-role message is not automatically the user's: the harness appends
+    // its own instructions through the same channel.
+    if role == SessionSearchRole::User && is_harness_injection(text) {
         return;
     }
     let ts_ms = message
@@ -868,9 +915,42 @@ fn push_message(
     rows.push(MessageRow {
         message_id,
         role,
+        model: (role == SessionSearchRole::Assistant)
+            .then(|| model.map(str::to_string))
+            .flatten()
+            .filter(|model| !model.trim().is_empty()),
         ts_ms,
         text: truncate_chars(&fold_cyrillic_yo(text), MAX_MESSAGE_CHARS),
     });
+}
+
+/// True when a user-role message was written by the harness, not typed by the
+/// human.
+///
+/// Every prefix here is a fixed header the runtime itself emits: session
+/// reminders, `[auto]` continuations (reload, interruption, todo gates),
+/// auto-poke prompts, swarm await/notification reports, and background-task
+/// notices. They are addressed to the model, so indexing them under "You"
+/// would make the search screen claim the user wrote the harness's own
+/// instructions.
+fn is_harness_injection(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    const PREFIXES: [&str; 7] = [
+        "<system-reminder>",
+        "[auto]",
+        "🐝 **Swarm",
+        "🐝 Swarm",
+        "**Background task",
+        "Member statuses:",
+        "Await satisfied.",
+    ];
+    if PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+    {
+        return true;
+    }
+    jcode_todo_policy::is_auto_poke_message(trimmed)
 }
 
 fn truncate_chars(text: &str, max: usize) -> String {

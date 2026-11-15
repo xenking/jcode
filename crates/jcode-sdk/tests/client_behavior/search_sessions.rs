@@ -13,6 +13,7 @@ fn hit(session_id: &str, role: SessionSearchRole, message_id: Option<&str>) -> S
         session_id: session_id.to_string(),
         title: "Walrus planning".to_string(),
         role,
+        model: (role == SessionSearchRole::Assistant).then(|| "claude-opus-5-5".to_string()),
         snippet: "…the walrus index…".to_string(),
         highlights: vec![SessionSearchHighlight { start: 4, end: 10 }],
         timestamp_ms: 1_767_323_046_000,

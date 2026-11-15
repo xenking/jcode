@@ -51,6 +51,11 @@ pub struct SessionSearchHit {
     /// second lookup. Empty when the session has never been titled.
     pub title: String,
     pub role: SessionSearchRole,
+    /// The model that produced an assistant hit, as the session recorded it
+    /// (`claude-opus-5-5`, `deepseek-v4.1-flash`, ...). Absent for user and
+    /// title hits, and for sessions stored before models were indexed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// One-line excerpt around the best match, with [`Self::highlights`]
     /// marking the matched terms inside it.
     pub snippet: String,

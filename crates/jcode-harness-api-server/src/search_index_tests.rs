@@ -61,12 +61,129 @@ fn index_for(dir: &Path) -> SearchIndex {
     index
 }
 
+/// A snapshot carrying the session's model, the way the runtime writes it.
+fn write_session_with_model(
+    dir: &Path,
+    id: &str,
+    title: &str,
+    model: &str,
+    messages: Vec<serde_json::Value>,
+) -> PathBuf {
+    let snapshot = serde_json::json!({
+        "id": id,
+        "title": title,
+        "model": model,
+        "created_at": "2026-01-02T03:04:05.000Z",
+        "updated_at": "2026-01-02T04:05:06.000Z",
+        "messages": messages,
+    });
+    let path = dir.join("sessions").join(format!("{id}.json"));
+    fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).expect("write session");
+    path
+}
+
 fn session_ids(results: &SessionSearchResults) -> Vec<String> {
     results
         .messages
         .iter()
         .map(|hit| hit.session_id.clone())
         .collect()
+}
+
+/// Harness instructions ride the user role. Indexing them as "You" makes the
+/// search screen attribute the runtime's own nudges to the human.
+#[test]
+fn harness_user_role_injections_are_not_indexed_as_prompts() {
+    let dir = test_dir("harness-injections");
+    write_session(
+        &dir,
+        "session_injections",
+        "Worker lane",
+        vec![
+            user_message(
+                "message_reminder",
+                "<system-reminder>\n# Session Context\nDate: 2026-11-15\nTimezone: +11:00\n</system-reminder>",
+                "2026-01-02T03:10:00.000Z",
+            ),
+            user_message(
+                "message_poke",
+                "You have 2 incomplete todos. Continue working, or update the todo tool.\nActionable todos:\n- \"write the indexer\"\n- \"verify the rebuild\"",
+                "2026-01-02T03:11:00.000Z",
+            ),
+            user_message(
+                "message_reload",
+                "[auto] Your session was interrupted by a server reload while a tool was running. Continue exactly where you left off.",
+                "2026-01-02T03:12:00.000Z",
+            ),
+            user_message(
+                "message_swarm",
+                "🐝 **Swarm await finished**\n\nAll members done.\n\nMember statuses:\n  ✓ jaguar (ready)",
+                "2026-01-02T03:13:00.000Z",
+            ),
+            user_message(
+                "message_real_prompt",
+                "please check the zebra indexer before you continue",
+                "2026-01-02T03:14:00.000Z",
+            ),
+        ],
+    );
+    let mut index = index_for(&dir);
+
+    for needle in ["Actionable", "incomplete", "interrupted", "Member"] {
+        let results = index.search(needle, None).unwrap();
+        assert!(
+            results.messages.is_empty(),
+            "{needle} must not match: the harness wrote it, not the user: {:?}",
+            results.messages
+        );
+    }
+
+    let results = index.search("zebra", None).unwrap();
+    assert_eq!(results.messages.len(), 1, "{:?}", results.messages);
+    assert_eq!(results.messages[0].role, SessionSearchRole::User);
+    assert_eq!(results.messages[0].message_id.as_deref(), Some("message_real_prompt"));
+    assert_eq!(
+        results.messages[0].model, None,
+        "a prompt has no authoring model"
+    );
+}
+
+/// The row says which model answered, so the index has to carry it.
+#[test]
+fn assistant_hit_carries_the_session_model() {
+    let dir = test_dir("hit-model");
+    write_session_with_model(
+        &dir,
+        "session_model",
+        "Model attribution",
+        "claude-opus-5-5",
+        vec![
+            user_message(
+                "message_prompt",
+                "how does the walrus indexer work",
+                "2026-01-02T03:10:00.000Z",
+            ),
+            assistant_message(
+                "message_answer",
+                "2026-01-02T03:11:00.000Z",
+                serde_json::json!([block("the walrus indexer rebuilds from the snapshots")]),
+            ),
+        ],
+    );
+    let mut index = index_for(&dir);
+    let results = index.search("walrus", None).unwrap();
+    let assistant = results
+        .messages
+        .iter()
+        .find(|hit| hit.role == SessionSearchRole::Assistant)
+        .expect("assistant hit");
+    assert_eq!(assistant.model.as_deref(), Some("claude-opus-5-5"));
+    let prompt = results
+        .messages
+        .iter()
+        .find(|hit| hit.role == SessionSearchRole::User)
+        .expect("user hit");
+    assert_eq!(prompt.model, None);
 }
 
 #[test]
