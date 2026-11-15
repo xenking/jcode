@@ -34,6 +34,18 @@ pub(super) async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    // A `/btw` card owns Esc and Ctrl+P, the same as an in-process session.
+    if app.btw_open() {
+        if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('p') {
+            app.promote_btw();
+            return Ok(());
+        }
+        if code == KeyCode::Esc && app.input.trim().is_empty() {
+            app.close_btw();
+            return Ok(());
+        }
+    }
+
     if app.handle_key_during_provider_failover(code) {
         return Ok(());
     }

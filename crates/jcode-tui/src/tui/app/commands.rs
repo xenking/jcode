@@ -1355,7 +1355,7 @@ fn disconnect_ssh_remote(app: &mut App, name: &str) {
     }
 }
 
-fn handle_btw_command(app: &mut App, trimmed: &str) -> bool {
+pub(super) fn handle_btw_command(app: &mut App, trimmed: &str) -> bool {
     if trimmed != "/btw" && !trimmed.starts_with("/btw ") {
         return false;
     }
@@ -1366,7 +1366,9 @@ fn handle_btw_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
-    fork_session_with_prompt_local(app, Some(question));
+    if app.start_btw(question) {
+        app.pending_btw_turn = true;
+    }
     true
 }
 
@@ -1387,8 +1389,9 @@ fn handle_fork_command(app: &mut App, trimmed: &str) -> bool {
 }
 
 /// Fork the current session (like `/split`) and, when given, deliver `prompt`
-/// as the first message of the forked session. Shared by `/btw <question>`,
-/// `/fork [prompt]`, and `/split`.
+/// as the first message of the forked session. Shared by `/fork [prompt]` and
+/// `/split`; `/btw` uses a side card instead and only annotates a prompt here on
+/// a remote daemon session.
 pub(super) fn fork_session_with_prompt_local(app: &mut App, prompt: Option<&str>) {
     // Images attached to the input belong to the prompt being forked off, so
     // they travel with it instead of lingering on the parent's next message.

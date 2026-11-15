@@ -281,7 +281,7 @@ impl super::App {
         }
         let picker = AskPickerState::new(request_id, questions);
         self.inline_interactive_state = None;
-        self.inline_view_state = Some(picker.view());
+        self.set_inline_view(picker.view());
         self.ask_picker = Some(picker);
         self.set_status_notice("The agent is asking you a question");
     }
@@ -291,13 +291,15 @@ impl super::App {
         let picker = self.ask_picker.as_mut()?;
         match picker.handle_key(code) {
             AskKeyOutcome::Pending => {
-                self.inline_view_state = Some(picker.view());
+                let view = picker.view();
+                self.set_inline_view(view);
                 None
             }
             AskKeyOutcome::Done(response) => {
                 let request_id = picker.request_id.clone();
                 self.ask_picker = None;
-                self.inline_view_state = None;
+                self.clear_inline_view();
+                self.sync_btw_card();
                 Some((request_id, response))
             }
         }

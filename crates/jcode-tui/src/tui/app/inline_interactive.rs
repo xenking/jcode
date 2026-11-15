@@ -1132,7 +1132,7 @@ impl App {
         let entry_count = entries.len();
         let route_count = cache.route_count;
         let model_count = cache.model_count;
-        self.inline_view_state = None;
+        self.clear_inline_view();
         self.inline_interactive_state = Some(InlineInteractiveState {
             kind: PickerKind::Model,
             filtered: (0..entry_count).collect(),
@@ -1476,7 +1476,7 @@ impl App {
         } else {
             current_model.to_string()
         };
-        self.inline_view_state = None;
+        self.clear_inline_view();
         self.inline_interactive_state = Some(InlineInteractiveState {
             kind: PickerKind::Model,
             filtered: vec![0],
@@ -2175,7 +2175,7 @@ impl App {
             None
         };
 
-        self.inline_view_state = None;
+        self.clear_inline_view();
         if cache_entries && Self::should_cache_model_picker_entries(model_count, routes.len()) {
             self.model_picker_cache = Some(ModelPickerCache {
                 signature: cache_signature,
@@ -2227,6 +2227,7 @@ impl App {
         visible_limit: Option<usize>,
     ) -> String {
         let previous_inline_view = self.inline_view_state.clone();
+        let previous_inline_view_is_btw = self.inline_view_is_btw;
         let previous_inline_interactive = self.inline_interactive_state.clone();
         let previous_model_picker_cache = self.model_picker_cache.clone();
         let previous_pending_model_picker_load = self.pending_model_picker_load.take();
@@ -2345,6 +2346,7 @@ impl App {
         let picker_static_fallback_count: usize = picker_static_fallback_by_provider.values().sum();
 
         self.inline_view_state = previous_inline_view;
+        self.inline_view_is_btw = previous_inline_view_is_btw;
         self.inline_interactive_state = previous_inline_interactive;
         self.model_picker_cache = previous_model_picker_cache;
         self.pending_model_picker_load = previous_pending_model_picker_load;

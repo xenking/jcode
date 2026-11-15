@@ -160,7 +160,7 @@ impl App {
             .iter()
             .position(|entry| entry.is_current)
             .unwrap_or(0);
-        self.inline_view_state = None;
+        self.clear_inline_view();
         self.inline_interactive_state = Some(crate::tui::InlineInteractiveState {
             kind: crate::tui::PickerKind::Account,
             filtered: (0..entries.len()).collect(),
@@ -326,7 +326,7 @@ impl App {
             }
         }
 
-        self.inline_view_state = None;
+        self.clear_inline_view();
         self.inline_interactive_state = Some(crate::tui::InlineInteractiveState {
             kind: crate::tui::PickerKind::Account,
             filtered: (0..models.len()).collect(),

@@ -1149,6 +1149,11 @@ pub trait TuiState {
     fn inline_view_state(&self) -> Option<&InlineViewState> {
         None
     }
+    /// True while the `/btw` side-question card owns the inline view. The card
+    /// gets a taller view than a one-shot notice because its answer streams.
+    fn btw_card_open(&self) -> bool {
+        false
+    }
     /// General inline UI state shown above input.
     fn inline_ui_state(&self) -> Option<InlineUiStateRef<'_>> {
         self.inline_interactive_state()

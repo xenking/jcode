@@ -54,6 +54,9 @@ pub(super) struct SessionJournalMeta {
     pub(super) last_pid: Option<u32>,
     pub(super) last_active_at: Option<DateTime<Utc>>,
     pub(super) is_debug: bool,
+    /// `/btw` side-question forks stay off the session list until promoted.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) hidden: bool,
     pub(super) saved: bool,
     pub(super) save_label: Option<String>,
 }
@@ -121,6 +124,7 @@ pub(super) fn metadata_requires_snapshot(
         || prev.short_name != current.short_name
         || prev.status != current.status
         || prev.is_debug != current.is_debug
+        || prev.hidden != current.hidden
         || prev.saved != current.saved
         || prev.save_label != current.save_label
 }

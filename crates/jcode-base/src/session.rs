@@ -182,6 +182,11 @@ pub struct Session {
     /// Whether this is a debug/test session (created via debug socket)
     #[serde(default)]
     pub is_debug: bool,
+    /// A hidden session is a `/btw` side-question fork: it lives on disk and
+    /// can be resumed by id, but the session list skips it until the user
+    /// promotes it to a real chat.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
     /// Whether this session has been saved/bookmarked by the user
     #[serde(default)]
     pub saved: bool,
@@ -272,6 +277,8 @@ struct SessionStartupStub {
     last_active_at: Option<DateTime<Utc>>,
     #[serde(default)]
     is_debug: bool,
+    #[serde(default)]
+    hidden: bool,
     #[serde(default)]
     saved: bool,
     #[serde(default)]
@@ -378,6 +385,7 @@ impl Session {
         session.last_pid = stub.last_pid;
         session.last_active_at = stub.last_active_at;
         session.is_debug = stub.is_debug;
+        session.hidden = stub.hidden;
         session.saved = stub.saved;
         session.save_label = stub.save_label;
         session.migration_epoch = stub.migration_epoch;
@@ -419,6 +427,7 @@ impl Session {
         session.last_pid = snapshot.last_pid;
         session.last_active_at = snapshot.last_active_at;
         session.is_debug = snapshot.is_debug;
+        session.hidden = snapshot.hidden;
         session.saved = snapshot.saved;
         session.save_label = snapshot.save_label;
         session.replay_events.clear();
@@ -587,6 +596,7 @@ impl Session {
             last_pid: self.last_pid,
             last_active_at: self.last_active_at,
             is_debug: self.is_debug,
+            hidden: self.hidden,
             saved: self.saved,
             save_label: self.save_label.clone(),
         }
@@ -796,6 +806,7 @@ impl Session {
         self.last_pid = meta.last_pid;
         self.last_active_at = meta.last_active_at;
         self.is_debug = meta.is_debug;
+        self.hidden = meta.hidden;
         self.saved = meta.saved;
         self.save_label = meta.save_label;
         self.mark_memory_profile_dirty();
@@ -841,6 +852,7 @@ impl Session {
             last_pid: Some(std::process::id()),
             last_active_at: Some(now),
             is_debug,
+            hidden: false,
             saved: false,
             save_label: None,
             env_snapshots: Vec::new(),
@@ -901,6 +913,7 @@ impl Session {
             last_pid: Some(std::process::id()),
             last_active_at: Some(now),
             is_debug,
+            hidden: false,
             saved: false,
             save_label: None,
             env_snapshots: Vec::new(),
@@ -1882,6 +1895,8 @@ struct RemoteStartupSessionSnapshot {
     last_active_at: Option<DateTime<Utc>>,
     #[serde(default)]
     is_debug: bool,
+    #[serde(default)]
+    hidden: bool,
     #[serde(default)]
     saved: bool,
     #[serde(default)]

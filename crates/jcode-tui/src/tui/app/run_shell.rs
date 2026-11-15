@@ -824,6 +824,16 @@ impl App {
                 self.process_turn_with_input(&mut terminal, &mut event_stream, &mut bus_receiver)
                     .await;
                 needs_redraw = true;
+            } else if self.pending_btw_turn {
+                self.pending_btw_turn = false;
+                super::btw::process_btw_with_input(
+                    &mut self,
+                    &mut terminal,
+                    &mut event_stream,
+                    &mut status_spinner_renderer,
+                )
+                .await;
+                needs_redraw = true;
             } else if self.pending_queued_dispatch && !self.cloud_handoff_blocks_work() {
                 self.pending_queued_dispatch = false;
                 self.process_queued_messages(&mut terminal, &mut event_stream)
@@ -1017,6 +1027,10 @@ impl App {
             // them, one event per wakeup, and nothing on screen needs that
             // rate: text is revealed in REDRAW_UNFOCUSED_STREAM batches.
             let mut server_events_held_until: Option<tokio::time::Instant> = None;
+            // The `/btw` side question runs in its own hidden session on this
+            // same daemon. Its connection is polled here so the card streams
+            // without blocking the parent session's events.
+            let mut btw_conn: Option<crate::tui::backend::RemoteConnection> = None;
             // Main event loop
             loop {
                 self.sync_sleep_guard();
@@ -1105,6 +1119,32 @@ impl App {
                     remote::process_remote_followups(&mut self, &mut remote_conn).await;
                     needs_redraw = true;
                     continue;
+                }
+
+                // Start the side question once the parent has no turn running,
+                // so its own connection never competes with a live parent turn.
+                if self.pending_btw_turn && btw_conn.is_none() && !self.is_processing {
+                    self.pending_btw_turn = false;
+                    crate::logging::info("btw: starting the side question");
+                    match self.begin_btw_remote().await {
+                        Ok(connection) => btw_conn = Some(connection),
+                        Err(error) => {
+                            crate::logging::warn(&format!(
+                                "btw: side question start failed: {}",
+                                crate::util::format_error_chain(&error)
+                            ));
+                            self.fail_btw(crate::util::format_error_chain(&error));
+                        }
+                    }
+                    needs_redraw = true;
+                }
+                // A closed card stops its turn and drops the connection; the
+                // hidden session stays on disk until the user promotes it.
+                if btw_conn.is_some() && !self.btw_open() {
+                    if let Some(mut connection) = btw_conn.take() {
+                        let _ = connection.cancel().await;
+                    }
+                    needs_redraw = true;
                 }
 
                 let spinner_available = status_spinner_renderer.spinner_only_available(&self);
@@ -1198,6 +1238,27 @@ impl App {
                     }, if !on_spinner => {
                         super::wake_stats::note("server_events_released");
                         server_events_held_until = None;
+                    }
+                    event = async {
+                        match btw_conn.as_mut() {
+                            Some(connection) => connection.next_event().await,
+                            None => futures::future::pending::<crate::tui::backend::RemoteRead>().await,
+                        }
+                    }, if btw_conn.is_some() => {
+                        super::wake_stats::note("btw");
+                        match event {
+                            crate::tui::backend::RemoteRead::Event(event) => {
+                                if self.apply_btw_server_event(event) {
+                                    btw_conn = None;
+                                }
+                                needs_redraw = true;
+                            }
+                            crate::tui::backend::RemoteRead::Disconnected(reason) => {
+                                self.fail_btw(format!("side question connection closed: {reason:?}"));
+                                btw_conn = None;
+                                needs_redraw = true;
+                            }
+                        }
                     }
                     event = remote_conn.next_event(), if server_events_held_until.is_none() || self.client_focused() => {
                         server_events_held_until = None;

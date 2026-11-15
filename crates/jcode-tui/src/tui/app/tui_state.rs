@@ -2249,6 +2249,10 @@ impl crate::tui::TuiState for App {
         self.inline_view_state.as_ref()
     }
 
+    fn btw_card_open(&self) -> bool {
+        self.btw_open()
+    }
+
     fn changelog_scroll(&self) -> Option<usize> {
         self.changelog_scroll
     }

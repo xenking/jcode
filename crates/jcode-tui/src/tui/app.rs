@@ -59,6 +59,7 @@ mod ask_picker;
 mod auth;
 mod auth_account_picker_saved_accounts;
 mod auth_remote;
+mod btw;
 mod cache_diagnostics;
 mod catchup;
 mod commands;
@@ -1611,6 +1612,15 @@ pub struct App {
     side_panel_native_scrollbar: bool,
     // Passive inline UI (informational blocks shown above input).
     inline_view_state: Option<super::InlineViewState>,
+    /// True when `inline_view_state` belongs to the `/btw` card, so nothing else
+    /// clears a picker's inline view by accident.
+    inline_view_is_btw: bool,
+    /// The open `/btw` side question: its card is live in `inline_view_state`.
+    btw: Option<btw::BtwCard>,
+    /// Set by Esc while a side question streams, so the turn loop stops.
+    btw_cancel: bool,
+    /// The card was just opened and its ephemeral turn has not run yet.
+    pending_btw_turn: bool,
     // Pending `ask` tool questions; mirrored into inline_view_state for rendering.
     ask_picker: Option<ask_picker::AskPickerState>,
     // Interactive model/provider picker

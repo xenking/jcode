@@ -2926,10 +2926,14 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
                 .unwrap_or(false)
             {
                 app.inline_interactive_state = None;
-                app.inline_view_state = None;
+                app.clear_inline_view();
                 clear_input_for_escape(app);
             } else if app.inline_view_state.is_some() {
-                app.inline_view_state = None;
+                // A `/btw` card owns its own Esc: with a draft, Esc just clears
+                // the draft and leaves the card up.
+                if !app.inline_view_is_btw {
+                    app.clear_inline_view();
+                }
                 clear_input_for_escape(app);
             } else if app.is_processing && app.has_pending_user_followup() {
                 // The user typed a new prompt while this turn ran, then hit
@@ -3166,6 +3170,20 @@ impl App {
 
         if handle_modal_key(self, code, modifiers)? {
             return Ok(());
+        }
+
+        // A `/btw` card owns Esc and Ctrl+P. Esc only closes the card while the
+        // composer is empty, so it keeps clearing typed input otherwise.
+        if self.btw_open() {
+            let empty_composer = self.input.trim().is_empty();
+            if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('p') {
+                self.promote_btw();
+                return Ok(());
+            }
+            if code == KeyCode::Esc && empty_composer {
+                self.close_btw();
+                return Ok(());
+            }
         }
 
         if self.handle_onboarding_continue_prompt_key(code) {

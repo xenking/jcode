@@ -1320,6 +1320,9 @@ struct SessionSummary {
     is_canary: bool,
     #[serde(default)]
     is_debug: bool,
+    /// `/btw` side-question forks stay off the list until promoted.
+    #[serde(default)]
+    hidden: bool,
     #[serde(default)]
     saved: bool,
     #[serde(default)]
@@ -1824,6 +1827,9 @@ fn parse_jcode_session_info(
 
     let path = sessions_dir.join(format!("{stem}.json"));
     let session = load_session_summary(&path).ok()?;
+    if session.hidden {
+        return None;
+    }
 
     let visible_message_count = session.messages.visible_message_count;
     if visible_message_count == 0 {

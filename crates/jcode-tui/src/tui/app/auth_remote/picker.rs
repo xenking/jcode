@@ -96,20 +96,20 @@ impl App {
         let Some(login) = self.remote_login.as_ref() else {
             return;
         };
-        let host = login.target.host();
+        let host = login.target.host().to_string();
         let mut entries = if imports_only {
             Vec::new()
         } else {
             provider_catalog::tui_login_providers()
                 .into_iter()
-                .map(|provider| provider_entry(provider, host))
+                .map(|provider| provider_entry(provider, &host))
                 .collect()
         };
         entries.extend([
-            import_entry("openai", "OpenAI", host),
-            import_entry("claude", "Claude", host),
+            import_entry("openai", "OpenAI", &host),
+            import_entry("claude", "Claude", &host),
         ]);
-        self.inline_view_state = None;
+        self.clear_inline_view();
         self.inline_interactive_state = Some(InlineInteractiveState {
             kind: PickerKind::Login,
             filtered: (0..entries.len()).collect(),
@@ -119,7 +119,6 @@ impl App {
             filter: String::new(),
             preview: false,
         });
-        let host = host.to_string();
         self.set_status_notice(format!(
             "Login on {host}: choose a provider or Import local login. Some methods require setup directly on the SSH host. Esc cancels."
         ));

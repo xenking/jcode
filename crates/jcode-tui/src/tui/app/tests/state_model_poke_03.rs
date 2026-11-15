@@ -2615,7 +2615,7 @@ fn test_poke_queues_when_turn_is_in_progress() {
 }
 
 #[test]
-fn test_btw_forks_even_when_turn_is_in_progress() {
+fn test_btw_opens_a_side_card_even_when_turn_is_in_progress() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.is_processing = true;
@@ -2628,10 +2628,17 @@ fn test_btw_forks_even_when_turn_is_in_progress() {
         assert!(app.is_processing, "parent turn should keep running");
         assert!(app.queued_messages().is_empty());
         assert!(app.hidden_queued_system_messages.is_empty());
-        assert!(app.display_messages().iter().any(|msg| {
-            msg.content.contains("created for the next prompt")
-                || msg.content.contains("Next prompt launched in")
-        }));
+        // The card is visible at once and its own request waits for the turn.
+        let card = app.btw_card().expect("side card opens mid-turn");
+        assert_eq!(card.question, "should this fork context?");
+        assert!(card.waiting, "the request queues behind the running turn");
+        assert!(app.pending_btw_turn);
+        assert!(
+            !app.display_messages()
+                .iter()
+                .any(|msg| msg.content.contains("created for the next prompt")),
+            "no fork window is opened"
+        );
     });
 }
 

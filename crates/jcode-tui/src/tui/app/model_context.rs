@@ -1795,7 +1795,7 @@ impl App {
     }
 
     fn clear_usage_transient_ui(&mut self) {
-        self.inline_view_state = None;
+        self.clear_inline_view();
         self.usage_overlay = None;
         if self
             .inline_interactive_state

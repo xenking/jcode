@@ -143,7 +143,7 @@ impl App {
             created_date: None,
             effort: None,
         }).collect();
-        self.inline_view_state = None;
+        self.clear_inline_view();
         self.inline_interactive_state = Some(InlineInteractiveState {
             kind: PickerKind::Login,
             entries,

@@ -1192,10 +1192,17 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             return Ok(());
         }
 
-        if trimmed == "/btw" || trimmed.starts_with("/btw ") || trimmed.starts_with("/fork ") {
+        // `/btw` is a side card, not a new window: it shares the daemon's
+        // backend with Desktop's side question instead of forking a chat.
+        if (trimmed == "/btw" || trimmed.starts_with("/btw "))
+            && app_mod::commands::handle_btw_command(app, trimmed)
+        {
+            return Ok(());
+        }
+
+        if trimmed.starts_with("/fork ") {
             let prompt = trimmed
-                .strip_prefix("/btw")
-                .or_else(|| trimmed.strip_prefix("/fork"))
+                .strip_prefix("/fork")
                 .unwrap_or_default()
                 .trim();
             if prompt.is_empty() {

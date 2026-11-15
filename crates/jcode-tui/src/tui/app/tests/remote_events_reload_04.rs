@@ -2175,10 +2175,11 @@ fn test_remote_fork_with_prompt_stages_split_prompt() {
 }
 
 #[test]
-fn test_remote_btw_stages_question_in_forked_session() {
+fn test_remote_btw_opens_a_side_card_instead_of_forking_a_chat() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.is_remote = true;
+        app.remote_session_id = Some(app.session.id.clone());
         app.input = "/btw what are we doing?".to_string();
         app.cursor_pos = app.input.len();
 
@@ -2188,23 +2189,21 @@ fn test_remote_btw_stages_question_in_forked_session() {
         remote.mark_history_loaded();
 
         rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
-            .expect("/btw should launch split request");
+            .expect("/btw should open a side card");
 
-        assert!(app.pending_split_prompt.is_some());
-
-        app.handle_server_event(
-            crate::protocol::ServerEvent::SplitResponse {
-                id: 1,
-                new_session_id: "session_btw_child".to_string(),
-                new_session_name: "btw_child".to_string(),
-            },
-            &mut remote,
+        let card = app
+            .btw_card()
+            .expect("a daemon session still gets a side card");
+        assert_eq!(card.question, "what are we doing?");
+        assert!(
+            card.child.is_some(),
+            "the question runs in a hidden fork, not a new chat"
         );
-
-        let restored = App::restore_input_for_reload("session_btw_child")
-            .expect("btw fork should stage the question");
-        assert_eq!(restored.input, "what are we doing?");
-        assert!(restored.submit_on_restore);
+        assert!(
+            app.pending_split_prompt.is_none(),
+            "no fork window is staged"
+        );
+        assert!(app.pending_btw_turn, "the remote loop starts the request");
     });
 }
 
