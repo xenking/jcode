@@ -1000,7 +1000,7 @@ impl BridgeState {
                     return Self::error_reply(
                         api_id,
                         ErrorCode::InvalidRequest,
-                        "unsupported API-key provider; supported: claude-api, openai-api, openrouter, cursor, gemini, jcode",
+                        "unsupported API-key provider; supported: claude-api, openai-api, openrouter, cursor, gemini, jcode, or any API-key catalog provider such as opencode-go",
                     );
                 };
                 let configured = req == "set_api_key";
@@ -1017,7 +1017,7 @@ impl BridgeState {
                     );
                 }
                 if let Err(message) =
-                    Self::write_credential(file_name, env_keys, configured.then_some(key))
+                    Self::write_credential(file_name, &env_keys, configured.then_some(key))
                 {
                     return Self::error_reply(api_id, ErrorCode::Internal, &message);
                 }

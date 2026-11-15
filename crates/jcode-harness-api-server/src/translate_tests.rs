@@ -4125,3 +4125,45 @@ fn account_label_follows_the_daemons_routed_account() {
     state.note_models(&json!({"provider_oauth_account_label": null}));
     assert!(state.current_account.is_none());
 }
+
+#[test]
+fn credential_provisioning_stores_openai_compatible_catalog_keys_under_their_own_env_file() {
+    let home = ScopedJcodeHome::new("credentials-openai-compatible");
+    let config = home.path.join("config/jcode");
+    std::fs::create_dir_all(&config).unwrap();
+    let mut state = BridgeState::default();
+
+    let outbound = state.api_request_to_legacy(&json!({
+        "req": "set_api_key",
+        "id": 21,
+        "provider": "opencode-go",
+        "api_key": "oc-go-secret"
+    }));
+    let [Outbound::Legacy(notify)] = outbound.as_slice() else {
+        panic!("opencode-go credential should notify the daemon: {outbound:?}");
+    };
+    assert_eq!(notify["provider"], "opencode-go");
+    assert_eq!(
+        std::fs::read_to_string(config.join("opencode-go.env")).unwrap(),
+        "OPENCODE_GO_API_KEY=oc-go-secret\n"
+    );
+    assert!(
+        !config.join("openrouter.env").exists(),
+        "an OpenCode Go key must never land in the OpenRouter credential file"
+    );
+
+    // Unknown providers are still refused.
+    let event = only_reply_event(state.api_request_to_legacy(&json!({
+        "req": "set_api_key",
+        "id": 22,
+        "provider": "no-such-provider",
+        "api_key": "x"
+    })));
+    assert!(matches!(
+        event,
+        ApiEvent::Error {
+            code: ErrorCode::InvalidRequest,
+            ..
+        }
+    ));
+}

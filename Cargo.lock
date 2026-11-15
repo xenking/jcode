@@ -4001,6 +4001,7 @@ dependencies = [
  "jcode-background-types",
  "jcode-base",
  "jcode-harness-api",
+ "jcode-provider-metadata",
  "jcode-session-types",
  "jcode-todo-policy",
  "jcode-transport",

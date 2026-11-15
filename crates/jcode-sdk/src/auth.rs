@@ -63,8 +63,8 @@ fn supported(provider: LoginProviderDescriptor) -> Option<LoginProvider> {
         Claude | OpenAi | Gemini | Antigravity | Google => LoginMethod::OAuth,
         Copilot => LoginMethod::DeviceCode,
         ClaudeApiKey | OpenAiApiKey | OpenRouter | Cursor | Jcode => LoginMethod::ApiKey,
-        // The harness key API currently supports only these catalog profiles.
-        OpenAiCompatible(profile) if profile.id == "gemini-api" => LoginMethod::ApiKey,
+        // The harness key API stores any key-based catalog profile in its own env file.
+        OpenAiCompatible(profile) if profile.requires_api_key => LoginMethod::ApiKey,
         _ => return None,
     };
     Some(LoginProvider {
