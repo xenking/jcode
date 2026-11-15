@@ -1014,6 +1014,7 @@ impl App {
             // The Pong lists what this server supports. Until it arrives no
             // focus is reported, which the server treats as focused.
             let _ = remote_conn.request_capabilities().await;
+            let _ = remote_conn.get_queued_prompts().await;
 
             let mut bus_receiver_remote = Bus::global().subscribe();
             if let Some(status) = Bus::global().latest_update_status() {

@@ -2,12 +2,12 @@
 // and runs it as a real command once the turn ends, instead of running it now
 // or sending its text to the model.
 
-#[tokio::test]
-async fn send_modes_use_server_queue_for_both_modes() {
+fn assert_send_mode_uses_server_queue(queue_mode: bool, expected_mode: &str) {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
-    for (queue_mode, expected_mode) in [(false, "steer"), (true, "after_yield")] {
         let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
         app.is_processing = true;
         app.queue_mode = queue_mode;
         app.input = "follow up".into();
@@ -24,7 +24,17 @@ async fn send_modes_use_server_queue_for_both_modes() {
         assert_eq!(request["type"], "queue_prompt");
         assert_eq!(request["mode"], expected_mode);
         assert_eq!(request["content"], "follow up");
-    }
+        });
+}
+
+#[test]
+fn send_modes_steer_uses_server_queue() {
+    assert_send_mode_uses_server_queue(false, "steer");
+}
+
+#[test]
+fn send_modes_after_yield_uses_server_queue() {
+    assert_send_mode_uses_server_queue(true, "after_yield");
 }
 
 #[test]
@@ -39,7 +49,43 @@ fn send_modes_restore_server_snapshot_without_duplicates() {
         let event: crate::protocol::ServerEvent = serde_json::from_str(json).unwrap();
         app.handle_server_event(event, &mut remote);
     }
-    assert_eq!(app.pending_soft_interrupts, ["first", "second"]);
+    assert_eq!(app.server_queued_prompts.iter().map(|prompt| prompt.content.as_str()).collect::<Vec<_>>(), ["first", "second"]);
+    assert!(app.pending_soft_interrupts.is_empty());
+    assert!(app.queued_messages.is_empty());
+}
+
+#[test]
+fn send_modes_selection_switches_and_interrupts_selected_prompt() {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+    app.is_processing = true;
+    app.input = "draft stays".into();
+    app.cursor_pos = app.input.len();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, _writer) = peer.into_split();
+    let mut reader = BufReader::new(reader);
+    let event: crate::protocol::ServerEvent = serde_json::from_str(r#"{"type":"queued_prompts","id":1,"prompts":[{"client_id":"p1","content":"first","mode":"steer"},{"client_id":"p2","content":"second","mode":"after_yield"}]}"#).unwrap();
+    app.handle_server_event(event, &mut remote);
+    app.handle_remote_key(KeyCode::Up, KeyModifiers::ALT, &mut remote).await.unwrap();
+    assert_eq!(app.selected_queued_prompt, Some(1));
+    app.handle_remote_key(KeyCode::Char('m'), KeyModifiers::empty(), &mut remote).await.unwrap();
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(request["type"], "set_queued_prompt_mode");
+    assert_eq!(request["client_id"], "p2");
+    assert_eq!(request["mode"], "steer");
+    line.clear();
+    app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote).await.unwrap();
+    reader.read_line(&mut line).await.unwrap();
+    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(request["type"], "interrupt_queued_prompt");
+    assert_eq!(request["client_id"], "p2");
+    assert_eq!(app.input, "draft stays");
+    });
 }
 
 fn type_text(app: &mut App, text: &str) {

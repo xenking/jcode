@@ -10,20 +10,35 @@ pub(in crate::tui::app) async fn send_interleave_now(
     images: Vec<(String, String)>,
     remote: &mut RemoteConnection,
 ) {
-    if content.trim().is_empty() {
+    send_queued_prompt(app, content, images, crate::protocol::QueuedPromptMode::Steer, remote).await;
+}
+
+pub(in crate::tui::app) async fn send_queued_prompt(
+    app: &mut App,
+    content: String,
+    images: Vec<(String, String)>,
+    mode: crate::protocol::QueuedPromptMode,
+    remote: &mut RemoteConnection,
+) {
+    if content.trim().is_empty() && images.is_empty() {
         return;
     }
-    let msg_clone = content.clone();
-    match remote.soft_interrupt(content, images, false).await {
+    match remote.queue_prompt(content.clone(), images.clone(), mode).await {
         Err(e) => {
+            app.restore_failover_payload(app_mod::FallbackResendPayload {
+                content, images, is_system: false, system_reminder: None,
+                auto_retry: false, retry_attempts: 0, raw_input: None,
+            });
             app.push_display_message(DisplayMessage::error(format!(
-                "Failed to send interleave: {}",
+                "Failed to queue prompt: {}",
                 e
             )));
         }
-        Ok(request_id) => {
-            app.track_pending_soft_interrupt(request_id, msg_clone);
-            app.set_status_notice("⏭ Interleave sent");
+        Ok(_) => {
+            app.set_status_notice(match mode {
+                crate::protocol::QueuedPromptMode::Steer => "Queued: steer",
+                crate::protocol::QueuedPromptMode::AfterYield => "Queued: after yield",
+            });
             app.restore_stash_after_send();
         }
     }

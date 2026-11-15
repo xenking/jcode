@@ -782,6 +782,13 @@ pub trait TuiState {
     fn interleave_message(&self) -> Option<&str>;
     /// Messages sent as soft interrupt but not yet injected (shown in queue preview)
     fn pending_soft_interrupts(&self) -> &[String];
+    /// Snapshot of prompts owned by the remote daemon, not a second dispatch queue.
+    fn server_queued_prompts(&self) -> &[crate::protocol::QueuedPrompt] {
+        &[]
+    }
+    fn selected_queued_prompt(&self) -> Option<usize> {
+        None
+    }
 
     // ---- Scroll ----
     fn scroll_offset(&self) -> usize;

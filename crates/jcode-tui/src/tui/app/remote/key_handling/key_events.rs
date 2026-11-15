@@ -506,6 +506,50 @@ pub(super) async fn handle_remote_key_internal(
         }
     }
 
+    // Alt+Up/Down enters and moves queue focus without consuming the draft.
+    if modifiers == KeyModifiers::ALT && matches!(code, KeyCode::Up | KeyCode::Down)
+        && !app.server_queued_prompts.is_empty()
+    {
+        let last = app.server_queued_prompts.len() - 1;
+        app.selected_queued_prompt = Some(match (app.selected_queued_prompt, code) {
+            (None, KeyCode::Up) => last,
+            (None, _) => 0,
+            (Some(index), KeyCode::Up) => index.saturating_sub(1),
+            (Some(index), _) => (index + 1).min(last),
+        });
+        app.set_status_notice("Queue: Alt+↑/↓ select · m mode · Enter interrupt · Esc unfocus");
+        return Ok(());
+    }
+    if let Some(index) = app.selected_queued_prompt {
+        if modifiers.is_empty() {
+            match code {
+                KeyCode::Esc => {
+                    app.selected_queued_prompt = None;
+                    return Ok(());
+                }
+                KeyCode::Char('m') => {
+                    if let Some(prompt) = app.server_queued_prompts.get(index) {
+                        let mode = match prompt.mode {
+                            crate::protocol::QueuedPromptMode::Steer => crate::protocol::QueuedPromptMode::AfterYield,
+                            crate::protocol::QueuedPromptMode::AfterYield => crate::protocol::QueuedPromptMode::Steer,
+                        };
+                        remote.set_queued_prompt_mode(prompt.client_id.clone(), mode).await?;
+                    }
+                    return Ok(());
+                }
+                KeyCode::Enter => {
+                    if let Some(prompt) = app.server_queued_prompts.get(index) {
+                        remote.interrupt_queued_prompt(prompt.client_id.clone()).await?;
+                        app.selected_queued_prompt = None;
+                        app.set_status_notice("Interrupting for selected queued prompt");
+                    }
+                    return Ok(());
+                }
+                _ => app.selected_queued_prompt = None,
+            }
+        }
+    }
+
     if app.handle_command_suggestion_key(code, modifiers) {
         return Ok(());
     }
@@ -689,9 +733,19 @@ pub(super) async fn handle_remote_key_internal(
             }
             KeyCode::Up => {
                 let had_server_interrupts = !app.pending_soft_interrupts.is_empty();
+                let legacy_ids = app.pending_soft_interrupt_client_ids();
+                if had_server_interrupts && legacy_ids.is_none() && !app.server_queued_prompts.is_empty() {
+                    app.set_status_notice("Cannot recall legacy follow-ups while server queue is nonempty");
+                    return Ok(());
+                }
                 let had_pending = app.retrieve_pending_message_for_edit();
                 if had_pending && had_server_interrupts {
-                    if let Err(error) = remote.cancel_soft_interrupts().await {
+                    let cancellation = if let Some(ids) = legacy_ids {
+                        remote.cancel_soft_interrupts_by_id(ids).await.map(|_| ())
+                    } else {
+                        remote.cancel_soft_interrupts().await
+                    };
+                    if let Err(error) = cancellation {
                         app.push_display_message(DisplayMessage::error(format!(
                             "Recalled draft retained, but server interrupt cancellation failed: {error}"
                         )));
@@ -730,8 +784,7 @@ pub(super) async fn handle_remote_key_internal(
             match app.send_action(true) {
                 SendAction::Submit => submit_prepared_remote_input(app, remote, prepared).await?,
                 SendAction::Queue => {
-                    queue_prepared_remote_input(app, prepared);
-                    app.restore_stash_after_send();
+                    super::update::send_queued_prompt(app, prepared.expanded, prepared.images, crate::protocol::QueuedPromptMode::AfterYield, remote).await;
                 }
                 SendAction::Interleave => {
                     app.send_interleave_now(prepared.expanded, prepared.images, remote)

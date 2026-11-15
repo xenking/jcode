@@ -81,7 +81,7 @@ impl App {
 
     /// Server caller ids for every pending soft interrupt, or `None` when any
     /// of them cannot be named (restored from a reload snapshot, for example).
-    fn pending_soft_interrupt_client_ids(&self) -> Option<Vec<String>> {
+    pub(in crate::tui::app) fn pending_soft_interrupt_client_ids(&self) -> Option<Vec<String>> {
         let mut used = vec![false; self.sent_soft_interrupts.len()];
         let mut ids = Vec::with_capacity(self.pending_soft_interrupts.len());
         for pending in &self.pending_soft_interrupts {
@@ -380,6 +380,12 @@ pub(super) async fn recover_stranded_soft_interrupts(
         return false;
     }
 
+    // A legacy cancel-all would also delete daemon-owned send-mode prompts.
+    // Preserve legacy state rather than risk losing unrelated queue entries.
+    if !app.server_queued_prompts.is_empty() {
+        app.set_status_notice("Legacy follow-up recovery deferred while server queue is nonempty");
+        return false;
+    }
     let recovered_interrupts = std::mem::take(&mut app.pending_soft_interrupts);
     if recovered_interrupts.is_empty() {
         return false;

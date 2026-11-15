@@ -1389,6 +1389,37 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    pub async fn queue_prompt(
+        &mut self,
+        content: String,
+        images: Vec<(String, String)>,
+        mode: crate::protocol::QueuedPromptMode,
+    ) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        let client_id = crate::id::new_id("prompt");
+        self.send_request(Request::QueuePrompt { id, client_id, content, images, mode }).await?;
+        Ok(id)
+    }
+
+    pub async fn set_queued_prompt_mode(&mut self, client_id: String, mode: crate::protocol::QueuedPromptMode) -> Result<()> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::SetQueuedPromptMode { id, client_id, mode }).await
+    }
+
+    pub async fn interrupt_queued_prompt(&mut self, client_id: String) -> Result<()> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::InterruptQueuedPrompt { id, client_id }).await
+    }
+
+    pub async fn get_queued_prompts(&mut self) -> Result<()> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::GetQueuedPrompts { id }).await
+    }
+
     /// Cancel only the named soft interrupts. The server answers with
     /// `SoftInterruptsCancelled`, splitting the ids into still-queued (now
     /// removed) and not-queued (already injected or started as a turn).

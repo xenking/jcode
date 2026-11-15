@@ -1024,6 +1024,19 @@ fn handle_server_event_inner(
             });
             true
         }
+        ServerEvent::QueuedPrompts { prompts, .. } => {
+            let selected_id = app.selected_queued_prompt
+                .and_then(|index| app.server_queued_prompts.get(index))
+                .map(|prompt| prompt.client_id.clone());
+            let mut seen = std::collections::HashSet::new();
+            app.server_queued_prompts = prompts.into_iter()
+                .filter(|prompt| seen.insert(prompt.client_id.clone()))
+                .collect();
+            app.selected_queued_prompt = selected_id.and_then(|id| {
+                app.server_queued_prompts.iter().position(|prompt| prompt.client_id == id)
+            });
+            true
+        }
         ServerEvent::Ack { id } => {
             let _ = app.acknowledge_pending_soft_interrupt(id);
             false

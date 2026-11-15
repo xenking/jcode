@@ -378,7 +378,8 @@ pub(super) fn pending_prompt_count(app: &dyn TuiState) -> usize {
             .interleave_message()
             .map(|msg| !msg.is_empty())
             .unwrap_or(false);
-    app.queued_messages().len()
+    app.server_queued_prompts().len()
+        + app.queued_messages().len()
         + app.queued_commands().len()
         + pending_count
         + if interleave { 1 } else { 0 }
@@ -386,6 +387,14 @@ pub(super) fn pending_prompt_count(app: &dyn TuiState) -> usize {
 
 pub(super) fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
     let mut previews = Vec::new();
+    for prompt in app.server_queued_prompts() {
+        let tag = match prompt.mode {
+            crate::protocol::QueuedPromptMode::Steer => "steer",
+            crate::protocol::QueuedPromptMode::AfterYield => "after",
+        };
+        let normalized = normalize_repaint_sensitive_notice_text(&prompt.content);
+        previews.push(format!("[{tag}] {}", normalized.chars().take(100).collect::<String>()));
+    }
     if app.is_processing() {
         for msg in app.pending_soft_interrupts() {
             if !msg.is_empty() {
@@ -425,6 +434,9 @@ pub(super) fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
 
 pub(super) fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, start_num: usize) {
     let mut items: Vec<(QueuedMsgType, &str)> = Vec::new();
+    for (index, prompt) in app.server_queued_prompts().iter().enumerate() {
+        items.push((QueuedMsgType::Server(prompt.mode, app.selected_queued_prompt() == Some(index)), &prompt.content));
+    }
     if app.is_processing() {
         for msg in app.pending_soft_interrupts() {
             if !msg.is_empty() {
@@ -445,15 +457,21 @@ pub(super) fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, sta
     }
 
     let pending_count = items.len();
+    let first = app.selected_queued_prompt().map(|index| index.saturating_sub(2)).unwrap_or(0);
     let lines: Vec<Line> = items
         .iter()
-        .take(3)
         .enumerate()
+        .skip(first)
+        .take(3)
         .map(|(i, (msg_type, msg))| {
             let normalized_msg = normalize_repaint_sensitive_notice_text(msg);
             let distance = pending_count.saturating_sub(i);
             let num_color = rainbow_prompt_color(distance);
             let (indicator, indicator_color, msg_color, dim) = match msg_type {
+                QueuedMsgType::Server(crate::protocol::QueuedPromptMode::Steer, true) => ("> steer", pending_color(), pending_color(), false),
+                QueuedMsgType::Server(crate::protocol::QueuedPromptMode::Steer, false) => ("  steer", pending_color(), pending_color(), true),
+                QueuedMsgType::Server(crate::protocol::QueuedPromptMode::AfterYield, true) => ("> after", queued_color(), queued_color(), false),
+                QueuedMsgType::Server(crate::protocol::QueuedPromptMode::AfterYield, false) => ("  after", queued_color(), queued_color(), true),
                 QueuedMsgType::Pending => ("queued ⏎", pending_color(), pending_color(), true),
                 QueuedMsgType::Interleave => ("⚡", asap_color(), asap_color(), false),
                 QueuedMsgType::Queued => ("⏳", queued_color(), queued_color(), true),
@@ -3114,6 +3132,7 @@ fn draw_send_mode_indicator(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
 
 #[derive(Clone, Copy)]
 enum QueuedMsgType {
+    Server(crate::protocol::QueuedPromptMode, bool),
     Pending,
     Interleave,
     Queued,

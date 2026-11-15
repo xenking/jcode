@@ -884,6 +884,14 @@ impl crate::tui::TuiState for App {
         &self.pending_soft_interrupts
     }
 
+    fn server_queued_prompts(&self) -> &[crate::protocol::QueuedPrompt] {
+        &self.server_queued_prompts
+    }
+
+    fn selected_queued_prompt(&self) -> Option<usize> {
+        self.selected_queued_prompt
+    }
+
     fn scroll_offset(&self) -> usize {
         self.scroll_offset
     }
