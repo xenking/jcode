@@ -947,20 +947,37 @@ impl Agent {
         Ok((pre_tokens, post_tokens))
     }
 
+    /// Prompt-cache TTL for cache-expiry triggers: `[compaction] cache_ttl_secs`
+    /// when set, else the conservative provider estimate (None = never expires).
+    fn cache_expiry_ttl_secs(&self, manager: &crate::compaction::CompactionManager) -> Option<u64> {
+        let configured = manager.effective_config().cache_ttl_secs;
+        if configured > 0 {
+            return Some(configured);
+        }
+        let model = self.provider.model();
+        crate::provider::shake_cache_ttl_for_provider_model(self.provider.name(), Some(&model))
+    }
+
     /// Shake hook: before LLM compaction or on the first request after the
     /// provider prompt cache expired. Never while the cache is warm.
     fn maybe_shake_before_request(&mut self, manager: &mut crate::compaction::CompactionManager) {
         let now = std::time::Instant::now();
-        let model = self.provider.model();
-        let ttl =
-            crate::provider::shake_cache_ttl_for_provider_model(self.provider.name(), Some(&model));
+        let ttl = self.cache_expiry_ttl_secs(manager);
         let plan = manager.plan_shake(self.session.provider_messages(), now, ttl);
         let Some((reason, cfg)) = plan else {
             return;
         };
         let start = manager.active_start(self.session.provider_messages());
+        let tokens_before = manager.effective_token_count_with(self.session.provider_messages());
         let outcome = self.session.shake_stored_messages(start, &cfg);
         manager.record_shake(reason, outcome);
+        logging::info(&format!(
+            "[compaction] strategy={} tokens_before={} tokens_after={} changed={}",
+            reason.label(),
+            tokens_before,
+            manager.effective_token_count_with(self.session.provider_messages()),
+            outcome != crate::compaction::ShakeOutcome::NoChange,
+        ));
         if outcome != crate::compaction::ShakeOutcome::NoChange {
             self.persist_session_best_effort("shake compaction");
         }
@@ -973,9 +990,7 @@ impl Agent {
         manager: &mut crate::compaction::CompactionManager,
     ) {
         let now = std::time::Instant::now();
-        let model = self.provider.model();
-        let ttl =
-            crate::provider::shake_cache_ttl_for_provider_model(self.provider.name(), Some(&model));
+        let ttl = self.cache_expiry_ttl_secs(manager);
         let messages = self.session.provider_messages();
         if !manager.plan_cache_expiry_compaction(messages, now, ttl) {
             return;

@@ -372,6 +372,10 @@ pub struct CompactionConfig {
     /// Minimum context tokens for cache-expiry snapcompact (omp
     /// `idleThresholdTokens`). 0 disables the trigger.
     pub cache_expiry_threshold_tokens: usize,
+    /// Override the estimated provider prompt-cache TTL (seconds) used by the
+    /// cache-expiry shake/snapcompact triggers. 0 = provider estimate. Useful
+    /// for testing; a value below the real TTL compacts a still-warm cache.
+    pub cache_ttl_secs: u64,
 
     /// Per-provider overrides (`[compaction.providers.openai]`). Merged over
     /// the global section; model overrides win over provider overrides.
@@ -412,6 +416,7 @@ pub struct CompactionOverride {
     pub shake_cache_expiry: Option<bool>,
     pub snapcompact_cache_expiry: Option<bool>,
     pub cache_expiry_threshold_tokens: Option<usize>,
+    pub cache_ttl_secs: Option<u64>,
 }
 
 impl CompactionOverride {
@@ -442,7 +447,8 @@ impl CompactionOverride {
             shake_code_blocks,
             shake_cache_expiry,
             snapcompact_cache_expiry,
-            cache_expiry_threshold_tokens
+            cache_expiry_threshold_tokens,
+            cache_ttl_secs
         );
     }
 }
@@ -531,6 +537,7 @@ impl Default for CompactionConfig {
             shake_cache_expiry: true,
             snapcompact_cache_expiry: false,
             cache_expiry_threshold_tokens: 200_000,
+            cache_ttl_secs: 0,
             providers: Default::default(),
             models: Default::default(),
         }
