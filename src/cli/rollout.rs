@@ -12,9 +12,9 @@
 //! 3. package-desktop package Desktop against the SAME jcode worktree
 //! 4. stage           versions/<sha>, promote shared-server, current + current-version
 //! 5. drain           wait until nothing is mid-turn (`--now` skips, relying on
-//!                    reload recovery to resume interrupted turns)
+//!    reload recovery to resume interrupted turns)
 //! 6. reload          graceful daemon reload; prove the socket runs the new
-//!                    binary and every previously live worker came back
+//!    binary and every previously live worker came back
 //! 7. desktop-swap    graceful quit, kill only the old bundle's bridges, swap, relaunch
 //! 8. verify          versions, bridge answers search_sessions, Sparkle key
 //!
@@ -191,9 +191,9 @@ pub trait Host {
     fn deployed(&self) -> Deployed;
     /// Sessions with a model turn in flight right now, excluding the session
     /// that runs this command (its own turn would never drain).
-    fn busy_sessions(&self) -> Vec<String>;
+    fn busy_sessions(&self) -> Result<Vec<String>>;
     /// Headless swarm workers and their lifecycle status.
-    fn workers(&self) -> Vec<(String, String)>;
+    fn workers(&self) -> Result<Vec<(String, String)>>;
     /// An already built CLI binary for `pair`, verified to report its commit.
     fn built_cli(&self, pair: &Pair) -> Option<PathBuf>;
     fn build_cli(&mut self, pair: &Pair) -> Result<PathBuf>;
@@ -255,22 +255,22 @@ fn opt(value: &Option<String>) -> &str {
     value.as_deref().unwrap_or("?")
 }
 
-fn running_workers<H: Host + ?Sized>(host: &H) -> Vec<String> {
+fn running_workers<H: Host + ?Sized>(host: &H) -> Result<Vec<String>> {
     let mut ids: Vec<String> = host
-        .workers()
+        .workers()?
         .into_iter()
         .filter(|(_, status)| status == "running")
         .map(|(id, _)| id)
         .collect();
     ids.sort();
-    ids
+    Ok(ids)
 }
 
 /// Of `before`, the workers the reload left stopped, crashed, failed or gone.
 /// A worker that resumed and already finished (`ready`) is not lost.
-fn lost_workers<H: Host + ?Sized>(host: &H, before: &[String]) -> Vec<String> {
-    let now = host.workers();
-    before
+fn lost_workers<H: Host + ?Sized>(host: &H, before: &[String]) -> Result<Vec<String>> {
+    let now = host.workers()?;
+    Ok(before
         .iter()
         .filter(|id| {
             now.iter()
@@ -280,7 +280,7 @@ fn lost_workers<H: Host + ?Sized>(host: &H, before: &[String]) -> Vec<String> {
                 })
         })
         .cloned()
-        .collect()
+        .collect())
 }
 
 struct Run<'a, H: Host, W: Write> {
@@ -342,7 +342,7 @@ pub fn run<H: Host, W: Write>(host: &mut H, opts: &RolloutOptions, out: &mut W) 
         .as_deref()
         .and_then(|from| run.host.commits_between(Repo::Desktop, from, &pair.desktop));
     let delta = |count: Option<usize>| count.map_or("?".to_string(), |count| format!("+{count}"));
-    let busy = run.host.busy_sessions();
+    let busy = run.host.busy_sessions()?;
     run.say(
         "plan",
         if low_disk.is_some() { "FAIL" } else { "ok" },
@@ -574,7 +574,7 @@ fn dry_run_plan<H: Host, W: Write>(
             "jcode server reload; daemon pid {} runs {} now, must run {label}; workers live now: {}",
             deployed.daemon_pid.map_or("?".into(), |pid| pid.to_string()),
             opt(&deployed.daemon_label),
-            names(&running_workers(&*run.host))
+            names(&running_workers(&*run.host)?)
         ),
     )?;
     if run.opts.desktop {
@@ -604,7 +604,7 @@ fn drain<H: Host, W: Write>(run: &mut Run<'_, H, W>) -> Result<()> {
     let mut waited = Duration::ZERO;
     let mut last: Vec<String> = Vec::new();
     loop {
-        let busy = run.host.busy_sessions();
+        let busy = run.host.busy_sessions()?;
         if busy.is_empty() {
             let detail = if waited.is_zero() {
                 "nothing mid-turn".to_string()
@@ -670,7 +670,7 @@ fn reload<H: Host, W: Write>(run: &mut Run<'_, H, W>, label: &str) -> Result<()>
             ),
         );
     }
-    let workers = running_workers(&*run.host);
+    let workers = running_workers(&*run.host)?;
     run.host.reload(label)?;
     let mut now = run.host.deployed();
     for _ in 0..RELOAD_SETTLE_ATTEMPTS {
@@ -698,7 +698,7 @@ fn reload<H: Host, W: Write>(run: &mut Run<'_, H, W>, label: &str) -> Result<()>
     // moment, then resume any it left stopped, crashed or missing.
     let mut missing = Vec::new();
     for _ in 0..RELOAD_SETTLE_ATTEMPTS {
-        missing = lost_workers(&*run.host, &workers);
+        missing = lost_workers(&*run.host, &workers)?;
         if missing.is_empty() {
             break;
         }
@@ -795,11 +795,30 @@ fn roll_back<H: Host>(host: &mut H, state: &RolloutState, desktop: bool) -> Resu
     match (state.prev_current.as_deref(), state.prev_shared.as_deref()) {
         (Some(current), Some(shared)) => {
             host.rollback_cli(current, shared)?;
+            let mut now = host.deployed();
+            for _ in 0..RELOAD_SETTLE_ATTEMPTS {
+                if now.daemon_label.as_deref() == Some(shared) {
+                    break;
+                }
+                host.sleep(RELOAD_SETTLE);
+                now = host.deployed();
+            }
+            if now.daemon_label.as_deref() != Some(shared)
+                || now.cli_current.as_deref() != Some(current)
+                || now.cli_shared.as_deref() != Some(shared)
+            {
+                bail!(
+                    "rollback could not prove previous daemon {shared}: daemon {}, current {}, shared {}; Desktop not restored",
+                    opt(&now.daemon_label),
+                    opt(&now.cli_current),
+                    opt(&now.cli_shared)
+                );
+            }
             done.push(format!(
                 "jcode current {current}, shared-server {shared}, reloaded"
             ));
         }
-        _ => done.push("no previous jcode version recorded, CLI left as is".into()),
+        _ => bail!("no previous jcode version recorded; cannot safely restore Desktop"),
     }
     if desktop && state.desktop_backed_up {
         host.rollback_desktop()?;

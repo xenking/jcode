@@ -13,7 +13,7 @@ const DEVELOPER_DIR: &str = "/Applications/Xcode.app/Contents/Developer";
 
 /// `jcode rollout` entry point: map the flags, run on this machine, and
 /// fail the command when verify rolled the pair back.
-pub fn run_cli(args: super::args::RolloutArgs) -> Result<()> {
+pub(crate) fn run_cli(args: super::args::RolloutArgs) -> Result<()> {
     let options = super::rollout::RolloutOptions {
         dry_run: args.dry_run,
         now: args.now,
@@ -37,6 +37,8 @@ pub struct MacHost {
     jcode_home: PathBuf,
     /// The session running this command, if any: never waited for.
     own_session: Option<String>,
+    daemon_socket: PathBuf,
+    bridge_socket: PathBuf,
 }
 
 impl MacHost {
@@ -51,6 +53,14 @@ impl MacHost {
             .map(PathBuf::from)
             .unwrap_or_else(|| jcode_home.join("shared-build/target"));
         let desktop_worktree = worktrees.join("jcode-desktop");
+        let runtime_dir = rollout_runtime_dir()?;
+        let bridge_socket = std::env::var_os("JCODE_API_SOCKET")
+            .map(PathBuf::from)
+            .or_else(|| bundle_bridge_socket(Path::new(APP)))
+            .unwrap_or_else(|| runtime_dir.join("jcode-api.sock"));
+        let daemon_socket = std::env::var_os("JCODE_SOCKET")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| bridge_socket.with_file_name("jcode.sock"));
         Ok(Self {
             layout: Layout {
                 jcode_repo: projects.join("jcode"),
@@ -68,6 +78,8 @@ impl MacHost {
             },
             jcode_home,
             own_session: std::env::var("JCODE_SESSION_ID").ok(),
+            daemon_socket,
+            bridge_socket,
         })
     }
 
@@ -129,11 +141,17 @@ impl MacHost {
     }
 
     fn jcode(&self) -> Command {
-        Command::new(std::env::current_exe().unwrap_or_else(|_| PathBuf::from("jcode")))
+        let mut command =
+            Command::new(std::env::current_exe().unwrap_or_else(|_| PathBuf::from("jcode")));
+        command.env("JCODE_SOCKET", &self.daemon_socket);
+        if let Some(dir) = self.daemon_socket.parent() {
+            command.env("JCODE_RUNTIME_DIR", dir);
+        }
+        command
     }
 
     fn daemon(&self) -> Option<(u32, PathBuf)> {
-        let socket = crate::server::socket_path();
+        let socket = &self.daemon_socket;
         let listing = output(Command::new("lsof").args(["-U", "-F", "pn"])).ok()?;
         let socket = socket.to_string_lossy().to_string();
         let mut pid = None;
@@ -294,58 +312,33 @@ impl Host for MacHost {
         }
     }
 
-    fn busy_sessions(&self) -> Vec<String> {
+    fn busy_sessions(&self) -> Result<Vec<String>> {
         // Streaming markers only cover the model call; a worker running a
         // tool between calls is still mid-turn, and its swarm status says so.
+        let workers = self.workers()?;
         let mut busy: Vec<String> = crate::storage::streaming_session_ids()
             .into_iter()
+            .filter(|id| {
+                workers
+                    .iter()
+                    .find(|(worker, _)| worker == id)
+                    .is_none_or(|(_, status)| status == "running")
+            })
             .chain(
-                self.workers()
-                    .into_iter()
+                workers
+                    .iter()
                     .filter(|(_, status)| status == "running")
-                    .map(|(id, _)| id),
+                    .map(|(id, _)| id.clone()),
             )
             .filter(|id| Some(id) != self.own_session.as_ref())
             .collect();
         busy.sort();
         busy.dedup();
-        busy
+        Ok(busy)
     }
 
-    fn workers(&self) -> Vec<(String, String)> {
-        let dir = crate::storage::durable_state_dir().join("swarm");
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return Vec::new();
-        };
-        let mut workers = Vec::new();
-        for path in entries.flatten().map(|entry| entry.path()) {
-            if path.extension().is_none_or(|ext| ext != "json") {
-                continue;
-            }
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
-                continue;
-            };
-            for member in json["members"].as_array().into_iter().flatten() {
-                if member["is_headless"].as_bool() != Some(true) {
-                    continue;
-                }
-                let (Some(id), Some(status)) =
-                    (member["session_id"].as_str(), member["status"].as_str())
-                else {
-                    continue;
-                };
-                if Some(id) == self.own_session.as_deref() {
-                    continue;
-                }
-                workers.push((id.to_string(), status.to_string()));
-            }
-        }
-        workers.sort();
-        workers.dedup_by(|a, b| a.0 == b.0);
-        workers
+    fn workers(&self) -> Result<Vec<(String, String)>> {
+        live_workers(&self.daemon_socket, self.own_session.as_deref())
     }
 
     fn built_cli(&self, pair: &Pair) -> Option<PathBuf> {
@@ -435,7 +428,7 @@ impl Host for MacHost {
     }
 
     fn resume_worker(&mut self, session_id: &str) -> Result<()> {
-        let client = jcode_harness_api_server_client()?;
+        let client = jcode_harness_api_server_client(&self.bridge_socket)?;
         client
             .attach_session(session_id)
             .with_context(|| format!("attach {session_id}"))?;
@@ -482,7 +475,7 @@ impl Host for MacHost {
     }
 
     fn bridge_search(&self) -> Result<()> {
-        jcode_harness_api_server_client()?
+        jcode_harness_api_server_client(&self.bridge_socket)?
             .search_sessions("rollout", Some(1))
             .map(|_| ())
             .map_err(Into::into)
@@ -491,7 +484,7 @@ impl Host for MacHost {
     fn rollback_cli(&mut self, current: &str, shared: &str) -> Result<()> {
         crate::build::update_current_symlink(current)?;
         crate::build::promote_version_to_shared_server(shared)?;
-        run(self.jcode().args(["server", "reload", "--json"]))
+        run(self.jcode().args(["server", "reload", "--force", "--json"]))
     }
 
     fn rollback_desktop(&mut self) -> Result<()> {
@@ -532,8 +525,154 @@ impl Host for MacHost {
     }
 }
 
-fn jcode_harness_api_server_client() -> Result<jcode_sdk::JcodeClient> {
+fn live_workers(socket: &Path, own: Option<&str>) -> Result<Vec<(String, String)>> {
+    // The lightweight protocol works even when debug control is disabled.
+    let roots = daemon_members(socket, "comm_list_sessions", "")?;
+    let mut workers = Vec::new();
+    for root in &roots {
+        record_worker(root, own, &mut workers)?;
+        let id = root["session_id"]
+            .as_str()
+            .context("daemon returned root without session_id")?;
+        match daemon_members(socket, "comm_list", id) {
+            Ok(members) => {
+                for member in &members {
+                    record_worker(member, own, &mut workers)?;
+                }
+            }
+            Err(error) if error.to_string().contains("Not in a swarm") => {}
+            Err(error) => return Err(error),
+        }
+    }
+    workers.sort();
+    workers.dedup_by(|a, b| a.0 == b.0);
+    Ok(workers)
+}
+
+fn record_worker(
+    member: &serde_json::Value,
+    own: Option<&str>,
+    workers: &mut Vec<(String, String)>,
+) -> Result<()> {
+    if member["is_headless"].as_bool() != Some(true) {
+        return Ok(());
+    }
+    let id = member["session_id"]
+        .as_str()
+        .context("daemon returned worker without session_id")?;
+    let status = member["status"]
+        .as_str()
+        .context("daemon returned worker without status")?;
+    if Some(id) != own {
+        workers.push((id.to_string(), status.to_string()));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn daemon_members(socket: &Path, command: &str, session: &str) -> Result<Vec<serde_json::Value>> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket)
+        .with_context(|| format!("cannot query live sessions at {}", socket.display()))?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    let request = serde_json::json!({"type": command, "id": 1, "session_id": session});
+    writeln!(stream, "{request}")?;
+    let mut reader = BufReader::new(stream);
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            bail!("daemon disconnected before answering {command}");
+        }
+        let event: serde_json::Value = serde_json::from_str(&line)?;
+        match event["type"].as_str() {
+            Some("ack") => {}
+            Some("comm_members") => {
+                return event["members"]
+                    .as_array()
+                    .cloned()
+                    .context("daemon returned invalid members");
+            }
+            Some("error") => bail!(
+                "daemon {command}: {}",
+                event["message"].as_str().unwrap_or("unknown error")
+            ),
+            _ => bail!("unexpected daemon response to {command}"),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn daemon_members(
+    _socket: &Path,
+    _command: &str,
+    _session: &str,
+) -> Result<Vec<serde_json::Value>> {
+    bail!("rollout requires Unix sockets")
+}
+
+fn bundle_bridge_socket(app: &Path) -> Option<PathBuf> {
+    let listing = output(Command::new("ps").args(["-Ao", "pid=,command="])).ok()?;
+    for line in listing.lines().filter(|line| line.contains("api-bridge")) {
+        let pid = line.split_whitespace().next()?.parse::<u32>().ok()?;
+        if !executable_of(pid).is_some_and(|exe| exe.starts_with(app)) {
+            continue;
+        }
+        let sockets =
+            output(Command::new("lsof").args(["-a", "-p", &pid.to_string(), "-U", "-Fn"])).ok()?;
+        if let Some(path) = sockets
+            .lines()
+            .filter_map(|line| line.strip_prefix('n'))
+            .map(PathBuf::from)
+            .find(|path| {
+                path.is_absolute()
+                    && path
+                        .file_name()
+                        .is_some_and(|name| name == "jcode-api.sock")
+            })
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn rollout_runtime_dir() -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("JCODE_RUNTIME_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let len = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, std::ptr::null_mut(), 0) };
+        if len == 0 {
+            bail!("cannot determine macOS user runtime directory");
+        }
+        let mut buf = vec![0u8; len];
+        let written = unsafe {
+            libc::confstr(
+                libc::_CS_DARWIN_USER_TEMP_DIR,
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+            )
+        };
+        if written == 0 || written > buf.len() {
+            bail!("cannot read macOS user runtime directory");
+        }
+        use std::os::unix::ffi::OsStringExt;
+        buf.truncate(written - 1);
+        Ok(PathBuf::from(std::ffi::OsString::from_vec(buf)))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(crate::storage::runtime_dir())
+    }
+}
+
+fn jcode_harness_api_server_client(socket: &Path) -> Result<jcode_sdk::JcodeClient> {
     jcode_sdk::JcodeClient::connect(jcode_sdk::ConnectOptions {
+        socket_path: Some(socket.to_path_buf()),
         ensure_runtime: false,
         request_timeout: Some(Duration::from_secs(20)),
         client_name: "jcode-rollout".into(),
@@ -593,4 +732,90 @@ fn executable_of(pid: u32) -> Option<PathBuf> {
 #[cfg(not(target_os = "macos"))]
 fn executable_of(pid: u32) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn runtime_dir_ignores_agent_tmpdir() {
+        const CHILD: &str = "JCODE_ROLLOUT_RUNTIME_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let expected = output(Command::new("getconf").arg("DARWIN_USER_TEMP_DIR")).unwrap();
+            let actual = rollout_runtime_dir().unwrap();
+            assert_eq!(actual, PathBuf::from(expected.trim()));
+            assert_ne!(actual, std::env::temp_dir());
+            return;
+        }
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cli::rollout_host::tests::runtime_dir_ignores_agent_tmpdir",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("TMPDIR", "/tmp/jcode-rollout-foreign-tmp")
+            .env_remove("JCODE_RUNTIME_DIR")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn live_workers_come_from_daemon_not_stale_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            for (expected, members) in [
+                (
+                    "comm_list_sessions",
+                    serde_json::json!([
+                        {"session_id":"root", "is_headless":false, "status":"running"}
+                    ]),
+                ),
+                (
+                    "comm_list",
+                    serde_json::json!([
+                        {"session_id":"stale", "is_headless":true, "status":"stopped"},
+                        {"session_id":"live", "is_headless":true, "status":"running"},
+                        {"session_id":"self", "is_headless":true, "status":"running"}
+                    ]),
+                ),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["type"], expected);
+                writeln!(stream, "{{\"type\":\"ack\",\"id\":1}}").unwrap();
+                writeln!(
+                    stream,
+                    "{}",
+                    serde_json::json!({"type":"comm_members","id":1,"members":members})
+                )
+                .unwrap();
+            }
+        });
+        let workers = live_workers(&socket, Some("self")).unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            workers,
+            [
+                ("live".into(), "running".into()),
+                ("stale".into(), "stopped".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn live_workers_fail_closed_when_daemon_is_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(live_workers(&dir.path().join("missing.sock"), None).is_err());
+    }
 }
