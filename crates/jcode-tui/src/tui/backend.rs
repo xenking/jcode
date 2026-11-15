@@ -1413,6 +1413,7 @@ impl RemoteConnection {
             content: prompt.content,
             images: prompt.images,
             mode: prompt.mode,
+            system_reminder: None,
         })
         .await?;
         Ok(id)
