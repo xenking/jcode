@@ -919,6 +919,30 @@ async fn run_turn_streaming_mpsc_emits_keepalive_while_provider_is_quiet() {
     task.await.unwrap().unwrap();
 }
 
+#[test]
+fn compaction_usage_event_is_a_plain_post_compaction_report() {
+    assert_eq!(
+        crate::agent::compaction_context_usage_event(None, Some(1)),
+        None
+    );
+    match crate::agent::compaction_context_usage_event(Some(58_400), Some(1_000_000)) {
+        Some(ServerEvent::TokenUsage {
+            input,
+            output,
+            cache_read_input,
+            cache_creation_input,
+            effective_budget,
+        }) => {
+            assert_eq!(input, 58_400);
+            assert_eq!(output, 0);
+            assert_eq!(cache_read_input, Some(0));
+            assert_eq!(cache_creation_input, Some(0));
+            assert_eq!(effective_budget, Some(1_000_000));
+        }
+        other => panic!("expected a usage report, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn run_turn_streaming_mpsc_emits_native_compaction_for_client_cache_reset() {
     let _guard = crate::storage::lock_test_env();
@@ -937,7 +961,18 @@ async fn run_turn_streaming_mpsc_emits_native_compaction_for_client_cache_reset(
     agent.run_turn_streaming_mpsc(tx).await.unwrap();
 
     let mut saw_native_compaction = false;
+    let mut compaction_post_tokens: Option<u64> = None;
+    let mut usage_after_compaction: Vec<(u64, Option<u64>)> = Vec::new();
     while let Ok(event) = rx.try_recv() {
+        if let ServerEvent::TokenUsage {
+            input,
+            cache_read_input,
+            ..
+        } = &event
+            && compaction_post_tokens.is_some()
+        {
+            usage_after_compaction.push((*input, *cache_read_input));
+        }
         if let ServerEvent::Compaction {
             trigger,
             pre_tokens,
@@ -963,12 +998,24 @@ async fn run_turn_streaming_mpsc_emits_native_compaction_for_client_cache_reset(
                 messages_compacted.is_some_and(|count| count > 0),
                 "native compaction should report a non-empty compacted prefix"
             );
+            compaction_post_tokens = Some(post);
             saw_native_compaction = true;
         }
     }
     assert!(
         saw_native_compaction,
         "native provider compaction must reach clients so they clear KV baselines"
+    );
+    // Clients derive the context percentage from the last usage report, so the
+    // post-compaction size must arrive as its own report immediately after the
+    // compaction event, or the composer pill keeps the pre-compaction figure
+    // until the next provider call rewrites it (the 2026-11-15 07:20Z incident:
+    // the pill sat at 45% for eight minutes after a compaction to ~58K).
+    let post = compaction_post_tokens.expect("compaction post count");
+    assert_eq!(
+        usage_after_compaction.first(),
+        Some(&(post, Some(0))),
+        "the first usage report after compaction must be the new context size"
     );
 }
 

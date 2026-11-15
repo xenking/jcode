@@ -99,6 +99,15 @@ impl Agent {
                     summary_chars: event.summary_chars,
                     active_messages: event.active_messages,
                 });
+                // The last usage report described the transcript that was just
+                // summarized. Publish the new size or every client keeps showing
+                // the pre-compaction context percentage.
+                if let Some(usage) = crate::agent::compaction_context_usage_event(
+                    event.post_tokens,
+                    Some(self.effective_context_budget().await),
+                ) {
+                    let _ = event_tx.send(usage);
+                }
                 // Compaction clears the tool lock, so rebuild the foreground
                 // request metadata rather than relying on the pre-compaction snapshot.
                 tools = self.tool_definitions().await;
@@ -1327,6 +1336,15 @@ impl Agent {
                     summary_chars: None,
                     active_messages: None,
                 });
+                // The last usage report described the transcript that was just
+                // replaced; publish the new size so clients stop showing the
+                // pre-compaction context percentage.
+                if let Some(usage) = crate::agent::compaction_context_usage_event(
+                    post_tokens,
+                    Some(self.effective_context_budget().await),
+                ) {
+                    let _ = event_tx.send(usage);
+                }
             }
 
             // If stop_reason indicates truncation (e.g. max_tokens), discard tool calls

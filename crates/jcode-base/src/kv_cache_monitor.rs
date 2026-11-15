@@ -17,6 +17,12 @@ use std::time::{Duration, Instant};
 /// Misses smaller than this are noise (provider cache block granularity).
 pub const MIN_MISSED_TOKENS: u64 = 1_024;
 
+/// How much smaller a request may be than the baseline before the difference
+/// stops being rounding noise. A request that carries fewer tokens than the
+/// previous one cannot read the missing tokens back, so the shortfall is not
+/// evidence of cache loss.
+pub const SHRINK_NOISE_TOKENS: u64 = 1_024;
+
 /// OpenAI reports cache reads in 128-token blocks and routinely leaves the
 /// last ~1024 tokens of the previous request uncached, so a byte-identical
 /// append still shows a 1024-1300 token shortfall. Across ~34k verified
@@ -459,20 +465,41 @@ impl KvCacheMonitor {
         }
     }
 
-    /// Record completed usage. `reusable_cache_tokens` is the reusable cache
-    /// boundary (read plus write, excluding uncached input for split accounting).
-    /// `read_tokens` is `None` when the provider did not report cache reads,
-    /// which is never treated as a miss.
+    /// Record completed usage.
+    ///
+    /// `reusable_cache_tokens` is the reusable cache boundary (read plus write,
+    /// excluding uncached input for split accounting). `read_tokens` is `None`
+    /// when the provider did not report cache reads, which is never treated as
+    /// a miss.
+    ///
+    /// The prefix size this request actually carried is unknown here, so this
+    /// form cannot tell a cache loss apart from a request that simply sent less
+    /// content. Production callers use [`Self::finish_request_with_prefix`].
     pub fn finish_request(
         &mut self,
         reusable_cache_tokens: u64,
+        read_tokens: Option<u64>,
+    ) -> Option<KvCacheMiss> {
+        self.finish_request_with_prefix(reusable_cache_tokens, None, read_tokens)
+    }
+
+    /// [`Self::finish_request`] with the whole prefix the request carried
+    /// (uncached input plus read plus write).
+    ///
+    /// The miss check needs it because a request can never read back more cache
+    /// than the content it sent: when the current request is materially smaller
+    /// than the baseline, the unread tokens were never part of it.
+    pub fn finish_request_with_prefix(
+        &mut self,
+        reusable_cache_tokens: u64,
+        prefix_tokens: Option<u64>,
         read_tokens: Option<u64>,
     ) -> Option<KvCacheMiss> {
         let pending = self.pending.take()?;
         let miss = self
             .baseline
             .as_ref()
-            .and_then(|baseline| classify(baseline, &pending, read_tokens));
+            .and_then(|baseline| classify(baseline, &pending, prefix_tokens, read_tokens));
         if reusable_cache_tokens > 0 {
             self.baseline = Some(Baseline {
                 route: pending.route,
@@ -489,6 +516,7 @@ impl KvCacheMonitor {
 fn classify(
     baseline: &Baseline,
     pending: &Pending,
+    prefix_tokens: Option<u64>,
     read_tokens: Option<u64>,
 ) -> Option<KvCacheMiss> {
     let read_tokens = read_tokens?;
@@ -501,6 +529,22 @@ fn classify(
         return None;
     }
     let reason = reason(baseline, pending, read_tokens)?;
+    // A request cannot read back more cache than the content it carried. Known
+    // causes above stay actionable (a routing or system-prompt change is real
+    // even when the request also shrank). Only for an otherwise unexplained low
+    // read does the request's own size decide: when this request is materially
+    // smaller than the baseline, the unread tokens were never part of it, so
+    // nothing was lost.
+    if matches!(reason, MissReason::LowRead | MissReason::ZeroRead)
+        && let Some(prefix_tokens) = prefix_tokens
+        && prefix_tokens.saturating_add(SHRINK_NOISE_TOKENS) < expected
+    {
+        crate::logging::info(&format!(
+            "KV_CACHE_SHRINK expected={} prefix={} read={}; this request is smaller than the previous one (content dropped or the previous report overstated the prefix), not a miss",
+            expected, prefix_tokens, read_tokens,
+        ));
+        return None;
+    }
     let documented_cause = if reason == MissReason::Compaction {
         Some("provider_auto_compaction".to_string())
     } else if reason == MissReason::DailyRollover {
@@ -1031,6 +1075,68 @@ mod tests {
         monitor.begin_request_on_day(route(), sig(&[10, 99, 12]), 2);
         let miss = monitor.finish_request(52_000, Some(2_000)).expect("miss");
         assert_eq!(miss.reason, MissReason::PrefixChanged);
+    }
+
+    /// Real incident (2026-11-15 07:22Z, claude-opus-5-5): a turn reported
+    /// prompt_tokens=883966 for a request whose serialized content is ~447K
+    /// tokens, and the request one second later reported 447092 of its own.
+    /// The second request was compared against the inflated 883823 baseline and
+    /// alarmed "KV cache miss [low_read] [prefix unchanged]: ~446K resent".
+    /// Nothing was evicted: the smaller request never carried those tokens.
+    #[test]
+    fn a_request_smaller_than_an_inflated_baseline_is_not_a_cache_miss() {
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request(route(), sig(&[10, 11]));
+        monitor.finish_request(433_676, Some(430_021));
+
+        // Inflated report (server-side tool accounting doubles the prefix).
+        monitor.begin_request(route(), sig(&[10, 11, 12]));
+        assert_eq!(
+            monitor.finish_request_with_prefix(883_823, Some(883_966), Some(871_082)),
+            None
+        );
+
+        // The next request carries its real 447K prefix and reads 98% of it.
+        monitor.begin_request(route(), sig(&[10, 11, 12, 13]));
+        assert_eq!(
+            monitor.finish_request_with_prefix(446_774, Some(447_092), Some(437_406)),
+            None,
+            "a request that carries less content cannot miss cache it never sent"
+        );
+
+        // The baseline followed the real figure, so the next genuine loss is
+        // still reported.
+        monitor.begin_request(route(), sig(&[10, 11, 12, 13, 14]));
+        let miss = monitor
+            .finish_request_with_prefix(9_000, Some(450_000), Some(0))
+            .expect("real miss");
+        assert_eq!(miss.reason, MissReason::ZeroRead);
+    }
+
+    #[test]
+    fn shrink_guard_does_not_mask_a_total_miss_on_the_same_prefix() {
+        let mut monitor = KvCacheMonitor::new();
+        warm(&mut monitor);
+        monitor.begin_request(route(), sig(&[10, 11, 12]));
+        // Writes are small next to the prefix; the request itself did not shrink.
+        let miss = monitor
+            .finish_request_with_prefix(9_368, Some(52_000), Some(0))
+            .expect("miss");
+        assert_eq!(miss.reason, MissReason::ZeroRead);
+    }
+
+    #[test]
+    fn harness_causes_still_report_when_the_request_also_shrank() {
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request(route(), sig(&[10, 11]));
+        monitor.finish_request(400_000, Some(400_000));
+        let mut other_model = route();
+        other_model.model = "claude-haiku".into();
+        monitor.begin_request(other_model, sig(&[10, 11, 12]));
+        let miss = monitor
+            .finish_request_with_prefix(50_000, Some(52_000), Some(0))
+            .expect("model switch");
+        assert_eq!(miss.reason, MissReason::ModelSwitch);
     }
 
     #[test]

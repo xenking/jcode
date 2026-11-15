@@ -169,7 +169,19 @@ impl Agent {
             cache_read,
             cache_creation,
         );
-        let miss = self.kv_cache_monitor.finish_request(reusable, cache_read)?;
+        // The whole prefix this request carried. A request can never read back
+        // more cache than the content it sent, so a materially smaller request
+        // is a content drop, not evidence that the provider evicted a prefix it
+        // never received.
+        let prefix = crate::compaction::effective_context_tokens_from_usage(
+            self.provider.name(),
+            input,
+            cache_read,
+            cache_creation,
+        );
+        let miss =
+            self.kv_cache_monitor
+                .finish_request_with_prefix(reusable, Some(prefix), cache_read)?;
         let expected_refresh = matches!(
             miss.reason,
             crate::kv_cache_monitor::MissReason::Compaction
@@ -206,6 +218,28 @@ impl Agent {
             documented_cause: miss.documented_cause,
         })
     }
+}
+
+/// Usage refresh clients need after a compaction shrinks the transcript.
+///
+/// Clients derive the context-usage percentage from the last usage report, and
+/// a compaction makes that report describe content that no longer exists. Send
+/// the post-compaction size as an ordinary usage report so the composer pill,
+/// the sidebar and the mobile header follow the compaction instead of staying
+/// at the pre-compaction figure. The summarizing provider call carries no
+/// meaningful cache state, so the cache counters are zero rather than inherited.
+pub(crate) fn compaction_context_usage_event(
+    post_tokens: Option<u64>,
+    effective_budget: Option<usize>,
+) -> Option<ServerEvent> {
+    let post_tokens = post_tokens?;
+    Some(ServerEvent::TokenUsage {
+        input: post_tokens,
+        output: 0,
+        cache_read_input: Some(0),
+        cache_creation_input: Some(0),
+        effective_budget,
+    })
 }
 
 fn log_agent_provider_stream_lifecycle(
