@@ -22,6 +22,8 @@ use std::time::Duration;
 mod protocol_disconnect;
 #[path = "client_behavior/protocol_partial_disconnect.rs"]
 mod protocol_partial_disconnect;
+#[path = "client_behavior/search_sessions.rs"]
+mod search_sessions;
 
 /// A socket-pair transport, so the test drives the client over the same code
 /// path a real connection uses.
