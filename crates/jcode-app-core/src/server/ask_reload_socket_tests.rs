@@ -146,6 +146,21 @@ async fn socket_resume_replays_reload_interrupted_ask_before_provider() {
     })
     .await;
     assert_eq!(provider.0.load(Ordering::SeqCst), 0);
+    writer
+        .write_all(
+            format!(
+                "{}\n",
+                json!({"type":"message","id":43,"content":"another message"})
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    until(&mut reader, |event| {
+        assert!(!matches!(event, ServerEvent::ToolDone { name, .. } if name == "ask"), "message cancelled the ask");
+        matches!(event, ServerEvent::Error { id: 43, message, .. } if message.contains("Already processing"))
+    }).await;
+    assert_eq!(provider.0.load(Ordering::SeqCst), 0);
     writer.write_all(format!("{}\n", json!({"type":"ask_user_response","id":42,"request_id":request_id,"response":{"answers":[{"selected":["B"],"other":"custom","comments":{"B":"reason"}}]}})).as_bytes()).await.unwrap();
     let ack = std::cell::Cell::new(false);
     let tool_done = std::cell::Cell::new(false);
