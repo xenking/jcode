@@ -584,6 +584,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::async_yields_async)] // the child handle is the result under test
     async fn detached_callbacks_inherit_session_and_reserve_before_poll() {
         let gate = Arc::new(ActivityGate::default());
         let selected = BTreeSet::from(["selected".into()]);
