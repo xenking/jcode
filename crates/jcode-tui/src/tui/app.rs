@@ -1744,7 +1744,7 @@ pub struct App {
     // Scroll bookmark: stashed scroll position for quick teleport back
     scroll_bookmark: Option<usize>,
     // Stashed input: saved via Ctrl+S for later retrieval
-    stashed_input: Option<(String, usize)>,
+    stashed_input: Option<StashedInput>,
     // Undo history for in-progress input editing (Ctrl+Z)
     input_undo_stack: Vec<(String, usize)>,
     input_typing_undo: Option<(Instant, usize)>,
@@ -1941,6 +1941,15 @@ pub struct App {
     /// Lazily-loaded persisted cross-session prompt history (oldest first,
     /// deduped). None until first use; see `prompt_history.rs`.
     persisted_prompt_history: Option<Vec<String>>,
+}
+
+#[derive(Default)]
+struct StashedInput {
+    text: String,
+    cursor: usize,
+    pastes: Vec<String>,
+    images: Vec<(String, String)>,
+    undo: Vec<(String, usize)>,
 }
 
 /// Inert provider used by runtime modes whose output is supplied by another source.

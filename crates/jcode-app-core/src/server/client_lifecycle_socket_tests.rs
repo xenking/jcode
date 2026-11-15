@@ -54,6 +54,7 @@ struct TerminalSocketProvider {
     fail_catalog: Arc<std::sync::atomic::AtomicBool>,
     churn_catalog: Arc<std::sync::atomic::AtomicBool>,
     catalog_revision: Arc<std::sync::atomic::AtomicUsize>,
+    ask_after_reattach: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[async_trait]
@@ -68,6 +69,14 @@ impl Provider for TerminalSocketProvider {
         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
             self.first_started.notify_one();
             self.finish_first.notified().await;
+            if self.ask_after_reattach.load(Ordering::SeqCst) {
+                return Ok(Box::pin(stream::iter(vec![
+                    Ok(StreamEvent::ToolUseStart { id: "ask-after-reattach".into(), name: "ask".into() }),
+                    Ok(StreamEvent::ToolInputDelta(r#"{"questions":[{"question":"Which?","options":[{"label":"A"},{"label":"B"}]}]}"#.into())),
+                    Ok(StreamEvent::ToolUseEnd),
+                    Ok(StreamEvent::MessageEnd { stop_reason: Some("tool_use".into()) }),
+                ])));
+            }
         }
         Ok(Box::pin(stream::iter(vec![
             Ok(StreamEvent::TextDelta("completed".into())),
@@ -127,17 +136,22 @@ async fn scoped_and_legacy_socket_subscribers_receive_compatible_turn_streams() 
 
 #[tokio::test]
 async fn scoped_cancel_socket_immediately_dispatches_next_prompt() {
-    sdk_socket_cancel_workflow(false, true, true, true, false, false).await;
+    sdk_socket_cancel_workflow(false, true, true, true, false, false, false).await;
 }
 
 #[tokio::test]
 async fn idle_soft_interrupt_without_client_id_is_picked_up_before_cancel() {
-    sdk_socket_cancel_workflow(false, true, true, true, true, false).await;
+    sdk_socket_cancel_workflow(false, true, true, true, true, false, false).await;
 }
 
 #[tokio::test]
 async fn catalog_failure_preserves_remote_socket_owner_and_next_turn() {
-    sdk_socket_cancel_workflow(false, true, true, false, false, true).await;
+    sdk_socket_cancel_workflow(false, true, true, false, false, true, false).await;
+}
+
+#[tokio::test]
+async fn live_reattached_socket_answers_ask_in_existing_turn() {
+    sdk_socket_cancel_workflow(false, true, true, false, false, false, true).await;
 }
 
 async fn sdk_socket_workflow(response_only: bool, terminal_race: bool, identity_capability: bool) {
@@ -148,10 +162,12 @@ async fn sdk_socket_workflow(response_only: bool, terminal_race: bool, identity_
         false,
         false,
         false,
+        false,
     )
     .await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn sdk_socket_cancel_workflow(
     response_only: bool,
     terminal_race: bool,
@@ -159,10 +175,14 @@ async fn sdk_socket_cancel_workflow(
     cancel_first: bool,
     idle_soft_interrupt: bool,
     catalog_failure: bool,
+    ask_reattach: bool,
 ) {
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
     let terminal_provider = TerminalSocketProvider::default();
+    terminal_provider
+        .ask_after_reattach
+        .store(ask_reattach, Ordering::SeqCst);
     let provider_template: Arc<dyn Provider> = if terminal_race {
         Arc::new(terminal_provider.clone())
     } else {
@@ -258,7 +278,7 @@ async fn sdk_socket_cancel_workflow(
     use serde_json::json;
     send(
         &mut client_writer,
-        json!({"type":"subscribe","id":1,"working_dir":home._home.path(),"supports_turn_identity":identity_capability}),
+        json!({"type":"subscribe","id":1,"working_dir":home._home.path(),"supports_turn_identity":identity_capability,"continue_on_disconnect":ask_reattach}),
     )
     .await;
     until(&mut client_reader, |e| {
@@ -408,6 +428,56 @@ async fn sdk_socket_cancel_workflow(
         )
         .await
         .unwrap();
+        if ask_reattach {
+            drop(client_writer);
+            drop(client_reader);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while client_connections.read().await.len() > 1 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("old socket must detach while turn continues");
+            let (new_task, new_stream) = connect();
+            let (new_reader, mut new_writer) = new_stream.into_split();
+            let mut new_reader = BufReader::new(new_reader);
+            send(&mut new_writer, json!({"type":"subscribe","id":41,"target_session_id":session_id,"continue_on_disconnect":true})).await;
+            until(&mut new_reader, |event| {
+                matches!(event, ServerEvent::Done { id: 41 })
+            })
+            .await;
+            terminal_provider.finish_first.notify_one();
+            let ServerEvent::AskUserRequest { request_id, .. } = until(&mut new_reader, |event| {
+                matches!(event, ServerEvent::AskUserRequest { .. })
+            })
+            .await
+            else {
+                unreachable!()
+            };
+            send(
+                &mut new_writer,
+                json!({"type":"ask_user_response","id":42,"request_id":request_id,"response":{}}),
+            )
+            .await;
+            until(&mut new_reader, |event| {
+                matches!(event, ServerEvent::Done { id: 2 })
+            })
+            .await;
+            assert_eq!(terminal_provider.calls.load(Ordering::SeqCst), 2);
+            sessions.clear_for_test().await;
+            drop(new_writer);
+            drop(new_reader);
+            drop(legacy_writer);
+            drop(legacy_reader);
+            for task in [server_task, legacy_task, new_task] {
+                tokio::time::timeout(Duration::from_secs(5), task)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+            }
+            return;
+        }
         if idle_soft_interrupt {
             until(&mut client_reader, |event| {
                 matches!(event, ServerEvent::SoftInterruptInjected { content, point, client_ids, .. }

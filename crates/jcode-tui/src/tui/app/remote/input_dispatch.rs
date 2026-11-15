@@ -275,6 +275,8 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
         app.set_status_notice("Message not sent; draft restored");
         return Ok(());
     }
+    // Origin: restore a stashed draft once the send succeeded.
+    app.restore_stash_after_send();
     Ok(())
 }
 

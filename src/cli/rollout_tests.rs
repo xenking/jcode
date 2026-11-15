@@ -13,10 +13,12 @@ struct Fake {
     busy: RefCell<Vec<Vec<String>>>,
     workers_before: Vec<(String, String)>,
     workers_after: Vec<(String, String)>,
+    live_sessions: Vec<String>,
     reloaded: bool,
     built: bool,
     packaged: bool,
     reload_takes: bool,
+    rollback_takes: bool,
     bridge_ok: bool,
     swap_sparkle: bool,
     state: Option<RolloutState>,
@@ -63,10 +65,12 @@ impl Fake {
                 ("session_calf_1_a".into(), "running".into()),
                 ("session_hare_1_a".into(), "stopped".into()),
             ],
+            live_sessions: vec!["session_calf_1_a".into(), "session_hare_1_a".into()],
             reloaded: false,
             built: false,
             packaged: false,
             reload_takes: true,
+            rollback_takes: true,
             bridge_ok: true,
             swap_sparkle: true,
             state: None,
@@ -104,20 +108,28 @@ impl Host for Fake {
     fn deployed(&self) -> Deployed {
         self.deployed.borrow().clone()
     }
-    fn busy_sessions(&self) -> Vec<String> {
+    fn busy_sessions(&self) -> Result<Vec<String>> {
         let mut busy = self.busy.borrow_mut();
-        if busy.len() > 1 {
+        let ids = if busy.len() > 1 {
             busy.remove(0)
         } else {
             busy[0].clone()
-        }
+        };
+        Ok(ids
+            .into_iter()
+            .filter(|id| self.live_sessions.contains(id))
+            .collect())
     }
-    fn workers(&self) -> Vec<(String, String)> {
-        if self.reloaded {
+    fn workers(&self) -> Result<Vec<(String, String)>> {
+        let workers = if self.reloaded {
             self.workers_after.clone()
         } else {
             self.workers_before.clone()
-        }
+        };
+        Ok(workers
+            .into_iter()
+            .filter(|(id, _)| self.live_sessions.contains(id))
+            .collect())
     }
     fn built_cli(&self, _pair: &Pair) -> Option<PathBuf> {
         self.built.then(|| PathBuf::from("/target/release/jcode"))
@@ -178,6 +190,12 @@ impl Host for Fake {
     }
     fn rollback_cli(&mut self, current: &str, shared: &str) -> Result<()> {
         self.calls.push(format!("rollback cli {current} {shared}"));
+        let mut deployed = self.deployed.borrow_mut();
+        deployed.cli_current = Some(current.into());
+        deployed.cli_shared = Some(shared.into());
+        if self.rollback_takes {
+            deployed.daemon_label = Some(shared.into());
+        }
         Ok(())
     }
     fn rollback_desktop(&mut self) -> Result<()> {
@@ -238,6 +256,26 @@ fn dry_run_prints_every_phase_and_changes_nothing() {
     assert!(lines[3].contains("no reload"), "{}", lines[3]);
     assert!(lines[5].contains("workers live now: calf"), "{}", lines[5]);
     assert_eq!(lines[8], "dry run: nothing changed");
+}
+
+#[test]
+fn stale_snapshot_worker_is_not_reported_as_busy_or_live() {
+    let mut fake = Fake::new();
+    fake.workers_before = vec![("session_mushroom_1_a".into(), "running".into())];
+    fake.busy = RefCell::new(vec![vec!["session_mushroom_1_a".into()]]);
+    fake.live_sessions.clear();
+    let (outcome, output) = rollout(
+        &mut fake,
+        &RolloutOptions {
+            dry_run: true,
+            ..opts()
+        },
+    );
+    assert_eq!(outcome.unwrap(), Outcome::Planned);
+    assert!(
+        !output.contains("mushroom"),
+        "stale worker leaked into plan: {output}"
+    );
 }
 
 #[test]
@@ -423,8 +461,22 @@ fn failed_verify_rolls_back_cli_and_desktop() {
 }
 
 #[test]
-fn verify_catches_a_stale_bundle_bridge() {
+fn rollback_must_not_restore_old_desktop_if_daemon_did_not_downgrade() {
     let mut fake = Fake::new();
+    fake.bridge_ok = false;
+    fake.rollback_takes = false;
+    let (outcome, output) = rollout(&mut fake, &opts());
+    assert!(
+        outcome.is_err(),
+        "rollback must reject the new daemon: {output}"
+    );
+    assert!(output.contains("rollback FAILED"), "{output}");
+    assert!(!fake.mutations().contains(&"rollback desktop"));
+}
+
+#[test]
+fn verify_catches_a_stale_bundle_bridge() {
+    let fake = Fake::new();
     let pair = Pair {
         cli: CLI.into(),
         desktop: DESKTOP.into(),
@@ -442,7 +494,7 @@ fn verify_catches_a_stale_bundle_bridge() {
         ];
     }
     let layout = fake.layout.clone();
-    let failures = verify(&mut fake, &pair, true, &layout);
+    let failures = verify(&fake, &pair, true, &layout);
     assert_eq!(failures.len(), 1, "{failures:?}");
     assert!(failures[0].contains("stale bundle bridge"), "{failures:?}");
 }

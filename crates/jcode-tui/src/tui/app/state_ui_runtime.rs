@@ -478,20 +478,36 @@ impl App {
     }
 
     pub(super) fn toggle_input_stash(&mut self) {
-        if let Some((stashed, stashed_cursor)) = self.stashed_input.take() {
-            let current_input = std::mem::replace(&mut self.input, stashed);
-            let current_cursor = std::mem::replace(&mut self.cursor_pos, stashed_cursor);
-            if current_input.is_empty() {
-                self.set_status_notice("📋 Input restored from stash");
-            } else {
-                self.stashed_input = Some((current_input, current_cursor));
-                self.set_status_notice("📋 Swapped input with stash");
-            }
-        } else if !self.input.is_empty() {
-            let input = std::mem::take(&mut self.input);
-            let cursor = std::mem::replace(&mut self.cursor_pos, 0);
-            self.stashed_input = Some((input, cursor));
-            self.set_status_notice("📋 Input stashed");
+        let current =
+            (!self.input.is_empty() || !self.pending_images.is_empty()).then(|| StashedInput {
+                text: std::mem::take(&mut self.input),
+                cursor: std::mem::take(&mut self.cursor_pos),
+                pastes: std::mem::take(&mut self.pasted_contents),
+                images: std::mem::take(&mut self.pending_images),
+                undo: std::mem::take(&mut self.input_undo_stack),
+            });
+        let previous = std::mem::replace(&mut self.stashed_input, current);
+        if let Some(stash) = previous {
+            self.apply_input_stash(stash);
+        }
+        self.reset_tab_completion();
+        self.sync_model_picker_preview_from_input();
+    }
+
+    fn apply_input_stash(&mut self, stash: StashedInput) {
+        self.input = stash.text;
+        self.cursor_pos = stash.cursor;
+        self.pasted_contents = stash.pastes;
+        self.pending_images = stash.images;
+        self.input_undo_stack = stash.undo;
+    }
+
+    pub(super) fn restore_stash_after_send(&mut self) {
+        if self.input.is_empty()
+            && let Some(stash) = self.stashed_input.take()
+        {
+            self.apply_input_stash(stash);
+            self.sync_model_picker_preview_from_input();
         }
     }
 }

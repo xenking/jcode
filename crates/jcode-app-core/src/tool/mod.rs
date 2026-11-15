@@ -32,6 +32,7 @@ pub mod applet;
 #[allow(dead_code)]
 mod goal;
 pub mod inflight;
+pub(crate) mod interactive;
 mod jcode_docs;
 pub(crate) mod load_tools;
 pub use jcode_docs::{BundledDocs, bundled_docs, register_bundled_docs};

@@ -1152,6 +1152,7 @@ pub(super) fn expand_paste_placeholders(app: &App, input: &str) -> String {
 pub(super) fn queue_message(app: &mut App) {
     let prepared = take_prepared_input(app);
     app.queued_messages.push(prepared.expanded);
+    app.restore_stash_after_send();
 }
 
 /// True for composer text that runs as a client command rather than a prompt:
@@ -3014,6 +3015,7 @@ pub(super) fn stage_local_interleave(
     app.interleave_message = Some(content);
     app.interleave_images = images;
     app.set_status_notice("⏭ Sending now (interleave)");
+    app.restore_stash_after_send();
 }
 
 fn attach_image(app: &mut App, media_type: String, base64_data: String) {
@@ -4232,6 +4234,7 @@ impl App {
         self.processing_started = Some(Instant::now());
         self.visible_turn_started = Some(Instant::now());
         self.pending_turn = true;
+        self.restore_stash_after_send();
     }
 
     /// Process all queued messages (combined into a single request)

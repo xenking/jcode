@@ -72,9 +72,8 @@ impl Tool for AskTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let input: Input = serde_json::from_value(input)?;
         validate_ask_questions(&input.questions).map_err(|e| anyhow!(e))?;
-        let tx = ctx
-            .stdin_request_tx
-            .as_ref()
+        let tx = super::interactive::sender(&ctx.session_id)
+            .or(ctx.stdin_request_tx.clone())
             .ok_or_else(|| anyhow!(NO_INTERACTIVE_USER))?;
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         tx.send(StdinInputRequest {
@@ -125,6 +124,26 @@ mod tests {
     async fn headless_session_errors_cleanly() {
         let err = AskTool.execute(input(), ctx(None)).await.unwrap_err();
         assert!(err.to_string().contains("no interactive user"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn reattached_client_receives_ask_from_existing_turn() {
+        let (old_tx, old_rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(old_rx);
+        let (new_tx, mut new_rx) = tokio::sync::mpsc::unbounded_channel::<StdinInputRequest>();
+        let _new_client = super::super::interactive::attach("ask-reattach-test", new_tx);
+        let mut context = ctx(Some(old_tx));
+        context.session_id = "ask-reattach-test".into();
+        let task = tokio::spawn(AskTool.execute(input(), context));
+        let request = tokio::time::timeout(std::time::Duration::from_millis(200), new_rx.recv())
+            .await
+            .expect("ask was not routed to the reattached client")
+            .expect("client closed");
+        request
+            .response_tx
+            .send(serde_json::to_string(&AskResponse::declined()).unwrap())
+            .unwrap();
+        assert!(task.await.unwrap().is_ok());
     }
 
     #[tokio::test]
