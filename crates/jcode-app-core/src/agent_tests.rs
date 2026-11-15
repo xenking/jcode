@@ -2068,11 +2068,11 @@ async fn mark_closed_persists_soft_interrupts_for_restore_after_reload() {
 
     assert_eq!(restored.soft_interrupt_count(), 1);
     assert!(restored.has_urgent_interrupt());
-    assert!(
-        crate::soft_interrupt_store::load(&session_id)
-            .expect("store should be readable after restore")
-            .is_empty()
-    );
+    // Restore copies the queue into memory but must not erase its durable
+    // copy before delivery and history persistence, or a second crash loses it.
+    let persisted = crate::soft_interrupt_store::load(&session_id)
+        .expect("store should be readable after restore");
+    assert_eq!(persisted.len(), 1);
 
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);

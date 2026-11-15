@@ -171,11 +171,11 @@ async fn queue_soft_interrupt_for_session_persists_when_live_queue_is_unavailabl
         .restore_session(&session_id)
         .expect("restore session should rehydrate interrupts");
     assert_eq!(restored.soft_interrupt_count(), 1);
-    assert!(
-        crate::soft_interrupt_store::load(&session_id)
-            .expect("load persisted interrupts after restore")
-            .is_empty()
-    );
+    // The durable queue remains until delivery is saved to session history.
+    let persisted = crate::soft_interrupt_store::load(&session_id)
+        .expect("load persisted interrupts after restore");
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].content, "persist while reloading");
 
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);
