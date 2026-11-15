@@ -454,22 +454,58 @@ async fn sdk_socket_cancel_workflow(
             else {
                 unreachable!()
             };
+            // The question is already on screen when Desktop exits. Its response
+            // sender must remain owned by the session, not by this socket.
+            drop(new_writer);
+            drop(new_reader);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while client_connections.read().await.len() > 1 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("question socket must detach");
+            let (reopened_task, reopened_stream) = connect();
+            let (reopened_reader, mut reopened_writer) = reopened_stream.into_split();
+            let mut reopened_reader = BufReader::new(reopened_reader);
+            send(&mut reopened_writer, json!({"type":"subscribe","id":43,"target_session_id":session_id,"continue_on_disconnect":true})).await;
+            let replay = until(&mut reopened_reader, |event| {
+                matches!(event, ServerEvent::AskUserRequest { .. })
+            })
+            .await;
+            assert!(
+                matches!(replay, ServerEvent::AskUserRequest { request_id: ref replayed, .. } if replayed == &request_id)
+            );
             send(
-                &mut new_writer,
-                json!({"type":"ask_user_response","id":42,"request_id":request_id,"response":{}}),
+                &mut reopened_writer,
+                json!({"type":"ask_user_response","id":42,"request_id":request_id,"response":{"answers":[{"selected":["B"],"other":"custom","comments":{"B":"reason"}}]}}),
             )
             .await;
-            until(&mut new_reader, |event| {
+            until(&mut reopened_reader, |event| {
+                matches!(event, ServerEvent::Done { id: 42 })
+            })
+            .await;
+            until(&mut reopened_reader, |event| {
                 matches!(event, ServerEvent::Done { id: 2 })
             })
             .await;
+            send(&mut reopened_writer, json!({"type":"get_history","id":44})).await;
+            let history = until(&mut reopened_reader, |event| {
+                matches!(event, ServerEvent::History { .. })
+            })
+            .await;
+            let history = serde_json::to_string(&history).unwrap();
+            assert!(
+                history.contains("comment: reason") && history.contains("Other: custom"),
+                "{history}"
+            );
             assert_eq!(terminal_provider.calls.load(Ordering::SeqCst), 2);
             sessions.clear_for_test().await;
-            drop(new_writer);
-            drop(new_reader);
+            drop(reopened_writer);
+            drop(reopened_reader);
             drop(legacy_writer);
             drop(legacy_reader);
-            for task in [server_task, legacy_task, new_task] {
+            for task in [server_task, legacy_task, new_task, reopened_task] {
                 tokio::time::timeout(Duration::from_secs(5), task)
                     .await
                     .unwrap()
