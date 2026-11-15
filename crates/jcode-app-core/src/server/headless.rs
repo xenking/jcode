@@ -97,6 +97,9 @@ pub(super) async fn create_headless_session(
         working_dir_string.as_deref(),
         report_back_to_session_id.clone(),
     );
+    if report_back_to_session_id.is_some() {
+        new_agent.mark_swarm_worker()?;
+    }
     new_agent.set_memory_enabled(memory_enabled);
     // Inline swarm mode renders a live gallery of worker viewports in the
     // coordinator TUI; enable the per-agent output tap so this worker streams a
@@ -168,6 +171,9 @@ pub(super) async fn create_headless_session(
         .filter(|effort| !effort.is_empty())
         && let Err(e) = new_agent.set_reasoning_effort(effort)
     {
+        if new_agent.has_worker_effort_cap() {
+            return Err(e.context("Failed to apply swarm worker reasoning effort"));
+        }
         crate::logging::warn(&format!(
             "Failed to set headless session reasoning effort override '{}': {}",
             effort, e

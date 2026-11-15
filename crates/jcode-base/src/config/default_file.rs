@@ -672,6 +672,10 @@ spawn_allowed_models = []
 # Agents cannot choose worker effort through the swarm tool. Unset = "low".
 # Env override: JCODE_SWARM_EFFORT
 # swarm_effort = "low"
+# Optional per-route worker effort ceilings. An absent entry leaves the model's
+# supported levels unrestricted. Applies on spawn, model failover, and /effort.
+swarm_effort_caps = {}
+# swarm_effort_caps = { "openai:gpt-6.1-sol" = "xhigh" }
 #
 # Root model reasoning while /effort swarm is selected. Independent of worker
 # swarm_effort. Supported levels: none|minimal|low|medium|high|xhigh|max.

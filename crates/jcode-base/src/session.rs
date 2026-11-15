@@ -130,6 +130,9 @@ pub struct Session {
     /// Provider reasoning/thinking effort for this session (e.g., OpenAI low|medium|high|xhigh).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// This session was spawned as a swarm worker, not a user-started session.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_swarm_worker: bool,
     /// Per-session context ceiling. Missing values follow the global cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_cap: Option<usize>,
@@ -240,6 +243,8 @@ struct SessionStartupStub {
     route_api_method: Option<String>,
     #[serde(default)]
     reasoning_effort: Option<String>,
+    #[serde(default)]
+    is_swarm_worker: bool,
     #[serde(default)]
     context_cap: Option<usize>,
     #[serde(default)]
@@ -363,6 +368,7 @@ impl Session {
         session.model = stub.model;
         session.route_api_method = stub.route_api_method;
         session.reasoning_effort = stub.reasoning_effort;
+        session.is_swarm_worker = stub.is_swarm_worker;
         session.context_cap = stub.context_cap;
         session.subagent_model = stub.subagent_model;
         session.agent_model_overrides = stub.agent_model_overrides;
@@ -405,6 +411,7 @@ impl Session {
         session.model = snapshot.model;
         session.route_api_method = snapshot.route_api_method;
         session.reasoning_effort = snapshot.reasoning_effort;
+        session.is_swarm_worker = snapshot.is_swarm_worker;
         session.context_cap = snapshot.context_cap;
         session.subagent_model = snapshot.subagent_model;
         session.agent_model_overrides = snapshot.agent_model_overrides;
@@ -648,6 +655,7 @@ impl Session {
             route_api_method_present: true,
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
+            is_swarm_worker: self.is_swarm_worker,
             context_cap: self.context_cap,
             subagent_model: self.subagent_model.clone(),
             agent_model_overrides: self.agent_model_overrides.clone(),
@@ -858,6 +866,7 @@ impl Session {
         self.model = meta.model;
         self.normalize_placeholder_model();
         self.reasoning_effort = meta.reasoning_effort;
+        self.is_swarm_worker = meta.is_swarm_worker;
         self.context_cap = meta.context_cap;
         self.subagent_model = meta.subagent_model;
         self.agent_model_overrides = meta.agent_model_overrides;
@@ -904,6 +913,7 @@ impl Session {
             model: None,
             route_api_method: None,
             reasoning_effort: None,
+            is_swarm_worker: false,
             context_cap: None,
             subagent_model: None,
             agent_model_overrides: AgentModelOverrides::new(),
@@ -965,6 +975,7 @@ impl Session {
             model: None,
             route_api_method: None,
             reasoning_effort: None,
+            is_swarm_worker: false,
             context_cap: None,
             subagent_model: None,
             agent_model_overrides: AgentModelOverrides::new(),
@@ -1907,6 +1918,8 @@ struct RemoteStartupSessionSnapshot {
     route_api_method: Option<String>,
     #[serde(default)]
     reasoning_effort: Option<String>,
+    #[serde(default)]
+    is_swarm_worker: bool,
     #[serde(default)]
     context_cap: Option<usize>,
     #[serde(default)]

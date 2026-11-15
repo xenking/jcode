@@ -75,6 +75,7 @@ fn create_visible_spawn_session(
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
     let mut session = Session::create(None, None);
+    session.is_swarm_worker = true;
     session.working_dir = Some(cwd.display().to_string());
     if let Some(model) = model_override {
         session.model = Some(model.to_string());

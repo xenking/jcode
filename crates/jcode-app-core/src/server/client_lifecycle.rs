@@ -2223,10 +2223,13 @@ pub(super) async fn handle_client(
                 effort,
                 target_session_id,
             } => {
+                let effective_target = target_session_id.as_deref().unwrap_or(&client_session_id);
+                let is_swarm_worker = swarm_members.read().await.get(effective_target)
+                    .is_some_and(|member| member.report_back_to_session_id.is_some());
                 if let Some(target_session_id) = target_session_id {
                     let target_agent = { sessions.read().await.get(&target_session_id).cloned() };
                     if let Some(target_agent) = target_agent {
-                        handle_set_reasoning_effort(id, effort, &target_agent, &client_event_tx)
+                        handle_set_reasoning_effort(id, effort, is_swarm_worker, &target_agent, &client_event_tx)
                             .await;
                     } else {
                         let _ = client_event_tx.send(ServerEvent::ReasoningEffortChanged {
@@ -2236,7 +2239,7 @@ pub(super) async fn handle_client(
                         });
                     }
                 } else {
-                    handle_set_reasoning_effort(id, effort, &agent, &client_event_tx).await;
+                    handle_set_reasoning_effort(id, effort, is_swarm_worker, &agent, &client_event_tx).await;
                 }
             }
 

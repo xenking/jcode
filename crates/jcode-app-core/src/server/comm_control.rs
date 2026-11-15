@@ -558,17 +558,22 @@ fn spawn_assigned_task_run(
             &worker_allowed_models,
             &agents_config.swarm_model_fallbacks,
         );
-        let result = super::turn_failover::process_reserved_locked_message_with_swarm_fallbacks(
-            &mut agent,
-            &turn_lease,
-            &assignment_text,
-            vec![],
-            None,
-            event_tx,
-            &worker_fallbacks,
-            &worker_allowed_models,
-        )
-        .await;
+        let result = match agent.mark_swarm_worker() {
+            Ok(()) => {
+                super::turn_failover::process_reserved_locked_message_with_swarm_fallbacks(
+                    &mut agent,
+                    &turn_lease,
+                    &assignment_text,
+                    vec![],
+                    None,
+                    event_tx,
+                    &worker_fallbacks,
+                    &worker_allowed_models,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
         let completion_report = agent.recent_assistant_output_tail_after(start_message_index);
         // The lease preserves ownership without holding Agent across queue drains.
         drop(agent);

@@ -1080,6 +1080,131 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct CappedFallbackProvider {
+        inner: RejectingPrimaryProvider,
+        effort: Arc<StdMutex<String>>,
+        observed: Arc<StdMutex<Vec<(String, String)>>>,
+    }
+
+    #[async_trait]
+    impl Provider for CappedFallbackProvider {
+        async fn complete(
+            &self,
+            messages: &[Message],
+            tools: &[ToolDefinition],
+            system: &str,
+            session_id: Option<&str>,
+        ) -> anyhow::Result<EventStream> {
+            self.observed
+                .lock()
+                .unwrap()
+                .push((self.model(), self.effort.lock().unwrap().clone()));
+            self.inner
+                .complete(messages, tools, system, session_id)
+                .await
+        }
+        fn name(&self) -> &str {
+            "test"
+        }
+        fn model(&self) -> String {
+            self.inner.model()
+        }
+        fn set_model(&self, model: &str) -> anyhow::Result<()> {
+            self.inner.set_model(model)
+        }
+        fn available_efforts(&self) -> Vec<&'static str> {
+            vec!["low", "medium", "high", "xhigh", "max"]
+        }
+        fn reasoning_effort(&self) -> Option<String> {
+            Some(self.effort.lock().unwrap().clone())
+        }
+        fn set_reasoning_effort(&self, effort: &str) -> anyhow::Result<()> {
+            *self.effort.lock().unwrap() = effort.to_string();
+            Ok(())
+        }
+        async fn complete_simple_with_usage(
+            &self,
+            prompt: &str,
+            system: &str,
+        ) -> anyhow::Result<(String, jcode_provider_core::SimpleCompletionUsage)> {
+            self.inner.complete_simple_with_usage(prompt, system).await
+        }
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(self.clone())
+        }
+    }
+
+    #[test]
+    fn worker_failover_applies_target_model_effort_cap_before_completion() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(home) => crate::env::set_var("JCODE_HOME", home),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+                crate::config::Config::invalidate_cache();
+            }
+        }
+        let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[agents]\nswarm_effort_caps = { \"test:claude-sonnet-5-5\" = \"medium\" }\n",
+        )
+        .unwrap();
+        crate::config::Config::invalidate_cache();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let provider = CappedFallbackProvider {
+                    inner: RejectingPrimaryProvider {
+                        model: Arc::new(StdMutex::new("deepseek-v4.1-flash".into())),
+                        calls: Arc::new(StdMutex::new(Vec::new())),
+                    },
+                    effort: Arc::new(StdMutex::new("max".into())),
+                    observed: Arc::new(StdMutex::new(Vec::new())),
+                };
+                let dyn_provider: Arc<dyn Provider> = Arc::new(provider.clone());
+                let registry = crate::tool::Registry::new(dyn_provider.clone()).await;
+                let session = crate::session::Session::create_with_id(
+                    "session_capped_fallback".into(),
+                    None,
+                    None,
+                );
+                let mut agent = Agent::new_with_session(dyn_provider, registry, session, None);
+                agent.mark_swarm_worker().unwrap();
+                agent.set_reasoning_effort("max").unwrap();
+                let lease = agent.claim_server_turn().unwrap();
+                let (tx, _rx) = mpsc::unbounded_channel();
+                let result = process_reserved_locked_message_with_swarm_fallbacks(
+                    &mut agent,
+                    &lease,
+                    "swarm task",
+                    Vec::new(),
+                    None,
+                    tx,
+                    &["claude:claude-sonnet-5-5".into()],
+                    &[],
+                )
+                .await;
+                assert!(result.is_ok(), "worker should fall back: {result:?}");
+                assert!(
+                    provider
+                        .observed
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|(model, effort)| model == "claude-sonnet-5-5" && effort == "medium")
+                );
+            });
+    }
+
     #[test]
     fn swarm_worker_turn_falls_back_when_primary_fails_with_non_rate_limit_error() {
         let _guard = crate::storage::lock_test_env();

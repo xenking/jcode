@@ -657,15 +657,23 @@ pub(super) async fn handle_set_context_cap(
 pub(super) async fn handle_set_reasoning_effort(
     id: u64,
     effort: String,
+    is_swarm_worker: bool,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     let result = if let Ok(mut agent_guard) = agent.try_lock() {
-        agent_guard.set_reasoning_effort(&effort)
+        if is_swarm_worker {
+            agent_guard
+                .mark_swarm_worker()
+                .and_then(|()| agent_guard.set_reasoning_effort(&effort))
+        } else {
+            agent_guard.set_reasoning_effort(&effort)
+        }
     } else {
         spawn_deferred_reasoning_effort_change(
             id,
             effort,
+            is_swarm_worker,
             Arc::clone(agent),
             client_event_tx.clone(),
         );
@@ -701,6 +709,7 @@ fn send_reasoning_effort_result(
 fn spawn_deferred_reasoning_effort_change(
     id: u64,
     effort: String,
+    is_swarm_worker: bool,
     agent: Arc<Mutex<Agent>>,
     client_event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) {
@@ -708,7 +717,13 @@ fn spawn_deferred_reasoning_effort_change(
     crate::runtime_activity::spawn(async move {
         let mut agent_guard = agent.lock().await;
         log_provider_control_lock_acquired("set_reasoning_effort", id, queued_at);
-        let result = agent_guard.set_reasoning_effort(&effort);
+        let result = if is_swarm_worker {
+            agent_guard
+                .mark_swarm_worker()
+                .and_then(|()| agent_guard.set_reasoning_effort(&effort))
+        } else {
+            agent_guard.set_reasoning_effort(&effort)
+        };
         crate::logging::info(&format!(
             "Deferred reasoning effort change completed request_id={} requested={} success={}",
             id,

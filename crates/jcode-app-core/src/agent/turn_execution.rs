@@ -5,6 +5,7 @@ impl Agent {
     /// Refuse to run a model turn when this session moved to another machine
     /// or this in-memory copy is older than the transcript on disk.
     pub(crate) fn ensure_session_lease(&self) -> Result<()> {
+        self.enforce_worker_effort()?;
         let account_route = self
             .session
             .route_api_method

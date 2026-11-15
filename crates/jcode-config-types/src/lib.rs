@@ -737,6 +737,8 @@ pub struct AgentsConfig {
     /// `"high"`, ...). The swarm tool does not let agents choose worker
     /// effort. Unset means `"low"`.
     pub swarm_effort: Option<String>,
+    /// Maximum worker effort per exact provider:model route. Empty is unrestricted.
+    pub swarm_effort_caps: std::collections::BTreeMap<String, String>,
     /// Root reasoning effort in swarm mode. Unset or invalid means `low`.
     /// This does not change worker effort (`swarm_effort`).
     pub swarm_root_effort: Option<String>,
@@ -870,6 +872,7 @@ impl Default for AgentsConfig {
             spawn_allowed_models: Vec::new(),
             swarm_model_fallbacks: Vec::new(),
             swarm_effort: None,
+            swarm_effort_caps: std::collections::BTreeMap::new(),
             swarm_root_effort: None,
             swarm_spawn_mode: SwarmSpawnMode::default(),
             swarm_gallery_max_pct: None,

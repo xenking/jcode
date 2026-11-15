@@ -13,6 +13,7 @@ the active model.
 | Hard worker allowlist | `[agents] spawn_allowed_models` (exact strings) | none | unset = unrestricted |
 | Agent-chosen worker model (swarm tool `model` param) | `[agents] swarm_model_selection` + `swarm_model_allowlist` (exact strings) | none | denied |
 | Worker effort | `[agents] swarm_effort` | none | `low` |
+| Worker effort ceilings by model route | `[agents] swarm_effort_caps` | none | no cap |
 | `/review`, autoreview | `[autoreview] model` | `/agents review <model>` | inherit |
 | `/judge`, autojudge | `[autojudge] model` | `/agents judge <model>` | inherit |
 | Memory extraction | `[agents] memory_model` | `/agents memory <model>` | inherit |
@@ -74,6 +75,8 @@ swarm_model = "openai:gpt-6.1-terra"
 # swarm_model = "deepinfra:deepseek-ai/DeepSeek-V4-Flash"  # needs deepinfra key
 swarm_model_fallbacks = ["openai:gpt-6.1-terra", "claude:claude-sonnet-5-5"]
 swarm_effort = "low"
+# Optional: cap workers on this route, including after failover or /effort.
+swarm_effort_caps = { "openai:gpt-6.1-sol" = "xhigh" }
 memory_model = "claude-haiku-5-5"
 title_model = "claude-haiku-5-5"
 

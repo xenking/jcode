@@ -1,6 +1,165 @@
 use super::*;
 
+fn worker_effort_cap<'a>(
+    agents: &'a crate::config::AgentsConfig,
+    provider_key: Option<&str>,
+    provider_name: &str,
+    model: &str,
+) -> Option<&'a String> {
+    let unpinned = model.split_once('@').map_or(model, |(model, _)| model);
+    [model, unpinned].into_iter().find_map(|model| {
+        let route = provider_key.map(|key| format!("{key}:{model}"));
+        let provider_route = format!("{}:{model}", provider_name.to_ascii_lowercase());
+        agents
+            .swarm_effort_caps
+            .get(model)
+            .or_else(|| {
+                route
+                    .as_ref()
+                    .and_then(|route| agents.swarm_effort_caps.get(route))
+            })
+            .or_else(|| agents.swarm_effort_caps.get(&provider_route))
+    })
+}
+
+fn capped_worker_effort(
+    agents: &crate::config::AgentsConfig,
+    provider_key: Option<&str>,
+    provider_name: &str,
+    model: &str,
+    requested: &str,
+    available: &[&str],
+) -> Result<String> {
+    let cap = worker_effort_cap(agents, provider_key, provider_name, model);
+    let Some(cap) = cap else {
+        return Ok(requested.to_string());
+    };
+    let cap_rank = jcode_provider_core::reasoning_effort_rank(cap)
+        .ok_or_else(|| anyhow::anyhow!("Invalid swarm effort cap {cap:?} for {model}"))?;
+    let requested_rank = jcode_provider_core::reasoning_effort_rank(requested)
+        .or_else(|| crate::prompt::is_swarm_mode_effort(requested).then_some(u8::MAX))
+        .ok_or_else(|| anyhow::anyhow!("Invalid reasoning effort {requested:?}"))?;
+    if requested_rank <= cap_rank && (available.is_empty() || available.contains(&requested)) {
+        return Ok(requested.to_string());
+    }
+    if available.is_empty() {
+        return Ok(cap.trim().to_ascii_lowercase());
+    }
+    let limit = cap_rank.min(requested_rank);
+    available
+        .iter()
+        .filter_map(|level| {
+            jcode_provider_core::reasoning_effort_rank(level)
+                .filter(|rank| *rank <= limit)
+                .map(|rank| (rank, *level))
+        })
+        .max_by_key(|(rank, _)| *rank)
+        .map(|(_, level)| level.to_string())
+        .ok_or_else(|| {
+            anyhow::anyhow!("No supported effort at or below swarm cap {cap:?} for {model}")
+        })
+}
+
+#[cfg(test)]
+mod worker_effort_cap_tests {
+    use super::*;
+
+    #[test]
+    fn model_caps_choose_supported_rung_and_leave_other_routes_unrestricted() {
+        let mut agents = crate::config::AgentsConfig::default();
+        agents
+            .swarm_effort_caps
+            .insert("openai:gpt-6.1-sol".into(), "xhigh".into());
+        let levels = ["low", "medium", "high", "xhigh", "max"];
+        let resolve = |provider, model, request, available: &[&str]| {
+            capped_worker_effort(&agents, Some(provider), provider, model, request, available)
+                .unwrap()
+        };
+        assert_eq!(resolve("openai", "gpt-6.1-sol", "max", &levels), "xhigh");
+        assert_eq!(
+            resolve("openai", "gpt-6.1-sol@account", "max", &levels),
+            "xhigh"
+        );
+        assert_eq!(resolve("openai", "gpt-6.1-sol", "high", &levels), "high");
+        assert_eq!(
+            resolve("openai", "gpt-6.1-sol", "max", &["low", "high", "max"]),
+            "high"
+        );
+        assert_eq!(resolve("openrouter", "gpt-6.1-sol", "max", &levels), "max");
+        assert_eq!(resolve("openai", "other", "max", &levels), "max");
+    }
+}
+
 impl Agent {
+    pub(crate) fn mark_swarm_worker(&mut self) -> Result<()> {
+        if self.session.is_swarm_worker {
+            return Ok(());
+        }
+        self.session.is_swarm_worker = true;
+        self.session.save_prepared()
+    }
+
+    pub(crate) fn has_worker_effort_cap(&self) -> bool {
+        self.session.is_swarm_worker
+            && worker_effort_cap(
+                &crate::config::config().agents,
+                self.session.provider_key.as_deref(),
+                self.provider.name(),
+                &self.provider_model(),
+            )
+            .is_some()
+    }
+
+    fn worker_effort(&self, requested: &str) -> Result<String> {
+        if !self.session.is_swarm_worker {
+            return Ok(requested.to_string());
+        }
+        capped_worker_effort(
+            &crate::config::config().agents,
+            self.session.provider_key.as_deref(),
+            self.provider.name(),
+            &self.provider_model(),
+            requested,
+            &self.provider.available_efforts(),
+        )
+    }
+
+    pub(super) fn enforce_worker_effort(&self) -> Result<()> {
+        if !self.session.is_swarm_worker {
+            return Ok(());
+        }
+        if let Some(current) = self.provider.reasoning_effort() {
+            let clamped = self.worker_effort(&current)?;
+            if clamped != current {
+                self.provider.set_reasoning_effort(&clamped)?;
+                crate::session_effort::record_session_effort(&self.session.id, Some(&clamped));
+            }
+        }
+        Ok(())
+    }
+
+    fn clamp_worker_effort_after_model_switch(&mut self, previous: Option<String>) -> Result<()> {
+        if !self.session.is_swarm_worker {
+            return Ok(());
+        }
+        if !self.has_worker_effort_cap() {
+            return Ok(());
+        }
+        if let Some(requested) = previous.or_else(|| self.provider.reasoning_effort()) {
+            let effort = self.worker_effort(&requested)?;
+            if effort != requested
+                || self.provider.reasoning_effort().as_deref() != Some(effort.as_str())
+            {
+                self.provider.set_reasoning_effort(&effort)?;
+            }
+            self.session.reasoning_effort = self.provider.reasoning_effort();
+            crate::session_effort::record_session_effort(
+                &self.session.id,
+                self.session.reasoning_effort.as_deref(),
+            );
+        }
+        Ok(())
+    }
     pub fn set_premium_mode(&self, mode: crate::provider::copilot::PremiumMode) {
         self.provider.set_premium_mode(mode);
     }
@@ -284,11 +443,13 @@ impl Agent {
         selection: &crate::provider::RouteSelection,
         source: crate::provider::ProviderModelSelectionSource,
     ) -> Result<()> {
+        let previous_effort = self.provider.reasoning_effort();
         self.provider.set_route_selection(selection)?;
         let resolved_model = self.provider.model();
         self.session.provider_key = Some(selection.runtime_key.stable_id());
         self.session.route_api_method = Some(selection.api_method.clone());
         self.session.model = Some(self.provider_model());
+        self.clamp_worker_effort_after_model_switch(previous_effort)?;
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
         self.refresh_compaction_budget();
@@ -309,6 +470,7 @@ impl Agent {
         model: &str,
         source: crate::provider::ProviderModelSelectionSource,
     ) -> Result<()> {
+        let previous_effort = self.provider.reasoning_effort();
         crate::provider::set_model_with_auth_refresh(self.provider.as_ref(), model)?;
         let resolved_model = self.provider.model();
         self.session.provider_key =
@@ -333,6 +495,7 @@ impl Agent {
             self.session.route_api_method = None;
         }
         self.session.model = Some(self.provider_model());
+        self.clamp_worker_effort_after_model_switch(previous_effort)?;
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
         self.refresh_compaction_budget();
@@ -351,14 +514,25 @@ impl Agent {
 
     pub fn restore_reasoning_effort_from_session(&mut self) {
         if let Some(effort) = self.session.reasoning_effort.clone() {
-            if let Err(e) = self.provider.set_reasoning_effort(&effort) {
-                crate::logging::error(&format!(
+            match self
+                .worker_effort(&effort)
+                .and_then(|effort| self.provider.set_reasoning_effort(&effort))
+            {
+                Ok(()) => self.session.reasoning_effort = self.provider.reasoning_effort(),
+                Err(e) => crate::logging::error(&format!(
                     "Failed to restore session reasoning effort '{}': {}",
                     effort, e
-                ));
+                )),
             }
         } else {
             self.session.reasoning_effort = self.provider.reasoning_effort();
+            if let Some(effort) = self.session.reasoning_effort.clone()
+                && let Ok(clamped) = self.worker_effort(&effort)
+                && clamped != effort
+                && self.provider.set_reasoning_effort(&clamped).is_ok()
+            {
+                self.session.reasoning_effort = self.provider.reasoning_effort();
+            }
         }
         // Mirror the effort into the deadlock-free side-table so server handlers
         // (e.g. the swarm seed handler) can learn this session's effort without
@@ -370,7 +544,8 @@ impl Agent {
     }
 
     pub fn set_reasoning_effort(&mut self, effort: &str) -> Result<Option<String>> {
-        self.provider.set_reasoning_effort(effort)?;
+        let effort = self.worker_effort(effort)?;
+        self.provider.set_reasoning_effort(&effort)?;
         let current = self.provider.reasoning_effort();
         self.session.reasoning_effort = current.clone();
         // Keep the side-table in sync (see `restore_reasoning_effort_from_session`).

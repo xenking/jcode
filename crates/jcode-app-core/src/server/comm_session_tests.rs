@@ -459,6 +459,7 @@ fn prepare_visible_spawn_session_persists_requested_effort() {
     assert!(launched);
     let session = crate::session::Session::load(&session_id).expect("prepared session should save");
     assert_eq!(session.model.as_deref(), Some("gpt-5.5"));
+    assert!(session.is_swarm_worker);
     assert_eq!(
         session.reasoning_effort.as_deref(),
         Some("low"),

@@ -66,6 +66,7 @@ impl Provider for TestEffortProvider {
     }
 
     fn set_model(&self, model: &str) -> anyhow::Result<()> {
+        let model = model.split_once(':').map_or(model, |(_, model)| model);
         *self.model.lock().expect("model lock") = Some(model.to_string());
         Ok(())
     }
@@ -89,6 +90,10 @@ impl Provider for TestEffortProvider {
     fn set_reasoning_effort(&self, effort: &str) -> anyhow::Result<()> {
         *self.effort.lock().expect("effort lock") = Some(effort.to_string());
         Ok(())
+    }
+
+    fn available_efforts(&self) -> Vec<&'static str> {
+        vec!["low", "medium", "high", "xhigh", "max"]
     }
 
     fn service_tier(&self) -> Option<String> {
@@ -117,6 +122,90 @@ impl Provider for TestEffortProvider {
             transport: StdMutex::new(self.transport()),
         })
     }
+}
+
+#[tokio::test]
+async fn worker_effort_caps_apply_to_spawn_control_failover_and_resume() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[agents]\nswarm_effort_caps = { \"test-effort:test-model-b\" = \"medium\" }\n",
+    )
+    .unwrap();
+    crate::config::Config::invalidate_cache();
+
+    let (provider, worker, tx, mut rx) = test_agent("session_effort_cap_worker").await;
+    {
+        let mut agent = worker.lock().await;
+        agent.mark_swarm_worker().unwrap();
+        agent.set_model("test-model-b").unwrap();
+        assert_eq!(
+            agent.set_reasoning_effort("max").unwrap().as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            agent.set_reasoning_effort("low").unwrap().as_deref(),
+            Some("low")
+        );
+        agent.set_model("test-model-a").unwrap();
+        assert_eq!(
+            agent.set_reasoning_effort("max").unwrap().as_deref(),
+            Some("max")
+        );
+        agent.set_model("test-model-b").unwrap();
+        assert_eq!(provider.reasoning_effort().as_deref(), Some("medium"));
+    }
+    handle_set_reasoning_effort(71, "xhigh".into(), true, &worker, &tx).await;
+    let event = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(event, ServerEvent::ReasoningEffortChanged { effort: Some(ref effort), error: None, .. } if effort == "medium")
+    );
+    let mut saved = crate::session::Session::load("session_effort_cap_worker").unwrap();
+    assert!(saved.is_swarm_worker);
+    saved.model = Some("test-model-b".into());
+    saved.provider_key = None;
+    saved.route_api_method = None;
+    saved.reasoning_effort = Some("max".into());
+    let resumed_provider = Arc::new(TestEffortProvider {
+        model: StdMutex::new(Some("test-model-b".into())),
+        ..Default::default()
+    });
+    let dyn_provider: Arc<dyn Provider> = resumed_provider.clone();
+    let registry = crate::tool::Registry::new(dyn_provider.clone()).await;
+    let resumed = Agent::new_with_session(dyn_provider, registry, saved, None);
+    assert!(
+        resumed.has_worker_effort_cap(),
+        "resumed model {:?}",
+        resumed.provider_model()
+    );
+    assert_eq!(
+        resumed_provider.reasoning_effort().as_deref(),
+        Some("medium")
+    );
+    let (_, root, _, _) = test_agent("session_effort_cap_root").await;
+    let mut root = root.lock().await;
+    root.set_model("test-model-b").unwrap();
+    assert_eq!(
+        root.set_reasoning_effort("max").unwrap().as_deref(),
+        Some("max")
+    );
 }
 
 async fn test_agent(
@@ -236,7 +325,7 @@ async fn set_reasoning_effort_does_not_wait_for_busy_agent_lock() {
 
     timeout(
         Duration::from_millis(100),
-        handle_set_reasoning_effort(7, "low".to_string(), &agent, &client_event_tx),
+        handle_set_reasoning_effort(7, "low".to_string(), false, &agent, &client_event_tx),
     )
     .await
     .expect("reasoning effort changes must not wait for a busy agent mutex");

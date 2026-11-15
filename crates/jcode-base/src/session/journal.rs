@@ -36,6 +36,8 @@ pub(super) struct SessionJournalMeta {
     pub(super) model: Option<String>,
     #[serde(default)]
     pub(super) reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) is_swarm_worker: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) context_cap: Option<usize>,
     pub(super) subagent_model: Option<String>,
@@ -111,6 +113,7 @@ pub(super) fn metadata_requires_snapshot(
         || prev.provider_key != current.provider_key
         || prev.route_api_method != current.route_api_method
         || prev.reasoning_effort != current.reasoning_effort
+        || prev.is_swarm_worker != current.is_swarm_worker
         || prev.context_cap != current.context_cap
         || prev.subagent_model != current.subagent_model
         || prev.agent_model_overrides != current.agent_model_overrides

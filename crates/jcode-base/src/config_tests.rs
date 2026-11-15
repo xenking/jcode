@@ -496,6 +496,15 @@ fn swarm_effort_parses_from_toml_and_env_override() {
 }
 
 #[test]
+fn swarm_effort_caps_are_preserved_in_config() {
+    let cfg: Config =
+        toml::from_str("[agents]\nswarm_effort_caps = { \"openai:gpt-6.1-sol\" = \"xhigh\" }\n")
+            .unwrap();
+    let json = serde_json::to_value(&cfg.agents).unwrap();
+    assert_eq!(json["swarm_effort_caps"]["openai:gpt-6.1-sol"], "xhigh");
+}
+
+#[test]
 fn wake_mode_defaults_parses_and_env_overrides() {
     let _guard = crate::storage::lock_test_env();
     let prev = std::env::var_os("JCODE_WAKE_MODE");
