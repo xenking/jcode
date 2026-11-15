@@ -167,7 +167,8 @@ fn preview_loading_preserves_live_tool_duration_metadata() {
             tool_use_id: "tool-call".into(),
             content: "completed".into(),
             is_error: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: Some(1250),
@@ -241,7 +242,8 @@ fn cloud_sessions_are_loaded_outside_the_recent_window_and_grouped_by_host() {
         content: vec![crate::message::ContentBlock::Text {
             text: "Continue my cloud work".into(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -1114,7 +1116,8 @@ fn load_sessions_prefers_custom_title_over_generated_title() {
         content: vec![crate::message::ContentBlock::Text {
             text: "please plan the release".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -1151,7 +1154,8 @@ fn load_sessions_prefers_generated_title_over_todo_lane_label() {
         content: vec![crate::message::ContentBlock::Text {
             text: "please improve the session picker".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -1265,7 +1269,8 @@ fn load_sessions_keeps_custom_title_over_todo_group() {
         content: vec![crate::message::ContentBlock::Text {
             text: "please improve the session picker".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -1324,7 +1329,8 @@ fn load_sessions_caps_saved_sessions_within_global_scan_limit() {
         content: vec![crate::message::ContentBlock::Text {
             text: "keep this bookmarked session visible".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -1344,7 +1350,8 @@ fn load_sessions_caps_saved_sessions_within_global_scan_limit() {
             content: vec![crate::message::ContentBlock::Text {
                 text: format!("newer unsaved session {idx:03}"),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -1381,7 +1388,8 @@ fn load_sessions_preserves_snapshot_saved_when_journal_meta_omits_saved() {
         content: vec![crate::message::ContentBlock::Text {
             text: "saved session with old journal metadata".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -1468,7 +1476,8 @@ fn session_matches_query_searches_jcode_transcript_contents() {
         content: vec![crate::message::ContentBlock::Text {
             text: "please find the zebra needle hidden in transcript text".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -1513,7 +1522,8 @@ fn jcode_search_index_keeps_late_turns_after_reaching_its_budget() {
             content: vec![crate::message::ContentBlock::Text {
                 text,
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -1798,7 +1808,8 @@ fn benchmark_resume_loading_reports_timings() {
             content: vec![crate::message::ContentBlock::Text {
                 text: format!("session {idx:03} says benchmark transcript token zebra-{idx:03}"),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -1810,7 +1821,8 @@ fn benchmark_resume_loading_reports_timings() {
             content: vec![crate::message::ContentBlock::Text {
                 text: "assistant reply for benchmark coverage".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,

@@ -639,7 +639,8 @@ mod tests {
                     name: "read".into(),
                     input: serde_json::json!({"path": "a.rs"}),
                     thought_signature: None,
-                }],
+                }]
+                .into(),
                 timestamp: None,
                 tool_duration_ms: None,
             },
@@ -649,7 +650,8 @@ mod tests {
                     tool_use_id: "t1".into(),
                     content: output.into(),
                     is_error: None,
-                }],
+                }]
+                .into(),
                 timestamp: None,
                 tool_duration_ms: None,
             },
@@ -662,7 +664,8 @@ mod tests {
             role: Role::Assistant,
             content: vec![ContentBlock::ReasoningTrace {
                 text: "local-only".into(),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         };
@@ -684,7 +687,8 @@ mod tests {
                     name: "read".into(),
                     input: serde_json::json!({"path":"a.rs"}),
                     thought_signature: None,
-                }],
+                }]
+                .into(),
                 timestamp: None,
                 tool_duration_ms: None,
             },
@@ -694,7 +698,8 @@ mod tests {
                     tool_use_id: "t1".into(),
                     content: "output".into(),
                     is_error: None,
-                }],
+                }]
+                .into(),
                 timestamp: None,
                 tool_duration_ms: None,
             },
@@ -741,7 +746,8 @@ mod tests {
                         text: "after".into(),
                         cache_control: None,
                     },
-                ],
+                ]
+                .into(),
                 timestamp: None,
                 tool_duration_ms: None,
             },

@@ -7,7 +7,8 @@ fn text(role: Role, t: &str) -> Message {
         content: vec![ContentBlock::Text {
             text: t.to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }
@@ -22,7 +23,8 @@ fn tool_pair(id: &str, name: &str, output: &str) -> [Message; 2] {
                 name: name.into(),
                 input: serde_json::json!({"path": "x"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -32,7 +34,8 @@ fn tool_pair(id: &str, name: &str, output: &str) -> [Message; 2] {
                 tool_use_id: id.into(),
                 content: output.into(),
                 is_error: Some(false),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -173,7 +176,8 @@ fn elides_code_blocks_but_keeps_prose_and_images() {
             content: vec![ContentBlock::Image {
                 media_type: "image/png".into(),
                 data: "A".repeat(50_000),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -259,7 +263,8 @@ fn skill_file_reads_are_protected() {
                 name: "read".into(),
                 input: serde_json::json!({"path": "/home/u/.jcode/skills/selfdev/SKILL.md"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         });
@@ -269,7 +274,8 @@ fn skill_file_reads_are_protected() {
                 tool_use_id: format!("k{i}"),
                 content: "k".repeat(4_000),
                 is_error: Some(false),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         });

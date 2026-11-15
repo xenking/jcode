@@ -158,21 +158,171 @@ impl App {
         Ok(self.finalize_model_switch(route))
     }
 
+    /// Diagnostic metadata only. Never include prompts, reminders, credentials,
+    /// provider error bodies, or image bytes in recovery event fields.
+    pub(super) fn recovery_log_fields(&self, reason: &str) -> Vec<(&'static str, String)> {
+        let pending = self.rate_limit_pending_message.as_ref();
+        vec![
+            (
+                "auto_resume_enabled",
+                self.auto_poke_incomplete_todos.to_string(),
+            ),
+            (
+                "has_final_response",
+                self.streaming
+                    .response_output
+                    .has_final_response()
+                    .to_string(),
+            ),
+            (
+                "runtime_generation",
+                self.remote_turn_fence
+                    .diagnostic_identity()
+                    .map(|turn| turn.runtime_generation.clone())
+                    .unwrap_or_else(|| "none".into()),
+            ),
+            (
+                "turn_id",
+                self.remote_turn_fence
+                    .diagnostic_identity()
+                    .map(|turn| turn.turn_id.to_string())
+                    .unwrap_or_else(|| "none".into()),
+            ),
+            (
+                "retry_delay_ms",
+                self.rate_limit_reset
+                    .map(|deadline| {
+                        deadline
+                            .saturating_duration_since(Instant::now())
+                            .as_millis()
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| "none".into()),
+            ),
+            ("reason", reason.to_string()),
+            (
+                "session_id",
+                self.remote_session_id
+                    .as_deref()
+                    .unwrap_or(&self.session.id)
+                    .to_string(),
+            ),
+            (
+                "request_id",
+                self.current_message_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "none".into()),
+            ),
+            ("pending", pending.is_some().to_string()),
+            (
+                "attempt",
+                pending.map_or(0, |p| p.retry_attempts).to_string(),
+            ),
+            (
+                "auto_retry",
+                pending.is_some_and(|p| p.auto_retry).to_string(),
+            ),
+            (
+                "is_system",
+                pending.is_some_and(|p| p.is_system).to_string(),
+            ),
+            (
+                "image_count",
+                pending.map_or(0, |p| p.images.len()).to_string(),
+            ),
+            (
+                "draft_image_count",
+                self.pending_images
+                    .iter()
+                    .filter(|(_, data)| !data.is_empty())
+                    .count()
+                    .to_string(),
+            ),
+            ("has_draft", (!self.input.is_empty()).to_string()),
+            ("queued_count", self.queued_messages.len().to_string()),
+            (
+                "hidden_queue_count",
+                self.hidden_queued_system_messages.len().to_string(),
+            ),
+            ("processing", self.is_processing.to_string()),
+            (
+                "model_switch_pending",
+                self.remote_model_switch_in_flight.to_string(),
+            ),
+            ("retry_armed", self.rate_limit_reset.is_some().to_string()),
+        ]
+    }
+
+    pub(super) fn log_recovery_event(
+        &self,
+        level: crate::logging::LogLevel,
+        event: &str,
+        reason: &str,
+    ) {
+        crate::logging::event(level, event, self.recovery_log_fields(reason));
+    }
+
     pub(super) fn restore_failover_payload(&mut self, payload: super::FallbackResendPayload) {
+        self.log_recovery_event(
+            crate::logging::LogLevel::Info,
+            "RECOVERY_DRAFT_RESTORE",
+            "held_payload",
+        );
         let restored = payload.raw_input.unwrap_or(payload.content);
+        let image_indices: Vec<Option<usize>> = payload
+            .images
+            .into_iter()
+            .map(|image| {
+                if image.0.is_empty() || image.1.is_empty() {
+                    return None;
+                }
+                let index = self
+                    .pending_images
+                    .iter()
+                    .position(|existing| existing == &image)
+                    .unwrap_or_else(|| {
+                        self.pending_images.push(image);
+                        self.pending_images.len() - 1
+                    });
+                Some(index + 1)
+            })
+            .collect();
         if self.input.is_empty() {
-            self.input = restored;
+            // The composer may already have attachment slots. Remap markers
+            // in the recovered prompt once, so swaps and collisions cannot
+            // associate its text with a different image.
+            static IMAGE_MARKER: std::sync::LazyLock<regex::Regex> =
+                std::sync::LazyLock::new(|| regex::Regex::new(r"\[image (\d+)\]").unwrap());
+            self.input = IMAGE_MARKER
+                .replace_all(&restored, |captures: &regex::Captures<'_>| {
+                    captures[1]
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|number| number.checked_sub(1))
+                        .and_then(|index| image_indices.get(index).copied().flatten())
+                        .map(|index| format!("[image {index}]"))
+                        .unwrap_or_else(|| captures[0].to_string())
+                })
+                .into_owned();
             self.cursor_pos = self.input.len();
         } else if !restored.is_empty() && self.input != restored {
             // Do not turn a partially typed command or prompt into a different
             // request. Keep the held request recoverable in the transcript.
             self.push_display_message(DisplayMessage::system(format!(
-                "Failover request was not resent. Your draft is unchanged. Recover the previous request from here:\n\n{restored}"
+                "Failover request was not resent. Your draft text is preserved. Recover the previous request from here:\n\n{restored}"
             )));
         }
-        for image in payload.images {
-            if !self.pending_images.contains(&image) {
-                self.pending_images.push(image);
+        // Attachment synchronization intentionally drops payloads without a
+        // marker. Keep recovered images attached even for image-only prompts
+        // or when a newer draft was already present.
+        for index in image_indices.into_iter().flatten() {
+            let marker = format!("[image {index}]");
+            if !self.input.contains(&marker) {
+                if !self.input.is_empty() && !self.input.ends_with(char::is_whitespace) {
+                    self.input.push(' ');
+                }
+                self.input.push_str(&marker);
+                self.cursor_pos = self.input.len();
             }
         }
     }
@@ -1406,6 +1556,37 @@ impl App {
             let estimate = manager.token_estimate_with(&messages);
             manager.update_observed_input_tokens_with_estimate(tokens, estimate);
         };
+    }
+
+    /// Recover the complete user payload before a terminal retry path clears it.
+    /// Restoring only `last_submitted_input` loses consumed image attachments.
+    pub(super) fn restore_terminal_remote_retry_input(&mut self) {
+        self.log_recovery_event(
+            crate::logging::LogLevel::Warn,
+            "RECOVERY_RETRY_RESTORE",
+            "terminal_retry_stop",
+        );
+        if self
+            .rate_limit_pending_message
+            .as_ref()
+            .is_some_and(|pending| !pending.is_system)
+        {
+            let pending = self.rate_limit_pending_message.take().unwrap();
+            let raw_input = self.last_submitted_input.take();
+            self.restore_failover_payload(super::FallbackResendPayload {
+                content: pending.content,
+                images: pending.images,
+                is_system: pending.is_system,
+                system_reminder: pending.system_reminder,
+                auto_retry: pending.auto_retry,
+                retry_attempts: pending.retry_attempts,
+                raw_input,
+            });
+            self.reset_tab_completion();
+            self.sync_model_picker_preview_from_input();
+        } else {
+            self.restore_failed_input_to_box();
+        }
     }
 
     /// Put the prompt that started the failed turn back into the input box so the

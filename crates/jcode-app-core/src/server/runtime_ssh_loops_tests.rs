@@ -518,7 +518,7 @@ fn stored(content: Vec<ContentBlock>) -> crate::session::StoredMessage {
     crate::session::StoredMessage {
         id: "m".into(),
         role: Role::Assistant,
-        content,
+        content: content.into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,

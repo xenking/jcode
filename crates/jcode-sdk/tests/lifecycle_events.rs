@@ -211,7 +211,10 @@ fn serve_connection(
                     .collect();
                 reply(
                     frame.id,
-                    ApiEvent::Sessions { sessions: listed },
+                    ApiEvent::Sessions {
+                        sessions: listed,
+                        workers: Default::default(),
+                    },
                     &mut writer,
                 );
             }
