@@ -391,7 +391,7 @@ pub(super) fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
             if !msg.is_empty() {
                 let normalized = normalize_repaint_sensitive_notice_text(msg);
                 previews.push(format!(
-                    "↻ {}",
+                    "queued ⏎ {}",
                     normalized.chars().take(100).collect::<String>()
                 ));
             }
@@ -454,7 +454,7 @@ pub(super) fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, sta
             let distance = pending_count.saturating_sub(i);
             let num_color = rainbow_prompt_color(distance);
             let (indicator, indicator_color, msg_color, dim) = match msg_type {
-                QueuedMsgType::Pending => ("↻", pending_color(), pending_color(), false),
+                QueuedMsgType::Pending => ("queued ⏎", pending_color(), pending_color(), true),
                 QueuedMsgType::Interleave => ("⚡", asap_color(), asap_color(), false),
                 QueuedMsgType::Queued => ("⏳", queued_color(), queued_color(), true),
             };
@@ -852,7 +852,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
     );
 
     let queued_suffix = if pending_count > 0 {
-        format!(" · +{} queued", pending_count)
+        format!(" · ⏎ {} queued", pending_count)
     } else {
         String::new()
     };

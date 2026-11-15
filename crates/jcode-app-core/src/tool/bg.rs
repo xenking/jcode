@@ -429,6 +429,8 @@ fn task_wait_reason(task: &background::TaskStatusFile) -> String {
     format!("Waiting for {}", task_label(task))
 }
 
+const USER_MESSAGE_NOTE: &str = "A user message arrived while waiting, so the wait ended early. The user's message is delivered right after this result: handle it first. The task keeps running; resume the wait later if still needed.";
+
 async fn wait_many_polling(
     manager: &background::BackgroundTaskManager,
     session_id: &str,
@@ -437,6 +439,7 @@ async fn wait_many_polling(
     return_on_progress: bool,
     mode: &str,
 ) -> Result<(String, Vec<background::TaskStatusFile>)> {
+    let incoming = crate::incoming_message::watch(session_id);
     let deadline = Instant::now() + max_wait;
     let mut last_progress = std::collections::HashMap::new();
     let mut wait_guard = None;
@@ -476,6 +479,9 @@ async fn wait_many_polling(
             }
         }
 
+        if max_wait > Duration::ZERO && incoming.is_pending() {
+            return Ok(("user_message".to_string(), tasks));
+        }
         if Instant::now() >= deadline {
             return Ok(("timeout".to_string(), tasks));
         }
@@ -501,7 +507,10 @@ async fn wait_many_polling(
             };
             crate::wait_registry::register(session_id, &reason)
         });
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            _ = incoming.arrived() => {}
+        }
     }
 }
 
@@ -780,6 +789,10 @@ impl Tool for BgTool {
                     .await?;
                     let mut output =
                         format!("Multi-task wait returned: {}\nMode: {}\n\n", reason, mode);
+                    if reason == "user_message" {
+                        output.push_str(USER_MESSAGE_NOTE);
+                        output.push_str("\n\n");
+                    }
                     for task in &tasks {
                         output.push_str(&format!(
                             "- {} · {} · {}\n",
@@ -816,16 +829,54 @@ impl Tool for BgTool {
                     .unwrap_or_else(|| "Waiting for background task".to_string());
                 let wait_guard =
                     blocking.then(|| crate::wait_registry::register(&ctx.session_id, &wait_reason));
-                let wait_result = manager
-                    .wait(
-                        &task_id,
-                        wait_duration,
-                        params
-                            .return_on_progress
-                            .unwrap_or_else(default_wait_return_on_progress),
+                let incoming = crate::incoming_message::watch(&ctx.session_id);
+                let wait_result = if blocking {
+                    tokio::select! {
+                        biased;
+                        _ = incoming.arrived() => None,
+                        result = manager.wait(
+                            &task_id,
+                            wait_duration,
+                            params
+                                .return_on_progress
+                                .unwrap_or_else(default_wait_return_on_progress),
+                        ) => Some(result),
+                    }
+                } else {
+                    Some(
+                        manager
+                            .wait(
+                                &task_id,
+                                wait_duration,
+                                params
+                                    .return_on_progress
+                                    .unwrap_or_else(default_wait_return_on_progress),
+                            )
+                            .await,
                     )
-                    .await;
+                };
                 drop(wait_guard);
+                let Some(wait_result) = wait_result else {
+                    // A user message is queued behind this wait. Return now so
+                    // the turn injects it instead of hiding it until Ctrl+C.
+                    let Some(task) = manager.status(&task_id).await else {
+                        return Err(anyhow::anyhow!("Task not found: {}", task_id));
+                    };
+                    let mut output = format!("{USER_MESSAGE_NOTE}\n\n");
+                    output.push_str(&format_task_details(&task));
+                    return Ok(ToolOutput::new(output)
+                        .with_title(format!("bg wait {}", task_id))
+                        .with_metadata(json!({
+                            "task_id": task.task_id,
+                            "task": task_metadata(manager, &task),
+                            "display_name": task.display_name,
+                            "status": status_label(&task.status),
+                            "wait_reason": "user_message",
+                            "timed_out": false,
+                            "max_wait_seconds": capped_wait,
+                            "interrupted_by_user_message": true,
+                        })));
+                };
                 match wait_result {
                     Some(wait_result) => {
                         let task = wait_result.task;
@@ -969,6 +1020,130 @@ mod tests {
         drop(future);
         assert_eq!(crate::wait_registry::current(sid), None);
         manager.cancel(&task.task_id).await.unwrap();
+    }
+
+    fn test_ctx(session_id: &str) -> ToolContext {
+        ToolContext {
+            session_id: session_id.to_string(),
+            message_id: "m".into(),
+            tool_call_id: "t".into(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: crate::tool::ToolExecutionMode::Direct,
+        }
+    }
+
+    #[tokio::test]
+    async fn single_wait_returns_early_when_user_message_is_queued() {
+        let sid = "bg_wait_user_message_single";
+        let task = background::global()
+            .spawn("test", sid, |_| async {
+                std::future::pending::<Result<background::TaskResult>>().await
+            })
+            .await;
+        let started = Instant::now();
+        let notifier = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            crate::incoming_message::notify(sid);
+        });
+        let output = BgTool::new()
+            .execute(
+                json!({
+                    "action": "wait",
+                    "intent": "wait for pending test task",
+                    "task_id": task.task_id,
+                    "max_wait_seconds": 120,
+                }),
+                test_ctx(sid),
+            )
+            .await
+            .expect("wait result");
+        notifier.await.unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "wait must end right after the message, took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            output.output.contains("user message arrived"),
+            "{}",
+            output.output
+        );
+        assert_eq!(output.metadata.unwrap()["wait_reason"], "user_message");
+        assert_eq!(crate::wait_registry::current(sid), None);
+        background::global().cancel(&task.task_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn single_wait_returns_at_once_for_already_queued_user_message() {
+        let sid = "bg_wait_user_message_prequeued";
+        let queue: jcode_agent_runtime::SoftInterruptQueue =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        crate::incoming_message::bind(sid, &queue);
+        queue
+            .lock()
+            .unwrap()
+            .push(jcode_agent_runtime::SoftInterruptMessage {
+                content: "hi".into(),
+                images: Vec::new(),
+                urgent: false,
+                source: jcode_agent_runtime::SoftInterruptSource::User,
+                client_id: None,
+            });
+        let task = background::global()
+            .spawn("test", sid, |_| async {
+                std::future::pending::<Result<background::TaskResult>>().await
+            })
+            .await;
+        let started = Instant::now();
+        let output = BgTool::new()
+            .execute(
+                json!({
+                    "action": "wait",
+                    "intent": "wait for pending test task",
+                    "task_id": task.task_id,
+                    "max_wait_seconds": 120,
+                }),
+                test_ctx(sid),
+            )
+            .await
+            .expect("wait result");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(output.metadata.unwrap()["wait_reason"], "user_message");
+        background::global().cancel(&task.task_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn multi_wait_returns_early_when_user_message_is_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = background::BackgroundTaskManager::with_output_dir(dir.path().into());
+        let sid = "bg_wait_user_message_multi";
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let task = manager
+                .spawn("test", sid, |_| async {
+                    std::future::pending::<Result<background::TaskResult>>().await
+                })
+                .await;
+            ids.push(task.task_id);
+        }
+        let notifier = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            crate::incoming_message::notify(sid);
+        });
+        let started = Instant::now();
+        let (reason, _) =
+            wait_many_polling(&manager, sid, &ids, Duration::from_secs(120), false, "all")
+                .await
+                .unwrap();
+        notifier.await.unwrap();
+        assert_eq!(reason, "user_message");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(crate::wait_registry::current(sid), None);
+        for id in ids {
+            manager.cancel(&id).await.unwrap();
+        }
     }
 
     #[test]

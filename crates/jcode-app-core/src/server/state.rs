@@ -711,7 +711,10 @@ impl SessionControlHandle {
         urgent: bool,
         source: SoftInterruptSource,
     ) -> bool {
-        enqueue_soft_interrupt(&self.soft_interrupt_queue, content, images, urgent, source)
+        let queued =
+            enqueue_soft_interrupt(&self.soft_interrupt_queue, content, images, urgent, source);
+        self.wake_blocking_waits(queued, source);
+        queued
     }
 
     pub fn queue_soft_interrupt_with_id(
@@ -722,14 +725,24 @@ impl SessionControlHandle {
         source: SoftInterruptSource,
         client_id: Option<String>,
     ) -> bool {
-        enqueue_soft_interrupt_with_id(
+        let queued = enqueue_soft_interrupt_with_id(
             &self.soft_interrupt_queue,
             content,
             images,
             urgent,
             source,
             client_id,
-        )
+        );
+        self.wake_blocking_waits(queued, source);
+        queued
+    }
+
+    /// A queued user prompt must not sit behind a long blocking tool wait.
+    fn wake_blocking_waits(&self, queued: bool, source: SoftInterruptSource) {
+        if queued {
+            crate::incoming_message::bind(&self.session_id, &self.soft_interrupt_queue);
+            crate::incoming_message::notify_if_user(&self.session_id, source);
+        }
     }
 
     /// Soft interrupts queued and not yet injected.
@@ -899,6 +912,7 @@ pub(super) async fn register_session_interrupt_queue(
     session_id: &str,
     queue: SoftInterruptQueue,
 ) {
+    crate::incoming_message::bind(session_id, &queue);
     let mut guard = queues.write().await;
     guard.insert(session_id.to_string(), queue);
 }
@@ -910,6 +924,7 @@ pub(super) async fn rename_session_interrupt_queue(
 ) {
     let mut guard = queues.write().await;
     if let Some(queue) = guard.remove(old_session_id) {
+        crate::incoming_message::bind(new_session_id, &queue);
         guard.insert(new_session_id.to_string(), queue);
     }
 }
@@ -920,6 +935,7 @@ pub(super) async fn remove_session_interrupt_queue(
 ) {
     let mut guard = queues.write().await;
     guard.remove(session_id);
+    crate::incoming_message::forget(session_id);
 }
 
 pub(super) async fn queue_soft_interrupt_for_session(
@@ -931,7 +947,11 @@ pub(super) async fn queue_soft_interrupt_for_session(
     sessions: &super::SessionAgents,
 ) -> bool {
     if let Some(queue) = queues.read().await.get(session_id).cloned() {
-        return enqueue_soft_interrupt(&queue, content, Vec::new(), urgent, source);
+        let queued = enqueue_soft_interrupt(&queue, content, Vec::new(), urgent, source);
+        if queued {
+            crate::incoming_message::notify_if_user(session_id, source);
+        }
+        return queued;
     }
 
     let queue = {
@@ -946,7 +966,11 @@ pub(super) async fn queue_soft_interrupt_for_session(
 
     if let Some(queue) = queue {
         register_session_interrupt_queue(queues, session_id, queue.clone()).await;
-        enqueue_soft_interrupt(&queue, content, Vec::new(), urgent, source)
+        let queued = enqueue_soft_interrupt(&queue, content, Vec::new(), urgent, source);
+        if queued {
+            crate::incoming_message::notify_if_user(session_id, source);
+        }
+        queued
     } else {
         let session_exists = {
             let guard = sessions.read().await;

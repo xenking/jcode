@@ -165,6 +165,9 @@ impl Agent {
                 pending_before,
                 queue.len()
             ));
+            drop(queue);
+            crate::incoming_message::bind(self.session_id(), &self.soft_interrupt_queue);
+            crate::incoming_message::notify_if_user(self.session_id(), source);
         } else {
             logging::warn(&format!(
                 "AGENT_SOFT_INTERRUPT_QUEUE_PUSH_FAILED session={} source={:?} urgent={} content_bytes={} content_chars={} image_count={} reason=queue_lock_poisoned",
