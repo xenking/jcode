@@ -2,6 +2,7 @@
 //! rquickjs-sys has no prebuilt bindings.
 
 use super::{CallReceipt, CallStatus, Host, Limits, RunOutput, ToolInfo};
+use crate::strip::Stripped;
 use rquickjs::{
     AsyncContext, AsyncRuntime, CatchResultExt, Function, Promise, Value as JsValue, prelude::Async,
 };
@@ -9,6 +10,11 @@ use serde_json::{Map, Value, json};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Lines the engine prepends to the script when it wraps the body in an async
+/// function, so a position in the evaluated source is that many lines ahead of
+/// the script the model wrote.
+const WRAPPER_LINES: u32 = 1;
 
 const PRELUDE: &str = r#"
 (() => {
@@ -205,6 +211,14 @@ async fn run_on_thread(
     shared: Arc<Shared>,
     started: Instant,
 ) -> Result<Option<Value>, String> {
+    // Erase TypeScript types before QuickJS ever sees the script. A script that
+    // does not parse as JavaScript or TypeScript returns here, so the model
+    // gets its own line and column instead of a bare `unexpected token`.
+    let stripped = crate::strip::strip(&code).map_err(|err| {
+        format!(
+            "script did not parse: {err}\ncodemode runs JavaScript and TypeScript; types are erased, so fix the syntax at that position."
+        )
+    })?;
     let rt = AsyncRuntime::new().map_err(|e| format!("failed to create JS runtime: {e}"))?;
     rt.set_memory_limit(shared.limits.memory_bytes).await;
     rt.set_max_stack_size(1024 * 1024).await;
@@ -231,16 +245,16 @@ async fn run_on_thread(
         ctx.eval::<(), _>(PRELUDE)
             .catch(&ctx)
             .map_err(|e| format!("prelude failed: {e}"))?;
-        let wrapped = format!("(async () => {{\n{code}\n}})()");
+        let wrapped = format!("(async () => {{\n{code}\n}})()", code = stripped.code);
         let promise: Promise = ctx
             .eval(wrapped)
             .catch(&ctx)
-            .map_err(|e| format_js_parse_error(&e.to_string()))?;
+            .map_err(|e| format_js_parse_error(&stripped, &e.to_string()))?;
         let value: JsValue = promise
             .into_future::<JsValue>()
             .await
             .catch(&ctx)
-            .map_err(|e| format_js_error(&e.to_string()))?;
+            .map_err(|e| format_js_error(&stripped, &e.to_string()))?;
         if value.is_undefined() {
             return Ok(None);
         }
@@ -276,26 +290,27 @@ async fn run_on_thread(
     result
 }
 
-fn format_js_error(raw: &str) -> String {
-    let trimmed = raw.trim();
+/// QuickJS reports positions in the stripped, wrapped source. Put them back on
+/// the script the model wrote before anything else looks at the message.
+fn format_js_error(stripped: &Stripped, raw: &str) -> String {
+    let trimmed = stripped.remap_error(raw.trim(), WRAPPER_LINES);
     if trimmed.contains("out of memory") {
         return format!("{trimmed} (memory limit reached)");
     }
     trimmed.to_string()
 }
 
-/// A script that does not parse usually came from `types()` output: the model
-/// copies a declaration or writes `const x: string = ...`. QuickJS reports that
-/// as `missing initializer for variable` or a bare `unexpected token`, which
-/// reads as "codemode is broken" instead of "drop the annotation". Name the
-/// real cause on every parse failure; runtime failures keep the plain message.
-fn format_js_parse_error(raw: &str) -> String {
-    let message = format_js_error(raw);
+/// [`crate::strip`] has already produced the JavaScript QuickJS evaluates, and
+/// it only returns code the parser and codegen agree on. Reaching a parse error
+/// at this point means the stripper, not the model's script, is at fault, so
+/// say that instead of sending the model off to rewrite working code.
+fn format_js_parse_error(stripped: &Stripped, raw: &str) -> String {
+    let message = format_js_error(stripped, raw);
     if message.contains("memory limit reached") {
         return message;
     }
     format!(
-        "{message}\nThis sandbox runs plain JavaScript (QuickJS), not TypeScript. `types()` output is a reference, not runnable code: remove type annotations (`const x: string` -> `const x`), interfaces, generics, and `as` casts.\n"
+        "{message}\nThe stripped script did not parse. That is a codemode bug rather than a problem with your script: nothing about your code was rejected for its types.\n"
     )
 }
 

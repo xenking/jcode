@@ -131,24 +131,93 @@ async fn syntax_errors_are_reported() {
     assert!(out.error.is_some());
 }
 
-/// `types()` hands the model TypeScript declarations, so a model naturally
-/// writes `const x: string = ...`. QuickJS only runs plain JavaScript, and the
-/// bare `SyntaxError: unexpected token` that results teaches the model that
-/// codemode is broken rather than that annotations must go. The error has to
-/// name the real problem.
+/// `types()` hands the model TypeScript declarations, so a model writes
+/// `const x: string = ...` and means it. Types are erased before QuickJS sees
+/// the script, exactly like Deno and Bun, so the annotation is a no-op rather
+/// than a syntax error.
 #[tokio::test(flavor = "multi_thread")]
-async fn typescript_annotations_explain_the_plain_javascript_rule() {
-    let out = exec("const name: string = 'x'; return name;").await;
-    let err = out.error.unwrap_or_default();
-    assert!(!err.is_empty(), "a TypeScript annotation must not run");
-    assert!(
-        err.to_lowercase().contains("typescript")
-            && err.to_lowercase().contains("plain javascript"),
-        "error must explain the plain-JavaScript rule, got: {err}"
+async fn typescript_annotations_run() {
+    let out = exec(
+        r#"
+        type Severity = "info" | "warn";
+        interface Finding { path: string; severity: Severity }
+        const name: string = "x";
+        const severity = "info" satisfies Severity;
+        const finding = { path: name, severity } as Finding;
+        const optional = (value?: string): string => value ?? "none";
+        return [finding.path, optional(), optional("y")];
+        "#,
+    )
+    .await;
+    assert_eq!(out.error, None);
+    assert_eq!(
+        out.result,
+        Some(json!(["x", "none", "y"])),
+        "{:?}",
+        out.result
     );
+}
+
+/// The shape `types()` prints: a named input type plus a `declare const tools`
+/// whose members return promises. A model copies that and calls through it.
+#[tokio::test(flavor = "multi_thread")]
+async fn typescript_program_calls_tools_with_declaration_style_annotations() {
+    let out = exec(
+        r#"
+        type EchoInput = {
+          x: number;
+          note?: string;
+        };
+
+        declare const tools: {
+          echo(args: EchoInput): Promise<any>;
+        };
+
+        const args: EchoInput = { x: 1 } satisfies EchoInput;
+        const first = await tools.echo(args);
+        const second = await tools.echo<EchoInput>({ x: 2 });
+        return [first, second] as const;
+        "#,
+    )
+    .await;
+    assert_eq!(out.error, None);
+    assert_eq!(
+        out.result,
+        Some(json!([
+            { "echo": { "x": 1 } },
+            { "echo": { "x": 2 } }
+        ])),
+        "{:?}",
+        out.result
+    );
+    assert_eq!(out.tool_calls, 2);
+}
+
+/// A real syntax error has to name the line the model wrote. Type-only lines
+/// are gone after stripping, so the position comes from the parser over the
+/// original source rather than from the printed JavaScript.
+#[tokio::test(flavor = "multi_thread")]
+async fn typescript_syntax_errors_point_at_the_model_line() {
+    let out = exec("type A = string;\n\nconst a: A = ;\n").await;
+    let err = out.error.unwrap_or_default();
+    assert!(err.contains("line 3:"), "{err}");
+    assert_eq!(out.tool_calls, 0, "{err}");
+}
+
+/// Runtime errors come back from the stripped, wrapped source. The engine maps
+/// the position back onto the script the model wrote, so the line it is told to
+/// fix is the line it can see.
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_errors_point_at_the_model_line() {
+    let out = exec(
+        "type A = string;\ninterface B { x: A }\nconst a: A = 'x';\nnull.boom(a);\nreturn a;\n",
+    )
+    .await;
+    let err = out.error.unwrap_or_default();
+    assert!(err.contains("boom") || err.contains("null"), "{err}");
     assert!(
-        err.contains("type annotation") || err.contains("annotations"),
-        "error must name the annotation, got: {err}"
+        err.contains(":4:"),
+        "error must point at line 4, got: {err}"
     );
 }
 

@@ -201,6 +201,41 @@ async fn script_composes_registry_tools() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn typescript_script_runs_through_the_tool() {
+    let registry = registry().await;
+    // The shape `types()` prints, plus the annotations a model writes after
+    // reading it: this has to reach the registry's tools, not just the parser.
+    let out = registry
+        .execute(
+            "codemode",
+            json!({
+                "code": r#"
+                    type LookupInput = { id: number };
+                    interface LookupResult { square: number }
+
+                    declare const tools: {
+                      lookup(args: LookupInput): Promise<LookupResult>;
+                      shout(args: { text: string }): Promise<any>;
+                    };
+
+                    const ids: number[] = [1, 2, 3];
+                    const rows = await Promise.all(
+                      ids.map((id: number) => tools.lookup({ id } as LookupInput)),
+                    );
+                    const total = rows.reduce((s: number, r: LookupResult) => s + r.square, 0);
+                    const loud = await tools.shout<{ text: string }>({ text: "done" });
+                    return { total, loud } satisfies Record<string, unknown>;
+                "#
+            }),
+            ctx("codemode-typescript-test"),
+        )
+        .await
+        .expect("codemode runs TypeScript");
+    assert!(out.output.contains("\"total\": 14"), "{}", out.output);
+    assert!(out.output.contains("\"loud\": \"DONE\""), "{}", out.output);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn script_cannot_call_itself_or_batch() {
     let registry = registry().await;
     let out = registry

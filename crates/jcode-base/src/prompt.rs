@@ -42,7 +42,7 @@ pub const MERMAID_PROMPT: &str = "# Mermaid\n\nRender fenced `mermaid` blocks in
 /// `batch` instead (codemode was 0.14% of 7,884 tool calls).
 pub const CODEMODE_PROMPT: &str = "# Tool calls
 
-`codemode` runs one JavaScript program that calls tools itself, so a whole lookup chain costs one turn instead of many. Reach for it when:
+`codemode` runs one JavaScript or TypeScript program that calls tools itself, so a whole lookup chain costs one turn instead of many. Type annotations are erased before it runs, so `types()` output can be copied as-is. Reach for it when:
 - the task needs 5 or more tool calls,
 - each call needs the previous call's result,
 - you would loop over a list another tool returned,

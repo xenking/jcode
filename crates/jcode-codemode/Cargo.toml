@@ -19,6 +19,19 @@ futures = "0.3"
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 
+# TypeScript type stripping (src/strip.rs). oxc's parser, semantic builder,
+# transformer and codegen are linked in-process, the way Deno and Bun erase
+# types: no `tsc`, no Node, no subprocess. Pinned to the last release whose
+# MSRV is the workspace toolchain (1.95); 0.158 wants 1.97.
+oxc_allocator = "=0.146.0"
+oxc_ast = "=0.146.0"
+oxc_codegen = "=0.146.0"
+oxc_diagnostics = "=0.146.0"
+oxc_parser = "=0.146.0"
+oxc_semantic = "=0.146.0"
+oxc_span = "=0.146.0"
+oxc_transformer = "=0.146.0"
+
 # rquickjs-sys ships no prebuilt FreeBSD bindings, and generating them needs
 # libclang in the build VM. Codemode reports itself unavailable there instead.
 [target.'cfg(not(target_os = "freebsd"))'.dependencies]

@@ -1,9 +1,14 @@
 //! Embedded QuickJS sandbox for Jcode's opt-in Codemode.
 //!
-//! Codemode lets the model write a short JavaScript program that orchestrates
-//! harness tool calls (built-in tools and MCP tools alike) instead of issuing
-//! them one model turn at a time. Intermediate results stay inside the
-//! sandbox, so only what the script returns reaches the transcript.
+//! Codemode lets the model write a short JavaScript or TypeScript program that
+//! orchestrates harness tool calls (built-in tools and MCP tools alike) instead
+//! of issuing them one model turn at a time. Intermediate results stay inside
+//! the sandbox, so only what the script returns reaches the transcript.
+//!
+//! TypeScript is accepted because [`ts`] hands the model TypeScript
+//! declarations for every tool. [`strip`] erases the types in-process before
+//! QuickJS sees the script, the way Deno and Bun do, and keeps a line map so
+//! errors still point at the line the model wrote.
 //!
 //! The sandbox runs where the harness runs, not where `bash` runs. It has no
 //! filesystem, network, timer, or process APIs. The only way to affect the
@@ -22,6 +27,7 @@ use std::time::Duration;
 
 #[cfg(not(target_os = "freebsd"))]
 mod engine;
+pub mod strip;
 pub mod ts;
 
 /// Host-recorded outcome of one nested tool call. Recorded by the host, not
