@@ -25,7 +25,8 @@ pub async fn build_transfer_compaction_state(
         .map(|state| state.original_turn_count.max(state.covers_up_to_turn))
         .unwrap_or(0);
     let result =
-        generate_compaction_artifact(provider, messages.clone(), existing_summary, false).await?;
+        generate_compaction_artifact(provider, messages.clone(), existing_summary, false, None)
+            .await?;
     let total_turns = prior_turns + messages.len();
 
     Ok(Some(crate::session::StoredCompactionState {

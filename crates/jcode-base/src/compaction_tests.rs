@@ -1379,6 +1379,7 @@ async fn refused_compaction_keeps_original_messages_issue_2089() {
         messages.clone(),
         None,
         false,
+        None,
     )
     .await
     .err()
@@ -1484,6 +1485,40 @@ fn shake_does_not_expire_during_a_long_provider_response() {
             .unwrap()
             .0,
         ShakeReason::CacheExpiry
+    );
+}
+
+/// A warm prompt cache must not suppress pre-compaction shake: LLM compaction
+/// rewrites the prefix anyway in the same request, so the cheap reducer has to
+/// run first (it is unreachable otherwise for every TTL provider such as
+/// Anthropic's 1h cache).
+fn shake_manager_with_budget(budget: usize) -> CompactionManager {
+    let mut m = CompactionManager::new().with_budget(budget);
+    m.set_context_cap_override(Some(usize::MAX));
+    m.mode = crate::config::CompactionMode::Reactive;
+    m.compaction_config.shake = true;
+    m.compaction_config.shake_cache_expiry = true;
+    m.compaction_config.reactive_threshold = 0.99;
+    m.compaction_config.reactive_threshold_tokens = 0;
+    m
+}
+
+/// omp orders `snapcompact` before `shake`: when the bitmap archive can handle
+/// this compaction, no pre-compaction shake is planned.
+#[test]
+fn snapcompact_preference_suppresses_pre_compaction_shake() {
+    let mut m = shake_manager_with_budget(40_000);
+    m.compaction_config.reactive_threshold = 0.80;
+    let over = shake_session(40, 2000);
+    assert!(m.should_compact_with(&over));
+    assert!(
+        m.plan_shake_with(&over, Instant::now(), Some(3600), true)
+            .is_none()
+    );
+    assert_eq!(
+        m.plan_shake_with(&over, Instant::now(), Some(3600), false)
+            .map(|(reason, _)| reason),
+        Some(ShakeReason::PreCompact)
     );
 }
 
@@ -1658,13 +1693,131 @@ impl Provider for VisionSummaryProvider {
     }
 }
 
+/// Counting wrapper so a test can prove the summarizer was never called.
+struct CountingVisionProvider {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Provider for CountingVisionProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[crate::message::ToolDefinition],
+        system: &str,
+        resume: Option<&str>,
+    ) -> Result<EventStream> {
+        MockSummaryProvider
+            .complete(messages, tools, system, resume)
+            .await
+    }
+    fn name(&self) -> &str {
+        "vision-test"
+    }
+    fn model(&self) -> String {
+        "claude-opus-4-6".to_string()
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            calls: self.calls.clone(),
+        })
+    }
+    fn supports_image_input(&self) -> bool {
+        true
+    }
+    async fn complete_simple_with_usage(
+        &self,
+        prompt: &str,
+        system: &str,
+    ) -> Result<(String, jcode_provider_core::SimpleCompletionUsage)> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        MockSummaryProvider
+            .complete_simple_with_usage(prompt, system)
+            .await
+    }
+}
+
+/// omp snapcompact is a complete compaction: no LLM summarizer request at all.
+/// jcode used to render the frames and then still pay the full-context summary.
+#[tokio::test]
+async fn snapcompact_skips_the_llm_summarizer() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let provider = Arc::new(CountingVisionProvider {
+        calls: calls.clone(),
+    });
+    let result = generate_compaction_artifact(
+        provider,
+        vec![make_text_message(Role::User, "early codeword ZEBRA-ORCHID")],
+        None,
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "snapcompact must not call the summarizer"
+    );
+    assert!(
+        result
+            .summary_text
+            .starts_with("Resume prior conversation."),
+        "{}",
+        result.summary_text
+    );
+    assert!(result.summary_text.contains("HISTORY"));
+    assert!(result.snapcompact.is_some());
+
+    // Without image input the text summarizer still runs.
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let text_only = generate_compaction_artifact(
+        Arc::new(MockSummaryProvider),
+        vec![make_text_message(Role::User, "no vision")],
+        None,
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(text_only.summary_text.starts_with("summary("));
+    assert!(text_only.snapcompact.is_none());
+    drop(calls);
+}
+
+/// omp advances to the next method when snapcompact fails; jcode must still
+/// produce a usable text summary, shaken first, and never an empty one.
+#[tokio::test]
+async fn snapcompact_failure_still_produces_a_text_summary() {
+    let messages = vec![Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ReasoningTrace {
+            text: "local only, nothing archivable".into(),
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+    let result =
+        generate_compaction_artifact(Arc::new(VisionSummaryProvider), messages, None, true, None)
+            .await
+            .unwrap();
+    assert!(result.snapcompact.is_none());
+    assert!(result.summary_text.starts_with("summary("));
+    assert!(!result.summary_text.trim().is_empty());
+}
+
 #[tokio::test]
 async fn snapcompact_generates_summary_and_preserves_previous_archive() {
     let messages = vec![make_text_message(Role::User, "early codeword ZEBRA-ORCHID")];
-    let first = generate_compaction_artifact(Arc::new(VisionSummaryProvider), messages, None, true)
-        .await
-        .unwrap();
-    assert!(first.summary_text.starts_with("summary("));
+    let first =
+        generate_compaction_artifact(Arc::new(VisionSummaryProvider), messages, None, true, None)
+            .await
+            .unwrap();
+    assert!(
+        first.summary_text.starts_with("Resume prior conversation."),
+        "{}",
+        first.summary_text
+    );
     let archive = first.snapcompact.unwrap();
     assert!(!archive.pages.is_empty());
     assert!(archive.source.contains("ZEBRA-ORCHID"));
@@ -1680,6 +1833,7 @@ async fn snapcompact_generates_summary_and_preserves_previous_archive() {
         vec![make_text_message(Role::User, "later turn")],
         Some(previous),
         true,
+        None,
     )
     .await
     .unwrap();
@@ -1691,6 +1845,7 @@ async fn snapcompact_generates_summary_and_preserves_previous_archive() {
         vec![make_text_message(Role::User, "no vision")],
         None,
         true,
+        None,
     )
     .await
     .unwrap();

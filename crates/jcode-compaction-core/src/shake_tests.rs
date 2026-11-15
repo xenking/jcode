@@ -202,3 +202,196 @@ fn whole_log_inside_window_is_no_change() {
     assert_eq!(shake(&mut m, &c), ShakeOutcome::NoChange);
     assert_eq!(shake_savings(&m, &c), 0);
 }
+
+// ── omp parity (packages/agent/src/compaction/shake.ts) ───────────────
+
+/// omp `DEFAULT_SHAKE_CONFIG`: protectTokens 16000, minSavings 4000,
+/// fenceMinTokens 400.
+#[test]
+fn defaults_match_omp_auto_shake() {
+    let config = ShakeConfig::default();
+    assert_eq!(config.protect_window_tokens, 16_000);
+    assert_eq!(config.min_savings_tokens, 4_000);
+    assert_eq!(config.min_elidable_tokens, 400);
+    assert_eq!(config.code_blocks, true);
+    assert_eq!(config.protected_tools, PROTECTED_TOOLS_DEFAULT);
+}
+
+/// omp `isProtectedToolResult`: a skill result is never elided, even when old
+/// and large, because the agent re-reads it to follow the skill.
+#[test]
+fn skill_results_are_never_elided() {
+    let mut messages = vec![text(Role::User, "start")];
+    for i in 0..10 {
+        messages.extend(tool_pair(
+            &format!("s{i}"),
+            "skill_manage",
+            &"s".repeat(4_000),
+        ));
+        messages.extend(tool_pair(&format!("t{i}"), "read", &"r".repeat(4_000)));
+    }
+    messages.push(text(Role::User, &"z".repeat(4_800)));
+    let outcome = shake(&mut messages, &cfg());
+    let ShakeOutcome::Shaken { regions_elided, .. } = outcome else {
+        panic!("expected shaken");
+    };
+    assert_eq!(regions_elided, 10, "only the read results are elided");
+    for message in &messages {
+        let ContentBlock::ToolResult { content, .. } = &message.content[0] else {
+            continue;
+        };
+        assert!(
+            !content.starts_with("[elided tool_result skill_manage"),
+            "skill result was elided"
+        );
+    }
+}
+
+/// omp `isSkillReadToolResult`: reading a skill file is protected too.
+#[test]
+fn skill_file_reads_are_protected() {
+    let mut messages = vec![text(Role::User, "start")];
+    for i in 0..10 {
+        messages.push(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: format!("k{i}"),
+                name: "read".into(),
+                input: serde_json::json!({"path": "/home/u/.jcode/skills/selfdev/SKILL.md"}),
+                thought_signature: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        });
+        messages.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: format!("k{i}"),
+                content: "k".repeat(4_000),
+                is_error: Some(false),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        });
+    }
+    messages.push(text(Role::User, &"z".repeat(4_800)));
+    assert_eq!(shake(&mut messages, &cfg()), ShakeOutcome::NoChange);
+}
+
+/// omp `scanTextForBlockRanges`: top-level XML blocks are elided like fences.
+#[test]
+fn xml_blocks_in_old_text_are_elided() {
+    let body = "tool output line\n".repeat(2_000);
+    let mut messages = vec![
+        text(
+            Role::Assistant,
+            &format!("before\n<bash_output>\n{body}</bash_output>\nafter"),
+        ),
+        text(Role::User, &"z".repeat(4_800)),
+    ];
+    let cfg = ShakeConfig {
+        protect_window_tokens: 100,
+        ..cfg()
+    };
+    let outcome = shake(&mut messages, &cfg);
+    assert!(
+        matches!(
+            outcome,
+            ShakeOutcome::Shaken {
+                regions_elided: 1,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+    let ContentBlock::Text { text: shaken, .. } = &messages[0].content[0] else {
+        panic!()
+    };
+    assert!(shaken.starts_with("before\n[elided "), "{shaken}");
+    assert!(shaken.ends_with("after"), "{shaken}");
+}
+
+/// omp suppresses XML detection inside fences: one region, not two.
+#[test]
+fn xml_inside_a_fence_is_one_region() {
+    let body = "fn x() {}\n".repeat(2_000);
+    let mut messages = vec![
+        text(
+            Role::Assistant,
+            &format!("```xml\n<bash_output>\n{body}</bash_output>\n```"),
+        ),
+        text(Role::User, &"z".repeat(4_800)),
+    ];
+    let cfg = ShakeConfig {
+        protect_window_tokens: 100,
+        ..cfg()
+    };
+    assert!(matches!(
+        shake(&mut messages, &cfg),
+        ShakeOutcome::Shaken {
+            regions_elided: 1,
+            ..
+        }
+    ));
+}
+
+/// An unterminated fence yields no region (omp is conservative).
+#[test]
+fn unterminated_fence_is_never_elided() {
+    let body = "fn x() {}\n".repeat(2000);
+    let mut messages = vec![
+        text(Role::Assistant, &format!("```rust\n{body}")),
+        text(Role::User, &"z".repeat(4_800)),
+    ];
+    let cfg = ShakeConfig {
+        protect_window_tokens: 100,
+        ..cfg()
+    };
+    assert_eq!(shake(&mut messages, &cfg), ShakeOutcome::NoChange);
+}
+
+/// omp `AGGRESSIVE_SHAKE_CONFIG` (manual `/shake`): no savings gate, shallow
+/// protect window.
+#[test]
+fn aggressive_preset_elides_below_the_default_savings_gate() {
+    // ~2950 savable tokens: under the 4000 default gate nothing happens.
+    let mut messages = session(3, 1000, 1200);
+    assert_eq!(shake(&mut messages, &cfg()), ShakeOutcome::NoChange);
+    let no_gate = ShakeConfig {
+        min_savings_tokens: 0,
+        ..cfg()
+    };
+    assert!(matches!(
+        shake(&mut messages, &no_gate),
+        ShakeOutcome::Shaken {
+            regions_elided: 3,
+            ..
+        }
+    ));
+
+    // The auto preset's 16k window protects the whole short session.
+    let mut messages = session(4, 1000, 1200);
+    assert_eq!(
+        shake(&mut messages, &ShakeConfig::default()),
+        ShakeOutcome::NoChange
+    );
+    assert!(matches!(
+        shake(&mut messages, &ShakeConfig::aggressive()),
+        ShakeOutcome::Shaken { .. }
+    ));
+}
+
+/// omp `RESCUE_SHAKE_CONFIG` (compaction dead-end): reaches into the tail so an
+/// oversized newest result can still be dropped.
+#[test]
+fn rescue_preset_reaches_into_the_tail() {
+    let mut messages = session(1, 1000, 8_000);
+    assert_eq!(shake(&mut messages, &cfg()), ShakeOutcome::NoChange);
+    let rescue = ShakeConfig::rescue();
+    assert_eq!(rescue.protect_window_tokens, 0);
+    let outcome = shake(&mut messages, &rescue);
+    assert!(
+        matches!(outcome, ShakeOutcome::Shaken { .. }),
+        "{outcome:?}"
+    );
+}

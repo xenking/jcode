@@ -346,6 +346,10 @@ pub struct CompactionConfig {
     /// Use bitmap snapcompact for vision-capable models at compaction time.
     /// Models without vision fall back to normal compaction.
     pub snapcompact: bool,
+    /// Frame shape snapcompact prints the archive with (omp `snapcompact.shape`).
+    /// `auto` picks the shape tuned for the active model; any `SHAPE_VARIANTS`
+    /// name (`11on16-bw`, `8on22-bw`, `6x6u-sent`, ...) forces that geometry.
+    pub snapcompact_shape: String,
 
     /// Enable LLM-free "shake" elision of stale large tool outputs and code
     /// blocks. Runs only when the prompt prefix is being rewritten anyway:
@@ -408,6 +412,7 @@ pub struct CompactionOverride {
     pub goal_window_turns: Option<usize>,
     pub max_context_tokens: Option<usize>,
     pub snapcompact: Option<bool>,
+    pub snapcompact_shape: Option<String>,
     pub shake: Option<bool>,
     pub shake_protect_tokens: Option<usize>,
     pub shake_min_region_tokens: Option<usize>,
@@ -440,6 +445,7 @@ impl CompactionOverride {
             goal_window_turns,
             max_context_tokens,
             snapcompact,
+            snapcompact_shape,
             shake,
             shake_protect_tokens,
             shake_min_region_tokens,
@@ -529,10 +535,12 @@ impl Default for CompactionConfig {
             goal_window_turns: 5,
             max_context_tokens: 0,
             snapcompact: true,
+            snapcompact_shape: "auto".to_string(),
             shake: false,
-            shake_protect_tokens: 16_384,
+            // omp `DEFAULT_SHAKE_CONFIG`: protectTokens 16000, minSavings 4000.
+            shake_protect_tokens: 16_000,
             shake_min_region_tokens: 400,
-            shake_min_savings_tokens: 4_096,
+            shake_min_savings_tokens: 4_000,
             shake_code_blocks: true,
             shake_cache_expiry: true,
             snapcompact_cache_expiry: false,
@@ -1874,6 +1882,56 @@ mod compaction_override_tests {
         );
         let disabled: CompactionConfig = serde_json::from_str(r#"{"snapcompact":false}"#).unwrap();
         assert!(!disabled.resolve(None, None).snapcompact);
+    }
+
+    /// omp `DEFAULT_SHAKE_CONFIG` / `snapcompact.shape`: the migrated defaults
+    /// and the shape override have to survive TOML parsing as written in
+    /// `~/.jcode/config.toml`.
+    #[test]
+    fn omp_compaction_defaults_parse_from_toml() {
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            compaction: CompactionConfig,
+        }
+        let parsed: Wrapper = toml::from_str(
+            r#"
+[compaction]
+snapcompact = true
+snapcompact_shape = "auto"
+shake = true
+shake_protect_tokens = 16000
+shake_min_region_tokens = 400
+shake_min_savings_tokens = 4000
+shake_code_blocks = true
+
+[compaction.providers.gemini]
+reactive_threshold_tokens = 280000
+
+[compaction.models."claude-opus-5-5"]
+reactive_threshold_tokens = 500000
+"#,
+        )
+        .expect("migrated compaction section parses");
+        let resolved = parsed
+            .compaction
+            .resolve(Some("gemini"), Some("gemini-3.5-flash"));
+        assert_eq!(resolved.snapcompact_shape, "auto");
+        assert_eq!(resolved.shake_protect_tokens, 16_000);
+        assert_eq!(resolved.shake_min_region_tokens, 400);
+        assert_eq!(resolved.shake_min_savings_tokens, 4_000);
+        assert!(resolved.shake_code_blocks);
+        assert_eq!(resolved.reactive_threshold_tokens, 280_000);
+        assert_eq!(
+            parsed
+                .compaction
+                .resolve(Some("claude"), Some("claude-opus-5-5"))
+                .reactive_threshold_tokens,
+            500_000
+        );
+        // A forced shape name is preserved verbatim for the snapcompact pass.
+        let forced: CompactionConfig =
+            serde_json::from_str(r#"{"snapcompact_shape":"6x6u-sent"}"#).unwrap();
+        assert_eq!(forced.snapcompact_shape, "6x6u-sent");
     }
 
     #[test]

@@ -994,6 +994,7 @@ impl CompactionManager {
             min_elidable_tokens: cfg.shake_min_region_tokens,
             min_savings_tokens: cfg.shake_min_savings_tokens,
             code_blocks: cfg.shake_code_blocks,
+            protected_tools: jcode_compaction_core::shake::PROTECTED_TOOLS_DEFAULT,
         })
     }
 
@@ -1014,18 +1015,39 @@ impl CompactionManager {
         now: Instant,
         cache_ttl_secs: Option<u64>,
     ) -> Option<(ShakeReason, ShakeConfig)> {
+        self.plan_shake_with(all_messages, now, cache_ttl_secs, false)
+    }
+
+    /// [`Self::plan_shake`] with omp's `methodOrder` preference: when
+    /// snapcompact can archive this compaction, the archive wins over shake
+    /// (omp orders `snapcompact` before `shake`), so no pre-compaction shake is
+    /// planned.
+    ///
+    /// The warm-cache guard below applies to the cache-expiry reason only. It
+    /// must never suppress [`ShakeReason::PreCompact`]: LLM compaction rewrites
+    /// the prefix anyway, so gating on a warm cache made pre-compaction shake
+    /// unreachable for every provider with a TTL (Anthropic's 1h default).
+    pub fn plan_shake_with(
+        &self,
+        all_messages: &[Message],
+        now: Instant,
+        cache_ttl_secs: Option<u64>,
+        snapcompact_preferred: bool,
+    ) -> Option<(ShakeReason, ShakeConfig)> {
         let cfg = self.shake_config()?;
         if self.should_compact_with(all_messages) {
+            if snapcompact_preferred {
+                return None;
+            }
             return Some((ShakeReason::PreCompact, cfg));
         }
+        let ttl = cache_ttl_secs.filter(|t| *t > 0)?;
         if self.last_response_cache_read
-            && let (Some(last), Some(ttl)) =
-                (self.last_response_at, cache_ttl_secs.filter(|t| *t > 0))
+            && let Some(last) = self.last_response_at
             && now.saturating_duration_since(last) < Duration::from_secs(ttl)
         {
             return None;
         }
-        let ttl = cache_ttl_secs.filter(|t| *t > 0)?;
         let last = self.last_response_at?;
         (self.compaction_config.shake_cache_expiry
             && now.saturating_duration_since(last).as_secs() >= ttl)
@@ -1230,6 +1252,8 @@ impl CompactionManager {
         let msg_count = messages_to_summarize.len();
         let existing_summary = self.active_summary.clone();
         let snapcompact_enabled = self.compaction_config.snapcompact;
+        let snapcompact_shape = Some(self.compaction_config.snapcompact_shape.clone())
+            .filter(|shape| !shape.trim().is_empty() && !shape.trim().eq_ignore_ascii_case("auto"));
         let estimated_tokens = self.effective_token_count_with(all_messages);
         crate::logging::info(&format!(
             "[TIMING] compaction_start: trigger={}, active_messages={}, cutoff={}, estimated_tokens={}, has_existing_summary={}",
@@ -1252,6 +1276,7 @@ impl CompactionManager {
                 messages_to_summarize,
                 existing_summary,
                 snapcompact_enabled,
+                snapcompact_shape,
             )
             .await;
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -1475,6 +1500,8 @@ impl CompactionManager {
         let msg_count = messages_to_summarize.len();
         let existing_summary = self.active_summary.clone();
         let snapcompact_enabled = self.compaction_config.snapcompact;
+        let snapcompact_shape = Some(self.compaction_config.snapcompact_shape.clone())
+            .filter(|shape| !shape.trim().is_empty() && !shape.trim().eq_ignore_ascii_case("auto"));
 
         self.pending_cutoff = cutoff;
         self.pending_trigger = Some("manual".to_string());
@@ -1487,6 +1514,7 @@ impl CompactionManager {
                 messages_to_summarize,
                 existing_summary,
                 snapcompact_enabled,
+                snapcompact_shape,
             )
             .await;
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -2104,9 +2132,10 @@ impl Default for CompactionManager {
 /// Generate summary using the provider
 async fn generate_compaction_artifact(
     provider: Arc<dyn Provider>,
-    messages: Vec<Message>,
+    mut messages: Vec<Message>,
     mut existing_summary: Option<Summary>,
     snapcompact_enabled: bool,
+    snapcompact_shape: Option<String>,
 ) -> Result<CompactionResult> {
     let start = Instant::now();
     if let Some(summary) = existing_summary.as_mut()
@@ -2175,6 +2204,7 @@ async fn generate_compaction_artifact(
     }
 
     let mut snapcompact = None;
+    let mut snapcompact_summary = None;
     if snapcompact_enabled
         && provider.supports_image_input()
         && existing_summary
@@ -2182,24 +2212,42 @@ async fn generate_compaction_artifact(
             .is_none_or(|s| s.openai_encrypted_content.is_none())
     {
         let input = messages.clone();
+        // A previous archive source is re-folded as history; a previous text
+        // summary is labelled (`[Summary of earlier history]`) the way omp
+        // folds a pre-snapcompact summary into the archive head.
         let previous = existing_summary.as_ref().map(|summary| {
-            summary
-                .snapcompact
-                .as_ref()
-                .map(|archive| archive.source.clone())
-                .unwrap_or_else(|| jcode_compaction_core::snapcompact::normalize(&summary.text))
+            summary.snapcompact.as_ref().map_or_else(
+                || {
+                    (
+                        jcode_compaction_core::snapcompact::normalize(&summary.text),
+                        true,
+                    )
+                },
+                |archive| (archive.source.clone(), false),
+            )
         });
         let model_id = provider.model();
+        let provider_name = provider.name().to_string();
+        let options = jcode_compaction_core::snapcompact::CompactOptions {
+            model_id,
+            provider: provider_name,
+            shape: snapcompact_shape
+                .as_ref()
+                .and_then(|name| jcode_compaction_core::snapcompact::shape_by_name(name)),
+            ..Default::default()
+        };
         let rendered = tokio::task::spawn_blocking(move || {
-            use jcode_compaction_core::snapcompact::{CompactOptions, compact, prepare_messages};
-            let preparation = prepare_messages(&input, previous.as_deref(), usize::MAX)?;
-            compact(
-                &preparation,
-                &CompactOptions {
-                    model_id,
-                    ..Default::default()
-                },
-            )
+            use jcode_compaction_core::snapcompact::{
+                CompactOptions, compact, prepare_messages_with,
+            };
+            let previous = previous.as_ref().map(|(text, is_summary)| {
+                jcode_compaction_core::snapcompact::PreviousArchive {
+                    text,
+                    is_summary: *is_summary,
+                }
+            });
+            let preparation = prepare_messages_with(&input, previous, usize::MAX)?;
+            compact(&preparation, &options)
         })
         .await;
         match rendered {
@@ -2209,18 +2257,50 @@ async fn generate_compaction_artifact(
                     .into_iter()
                     .map(|frame| base64::engine::general_purpose::STANDARD.encode(frame.bytes))
                     .collect();
+                snapcompact_summary = Some(result.summary);
                 snapcompact = Some(jcode_message_types::SnapcompactArchive {
                     source: result.source_text,
                     pages,
                 });
             }
-            Ok(Err(error)) => crate::logging::warn(&format!(
-                "[compaction] Snapcompact failed; falling back to LLM: {error}"
-            )),
+            Ok(Err(error)) => {
+                crate::logging::warn(&format!(
+                    "[compaction] Snapcompact failed; falling back to LLM: {error}"
+                ));
+                // omp advances to its `shake` method after snapcompact fails, so
+                // the text summarizer at least sees a mechanically reduced
+                // prompt instead of the raw full history.
+                let outcome = jcode_compaction_core::shake::shake(
+                    &mut messages,
+                    &jcode_compaction_core::shake::ShakeConfig::default(),
+                );
+                if outcome != jcode_compaction_core::shake::ShakeOutcome::NoChange {
+                    crate::logging::info(&format!(
+                        "[compaction] post-snapcompact shake saved ~{} tokens",
+                        outcome.tokens_saved()
+                    ));
+                }
+            }
             Err(error) => crate::logging::warn(&format!(
                 "[compaction] Snapcompact worker failed; falling back to LLM: {error}"
             )),
         }
+    }
+
+    // A snapcompact pass is a complete compaction: omp makes no LLM call for
+    // it, so the reading guide stands in for the summary and the whole
+    // full-context summarizer request disappears on vision models.
+    if let Some(summary) = snapcompact_summary
+        && snapcompact.is_some()
+    {
+        return Ok(CompactionResult {
+            summary_text: summary,
+            openai_encrypted_content: None,
+            snapcompact,
+            covers_up_to_turn: messages.len(),
+            duration_ms: start.elapsed().as_millis() as u64,
+            summarized_messages: messages.len(),
+        });
     }
 
     // Include the archive source when falling back to text-only compaction.

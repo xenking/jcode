@@ -328,20 +328,135 @@ impl Shape {
     }
 }
 
-/// Pick the eval-validated shape for `model_id`.
-pub fn resolve_shape(model_id: &str) -> Shape {
+/// Per-provider default frame shape when the model line is unmeasured
+/// (omp `FAMILY_VARIANT`). Unknown readers get the OpenAI/Google winner.
+const FAMILY_VARIANT_UNKNOWN: &str = "8on22-bw";
+
+/// Eval-winning variant and frame size for a model line, or `None` when the
+/// line is unmeasured (omp `idealShapeVariant`).
+///
+/// `11on16-bw` is 8x13 glyphs on an 11px advance (extra tracking): letter
+/// spacing the readable cell won omp's tool-result legibility bench. Opus 4.7+
+/// and the Fable/Mythos lines read 1932px frames natively (largest square that
+/// is not downscaled under Anthropic's 4,784 visual-token cap); Gemini bills a
+/// fixed per-image budget, so 2048px packs more chars for the same price.
+fn ideal_shape(model_id: &str) -> Option<(&'static str, Option<u32>)> {
     let id = model_id.to_ascii_lowercase();
-    if id.contains("claude") || id.contains("anthropic") {
-        return lookup_owned("11on16-bw").unwrap_or_else(|| SHAPES[0].clone());
-    }
-    if id.contains("gpt-5") || id.contains("gpt-4.1") || id.contains("o3") || id.contains("o4") {
-        return lookup_owned("8on22-bw").unwrap_or_else(|| SHAPES[0].clone());
+    let revision = model_revision(&id);
+    let high_res = Some(("11on16-bw", Some(1932)));
+    if id.contains("claude") {
+        let family_high_res = ["fable", "mythos"].iter().any(|family| id.contains(family))
+            || (id.contains("opus") && revision.is_some_and(|revision| revision >= (4, 7)));
+        return Some(if family_high_res {
+            high_res?
+        } else {
+            ("11on16-bw", None)
+        });
     }
     if id.contains("gemini") {
-        return lookup_owned("8on22-bw").unwrap_or_else(|| SHAPES[0].clone());
+        return Some(("8on22-bw", Some(2048)));
     }
-    // Unknown provider: Anthropic shape (safest default for vision).
-    lookup_owned("11on16-bw").unwrap_or_else(|| SHAPES[0].clone())
+    if id.contains("gpt") || id.contains("codex") {
+        return Some(("8on22-bw", None));
+    }
+    if id.contains("kimi") {
+        return Some(("8on22-bw", None));
+    }
+    if id.contains("glm") {
+        return Some(("8on16-bw", None));
+    }
+    None
+}
+
+/// `(major, minor)` of the first `N` / `N.M` version in a model id.
+fn model_revision(id: &str) -> Option<(u32, u32)> {
+    let bytes = id.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if !bytes[index].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        let major: u32 = id[start..index].parse().ok()?;
+        let mut minor = 0;
+        if bytes.get(index) == Some(&b'.') && bytes.get(index + 1).is_some_and(u8::is_ascii_digit) {
+            let minor_start = index + 1;
+            index = minor_start;
+            while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+                index += 1;
+            }
+            minor = id[minor_start..index].parse().ok()?;
+        }
+        return Some((major, minor));
+    }
+    None
+}
+
+/// Pick the eval-validated shape for `model_id`, including its frame size.
+///
+/// Mirrors omp `resolveShape`: the model id selects the eval-winning shape and
+/// frame size for its line, and an unmeasured model falls back to the family
+/// winner at the standard 1568px frame.
+pub fn resolve_shape(model_id: &str) -> Shape {
+    resolve_shape_for(model_id, "")
+}
+
+/// Pick the shape for a reader, using `provider` for the fallback family the
+/// way omp keys `FAMILY_VARIANT` on the wire API.
+pub fn resolve_shape_for(model_id: &str, provider: &str) -> Shape {
+    let variant = match ideal_shape(model_id) {
+        Some((variant, frame_size)) => {
+            let mut shape = lookup_owned(variant).unwrap_or_else(|| SHAPES[0].clone());
+            if let Some(frame_size) = frame_size {
+                shape.frame_size = frame_size;
+            }
+            return shape;
+        }
+        None => family_variant(provider),
+    };
+    lookup_owned(variant).unwrap_or_else(|| SHAPES[0].clone())
+}
+
+/// omp `FAMILY_VARIANT`: the eval winner for the reader's wire family.
+fn family_variant(provider: &str) -> &'static str {
+    let provider = provider.to_ascii_lowercase();
+    if provider.contains("anthropic")
+        || provider.contains("claude")
+        || provider.contains("bedrock")
+        || provider.contains("vertex-anthropic")
+    {
+        "11on16-bw"
+    } else {
+        FAMILY_VARIANT_UNKNOWN
+    }
+}
+
+/// Images one archive may carry for `provider`, mirroring omp's
+/// `providerFrameBudget` (its catalog `image-count-budget`, capped at
+/// `MAX_FRAMES_DEFAULT`). Providers with no tighter rule keep the default.
+pub fn frame_budget(provider: &str) -> u32 {
+    let provider = provider.to_ascii_lowercase();
+    let budget = if provider.contains("xai") || provider.contains("grok") {
+        60
+    } else if provider.contains("cursor") {
+        60
+    } else if provider.contains("antigravity") {
+        20
+    } else if provider.contains("umans") {
+        10
+    } else {
+        MAX_FRAMES_DEFAULT
+    };
+    budget.min(MAX_FRAMES_DEFAULT).max(1)
+}
+
+/// Look up a shape by its stable name (omp `SHAPE_VARIANTS` key).
+pub fn shape_by_name(name: &str) -> Option<Shape> {
+    lookup_owned(name.trim())
 }
 
 fn lookup_owned(name: &str) -> Option<Shape> {
@@ -390,12 +505,30 @@ pub fn normalize(input: &str) -> String {
 
 // ── Preparation ──────────────────────────────────────────────────────
 
+/// Newline glyph used inside normalized archive text.
+pub const NEWLINE_GLYPH: char = '\u{2588}';
+
+/// Head of a folded-in text summary, matching omp
+/// `PREVIOUS_SUMMARY_HEAD`.
+pub const PREVIOUS_SUMMARY_HEAD: &str = "[Summary of earlier history]";
+
 /// Inputs to a compaction pass.
 #[derive(Debug, Clone)]
 pub struct CompactPreparation {
     pub text: String,
     pub bounded_text: String,
     pub remaining_text: String,
+    /// The archive opens with a condensed digest of still-older context
+    /// (omp `includedPreviousSummary`).
+    pub included_previous_summary: bool,
+}
+
+/// A previously compacted history a new pass folds in.
+#[derive(Debug, Clone, Copy)]
+pub struct PreviousArchive<'a> {
+    pub text: &'a str,
+    /// The text is an LLM summary rather than a snapcompact archive source.
+    pub is_summary: bool,
 }
 
 /// Prepare structured conversation history, retaining a previous archive when
@@ -405,11 +538,46 @@ pub fn prepare_messages(
     previous_archive: Option<&str>,
     text_limit: usize,
 ) -> Result<CompactPreparation, String> {
+    prepare_messages_with(
+        messages,
+        previous_archive.map(|text| PreviousArchive {
+            text,
+            is_summary: false,
+        }),
+        text_limit,
+    )
+}
+
+/// Prepare structured conversation history, folding in a previous archive
+/// source or a previous text summary.
+pub fn prepare_messages_with(
+    messages: &[jcode_message_types::Message],
+    previous: Option<PreviousArchive<'_>>,
+    text_limit: usize,
+) -> Result<CompactPreparation, String> {
     let serialized = serialize::serialize_messages(messages)?;
     let fresh = normalize(&serialized);
-    let text = match previous_archive.filter(|text| !text.is_empty()) {
-        Some(previous) if !fresh.is_empty() => format!("{previous}█{fresh}"),
-        Some(previous) => previous.to_string(),
+    let mut included_previous_summary = false;
+    let text = match previous.filter(|previous| !previous.text.is_empty()) {
+        Some(PreviousArchive {
+            text: previous_text,
+            is_summary: true,
+        }) => {
+            let lead = format!("{PREVIOUS_SUMMARY_HEAD} {}", normalize(previous_text));
+            included_previous_summary = true;
+            if fresh.is_empty() {
+                lead
+            } else {
+                format!("{lead} [Recent conversation] {fresh}")
+            }
+        }
+        Some(previous) => {
+            if fresh.is_empty() {
+                previous.text.to_string()
+            } else {
+                format!("{}{NEWLINE_GLYPH}{fresh}", previous.text)
+            }
+        }
         None => fresh,
     };
     let bounded_text = bounded_slice(&text, text_limit);
@@ -418,6 +586,7 @@ pub fn prepare_messages(
         text,
         bounded_text,
         remaining_text,
+        included_previous_summary,
     })
 }
 
@@ -435,6 +604,7 @@ pub fn prepare(input: &str, tool_result_max_chars: usize, text_limit: usize) -> 
         text,
         bounded_text: bounded,
         remaining_text: remaining,
+        included_previous_summary: false,
     }
 }
 
@@ -486,17 +656,26 @@ fn bounded_slice(s: &str, max_chars: usize) -> String {
 /// Options for [`compact`].
 #[derive(Debug, Clone)]
 pub struct CompactOptions {
+    /// Reading model id; selects the eval-winning frame shape.
     pub model_id: String,
+    /// Reading provider; caps the archive frame count like omp
+    /// `providerFrameBudget`.
+    pub provider: String,
     pub max_frames: u32,
+    /// Forced shape (omp `snapcompact.shape` setting); `None` = auto.
     pub shape: Option<Shape>,
+    /// Forced frame edge in pixels.
+    pub frame_size: Option<u32>,
 }
 
 impl Default for CompactOptions {
     fn default() -> Self {
         Self {
             model_id: String::new(),
-            max_frames: 80,
+            provider: String::new(),
+            max_frames: MAX_FRAMES_DEFAULT,
             shape: None,
+            frame_size: None,
         }
     }
 }
@@ -504,10 +683,16 @@ impl Default for CompactOptions {
 /// Outcome of a compaction pass.
 #[derive(Debug, Clone)]
 pub struct CompactResult {
+    /// Reading guide for the frames plus the `HISTORY` section head. This is
+    /// the compaction summary: omp makes no LLM call for a snapcompact pass.
     pub summary: String,
     pub source_text: String,
     pub frames: Vec<FrameRef>,
     pub shape: Shape,
+    /// Characters of the archive middle dropped to fit the frame budget.
+    pub truncated_chars: usize,
+    /// Characters represented by frames plus plain text.
+    pub total_chars: usize,
 }
 
 /// A reference to a rendered frame.
@@ -517,24 +702,6 @@ pub struct FrameRef {
     pub source_start: usize,
     pub source_end: usize,
     pub bytes: Vec<u8>,
-}
-
-/// The minimal envelope returned by [`compact`] when no renderer is
-/// available — shape chosen, text chunked into per-frame source ranges,
-/// but frame bytes are empty.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BoundedSource {
-    pub lead_in: String,
-    pub text: String,
-    pub frames: Vec<FrameRange>,
-}
-
-/// Per-frame source range.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct FrameRange {
-    pub index: u32,
-    pub source_start: usize,
-    pub source_end: usize,
 }
 
 impl CompactResult {
@@ -574,32 +741,112 @@ fn shape_to_render_options(shape: &Shape) -> self::renderer::SnapcompactRenderOp
     }
 }
 
+/// A bounded archive: reading guide, plain source text, and the frame ranges
+/// that render each page.
+#[derive(Debug, Clone)]
+pub struct BoundedSource {
+    pub lead_in: String,
+    pub text: String,
+    pub frames: Vec<FrameRange>,
+}
+
+/// One rendered page's character range in the source text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameRange {
+    pub index: u32,
+    pub source_start: usize,
+    pub source_end: usize,
+}
+
+/// Upper bound on archive frames carried per compaction (omp
+/// `MAX_FRAMES_DEFAULT`): ~400k tokens of high-res Anthropic frames while
+/// staying under the ~100-image per-request wire cap.
+pub const MAX_FRAMES_DEFAULT: u32 = 80;
+
+/// One planned archive layout.
+struct FramePlan {
+    ranges: Vec<FrameRange>,
+    /// Frames before the dropped middle.
+    head_count: usize,
+    /// Character range dropped from the middle, if the source did not fit.
+    elided: Option<(usize, usize)>,
+}
+
+/// Plan frames for `text`, keeping both chronological ends when the source does
+/// not fit `max_frames` (omp `planArchive` foveation: the least-important
+/// middle of a long archive is dropped rather than failing the pass).
+fn plan_frames(text: &str, shape: &Shape, max_frames: usize) -> FramePlan {
+    let all = chunk_into_frames(text, shape, usize::MAX);
+    if all.len() <= max_frames {
+        let head_count = all.len();
+        return FramePlan {
+            ranges: all,
+            head_count,
+            elided: None,
+        };
+    }
+    let head_count = max_frames.div_ceil(2);
+    let tail_count = max_frames - head_count;
+    let total = all.len();
+    let mut ranges: Vec<FrameRange> = all[..head_count].to_vec();
+    if tail_count > 0 {
+        ranges.extend(all[total - tail_count..].iter().cloned());
+    }
+    let elided_end = if tail_count > 0 {
+        ranges[head_count].source_start
+    } else {
+        all[total - 1].source_end
+    };
+    let elided = (ranges[head_count - 1].source_end, elided_end);
+    for (index, range) in ranges.iter_mut().enumerate() {
+        range.index = index as u32;
+    }
+    FramePlan {
+        ranges,
+        head_count,
+        elided: Some(elided),
+    }
+}
+
 /// Run a compaction pass — render each frame slice through the
 /// pi-natives ported renderer (`render_snapcompact_png`) so the
 /// returned bytes are real PNG-encoded image data.
 ///
-/// Errors and insufficient frame budgets are returned to the caller.
+/// Never fails for a long history: like omp it drops the archive middle and
+/// reports `truncated_chars` instead of falling back to an LLM summary.
 pub fn compact(
     prep: &CompactPreparation,
     options: &CompactOptions,
 ) -> Result<CompactResult, String> {
-    let shape: Shape = options
+    let mut shape: Shape = options
         .shape
         .clone()
-        .unwrap_or_else(|| resolve_shape(&options.model_id));
+        .unwrap_or_else(|| resolve_shape_for(&options.model_id, &options.provider));
+    if let Some(frame_size) = options.frame_size {
+        shape.frame_size = frame_size;
+    }
     if shape.columns != 1 {
         return Err("snapcompact multi-column pagination is not implemented".into());
     }
-    let frames = chunk_into_frames(&prep.bounded_text, &shape, options.max_frames as usize);
-    if prep.bounded_text.is_empty()
-        || !prep.remaining_text.is_empty()
-        || frames.last().map_or(0, |frame| frame.source_end) != prep.bounded_text.chars().count()
-    {
+    if prep.bounded_text.is_empty() {
+        return Err("snapcompact source is empty".into());
+    }
+    if !prep.remaining_text.is_empty() {
+        return Err("snapcompact frame budget cannot represent all source text".into());
+    }
+    let max_frames = options
+        .max_frames
+        .max(1)
+        .min(MAX_FRAMES_DEFAULT)
+        .min(frame_budget(&options.provider)) as usize;
+    let plan = plan_frames(&prep.bounded_text, &shape, max_frames);
+    if plan.ranges.is_empty() {
         return Err("snapcompact frame budget cannot represent all source text".into());
     }
     let render_opts = shape_to_render_options(&shape);
     let mut dim_open = false;
-    let rendered: Vec<FrameRef> = frames
+    let rendered: Vec<FrameRef> = plan
+        .ranges
         .iter()
         .map(|range| -> Result<FrameRef, String> {
             let slice = slice_char_range(&prep.bounded_text, range.source_start, range.source_end);
@@ -614,12 +861,115 @@ pub fn compact(
             })
         })
         .collect::<Result<_, _>>()?;
+    let truncated_chars = plan
+        .elided
+        .map(|(start, end)| end.saturating_sub(start))
+        .unwrap_or(0);
+    let source_text = render_kept_source(&prep.bounded_text, &plan);
+    let total_chars = rendered
+        .iter()
+        .map(|frame| frame.source_end.saturating_sub(frame.source_start))
+        .sum::<usize>();
+    let summary = render_summary(&shape, rendered.len(), truncated_chars, prep);
     Ok(CompactResult {
-        summary: render_lead_in(&prep.text),
-        source_text: prep.bounded_text.clone(),
+        summary,
+        source_text,
         frames: rendered,
         shape,
+        truncated_chars,
+        total_chars,
     })
+}
+
+/// Archive source text a reader without image input can still use: the frames'
+/// slices in chronological order, with the dropped middle replaced by a marker.
+fn render_kept_source(text: &str, plan: &FramePlan) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (position, range) in plan.ranges.iter().enumerate() {
+        if position == plan.head_count
+            && let Some((start, end)) = plan.elided
+        {
+            out.push(NEWLINE_GLYPH);
+            out.push_str(&format!(
+                "[snapcompact: {} chars elided from the middle of the archive]",
+                end.saturating_sub(start)
+            ));
+            out.push(NEWLINE_GLYPH);
+        }
+        out.push_str(&slice_char_range(
+            text,
+            range.source_start,
+            range.source_end,
+        ));
+    }
+    out
+}
+
+/// Reading guide rendered as the compaction summary (omp
+/// `prompts/snapcompact-summary.md`).
+fn render_summary(
+    shape: &Shape,
+    frame_count: usize,
+    truncated_chars: usize,
+    prep: &CompactPreparation,
+) -> String {
+    let cols = shape.frame_size / shape.cell_width.max(1);
+    let rows = shape.rows_per_frame();
+    let mut out = String::from(
+        "Resume prior conversation. Earlier turns archived under HISTORY below, oldest→newest. Read HISTORY fully; continue the live conversation following it.
+
+Archived transcript scopes:
+- `¶user:`, `¶think:`, `¶ai:`, `¶call:`: user, assistant reasoning, assistant reply, tool call.
+- Unprefixed following lines: current scope. Consecutive same-kind blocks omit repeated prefix.
+- Tool call: `¶call:name(args)//intent`; trailing `//intent` optional. `<out>…</out>`: tool output.
+
+Reading HISTORY:
+- Plain text: verbatim transcript; rely on it exactly.
+",
+    );
+    if frame_count > 0 {
+        out.push_str(&format!(
+            "- Some middle sections: images, not text. Each image: one page of that transcript, in reading order between marked delimiters. Solid black cell: newline; runs of spaces collapse to one.
+  - Frame: one grid {cols} characters wide, up to {rows} rows tall; read left→right, top→bottom. No word wrap; words may break across rows.
+"
+        ));
+        if shape.variant == Variant::Sent {
+            out.push_str(
+                "  - Ink: six colors, one per sentence.
+",
+            );
+        }
+        if shape.stopword_dim {
+            out.push_str(
+                "  - Function words: dim gray; content words: full ink.
+",
+            );
+        }
+        if shape.line_repeat > 1 {
+            out.push_str(
+                "  - Each line printed twice (white, then pale-yellow band); copies identical.
+",
+            );
+        }
+    }
+    if prep.included_previous_summary {
+        out.push_str(
+            "- HISTORY opens with a condensed digest of still-older context predating archived turns.
+",
+        );
+    }
+    if truncated_chars > 0 {
+        out.push_str(&format!(
+            "- About {truncated_chars} characters of older middle history dropped to fit archive budget.
+"
+        ));
+    }
+    out.push_str("- If an exact earlier detail matters and a section is unclear, re-derive from workspace (re-read files, re-run commands), rather than guess.
+
+HISTORY
+===================
+");
+    out
 }
 
 fn finish_frame_text(text: &str, dim_open: &mut bool) -> String {
@@ -681,12 +1031,6 @@ fn slice_char_range(s: &str, start: usize, end: usize) -> String {
         .skip(start)
         .take(end.saturating_sub(start))
         .collect()
-}
-
-fn render_lead_in(text: &str) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let head: String = chars.iter().take(120).collect();
-    format!("Resume prior conversation. {head}…")
 }
 
 #[cfg(test)]
@@ -757,17 +1101,153 @@ mod tests {
         assert_eq!(ranges[1].source_end, 16);
     }
 
+    /// omp `planArchive` drops the archive middle instead of failing the pass:
+    /// a history too long for the frame budget still compacts, keeping both
+    /// chronological ends.
     #[test]
-    fn compact_rejects_unrendered_tail() {
-        let prep = super::prepare(&"x".repeat(100), 1000, 1000);
+    fn overflowing_archive_keeps_both_ends_instead_of_failing() {
+        let head = "HEAD";
+        let tail = "TAIL";
+        let prep = super::prepare(
+            &format!("{head}{}{tail}", "y".repeat(20_000)),
+            10_000,
+            40_000,
+        );
         let mut shape = super::resolve_shape("claude");
         shape.frame_size = 32;
         let options = super::CompactOptions {
             shape: Some(shape),
-            max_frames: 1,
+            max_frames: 4,
             ..Default::default()
         };
-        assert!(super::compact(&prep, &options).is_err());
+        let result = super::compact(&prep, &options).expect("keeps both ends");
+        assert_eq!(result.frames.len(), 4);
+        assert!(result.truncated_chars > 0);
+        assert!(result.summary.contains("dropped to fit archive budget"));
+        assert!(
+            result
+                .source_text
+                .contains("chars elided from the middle of the archive"),
+            "{}",
+            result.source_text
+        );
+        assert!(
+            result.source_text.starts_with("HEAD"),
+            "{}",
+            result.source_text
+        );
+        // `prepare` keeps the serialized turn's trailing newline.
+        assert!(
+            result.source_text.trim_end().ends_with("TAIL"),
+            "{}",
+            result.source_text
+        );
+    }
+
+    /// The summary is a reading guide for the frames, not a copy of the
+    /// archive text (omp `snapcompact-summary.md`).
+    #[test]
+    fn summary_is_a_reading_guide() {
+        let prep = super::prepare(
+            "User: durable detail
+Assistant: noted",
+            2000,
+            2000,
+        );
+        let result = super::compact(
+            &prep,
+            &super::CompactOptions {
+                model_id: "claude-opus-5-5".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(result.summary.starts_with("Resume prior conversation."));
+        assert!(result.summary.contains("¶user:"));
+        assert!(result.summary.contains("Frame: one grid"));
+        assert!(result.summary.ends_with(
+            "HISTORY
+===================\n"
+        ));
+        assert!(!result.summary.contains("durable detail"));
+        assert_eq!(result.frames.len(), 1);
+    }
+
+    /// omp `resolveShape` / `idealShapeVariant` model rules, including the
+    /// high-res frame sizes.
+    #[test]
+    fn shape_resolution_matches_omp_model_rules() {
+        let case = |model: &str| {
+            let shape = super::resolve_shape(model);
+            (shape.name, shape.frame_size)
+        };
+        assert_eq!(case("claude-opus-5-5"), ("11on16-bw", 1932));
+        assert_eq!(case("claude-opus-4-6"), ("11on16-bw", 1568));
+        assert_eq!(case("claude-sonnet-4-5"), ("11on16-bw", 1568));
+        assert_eq!(case("claude-fable-latest"), ("11on16-bw", 1932));
+        assert_eq!(case("gemini-3.5-flash"), ("8on22-bw", 2048));
+        assert_eq!(case("gpt-5.5"), ("8on22-bw", 1568));
+        assert_eq!(case("gpt-6.1-codex"), ("8on22-bw", 1568));
+        assert_eq!(case("kimi-k3"), ("8on22-bw", 1568));
+        assert_eq!(case("glm-4.6v"), ("8on16-bw", 1568));
+        // Unmeasured reader: the family winner, not the Claude shape.
+        assert_eq!(case("mystery-model-9"), ("8on22-bw", 1568));
+    }
+
+    /// omp `providerFrameBudget`: the archive never exceeds the provider's
+    /// per-request image budget.
+    #[test]
+    fn frame_budget_matches_provider_image_limits() {
+        assert_eq!(super::frame_budget("anthropic"), 80);
+        assert_eq!(super::frame_budget("openai"), 80);
+        assert_eq!(super::frame_budget("gemini"), 80);
+        assert_eq!(super::frame_budget("xai"), 60);
+        assert_eq!(super::frame_budget("cursor"), 60);
+        assert_eq!(super::frame_budget("google-antigravity"), 20);
+        assert_eq!(super::frame_budget("umans"), 10);
+        assert_eq!(super::frame_budget("unknown-gateway"), 80);
+    }
+
+    /// omp caps a caller's `maxFrames` at the provider budget, never above it.
+    #[test]
+    fn compact_never_exceeds_the_provider_frame_budget() {
+        let prep = super::prepare(&"z".repeat(400_000), 10_000, 500_000);
+        let mut shape = super::resolve_shape("claude-sonnet-4-5");
+        shape.frame_size = 32;
+        let result = super::compact(
+            &prep,
+            &super::CompactOptions {
+                shape: Some(shape),
+                provider: "umans".into(),
+                max_frames: 80,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.frames.len(), 10);
+    }
+
+    /// A folded-in text summary is labelled and reported (omp
+    /// `PREVIOUS_SUMMARY_HEAD` / `includedPreviousSummary`).
+    #[test]
+    fn previous_summary_is_labelled_and_reported() {
+        let messages = [jcode_message_types::Message::user("fresh turn")];
+        let prepared = super::prepare_messages_with(
+            &messages,
+            Some(super::PreviousArchive {
+                text: "older digest",
+                is_summary: true,
+            }),
+            100,
+        )
+        .unwrap();
+        assert!(prepared.included_previous_summary);
+        assert!(
+            prepared
+                .text
+                .starts_with("[Summary of earlier history] older digest")
+        );
+        assert!(prepared.text.contains("[Recent conversation]"));
     }
 
     #[test]
@@ -837,9 +1317,14 @@ mod tests {
     }
 
     #[test]
-    fn resolve_shape_unknown_defaults_to_anthropic() {
-        let s = resolve_shape("unknown-provider-model-xyz");
-        assert_eq!(s.name, "11on16-bw");
+    fn resolve_shape_unknown_model_uses_the_wire_family_winner() {
+        // omp `FAMILY_VARIANT`: an unmeasured model id takes the family winner,
+        // which is the OpenAI/Google shape for an unknown API.
+        assert_eq!(resolve_shape("unknown-provider-model-xyz").name, "8on22-bw");
+        assert_eq!(
+            resolve_shape_for("unknown-provider-model-xyz", "anthropic").name,
+            "11on16-bw"
+        );
     }
 
     #[test]

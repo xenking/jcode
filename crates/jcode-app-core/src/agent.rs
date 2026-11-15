@@ -1002,7 +1002,17 @@ impl Agent {
     fn maybe_shake_before_request(&mut self, manager: &mut crate::compaction::CompactionManager) {
         let now = std::time::Instant::now();
         let ttl = self.cache_expiry_ttl_secs(manager);
-        let plan = manager.plan_shake(self.session.provider_messages(), now, ttl);
+        // omp `methodOrder` is remote, snapcompact, handoff, shake, soft: when
+        // snapcompact can archive this compaction the bitmap archive wins, and
+        // no pre-compaction shake runs.
+        let snapcompact_preferred =
+            manager.effective_config().snapcompact && self.provider.supports_image_input();
+        let plan = manager.plan_shake_with(
+            self.session.provider_messages(),
+            now,
+            ttl,
+            snapcompact_preferred,
+        );
         let Some((reason, cfg)) = plan else {
             return;
         };
