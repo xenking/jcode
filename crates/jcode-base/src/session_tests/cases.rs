@@ -360,6 +360,49 @@ fn placeholder_model_is_never_persisted_and_resumes_unresolved() -> Result<()> {
 }
 
 #[test]
+fn placeholder_model_keeps_an_observed_account_route() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-placeholder-account-route-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let session_id = "session_placeholder_account_route";
+    let mut session = Session::create_with_id(session_id.to_string(), None, None);
+    // An unresolved model must not persist, but the account the session was
+    // observed to use is not model state: forgetting it on resume would route
+    // the session to another account.
+    session.model = Some("unknown".to_string());
+    session.provider_key = Some("openai-oauth".to_string());
+    session.route_api_method = Some("openai-oauth@work".to_string());
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.save()?;
+
+    let raw = std::fs::read_to_string(crate::session::storage_paths::session_path(session_id)?)?;
+    assert!(
+        !raw.contains("\"model\":\"unknown\""),
+        "placeholder model reached disk: {raw}"
+    );
+
+    let restored = Session::load_startup_stub(session_id)?;
+    assert_eq!(restored.model, None, "a placeholder loads as unresolved");
+    assert_eq!(
+        restored.route_api_method.as_deref(),
+        Some("openai-oauth@work"),
+        "the observed account route must survive an unresolved model"
+    );
+    assert_eq!(restored.provider_key.as_deref(), Some("openai-oauth"));
+    Ok(())
+}
+
+#[test]
 fn load_startup_stub_preserves_metadata_but_skips_heavy_vectors() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()

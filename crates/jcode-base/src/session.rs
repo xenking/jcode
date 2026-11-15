@@ -552,16 +552,28 @@ impl Session {
 
     /// Drop a placeholder model so an attach re-resolves it from the provider
     /// instead of resuming as "unknown".
+    ///
+    /// Route metadata only falls with the placeholder when it merely named the
+    /// provider (`claude-oauth`, `openai-api`). A route that names an observed
+    /// account (`openai-oauth@work`) is a fact about the session's account, not
+    /// about the model, so it survives: dropping it would make a resumed
+    /// session forget which account it was bound to and route elsewhere.
     pub fn normalize_placeholder_model(&mut self) {
         if self
             .model
             .as_deref()
             .is_some_and(Self::is_placeholder_model)
         {
+            let observed_account = self
+                .route_api_method
+                .as_deref()
+                .and_then(jcode_provider_core::oauth_account_label)
+                .is_some();
             self.model = None;
-            // Route metadata described the placeholder, not a real model.
-            self.provider_key = None;
-            self.route_api_method = None;
+            if !observed_account {
+                self.provider_key = None;
+                self.route_api_method = None;
+            }
         }
     }
 
