@@ -1502,6 +1502,36 @@ pub(super) fn draw_notification(frame: &mut Frame, app: &dyn TuiState, area: Rec
     frame.render_widget(Paragraph::new(notification_lines(app, area.width)), area);
 }
 
+/// `cache 47m` on the pinned status line. Quiet while the provider's prompt
+/// cache is warm, warm itself when the retention window is nearly over, and
+/// dim once it has lapsed, so the glassy "why did this turn cost so much"
+/// question is answered before it happens. Estimated windows get a `~`: the
+/// provider may evict earlier than the number says.
+pub(crate) fn overscroll_cache_spans(
+    info: &crate::tui::CacheTtlInfo,
+) -> Option<Vec<Span<'static>>> {
+    let text = if info.is_cold {
+        "cache cold".to_string()
+    } else {
+        let remaining = info.remaining_secs;
+        let span = if remaining >= 60 {
+            format!("{}m", remaining.div_ceil(60))
+        } else {
+            format!("{remaining}s")
+        };
+        let tilde = if info.is_estimate { "~" } else { "" };
+        format!("cache {tilde}{span}")
+    };
+    let ink = if info.is_cold {
+        rgb(100, 100, 110)
+    } else if info.expiring_soon() {
+        rgb(255, 193, 7)
+    } else {
+        rgb(140, 140, 150)
+    };
+    Some(vec![Span::styled(text, Style::default().fg(ink))])
+}
+
 /// Draw the session status line, pinned directly below the input. Shows the
 /// directory, branch, git status, context usage, access method, provider, and
 /// model, compacting facts step by step as the terminal narrows.
@@ -1541,6 +1571,7 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
             ))
             .or_else(|| overscroll_usage_windows(&data))
         },
+        cache: app.cache_ttl_status(),
         auth: overscroll_auth_label(data.auth_method),
         provider: (!provider.is_empty() && !overscroll_is_runtime_placeholder(&provider))
             .then(|| overscroll_provider_display(&provider)),
@@ -1597,6 +1628,7 @@ pub(crate) fn preview_overscroll_line_for_host(
         context: overscroll_context_usage(data),
         account_remaining: overscroll_account_remaining(data),
         account_windows: overscroll_usage_windows(data),
+        cache: None,
         auth: overscroll_auth_label(data.auth_method),
         provider: data
             .provider_name
@@ -1639,6 +1671,8 @@ struct OverscrollFacts {
     branch: Option<String>,
     git: Option<crate::tui::info_widget::GitInfo>,
     context: Option<(usize, usize)>,
+    /// Prompt-cache countdown, when the provider documents a retention window.
+    cache: Option<crate::tui::CacheTtlInfo>,
     account_remaining: Option<u8>,
     account_windows: Option<String>,
     auth: Option<(&'static str, Color)>,
@@ -1656,6 +1690,7 @@ struct OverscrollLevels {
     branch: u8,
     git: u8,
     context: u8,
+    cache: u8,
     account_bar: u8,
     account_windows: u8,
     context_bar: u8,
@@ -1676,6 +1711,7 @@ const OVERSCROLL_LADDER: &[fn(&mut OverscrollLevels)] = &[
     |l| l.account_bar = 1, // drop account bar before shortening other facts
     |l| l.context_bar = 1, // keep token counts when the context bar cannot fit
     |l| l.auth = 1,        // hide auth ("OAuth"/"API key")
+    |l| l.cache = 1,       // hide the prompt-cache countdown
     |l| l.git = 1,         // "~3 +1 ?2 ↑1" -> "±6 ↑1"
     |l| l.branch = 1,      // long branch -> 12 chars
     |l| l.provider = 1,    // hide provider
@@ -1773,6 +1809,13 @@ fn overscroll_fact_spans(
         } else {
             spans.push(overscroll_context_percentage(used, limit));
         }
+        out.push(spans);
+    }
+
+    if levels.cache == 0
+        && let Some(info) = &facts.cache
+        && let Some(spans) = overscroll_cache_spans(info)
+    {
         out.push(spans);
     }
 

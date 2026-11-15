@@ -252,6 +252,7 @@ fn overscroll_merges_cloud_machine_with_dir_and_fits_narrow() {
         branch: None,
         git: None,
         context: None,
+        cache: None,
         account_remaining: None,
         account_windows: None,
         auth: None,
@@ -281,6 +282,7 @@ fn overscroll_context_shows_small_bar_and_counts_and_compacts_when_narrow() {
         branch: None,
         git: None,
         context: Some((74_000, 256_000)),
+        cache: None,
         account_remaining: None,
         account_windows: None,
         auth: None,
@@ -967,4 +969,71 @@ fn voice_ghost_text_wraps_after_input_without_moving_cursor() {
     let ghost = lines[0].spans.last().unwrap();
     assert_eq!(ghost.content.as_ref(), " the bug");
     assert!(ghost.style.add_modifier.contains(Modifier::ITALIC));
+}
+
+fn cache_info(remaining_secs: u64) -> crate::tui::CacheTtlInfo {
+    crate::tui::CacheTtlInfo {
+        is_estimate: false,
+        remaining_secs,
+        ttl_secs: 3600,
+        is_cold: remaining_secs == 0,
+        cold_for_secs: 0,
+        cached_tokens: Some(18_200),
+    }
+}
+
+/// The pinned line counts the prompt cache down in minutes the whole time it
+/// is warm, warms itself as the window closes, and dims once it has lapsed.
+#[test]
+fn the_status_line_counts_the_prompt_cache_down() {
+    let warm = cache_info(47 * 60 + 12);
+    let spans = overscroll_cache_spans(&warm).expect("warm cache has a countdown");
+    assert_eq!(spans[0].content, "cache 48m");
+    assert_eq!(spans[0].style.fg, Some(rgb(140, 140, 150)), "warm is quiet");
+
+    let expiring = cache_info(2 * 60);
+    let spans = overscroll_cache_spans(&expiring).unwrap();
+    assert_eq!(spans[0].content, "cache 2m");
+    assert_eq!(
+        spans[0].style.fg,
+        Some(rgb(255, 193, 7)),
+        "a closing window warns"
+    );
+
+    let mut estimate = cache_info(47 * 60);
+    estimate.is_estimate = true;
+    let spans = overscroll_cache_spans(&estimate).unwrap();
+    assert_eq!(spans[0].content, "cache ~47m", "estimates are marked");
+
+    let mut cold = cache_info(0);
+    cold.cold_for_secs = 600;
+    let spans = overscroll_cache_spans(&cold).unwrap();
+    assert_eq!(spans[0].content, "cache cold");
+    assert_eq!(spans[0].style.fg, Some(rgb(100, 100, 110)), "cold is dim");
+}
+
+/// Effort ink is a heat scale: cool low rungs, a neutral middle, hot top, and
+/// no two neighbouring rungs share an ink.
+#[test]
+fn effort_ink_is_a_heat_scale() {
+    let levels = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+    for pair in levels.windows(2) {
+        assert_ne!(
+            effort_ink(pair[0]),
+            effort_ink(pair[1]),
+            "{} and {} share an ink",
+            pair[0],
+            pair[1]
+        );
+    }
+    let channel = |effort: &str| match effort_ink(effort) {
+        Color::Rgb(r, g, b) => (r, g, b),
+        other => panic!("{effort} is {other:?}"),
+    };
+    let (low_r, _, low_b) = channel("low");
+    assert!(low_b > low_r, "low is cool");
+    let (high_r, _, high_b) = channel("high");
+    assert!(high_r > high_b, "high is warm");
+    let (max_r, max_g, max_b) = channel("max");
+    assert!(max_r > max_g && max_r > max_b, "max is hot");
 }
