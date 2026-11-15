@@ -270,8 +270,10 @@ impl PersistedSessionMetadata {
             .and_then(Self::normalized_title)
             // Bookmarks labelled before labels doubled as titles.
             .or_else(|| self.save_label())
-            .or_else(|| self.todo_title.as_deref().and_then(Self::normalized_title))
             .or_else(|| self.title.as_deref().and_then(Self::normalized_title))
+            // A todo group is a lane label ("session-titles"), not a
+            // conversation title: only fill in when no title exists.
+            .or_else(|| self.todo_title.as_deref().and_then(Self::normalized_title))
     }
 
     fn save_label(&self) -> Option<String> {

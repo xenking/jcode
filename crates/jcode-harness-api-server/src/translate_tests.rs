@@ -419,6 +419,28 @@ fn persisted_metadata_reads_large_transcripts_from_bounded_windows() {
     assert_eq!(metadata.display_title().as_deref(), Some("Pinned title"));
 }
 
+#[test]
+fn metadata_display_title_prefers_generated_title_over_todo_lane_label() {
+    let mut metadata = PersistedSessionMetadata {
+        working_dir: None,
+        title: Some("Fix session titles".into()),
+        custom_title: None,
+        todo_title: Some("session-titles".into()),
+        saved: false,
+        save_label: None,
+        updated_at_ms: None,
+        last_active_at_ms: None,
+    };
+    assert_eq!(
+        metadata.display_title().as_deref(),
+        Some("Fix session titles")
+    );
+
+    // Lane labels only name sessions that have no generated title at all.
+    metadata.title = None;
+    assert_eq!(metadata.display_title().as_deref(), Some("session-titles"));
+}
+
 fn only_reply_event(outbound: Vec<Outbound>) -> ApiEvent {
     assert_eq!(outbound.len(), 1, "expected exactly one reply");
     match outbound.into_iter().next().expect("one outbound") {

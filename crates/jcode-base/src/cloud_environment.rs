@@ -377,23 +377,49 @@ fn lock_private(base: &Path, relative: &Path) -> Result<std::fs::File> {
     #[cfg(unix)]
     {
         use std::os::fd::{AsRawFd, FromRawFd};
-        let (dir, name) = open_parent(base, relative, true)?;
-        let fd = unsafe {
-            libc::openat(
-                dir.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDWR
-                    | libc::O_CREAT
-                    | libc::O_NOFOLLOW
-                    | libc::O_CLOEXEC
-                    | libc::O_NONBLOCK,
-                0o600,
-            )
-        };
-        ensure!(fd >= 0, "cannot lock private state");
+        let (mut dir, mut name) = open_parent(base, relative, true)?;
+        let mut fd = -1;
+        let mut last_error = None;
+        // APFS can transiently answer ENOENT for O_CREAT under concurrent
+        // writers racing to create the same private directory, even though the
+        // directory fd is valid. Re-resolve the parent and retry instead of
+        // failing a save that has no logical conflict.
+        for attempt in 0..5 {
+            fd = unsafe {
+                libc::openat(
+                    dir.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDWR
+                        | libc::O_CREAT
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC
+                        | libc::O_NONBLOCK,
+                    0o600,
+                )
+            };
+            if fd >= 0 {
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            last_error = Some(error.to_string());
+            if error.kind() != std::io::ErrorKind::NotFound {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2 * (attempt + 1)));
+            (dir, name) = open_parent(base, relative, true)?;
+        }
+        ensure!(
+            fd >= 0,
+            "cannot lock private state {}: {}",
+            base.join(relative).display(),
+            last_error.unwrap_or_else(|| "open failed".to_string())
+        );
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
         ensure!(file.metadata()?.is_file(), "invalid private lock");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // A peer can legitimately hold this while fsync-ing on a busy disk;
+        // five seconds was short enough that a loaded test machine (and a slow
+        // external volume) timed out instead of waiting.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
                 break;
