@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 const MAX_PARALLEL: usize = 10;
 
-const BATCH_DESCRIPTION: &str = "Run independent tool calls in parallel (1-10). Each tool_calls entry contains tool, intent, and the tool's normal arguments as sibling fields. Do not batch dependent calls or nest batch.";
+const BATCH_DESCRIPTION: &str = "Run independent tool calls in parallel (1-10). Each tool_calls entry contains tool, intent, and the tool's normal arguments as sibling fields. Use `codemode` instead when the calls depend on each other, you would loop over results, or the work needs more than 10 calls. Do not batch dependent calls or nest batch.";
 
 pub(crate) fn generic_batch_schema() -> Value {
     json!({

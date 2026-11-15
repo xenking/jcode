@@ -8,6 +8,26 @@ the bounded return value, captured `console.*` output, and a host-recorded
 receipt of the nested calls reach the model. The model sees the same idea as
 Cloudflare's Code Mode: a typed TypeScript API generated from tool schemas.
 
+## When the model is told to use it
+
+Tool descriptions alone were not enough: measured over three days (2026-11-13
+to 2026-11-15), `codemode` was 11 of 7,884 tool calls (0.14%, and 6 of those 11
+came from probe sessions told to use it), while `bash` was 65.5% and `batch`
+1.1%. The cause was steering, not availability: the tool was registered and
+eager in every build, but nothing told the model when one script beats many
+calls.
+
+Three places now carry that guidance:
+
+- `CODEMODE_PROMPT` in `jcode-base/src/prompt.rs`, appended to the static
+  system prompt when both `[features] code_mode` and `[tools] codemode` are
+  on. It lists the work shapes: 5+ calls, dependent chains, loops over a
+  previous result, and large outputs that only need a summary.
+- The tool description leads with the same shapes before the mechanics, and
+  says which tool wins for each (`batch` for 1-10 independent calls, `bash`
+  for shell work).
+- `batch`'s description points at `codemode` for dependent or looping work.
+
 ## Enabling
 
 ```toml
@@ -112,6 +132,10 @@ unavailable instead of failing the build.
 TypeScript is not compiled. `types()` gives the model the declarations to
 write against, and the program itself must be plain JavaScript (QuickJS
 ES2023). This matches Cloudflare's model, which also strips types first.
+Because that mismatch is invisible in the error QuickJS raises, a script that
+fails to parse gets an explicit tail on the error: the sandbox runs plain
+JavaScript, `types()` output is a reference, drop annotations, interfaces,
+generics, and `as` casts. Runtime failures keep the plain message.
 
 ## References
 
@@ -126,7 +150,8 @@ ES2023). This matches Cloudflare's model, which also strips types first.
 
 ## Gaps
 
-- No TS transpile step, so type annotations in the program are syntax errors.
+- No TS transpile step. A parse failure now names the cause, but annotations
+  still have to be removed by the model.
 - No approval pause clock (codewhale pauses the deadline while a human
   approves). jcode's `pre_tool` gate is non-interactive, so this is not
   needed today.

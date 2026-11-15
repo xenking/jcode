@@ -131,6 +131,38 @@ async fn syntax_errors_are_reported() {
     assert!(out.error.is_some());
 }
 
+/// `types()` hands the model TypeScript declarations, so a model naturally
+/// writes `const x: string = ...`. QuickJS only runs plain JavaScript, and the
+/// bare `SyntaxError: unexpected token` that results teaches the model that
+/// codemode is broken rather than that annotations must go. The error has to
+/// name the real problem.
+#[tokio::test(flavor = "multi_thread")]
+async fn typescript_annotations_explain_the_plain_javascript_rule() {
+    let out = exec("const name: string = 'x'; return name;").await;
+    let err = out.error.unwrap_or_default();
+    assert!(!err.is_empty(), "a TypeScript annotation must not run");
+    assert!(
+        err.to_lowercase().contains("typescript")
+            && err.to_lowercase().contains("plain javascript"),
+        "error must explain the plain-JavaScript rule, got: {err}"
+    );
+    assert!(
+        err.contains("type annotation") || err.contains("annotations"),
+        "error must name the annotation, got: {err}"
+    );
+}
+
+/// The hint is for parse failures only. A script that ran and threw keeps the
+/// plain message: telling it about TypeScript there would send the model off to
+/// rewrite working code.
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_errors_do_not_mention_plain_javascript() {
+    let out = exec("throw new Error('nope');").await;
+    let err = out.error.unwrap_or_default();
+    assert!(err.contains("nope"), "{err}");
+    assert!(!err.to_lowercase().contains("plain javascript"), "{err}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn unknown_tools_suggest_alternatives() {
     let out = exec("return await tools.ech({});").await;

@@ -235,7 +235,7 @@ async fn run_on_thread(
         let promise: Promise = ctx
             .eval(wrapped)
             .catch(&ctx)
-            .map_err(|e| format_js_error(&e.to_string()))?;
+            .map_err(|e| format_js_parse_error(&e.to_string()))?;
         let value: JsValue = promise
             .into_future::<JsValue>()
             .await
@@ -282,6 +282,21 @@ fn format_js_error(raw: &str) -> String {
         return format!("{trimmed} (memory limit reached)");
     }
     trimmed.to_string()
+}
+
+/// A script that does not parse usually came from `types()` output: the model
+/// copies a declaration or writes `const x: string = ...`. QuickJS reports that
+/// as `missing initializer for variable` or a bare `unexpected token`, which
+/// reads as "codemode is broken" instead of "drop the annotation". Name the
+/// real cause on every parse failure; runtime failures keep the plain message.
+fn format_js_parse_error(raw: &str) -> String {
+    let message = format_js_error(raw);
+    if message.contains("memory limit reached") {
+        return message;
+    }
+    format!(
+        "{message}\nThis sandbox runs plain JavaScript (QuickJS), not TypeScript. `types()` output is a reference, not runnable code: remove type annotations (`const x: string` -> `const x`), interfaces, generics, and `as` casts.\n"
+    )
 }
 
 fn install_globals<'js>(ctx: &rquickjs::Ctx<'js>, shared: &Arc<Shared>) -> rquickjs::Result<()> {

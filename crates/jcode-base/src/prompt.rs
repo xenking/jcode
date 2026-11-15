@@ -34,22 +34,45 @@ pub fn load_base_system_prompt(working_dir: Option<&Path>) -> String {
 /// Prompt guidance for the optional Mermaid rendering capability.
 pub const MERMAID_PROMPT: &str = "# Mermaid\n\nRender fenced `mermaid` blocks inline.";
 
+/// Prompt guidance for the Codemode capability.
+///
+/// This is the only place the model is told *when* one script beats many
+/// single tool calls. Without it the model only ever sees the tool's own
+/// description, and measured history shows it then reaches for `bash` and
+/// `batch` instead (codemode was 0.14% of 7,884 tool calls).
+pub const CODEMODE_PROMPT: &str = "# Tool calls
+
+`codemode` runs one JavaScript program that calls tools itself, so a whole lookup chain costs one turn instead of many. Reach for it when:
+- the task needs 5 or more tool calls,
+- each call needs the previous call's result,
+- you would loop over a list another tool returned,
+- a tool returns far more output than you need and you only want a summary.
+Only the script's return value and console output reach the conversation, so intermediate data costs no context.
+
+Use `batch` for a handful (1-10) independent calls whose results you want verbatim. Use `bash` for shell work, not as a way to fan out tool calls. Call a tool directly when one call is enough.";
+
 /// Harness capabilities that conditionally contribute prompt modules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromptCapabilities {
     pub mermaid: bool,
+    pub codemode: bool,
 }
 
 impl Default for PromptCapabilities {
     fn default() -> Self {
-        Self { mermaid: true }
+        Self {
+            mermaid: true,
+            codemode: false,
+        }
     }
 }
 
 impl PromptCapabilities {
     fn current() -> Self {
+        let config = crate::config::config();
         Self {
-            mermaid: crate::config::config().features.mermaid,
+            mermaid: config.features.mermaid,
+            codemode: config.features.code_mode && config.tools.codemode,
         }
     }
 }
@@ -61,6 +84,9 @@ fn base_system_prompt_parts(
     let mut parts = vec![load_base_system_prompt(working_dir)];
     if capabilities.mermaid {
         parts.push(MERMAID_PROMPT.to_string());
+    }
+    if capabilities.codemode {
+        parts.push(CODEMODE_PROMPT.to_string());
     }
     parts
 }

@@ -25,7 +25,35 @@ fn description_is_compact_and_preserves_execution_contract() {
     ] {
         assert!(description.contains(clause), "Missing contract: {clause}");
     }
-    assert!(description.len() <= 750);
+    assert!(description.len() <= 1100);
+}
+
+/// The description is the only steering a model gets when it reads the tool
+/// list, so it must name the work shapes where one script beats many calls and
+/// say which tool wins for each shape. Measured over three days, models that
+/// were only told the mechanics used `codemode` in 0.14% of tool calls.
+#[test]
+fn description_steers_toward_scripts_over_many_single_calls() {
+    let registry = Registry::empty();
+    let tool = CodemodeTool::new(registry.downgrade());
+    let description = tool.to_definition().description;
+    for clause in [
+        "Reach for it when work needs several calls",
+        "dependent chains",
+        "loops over a previous result",
+        "5+ calls",
+        "summarized",
+        "Prefer it over repeated single calls or `batch`",
+        "`batch` for 1-10 independent calls",
+        "`bash` for shell work",
+    ] {
+        assert!(description.contains(clause), "Missing steer: {clause}");
+    }
+    // The steering must come before the mechanics: a model that stops reading
+    // early still has to learn when the tool is worth a turn.
+    let steer_at = description.find("Reach for it when").unwrap();
+    let mechanics_at = description.find("Supply an async function body").unwrap();
+    assert!(steer_at < mechanics_at);
 }
 
 struct JsonTool;

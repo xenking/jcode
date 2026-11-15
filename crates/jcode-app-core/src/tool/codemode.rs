@@ -1,7 +1,8 @@
-//! Opt-in `codemode` tool: run model-written JavaScript in an embedded QuickJS
+//! `codemode` tool: run model-written JavaScript in an embedded QuickJS
 //! sandbox that can call any tool available to the session.
 //!
-//! Enabled with `[tools] codemode = true` (or `JCODE_CODEMODE=1`). See
+//! Enabled by default (`[features] code_mode` and `[tools] codemode`, both
+//! true unless turned off; `JCODE_CODEMODE=0` also disables it). See
 //! `jcode-codemode` for the sandbox itself. This module is the harness side:
 //! it lists the session's tools, routes calls through [`Registry::execute`]
 //! (so session policy, hooks, and MCP routing all apply), and persists the
@@ -26,8 +27,8 @@ const EXCLUDED: &[&str] = &["codemode", "batch"];
 /// Maximum characters of the final report returned to the model.
 const MAX_REPORT_CHARS: usize = 60_000;
 
-const DESCRIPTION: &str = "Run sandboxed JavaScript to chain, filter, or parallelize tool calls, including MCP. Supply an async function body using await/return; only returned values and console.log reach the conversation.\n\
-tools.<name>(args) or callTool(name, args) takes normal tool arguments; JSON output becomes objects, and failures throw. Use Promise.all for independent calls.\n\
+const DESCRIPTION: &str = "Run one JavaScript program that calls tools itself. Reach for it when work needs several calls: dependent chains, loops over a previous result, 5+ calls, or big outputs you only want summarized. Only your return value and console.log output reach the conversation, so intermediate data costs no context. Prefer it over repeated single calls or `batch`; use `batch` for 1-10 independent calls whose results you want verbatim, and `bash` for shell work.\n\
+Supply an async function body using await/return; tools.<name>(args) or callTool(name, args) takes normal tool arguments, JSON output becomes objects, and failures throw. Use Promise.all for independent calls.\n\
 listTools(filter?) lists names; types(filter?) and describeTool(name) give TypeScript declarations and schemas. store(key, value), load(key), storedKeys() persist JSON for the session.\n\
 No direct filesystem, network, timers, or modules. Limits: 64 MB heap, 300 s, 2000 tool calls.";
 

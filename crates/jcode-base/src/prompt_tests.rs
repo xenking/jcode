@@ -24,7 +24,10 @@ fn mermaid_prompt_module_follows_capability() {
         false,
         None,
         None,
-        PromptCapabilities { mermaid: true },
+        PromptCapabilities {
+            mermaid: true,
+            ..Default::default()
+        },
     );
     assert!(enabled.static_part.contains(MERMAID_PROMPT));
 
@@ -34,10 +37,61 @@ fn mermaid_prompt_module_follows_capability() {
         false,
         None,
         None,
-        PromptCapabilities { mermaid: false },
+        PromptCapabilities {
+            mermaid: false,
+            ..Default::default()
+        },
     );
     assert!(!disabled.static_part.contains("Mermaid diagrams"));
     assert!(!disabled.static_part.contains("fenced `mermaid` code block"));
+}
+
+#[test]
+fn codemode_prompt_module_follows_capability() {
+    let (enabled, _) = build_system_prompt_split_with_capabilities(
+        None,
+        &[],
+        false,
+        None,
+        None,
+        PromptCapabilities {
+            codemode: true,
+            ..Default::default()
+        },
+    );
+    assert!(enabled.static_part.contains(CODEMODE_PROMPT));
+
+    let (disabled, _) = build_system_prompt_split_with_capabilities(
+        None,
+        &[],
+        false,
+        None,
+        None,
+        PromptCapabilities {
+            codemode: false,
+            ..Default::default()
+        },
+    );
+    assert!(!disabled.static_part.contains("# Tool calls"));
+    assert!(!disabled.static_part.contains("`codemode` runs one JavaScript"));
+}
+
+#[test]
+fn codemode_prompt_names_the_conditions_where_it_beats_other_tools() {
+    for clause in [
+        "5 or more tool calls",
+        "each call needs the previous call's result",
+        "loop over a list another tool returned",
+        "far more output than you need",
+        "`batch` for a handful (1-10) independent calls",
+        "`bash` for shell work",
+    ] {
+        assert!(
+            CODEMODE_PROMPT.contains(clause),
+            "CODEMODE_PROMPT must steer with: {clause}"
+        );
+    }
+    assert!(CODEMODE_PROMPT.len() <= 900, "prompt module must stay cheap");
 }
 
 /// Verify skill prompts don't accidentally introduce "Claude Code" identity
