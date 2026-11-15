@@ -146,6 +146,23 @@ async fn streaming_ask_user_wait_is_not_automatically_backgrounded() {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn native_ask_tool_wait_is_not_automatically_backgrounded() {
+    // The registered tool is named `ask`; a human cannot answer inside the 3s
+    // foreground budget, so handing it off would hide the picker from the turn.
+    let input = serde_json::json!({"questions": []});
+    assert!(!auto_background_allowed("ask", &input));
+    let bg = InterruptSignal::new();
+    let shutdown = InterruptSignal::new();
+    tokio::select! {
+        biased;
+        _ = wait_for_tool_handoff(&bg, &shutdown, auto_background_allowed("ask", &input), Duration::from_secs(3)) => {
+            panic!("ask was automatically backgrounded");
+        }
+        _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+    }
+}
+
 #[async_trait::async_trait]
 impl crate::tool::Tool for WaitProbe {
     fn name(&self) -> &str {

@@ -26,7 +26,7 @@ impl Tool for AskTool {
     }
 
     fn description(&self) -> &str {
-        "Ask the user 1-4 multiple-choice questions and block until they answer. Use only for genuine owner decisions that materially change the outcome (user-visible behavior, public API, data model, cost, privacy, irreversible or external actions), never for facts you can research or ordinary implementation details. Batch all pending decisions into one call. Put your recommended option first and append \" (Recommended)\" to its label. Each question has 2-6 options (label plus optional description), optional multi_select, and optional allow_other for a free-text answer. If the user declines, proceed with your best judgment or stop as appropriate. Fails when no interactive user is attached."
+        "Ask the user 1-4 multiple-choice questions and block until they answer. This is the way to get a decision from the user: when a genuine owner decision materially changes the outcome (user-visible behavior, public API, data model, cost, privacy, irreversible or external actions) and you cannot research the answer, call this instead of ending your turn with a free-text question. Never use it for facts you can research, ordinary implementation details, or progress check-ins. Batch all pending decisions into one call. Put your recommended option first and append \" (Recommended)\" to its label. Each question has 2-6 options (label plus optional description), optional multi_select, and optional allow_other for a free-text answer. If the user declines, proceed with your best judgment or stop as appropriate. Fails when no interactive user is attached."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -157,5 +157,17 @@ mod tests {
             let out = task.await.unwrap().unwrap();
             assert!(out.output.contains(expect), "{}", out.output);
         }
+    }
+}
+
+#[cfg(test)]
+mod description_tests {
+    use super::*;
+
+    #[test]
+    fn description_invites_use_for_owner_decisions_and_bounds_overuse() {
+        let d = AskTool.description();
+        assert!(d.contains("instead of ending your turn with a free-text question"));
+        assert!(d.contains("Never use it for facts you can research"));
     }
 }

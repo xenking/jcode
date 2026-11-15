@@ -880,3 +880,11 @@ fn prompt_guidance_missing_or_unreadable_project_keeps_global_content() {
         }
     });
 }
+
+#[test]
+fn default_prompt_points_owner_decisions_at_the_ask_tool() {
+    assert!(
+        DEFAULT_SYSTEM_PROMPT.contains("`ask` tool"),
+        "the model never reaches for ask unless the base prompt names it"
+    );
+}

@@ -10,7 +10,8 @@ pub(super) fn automatic_handoff_reason(budget: Duration) -> String {
 
 pub(super) fn auto_background_allowed(name: &str, input: &serde_json::Value) -> bool {
     // Human decisions belong to the live turn that owns the response channel.
-    name != "ask_user"
+    // `ask` is the registered tool name; `ask_user` is the legacy spelling.
+    !matches!(name, "ask" | "ask_user")
         && !(name == "bg" && input.get("action").and_then(|value| value.as_str()) == Some("wait"))
 }
 
