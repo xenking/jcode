@@ -183,3 +183,55 @@ async fn queue_soft_interrupt_for_session_persists_when_live_queue_is_unavailabl
         crate::env::remove_var("JCODE_HOME");
     }
 }
+
+#[tokio::test]
+async fn queued_user_message_wakes_blocking_wait_but_system_message_does_not() {
+    let agent = test_agent().await;
+    let (session_id, queue) = {
+        let guard = agent.lock().await;
+        (guard.session_id().to_string(), guard.soft_interrupt_queue())
+    };
+    let queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
+    register_session_interrupt_queue(&queues, &session_id, queue).await;
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.clone(), agent.clone())]),
+    ));
+
+    let watch = crate::incoming_message::watch(&session_id);
+    assert!(
+        queue_soft_interrupt_for_session(
+            &session_id,
+            "background notice".to_string(),
+            false,
+            SoftInterruptSource::System,
+            &queues,
+            &sessions,
+        )
+        .await
+    );
+    assert!(
+        !watch.is_pending(),
+        "system notifications must not end a blocking wait"
+    );
+
+    let waiter = tokio::spawn({
+        let watch = crate::incoming_message::watch(&session_id);
+        async move { watch.arrived().await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        queue_soft_interrupt_for_session(
+            &session_id,
+            "user says hi".to_string(),
+            false,
+            SoftInterruptSource::User,
+            &queues,
+            &sessions,
+        )
+        .await
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+        .await
+        .expect("user message must wake the wait within 1s")
+        .unwrap();
+}
