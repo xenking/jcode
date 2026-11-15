@@ -1141,7 +1141,7 @@ impl Agent {
                         user_count,
                         assistant_count,
                     ));
-                    return (messages, event);
+                    return (Self::bounded_outbound_images(messages), event);
                 }
                 Err(_) => {
                     logging::info("messages_for_provider: compaction lock failed, using session");
@@ -1150,7 +1150,7 @@ impl Agent {
         }
 
         let all_messages = self.session.provider_messages();
-        let messages = all_messages.to_vec();
+        let messages = Self::bounded_outbound_images(all_messages.to_vec());
         let user_count = messages
             .iter()
             .filter(|message| matches!(message.role, Role::User))
@@ -1164,6 +1164,47 @@ impl Agent {
         ));
         (messages, None)
     }
+
+/// Bound the inline screenshot payload of one outbound request.
+///
+/// Screenshot decay used to run from `Session::append_stored_message`, so
+/// appending one more screenshot rewrote messages that earlier requests had
+/// already sent. Any rewrite invalidates the provider prompt cache from the
+/// first rewritten message to the end of the prompt: on 2026-11-15 a
+/// computer-use turn rebuilt a ~360K-token prefix mid-turn that way, and the
+/// user's `/btw` side question was in flight at the same moment, so the fork
+/// took the blame.
+///
+/// The stored transcript is now read-only while a turn runs. Only the request
+/// copy is trimmed, and only once its payload genuinely approaches the
+/// provider's body limit, so an ordinary screenshot stream never changes a
+/// message that has already been sent.
+fn bounded_outbound_images(mut messages: Vec<Message>) -> Vec<Message> {
+    let total: usize = messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::Image { data, .. } => Some(data.len()),
+            _ => None,
+        })
+        .sum();
+    let budget = crate::compaction::TOOL_IMAGE_DECAY_KEEP_CHARS;
+    if total <= budget {
+        return messages;
+    }
+    let mut contents: Vec<&mut Vec<ContentBlock>> = messages
+        .iter_mut()
+        .map(|message| &mut message.content)
+        .collect();
+    let stripped = crate::compaction::strip_large_images_in_contents(&mut contents, budget);
+    drop(contents);
+    if stripped > 0 {
+        logging::warn(&format!(
+            "Outbound image payload {total} chars exceeds the {budget} char budget; stripped {stripped} older screenshot(s) from this request only"
+        ));
+    }
+    messages
+}
 
     fn record_client_cache_request(&mut self, messages: &[Message]) {
         if !self.should_track_client_cache() {
