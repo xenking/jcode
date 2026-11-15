@@ -24,6 +24,8 @@ pub(crate) fn initial_title(args: &Args) -> String {
         Some(Command::Repl) => "jcode repl".to_string(),
         Some(Command::Update { .. }) => "jcode update".to_string(),
         Some(Command::Version { .. }) => "jcode version".to_string(),
+        #[cfg(unix)]
+        Some(Command::Rollout { .. }) => "jcode rollout".to_string(),
         Some(Command::Usage { .. }) => "jcode usage".to_string(),
         Some(Command::Titles { .. }) => "jcode titles".to_string(),
         Some(Command::Telemetry(_)) => "jcode telemetry".to_string(),

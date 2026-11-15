@@ -384,6 +384,8 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Version { json }) => {
             commands::run_version_command(json)?;
         }
+        #[cfg(unix)]
+        Some(Command::Rollout(args)) => super::rollout_host::run_cli(args)?,
         Some(Command::Usage { json }) => {
             commands::run_usage_command(json).await?;
         }

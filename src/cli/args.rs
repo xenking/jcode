@@ -8,11 +8,15 @@ mod cloud_ephemeral;
 mod cloud_runtime;
 mod google;
 mod mcp;
+#[cfg(unix)]
+mod rollout;
 pub(crate) use cloud_ephemeral::CloudEphemeralCommand;
 pub(crate) use cloud_runtime::CloudRuntimeCommand;
 #[allow(unused_imports)]
 pub(crate) use google::{GoogleAccessTierArg, GoogleLoginArgs};
 pub(crate) use mcp::McpCommand;
+#[cfg(unix)]
+pub(crate) use rollout::RolloutArgs;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum TranscriptModeArg {
@@ -310,6 +314,12 @@ pub(crate) enum Command {
         #[arg(long)]
         json: bool,
     },
+
+    /// Build, stage and roll out a matched jcode + Jcode Desktop pair on this
+    /// machine: plan, build, package, stage, drain, reload, swap, verify, with
+    /// automatic rollback. Re-running resumes where the last run stopped.
+    #[cfg(unix)]
+    Rollout(RolloutArgs),
 
     /// Show usage limits for connected providers
     Usage {

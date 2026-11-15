@@ -3693,6 +3693,7 @@ dependencies = [
  "jcode-provider-grok-build-runtime",
  "jcode-provider-openai-runtime",
  "jcode-provider-openrouter-runtime",
+ "jcode-sdk",
  "jcode-selfdev-types",
  "jcode-session-types",
  "jcode-terminal-prompt",
