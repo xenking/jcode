@@ -505,7 +505,12 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(screen.contains("Hibernated"));
-        assert!(screen.contains("private mem"));
+        // The memory figure appears only where the OS reports it.
+        assert_eq!(
+            screen.contains("private mem"),
+            private_memory_bytes().is_some(),
+            "{screen}"
+        );
         let snapshot = app.hibernation_frame().unwrap().clone();
         app.enter_idle_hibernation(Some(&Buffer::empty(Rect::new(0, 0, 5, 5))));
         assert_eq!(app.hibernation_frame().unwrap(), &snapshot);
