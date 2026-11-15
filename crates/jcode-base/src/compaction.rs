@@ -50,6 +50,22 @@ const HARD_THRESHOLD_PENDING_POLL_MS: u64 = 50;
 /// even if it alone exceeds this target.
 const MANUAL_RECENT_TAIL_TOKENS: usize = 40_000;
 
+/// Real tokens per estimated token that the harness is willing to believe when
+/// the estimate did not grow. The estimate charges one token per four characters
+/// of text, while dense content (base64 inside tool output, CJK) tokenizes near
+/// 1.3 characters per token, so three times the estimate is the plausible
+/// extreme. The 2026-11-15 incident reported 3.14x.
+const REPORT_DENSITY_CEILING: u64 = 3;
+
+/// Ceiling for the first report of a session, where there is no accepted report
+/// to measure growth against. Four times the estimate rejects only absurd
+/// numbers.
+const FIRST_REPORT_DENSITY_CEILING: u64 = 4;
+
+/// Slack band for tokenizer density and provider rounding, in tokens, so normal
+/// reports are never trimmed. Also scaled up as 5% of the estimate.
+const REPORT_SLACK_TOKENS: u64 = 4_096;
+
 /// Result from background compaction task
 struct CompactionResult {
     summary_text: String,
@@ -184,6 +200,12 @@ pub struct CompactionManager {
     /// Provider-reported input token usage from the latest request.
     /// Used to trigger compaction with real token counts instead of only heuristics.
     observed_input_tokens: Option<u64>,
+
+    /// The harness's own token estimate for the request whose usage produced
+    /// [`Self::observed_input_tokens`]. Provider reports are checked against the
+    /// growth of this estimate, so a report cannot claim context the harness
+    /// never sent (see [`Self::update_observed_input_tokens_with_estimate`]).
+    observed_estimate_tokens: Option<u64>,
 
     /// Last compaction event (if any)
     last_compaction: Option<CompactionEvent>,
@@ -325,6 +347,7 @@ impl CompactionManager {
             model_token_budget: DEFAULT_TOKEN_BUDGET,
             context_cap_override: None,
             observed_input_tokens: None,
+            observed_estimate_tokens: None,
             last_compaction: None,
             last_compaction_error: None,
             mode,
@@ -507,6 +530,7 @@ impl CompactionManager {
         self.pending_trigger = None;
         self.pending_cutoff = 0;
         self.observed_input_tokens = None;
+        self.observed_estimate_tokens = None;
         self.last_compaction = None;
         self.token_history.clear();
         self.turns_since_last_compact = 0;
@@ -604,6 +628,7 @@ impl CompactionManager {
             summary.text.push_str(&fallback);
         }
         self.observed_input_tokens = None;
+        self.observed_estimate_tokens = None;
         true
     }
 
@@ -1075,6 +1100,7 @@ impl CompactionManager {
             return;
         };
         self.observed_input_tokens = None;
+        self.observed_estimate_tokens = None;
         self.active_chars.invalidate();
         crate::logging::info(&format!(
             "[compaction] {}: elided {} regions, ~{} tokens saved",
@@ -1097,9 +1123,71 @@ impl CompactionManager {
         outcome
     }
 
-    /// Store provider-reported input token usage for compaction decisions.
+    /// Store provider-reported input token usage, without a plausibility check.
+    ///
+    /// Prefer [`Self::update_observed_input_tokens_with_estimate`]: an unchecked
+    /// number is trusted for both the context percentage and the compaction
+    /// trigger, so one over-reported usage doubles the apparent context.
+    ///
+    /// This form drops the estimate anchor, because the new value no longer
+    /// describes the request that anchor was recorded for (callers use it to
+    /// force a full context during context-limit recovery). The next checked
+    /// report starts a fresh anchor instead of being measured against stale
+    /// numbers.
     pub fn update_observed_input_tokens(&mut self, tokens: u64) {
         self.observed_input_tokens = Some(tokens);
+        self.observed_estimate_tokens = None;
+    }
+
+    /// Store provider-reported usage, refusing growth the harness's own estimate
+    /// cannot explain.
+    ///
+    /// A provider can report more input tokens than the request contained. On
+    /// 2026-11-15 07:22Z Anthropic reported 883_966 tokens (cache read 871_082 +
+    /// write 12_741) for a request that held ~447_000, and the very next report
+    /// for the same content was 447_092. Taken at face value that figure doubled
+    /// the context percentage the composer showed and pushed the ratio
+    /// threshold to where compaction fires early.
+    ///
+    /// The estimate is content the harness sent, so a large jump in the estimate
+    /// is exactly what a large jump in the report looks like. Growth the estimate
+    /// does not see is the anomaly, so the accepted value is capped at the last
+    /// accepted report plus `DENSITY_CEILING` times that unseen growth (plus a
+    /// slack band for tokenizer density and rounding). A first report arrives
+    /// with nothing to measure against and is capped at
+    /// `FIRST_REPORT_DENSITY_CEILING` times the estimate, which only rejects
+    /// absurd numbers.
+    ///
+    /// Returns the accepted value.
+    pub fn update_observed_input_tokens_with_estimate(
+        &mut self,
+        reported: u64,
+        estimate: usize,
+    ) -> u64 {
+        let estimate = u64::try_from(estimate).unwrap_or(0);
+        let accepted = if estimate == 0 {
+            reported
+        } else if let Some(previous_estimate) = self.observed_estimate_tokens {
+            let unseen_growth = estimate.saturating_sub(previous_estimate);
+            let slack = (estimate / 20).max(REPORT_SLACK_TOKENS);
+            let ceiling = self
+                .observed_input_tokens
+                .unwrap_or(0)
+                .saturating_add(unseen_growth.saturating_mul(REPORT_DENSITY_CEILING))
+                .saturating_add(slack);
+            reported.min(ceiling)
+        } else {
+            reported.min(estimate.saturating_mul(FIRST_REPORT_DENSITY_CEILING))
+        };
+        if accepted < reported {
+            crate::logging::warn(&format!(
+                "[compaction] implausible provider usage: reported={reported} accepted={accepted} estimate={estimate} previous_report={:?} previous_estimate={:?}; the report claims context this request did not carry, so the harness keeps its own bound",
+                self.observed_input_tokens, self.observed_estimate_tokens
+            ));
+        }
+        self.observed_input_tokens = Some(accepted);
+        self.observed_estimate_tokens = Some(estimate);
+        accepted
     }
 
     /// Best-effort current token count using the caller's messages.
@@ -1624,6 +1712,7 @@ impl CompactionManager {
                 self.active_summary = Some(summary);
                 self.discard_oversized_openai_native_compaction();
                 self.observed_input_tokens = None;
+                self.observed_estimate_tokens = None;
                 let post_tokens = self.effective_token_count_with(all_messages) as u64;
                 self.last_compaction = Some(CompactionEvent {
                     trigger: trigger.clone(),
@@ -1974,6 +2063,7 @@ impl CompactionManager {
         self.active_chars.set_exact(remaining_suffix_chars[cutoff]);
         self.active_summary = Some(summary);
         self.observed_input_tokens = None;
+        self.observed_estimate_tokens = None;
         let post_tokens = self.effective_token_count_with(all_messages) as u64;
         self.last_compaction = Some(CompactionEvent {
             trigger: "hard_compact".to_string(),
@@ -2020,6 +2110,7 @@ impl CompactionManager {
 
         if truncated > 0 {
             self.observed_input_tokens = None;
+            self.observed_estimate_tokens = None;
             self.active_chars.invalidate();
         }
         truncated
@@ -2407,3 +2498,7 @@ pub use transfer::build_transfer_compaction_state;
 #[cfg(test)]
 #[path = "compaction_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "compaction_usage_plausibility_tests.rs"]
+mod usage_plausibility_tests;

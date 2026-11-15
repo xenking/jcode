@@ -1361,9 +1361,14 @@ impl App {
         let Some(tokens) = self.current_stream_context_tokens() else {
             return;
         };
+        // Same plausibility check as the daemon path: the provider can report
+        // more input tokens than the request carried, and this value feeds both
+        // the context percentage and the compaction trigger.
+        let messages = self.session.messages_for_provider_uncached();
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
-            manager.update_observed_input_tokens(tokens);
+            let estimate = manager.token_estimate_with(&messages);
+            manager.update_observed_input_tokens_with_estimate(tokens, estimate);
         };
     }
 

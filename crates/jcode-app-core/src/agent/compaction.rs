@@ -417,10 +417,16 @@ impl Agent {
             cache_read_input_tokens,
             cache_creation_input_tokens,
         );
+        // The provider can report more input tokens than the request carried, so
+        // the report is checked against the harness's own estimate of the same
+        // messages before it drives the context percentage or the compaction
+        // trigger.
+        let messages = self.session.provider_messages();
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
-            manager.update_observed_input_tokens(observed);
-            manager.push_token_snapshot(observed);
+            let estimate = manager.token_estimate_with(&messages);
+            let accepted = manager.update_observed_input_tokens_with_estimate(observed, estimate);
+            manager.push_token_snapshot(accepted);
         };
     }
 
