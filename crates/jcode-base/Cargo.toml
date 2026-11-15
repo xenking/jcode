@@ -132,6 +132,11 @@ default = ["bedrock"]
 # dev-dependency feature by jcode-app-core / jcode / etc.; never in normal
 # (non-test) builds.
 test-support = []
+# Suppress the machine's hooks in test builds unless a test opts in with
+# `hooks::TestHooksGuard::allow`. Enabled as a dev-dependency feature by
+# jcode-app-core, so it applies to test/bench/example builds only: unit tests must
+# not inherit the developer's ~/.jcode/config.toml hooks (see hooks::hooks_suppressed).
+test-isolated-hooks = []
 jemalloc = [
     "dep:tikv-jemalloc-ctl",
     "dep:tikv-jemalloc-sys",

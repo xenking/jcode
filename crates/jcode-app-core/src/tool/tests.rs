@@ -588,6 +588,7 @@ async fn registry_execute_pre_tool_hook_blocks_and_allows() {
     use std::os::unix::fs::PermissionsExt;
 
     let _guard = crate::storage::lock_test_env();
+    let _allow_hooks = jcode_base::hooks::TestHooksGuard::allow();
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
     let temp = tempfile::TempDir::new().expect("temp dir");
@@ -2186,6 +2187,9 @@ impl Drop for HookEnvGuard {
 #[test]
 fn hook_env_override_applies_after_config_is_already_loaded() {
     let _env_lock = crate::storage::lock_test_env();
+    // The subject is hook resolution, so opt this test back into hooks: test builds
+    // suppress them by default.
+    let _allow_hooks = jcode_base::hooks::TestHooksGuard::allow();
     // Load config before the override exists, as any earlier test would.
     let _ = crate::config::config();
     let baseline = jcode_base::hooks::hook_commands("post_tool_feedback");
@@ -2216,6 +2220,7 @@ fn hook_env_override_applies_after_config_is_already_loaded() {
 async fn post_tool_feedback_hook_appends_stdout_to_tool_result() {
     use std::os::unix::fs::PermissionsExt;
     let _env_lock = crate::storage::lock_test_env();
+    let _allow_hooks = jcode_base::hooks::TestHooksGuard::allow();
     let dir = tempfile::tempdir().expect("temp dir");
     let target = dir.path().join("prose.md");
     std::fs::write(&target, "hello\n").expect("write target");
@@ -2245,6 +2250,55 @@ async fn post_tool_feedback_hook_appends_stdout_to_tool_result() {
         "{output}"
     );
     assert!(output.contains("stdin-ok"), "{output}");
+}
+
+/// A hook configured for this process must not run inside a unit test.
+///
+/// Unit tests run the production config loader, so they used to inherit whatever
+/// the developer has in `~/.jcode/config.toml`: a `pre_tool` gate added its
+/// timeout to the paused clock of unrelated timing tests, and any hook's side
+/// effects landed in whatever test happened to be running. Test builds now
+/// suppress hooks unless a test opts in (see `jcode_base::hooks`), and this test
+/// pins that: it configures a hook that would leave a marker file and asserts the
+/// marker never appears. It is deterministic on any machine because the hook comes
+/// from this test's own env, not from the user's config.
+#[cfg(unix)]
+#[tokio::test]
+async fn user_configured_hooks_cannot_run_inside_a_unit_test() {
+    use std::os::unix::fs::PermissionsExt;
+    let _env_lock = crate::storage::lock_test_env();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let target = dir.path().join("prose.md");
+    std::fs::write(&target, "hello\n").expect("write target");
+    let marker = dir.path().join("hook-ran");
+    let script = dir.path().join("leak.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\n: > '{}'\nexit 0\n",
+            marker.display()
+        ),
+    )
+    .expect("write script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let _pre = set_hook_env("JCODE_HOOK_PRE_TOOL", &script);
+    let _feedback = set_hook_env("JCODE_HOOK_POST_TOOL_FEEDBACK", &script);
+
+    let registry = Registry::new(Arc::new(MockProvider) as Arc<dyn Provider>).await;
+    let result = registry
+        .execute(
+            "read",
+            serde_json::json!({"file_path": "prose.md"}),
+            mcp_test_context(dir.path()),
+        )
+        .await
+        .expect("read should succeed");
+
+    assert!(result.output.contains("hello"), "{}", result.output);
+    assert!(
+        !marker.exists(),
+        "a hook configured for the process ran inside a unit test"
+    );
 }
 
 /// Dump every model-visible tool definition as JSON so a real tokenizer can

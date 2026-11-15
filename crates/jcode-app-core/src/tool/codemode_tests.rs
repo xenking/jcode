@@ -319,6 +319,7 @@ fn report_renders_strings_raw_and_lists_store_keys() {
 async fn pre_tool_hook_gates_each_nested_call() {
     use std::os::unix::fs::PermissionsExt;
     let _guard = crate::storage::lock_test_env();
+    let _allow_hooks = jcode_base::hooks::TestHooksGuard::allow();
     let temp = tempfile::TempDir::new().unwrap();
     let policy = temp.path().join("policy.sh");
     let seen = temp.path().join("seen.log");

@@ -709,8 +709,16 @@ mod tests {
                     result.is_ok(),
                     "turn should succeed after failover: {result:?}"
                 );
+                // The first two provider calls are this turn: the failed request on
+                // the source and the retry on the target. Any further calls belong to
+                // the session-title side turn, which runs on a forked provider after
+                // the answered turn.
                 assert_eq!(
-                    calls.iter().map(|(openai, _)| *openai).collect::<Vec<_>>(),
+                    calls
+                        .iter()
+                        .take(2)
+                        .map(|(openai, _)| *openai)
+                        .collect::<Vec<_>>(),
                     vec![false, true],
                     "one failed request on the source, one retry on the target"
                 );
@@ -780,8 +788,14 @@ mod tests {
                 crate::config::Config::invalidate_cache();
 
                 assert!(result.is_ok(), "worker turn should fail over: {result:?}");
+                // First two calls are the turn and its retry; a title side turn may
+                // follow on a cheap model.
                 assert_eq!(
-                    calls.iter().map(|(openai, _)| *openai).collect::<Vec<_>>(),
+                    calls
+                        .iter()
+                        .take(2)
+                        .map(|(openai, _)| *openai)
+                        .collect::<Vec<_>>(),
                     vec![false, true]
                 );
             });

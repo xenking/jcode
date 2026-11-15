@@ -353,9 +353,61 @@ pub async fn transform_tool_input(
     current
 }
 
-/// True when running inside a hook process (recursion guard).
+/// Set when this process is a hook subprocess (recursion guard) or when a test
+/// build has opted out of real hook execution.
+const HOOKS_DISABLED_ENV: &str = "JCODE_HOOKS_DISABLED";
+
+/// Set by a test that wants the machine's hooks to run for its duration.
+const ALLOW_HOOKS_IN_TEST_ENV: &str = "JCODE_TEST_ALLOW_HOOKS";
+
+/// True when hooks must not run: inside a hook process (recursion guard), or in a
+/// test build that has not opted in.
+///
+/// Unit tests run the production config loader, which reads the developer's
+/// `~/.jcode/config.toml`, so without this every test inherits the machine's
+/// hooks. Two things go wrong when they do. A paused-clock test that measures a
+/// tool call also absorbs each hook's *timeout* as virtual seconds (measured:
+/// 28s instead of the tool's 8s on a machine with two `pre_tool` commands and a
+/// 10s `post_tool_feedback` timeout), and a hook's side effects land in whatever
+/// test happens to be running. `cargo test` enables `test-isolated-hooks` through
+/// this crate's dev-dependency in jcode-app-core; a test that asserts hook
+/// behavior opts back in with [`TestHooksGuard::allow`].
 fn hooks_suppressed() -> bool {
-    std::env::var_os("JCODE_HOOKS_DISABLED").is_some()
+    if std::env::var_os(HOOKS_DISABLED_ENV).is_some() {
+        return true;
+    }
+    // `cfg(test)` keeps this crate's own unit tests working: their subject *is* a
+    // hook. Everything else that builds with the feature is a downstream test
+    // target, and those must not run the machine's hooks.
+    cfg!(feature = "test-isolated-hooks")
+        && !cfg!(test)
+        && std::env::var_os(ALLOW_HOOKS_IN_TEST_ENV).is_none()
+}
+
+/// Lets one test run the machine's real hooks, for tests whose subject *is* a
+/// hook. Callers hold `crate::storage::lock_test_env()` for the guard's lifetime
+/// so a concurrent test cannot observe hooks enabled.
+#[doc(hidden)]
+pub struct TestHooksGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl TestHooksGuard {
+    #[doc(hidden)]
+    pub fn allow() -> Self {
+        let previous = std::env::var_os(ALLOW_HOOKS_IN_TEST_ENV);
+        crate::env::set_var(ALLOW_HOOKS_IN_TEST_ENV, "1");
+        Self { previous }
+    }
+}
+
+impl Drop for TestHooksGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => crate::env::set_var(ALLOW_HOOKS_IN_TEST_ENV, value),
+            None => crate::env::remove_var(ALLOW_HOOKS_IN_TEST_ENV),
+        }
+    }
 }
 
 fn expand_home(program: &str) -> PathBuf {
