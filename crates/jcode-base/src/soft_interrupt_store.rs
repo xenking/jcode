@@ -51,7 +51,7 @@ impl From<SoftInterruptMessage> for PersistedSoftInterrupt {
             images: value.images,
             urgent: value.urgent,
             source: value.source.into(),
-            after_yield: value.mode == jcode_agent_runtime::QueuedMessageMode::AfterYield,
+            after_yield: value.mode != jcode_agent_runtime::QueuedMessageMode::Steer,
             client_id: value.client_id,
         }
     }

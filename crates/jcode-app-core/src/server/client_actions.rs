@@ -1305,6 +1305,7 @@ pub(super) async fn handle_agent_task(
         vec![],
         None,
         events.sender(),
+        None,
     )
     .await;
     match result {

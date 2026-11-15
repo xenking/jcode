@@ -204,6 +204,7 @@ pub(super) async fn process_message_with_server_failover(
         system_reminder,
         event_tx,
         enabled,
+        None,
     )
     .await
 }
@@ -217,6 +218,7 @@ pub(super) async fn process_reserved_message_with_server_failover(
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
     enabled: bool,
+    queued_client_id: Option<String>,
 ) -> anyhow::Result<()> {
     let reminder = system_reminder.clone();
     let mut guard = agent.lock().await;
@@ -227,6 +229,7 @@ pub(super) async fn process_reserved_message_with_server_failover(
         images,
         system_reminder,
         event_tx.clone(),
+        queued_client_id,
     )
     .await;
     if !enabled && result.is_err() {
@@ -309,6 +312,7 @@ pub(super) async fn process_reserved_locked_message_with_swarm_fallbacks(
         images,
         system_reminder,
         event_tx.clone(),
+        None,
     )
     .await;
     let result = retry_turn_with_server_failover(
@@ -514,6 +518,7 @@ pub(super) async fn process_reserved_locked_context_with_server_failover(
             system_reminder,
             event_tx.clone(),
             Some(display_role),
+            None,
         )
         .await;
     if result.is_ok() {

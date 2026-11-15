@@ -103,6 +103,7 @@ fn event_for_transport(
 
 struct ProcessingMessage {
     id: u64,
+    queued_client_id: Option<String>,
     content: String,
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
@@ -1207,6 +1208,7 @@ pub(super) async fn handle_client(
         if matches!(&request, Request::QueuePrompt { .. } | Request::SetQueuedPromptMode { .. } | Request::InterruptQueuedPrompt { .. } | Request::GetQueuedPrompts { .. }) {
             let mut interrupt = false;
             let mut dispatch_if_idle = false;
+            let mut already_delivered = None;
             let (id, result) = match request {
                 Request::QueuePrompt { id, client_id, content, images, mode } => {
                     let mode = match mode {
@@ -1214,7 +1216,10 @@ pub(super) async fn handle_client(
                         crate::protocol::QueuedPromptMode::AfterYield => jcode_agent_runtime::QueuedMessageMode::AfterYield,
                     };
                     dispatch_if_idle = true;
-                    (id, session_control.enqueue_user_prompt(client_id, content, images, mode))
+                    let result = session_control.enqueue_user_prompt(client_id.clone(), content.clone(), images, mode).map(|delivered| {
+                        if delivered { already_delivered = Some((client_id, content)); }
+                    });
+                    (id, result)
                 }
                 Request::SetQueuedPromptMode { id, client_id, mode } => {
                     let mode = match mode {
@@ -1228,12 +1233,15 @@ pub(super) async fn handle_client(
                     interrupt = true;
                     (id, session_control.set_user_prompt_mode(&client_id, jcode_agent_runtime::QueuedMessageMode::AfterYield, true))
                 }
-                Request::GetQueuedPrompts { id } => (id, Ok(())),
+                Request::GetQueuedPrompts { id } => { dispatch_if_idle = true; (id, Ok(())) },
                 _ => unreachable!(),
             };
             match result {
                 Ok(()) => {
                     let _ = client_event_tx.send(ServerEvent::Ack { id });
+                    if let Some((client_id, content)) = already_delivered {
+                        let _ = client_event_tx.send(ServerEvent::SoftInterruptInjected { content, display_role: None, point: "already_delivered".into(), tools_skipped: None, client_ids: vec![client_id] });
+                    }
                     if let Ok(prompts) = session_control.queued_user_prompts() {
                         let _ = client_event_tx.send(ServerEvent::QueuedPrompts { id, prompts: prompts.clone() });
                         super::state::fanout_peer_client_event(&swarm_members, &client_session_id, &client_connection_id, ServerEvent::QueuedPrompts { id: 0, prompts }).await;
@@ -1387,6 +1395,7 @@ pub(super) async fn handle_client(
                 start_processing_message(
                     ProcessingMessage {
                         id,
+                        queued_client_id: None,
                         content,
                         images,
                         system_reminder,
@@ -1497,6 +1506,7 @@ pub(super) async fn handle_client(
                     start_processing_message(
                         ProcessingMessage {
                             id,
+                            queued_client_id: None,
                             content,
                             images,
                             system_reminder: None,
@@ -2703,7 +2713,7 @@ pub(super) async fn handle_client(
                             }
                             start_processing_message(
                                 ProcessingMessage {
-                                    id, content, images: Vec::new(), system_reminder: None,
+                                    id, queued_client_id: None, content, images: Vec::new(), system_reminder: None,
                                     active_skill: None, server_failover: true,
                                 },
                                 &client_session_id,
@@ -3784,6 +3794,7 @@ pub(super) async fn process_locked_message_streaming_mpsc(
         images,
         system_reminder,
         event_tx,
+        None,
     )
     .await
 }
@@ -3796,11 +3807,12 @@ pub(super) async fn process_reserved_message_streaming_mpsc(
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
+    queued_client_id: Option<String>,
 ) -> Result<()> {
     agent.validate_server_turn(lease)?;
     let session_id = agent.session_id().to_string();
     let result = agent
-        .run_reserved_streaming_mpsc(lease, content, images, system_reminder, event_tx, None)
+        .run_reserved_streaming_mpsc(lease, content, images, system_reminder, event_tx, None, queued_client_id)
         .await;
     if result.is_ok() {
         crate::runtime_memory_log::emit_event(

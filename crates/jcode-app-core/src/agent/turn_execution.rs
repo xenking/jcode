@@ -149,6 +149,7 @@ impl Agent {
             system_reminder,
             event_tx,
             display_role,
+            None,
         )
         .await
     }
@@ -162,6 +163,7 @@ impl Agent {
         system_reminder: Option<String>,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
         display_role: Option<crate::session::StoredDisplayRole>,
+        queued_client_id: Option<String>,
     ) -> Result<()> {
         self.validate_server_turn(lease)?;
         let _runtime_activity =
@@ -212,7 +214,24 @@ impl Agent {
             images,
             display_role,
             continues_turn,
+            queued_client_id.as_deref(),
         )?;
+        if let Some(client_id) = queued_client_id {
+            let mut queue = self
+                .soft_interrupt_queue
+                .lock()
+                .map_err(|_| anyhow::anyhow!("queue lock poisoned"))?;
+            queue.retain(|item| item.client_id.as_deref() != Some(client_id.as_str()));
+            crate::soft_interrupt_store::overwrite(self.session_id(), &queue)?;
+            drop(queue);
+            let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
+                content: user_message.to_string(),
+                display_role: None,
+                point: "turn_start".into(),
+                tools_skipped: None,
+                client_ids: vec![client_id],
+            });
+        }
         if continues_turn || display_role.is_some() {
             self.emit_context_messages_since(input_start, &event_tx);
         }
@@ -328,7 +347,7 @@ impl Agent {
         user_message: &str,
         images: Vec<(String, String)>,
     ) -> Result<()> {
-        self.append_user_context_message_with_display_role(user_message, images, None, false)
+        self.append_user_context_message_with_display_role(user_message, images, None, false, None)
     }
 
     fn append_user_context_message_with_display_role(
@@ -339,6 +358,7 @@ impl Agent {
         // A synthetic continuation (reload recovery) resumes the previous
         // turn, so it must not start a new model-usage turn.
         continues_turn: bool,
+        queued_client_id: Option<&str>,
     ) -> Result<()> {
         let mut blocks: Vec<ContentBlock> = images
             .into_iter()
@@ -365,7 +385,13 @@ impl Agent {
         }
 
         let starts_turn = !continues_turn && (blocks.len() > 1 || !user_message.trim().is_empty());
-        let input_id = self.add_message_with_display_role(Role::User, blocks, display_role);
+        let mut input_id = self.add_message_with_display_role(Role::User, blocks, display_role);
+        if let Some(client_id) = queued_client_id {
+            input_id = format!("queued:{}", serde_json::to_string(&[client_id])?);
+            if let Some(message) = self.session.messages.last_mut() {
+                message.id.clone_from(&input_id);
+            }
+        }
         if starts_turn {
             self.begin_model_usage_turn(&input_id);
         }

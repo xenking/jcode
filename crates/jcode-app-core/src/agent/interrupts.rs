@@ -72,7 +72,14 @@ pub(super) enum PostToolInterruptOutcome {
 
 impl Agent {
     pub fn restore_persisted_soft_interrupts(&self) -> usize {
-        let restored = match crate::soft_interrupt_store::take(self.session_id()) {
+        let Ok(mut queue) = self.soft_interrupt_queue.lock() else {
+            logging::warn(&format!(
+                "Failed to restore soft interrupts for {} because queue lock was poisoned",
+                self.session_id()
+            ));
+            return 0;
+        };
+        let restored = match crate::soft_interrupt_store::load(self.session_id()) {
             Ok(items) => items,
             Err(err) => {
                 logging::warn(&format!(
@@ -88,18 +95,37 @@ impl Agent {
             return 0;
         }
 
-        let restored_count = restored.len();
-        if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
-            queue.extend(restored);
-        } else {
-            logging::warn(&format!(
-                "Failed to restore persisted soft interrupts for {} because queue lock was poisoned",
-                self.session_id()
-            ));
-            return 0;
+        let delivered: std::collections::HashSet<String> = self
+            .session
+            .messages
+            .iter()
+            .filter_map(|message| message.id.strip_prefix("queued:"))
+            .filter_map(|ids| serde_json::from_str::<Vec<String>>(ids).ok())
+            .flatten()
+            .collect();
+        let mut restored_count = 0;
+        {
+            for item in restored {
+                if item.client_id.as_ref().is_some_and(|id| {
+                    delivered.contains(id)
+                        || queue
+                            .iter()
+                            .any(|queued| queued.client_id.as_ref() == Some(id))
+                }) {
+                    continue;
+                }
+                queue.push(item);
+                restored_count += 1;
+            }
+            if let Err(err) = crate::soft_interrupt_store::overwrite(self.session_id(), &queue) {
+                logging::warn(&format!(
+                    "Failed to persist restored queue for {}: {}",
+                    self.session_id(),
+                    err
+                ));
+            }
         }
 
-        self.persist_soft_interrupt_snapshot();
         logging::info(&format!(
             "Restored {} persisted soft interrupt(s) for session {}",
             restored_count,
@@ -110,7 +136,7 @@ impl Agent {
 
     pub fn persist_soft_interrupt_snapshot(&self) {
         let pending = match self.soft_interrupt_queue.lock() {
-            Ok(queue) => queue.clone(),
+            Ok(queue) => queue,
             Err(_) => {
                 logging::warn(&format!(
                     "Failed to snapshot soft interrupts for {} because queue lock was poisoned",
@@ -395,17 +421,20 @@ impl Agent {
             }
             return Vec::new();
         }
+        let queue_handle = self.soft_interrupt_queue.clone();
+        let mut queue = match queue_handle.lock() {
+            Ok(queue) => queue,
+            Err(_) => {
+                logging::warn(&format!(
+                    "AGENT_SOFT_INTERRUPT_INJECT_LOCK_FAILED session={}",
+                    self.session_id()
+                ));
+                return Vec::new();
+            }
+        };
+        let previous_queue = queue.clone();
+        let initial_message_count = self.session.messages.len();
         let messages: Vec<SoftInterruptMessage> = {
-            let mut queue = match self.soft_interrupt_queue.lock() {
-                Ok(queue) => queue,
-                Err(_) => {
-                    logging::warn(&format!(
-                        "AGENT_SOFT_INTERRUPT_INJECT_LOCK_FAILED session={}",
-                        self.session_id()
-                    ));
-                    return Vec::new();
-                }
-            };
             if queue.is_empty() {
                 return Vec::new();
             }
@@ -459,6 +488,14 @@ impl Agent {
                 blocks,
                 soft_interrupt_session_display_role(source),
             );
+            if !ids.is_empty() {
+                if let Some(message) = agent.session.messages.last_mut() {
+                    message.id = format!(
+                        "queued:{}",
+                        serde_json::to_string(ids).expect("string ids serialize")
+                    );
+                }
+            }
             injected.push(InjectedSoftInterrupt {
                 content,
                 source,
@@ -500,8 +537,24 @@ impl Agent {
             );
         }
 
-        self.persist_session_best_effort("soft interrupt injection");
-        self.persist_soft_interrupt_snapshot();
+        if let Err(err) = self.session.save() {
+            self.session.truncate_messages(initial_message_count);
+            *queue = previous_queue;
+            logging::warn(&format!(
+                "Failed to persist soft interrupt injection for {}: {}",
+                self.session_id(),
+                err
+            ));
+            return Vec::new();
+        }
+        if let Err(err) = crate::soft_interrupt_store::overwrite(self.session_id(), &queue) {
+            logging::warn(&format!(
+                "Failed to persist delivered queue for {}: {}",
+                self.session_id(),
+                err
+            ));
+        }
+        drop(queue);
         logging::info(&format!(
             "AGENT_SOFT_INTERRUPT_INJECT_COMMIT session={} groups={} total_content_bytes={}",
             self.session_id(),

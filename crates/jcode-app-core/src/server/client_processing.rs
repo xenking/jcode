@@ -124,6 +124,28 @@ pub(super) async fn record_processing_completion(
     }
 }
 
+/// Restore a reservation if its task is cancelled before recording the input.
+struct QueuedPromptClaimGuard {
+    queue: jcode_agent_runtime::SoftInterruptQueue,
+    client_id: Option<String>,
+}
+
+impl Drop for QueuedPromptClaimGuard {
+    fn drop(&mut self) {
+        let Some(client_id) = self.client_id.as_deref() else {
+            return;
+        };
+        if let Ok(mut queue) = self.queue.lock() {
+            if let Some(item) = queue.iter_mut().find(|item| {
+                item.client_id.as_deref() == Some(client_id)
+                    && item.mode == jcode_agent_runtime::QueuedMessageMode::InFlight
+            }) {
+                item.mode = jcode_agent_runtime::QueuedMessageMode::AfterYield;
+            }
+        }
+    }
+}
+
 /// Dispatch a daemon-owned prompt after the preceding turn has retired.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn start_next_queued_prompt(
@@ -166,6 +188,7 @@ pub(super) async fn start_next_queued_prompt(
     start_processing_message(
         ProcessingMessage {
             id: QUEUED_TURN_REQUEST_ID,
+            queued_client_id: prompt.client_id.clone(),
             content: prompt.content.clone(),
             images: prompt.images.clone(),
             system_reminder: None,
@@ -181,23 +204,7 @@ pub(super) async fn start_next_queued_prompt(
         swarm,
     )
     .await;
-    if *state.message_id == Some(QUEUED_TURN_REQUEST_ID) {
-        let picked_up = ServerEvent::SoftInterruptInjected {
-            content: prompt.content,
-            display_role: None,
-            point: "turn_start".into(),
-            tools_skipped: None,
-            client_ids: prompt.client_id.into_iter().collect(),
-        };
-        let _ = event_tx.send(picked_up.clone());
-        super::super::state::fanout_peer_client_event(
-            swarm.members,
-            session_id,
-            connection_id,
-            picked_up,
-        )
-        .await;
-    } else {
+    if *state.message_id != Some(QUEUED_TURN_REQUEST_ID) {
         if let Err(error) = control.restore_user_prompt(prompt) {
             crate::logging::error(&format!(
                 "Failed to restore queued prompt for {session_id}: {error}"
@@ -285,6 +292,7 @@ pub(super) async fn start_processing_message(
 ) {
     let ProcessingMessage {
         id,
+        queued_client_id,
         content,
         images,
         mut system_reminder,
@@ -435,7 +443,12 @@ pub(super) async fn start_processing_message(
     crate::mobile_push::clear_cancelled(&push_session_id);
     let turn_started = Instant::now();
     crate::logging::info(&format!("Processing message id={} spawning task", id));
+    let queued_claim = QueuedPromptClaimGuard {
+        queue: pending_queue.clone(),
+        client_id: queued_client_id.clone(),
+    };
     *state.task = crate::runtime_activity::spawn_session(client_session_id, async move {
+        let _queued_claim = queued_claim;
         let event_tx = tx.clone();
         let mut stop_reason = crate::protocol::TurnStopReason::Failure;
         let result = match std::panic::AssertUnwindSafe(crate::hooks::with_client_terminal_env(
@@ -448,6 +461,7 @@ pub(super) async fn start_processing_message(
                 system_reminder,
                 event_tx,
                 server_failover,
+                queued_client_id,
             ),
         ))
         .catch_unwind()

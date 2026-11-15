@@ -6,6 +6,8 @@ pub enum QueuedMessageMode {
     #[default]
     Steer,
     AfterYield,
+    /// Reserved by a turn but still durable until its input is saved.
+    InFlight,
 }
 
 /// A message queued for delivery at a safe point or after the active turn.

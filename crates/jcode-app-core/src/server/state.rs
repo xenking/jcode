@@ -839,7 +839,7 @@ impl SessionControlHandle {
         content: String,
         images: Vec<(String, String)>,
         mode: jcode_agent_runtime::QueuedMessageMode,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
         anyhow::ensure!(!client_id.trim().is_empty(), "client_id must not be empty");
         let mut queue = self
             .soft_interrupt_queue
@@ -850,10 +850,30 @@ impl SessionControlHandle {
             .find(|message| message.client_id.as_deref() == Some(&client_id))
         {
             anyhow::ensure!(
-                existing.content == content && existing.images == images && existing.mode == mode,
+                existing.content == content
+                    && existing.images == images
+                    && (existing.mode == mode
+                        || existing.mode == jcode_agent_runtime::QueuedMessageMode::InFlight),
                 "client_id already belongs to another prompt"
             );
-            return Ok(());
+            return Ok(false);
+        }
+        // The input can have been committed immediately before a lost ack.
+        // Its receipt is part of the durable session history, so a retry must
+        // never create a second turn even when the queue no longer contains it.
+        if crate::session::Session::load(&self.session_id)
+            .ok()
+            .is_some_and(|session| {
+                session.messages.iter().any(|message| {
+                    message
+                        .id
+                        .strip_prefix("queued:")
+                        .and_then(|ids| serde_json::from_str::<Vec<String>>(ids).ok())
+                        .is_some_and(|ids| ids.contains(&client_id))
+                })
+            })
+        {
+            return Ok(true);
         }
         queue.push(SoftInterruptMessage {
             content,
@@ -868,7 +888,7 @@ impl SessionControlHandle {
             return Err(error);
         }
         drop(queue);
-        Ok(())
+        Ok(false)
     }
 
     pub(super) fn queued_user_prompts(&self) -> anyhow::Result<Vec<crate::protocol::QueuedPrompt>> {
@@ -882,6 +902,9 @@ impl SessionControlHandle {
                 if message.source != SoftInterruptSource::User {
                     return None;
                 }
+                if message.mode == jcode_agent_runtime::QueuedMessageMode::InFlight {
+                    return None;
+                }
                 Some(crate::protocol::QueuedPrompt {
                     client_id: message.client_id.clone()?,
                     content: message.content.clone(),
@@ -893,6 +916,7 @@ impl SessionControlHandle {
                         jcode_agent_runtime::QueuedMessageMode::AfterYield => {
                             crate::protocol::QueuedPromptMode::AfterYield
                         }
+                        jcode_agent_runtime::QueuedMessageMode::InFlight => unreachable!(),
                     },
                 })
             })
@@ -915,6 +939,7 @@ impl SessionControlHandle {
             .position(|message| {
                 message.source == SoftInterruptSource::User
                     && message.client_id.as_deref() == Some(client_id)
+                    && message.mode != jcode_agent_runtime::QueuedMessageMode::InFlight
             })
             .ok_or_else(|| anyhow::anyhow!("queued prompt not found"))?;
         queue[index].mode = mode;
@@ -942,17 +967,15 @@ impl SessionControlHandle {
         let Some(index) = queue.iter().position(|message| {
             message.source == SoftInterruptSource::User
                 && message.client_id.is_some()
+                && message.mode != jcode_agent_runtime::QueuedMessageMode::InFlight
                 && (!interrupted_only
                     || (message.mode == jcode_agent_runtime::QueuedMessageMode::AfterYield
                         && message.urgent))
         }) else {
             return Ok(None);
         };
-        let prompt = queue.remove(index);
-        if let Err(error) = crate::soft_interrupt_store::overwrite(&self.session_id, &queue) {
-            queue.insert(index, prompt);
-            return Err(error);
-        }
+        let prompt = queue[index].clone();
+        queue[index].mode = jcode_agent_runtime::QueuedMessageMode::InFlight;
         Ok(Some(prompt))
     }
 
@@ -961,7 +984,14 @@ impl SessionControlHandle {
             .soft_interrupt_queue
             .lock()
             .map_err(|_| anyhow::anyhow!("queue lock poisoned"))?;
-        queue.insert(0, prompt);
+        if let Some(existing) = queue
+            .iter_mut()
+            .find(|item| item.client_id == prompt.client_id)
+        {
+            *existing = prompt;
+        } else {
+            queue.insert(0, prompt);
+        }
         crate::soft_interrupt_store::overwrite(&self.session_id, &queue)
     }
 
@@ -999,11 +1029,21 @@ impl SessionControlHandle {
         }
         let removed: Vec<String> = match self.soft_interrupt_queue.lock() {
             Ok(mut queue) => {
+                let cancellable: Vec<String> = requested
+                    .iter()
+                    .filter(|id| {
+                        !queue.iter().any(|item| {
+                            item.client_id.as_ref() == Some(*id)
+                                && item.mode == jcode_agent_runtime::QueuedMessageMode::InFlight
+                        })
+                    })
+                    .cloned()
+                    .collect();
                 // Queue mutation and its durable counterpart share this lock.
                 // Otherwise a cancelled daemon-owned prompt reappears on reload.
                 let mut removed = match crate::soft_interrupt_store::remove_by_client_ids(
                     &self.session_id,
-                    &requested,
+                    &cancellable,
                 ) {
                     Ok(removed) => removed,
                     Err(error) => {
@@ -1015,7 +1055,7 @@ impl SessionControlHandle {
                     }
                 };
                 queue.retain(|message| match &message.client_id {
-                    Some(id) if requested.contains(id) => {
+                    Some(id) if cancellable.contains(id) => {
                         if !removed.contains(id) {
                             removed.push(id.clone());
                         }

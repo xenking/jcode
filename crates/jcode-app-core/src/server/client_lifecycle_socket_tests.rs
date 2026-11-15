@@ -1,6 +1,274 @@
 use super::*;
 use crate::message::Role;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn daemon_restart_restores_and_delivers_pending_prompt_once() {
+    use crate::server::runtime::ServerRuntime;
+    use serde_json::json;
+    let _lock = crate::storage::lock_test_env();
+    let home = IsolatedReloadRecoveryEnv::new();
+    let provider = TerminalSocketProvider::default();
+    let socket = home._runtime.path().join("restart-1.sock");
+    let server = crate::server::Server::new_with_paths(
+        Arc::new(provider.clone()),
+        socket.clone(),
+        home._runtime.path().join("debug-1.sock"),
+    );
+    let runtime = ServerRuntime::from_server(&server);
+    let handle = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
+    let (reader, mut writer) = crate::transport::Stream::connect(&socket)
+        .await
+        .unwrap()
+        .into_split();
+    let mut reader = BufReader::new(reader);
+    async fn send(writer: &mut crate::transport::WriteHalf, value: serde_json::Value) {
+        writer
+            .write_all(format!("{value}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+    async fn until(
+        reader: &mut BufReader<crate::transport::ReadHalf>,
+        predicate: impl Fn(&ServerEvent) -> bool,
+    ) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                let event: ServerEvent = serde_json::from_str(&line).unwrap();
+                if predicate(&event) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("daemon event timeout");
+    }
+    send(
+        &mut writer,
+        json!({"type":"subscribe","id":1,"working_dir":home._home.path()}),
+    )
+    .await;
+    until(&mut reader, |e| matches!(e, ServerEvent::Done { id: 1 })).await;
+    let session_id = server.sessions.read().await.keys().next().unwrap().clone();
+    send(
+        &mut writer,
+        json!({"type":"message","id":2,"content":"first"}),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(5), provider.first_started.notified())
+        .await
+        .unwrap();
+    send(&mut writer, json!({"type":"queue_prompt","id":3,"client_id":"restart-prompt","content":"survive restart","mode":"after_yield"})).await;
+    until(&mut reader, |e| matches!(e, ServerEvent::Ack { id: 3 })).await;
+    drop(writer);
+    drop(reader);
+    tokio::time::timeout(Duration::from_secs(10), runtime.shutdown())
+        .await
+        .unwrap();
+    handle.await.unwrap();
+    // A real process exit destroys its turn tasks. Both runtimes share this
+    // test process, so retire the old detached task without consuming its queue.
+    for signal in crate::turn_cancel_registry::active_turn_signals(&session_id) {
+        signal.fire();
+    }
+    provider.finish_first.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while crate::turn_cancel_registry::has_active_turn(&session_id) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("old process turn did not retire");
+    assert_eq!(
+        crate::soft_interrupt_store::load(&session_id)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let provider2 = TerminalSocketProvider::default();
+    provider2.finish_first.notify_one();
+    let socket2 = home._runtime.path().join("restart-2.sock");
+    let server2 = crate::server::Server::new_with_paths(
+        Arc::new(provider2.clone()),
+        socket2.clone(),
+        home._runtime.path().join("debug-2.sock"),
+    );
+    let runtime2 = ServerRuntime::from_server(&server2);
+    let handle2 =
+        runtime2.spawn_main_accept_loop(crate::transport::Listener::bind(&socket2).unwrap());
+    let (reader, mut writer) = crate::transport::Stream::connect(&socket2)
+        .await
+        .unwrap()
+        .into_split();
+    let mut reader = BufReader::new(reader);
+    send(
+        &mut writer,
+        json!({"type":"subscribe","id":4,"target_session_id":session_id}),
+    )
+    .await;
+    until(&mut reader, |e| matches!(e, ServerEvent::Done { id: 4 })).await;
+    send(&mut writer, json!({"type":"get_queued_prompts","id":5})).await;
+    until(&mut reader, |e| {
+        matches!(e, ServerEvent::QueuedPrompts { id: 5, .. })
+    })
+    .await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while provider2.calls.load(Ordering::SeqCst) < 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("restored prompt not delivered");
+    let messages = provider2.messages.lock().unwrap().clone();
+    assert_eq!(
+        messages[0]
+            .iter()
+            .filter(|s| s.ends_with("] survive restart"))
+            .count(),
+        1,
+        "{messages:?}"
+    );
+    send(&mut writer, json!({"type":"queue_prompt","id":6,"client_id":"restart-prompt","content":"survive restart","mode":"after_yield"})).await;
+    until(&mut reader, |e| matches!(e, ServerEvent::Ack { id: 6 })).await;
+    assert_eq!(provider2.calls.load(Ordering::SeqCst), 1);
+    drop(writer);
+    drop(reader);
+    runtime2.shutdown().await;
+    handle2.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn daemon_listener_delivers_all_queue_modes_once() {
+    use crate::server::runtime::ServerRuntime;
+    use serde_json::json;
+    let _lock = crate::storage::lock_test_env();
+    let home = IsolatedReloadRecoveryEnv::new();
+    for mode in ["after_yield", "steer", "interrupt"] {
+        let provider = TerminalSocketProvider::default();
+        provider.steer_tool.store(mode == "steer", Ordering::SeqCst);
+        let socket = home._runtime.path().join(format!("{mode}.sock"));
+        let server = crate::server::Server::new_with_paths(
+            Arc::new(provider.clone()),
+            socket.clone(),
+            home._runtime.path().join(format!("{mode}-debug.sock")),
+        );
+        let runtime = ServerRuntime::from_server(&server);
+        let handle =
+            runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
+        let stream = crate::transport::Stream::connect(&socket).await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        async fn send(writer: &mut crate::transport::WriteHalf, value: serde_json::Value) {
+            writer
+                .write_all(format!("{value}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        async fn until(
+            reader: &mut BufReader<crate::transport::ReadHalf>,
+            predicate: impl Fn(&ServerEvent) -> bool,
+        ) {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let mut line = String::new();
+                    assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                    let event: ServerEvent = serde_json::from_str(&line).unwrap();
+                    if predicate(&event) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("daemon event timeout");
+        }
+        send(
+            &mut writer,
+            json!({"type":"subscribe","id":1,"working_dir":home._home.path()}),
+        )
+        .await;
+        until(&mut reader, |e| matches!(e, ServerEvent::Done { id: 1 })).await;
+        send(
+            &mut writer,
+            json!({"type":"message","id":2,"content":"first turn"}),
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(5), provider.first_started.notified())
+            .await
+            .unwrap();
+        let queue_mode = if mode == "steer" {
+            "steer"
+        } else {
+            "after_yield"
+        };
+        let request = json!({"type":"queue_prompt","id":3,"client_id":format!("{mode}-one"),"content":"follow-up","mode":queue_mode});
+        send(&mut writer, request.clone()).await;
+        until(&mut reader, |e| matches!(e, ServerEvent::Ack { id: 3 })).await;
+        send(&mut writer, request).await;
+        until(&mut reader, |e| matches!(e, ServerEvent::Ack { id: 3 })).await;
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        if mode == "interrupt" {
+            let session_id = server.sessions.read().await.keys().next().unwrap().clone();
+            let (peer_reader, mut peer_writer) = crate::transport::Stream::connect(&socket)
+                .await
+                .unwrap()
+                .into_split();
+            let mut peer_reader = BufReader::new(peer_reader);
+            send(
+                &mut peer_writer,
+                json!({"type":"subscribe", "id":10, "target_session_id":session_id}),
+            )
+            .await;
+            until(&mut peer_reader, |e| {
+                matches!(e, ServerEvent::Done { id: 10 })
+            })
+            .await;
+            send(
+                &mut peer_writer,
+                json!({"type":"interrupt_queued_prompt","id":4,"client_id":format!("{mode}-one")}),
+            )
+            .await;
+            until(&mut peer_reader, |e| {
+                matches!(e, ServerEvent::Ack { id: 4 })
+            })
+            .await;
+        } else {
+            provider.finish_first.notify_one();
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while provider.calls.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("queued prompt not delivered");
+        let messages = provider.messages.lock().unwrap().clone();
+        assert_eq!(messages.len(), 2, "{mode}: {messages:?}");
+        assert_eq!(
+            messages[0]
+                .iter()
+                .filter(|s| s.ends_with("] follow-up"))
+                .count(),
+            0
+        );
+        assert_eq!(
+            messages[1]
+                .iter()
+                .filter(|s| s.ends_with("] follow-up"))
+                .count(),
+            1,
+            "{mode}: {messages:?}"
+        );
+        drop(writer);
+        drop(reader);
+        runtime.shutdown().await;
+        handle.await.unwrap();
+    }
+}
+
 #[derive(Clone, Default)]
 struct SdkCallbackProvider {
     calls: Arc<std::sync::atomic::AtomicUsize>,
