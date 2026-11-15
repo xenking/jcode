@@ -203,9 +203,11 @@ sys.exit(1 if mode in ('warning', 'legacy-warning') else 0)
         let notified = thread::spawn(move || {
             use std::io::BufRead;
             let (stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
+            // Best effort: Darwin rejects `SO_RCVTIMEO` with `EINVAL` once the
+            // peer has closed, and the client may legitimately finish before
+            // this thread gets here. The request line is already buffered, so
+            // the timeout is a safety net, not a precondition.
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
             let mut line = String::new();
             std::io::BufReader::new(stream)
                 .read_line(&mut line)

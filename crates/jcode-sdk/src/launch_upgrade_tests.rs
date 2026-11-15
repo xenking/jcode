@@ -198,3 +198,37 @@ fn upgrade_negotiation_is_bounded_for_unresponsive_old_runtime() {
     assert!(start.elapsed() < Duration::from_millis(300));
     server.join().unwrap();
 }
+
+/// A runtime that answers and then closes must still have its answer read.
+///
+/// This is what a restarting daemon does (`exec` or exit right after replying),
+/// and it is the shape every fake server below has. The reply is already in the
+/// client's socket buffer when the peer goes away, so losing it is not a
+/// network accident: the read path used to re-arm `SO_RCVTIMEO` per byte, and
+/// Darwin rejects that with `EINVAL` once the peer has closed, aborting a reply
+/// it could have read.
+#[test]
+fn reply_written_just_before_the_runtime_closes_is_still_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("native.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(stream.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        writeln!(
+            stream,
+            "{}",
+            json!({"type":"reload_progress","id":1,"step":"unchanged","message":"status"})
+        )
+        .unwrap();
+        // Drop the connection immediately: the reply is buffered on the client.
+    });
+    assert_eq!(
+        request(&path, Path::new("/bundle/jcode"), Duration::from_secs(3)).unwrap(),
+        Outcome::Unchanged
+    );
+    server.join().unwrap();
+}
