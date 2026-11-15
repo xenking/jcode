@@ -11,7 +11,8 @@ pub(super) async fn reconcile_processing_completions(
     connection_id: &str,
     connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     swarm: &SwarmStatusRefs<'_>,
-) {
+) -> Option<bool> {
+    let mut succeeded = None;
     while let Some((done_id, result, completion_report, owner, _finalization)) =
         completion.take().or_else(|| match receiver.try_recv() {
             Ok(completion) => Some(completion),
@@ -50,10 +51,12 @@ pub(super) async fn reconcile_processing_completions(
                 info.current_tool_name = None;
             }
         }
+        succeeded = Some(result.is_ok());
         let done_session = state.session_id.take();
         record_processing_completion(done_session.as_deref(), result, completion_report, swarm)
             .await;
     }
+    succeeded
 }
 
 pub(super) async fn record_processing_completion(
@@ -117,6 +120,92 @@ pub(super) async fn record_processing_completion(
                     crate::telemetry::record_error(crate::telemetry::ErrorCategory::AuthFailed);
                 }
             }
+        }
+    }
+}
+
+/// Dispatch a daemon-owned prompt after the preceding turn has retired.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn start_next_queued_prompt(
+    session_id: &str,
+    state: &mut ProcessingState<'_>,
+    control: &SessionControlHandle,
+    agent: &Arc<Mutex<Agent>>,
+    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    done_tx: &mpsc::UnboundedSender<ProcessingCompletion>,
+    terminal_env: Vec<(String, String)>,
+    swarm: &SwarmStatusRefs<'_>,
+    connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
+    connection_id: &str,
+    interrupted_only: bool,
+    server_failover: bool,
+) {
+    if *state.client_is_processing || crate::turn_cancel_registry::has_active_turn(session_id) {
+        return;
+    }
+    let prompt = match control.take_next_user_prompt(interrupted_only) {
+        Ok(Some(prompt)) => prompt,
+        Ok(None) => return,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Failed to claim queued prompt for {session_id}: {error}"
+            ));
+            return;
+        }
+    };
+    {
+        let mut connections = connections.write().await;
+        if let Some(info) = connections.get_mut(connection_id) {
+            info.is_processing = true;
+            info.current_tool_name = None;
+        }
+    }
+    // Internal requests have no transport request to correlate. Their stable
+    // caller id is carried on the turn-start pickup event instead.
+    const QUEUED_TURN_REQUEST_ID: u64 = 0;
+    start_processing_message(
+        ProcessingMessage {
+            id: QUEUED_TURN_REQUEST_ID,
+            content: prompt.content.clone(),
+            images: prompt.images.clone(),
+            system_reminder: None,
+            active_skill: None,
+            server_failover,
+        },
+        session_id,
+        state,
+        agent,
+        event_tx,
+        done_tx,
+        terminal_env,
+        swarm,
+    )
+    .await;
+    if *state.message_id == Some(QUEUED_TURN_REQUEST_ID) {
+        let picked_up = ServerEvent::SoftInterruptInjected {
+            content: prompt.content,
+            display_role: None,
+            point: "turn_start".into(),
+            tools_skipped: None,
+            client_ids: prompt.client_id.into_iter().collect(),
+        };
+        let _ = event_tx.send(picked_up.clone());
+        super::super::state::fanout_peer_client_event(
+            swarm.members,
+            session_id,
+            connection_id,
+            picked_up,
+        )
+        .await;
+    } else {
+        if let Err(error) = control.restore_user_prompt(prompt) {
+            crate::logging::error(&format!(
+                "Failed to restore queued prompt for {session_id}: {error}"
+            ));
+        }
+        let mut connections = connections.write().await;
+        if let Some(info) = connections.get_mut(connection_id) {
+            info.is_processing = false;
         }
     }
 }
@@ -781,27 +870,12 @@ pub(super) fn queue_soft_interrupt(
 
 pub(super) fn cancel_soft_interrupts_by_id(
     id: u64,
-    session_id: &str,
+    _session_id: &str,
     client_ids: &[String],
     session_control: &SessionControlHandle,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
-    let (mut cancelled, mut not_queued) = session_control.cancel_soft_interrupts_by_id(client_ids);
-    // An interrupt sent while no live queue was reachable is parked on disk
-    // until the session restores it. It is just as cancellable.
-    if !not_queued.is_empty() {
-        match crate::soft_interrupt_store::remove_by_client_ids(session_id, &not_queued) {
-            Ok(removed) if !removed.is_empty() => {
-                not_queued.retain(|id| !removed.contains(id));
-                cancelled.extend(removed);
-            }
-            Ok(_) => {}
-            Err(err) => crate::logging::warn(&format!(
-                "SERVER_SOFT_INTERRUPT_CANCEL_BY_ID_PERSISTED_FAILED id={} session={} error={}",
-                id, session_id, err
-            )),
-        }
-    }
+    let (cancelled, not_queued) = session_control.cancel_soft_interrupts_by_id(client_ids);
     let _ = client_event_tx.send(ServerEvent::SoftInterruptsCancelled {
         id,
         cancelled,

@@ -1,4 +1,5 @@
 use super::*;
+use crate::message::Role;
 
 #[derive(Clone, Default)]
 struct SdkCallbackProvider {
@@ -49,26 +50,55 @@ impl Provider for SdkCallbackProvider {
 #[derive(Clone, Default)]
 struct TerminalSocketProvider {
     calls: Arc<std::sync::atomic::AtomicUsize>,
+    messages: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
     first_started: Arc<tokio::sync::Notify>,
     finish_first: Arc<tokio::sync::Notify>,
     fail_catalog: Arc<std::sync::atomic::AtomicBool>,
     churn_catalog: Arc<std::sync::atomic::AtomicBool>,
     catalog_revision: Arc<std::sync::atomic::AtomicUsize>,
     ask_after_reattach: Arc<std::sync::atomic::AtomicBool>,
+    steer_tool: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[async_trait]
 impl Provider for TerminalSocketProvider {
     async fn complete(
         &self,
-        _: &[Message],
+        messages: &[Message],
         _: &[ToolDefinition],
         _: &str,
         _: Option<&str>,
     ) -> Result<EventStream> {
+        self.messages.lock().unwrap().push(
+            messages
+                .iter()
+                .filter(|message| message.role == Role::User)
+                .flat_map(|message| message.content.iter())
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect(),
+        );
         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
             self.first_started.notify_one();
             self.finish_first.notified().await;
+            if self.steer_tool.load(Ordering::SeqCst) {
+                return Ok(Box::pin(stream::iter(vec![
+                    Ok(StreamEvent::ToolUseStart {
+                        id: "steer-tool".into(),
+                        name: "bash".into(),
+                    }),
+                    Ok(StreamEvent::ToolInputDelta(
+                        r#"{"command":"printf queue-boundary","intent":"test queue boundary"}"#
+                            .into(),
+                    )),
+                    Ok(StreamEvent::ToolUseEnd),
+                    Ok(StreamEvent::MessageEnd {
+                        stop_reason: Some("tool_use".into()),
+                    }),
+                ])));
+            }
             if self.ask_after_reattach.load(Ordering::SeqCst) {
                 return Ok(Box::pin(stream::iter(vec![
                     Ok(StreamEvent::ToolUseStart { id: "ask-after-reattach".into(), name: "ask".into() }),
@@ -115,6 +145,56 @@ impl Provider for TerminalSocketProvider {
 }
 
 #[tokio::test]
+async fn queued_follow_up_runs_only_after_the_current_turn_over_socket() {
+    sdk_socket_cancel_workflow(
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        Some("after_yield"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn queued_steer_is_injected_without_cancelling_over_socket() {
+    sdk_socket_cancel_workflow(false, true, true, false, false, false, false, Some("steer")).await;
+}
+
+#[tokio::test]
+async fn queued_prompt_interrupts_current_turn_over_socket() {
+    sdk_socket_cancel_workflow(
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        Some("interrupt"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn queued_prompt_survives_socket_reattach_without_duplication() {
+    sdk_socket_cancel_workflow(
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        Some("reload"),
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn terminal_done_then_immediate_message_socket_dispatches_next_turn() {
     sdk_socket_workflow(false, true, false).await;
 }
@@ -136,22 +216,22 @@ async fn scoped_and_legacy_socket_subscribers_receive_compatible_turn_streams() 
 
 #[tokio::test]
 async fn scoped_cancel_socket_immediately_dispatches_next_prompt() {
-    sdk_socket_cancel_workflow(false, true, true, true, false, false, false).await;
+    sdk_socket_cancel_workflow(false, true, true, true, false, false, false, None).await;
 }
 
 #[tokio::test]
 async fn idle_soft_interrupt_without_client_id_is_picked_up_before_cancel() {
-    sdk_socket_cancel_workflow(false, true, true, true, true, false, false).await;
+    sdk_socket_cancel_workflow(false, true, true, true, true, false, false, None).await;
 }
 
 #[tokio::test]
 async fn catalog_failure_preserves_remote_socket_owner_and_next_turn() {
-    sdk_socket_cancel_workflow(false, true, true, false, false, true, false).await;
+    sdk_socket_cancel_workflow(false, true, true, false, false, true, false, None).await;
 }
 
 #[tokio::test]
 async fn live_reattached_socket_answers_ask_in_existing_turn() {
-    sdk_socket_cancel_workflow(false, true, true, false, false, false, true).await;
+    sdk_socket_cancel_workflow(false, true, true, false, false, false, true, None).await;
 }
 
 async fn sdk_socket_workflow(response_only: bool, terminal_race: bool, identity_capability: bool) {
@@ -163,6 +243,7 @@ async fn sdk_socket_workflow(response_only: bool, terminal_race: bool, identity_
         false,
         false,
         false,
+        None,
     )
     .await;
 }
@@ -176,6 +257,7 @@ async fn sdk_socket_cancel_workflow(
     idle_soft_interrupt: bool,
     catalog_failure: bool,
     ask_reattach: bool,
+    queued_test: Option<&str>,
 ) {
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
@@ -183,6 +265,9 @@ async fn sdk_socket_cancel_workflow(
     terminal_provider
         .ask_after_reattach
         .store(ask_reattach, Ordering::SeqCst);
+    terminal_provider
+        .steer_tool
+        .store(queued_test == Some("steer"), Ordering::SeqCst);
     let provider_template: Arc<dyn Provider> = if terminal_race {
         Arc::new(terminal_provider.clone())
     } else {
@@ -278,7 +363,7 @@ async fn sdk_socket_cancel_workflow(
     use serde_json::json;
     send(
         &mut client_writer,
-        json!({"type":"subscribe","id":1,"working_dir":home._home.path(),"supports_turn_identity":identity_capability,"continue_on_disconnect":ask_reattach}),
+        json!({"type":"subscribe","id":1,"working_dir":home._home.path(),"supports_turn_identity":identity_capability,"continue_on_disconnect":ask_reattach || queued_test == Some("reload")}),
     )
     .await;
     until(&mut client_reader, |e| {
@@ -520,6 +605,131 @@ async fn sdk_socket_cancel_workflow(
                     if content == "one shared turn" && point == "turn_start" && client_ids.is_empty())
             })
             .await;
+        }
+        if let Some(mode) = queued_test {
+            let queue_mode = if mode == "steer" {
+                "steer"
+            } else {
+                "after_yield"
+            };
+            let request = json!({"type":"queue_prompt","id":51,"client_id":"follow-up-1","mode":queue_mode,"content":"follow-up"});
+            send(&mut client_writer, request.clone()).await;
+            until(&mut client_reader, |event| {
+                matches!(event, ServerEvent::Ack { id: 51 })
+            })
+            .await;
+            // Retrying the same id after an uncertain acknowledgment is idempotent.
+            send(&mut client_writer, request).await;
+            until(&mut client_reader, |event| {
+                matches!(event, ServerEvent::Ack { id: 51 })
+            })
+            .await;
+            send(
+                &mut client_writer,
+                json!({"type":"get_queued_prompts","id":52}),
+            )
+            .await;
+            let snapshot = until(&mut client_reader, |event| {
+                matches!(event, ServerEvent::QueuedPrompts { id: 52, .. })
+            })
+            .await;
+            assert!(
+                matches!(snapshot, ServerEvent::QueuedPrompts { prompts, .. } if prompts.len() == 1 && prompts[0].content == "follow-up")
+            );
+            assert_eq!(
+                terminal_provider.calls.load(Ordering::SeqCst),
+                1,
+                "queued input must wait while provider is active"
+            );
+            if mode == "reload" {
+                let (new_task, new_stream) = connect();
+                let (new_reader, mut new_writer) = new_stream.into_split();
+                let mut new_reader = BufReader::new(new_reader);
+                send(&mut new_writer, json!({"type":"subscribe","id":60,"target_session_id":session_id,"continue_on_disconnect":true})).await;
+                until(&mut new_reader, |event| {
+                    matches!(event, ServerEvent::Done { id: 60 })
+                })
+                .await;
+                drop(client_writer);
+                drop(client_reader);
+                send(
+                    &mut new_writer,
+                    json!({"type":"get_queued_prompts","id":61}),
+                )
+                .await;
+                let snapshot = until(&mut new_reader, |event| {
+                    matches!(event, ServerEvent::QueuedPrompts { id: 61, .. })
+                })
+                .await;
+                assert!(
+                    matches!(snapshot, ServerEvent::QueuedPrompts { prompts, .. } if prompts.len() == 1 && prompts[0].client_id == "follow-up-1")
+                );
+                terminal_provider.finish_first.notify_one();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while terminal_provider.calls.load(Ordering::SeqCst) < 2 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("follow-up must run after reattachment");
+                assert_eq!(terminal_provider.calls.load(Ordering::SeqCst), 2);
+                let messages = terminal_provider.messages.lock().unwrap().clone();
+                assert_eq!(
+                    messages[1]
+                        .iter()
+                        .filter(|text| text.ends_with("] follow-up"))
+                        .count(),
+                    1,
+                    "captured messages: {messages:?}"
+                );
+                drop(new_writer);
+                drop(new_reader);
+                drop(legacy_writer);
+                drop(legacy_reader);
+                server_task.abort();
+                legacy_task.abort();
+                new_task.abort();
+                return;
+            }
+            if mode == "interrupt" {
+                send(
+                    &mut client_writer,
+                    json!({"type":"interrupt_queued_prompt","id":53,"client_id":"follow-up-1"}),
+                )
+                .await;
+                until(&mut client_reader, |event| {
+                    matches!(event, ServerEvent::Ack { id: 53 })
+                })
+                .await;
+            } else {
+                terminal_provider.finish_first.notify_one();
+                if mode == "steer" {
+                    // A real tool completes before steering is delivered.
+                    until(&mut client_reader, |event| match event {
+                        ServerEvent::SoftInterruptInjected { point, .. } => point == "C" || point == "D",
+                        ServerEvent::TurnEvent { event, .. } => matches!(event.as_ref(), ServerEvent::SoftInterruptInjected { point, .. } if point == "C" || point == "D"),
+                        _ => false,
+                    }).await;
+                }
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while terminal_provider.calls.load(Ordering::SeqCst) < 2 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("queued prompt must reach the model");
+            assert_eq!(terminal_provider.calls.load(Ordering::SeqCst), 2);
+            let messages = terminal_provider.messages.lock().unwrap().clone();
+            assert_eq!(
+                messages[1]
+                    .iter()
+                    .filter(|text| text.ends_with("] follow-up"))
+                    .count(),
+                1,
+                "captured messages: {messages:?}"
+            );
+            return;
         }
         if cancel_first {
             send(&mut client_writer, json!({"type":"cancel","id":3})).await;

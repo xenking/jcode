@@ -30,6 +30,24 @@ pub struct SessionToolConfig {
     pub custom: Vec<SessionToolDefinition>,
 }
 
+/// Delivery phase for a queued user prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedPromptMode {
+    Steer,
+    AfterYield,
+}
+
+/// One user-authored message still owned by the daemon queue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedPrompt {
+    pub client_id: String,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<(String, String)>,
+    pub mode: QueuedPromptMode,
+}
+
 /// Client request to server
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -72,6 +90,34 @@ pub enum Request {
     /// Move the currently executing tool to background
     #[serde(rename = "background_tool")]
     BackgroundTool { id: u64 },
+
+    /// Queue a user prompt with a stable caller id. Acknowledged only after
+    /// the queue has accepted and persisted it.
+    #[serde(rename = "queue_prompt")]
+    QueuePrompt {
+        id: u64,
+        client_id: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<(String, String)>,
+        mode: QueuedPromptMode,
+    },
+
+    /// Change the delivery phase of a prompt that is still queued.
+    #[serde(rename = "set_queued_prompt_mode")]
+    SetQueuedPromptMode {
+        id: u64,
+        client_id: String,
+        mode: QueuedPromptMode,
+    },
+
+    /// Stop the current turn and deliver the selected queued prompt next.
+    #[serde(rename = "interrupt_queued_prompt")]
+    InterruptQueuedPrompt { id: u64, client_id: String },
+
+    /// Obtain a fresh queue snapshot after reconnecting.
+    #[serde(rename = "get_queued_prompts")]
+    GetQueuedPrompts { id: u64 },
 
     /// Soft interrupt: inject message at next safe point without cancelling
     #[serde(rename = "soft_interrupt")]

@@ -716,6 +716,37 @@ pub(super) async fn handle_client(
     let mut provisional_session = true;
     let mut pending_request = Some(initial_request);
 
+    macro_rules! dispatch_queued_prompt {
+        ($interrupted_only:expr) => {
+            start_next_queued_prompt(
+                &client_session_id,
+                &mut ProcessingState {
+                    client_is_processing: &mut client_is_processing,
+                    message_id: &mut processing_message_id,
+                    session_id: &mut processing_session_id,
+                    task: &mut processing_task,
+                },
+                &session_control,
+                &agent,
+                &client_event_tx,
+                &processing_done_tx,
+                active_terminal_env.clone(),
+                &SwarmStatusRefs {
+                    members: &swarm_members,
+                    swarms_by_id: &swarms_by_id,
+                    event_history: &event_history,
+                    event_counter: &event_counter,
+                    event_tx: &swarm_event_tx,
+                },
+                &client_connections,
+                &client_connection_id,
+                $interrupted_only,
+                supports_server_failover,
+            )
+            .await
+        };
+    }
+
     let connection_result: Result<()> = async {
     loop {
         let mut request = if let Some(request) = pending_request.take() {
@@ -744,7 +775,7 @@ pub(super) async fn handle_client(
             }
             done = processing_done_rx.recv() => {
                 if let Some(done) = done {
-                    reconcile_processing_completions(
+                    let completion = reconcile_processing_completions(
                         Some(done), &mut processing_done_rx,
                         &mut ProcessingState {
                             client_is_processing: &mut client_is_processing,
@@ -761,6 +792,9 @@ pub(super) async fn handle_client(
                             event_tx: &swarm_event_tx,
                         },
                     ).await;
+                    if let Some(success) = completion {
+                        dispatch_queued_prompt!(!success);
+                    }
                 } else {
                     break;
                 }
@@ -961,7 +995,7 @@ pub(super) async fn handle_client(
         // state. Completion is enqueued before the terminal event, so drain it
         // before any request (especially Message/SoftInterrupt) inspects that
         // state. Keep streaming terminal events on their ordered fanout channel.
-        reconcile_processing_completions(
+        let completion = reconcile_processing_completions(
             None, &mut processing_done_rx,
             &mut ProcessingState {
                 client_is_processing: &mut client_is_processing,
@@ -978,6 +1012,9 @@ pub(super) async fn handle_client(
                 event_tx: &swarm_event_tx,
             },
         ).await;
+        if let Some(success) = completion {
+            dispatch_queued_prompt!(!success);
+        }
         // Reserve before Ack or any session mutation, not just when the turn
         // eventually polls. Upgrade requests themselves must not reserve work.
         let _request_activity = if matches!(&request, Request::UpgradeRuntime { .. }) {
@@ -1165,6 +1202,68 @@ pub(super) async fn handle_client(
             continue;
         }
 
+        // Queue controls are acknowledged after their durable mutation, not
+        // by the generic pre-dispatch Ack below.
+        if matches!(&request, Request::QueuePrompt { .. } | Request::SetQueuedPromptMode { .. } | Request::InterruptQueuedPrompt { .. } | Request::GetQueuedPrompts { .. }) {
+            let mut interrupt = false;
+            let mut dispatch_if_idle = false;
+            let (id, result) = match request {
+                Request::QueuePrompt { id, client_id, content, images, mode } => {
+                    let mode = match mode {
+                        crate::protocol::QueuedPromptMode::Steer => jcode_agent_runtime::QueuedMessageMode::Steer,
+                        crate::protocol::QueuedPromptMode::AfterYield => jcode_agent_runtime::QueuedMessageMode::AfterYield,
+                    };
+                    dispatch_if_idle = true;
+                    (id, session_control.enqueue_user_prompt(client_id, content, images, mode))
+                }
+                Request::SetQueuedPromptMode { id, client_id, mode } => {
+                    let mode = match mode {
+                        crate::protocol::QueuedPromptMode::Steer => jcode_agent_runtime::QueuedMessageMode::Steer,
+                        crate::protocol::QueuedPromptMode::AfterYield => jcode_agent_runtime::QueuedMessageMode::AfterYield,
+                    };
+                    dispatch_if_idle = true;
+                    (id, session_control.set_user_prompt_mode(&client_id, mode, false))
+                }
+                Request::InterruptQueuedPrompt { id, client_id } => {
+                    interrupt = true;
+                    (id, session_control.set_user_prompt_mode(&client_id, jcode_agent_runtime::QueuedMessageMode::AfterYield, true))
+                }
+                Request::GetQueuedPrompts { id } => (id, Ok(())),
+                _ => unreachable!(),
+            };
+            match result {
+                Ok(()) => {
+                    let _ = client_event_tx.send(ServerEvent::Ack { id });
+                    if let Ok(prompts) = session_control.queued_user_prompts() {
+                        let _ = client_event_tx.send(ServerEvent::QueuedPrompts { id, prompts: prompts.clone() });
+                        super::state::fanout_peer_client_event(&swarm_members, &client_session_id, &client_connection_id, ServerEvent::QueuedPrompts { id: 0, prompts }).await;
+                    }
+                    if interrupt {
+                        cancel_processing_message(
+                            &mut ProcessingState { client_is_processing: &mut client_is_processing, message_id: &mut processing_message_id, session_id: &mut processing_session_id, task: &mut processing_task },
+                            &session_control, &client_event_tx,
+                            &SwarmStatusRefs { members: &swarm_members, swarms_by_id: &swarms_by_id, event_history: &event_history, event_counter: &event_counter, event_tx: &swarm_event_tx },
+                            Some(id), Some(request_decoded_at), Some(&sessions),
+                        ).await;
+                        // A cooperatively cancelled task may have published a
+                        // completion retaining the turn reservation. Release it
+                        // before attempting to start the selected prompt.
+                        reconcile_processing_completions(
+                            None, &mut processing_done_rx,
+                            &mut ProcessingState { client_is_processing: &mut client_is_processing, message_id: &mut processing_message_id, session_id: &mut processing_session_id, task: &mut processing_task },
+                            &client_connection_id, &client_connections,
+                            &SwarmStatusRefs { members: &swarm_members, swarms_by_id: &swarms_by_id, event_history: &event_history, event_counter: &event_counter, event_tx: &swarm_event_tx },
+                        ).await;
+                        dispatch_queued_prompt!(true);
+                    } else if dispatch_if_idle {
+                        dispatch_queued_prompt!(false);
+                    }
+                }
+                Err(error) => { let _ = client_event_tx.send(ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None }); }
+            }
+            continue;
+        }
+
         // Send ack
         let ack = ServerEvent::Ack { id: request.id() };
         let json = encode_event(&ack);
@@ -1248,6 +1347,7 @@ pub(super) async fn handle_client(
             connection_client_name = Some(name.clone());
         }
         match request {
+            Request::QueuePrompt { .. } | Request::SetQueuedPromptMode { .. } | Request::InterruptQueuedPrompt { .. } | Request::GetQueuedPrompts { .. } => unreachable!("queue controls dispatched before acknowledgment"),
             Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. } => unreachable!("SDK controls dispatched before acknowledgment"),
             Request::Message {
                 id,
@@ -3558,35 +3658,44 @@ pub(super) async fn handle_client(
             crate::logging::warn(&format!("Client stdin forwarder failed: {error}"));
         }
         stdin_responses.lock().await.clear();
-        if let Some(handle) = processing_task.take() {
-            crate::logging::info(&format!(
-                "Retaining disconnected turn for session {}",
-                client_session_id
-            ));
-            let owner_id = handle.id();
-            if let Err(error) = handle.await {
-                crate::logging::warn(&format!("Disconnected turn task failed: {error}"));
-            }
-            while let Ok((done_id, result, report, owner, _finalization)) =
-                processing_done_rx.try_recv()
-            {
-                if Some(done_id) == processing_message_id && owner == owner_id {
-                    record_processing_completion(
-                        processing_session_id.as_deref(),
-                        result,
-                        report,
-                        &SwarmStatusRefs {
-                            members: &swarm_members,
-                            swarms_by_id: &swarms_by_id,
-                            event_history: &event_history,
-                            event_counter: &event_counter,
-                            event_tx: &swarm_event_tx,
-                        },
-                    )
-                    .await;
+        if processing_task.is_some() {
+            while let Some(handle) = processing_task.take() {
+                crate::logging::info(&format!(
+                    "Retaining disconnected turn for session {}",
+                    client_session_id
+                ));
+                let owner_id = handle.id();
+                if let Err(error) = handle.await {
+                    crate::logging::warn(&format!("Disconnected turn task failed: {error}"));
+                }
+                let mut completion = None;
+                while let Ok((done_id, result, report, owner, _finalization)) =
+                    processing_done_rx.try_recv()
+                {
+                    if Some(done_id) == processing_message_id && owner == owner_id {
+                        completion = Some(result.is_ok());
+                        record_processing_completion(
+                            processing_session_id.as_deref(),
+                            result,
+                            report,
+                            &SwarmStatusRefs {
+                                members: &swarm_members,
+                                swarms_by_id: &swarms_by_id,
+                                event_history: &event_history,
+                                event_counter: &event_counter,
+                                event_tx: &swarm_event_tx,
+                            },
+                        )
+                        .await;
+                    }
+                }
+                client_is_processing = false;
+                processing_message_id = None;
+                processing_session_id = None;
+                if let Some(success) = completion {
+                    dispatch_queued_prompt!(!success);
                 }
             }
-            client_is_processing = false;
         } else {
             // A reattached remote connection may disconnect again while the
             // original lifecycle owns the task. Wait for its active-turn lease
@@ -3638,8 +3747,8 @@ mod client_processing;
 use client_processing::{
     append_context_message, cancel_processing_message, cancel_soft_interrupts_by_id,
     clear_soft_interrupts, move_tool_to_background, queue_soft_interrupt,
-    reconcile_processing_completions, record_processing_completion, start_processing_message,
-    try_available_models_snapshot,
+    reconcile_processing_completions, record_processing_completion, start_next_queued_prompt,
+    start_processing_message, try_available_models_snapshot,
 };
 
 /// Process a message and stream events (mpsc channel - per-client)

@@ -57,6 +57,12 @@ pub enum ApiEvent {
         images: Vec<RenderedImage>,
     },
 
+    /// Current daemon-owned prompt queue, sent as a reply or as a live update.
+    QueuedPrompts {
+        session_id: String,
+        prompts: Vec<crate::QueuedPrompt>,
+    },
+
     /// Reply to `Ping`.
     Pong,
 

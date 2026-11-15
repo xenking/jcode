@@ -831,6 +831,140 @@ impl SessionControlHandle {
         queued
     }
 
+    /// Accept a prompt under the same lock as steering injection. Persist
+    /// before acknowledging it, and make retries with the same id idempotent.
+    pub(super) fn enqueue_user_prompt(
+        &self,
+        client_id: String,
+        content: String,
+        images: Vec<(String, String)>,
+        mode: jcode_agent_runtime::QueuedMessageMode,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(!client_id.trim().is_empty(), "client_id must not be empty");
+        let mut queue = self
+            .soft_interrupt_queue
+            .lock()
+            .map_err(|_| anyhow::anyhow!("queue lock poisoned"))?;
+        if let Some(existing) = queue
+            .iter()
+            .find(|message| message.client_id.as_deref() == Some(&client_id))
+        {
+            anyhow::ensure!(
+                existing.content == content && existing.images == images && existing.mode == mode,
+                "client_id already belongs to another prompt"
+            );
+            return Ok(());
+        }
+        queue.push(SoftInterruptMessage {
+            content,
+            images,
+            urgent: false,
+            source: SoftInterruptSource::User,
+            mode,
+            client_id: Some(client_id),
+        });
+        if let Err(error) = crate::soft_interrupt_store::overwrite(&self.session_id, &queue) {
+            queue.pop();
+            return Err(error);
+        }
+        drop(queue);
+        Ok(())
+    }
+
+    pub(super) fn queued_user_prompts(&self) -> anyhow::Result<Vec<crate::protocol::QueuedPrompt>> {
+        let queue = self
+            .soft_interrupt_queue
+            .lock()
+            .map_err(|_| anyhow::anyhow!("queue lock poisoned"))?;
+        Ok(queue
+            .iter()
+            .filter_map(|message| {
+                if message.source != SoftInterruptSource::User {
+                    return None;
+                }
+                Some(crate::protocol::QueuedPrompt {
+                    client_id: message.client_id.clone()?,
+                    content: message.content.clone(),
+                    images: message.images.clone(),
+                    mode: match message.mode {
+                        jcode_agent_runtime::QueuedMessageMode::Steer => {
+                            crate::protocol::QueuedPromptMode::Steer
+                        }
+                        jcode_agent_runtime::QueuedMessageMode::AfterYield => {
+                            crate::protocol::QueuedPromptMode::AfterYield
+                        }
+                    },
+                })
+            })
+            .collect())
+    }
+
+    pub(super) fn set_user_prompt_mode(
+        &self,
+        client_id: &str,
+        mode: jcode_agent_runtime::QueuedMessageMode,
+        prioritize: bool,
+    ) -> anyhow::Result<()> {
+        let mut queue = self
+            .soft_interrupt_queue
+            .lock()
+            .map_err(|_| anyhow::anyhow!("queue lock poisoned"))?;
+        let previous = queue.clone();
+        let index = queue
+            .iter()
+            .position(|message| {
+                message.source == SoftInterruptSource::User
+                    && message.client_id.as_deref() == Some(client_id)
+            })
+            .ok_or_else(|| anyhow::anyhow!("queued prompt not found"))?;
+        queue[index].mode = mode;
+        if prioritize {
+            queue[index].urgent = true;
+            let selected = queue.remove(index);
+            queue.insert(0, selected);
+        }
+        if let Err(error) = crate::soft_interrupt_store::overwrite(&self.session_id, &queue) {
+            *queue = previous;
+            return Err(error);
+        }
+        drop(queue);
+        Ok(())
+    }
+
+    pub(super) fn take_next_user_prompt(
+        &self,
+        interrupted_only: bool,
+    ) -> anyhow::Result<Option<SoftInterruptMessage>> {
+        let mut queue = self
+            .soft_interrupt_queue
+            .lock()
+            .map_err(|_| anyhow::anyhow!("queue lock poisoned"))?;
+        let Some(index) = queue.iter().position(|message| {
+            message.source == SoftInterruptSource::User
+                && message.client_id.is_some()
+                && (!interrupted_only
+                    || (message.mode == jcode_agent_runtime::QueuedMessageMode::AfterYield
+                        && message.urgent))
+        }) else {
+            return Ok(None);
+        };
+        let prompt = queue.remove(index);
+        if let Err(error) = crate::soft_interrupt_store::overwrite(&self.session_id, &queue) {
+            queue.insert(index, prompt);
+            return Err(error);
+        }
+        Ok(Some(prompt))
+    }
+
+    pub(super) fn restore_user_prompt(&self, prompt: SoftInterruptMessage) -> anyhow::Result<()> {
+        let mut queue = self
+            .soft_interrupt_queue
+            .lock()
+            .map_err(|_| anyhow::anyhow!("queue lock poisoned"))?;
+        queue.insert(0, prompt);
+        crate::soft_interrupt_store::overwrite(&self.session_id, &queue)
+    }
+
     /// A queued user prompt must not sit behind a long blocking tool wait.
     fn wake_blocking_waits(&self, queued: bool, source: SoftInterruptSource) {
         if queued {
@@ -865,10 +999,26 @@ impl SessionControlHandle {
         }
         let removed: Vec<String> = match self.soft_interrupt_queue.lock() {
             Ok(mut queue) => {
-                let mut removed = Vec::new();
+                // Queue mutation and its durable counterpart share this lock.
+                // Otherwise a cancelled daemon-owned prompt reappears on reload.
+                let mut removed = match crate::soft_interrupt_store::remove_by_client_ids(
+                    &self.session_id,
+                    &requested,
+                ) {
+                    Ok(removed) => removed,
+                    Err(error) => {
+                        crate::logging::warn(&format!(
+                            "SOFT_INTERRUPT_QUEUE_CANCEL_PERSIST_FAILED session={} error={error}",
+                            self.session_id
+                        ));
+                        return (Vec::new(), requested);
+                    }
+                };
                 queue.retain(|message| match &message.client_id {
                     Some(id) if requested.contains(id) => {
-                        removed.push(id.clone());
+                        if !removed.contains(id) {
+                            removed.push(id.clone());
+                        }
                         false
                     }
                     _ => true,

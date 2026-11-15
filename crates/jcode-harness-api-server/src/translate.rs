@@ -49,6 +49,10 @@ const REQUIRES_ATTACH: &[&str] = &[
     "send_message",
     "cancel",
     "soft_interrupt",
+    "queue_prompt",
+    "set_queued_prompt_mode",
+    "interrupt_queued_prompt",
+    "get_queued_prompts",
     "cancel_soft_interrupts",
     "background_tool",
     "clear",
@@ -132,6 +136,7 @@ pub struct BridgeState {
     pub session_tools_supported: bool,
     /// The daemon accepts soft interrupt ids and per-id cancellation, and
     /// replies to `background_tool` with a result.
+    pub queued_prompts_supported: bool,
     pub soft_interrupt_ids_supported: bool,
     /// Leftover queue size reported just before the current turn's `done`.
     pending_soft_interrupts_at_done: Option<u32>,
@@ -721,6 +726,35 @@ impl BridgeState {
                     interrupt["client_id"] = json!(client_id);
                 }
                 vec![Outbound::Legacy(interrupt)]
+            }
+            "queue_prompt"
+            | "set_queued_prompt_mode"
+            | "interrupt_queued_prompt"
+            | "get_queued_prompts" => {
+                if !self.queued_prompts_supported {
+                    return vec![Outbound::Reply(ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: "daemon does not advertise queued_prompts".into(),
+                        },
+                    ))];
+                }
+                let id = self.legacy_id();
+                let kind = if req == "get_queued_prompts" {
+                    SimpleKind::QueueSnapshot
+                } else {
+                    SimpleKind::QueueControl
+                };
+                self.pending_simple.push((id, api_id, kind));
+                let mut forwarded = request.clone();
+                forwarded["type"] = json!(req);
+                forwarded["id"] = json!(id);
+                if let Some(object) = forwarded.as_object_mut() {
+                    object.remove("req");
+                    object.remove("session_id");
+                }
+                vec![Outbound::Legacy(forwarded)]
             }
             "clear" => {
                 let id = self.legacy_id();
@@ -2563,15 +2597,18 @@ impl BridgeState {
             // comes back after a reload are identical. This bridge deliberately
             // links no application foundation, so it must not re-derive the text.
             "compaction" => {
-                let content = event["divider"].as_str().map(str::to_string).unwrap_or_else(|| {
-                    let before = event["pre_tokens"]
-                        .as_u64()
-                        .map_or_else(|| "unknown".to_string(), |n| n.to_string());
-                    let after = event["post_tokens"]
-                        .as_u64()
-                        .map_or_else(|| "unknown".to_string(), |n| n.to_string());
-                    format!("compacted · {before}→{after}")
-                });
+                let content = event["divider"]
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| {
+                        let before = event["pre_tokens"]
+                            .as_u64()
+                            .map_or_else(|| "unknown".to_string(), |n| n.to_string());
+                        let after = event["post_tokens"]
+                            .as_u64()
+                            .map_or_else(|| "unknown".to_string(), |n| n.to_string());
+                        format!("compacted · {before}→{after}")
+                    });
                 vec![ServerFrame::event(ApiEvent::CompactionDivider {
                     session_id: session(self),
                     content,
@@ -2728,7 +2765,7 @@ impl BridgeState {
                 };
                 let (_, api_id, kind) = self.pending_simple.remove(index);
                 match kind {
-                    SimpleKind::Ok | SimpleKind::ToolControl => {
+                    SimpleKind::Ok | SimpleKind::ToolControl | SimpleKind::QueueControl => {
                         vec![ServerFrame::reply(api_id, ApiEvent::Ok)]
                     }
                     SimpleKind::Credential {
@@ -2830,6 +2867,21 @@ impl BridgeState {
                     }));
                 }
                 frames
+            }
+            "queued_prompts" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let prompts = match serde_json::from_value(event["prompts"].clone()) {
+                    Ok(prompts) => prompts,
+                    Err(_) => return vec![],
+                };
+                let payload = ApiEvent::QueuedPrompts {
+                    session_id: session(self),
+                    prompts,
+                };
+                match self.take_simple(id, SimpleKind::QueueSnapshot) {
+                    Some(api_id) => vec![ServerFrame::reply(api_id, payload)],
+                    None => vec![ServerFrame::event(payload)],
+                }
             }
             "soft_interrupt_injected" => {
                 // Daemon-originated injections (background task results,

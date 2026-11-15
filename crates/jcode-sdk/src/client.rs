@@ -1008,6 +1008,59 @@ impl JcodeClient {
         .map(drop)
     }
 
+    /// Queue a prompt on the daemon, preserving its mode and caller ID.
+    pub fn queue_prompt(
+        &self,
+        session_id: &str,
+        prompt: jcode_harness_api::QueuedPrompt,
+    ) -> Result<()> {
+        self.request_ok(ApiRequest::QueuePrompt {
+            session_id: session_id.into(),
+            client_id: prompt.client_id,
+            content: prompt.content,
+            images: prompt.images,
+            mode: prompt.mode,
+        })
+        .map(drop)
+    }
+
+    pub fn set_queued_prompt_mode(
+        &self,
+        session_id: &str,
+        client_id: &str,
+        mode: jcode_harness_api::QueuedPromptMode,
+    ) -> Result<()> {
+        self.request_ok(ApiRequest::SetQueuedPromptMode {
+            session_id: session_id.into(),
+            client_id: client_id.into(),
+            mode,
+        })
+        .map(drop)
+    }
+
+    pub fn interrupt_queued_prompt(&self, session_id: &str, client_id: &str) -> Result<()> {
+        self.request_ok(ApiRequest::InterruptQueuedPrompt {
+            session_id: session_id.into(),
+            client_id: client_id.into(),
+        })
+        .map(drop)
+    }
+
+    pub fn get_queued_prompts(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<jcode_harness_api::QueuedPrompt>> {
+        match self
+            .request_ok(ApiRequest::GetQueuedPrompts {
+                session_id: session_id.into(),
+            })?
+            .event
+        {
+            ApiEvent::QueuedPrompts { prompts, .. } => Ok(prompts),
+            other => Err(unexpected("queued_prompts", &other)),
+        }
+    }
+
     pub fn get_history(&self, session_id: &str) -> Result<Vec<HistoryMessage>> {
         self.get_history_with_images(session_id)
             .map(|(messages, _)| messages)

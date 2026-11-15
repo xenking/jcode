@@ -415,6 +415,10 @@ pub enum ServerEvent {
         proposal_key: String,
     },
 
+    /// Snapshot of user-authored prompts still owned by the session queue.
+    #[serde(rename = "queued_prompts")]
+    QueuedPrompts { id: u64, prompts: Vec<QueuedPrompt> },
+
     /// Soft interrupt message was injected at a safe point
     #[serde(rename = "soft_interrupt_injected")]
     SoftInterruptInjected {

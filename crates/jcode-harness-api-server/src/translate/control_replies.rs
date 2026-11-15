@@ -4,6 +4,8 @@ use super::{ApiEvent, BridgeState, ErrorCode, ServerFrame, Value};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum SimpleKind {
+    QueueControl,
+    QueueSnapshot,
     RuntimeCommand,
     Detach,
     Tools,
@@ -49,7 +51,9 @@ impl BridgeState {
                 *pending_id == id
                     && matches!(
                         kind,
-                        SimpleKind::Tools
+                        SimpleKind::QueueControl
+                            | SimpleKind::QueueSnapshot
+                            | SimpleKind::Tools
                             | SimpleKind::ToolControl
                             | SimpleKind::OkOnDone
                             | SimpleKind::OkOnHistory

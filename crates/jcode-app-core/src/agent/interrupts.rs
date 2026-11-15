@@ -99,6 +99,7 @@ impl Agent {
             return 0;
         }
 
+        self.persist_soft_interrupt_snapshot();
         logging::info(&format!(
             "Restored {} persisted soft interrupt(s) for session {}",
             restored_count,
@@ -500,6 +501,7 @@ impl Agent {
         }
 
         self.persist_session_best_effort("soft interrupt injection");
+        self.persist_soft_interrupt_snapshot();
         logging::info(&format!(
             "AGENT_SOFT_INTERRUPT_INJECT_COMMIT session={} groups={} total_content_bytes={}",
             self.session_id(),

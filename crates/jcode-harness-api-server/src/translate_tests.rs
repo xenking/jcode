@@ -959,6 +959,44 @@ fn legacy_out(out: &[Outbound]) -> &serde_json::Value {
 }
 
 #[test]
+fn queued_prompt_bridge_forwards_and_correlates_controls_and_snapshots() {
+    let mut state = BridgeState {
+        session_id: Some("s1".into()),
+        queued_prompts_supported: true,
+        ..Default::default()
+    };
+    let out = state.api_request_to_legacy(&json!({"req":"queue_prompt","id":9,"session_id":"s1","client_id":"p1","content":"next","mode":"after_yield","images":[]}));
+    let legacy = legacy_out(&out);
+    assert_eq!(legacy["client_id"], "p1");
+    assert_eq!(legacy["mode"], "after_yield");
+    let id = legacy["id"].as_u64().unwrap();
+    let ack = state.legacy_event_to_api(&json!({"type":"ack","id":id}));
+    assert!(
+        matches!(&ack[..], [frame] if frame.reply_to == Some(9) && matches!(frame.event, ApiEvent::Ok))
+    );
+    let out =
+        state.api_request_to_legacy(&json!({"req":"get_queued_prompts","id":10,"session_id":"s1"}));
+    let id = legacy_out(&out)["id"].as_u64().unwrap();
+    assert!(
+        state
+            .legacy_event_to_api(&json!({"type":"ack","id":id}))
+            .is_empty()
+    );
+    let reply = state.legacy_event_to_api(&json!({"type":"queued_prompts","id":id,"prompts":[{"client_id":"p1","content":"next","mode":"after_yield"}]}));
+    assert!(
+        matches!(&reply[..], [frame] if frame.reply_to == Some(10) && matches!(&frame.event, ApiEvent::QueuedPrompts { prompts, .. } if prompts.len() == 1 && prompts[0].client_id == "p1"))
+    );
+    let out = state.api_request_to_legacy(
+        &json!({"req":"interrupt_queued_prompt","id":11,"session_id":"s1","client_id":"missing"}),
+    );
+    let id = legacy_out(&out)["id"].as_u64().unwrap();
+    let err = state.legacy_event_to_api(&json!({"type":"error","id":id,"message":"not found"}));
+    assert!(
+        matches!(&err[..], [frame] if frame.reply_to == Some(11) && matches!(&frame.event, ApiEvent::Error { message, .. } if message == "not found"))
+    );
+}
+
+#[test]
 fn soft_interrupt_forwards_client_id() {
     let mut state = ids_state();
     let out = state.api_request_to_legacy(&json!({
@@ -2325,10 +2363,13 @@ fn unattached_list_sessions_handles_no_session_candidates() {
             let event = only_reply_event(state.api_request_to_legacy(&json!({
                 "req": "list_sessions", "id": 1, "limit": limit,
             })));
-            assert_eq!(event, ApiEvent::Sessions {
-                sessions: vec![],
-                workers: Default::default(),
-            });
+            assert_eq!(
+                event,
+                ApiEvent::Sessions {
+                    sessions: vec![],
+                    workers: Default::default(),
+                }
+            );
             assert_eq!(
                 only_reply_event(state.api_request_to_legacy(&json!({"req": "ping", "id": 2}))),
                 ApiEvent::Pong,
@@ -2387,8 +2428,7 @@ fn list_sessions_carries_each_workers_own_record_facts() {
     .unwrap();
 
     let event = only_reply_event(
-        BridgeState::default()
-            .api_request_to_legacy(&json!({"req": "list_sessions", "id": 1})),
+        BridgeState::default().api_request_to_legacy(&json!({"req": "list_sessions", "id": 1})),
     );
     let ApiEvent::Sessions { sessions, workers } = event else {
         panic!("expected sessions reply, got {event:?}");
@@ -2444,9 +2484,12 @@ fn user_connections_are_global_independent_and_fresh_in_list_metadata() {
             "connection truth must not overwrite lifecycle/attachment status"
         );
     }
-    let ApiEvent::Sessions { sessions: limited, .. } = only_reply_event(
+    let ApiEvent::Sessions {
+        sessions: limited, ..
+    } = only_reply_event(
         state.api_request_to_legacy(&json!({"req":"list_sessions","id":9,"limit":0})),
-    ) else {
+    )
+    else {
         panic!("expected list");
     };
     assert_eq!(
@@ -2711,11 +2754,13 @@ fn archive_restore_and_retention_are_reversible_and_owner_only() {
         ApiEvent::Ok
     ));
 
-    let ApiEvent::Sessions { sessions, .. } = only_reply_event(state.api_request_to_legacy(&json!({
-        "req": "list_sessions",
-        "id": 5,
-        "include_archived": true
-    }))) else {
+    let ApiEvent::Sessions { sessions, .. } =
+        only_reply_event(state.api_request_to_legacy(&json!({
+            "req": "list_sessions",
+            "id": 5,
+            "include_archived": true
+        })))
+    else {
         panic!("expected sessions");
     };
     let old = sessions
