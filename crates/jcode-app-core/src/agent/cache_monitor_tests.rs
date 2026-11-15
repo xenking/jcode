@@ -40,10 +40,7 @@ impl Provider for CompactionCacheProvider {
                 events.insert(0, compaction);
             }
             if self.discard_compaction {
-                events.push(Ok(StreamEvent::RetryRollback {
-                    attempt: 1,
-                    max: 2,
-                }));
+                events.push(Ok(StreamEvent::RetryRollback { attempt: 1, max: 2 }));
                 events.push(Ok(StreamEvent::TokenUsage {
                     input_tokens: Some(216_000),
                     output_tokens: Some(5),

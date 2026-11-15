@@ -1522,22 +1522,64 @@ fn shake_never_runs_while_prompt_cache_is_warm() {
 }
 
 #[test]
+fn pre_compaction_shake_is_not_suppressed_by_a_warm_cache() {
+    // 2026-11-15 07:20Z incident: claude-opus-5-5 with ttl=3600, last response
+    // 1s earlier and a cache read of 871082, over the 400K reactive token cap.
+    // plan_shake() returned None from the warm-cache guard before it ever asked
+    // whether LLM compaction was about to run, so the session went straight to
+    // the summarizer with no cheap reduction first.
+    let over = shake_session(40, 2000);
+    let mut m = shake_manager();
+    m.set_budget(100_000);
+    m.compaction_config.reactive_threshold = 0.5;
+    let now = Instant::now();
+    m.note_provider_response(now, Some(871_082));
+    assert!(
+        m.should_compact_with(&over),
+        "fixture must exceed the compaction threshold"
+    );
+    let (reason, _) = m
+        .plan_shake(&over, now + Duration::from_secs(1), Some(3600))
+        .expect("shake must be planned before LLM compaction, warm cache or not");
+    assert_eq!(reason, ShakeReason::PreCompact);
+}
+
+#[test]
 fn shake_precompact_respects_recent_cache_hit() {
+    // Pre-compaction shake is not gated by a warm prompt cache: the compaction
+    // rewrites the same prefix in the same request. The cache-expiry reason
+    // still is.
     let msgs = shake_session(40, 2000);
     let mut m = shake_manager();
     m.set_budget(100_000);
     m.compaction_config.reactive_threshold = 0.5;
     let now = Instant::now();
     m.note_provider_response(now, Some(1));
-    assert!(
-        m.plan_shake(&msgs, now + Duration::from_secs(299), Some(300))
-            .is_none()
-    );
     assert_eq!(
-        m.plan_shake(&msgs, now + Duration::from_secs(300), Some(300))
-            .unwrap()
+        m.plan_shake(&msgs, now + Duration::from_secs(1), Some(300))
+            .expect("pre-compaction shake despite the warm cache")
             .0,
         ShakeReason::PreCompact
+    );
+
+    // Below the threshold the warm-cache guard still blocks cache-expiry shake.
+    let small = shake_session(8, 2000);
+    let mut under = shake_manager();
+    under.set_budget(100_000);
+    under.note_provider_response(now, Some(1));
+    assert!(!under.should_compact_with(&small));
+    assert!(
+        under
+            .plan_shake(&small, now + Duration::from_secs(299), Some(300))
+            .is_none(),
+        "warm cache blocks the cache-expiry reason below the threshold"
+    );
+    assert_eq!(
+        under
+            .plan_shake(&small, now + Duration::from_secs(300), Some(300))
+            .unwrap()
+            .0,
+        ShakeReason::CacheExpiry
     );
 }
 

@@ -1000,10 +1000,14 @@ impl CompactionManager {
     /// Decide whether shake may rewrite history before this request.
     ///
     /// Shake invalidates the prompt cache from the first elided message, so it
-    /// only runs when the prefix is cold or about to be rewritten: when LLM
-    /// compaction would trigger, or when `cache_ttl_secs` (None = persistent or
-    /// unknown cache, never shake) elapsed since the last successful response. Never
-    /// while the cache is warm.
+    /// only runs when the prefix is cold or about to be rewritten. LLM
+    /// compaction is exactly the rewriting case: it replaces the same prefix in
+    /// the same request, so the cheap local reducer must run first. The
+    /// warm-cache guard therefore applies only to the cache-expiry reason, never
+    /// to pre-compaction. Guarding pre-compaction on a cold cache made shake
+    /// unreachable in practice: with a TTL provider (Anthropic's 1h cache) every
+    /// turn that read any cached tokens suppressed shake, so compaction always
+    /// paid for a full LLM summary first.
     pub fn plan_shake(
         &self,
         all_messages: &[Message],
@@ -1011,15 +1015,15 @@ impl CompactionManager {
         cache_ttl_secs: Option<u64>,
     ) -> Option<(ShakeReason, ShakeConfig)> {
         let cfg = self.shake_config()?;
+        if self.should_compact_with(all_messages) {
+            return Some((ShakeReason::PreCompact, cfg));
+        }
         if self.last_response_cache_read
             && let (Some(last), Some(ttl)) =
                 (self.last_response_at, cache_ttl_secs.filter(|t| *t > 0))
             && now.saturating_duration_since(last) < Duration::from_secs(ttl)
         {
             return None;
-        }
-        if self.should_compact_with(all_messages) {
-            return Some((ShakeReason::PreCompact, cfg));
         }
         let ttl = cache_ttl_secs.filter(|t| *t > 0)?;
         let last = self.last_response_at?;
