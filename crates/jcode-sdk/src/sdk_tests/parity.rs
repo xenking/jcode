@@ -62,6 +62,7 @@ const CAPABILITIES: &[Capability] = &[
     cap("read_file", "readFile"),
     cap("find_files", "findFiles"),
     cap("search_text", "searchText"),
+    cap("search_sessions", "searchSessions"),
     cap("file_status", "fileStatus"),
     cap("todo_state", "todoState"),
     cap("ack_todo_follow_up", "ackTodoFollowUp"),

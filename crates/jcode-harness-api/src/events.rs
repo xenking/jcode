@@ -1,5 +1,6 @@
 //! Server-to-client events: replies and streaming.
 
+use crate::search::SessionSearchHit;
 use serde::{Deserialize, Serialize};
 
 /// Curated event surface. Internally-tagged on `"ev"`.
@@ -451,6 +452,18 @@ pub enum ApiEvent {
         size: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         modified_ms: Option<u64>,
+    },
+
+    /// Reply to `SearchSessions`. Both sections are ranked best-first; a
+    /// client renders them as separate sections and groups the message hits by
+    /// session itself.
+    SessionSearch {
+        query: String,
+        titles: Vec<SessionSearchHit>,
+        messages: Vec<SessionSearchHit>,
+        indexed_sessions: u64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        truncated: bool,
     },
 
     /// Reply to `GetTodoState`.

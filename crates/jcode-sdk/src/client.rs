@@ -752,6 +752,39 @@ impl JcodeClient {
         }
     }
 
+    /// Search every stored session's titles and transcripts.
+    ///
+    /// The reply is a distinct event rather than a list so a client can apply
+    /// its own debounce without the transport second-guessing it.
+    pub fn search_sessions(
+        &self,
+        query: &str,
+        limit: Option<u32>,
+    ) -> Result<jcode_harness_api::SessionSearchResults> {
+        match self
+            .request_ok(ApiRequest::SearchSessions {
+                query: query.to_string(),
+                limit,
+            })?
+            .event
+        {
+            ApiEvent::SessionSearch {
+                query,
+                titles,
+                messages,
+                indexed_sessions,
+                truncated,
+            } => Ok(jcode_harness_api::SessionSearchResults {
+                query,
+                titles,
+                messages,
+                indexed_sessions,
+                truncated,
+            }),
+            other => Err(unexpected("session_search", &other)),
+        }
+    }
+
     /// List only the newest persisted sessions, for bounded dashboard startup.
     pub fn list_sessions_limited(&self, limit: u32) -> Result<Vec<SessionInfo>> {
         match self

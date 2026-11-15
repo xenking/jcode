@@ -201,6 +201,7 @@ pub use jcode_harness_api as api;
 pub use jcode_harness_api::{
     ApiEvent, ApiRequest, HistoryMessage, HistoryTool, ModelRouteInfo, PermissionDecision,
     RenderedImage, RenderedImageAnchor, RenderedImageSource, ResponseStats, SessionInfo,
+    SessionSearchHighlight, SessionSearchHit, SessionSearchResults, SessionSearchRole,
     SessionToolDefinition, SidePanelPage, SidePanelPageFormat, SidePanelPageSource,
     SidePanelSnapshot, TextMatch, ToolConfiguration, TurnStopReason, api_socket_path,
 };

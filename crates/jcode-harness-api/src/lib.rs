@@ -25,6 +25,10 @@ pub use edit_stats::{
 mod requests;
 mod runtime_commands;
 pub use runtime_commands::{RuntimeCommand, RuntimeCommandOutput};
+mod search;
+pub use search::{
+    SessionSearchHighlight, SessionSearchHit, SessionSearchResults, SessionSearchRole,
+};
 mod sockets;
 mod swarm_metadata;
 
@@ -54,7 +58,7 @@ mod capability_coverage_tests;
 /// Protocol major version. Breaking changes only.
 pub const API_VERSION_MAJOR: u32 = 1;
 /// Protocol minor version. Additive changes.
-pub const API_VERSION_MINOR: u32 = 11;
+pub const API_VERSION_MINOR: u32 = 12;
 
 /// Envelope wrapping every client-to-server frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

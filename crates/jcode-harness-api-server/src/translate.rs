@@ -3,6 +3,7 @@
 
 mod control_replies;
 mod credentials;
+mod search_hooks;
 mod turn_identity;
 #[cfg(test)]
 mod turn_identity_tests;
@@ -1216,6 +1217,36 @@ impl BridgeState {
                 self.pending_simple.push((id, api_id, SimpleKind::Compact));
                 vec![Outbound::Legacy(json!({"type": "compact", "id": id}))]
             }
+            "search_sessions" => {
+                let query = request["query"].as_str().unwrap_or("");
+                if query.trim().is_empty() {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "query must not be empty",
+                    );
+                }
+                let limit = request["limit"].as_u64().map(|limit| limit as u32);
+                let started = std::time::Instant::now();
+                let results = crate::search_index::search(query, limit);
+                crate::timing::log(&format!(
+                    "search_sessions query={:?} titles={} messages={} in {:.1}ms",
+                    query,
+                    results.titles.len(),
+                    results.messages.len(),
+                    crate::timing::ms(started.elapsed())
+                ));
+                vec![Outbound::Reply(ServerFrame::reply(
+                    api_id,
+                    ApiEvent::SessionSearch {
+                        query: results.query,
+                        titles: results.titles,
+                        messages: results.messages,
+                        indexed_sessions: results.indexed_sessions,
+                        truncated: results.truncated,
+                    },
+                ))]
+            }
             "rename_session" => {
                 let id = self.legacy_id();
                 self.pending_simple.push((id, api_id, SimpleKind::OkOnDone));
@@ -1621,6 +1652,9 @@ impl BridgeState {
                 let frames = self.legacy_event_to_api_inner(payload);
                 if matches!(payload["type"].as_str(), Some("done" | "error")) {
                     self.turn_fence.complete();
+                    // The turn's messages are on disk now; index them while the
+                    // filesystem is already hot rather than on the next query.
+                    self.note_transcript_changed();
                 }
                 frames
             }
@@ -2279,6 +2313,9 @@ impl BridgeState {
                 // which is the only place it appears: remember it so
                 // `list_sessions` can answer with more than this connection.
                 self.note_sessions(event);
+                // A session that just sent its history is one whose transcript
+                // the user is about to search, so index it now.
+                self.note_session_transcript(event["session_id"].as_str().unwrap_or(""));
                 if let Some(api_id) = self.take_simple(id, SimpleKind::OkOnHistory) {
                     return vec![ServerFrame::reply(api_id, ApiEvent::Ok)];
                 }
@@ -2571,6 +2608,7 @@ impl BridgeState {
                     .as_str()
                     .map(str::to_string)
                     .unwrap_or_else(|| session(self));
+                self.note_session_title(&session_id, event["title"].as_str());
                 vec![ServerFrame::event(ApiEvent::SessionRenamed {
                     session_id,
                     title: event["title"].as_str().map(str::to_string),
@@ -3536,7 +3574,8 @@ impl BridgeState {
                 }
                 let content = flatten_content(&message["content"]);
                 (!content.trim().is_empty()).then(|| HistoryMessage {
-                    response_stats: None, timestamp_ms: None,
+                    response_stats: None,
+                    timestamp_ms: None,
                     role: role.to_string(),
                     content,
                     tool: None,

@@ -353,6 +353,19 @@ pub enum ApiRequest {
     /// `background_tool_result`, otherwise `Ok` whether or not a tool ran.
     BackgroundTool { session_id: String },
 
+    /// Search every stored session's transcript and titles.
+    ///
+    /// Answers from the daemon's own full-text index, so a client can offer
+    /// global recall without re-reading gigabytes of session files. Carries no
+    /// `session_id`: the search is cross-session by definition and must work
+    /// before the client attaches to anything. Replies `SessionSearch`.
+    SearchSessions {
+        query: String,
+        /// Cap for each section (titles, messages).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
+
     /// Liveness check.
     Ping,
 

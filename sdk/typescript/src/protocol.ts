@@ -82,6 +82,27 @@ export interface TextMatch {
   preview: string;
 }
 
+/** Which half of the corpus a global-search hit came from. */
+export type SessionSearchRole = "title" | "user" | "assistant";
+
+/** A highlighted span of `SessionSearchHit.snippet`, in char indices. */
+export interface SessionSearchHighlight {
+  start: number;
+  end: number;
+}
+
+/** One matching session title or transcript message. */
+export interface SessionSearchHit {
+  session_id: string;
+  title: string;
+  role: SessionSearchRole;
+  snippet: string;
+  highlights: SessionSearchHighlight[];
+  /** Unix epoch milliseconds: the message time, or the session's last activity. */
+  timestamp_ms: number;
+  message_id?: string;
+}
+
 /** A session's persisted todo state, as read by the follow-up policy.
  * Todos, plan, goals, and observations use the runtime's todo schema. */
 export interface TodoSnapshot {
@@ -238,6 +259,8 @@ export type ApiRequest =
   | { req: "cancel_soft_interrupts"; session_id: string; client_ids?: string[] }
   /** Replies `background_tool_result` when the `background_tool_result` capability is advertised, else `ok`. */
   | { req: "background_tool"; session_id: string }
+  /** Cross-session search over titles and transcripts. Replies `session_search`. */
+  | { req: "search_sessions"; query: string; limit?: number }
   | { req: "ping" };
 
 /** Markdown/PDF panel state, shared with the native runtime. */
@@ -440,6 +463,14 @@ export type ApiEvent =
       modified_ms?: number;
     }
   | { ev: "todo_state"; session_id: string; state: TodoSnapshot }
+  | {
+      ev: "session_search";
+      query: string;
+      titles: SessionSearchHit[];
+      messages: SessionSearchHit[];
+      indexed_sessions: number;
+      truncated?: boolean;
+    }
   | { ev: "compacted"; session_id: string; message: string }
   | {
       ev: "session_renamed";
@@ -529,6 +560,7 @@ export const KNOWN_EVENT_KINDS = [
   "text_matches",
   "file_status",
   "todo_state",
+  "session_search",
   "compacted",
   "session_renamed",
 ] as const;
@@ -582,6 +614,7 @@ export const KNOWN_REQUEST_KINDS = [
   "rewind_undo",
   "cancel_soft_interrupts",
   "background_tool",
+  "search_sessions",
   "ping",
 ] as const;
 

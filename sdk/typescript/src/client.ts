@@ -33,6 +33,7 @@ import {
   type RuntimeCommand,
   type ServerFrame,
   type SessionInfo,
+  type SessionSearchHit,
   type SessionToolDefinition,
   type TextMatch,
   type TodoEffects,
@@ -879,6 +880,32 @@ export class JcodeClient extends EventEmitter {
       "text_matches",
     );
     return frame.matches;
+  }
+
+  /** Search every stored session's titles and transcripts. Answers from the
+   * daemon's index, so a client can offer global recall without reading
+   * session files. Needs no attached session. */
+  async searchSessions(
+    query: string,
+    limit?: number,
+  ): Promise<{
+    query: string;
+    titles: SessionSearchHit[];
+    messages: SessionSearchHit[];
+    indexed_sessions: number;
+    truncated: boolean;
+  }> {
+    const frame = await this.expectReply(
+      { req: "search_sessions", query, limit },
+      "session_search",
+    );
+    return {
+      query: frame.query,
+      titles: frame.titles,
+      messages: frame.messages,
+      indexed_sessions: frame.indexed_sessions,
+      truncated: frame.truncated ?? false,
+    };
   }
 
   /** Persisted todo state for client-side auto-poke and quality gates.

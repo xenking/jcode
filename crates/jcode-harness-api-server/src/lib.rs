@@ -18,8 +18,13 @@
 
 pub mod allocator;
 pub mod background_progress;
+pub mod search_index;
 pub mod timing;
 pub mod translate;
+
+#[cfg(test)]
+#[path = "search_api_tests.rs"]
+mod search_api_tests;
 
 #[cfg(all(test, unix))]
 mod session_presence_tests;
@@ -401,6 +406,7 @@ where
                 "session_retention",
                 "session_files",
                 "session_fork",
+                "session_search",
                 "todo_state",
             ]
             .into_iter()
