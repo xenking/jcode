@@ -511,11 +511,13 @@ impl AnthropicProvider {
     }
 
     fn best_available_opus_model(exclude: &str) -> Option<String> {
+        let config = jcode_base::config::Config::load().provider;
         let mut models = jcode_base::provider::cached_anthropic_model_ids()
             .unwrap_or_else(jcode_base::provider::known_anthropic_model_ids);
         models.retain(|model| {
             let key = strip_1m_suffix(model).to_ascii_lowercase();
             key.contains("claude-opus")
+                && !config.failover_model_excluded(model)
                 && strip_1m_suffix(model) != strip_1m_suffix(exclude)
                 && !anthropic_model_is_retired(model)
         });
@@ -1968,12 +1970,9 @@ async fn run_stream_with_retries(
                 // Model not found (e.g. a retired or renamed model id): the
                 // server rejects the request up front with a 404 before any
                 // output streams. Transparently fall back to the *best* available
-                // model so the in-flight request still completes instead of
-                // hard-failing, and persist the switch so later turns reuse the
-                // working model. The fallback honors any server "Please use X"
-                // recommendation, then the curated flagship-first quality order,
-                // and never downgrades to a cheaper tier when a stronger model is
-                // available (see `anthropic_fallback_model`).
+                // eligible model so the in-flight request can complete, and
+                // persist the switch for later turns. Server recommendations and
+                // the curated quality order both honor failover exclusions.
                 if is_model_not_found_error(&error_str)
                     && !saw_output
                     && let Some(fallback) = anthropic_fallback_model(&tried_models, &error_str)
@@ -2002,6 +2001,12 @@ async fn run_stream_with_retries(
                     last_error = Some(e);
                     continue;
                 }
+                if is_model_not_found_error(&error_str) && !saw_output {
+                    let _ = tx.send(Err(anyhow::anyhow!(
+                        "{e:#}\nAutomatic model failover has no eligible candidates (see provider.failover_excluded_models). Use /model to choose explicitly."
+                    ))).await;
+                    return;
+                }
 
                 // Anthropic OAuth can reject Fable with a model-scoped weekly
                 // quota error before the usage cache observes the exhausted
@@ -2011,6 +2016,9 @@ async fn run_stream_with_retries(
                     && is_fable_scoped_limit_error(&model_name, &error_str)
                     && let Some(fallback) =
                         AnthropicProvider::best_available_opus_model(&model_name)
+                    && !jcode_base::config::Config::load()
+                        .provider
+                        .failover_model_excluded(&fallback)
                 {
                     jcode_base::logging::warn(&format!(
                         "Anthropic Fable weekly quota is exhausted ({}); retrying with '{}'",
@@ -2033,6 +2041,11 @@ async fn run_stream_with_retries(
                     model_name = fallback;
                     last_error = Some(e);
                     continue;
+                }
+
+                if is_oauth && !saw_output && is_fable_scoped_limit_error(&model_name, &error_str) {
+                    let _ = tx.send(Err(anyhow::anyhow!("{e:#}\nFable quota fallback has no eligible model (see provider.failover_excluded_models)"))).await;
+                    return;
                 }
 
                 // Reasoning request rejected (e.g. a model listed with effort or

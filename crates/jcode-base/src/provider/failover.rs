@@ -88,6 +88,13 @@ impl MultiProvider {
             msg.push(' ');
             msg.push_str(&extra_guidance.join(" "));
         }
+        if !crate::config::Config::load()
+            .provider
+            .failover_excluded_models
+            .is_empty()
+        {
+            msg.push_str(" Automatic failover skips models matching provider.failover_excluded_models; use /model to choose explicitly.");
+        }
         msg.push_str(" Use `/usage` to check limits and `/login <provider>` to re-authenticate.");
         anyhow::anyhow!(msg)
     }

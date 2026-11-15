@@ -567,6 +567,10 @@ preserve_reasoning_context = true
 # countdown = 3-second countdown before retrying on another provider; press Esc to cancel (default)
 # manual = show a notice and let you switch yourself
 # cross_provider_failover = "manual"
+# Case-insensitive model-ID substrings (optional * wildcard) excluded from all
+# automatic failover, including worker fallbacks. Explicit /model and spawn
+# choices remain available. Set [] to disable exclusions. Default: ["opus"].
+# failover_excluded_models = ["opus"]
 # Switch immediately only for definitive usage exhaustion (default: true).
 # False preserves the countdown. Manual mode always disables automatic switching.
 exhausted_usage_immediate_failover = true

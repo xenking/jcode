@@ -46,11 +46,8 @@ fn describe_route(route: &crate::provider::ModelRoute) -> String {
 /// Pick the next pool-approved route for `agent` after `error`, or `None`
 /// when automatic switching is disabled or nothing eligible remains.
 pub(super) fn pick_failover_target(agent: &Agent, error: &str) -> Option<FailoverTarget> {
-    if crate::config::Config::load()
-        .provider
-        .cross_provider_failover
-        != crate::config::CrossProviderFailoverMode::Countdown
-    {
+    let config = crate::config::Config::load().provider;
+    if config.cross_provider_failover != crate::config::CrossProviderFailoverMode::Countdown {
         return None;
     }
     if !error_wants_failover(error) {
@@ -70,6 +67,7 @@ pub(super) fn pick_failover_target(agent: &Agent, error: &str) -> Option<Failove
     // The provider router already chose an exact target. Honor it.
     if let Some(prompt) = crate::provider::parse_failover_prompt_message(error)
         && let Some(spec) = prompt.target_route.as_deref()
+        && !config.failover_model_excluded(spec)
         && crate::provider::MultiProvider::is_failover_route_pool_approved(spec)
     {
         let route = route_for_spec(spec);
@@ -102,6 +100,7 @@ pub(super) fn pick_failover_target(agent: &Agent, error: &str) -> Option<Failove
         .find(|route| {
             let spec = RouteSelection::from_model_route(route).routed_model_spec();
             crate::provider::MultiProvider::is_failover_route_pool_approved(&spec)
+                && !config.failover_model_excluded(&route.model)
                 && jcode_provider_core::route_pool_key(&route.api_method) != source_key
         })
         .map(|route| {
@@ -452,6 +451,15 @@ async fn retry_turn_with_model_fallbacks(
             break;
         }
         let candidate = FallbackTarget::parse(fallback);
+        if crate::config::Config::load()
+            .provider
+            .failover_model_excluded(&candidate.model)
+        {
+            crate::logging::warn(&format!(
+                "Swarm failover: excluded fallback {fallback:?} by provider.failover_excluded_models"
+            ));
+            continue;
+        }
         if candidate.model.is_empty() || tried.iter().any(|target| target.covers(&candidate)) {
             continue;
         }
@@ -477,7 +485,11 @@ async fn retry_turn_with_model_fallbacks(
             .continue_turn_after_failover(lease, reminder.clone(), event_tx.clone())
             .await;
     }
-    result
+    result.map_err(|error| {
+        error.context(
+            "Automatic failover exhausted or excluded by provider.failover_excluded_models",
+        )
+    })
 }
 
 /// A server wake has no local user echo. Persist it as a context entry and
@@ -576,6 +588,14 @@ pub(super) async fn retry_turn_with_server_failover(
             break;
         }
         let Some(target) = pick_failover_target(agent, &message) else {
+            if error_wants_failover(&message)
+                && crate::config::Config::load()
+                    .provider
+                    .cross_provider_failover
+                    == crate::config::CrossProviderFailoverMode::Countdown
+            {
+                result = result.map_err(|error| error.context("Automatic failover has no eligible route (see provider.failover_excluded_models)"));
+            }
             break;
         };
         // A worker may only ever move inside its allowlist, even when the
@@ -629,6 +649,118 @@ mod tests {
     use crate::provider::{EventStream, ModelRoute, Provider};
     use async_trait::async_trait;
     use std::sync::Mutex as StdMutex;
+
+    struct OpusOnlyProvider;
+
+    #[async_trait]
+    impl Provider for OpusOnlyProvider {
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self)
+        }
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<EventStream> {
+            anyhow::bail!("HTTP 429: usage_limit_reached")
+        }
+        fn name(&self) -> &str {
+            "OpenAI"
+        }
+        fn model(&self) -> String {
+            "gpt-6.1-sol".into()
+        }
+        fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
+            Some(jcode_provider_core::ResolvedCredential::ApiKey)
+        }
+        fn model_routes(&self) -> Vec<ModelRoute> {
+            vec![ModelRoute {
+                model: "claude-opus-5-5".into(),
+                provider: "Claude".into(),
+                api_method: "anthropic-api".into(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+                usage: None,
+            }]
+        }
+    }
+
+    #[test]
+    fn server_router_rejects_excluded_prompt_and_ranked_route() {
+        let _guard = crate::storage::lock_test_env();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let home = tempfile::tempdir().unwrap();
+                let prev = std::env::var_os("JCODE_HOME");
+                crate::env::set_var("JCODE_HOME", home.path());
+                crate::config::Config::invalidate_cache();
+                crate::provider::clear_all_provider_unavailability_for_account();
+                crate::provider::clear_provider_unavailable_for_account("anthropic-api");
+                crate::provider::clear_provider_unavailable_for_account("openai-api");
+                crate::auth::account_pool::AccountPool {
+                    members: vec!["openai-api".into(), "anthropic-api".into()],
+                    ..Default::default()
+                }
+                .save()
+                .unwrap();
+                let provider: Arc<dyn Provider> = Arc::new(OpusOnlyProvider);
+                let registry = crate::tool::Registry::new(Arc::clone(&provider)).await;
+                let session = crate::session::Session::create_with_id(
+                    "excluded_failover_test".into(),
+                    None,
+                    None,
+                );
+                let agent = Agent::new_with_session(provider, registry, session, None);
+                let prompt = jcode_provider_core::ProviderFailoverPrompt {
+                    from_provider: "openai".into(),
+                    from_label: "OpenAI".into(),
+                    to_provider: "claude".into(),
+                    to_label: "Claude".into(),
+                    target_route: Some("anthropic-api:claude-opus-5-5".into()),
+                    reason: "usage limit".into(),
+                    estimated_input_chars: 0,
+                    estimated_input_tokens: 0,
+                };
+                assert!(pick_failover_target(&agent, &prompt.to_error_message()).is_none());
+                assert!(pick_failover_target(&agent, "HTTP 429 usage_limit_reached").is_none());
+                let mut config = crate::config::Config::load();
+                config.provider.failover_excluded_models.clear();
+                config.save().unwrap();
+                assert!(
+                    crate::config::Config::load()
+                        .provider
+                        .failover_excluded_models
+                        .is_empty(),
+                    "config not persisted"
+                );
+                assert!(
+                    super::super::provider_control::automatic_failover_source_is_pool_member(
+                        &agent
+                    ),
+                    "source not enrolled"
+                );
+                assert!(
+                    crate::provider::MultiProvider::is_failover_route_pool_approved(
+                        "anthropic-api:claude-opus-5-5"
+                    ),
+                    "target not approved"
+                );
+                assert!(pick_failover_target(&agent, &prompt.to_error_message()).is_some());
+                assert!(pick_failover_target(&agent, "HTTP 429 usage_limit_reached").is_some());
+                crate::provider::clear_all_provider_unavailability_for_account();
+                match prev {
+                    Some(value) => crate::env::set_var("JCODE_HOME", value),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+                crate::config::Config::invalidate_cache();
+            });
+    }
 
     /// Fails with a usage limit while on the Anthropic API key, succeeds once
     /// the route switches to the OpenAI API key.
@@ -1002,6 +1134,46 @@ mod tests {
     }
 
     #[test]
+    fn swarm_worker_never_retries_excluded_opus() {
+        let _guard = crate::storage::lock_test_env();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let provider = RejectingPrimaryProvider {
+                    model: Arc::new(StdMutex::new("deepseek-v4.1-flash".into())),
+                    calls: Arc::new(StdMutex::new(Vec::new())),
+                };
+                let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+                let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+                let session = crate::session::Session::create_with_id(
+                    "session_no_opus_fallback".into(),
+                    None,
+                    None,
+                );
+                let mut agent = Agent::new_with_session(provider_dyn, registry, session, None);
+                let lease = agent.claim_server_turn().unwrap();
+                let (tx, _rx) = mpsc::unbounded_channel();
+                let result = process_reserved_locked_message_with_swarm_fallbacks(
+                    &mut agent,
+                    &lease,
+                    "swarm task",
+                    Vec::new(),
+                    None,
+                    tx,
+                    &["claude:claude-opus-5-5".into()],
+                    &[],
+                )
+                .await;
+                let error = result.expect_err("excluded fallback must not be tried");
+                assert!(format!("{error:#}").contains("failover_excluded_models"));
+                assert_eq!(*provider.calls.lock().unwrap(), vec!["deepseek-v4.1-flash"]);
+                assert_eq!(agent.provider_model(), "deepseek-v4.1-flash");
+            });
+    }
+
+    #[test]
     fn swarm_worker_never_falls_back_outside_the_spawn_allowlist() {
         let _guard = crate::storage::lock_test_env();
         tokio::runtime::Builder::new_current_thread()
@@ -1058,6 +1230,7 @@ mod tests {
 
     #[test]
     fn worker_allowed_fallbacks_keeps_order_and_drops_outside_models() {
+        let _guard = crate::storage::lock_test_env();
         let fallbacks = vec![
             "claude:claude-sonnet-5-5".to_string(),
             "claude:claude-fable-5".to_string(),
@@ -1072,18 +1245,18 @@ mod tests {
             super::super::comm_session::spawn_model_selection::worker_allowed_fallbacks(
                 &allowed, &fallbacks
             ),
-            vec![
-                "claude:claude-sonnet-5-5".to_string(),
-                "claude:claude-opus-5-5".to_string()
-            ]
+            vec!["claude:claude-sonnet-5-5".to_string()]
         );
-        // No allowlist configured keeps the legacy behaviour exactly.
+        // Without an allowlist, the failover exclusion still applies.
         assert_eq!(
             super::super::comm_session::spawn_model_selection::worker_allowed_fallbacks(
                 &[],
                 &fallbacks
             ),
-            fallbacks
+            vec![
+                "claude:claude-sonnet-5-5".to_string(),
+                "claude:claude-fable-5".to_string()
+            ]
         );
     }
 
@@ -1207,7 +1380,7 @@ mod tests {
         }
     }
 
-    /// `claude-oauth:opus` and `claude-api:opus` are the same model on two
+    /// `claude-oauth:sonnet` and `claude-api:sonnet` are the same model on two
     /// credential routes. Dedup on the bare model skipped the second route and
     /// left the worker dead while the API-key route would have answered.
     #[test]
@@ -1220,7 +1393,7 @@ mod tests {
             .block_on(async {
                 let provider = RouteSwitchingProvider::new(
                     "claude-oauth",
-                    "claude-opus-5-5",
+                    "claude-sonnet-5-5",
                     &["claude-oauth"],
                 );
                 let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
@@ -1234,8 +1407,8 @@ mod tests {
                 let lease = agent.claim_server_turn().unwrap();
                 let (tx, _rx) = mpsc::unbounded_channel();
                 let fallbacks = vec![
-                    "claude-oauth:claude-opus-5-5".to_string(),
-                    "claude-api:claude-opus-5-5".to_string(),
+                    "claude-oauth:claude-sonnet-5-5".to_string(),
+                    "claude-api:claude-sonnet-5-5".to_string(),
                 ];
 
                 let result = process_reserved_locked_message_with_swarm_fallbacks(
@@ -1257,8 +1430,8 @@ mod tests {
                 assert_eq!(
                     provider.calls(),
                     vec![
-                        ("claude-oauth".to_string(), "claude-opus-5-5".to_string()),
-                        ("claude-api".to_string(), "claude-opus-5-5".to_string()),
+                        ("claude-oauth".to_string(), "claude-sonnet-5-5".to_string()),
+                        ("claude-api".to_string(), "claude-sonnet-5-5".to_string()),
                     ],
                     "the second route is a new attempt, not a repeat of the first"
                 );

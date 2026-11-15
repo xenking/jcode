@@ -1155,18 +1155,21 @@ pub fn get_best_available_openai_model_for_scope(scope: &str) -> Option<String> 
         return None;
     }
     let models = OPENAI_MODEL_CATALOG_SERVICE.model_ids(scope)?;
+    let config = crate::config::Config::load().provider;
 
     for preferred in OPENAI_MODEL_PREFERENCE {
         if models.iter().any(|model| model == *preferred)
             && runtime_model_unavailability(scope, preferred).is_none()
+            && !config.failover_model_excluded(preferred)
         {
             return Some(preferred.to_string());
         }
     }
 
-    models
-        .into_iter()
-        .find(|model| runtime_model_unavailability(scope, model).is_none())
+    models.into_iter().find(|model| {
+        runtime_model_unavailability(scope, model).is_none()
+            && !config.failover_model_excluded(model)
+    })
 }
 
 /// Return the context window size in tokens for a given model, if known.
@@ -1274,6 +1277,31 @@ pub fn provider_for_model(model: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod scoped_refresh_tests {
     use super::*;
+
+    #[test]
+    fn openai_catalog_fallback_skips_excluded_model() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        crate::config::Config::invalidate_cache();
+        let mut config = crate::config::Config::load();
+        config.provider.failover_excluded_models = vec!["astra".into()];
+        config.save().unwrap();
+        let scope = "excluded-model-test";
+        populate_account_models_for_scope(scope, vec!["gpt-6-astra".into(), "gpt-5.4".into()]);
+        assert_eq!(
+            get_best_available_openai_model_for_scope(scope).as_deref(),
+            Some("gpt-5.4")
+        );
+        populate_account_models_for_scope(scope, vec!["gpt-6-astra".into()]);
+        assert_eq!(get_best_available_openai_model_for_scope(scope), None);
+        match previous {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+        crate::config::Config::invalidate_cache();
+    }
 
     #[test]
     fn saved_account_background_refresh_uses_captured_scope() {

@@ -1636,13 +1636,10 @@ fn anthropic_fallback_honors_server_recommendation() {
         "server recommendation 'Opus 4.8' should map to claude-opus-4-8"
     );
 
-    // The full fallback also returns the recommended model.
+    // A server recommendation cannot override automatic failover exclusions.
     let fallback = anthropic_fallback_model(&["claude-mythos-1".to_string()], body)
         .expect("a fallback should exist");
-    assert_eq!(
-        AnthropicProvider::normalized_model_key(&fallback),
-        "claude-opus-4-8"
-    );
+    assert!(!AnthropicProvider::normalized_model_key(&fallback).contains("opus"));
 
     let opus_55 = anthropic_recommended_model_from_error("please use opus 5.5. learn more")
         .expect("decimal release recommendation should resolve");
@@ -1698,28 +1695,14 @@ fn anthropic_quality_rank_orders_opus_before_haiku_and_retired_last() {
 }
 
 #[test]
-fn fable_quota_fallback_selects_the_best_available_opus() {
-    let fallback = AnthropicProvider::best_available_opus_model("claude-fable-5")
-        .expect("the curated Anthropic catalog should contain an Opus fallback");
-    assert!(
-        fallback.contains("claude-opus"),
-        "unexpected fallback: {fallback}"
-    );
-
-    let candidates = jcode_base::provider::cached_anthropic_model_ids()
-        .unwrap_or_else(jcode_base::provider::known_anthropic_model_ids);
-    let best_rank = candidates
-        .iter()
-        .filter(|model| model.to_ascii_lowercase().contains("claude-opus"))
-        .filter(|model| !anthropic_model_is_retired(model))
-        .map(|model| anthropic_model_quality_rank(model))
-        .min()
-        .expect("available Opus model");
-    assert_eq!(anthropic_model_quality_rank(&fallback), best_rank);
+fn fable_quota_fallback_excludes_opus_by_default() {
+    let _guard = jcode_base::storage::lock_test_env();
+    assert!(AnthropicProvider::best_available_opus_model("claude-fable-5").is_none());
 }
 
 #[test]
-fn model_scoped_usage_routes_only_exhausted_fable_to_opus() {
+fn model_scoped_usage_does_not_route_exhausted_fable_to_opus() {
+    let _guard = jcode_base::storage::lock_test_env();
     let usage = jcode_base::usage::UsageData {
         model_scoped: vec![jcode_base::usage::ModelScopedUsageWindow {
             model_name: "Fable".to_string(),
@@ -1728,12 +1711,7 @@ fn model_scoped_usage_routes_only_exhausted_fable_to_opus() {
         }],
         ..Default::default()
     };
-    let fallback = AnthropicProvider::fallback_for_model_scoped_usage("claude-fable-5", &usage)
-        .expect("exhausted Fable should route to Opus");
-    assert!(
-        fallback.contains("claude-opus"),
-        "unexpected fallback: {fallback}"
-    );
+    assert!(AnthropicProvider::fallback_for_model_scoped_usage("claude-fable-5", &usage).is_none());
     assert!(
         AnthropicProvider::fallback_for_model_scoped_usage("claude-opus-5", &usage).is_none(),
         "an exhausted Fable scope must not reroute an explicitly selected Opus"

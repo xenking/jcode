@@ -1540,6 +1540,9 @@ pub struct ProviderConfig {
     pub preserve_reasoning_context: bool,
     /// How to handle cross-provider failover when the same input would be resent elsewhere.
     pub cross_provider_failover: CrossProviderFailoverMode,
+    /// Case-insensitive model substrings, with optional `*` wildcards, excluded
+    /// from automatic failover. Explicit model choices are unaffected.
+    pub failover_excluded_models: Vec<String>,
     /// Skip the cross-provider countdown for definitive exhausted usage only.
     /// Manual cross-provider failover still disables automatic switching.
     pub exhausted_usage_immediate_failover: bool,
@@ -1616,6 +1619,7 @@ impl Default for ProviderConfig {
             openai_native_compaction_threshold_tokens: 200_000,
             preserve_reasoning_context: true,
             cross_provider_failover: CrossProviderFailoverMode::Countdown,
+            failover_excluded_models: vec!["opus".to_string()],
             exhausted_usage_immediate_failover: true,
             anthropic_retry_recoverable_rate_limits: true,
             same_provider_account_failover: true,
@@ -1633,6 +1637,34 @@ impl Default for ProviderConfig {
             retry_backoff_cap_secs: 30,
             request_compression: "auto".to_string(),
         }
+    }
+}
+
+impl ProviderConfig {
+    /// Match against a model ID or routed model spec, never a provider name.
+    pub fn failover_model_excluded(&self, spec: &str) -> bool {
+        let model = spec
+            .rsplit(':')
+            .next()
+            .unwrap_or(spec)
+            .split('@')
+            .next()
+            .unwrap_or(spec)
+            .to_ascii_lowercase();
+        self.failover_excluded_models.iter().any(|pattern| {
+            let pattern = pattern.trim().to_ascii_lowercase();
+            if pattern.is_empty() {
+                return false;
+            }
+            let mut remaining = model.as_str();
+            for part in pattern.split('*').filter(|part| !part.is_empty()) {
+                let Some(index) = remaining.find(part) else {
+                    return false;
+                };
+                remaining = &remaining[index + part.len()..];
+            }
+            true
+        })
     }
 }
 

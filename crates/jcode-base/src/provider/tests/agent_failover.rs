@@ -63,6 +63,30 @@ fn agent_failover_target(provider: &MultiProvider, tokens: usize, reason: &str) 
 }
 
 #[test]
+fn agent_failover_skips_configured_excluded_models() {
+    with_clean_provider_test_env(|| {
+        let rt = enter_test_runtime();
+        let _guard = rt.enter();
+        let mut config = crate::config::Config::load();
+        config.provider.failover_excluded_models = vec!["opus".into(), "astra".into()];
+        config.save().unwrap();
+        let provider = agent_failover_fixture(&["gpt-6-astra", "gpt-5.4"]);
+        assert_eq!(
+            agent_failover_target(&provider, 128, "401 unauthorized"),
+            Some("openai-api:gpt-5.4".into())
+        );
+        agent_failover_catalog(
+            &provider,
+            vec![build_openai_api_key_route("gpt-6-astra", true, "")],
+        );
+        assert_eq!(
+            agent_failover_target(&provider, 128, "401 unauthorized"),
+            None
+        );
+    });
+}
+
+#[test]
 fn automatic_reset_request_routes_first_for_live_and_cached_failures() {
     for cached in [false, true] {
         for split in [false, true] {

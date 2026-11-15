@@ -319,6 +319,19 @@ impl App {
             self.cancel_pending_provider_failover("Auto-switch disabled");
             return true;
         }
+        if pending
+            .prompt
+            .target_route
+            .as_deref()
+            .is_some_and(|target| {
+                crate::config::Config::load()
+                    .provider
+                    .failover_model_excluded(target)
+            })
+        {
+            self.cancel_pending_provider_failover("Automatic failover target excluded by provider.failover_excluded_models. Use /model to choose explicitly.");
+            return true;
+        }
         let now = Instant::now();
         if now < pending.deadline {
             let remaining = pending
@@ -452,6 +465,19 @@ impl App {
         };
 
         let config = crate::config::Config::load().provider;
+        if config.cross_provider_failover == crate::config::CrossProviderFailoverMode::Countdown
+            && prompt
+                .target_route
+                .as_deref()
+                .is_some_and(|target| config.failover_model_excluded(target))
+        {
+            if let Some(payload) = remote_resend {
+                self.restore_failover_payload(payload);
+            }
+            self.push_display_message(DisplayMessage::error("Automatic failover target excluded by provider.failover_excluded_models. Use /model to choose explicitly.".to_string()));
+            self.set_status_notice("Automatic failover target excluded");
+            return;
+        }
         if remote_resend
             .as_ref()
             .is_some_and(|payload| payload.retry_attempts >= Self::AUTO_RETRY_MAX_ATTEMPTS)
@@ -812,12 +838,14 @@ impl App {
             &pool.ordered_members(),
         );
         if automatic {
+            let config = crate::config::Config::load().provider;
             // Never let an excluded preferred route hide an approved later one.
             let approved = ranked.iter().map(|index| &routes[*index]).find(|route| {
                 let selection = crate::provider::RouteSelection::from_model_route(route);
                 crate::provider::MultiProvider::is_failover_route_pool_approved(
                     &selection.routed_model_spec(),
-                ) && Self::fallback_pool_identity(&route.api_method) != source_identity
+                ) && !config.failover_model_excluded(&route.model)
+                    && Self::fallback_pool_identity(&route.api_method) != source_identity
             });
             if let Some(route) = approved {
                 let target_route =
@@ -836,6 +864,14 @@ impl App {
                     remote_resend,
                 );
                 return true;
+            }
+            if ranked
+                .iter()
+                .any(|index| config.failover_model_excluded(&routes[*index].model))
+            {
+                self.push_display_message(DisplayMessage::error(
+                    "Automatic failover has no eligible route (see provider.failover_excluded_models). Use /model to choose explicitly.".to_string(),
+                ));
             }
         }
         // No approved automatic target: preserve unrestricted manual choice,

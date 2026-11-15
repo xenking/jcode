@@ -42,6 +42,22 @@ fn fallback_models_skip_current_model() {
 }
 
 #[test]
+fn automatic_fallback_honors_model_exclusions() {
+    let config = jcode_base::config::ProviderConfig {
+        failover_excluded_models: vec!["pro".into(), "flash".into()],
+        ..Default::default()
+    };
+    assert!(eligible_gemini_fallback_models("gemini-2.5-flash", &config).is_empty());
+    let config = jcode_base::config::ProviderConfig {
+        failover_excluded_models: vec!["3.1".into()],
+        ..Default::default()
+    };
+    let candidates = eligible_gemini_fallback_models("gemini-2.5-flash", &config);
+    assert!(!candidates.iter().any(|candidate| candidate.contains("3.1")));
+    assert!(!candidates.is_empty());
+}
+
+#[test]
 fn extract_gemini_model_ids_discovers_nested_models() {
     let response = json!({
         "routing": {

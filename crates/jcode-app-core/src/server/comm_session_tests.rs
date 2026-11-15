@@ -1332,6 +1332,38 @@ fn swarm_model_fallback_skips_unavailable_primary() {
 }
 
 #[test]
+fn swarm_automatic_fallback_skips_opus_but_keeps_explicit_primary() {
+    let _guard = crate::storage::lock_test_env();
+    let fallbacks = vec![
+        "claude:claude-opus-5-5".to_string(),
+        "openai:gpt-6.1-terra".to_string(),
+    ];
+    let routes = vec![
+        route("missing-model", false),
+        route("claude-opus-5-5", true),
+        route("gpt-6.1-terra", true),
+    ];
+    assert_eq!(
+        super::pick_available_swarm_model(Some("missing-model".into()), &fallbacks, &routes)
+            .as_deref(),
+        Some("openai:gpt-6.1-terra")
+    );
+    assert_eq!(
+        super::pick_available_swarm_model(
+            Some("claude:claude-opus-5-5".into()),
+            &fallbacks,
+            &routes
+        )
+        .as_deref(),
+        Some("claude:claude-opus-5-5")
+    );
+    assert_eq!(
+        super::spawn_model_selection::worker_allowed_fallbacks(&[], &fallbacks),
+        vec!["openai:gpt-6.1-terra"]
+    );
+}
+
+#[test]
 fn swarm_model_fallback_keeps_available_primary_and_unknown_catalog() {
     let fb = vec!["gpt-6.1-terra".to_string()];
     let routes = vec![

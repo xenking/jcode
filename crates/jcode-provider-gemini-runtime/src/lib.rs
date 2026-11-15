@@ -35,6 +35,16 @@ use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
+fn eligible_gemini_fallback_models(
+    model: &str,
+    config: &jcode_base::config::ProviderConfig,
+) -> Vec<&'static str> {
+    gemini_fallback_models(model)
+        .into_iter()
+        .filter(|candidate| !config.failover_model_excluded(candidate))
+        .collect()
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 struct PersistedCatalog {
     models: Vec<String>,
@@ -679,7 +689,8 @@ impl Provider for GeminiProvider {
                 Err(err) if is_gemini_model_not_found_error(&err) => {
                     let mut fallback_response = None;
                     let mut last_err = err;
-                    for fallback_model in gemini_fallback_models(&model) {
+                    let config = jcode_base::config::Config::load().provider;
+                    for fallback_model in eligible_gemini_fallback_models(&model, &config) {
                         jcode_base::logging::warn(&format!(
                             "Gemini model '{}' was not found; retrying with fallback '{}'",
                             model, fallback_model
@@ -709,7 +720,7 @@ impl Provider for GeminiProvider {
                     match fallback_response {
                         Some(response) => response,
                         None => {
-                            let _ = tx.send(Err(last_err)).await;
+                            let _ = tx.send(Err(last_err.context("Gemini automatic failover exhausted or excluded by provider.failover_excluded_models"))).await;
                             return;
                         }
                     }

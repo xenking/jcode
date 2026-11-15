@@ -1,6 +1,21 @@
 use super::*;
 
 #[test]
+fn automatic_failover_excludes_opus_by_default() {
+    let config: ProviderConfig = serde_json::from_str("{}").unwrap();
+    assert!(config.failover_model_excluded("claude-oauth:Claude-Opus-4-6"));
+    assert!(!config.failover_model_excluded("claude-sonnet-4-6"));
+    let overridden: ProviderConfig =
+        serde_json::from_str(r#"{"failover_excluded_models":[]}"#).unwrap();
+    assert!(!overridden.failover_model_excluded("claude-opus-4-6"));
+    let custom: ProviderConfig =
+        serde_json::from_str(r#"{"failover_excluded_models":["FA*le", "astra"]}"#).unwrap();
+    assert!(custom.failover_model_excluded("claude-fable-5"));
+    assert!(custom.failover_model_excluded("provider:astra-1"));
+    assert!(!custom.failover_model_excluded("astra-provider:sonnet"));
+}
+
+#[test]
 fn anthropic_effort_defaults_to_low() {
     let config = ProviderConfig::default();
     assert_eq!(config.anthropic_reasoning_effort.as_deref(), Some("low"));

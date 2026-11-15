@@ -343,7 +343,10 @@ fn test_remote_failover_first_generic_failure_is_instant_then_countdown_and_boun
         for index in 2..=3 {
             prompt.target_route = Some(format!("openai-oauth@account-{index}:gpt-5.4"));
             app.handle_provider_failover_prompt_with_payload(prompt.clone(), payload.clone());
-            let pending = app.pending_provider_failover.take().expect("later countdown");
+            let pending = app
+                .pending_provider_failover
+                .take()
+                .expect("later countdown");
             assert!(pending.deadline > Instant::now() + Duration::from_secs(2));
         }
         prompt.target_route = Some("openai-oauth@account-4:gpt-5.4".into());
@@ -710,6 +713,137 @@ fn test_remote_failover_confirmation_timeout_restores_prompt_once() {
         let messages = app.display_messages().len();
         rt.block_on(remote::handle_tick(&mut app, &mut connection));
         assert_eq!(app.display_messages().len(), messages);
+    });
+}
+
+#[test]
+fn test_automatic_failover_refuses_opus_target_and_skips_ranked_opus() {
+    with_temp_jcode_home(|| {
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
+        seed_failover_openai_fox();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, _remote) = remote_exact_failover_fixture();
+        let payload = app.pending_provider_failover.take().unwrap().remote_resend;
+        app.automatic_failover_targets.clear();
+        let prompt = crate::provider::ProviderFailoverPrompt {
+            from_provider: "openai".into(),
+            from_label: "OpenAI".into(),
+            to_provider: "claude".into(),
+            to_label: "Opus".into(),
+            target_route: Some("claude-oauth@claude-otter:claude-opus-5-5".into()),
+            reason: "usage limit".into(),
+            estimated_input_chars: 0,
+            estimated_input_tokens: 0,
+        };
+        app.handle_provider_failover_prompt_with_payload(prompt, payload.clone());
+        assert!(app.pending_provider_failover.is_none());
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|message| message.content.contains("failover_excluded_models"))
+        );
+        app.session.route_api_method = Some("claude-api".into());
+        app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
+        let mut opus = claude_oauth_route("claude-opus-5-5");
+        opus.api_method = "claude-oauth@claude-otter".into();
+        app.remote_model_options.insert(0, opus);
+        crate::auth::account_pool::AccountPool {
+            members: vec![
+                "anthropic-api".into(),
+                "claude:claude-otter".into(),
+                "openai:openai-fox".into(),
+            ],
+            ..Default::default()
+        }
+        .save()
+        .unwrap();
+        assert!(app.offer_fallback_after_error_with_payload("401 invalid API key", payload));
+        let target = app
+            .pending_provider_failover
+            .as_ref()
+            .unwrap()
+            .prompt
+            .target_route
+            .as_deref()
+            .unwrap();
+        assert!(
+            !target.contains("opus"),
+            "excluded model selected: {target}"
+        );
+    });
+}
+
+#[test]
+fn test_generic_auto_fallback_skips_opus_even_if_ranked_first() {
+    with_temp_jcode_home(|| {
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
+        seed_failover_openai_fox();
+        crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+            label: "claude-otter".into(),
+            access: "test-access".into(),
+            refresh: "test-refresh".into(),
+            expires: chrono::Utc::now().timestamp_millis() + 600_000,
+            email: None,
+            subscription_type: Some("max".into()),
+            scopes: Vec::new(),
+        })
+        .unwrap();
+        crate::provider::populate_anthropic_models_for_scope(
+            "oauth::claude-otter",
+            vec!["claude-opus-5-5".into()],
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, _remote) = remote_exact_failover_fixture();
+        let payload = app.pending_provider_failover.take().unwrap().remote_resend;
+        app.automatic_failover_targets.clear();
+        app.session.route_api_method = Some("claude-api".into());
+        app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
+        let mut opus = claude_oauth_route("claude-opus-5-5");
+        opus.api_method = "claude-oauth@claude-otter".into();
+        app.remote_model_options.insert(0, opus);
+        crate::auth::account_pool::AccountPool {
+            members: vec![
+                "anthropic-api".into(),
+                "claude:claude-otter".into(),
+                "openai:openai-fox".into(),
+            ],
+            ..Default::default()
+        }
+        .save()
+        .unwrap();
+        assert!(
+            app.offer_fallback_after_error_with_payload("401 invalid API key", payload.clone())
+        );
+        assert_eq!(
+            app.pending_provider_failover
+                .as_ref()
+                .unwrap()
+                .prompt
+                .target_route
+                .as_deref(),
+            Some("openai-oauth@openai-fox:gpt-5.4")
+        );
+        app.pending_provider_failover = None;
+        app.automatic_failover_targets.clear();
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\nfailover_excluded_models = []\n",
+        );
+        assert!(app.offer_fallback_after_error_with_payload("401 invalid API key", payload));
+        assert_eq!(
+            app.pending_provider_failover
+                .as_ref()
+                .unwrap()
+                .prompt
+                .target_route
+                .as_deref(),
+            Some("claude-oauth@claude-otter:claude-opus-5-5")
+        );
     });
 }
 

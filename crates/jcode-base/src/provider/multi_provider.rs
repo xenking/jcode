@@ -127,6 +127,7 @@ impl MultiProvider {
             return None;
         }
         let mut candidates: Vec<(String, ActiveProvider, String, String)> = Vec::new();
+        let failover_config = crate::config::Config::load().provider;
         // Preserve the current model when rotating to another saved account.
         // This path never consults or mutates the global active login.
         let context_only = jcode_provider_core::classify_failover_error_message(&reason)
@@ -136,9 +137,10 @@ impl MultiProvider {
         } else {
             tokens
         };
-        if let Some(current) = from_label
-            .as_deref()
-            .filter(|_| !context_only && same_provider_account_failover_enabled())
+        if !failover_config.failover_model_excluded(&self.model())
+            && let Some(current) = from_label
+                .as_deref()
+                .filter(|_| !context_only && same_provider_account_failover_enabled())
         {
             let method = if from == ActiveProvider::OpenAI {
                 "openai-oauth"
@@ -162,11 +164,9 @@ impl MultiProvider {
                 }
             }
         }
-        for route in self
-            .model_routes()
-            .into_iter()
-            .filter(|route| route.available)
-        {
+        for route in self.model_routes().into_iter().filter(|route| {
+            route.available && !failover_config.failover_model_excluded(&route.model)
+        }) {
             let selection = jcode_provider_core::RouteSelection::from_model_route(&route);
             let spec = selection.routed_model_spec();
             if !Self::is_failover_route_pool_approved(&spec) {

@@ -184,9 +184,7 @@ pub(crate) fn worker_allowed_fallbacks(
     allowed_models: &[String],
     fallbacks: &[String],
 ) -> Vec<String> {
-    if allowed_models.is_empty() {
-        return fallbacks.to_vec();
-    }
+    let config = crate::config::Config::load().provider;
     let agents = crate::config::AgentsConfig {
         spawn_allowed_models: allowed_models.to_vec(),
         ..Default::default()
@@ -194,10 +192,11 @@ pub(crate) fn worker_allowed_fallbacks(
     fallbacks
         .iter()
         .filter(|fallback| {
-            let allowed = agents.worker_may_use_model(fallback);
+            let allowed = (allowed_models.is_empty() || agents.worker_may_use_model(fallback))
+                && !config.failover_model_excluded(fallback);
             if !allowed {
                 crate::logging::warn(&format!(
-                    "Swarm failover: skipping fallback {fallback:?} outside agents.spawn_allowed_models"
+                    "Swarm failover: skipping fallback {fallback:?} excluded by provider.failover_excluded_models or agents.spawn_allowed_models"
                 ));
             }
             allowed
@@ -286,7 +285,11 @@ pub(super) fn pick_available_swarm_model(
         })
     };
     std::iter::once(&primary)
-        .chain(fallbacks.iter())
+        .chain(fallbacks.iter().filter(|candidate| {
+            !crate::config::Config::load()
+                .provider
+                .failover_model_excluded(candidate)
+        }))
         .find(|c| available(c))
         .cloned()
         .or(Some(primary))
