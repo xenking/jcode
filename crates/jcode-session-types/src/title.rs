@@ -346,8 +346,10 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 
 fn contains_wide_chars(text: &str) -> bool {
     text.chars().any(|c| {
+        // 0x2E80..=0x9FFF already covers the kana block, so the ranges stay
+        // mutually exclusive: every arm is reachable and testable.
         matches!(c as u32,
-            0x2E80..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0x3040..=0x30FF | 0xFF00..=0xFFEF)
+            0x2E80..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0xFF00..=0xFFEF)
     })
 }
 
