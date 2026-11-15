@@ -31,6 +31,13 @@ pub(super) fn openai_usage_cache() -> &'static std::sync::Mutex<HashMap<String, 
     OPENAI_ACCOUNT_USAGE_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// Last in-memory Claude usage for a saved login, stale or not. Never blocks or
+/// probes. Callers judge freshness from `fetched_at`/`last_error`.
+pub fn cached_anthropic_usage_for_label(label: &str) -> Option<UsageData> {
+    let map = anthropic_usage_cache().try_lock().ok()?;
+    map.get(&format!("label:{}", label.trim())).cloned()
+}
+
 /// Read fresh usage attributed to a saved account without probing credentials,
 /// reading files, waiting for a cache lock, or scheduling a network refresh.
 /// Missing, stale, and failed reports are unknown, not zero usage.

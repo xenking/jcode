@@ -41,6 +41,7 @@ use api_keys::enqueue_api_key_usage_tasks;
 use cache::*;
 pub use cache::{
     account_known_exhausted, cached_account_usage_snapshot, cached_account_usage_status_snapshot,
+    cached_anthropic_usage_for_label,
 };
 pub use disk_cache::{
     export_last_good as export_limits_snapshot, import_last_good as import_limits_snapshot,
