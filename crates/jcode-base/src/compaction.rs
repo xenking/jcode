@@ -230,6 +230,61 @@ pub struct CompactionManager {
     /// shake: a prefix older than the provider cache TTL is cold anyway.
     last_response_at: Option<Instant>,
     last_response_cache_read: bool,
+    /// Response timestamp whose cold stretch already got a cache-expiry
+    /// snapcompact, so a failed or skipped attempt does not repeat every turn.
+    cache_expiry_compacted_for: Option<Instant>,
+}
+
+/// Trigger label for snapcompact started by an expired prompt cache.
+pub const CACHE_EXPIRY_COMPACTION_TRIGGER: &str = "snapcompact_cache_expiry";
+
+/// Token count at which reactive compaction fires for `model` with a
+/// `context_window`-token window, after per-provider/per-model overrides.
+/// Context indicators show this as the denominator (e.g. `233k/500k`).
+/// `None` for non-reactive modes or an unknown window.
+pub fn compaction_threshold_tokens(
+    provider: Option<&str>,
+    model: Option<&str>,
+    context_window: usize,
+) -> Option<usize> {
+    let cfg = crate::config::config().compaction.resolve(provider, model);
+    threshold_tokens_for(&cfg, context_window)
+}
+
+fn threshold_tokens_for(
+    cfg: &crate::config::CompactionConfig,
+    context_window: usize,
+) -> Option<usize> {
+    if context_window == 0 || cfg.mode != crate::config::CompactionMode::Reactive {
+        return None;
+    }
+    let budget = if cfg.max_context_tokens > 0 {
+        context_window.min(cfg.max_context_tokens)
+    } else {
+        context_window
+    };
+    let by_ratio = (budget as f64 * f64::from(cfg.reactive_threshold.clamp(0.0, 1.0))) as usize;
+    let threshold = if cfg.reactive_threshold_tokens > 0 {
+        by_ratio.min(cfg.reactive_threshold_tokens)
+    } else {
+        by_ratio
+    };
+    (threshold > 0).then_some(threshold)
+}
+
+#[cfg(test)]
+#[test]
+fn threshold_tokens_takes_the_earlier_trigger() {
+    let mut cfg = crate::config::CompactionConfig::default();
+    cfg.reactive_threshold = 1.0;
+    cfg.reactive_threshold_tokens = 500_000;
+    cfg.max_context_tokens = 1_000_000;
+    assert_eq!(threshold_tokens_for(&cfg, 1_000_000), Some(500_000));
+    cfg.max_context_tokens = 0;
+    cfg.reactive_threshold = 0.8;
+    assert_eq!(threshold_tokens_for(&cfg, 200_000), Some(160_000));
+    cfg.mode = crate::config::CompactionMode::Semantic;
+    assert_eq!(threshold_tokens_for(&cfg, 200_000), None);
 }
 
 /// Why a shake pass is allowed to rewrite the prompt prefix.
@@ -283,6 +338,7 @@ impl CompactionManager {
             semantic_embed_cache_counter: 0,
             last_response_at: None,
             last_response_cache_read: false,
+            cache_expiry_compacted_for: None,
         }
     }
 
@@ -1085,7 +1141,68 @@ impl CompactionManager {
         if !self.should_compact_with(all_messages) {
             return;
         }
+        let label = self.mode_trigger_label().to_string();
+        self.start_background_compaction(all_messages, provider, label);
+    }
 
+    /// Decide whether the cold-cache snapcompact trigger fires for this request.
+    ///
+    /// Mirrors omp idle compaction: only after the provider prompt cache TTL
+    /// elapsed since the last response (never while warm), only for a known TTL,
+    /// only when context is at or above `cache_expiry_threshold_tokens`, and at
+    /// most once per cold stretch.
+    pub fn plan_cache_expiry_compaction(
+        &self,
+        all_messages: &[Message],
+        now: Instant,
+        cache_ttl_secs: Option<u64>,
+    ) -> bool {
+        let cfg = &self.compaction_config;
+        if !cfg.snapcompact || !cfg.snapcompact_cache_expiry {
+            return false;
+        }
+        if cfg.cache_expiry_threshold_tokens == 0
+            || self.pending_task.is_some()
+            || self.suppress_compaction_until_new_message
+        {
+            return false;
+        }
+        let (Some(ttl), Some(last)) = (cache_ttl_secs.filter(|t| *t > 0), self.last_response_at)
+        else {
+            return false;
+        };
+        if now.saturating_duration_since(last) < Duration::from_secs(ttl) {
+            return false;
+        }
+        if self.cache_expiry_compacted_for == Some(last) {
+            return false;
+        }
+        self.active_messages(all_messages).len() > RECENT_TURNS_TO_KEEP
+            && self.effective_token_count_with(all_messages) >= cfg.cache_expiry_threshold_tokens
+    }
+
+    /// Start snapcompact because the prompt cache went cold. Returns whether a
+    /// background task started.
+    pub fn start_cache_expiry_compaction(
+        &mut self,
+        all_messages: &[Message],
+        provider: Arc<dyn Provider>,
+    ) -> bool {
+        self.cache_expiry_compacted_for = self.last_response_at;
+        self.start_background_compaction(
+            all_messages,
+            provider,
+            CACHE_EXPIRY_COMPACTION_TRIGGER.to_string(),
+        );
+        self.pending_task.is_some()
+    }
+
+    fn start_background_compaction(
+        &mut self,
+        all_messages: &[Message],
+        provider: Arc<dyn Provider>,
+        mode_label: String,
+    ) {
         let active = self.active_messages(all_messages);
 
         // Calculate cutoff within active messages.
@@ -1109,7 +1226,6 @@ impl CompactionManager {
         let msg_count = messages_to_summarize.len();
         let existing_summary = self.active_summary.clone();
         let snapcompact_enabled = self.compaction_config.snapcompact;
-        let mode_label = self.mode_trigger_label().to_string();
         let estimated_tokens = self.effective_token_count_with(all_messages);
         crate::logging::info(&format!(
             "[TIMING] compaction_start: trigger={}, active_messages={}, cutoff={}, estimated_tokens={}, has_existing_summary={}",

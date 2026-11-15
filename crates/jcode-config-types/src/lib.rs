@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 mod display;
 mod update_policy;
-pub use update_policy::{CrossProviderFailoverMode, UpdateChannel};
+pub use update_policy::{AutoResetTrigger, CrossProviderFailoverMode, UpdateChannel};
 mod menubar;
 mod power;
 mod session;
@@ -364,6 +364,14 @@ pub struct CompactionConfig {
     /// (prefix is cold anyway). Skipped for providers with no TTL estimate,
     /// i.e. persistent or unknown caches.
     pub shake_cache_expiry: bool,
+    /// Start snapcompact on the first request after the provider prompt-cache
+    /// TTL expired, mirroring omp's idle compaction: the prefix is cold, so
+    /// folding it costs no cache. Requires `snapcompact`, a known TTL, and
+    /// context at or above `cache_expiry_threshold_tokens`. Never while warm.
+    pub snapcompact_cache_expiry: bool,
+    /// Minimum context tokens for cache-expiry snapcompact (omp
+    /// `idleThresholdTokens`). 0 disables the trigger.
+    pub cache_expiry_threshold_tokens: usize,
 
     /// Per-provider overrides (`[compaction.providers.openai]`). Merged over
     /// the global section; model overrides win over provider overrides.
@@ -402,6 +410,8 @@ pub struct CompactionOverride {
     pub shake_min_savings_tokens: Option<usize>,
     pub shake_code_blocks: Option<bool>,
     pub shake_cache_expiry: Option<bool>,
+    pub snapcompact_cache_expiry: Option<bool>,
+    pub cache_expiry_threshold_tokens: Option<usize>,
 }
 
 impl CompactionOverride {
@@ -430,7 +440,9 @@ impl CompactionOverride {
             shake_min_region_tokens,
             shake_min_savings_tokens,
             shake_code_blocks,
-            shake_cache_expiry
+            shake_cache_expiry,
+            snapcompact_cache_expiry,
+            cache_expiry_threshold_tokens
         );
     }
 }
@@ -447,7 +459,11 @@ fn canonical_compaction_model_id(value: &str) -> String {
         v = rest.to_string();
     }
     // `route:model` or `model:effort`; keep the part that looks like a model id.
-    let parts: Vec<&str> = v.split(':').map(str::trim).filter(|p| !p.is_empty()).collect();
+    let parts: Vec<&str> = v
+        .split(':')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
     const EFFORTS: [&str; 7] = ["minimal", "low", "medium", "high", "xhigh", "max", "none"];
     let kept: Vec<&str> = parts
         .iter()
@@ -513,6 +529,8 @@ impl Default for CompactionConfig {
             shake_min_savings_tokens: 4_096,
             shake_code_blocks: true,
             shake_cache_expiry: true,
+            snapcompact_cache_expiry: false,
+            cache_expiry_threshold_tokens: 200_000,
             providers: Default::default(),
             models: Default::default(),
         }
@@ -1444,6 +1462,12 @@ pub struct ProviderConfig {
     /// Preserve earned resets while the account pool router has another ready route.
     /// Applies to both OpenAI and Anthropic automatic resets. Default: true.
     pub auto_reset_only_when_no_routes: bool,
+    /// When automatic resets may fire: "exhausted" (any window at 100%) or
+    /// "blocked_wait_over" (blocked and the reset is more than
+    /// `auto_reset_min_wait_minutes` away). Default: blocked_wait_over.
+    pub auto_reset_trigger: AutoResetTrigger,
+    /// Minimum remaining wait before `blocked_wait_over` spends a reset. Default: 10.
+    pub auto_reset_min_wait_minutes: u64,
     /// Copilot premium request mode: "normal", "one", or "zero"
     /// "zero" means all requests are free (no premium requests consumed)
     pub copilot_premium: Option<String>,
@@ -1502,6 +1526,8 @@ impl Default for ProviderConfig {
             openai_auto_banked_reset: true,
             anthropic_auto_fable_reset: false,
             auto_reset_only_when_no_routes: true,
+            auto_reset_trigger: AutoResetTrigger::default(),
+            auto_reset_min_wait_minutes: 10,
             copilot_premium: None,
             gemini_force_oauth: false,
             gemini_project: None,
@@ -1854,7 +1880,9 @@ mod compaction_override_tests {
             " CLAUDE-OPUS-5-5[1M] ",
         ] {
             assert_eq!(
-                config.resolve(Some("Claude"), Some(id)).reactive_threshold_tokens,
+                config
+                    .resolve(Some("Claude"), Some(id))
+                    .reactive_threshold_tokens,
                 500_000,
                 "{id}"
             );

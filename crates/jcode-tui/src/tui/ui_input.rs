@@ -2089,7 +2089,9 @@ fn overscroll_context_usage(
         info.estimated_tokens()
     };
     let limit = data
-        .context_limit
+        .compaction_threshold_tokens
+        .filter(|threshold| *threshold > 0)
+        .or(data.context_limit)
         .unwrap_or(crate::provider::DEFAULT_CONTEXT_LIMIT)
         .max(1);
     Some((used_tokens, limit))

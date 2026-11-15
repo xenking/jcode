@@ -966,6 +966,30 @@ impl Agent {
         }
     }
 
+    /// Cold-cache snapcompact: once the prompt cache TTL lapsed, fold history
+    /// now instead of re-sending a stale prefix at full price. Runs after shake.
+    fn maybe_cache_expiry_compaction(
+        &mut self,
+        manager: &mut crate::compaction::CompactionManager,
+    ) {
+        let now = std::time::Instant::now();
+        let model = self.provider.model();
+        let ttl =
+            crate::provider::shake_cache_ttl_for_provider_model(self.provider.name(), Some(&model));
+        let messages = self.session.provider_messages();
+        if !manager.plan_cache_expiry_compaction(messages, now, ttl) {
+            return;
+        }
+        let tokens = manager.effective_token_count_with(messages);
+        let started = manager.start_cache_expiry_compaction(messages, self.provider.clone());
+        logging::info(&format!(
+            "[compaction] snapcompact_cache_expiry: cache ttl={}s lapsed, tokens_before={}, started={}",
+            ttl.unwrap_or(0),
+            tokens,
+            started,
+        ));
+    }
+
     async fn note_shake_provider_response(&self, cache_read_tokens: Option<u64>) {
         let now = std::time::Instant::now();
         self.registry
@@ -984,6 +1008,7 @@ impl Agent {
                         manager.discard_oversized_openai_native_compaction();
                     if self.provider.uses_jcode_compaction() {
                         self.maybe_shake_before_request(&mut manager);
+                        self.maybe_cache_expiry_compaction(&mut manager);
                     }
                     let messages = {
                         let all_messages = self.session.provider_messages();

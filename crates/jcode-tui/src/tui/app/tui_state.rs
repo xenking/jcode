@@ -1882,6 +1882,15 @@ impl crate::tui::TuiState for App {
             historical_context: false,
             queue_mode: Some(self.queue_mode),
             context_limit: Some(self.context_limit as usize),
+            compaction_threshold_tokens: crate::compaction::compaction_threshold_tokens(
+                if uses_remote_widget_metadata {
+                    self.remote_provider_name.as_deref()
+                } else {
+                    Some(self.provider.name())
+                },
+                model.as_deref(),
+                self.context_limit as usize,
+            ),
             model,
             reasoning_effort,
             service_tier: if !self.is_remote {

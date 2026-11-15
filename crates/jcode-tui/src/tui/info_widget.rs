@@ -684,6 +684,9 @@ pub struct InfoWidgetData {
     pub historical_context: bool,
     pub queue_mode: Option<bool>,
     pub context_limit: Option<usize>,
+    /// Reactive compaction trigger in tokens, after config overrides. Context
+    /// indicators show it as the denominator so the threshold is visible.
+    pub compaction_threshold_tokens: Option<usize>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,
@@ -1485,6 +1488,24 @@ fn overview_footer(data: &InfoWidgetData) -> String {
             .map(|info| info.estimated_tokens() as u64)
     });
     match (used, data.context_limit) {
+        (Some(used), _) if data.compaction_threshold_tokens.is_some_and(|t| t > 0) => {
+            let threshold = data.compaction_threshold_tokens.unwrap_or_default() as u64;
+            let estimate = if data.observed_context_tokens.is_none() {
+                "~"
+            } else {
+                ""
+            };
+            format!(
+                "{}{estimate}{}/{} to compact",
+                if data.historical_context {
+                    "saved "
+                } else {
+                    ""
+                },
+                crate::kv_cache_monitor::format_token_count(used),
+                crate::kv_cache_monitor::format_token_count(threshold),
+            )
+        }
         (Some(used), Some(limit)) => {
             let left = (limit as u64).saturating_sub(used);
             let estimate = if data.observed_context_tokens.is_none() {

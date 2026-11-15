@@ -1689,3 +1689,61 @@ fn snapcompact_pages_survive_persistence_and_follow_vision_capability() {
             .any(|b| matches!(b, ContentBlock::Text { text, .. } if text.contains("archive")))
     );
 }
+
+fn cache_expiry_manager() -> CompactionManager {
+    let mut m = shake_manager();
+    m.compaction_config.snapcompact = true;
+    m.compaction_config.snapcompact_cache_expiry = true;
+    m.compaction_config.cache_expiry_threshold_tokens = 10_000;
+    m
+}
+
+#[test]
+fn cache_expiry_snapcompact_never_runs_while_cache_is_warm() {
+    let msgs = shake_session(20, 2000);
+    let mut m = cache_expiry_manager();
+    let t0 = Instant::now();
+    assert!(
+        !m.plan_cache_expiry_compaction(&msgs, t0, Some(300)),
+        "no prior response, nothing to expire"
+    );
+    m.note_provider_response(t0, Some(100));
+    for secs in [0, 1, 120, 299] {
+        assert!(
+            !m.plan_cache_expiry_compaction(&msgs, t0 + Duration::from_secs(secs), Some(300)),
+            "warm at +{secs}s"
+        );
+    }
+    // Unknown/persistent cache: never.
+    assert!(!m.plan_cache_expiry_compaction(&msgs, t0 + Duration::from_secs(86_400), None));
+    // Disabled flags or below threshold: never.
+    m.compaction_config.snapcompact_cache_expiry = false;
+    assert!(!m.plan_cache_expiry_compaction(&msgs, t0 + Duration::from_secs(900), Some(300)));
+    m.compaction_config.snapcompact_cache_expiry = true;
+    m.compaction_config.cache_expiry_threshold_tokens = 10_000_000;
+    assert!(!m.plan_cache_expiry_compaction(&msgs, t0 + Duration::from_secs(900), Some(300)));
+}
+
+#[tokio::test]
+async fn cache_expiry_snapcompact_runs_on_first_turn_after_ttl_once() {
+    let msgs = shake_session(20, 2000);
+    let mut m = cache_expiry_manager();
+    let t0 = Instant::now();
+    m.note_provider_response(t0, Some(100));
+    let after = t0 + Duration::from_secs(300);
+    assert!(m.plan_cache_expiry_compaction(&msgs, after, Some(300)));
+    assert!(m.start_cache_expiry_compaction(&msgs, Arc::new(VisionSummaryProvider)));
+    assert_eq!(
+        m.pending_trigger.as_deref(),
+        Some(CACHE_EXPIRY_COMPACTION_TRIGGER)
+    );
+    // In flight, then the same cold stretch: no second run.
+    assert!(!m.plan_cache_expiry_compaction(&msgs, after, Some(300)));
+    m.pending_task.take().unwrap().abort();
+    assert!(!m.plan_cache_expiry_compaction(&msgs, after + Duration::from_secs(60), Some(300)));
+    // A new response starts a new stretch.
+    let t1 = after + Duration::from_secs(61);
+    m.note_provider_response(t1, Some(0));
+    assert!(!m.plan_cache_expiry_compaction(&msgs, t1 + Duration::from_secs(10), Some(300)));
+    assert!(m.plan_cache_expiry_compaction(&msgs, t1 + Duration::from_secs(300), Some(300)));
+}

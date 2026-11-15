@@ -456,3 +456,14 @@ fn narrow_overview_background_row_keeps_progress_visible() {
         "progress must fit at overview width:\n{out}"
     );
 }
+
+#[test]
+fn overview_footer_shows_compaction_threshold_when_known() {
+    let data = InfoWidgetData {
+        observed_context_tokens: Some(233_000),
+        context_limit: Some(1_000_000),
+        compaction_threshold_tokens: Some(500_000),
+        ..Default::default()
+    };
+    assert_eq!(super::super::overview_footer(&data), "233K/500K to compact");
+}
