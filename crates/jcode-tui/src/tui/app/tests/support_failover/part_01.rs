@@ -687,8 +687,10 @@ fn test_definitive_exhaustion_immediate_switch_and_manual_safety() {
         (
             "countdown",
             true,
+            // Since 1cf6c1402 the first automatic failover is instant for any
+            // cause. Only later hops wait for the countdown.
             "429 rate_limit_error: This request would exceed your account's rate limit. Please try again later.",
-            false,
+            true,
         ),
     ] {
         with_temp_jcode_home(|| {
