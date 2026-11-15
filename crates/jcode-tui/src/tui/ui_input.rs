@@ -393,7 +393,10 @@ pub(super) fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
             crate::protocol::QueuedPromptMode::AfterYield => "after",
         };
         let normalized = normalize_repaint_sensitive_notice_text(&prompt.content);
-        previews.push(format!("[{tag}] {}", normalized.chars().take(100).collect::<String>()));
+        previews.push(format!(
+            "[{tag}] {}",
+            normalized.chars().take(100).collect::<String>()
+        ));
     }
     if app.is_processing() {
         for msg in app.pending_soft_interrupts() {
@@ -435,7 +438,10 @@ pub(super) fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
 pub(super) fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, start_num: usize) {
     let mut items: Vec<(QueuedMsgType, &str)> = Vec::new();
     for (index, prompt) in app.server_queued_prompts().iter().enumerate() {
-        items.push((QueuedMsgType::Server(prompt.mode, app.selected_queued_prompt() == Some(index)), &prompt.content));
+        items.push((
+            QueuedMsgType::Server(prompt.mode, app.selected_queued_prompt() == Some(index)),
+            &prompt.content,
+        ));
     }
     if app.is_processing() {
         for msg in app.pending_soft_interrupts() {
@@ -457,7 +463,10 @@ pub(super) fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, sta
     }
 
     let pending_count = items.len();
-    let first = app.selected_queued_prompt().map(|index| index.saturating_sub(2)).unwrap_or(0);
+    let first = app
+        .selected_queued_prompt()
+        .map(|index| index.saturating_sub(2))
+        .unwrap_or(0);
     let lines: Vec<Line> = items
         .iter()
         .enumerate()
@@ -468,10 +477,18 @@ pub(super) fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, sta
             let distance = pending_count.saturating_sub(i);
             let num_color = rainbow_prompt_color(distance);
             let (indicator, indicator_color, msg_color, dim) = match msg_type {
-                QueuedMsgType::Server(crate::protocol::QueuedPromptMode::Steer, true) => ("> steer", pending_color(), pending_color(), false),
-                QueuedMsgType::Server(crate::protocol::QueuedPromptMode::Steer, false) => ("  steer", pending_color(), pending_color(), true),
-                QueuedMsgType::Server(crate::protocol::QueuedPromptMode::AfterYield, true) => ("> after", queued_color(), queued_color(), false),
-                QueuedMsgType::Server(crate::protocol::QueuedPromptMode::AfterYield, false) => ("  after", queued_color(), queued_color(), true),
+                QueuedMsgType::Server(crate::protocol::QueuedPromptMode::Steer, true) => {
+                    ("> steer", pending_color(), pending_color(), false)
+                }
+                QueuedMsgType::Server(crate::protocol::QueuedPromptMode::Steer, false) => {
+                    ("  steer", pending_color(), pending_color(), true)
+                }
+                QueuedMsgType::Server(crate::protocol::QueuedPromptMode::AfterYield, true) => {
+                    ("> after", queued_color(), queued_color(), false)
+                }
+                QueuedMsgType::Server(crate::protocol::QueuedPromptMode::AfterYield, false) => {
+                    ("  after", queued_color(), queued_color(), true)
+                }
                 QueuedMsgType::Pending => ("queued ⏎", pending_color(), pending_color(), true),
                 QueuedMsgType::Interleave => ("⚡", asap_color(), asap_color(), false),
                 QueuedMsgType::Queued => ("⏳", queued_color(), queued_color(), true),
@@ -2398,7 +2415,11 @@ pub(super) fn draw_input(
         )));
     } else if app.is_processing() && !input_text.is_empty() {
         hint_shown = true;
-        let hint = if app.queue_mode() {
+        let hint = if app.is_remote_mode() && app.queue_mode() {
+            "  Ctrl/Cmd+Enter to steer"
+        } else if app.is_remote_mode() {
+            "  Ctrl/Cmd+Enter to send after yield"
+        } else if app.queue_mode() {
             "  Ctrl/Cmd+Enter to send now"
         } else {
             "  Ctrl/Cmd+Enter to queue"

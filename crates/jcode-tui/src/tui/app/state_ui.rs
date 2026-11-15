@@ -20,6 +20,7 @@ pub(super) struct RestoredReloadInput {
     pub interleave_message: Option<String>,
     pub pending_soft_interrupts: Vec<String>,
     pub pending_soft_interrupt_resend: Option<Vec<String>>,
+    pub uncertain_queue_prompts: Vec<crate::protocol::QueuedPrompt>,
     pub rate_limit_pending_message: Option<super::PendingRemoteMessage>,
     pub rate_limit_reset: Option<Instant>,
     pub observe_mode_enabled: bool,
@@ -344,6 +345,8 @@ impl App {
             && self.interleave_message.is_none()
             && self.pending_soft_interrupts.is_empty()
             && self.pending_soft_interrupt_requests.is_empty()
+            && self.pending_queue_requests.is_empty()
+            && self.uncertain_queue_prompts.is_empty()
             && self.rate_limit_pending_message.is_none()
             && resume_prompt.is_none()
             && !self.observe_mode_enabled
@@ -437,6 +440,7 @@ impl App {
                 "interleave_message": self.interleave_message,
                 "pending_soft_interrupts": self.pending_soft_interrupts,
                 "pending_soft_interrupt_resend": pending_soft_interrupt_resend,
+                "uncertain_queue_prompts": self.uncertain_queue_prompts.iter().cloned().chain(self.pending_queue_requests.iter().filter_map(|(_, prompt)| prompt.clone())).collect::<Vec<_>>(),
                 "rate_limit_pending_message": rate_limit_pending_message,
                 "rate_limit_reset_in_ms": rate_limit_reset_in_ms,
                 "observe_mode_enabled": self.observe_mode_enabled,
@@ -696,6 +700,10 @@ impl App {
                 interleave_message,
                 pending_soft_interrupts,
                 pending_soft_interrupt_resend,
+                uncertain_queue_prompts: value
+                    .get("uncertain_queue_prompts")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default(),
                 rate_limit_pending_message,
                 rate_limit_reset,
                 observe_mode_enabled,
@@ -741,6 +749,7 @@ impl App {
             interleave_message: None,
             pending_soft_interrupts: Vec::new(),
             pending_soft_interrupt_resend: None,
+            uncertain_queue_prompts: Vec::new(),
             rate_limit_pending_message: None,
             rate_limit_reset: None,
             observe_mode_enabled: false,

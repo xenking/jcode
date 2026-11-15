@@ -382,7 +382,7 @@ pub(super) async fn recover_stranded_soft_interrupts(
 
     // A legacy cancel-all would also delete daemon-owned send-mode prompts.
     // Preserve legacy state rather than risk losing unrelated queue entries.
-    if !app.server_queued_prompts.is_empty() {
+    if remote.supports_queued_prompts() || !app.server_queued_prompts.is_empty() {
         app.set_status_notice("Legacy follow-up recovery deferred while server queue is nonempty");
         return false;
     }

@@ -10,7 +10,14 @@ pub(in crate::tui::app) async fn send_interleave_now(
     images: Vec<(String, String)>,
     remote: &mut RemoteConnection,
 ) {
-    send_queued_prompt(app, content, images, crate::protocol::QueuedPromptMode::Steer, remote).await;
+    send_queued_prompt(
+        app,
+        content,
+        images,
+        crate::protocol::QueuedPromptMode::Steer,
+        remote,
+    )
+    .await;
 }
 
 pub(in crate::tui::app) async fn send_queued_prompt(
@@ -23,18 +30,30 @@ pub(in crate::tui::app) async fn send_queued_prompt(
     if content.trim().is_empty() && images.is_empty() {
         return;
     }
-    match remote.queue_prompt(content.clone(), images.clone(), mode).await {
+    let prompt = crate::protocol::QueuedPrompt {
+        client_id: crate::id::new_id("prompt"),
+        content: content.clone(),
+        images: images.clone(),
+        mode,
+    };
+    match remote.queue_prompt(prompt.clone()).await {
         Err(e) => {
             app.restore_failover_payload(app_mod::FallbackResendPayload {
-                content, images, is_system: false, system_reminder: None,
-                auto_retry: false, retry_attempts: 0, raw_input: None,
+                content,
+                images,
+                is_system: false,
+                system_reminder: None,
+                auto_retry: false,
+                retry_attempts: 0,
+                raw_input: None,
             });
             app.push_display_message(DisplayMessage::error(format!(
                 "Failed to queue prompt: {}",
                 e
             )));
         }
-        Ok(_) => {
+        Ok(id) => {
+            app.pending_queue_requests.push((id, Some(prompt)));
             app.set_status_notice(match mode {
                 crate::protocol::QueuedPromptMode::Steer => "Queued: steer",
                 crate::protocol::QueuedPromptMode::AfterYield => "Queued: after yield",

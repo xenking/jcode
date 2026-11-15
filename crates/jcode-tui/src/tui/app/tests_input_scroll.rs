@@ -354,8 +354,10 @@ fn test_remote_ctrl_enter_queues_while_processing() {
         .unwrap();
 
     assert!(app.input().is_empty());
-    assert_eq!(app.queued_messages().len(), 1);
-    assert_eq!(app.queued_messages()[0], "hi");
+    assert!(app.queued_messages().is_empty());
+    let prompt = app.pending_queue_requests[0].1.as_ref().unwrap();
+    assert_eq!(prompt.content, "hi");
+    assert_eq!(prompt.mode, crate::protocol::QueuedPromptMode::AfterYield);
 }
 
 #[test]
@@ -374,6 +376,8 @@ fn test_remote_cmd_enter_queues_while_processing() {
         .unwrap();
 
     assert!(app.input().is_empty());
-    assert_eq!(app.queued_messages().len(), 1);
-    assert_eq!(app.queued_messages()[0], "hi");
+    assert!(app.queued_messages().is_empty());
+    let prompt = app.pending_queue_requests[0].1.as_ref().unwrap();
+    assert_eq!(prompt.content, "hi");
+    assert_eq!(prompt.mode, crate::protocol::QueuedPromptMode::AfterYield);
 }

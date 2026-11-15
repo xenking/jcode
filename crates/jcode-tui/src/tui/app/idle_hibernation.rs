@@ -76,6 +76,9 @@ impl App {
             || self.rate_limit_reset.is_some()
             || self.interleave_message.is_some()
             || !self.pending_soft_interrupts.is_empty()
+            || !self.server_queued_prompts.is_empty()
+            || !self.pending_queue_requests.is_empty()
+            || !self.uncertain_queue_prompts.is_empty()
             || !self.pending_soft_interrupt_requests.is_empty()
             || self.pending_local_transfer.is_some()
             || self.pending_transfer_request

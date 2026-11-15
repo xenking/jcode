@@ -1343,9 +1343,11 @@ impl App {
     /// new prompt" rather than "stop everything", so the follow-up is kept
     /// and auto-continuation stays on. Automatic pokes do not count.
     pub(super) fn has_pending_user_followup(&self) -> bool {
-        self.interleave_message
-            .as_deref()
-            .is_some_and(|message| !message.trim().is_empty())
+        !self.server_queued_prompts.is_empty()
+            || self
+                .interleave_message
+                .as_deref()
+                .is_some_and(|message| !message.trim().is_empty())
             || self
                 .pending_soft_interrupts
                 .iter()

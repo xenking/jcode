@@ -5,9 +5,9 @@
 fn assert_send_mode_uses_server_queue(queue_mode: bool, expected_mode: &str) {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
-        let mut app = create_test_app();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
         app.is_processing = true;
         app.queue_mode = queue_mode;
         app.input = "follow up".into();
@@ -16,15 +16,21 @@ fn assert_send_mode_uses_server_queue(queue_mode: bool, expected_mode: &str) {
         let peer = remote.take_dummy_peer().unwrap();
         let (reader, _writer) = peer.into_split();
         app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote)
-            .await.unwrap();
+            .await
+            .unwrap();
         let mut line = String::new();
-        tokio::time::timeout(std::time::Duration::from_secs(1), BufReader::new(reader).read_line(&mut line))
-            .await.expect("queue request not sent").unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            BufReader::new(reader).read_line(&mut line),
+        )
+        .await
+        .expect("queue request not sent")
+        .unwrap();
         let request: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(request["type"], "queue_prompt");
         assert_eq!(request["mode"], expected_mode);
         assert_eq!(request["content"], "follow up");
-        });
+    });
 }
 
 #[test]
@@ -49,7 +55,13 @@ fn send_modes_restore_server_snapshot_without_duplicates() {
         let event: crate::protocol::ServerEvent = serde_json::from_str(json).unwrap();
         app.handle_server_event(event, &mut remote);
     }
-    assert_eq!(app.server_queued_prompts.iter().map(|prompt| prompt.content.as_str()).collect::<Vec<_>>(), ["first", "second"]);
+    assert_eq!(
+        app.server_queued_prompts
+            .iter()
+            .map(|prompt| prompt.content.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
     assert!(app.pending_soft_interrupts.is_empty());
     assert!(app.queued_messages.is_empty());
 }
@@ -86,6 +98,153 @@ fn send_modes_selection_switches_and_interrupts_selected_prompt() {
     assert_eq!(request["client_id"], "p2");
     assert_eq!(app.input, "draft stays");
     });
+}
+
+#[test]
+fn send_modes_reload_reconciles_unconfirmed_prompt_by_id() {
+    let session_id = format!("send-modes-reload-{}", crate::id::new_id("test"));
+    let prompt = crate::protocol::QueuedPrompt {
+        client_id: "persisted-id".into(),
+        content: "only once".into(),
+        images: vec![],
+        mode: crate::protocol::QueuedPromptMode::AfterYield,
+    };
+    let mut app = create_test_app();
+    app.pending_queue_requests.push((41, Some(prompt.clone())));
+    app.save_input_for_reload(&session_id);
+    let mut restored = App::new_for_remote(Some(session_id));
+    assert_eq!(restored.uncertain_queue_prompts, [prompt.clone()]);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    restored.queue_snapshot_request_id = Some(7);
+    for _ in 0..2 {
+        restored.handle_server_event(
+            crate::protocol::ServerEvent::QueuedPrompts {
+                id: 7,
+                prompts: vec![prompt.clone()],
+            },
+            &mut remote,
+        );
+    }
+    assert!(restored.uncertain_queue_prompts.is_empty());
+    assert_eq!(restored.server_queued_prompts, [prompt]);
+    assert!(restored.input.is_empty());
+    assert!(restored.queued_messages.is_empty());
+}
+
+#[test]
+fn send_modes_unconfirmed_missing_snapshot_restores_draft_without_resending() {
+    let mut app = create_test_app();
+    app.uncertain_queue_prompts
+        .push(crate::protocol::QueuedPrompt {
+            client_id: "maybe-consumed".into(),
+            content: "check me".into(),
+            images: vec![],
+            mode: crate::protocol::QueuedPromptMode::Steer,
+        });
+    app.queue_snapshot_request_id = Some(5);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.handle_server_event(
+        crate::protocol::ServerEvent::QueuedPrompts {
+            id: 5,
+            prompts: vec![],
+        },
+        &mut remote,
+    );
+    assert_eq!(app.input, "check me");
+    assert!(app.queued_messages.is_empty());
+    assert!(app.uncertain_queue_prompts.is_empty());
+    assert!(
+        app.display_messages
+            .iter()
+            .any(|message| message.content.contains("may already have run"))
+    );
+}
+
+#[test]
+fn send_modes_server_rejection_preserves_active_turn_and_draft() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+    app.pending_queue_requests.push((
+        9,
+        Some(crate::protocol::QueuedPrompt {
+            client_id: "rejected".into(),
+            content: "recover me".into(),
+            images: vec![],
+            mode: crate::protocol::QueuedPromptMode::Steer,
+        }),
+    ));
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 9,
+            message: "denied".into(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    );
+    assert!(app.is_processing);
+    assert_eq!(app.input, "recover me");
+    assert!(app.pending_queue_requests.is_empty());
+}
+
+#[test]
+fn send_modes_reconnect_snapshot_is_read_from_protocol_socket() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.note_server_capabilities(&["queued_prompts".into()]);
+        let peer = remote.take_dummy_peer().unwrap();
+        let (reader, mut writer) = peer.into_split();
+        let mut reader = BufReader::new(reader);
+        let id = remote.get_queued_prompts().await.unwrap();
+        app.queue_snapshot_request_id = Some(id);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["type"], "get_queued_prompts");
+        assert_eq!(request["id"], id);
+        writer.write_all(format!("{{\"type\":\"queued_prompts\",\"id\":{id},\"prompts\":[{{\"client_id\":\"persisted\",\"content\":\"restored\",\"mode\":\"after_yield\"}}]}}\n").as_bytes()).await.unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), remote.next_event()).await.unwrap();
+        let crate::tui::backend::RemoteRead::Event(event) = event else { panic!("missing queue event") };
+        app.handle_server_event(event, &mut remote);
+        assert_eq!(app.server_queued_prompts.len(), 1);
+        assert_eq!(app.server_queued_prompts[0].content, "restored");
+        assert_eq!(app.server_queued_prompts[0].mode, crate::protocol::QueuedPromptMode::AfterYield);
+        assert!(app.queued_messages.is_empty());
+    });
+}
+
+#[test]
+fn send_modes_snapshot_does_not_duplicate_legacy_pending_rows() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+    app.track_pending_soft_interrupt(41, "legacy".into());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.handle_server_event(
+        crate::protocol::ServerEvent::QueuedPrompts {
+            id: 1,
+            prompts: vec![crate::protocol::QueuedPrompt {
+                client_id: crate::tui::backend::soft_interrupt_client_id(41),
+                content: "legacy".into(),
+                images: vec![],
+                mode: crate::protocol::QueuedPromptMode::Steer,
+            }],
+        },
+        &mut remote,
+    );
+    assert!(app.server_queued_prompts.is_empty());
+    assert_eq!(app.pending_soft_interrupts, ["legacy"]);
 }
 
 fn type_text(app: &mut App, text: &str) {
@@ -134,7 +293,10 @@ fn test_plain_enter_still_runs_slash_command_immediately_while_processing() {
         .unwrap();
 
     assert!(app.queued_commands.is_empty());
-    assert!(app.help_scroll.is_some(), "plain Enter runs the command now");
+    assert!(
+        app.help_scroll.is_some(),
+        "plain Enter runs the command now"
+    );
 }
 
 #[test]
@@ -266,7 +428,10 @@ fn test_remote_tick_arms_dispatch_for_idle_queued_command() {
 
     app.queued_commands.push("/help".to_string());
     rt.block_on(remote::handle_tick(&mut app, &mut remote));
-    assert!(app.pending_queued_dispatch, "an idle client must not strand it");
+    assert!(
+        app.pending_queued_dispatch,
+        "an idle client must not strand it"
+    );
 }
 
 #[test]
@@ -299,5 +464,9 @@ fn test_remote_queued_commands_run_before_queued_prompts() {
 
     assert!(app.queued_commands.is_empty());
     assert!(app.help_scroll.is_some());
-    assert_eq!(app.queued_messages(), &["then do this"], "prompt waits its turn");
+    assert_eq!(
+        app.queued_messages(),
+        &["then do this"],
+        "prompt waits its turn"
+    );
 }

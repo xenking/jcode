@@ -1790,6 +1790,11 @@ pub struct App {
     // Authoritative daemon-owned queue, displayed alongside legacy pending follow-ups.
     server_queued_prompts: Vec<crate::protocol::QueuedPrompt>,
     selected_queued_prompt: Option<usize>,
+    // Queue control errors are not conversation-turn errors. Keep unsent
+    // payloads until the daemon confirms its durable mutation.
+    pending_queue_requests: Vec<(u64, Option<crate::protocol::QueuedPrompt>)>,
+    uncertain_queue_prompts: Vec<crate::protocol::QueuedPrompt>,
+    queue_snapshot_request_id: Option<u64>,
     // Soft interrupts written to the socket but not yet acknowledged by the server.
     pending_soft_interrupt_requests: Vec<(u64, String)>,
     // Every soft interrupt still shown as pending, by request id. Unlike the

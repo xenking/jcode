@@ -45,7 +45,7 @@ fn every_interleave_send_path_carries_the_staged_images() {
 }
 
 #[test]
-fn remote_image_queue_keeps_complete_draft_for_both_enter_shortcuts() {
+fn remote_image_queue_sends_complete_payload_for_both_enter_shortcuts() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     for (queue_mode, modifiers) in [(true, KeyModifiers::NONE), (false, KeyModifiers::CONTROL)] {
@@ -72,22 +72,13 @@ fn remote_image_queue_keeps_complete_draft_for_both_enter_shortcuts() {
             app.queued_messages.is_empty(),
             "no image-less prompt may be queued"
         );
-        assert_eq!(app.input, expected);
-        assert_eq!(app.cursor_pos, expected.len());
-        app.sync_model_picker_preview_from_input();
-        assert_eq!(app.pending_images, vec![image]);
-        assert_eq!(connection.next_request_id_for_test(), next_id);
-        assert!(
-            app.status_notice
-                .as_ref()
-                .is_some_and(|(notice, _)| { notice.contains("Images cannot be queued") })
-        );
-        assert!(app.display_messages().iter().any(|message| {
-            message.content.contains("Message not queued")
-                && message
-                    .content
-                    .contains("text and images are still in the input")
-        }));
+        assert!(app.input.is_empty());
+        assert!(app.pending_images.is_empty());
+        assert_eq!(connection.next_request_id_for_test(), next_id + 1);
+        let prompt = app.pending_queue_requests[0].1.as_ref().unwrap();
+        assert_eq!(prompt.content, expected);
+        assert_eq!(prompt.images, vec![image]);
+        assert_eq!(prompt.mode, crate::protocol::QueuedPromptMode::AfterYield);
     }
 }
 
@@ -110,7 +101,10 @@ fn remote_text_only_queue_still_accepts_both_enter_shortcuts() {
             &mut connection,
         ))
         .unwrap();
-        assert_eq!(app.queued_messages, vec!["Queue this text".to_string()]);
+        assert!(app.queued_messages.is_empty());
+        let prompt = app.pending_queue_requests[0].1.as_ref().unwrap();
+        assert_eq!(prompt.content, "Queue this text");
+        assert_eq!(prompt.mode, crate::protocol::QueuedPromptMode::AfterYield);
         assert!(app.input.is_empty());
     }
 }

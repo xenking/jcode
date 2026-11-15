@@ -1014,7 +1014,6 @@ impl App {
             // The Pong lists what this server supports. Until it arrives no
             // focus is reported, which the server treats as focused.
             let _ = remote_conn.request_capabilities().await;
-            let _ = remote_conn.get_queued_prompts().await;
 
             let mut bus_receiver_remote = Bus::global().subscribe();
             if let Some(status) = Bus::global().latest_update_status() {
@@ -1272,11 +1271,32 @@ impl App {
                         loop {
                             match &event {
                                 crate::tui::backend::RemoteRead::Event(crate::protocol::ServerEvent::Pong { capabilities, .. }) => {
+                                    let queue_was_supported = remote_conn.supports_queued_prompts();
                                     remote_conn.note_server_capabilities(capabilities);
+                                    if !queue_was_supported && remote_conn.supports_queued_prompts() {
+                                        if let Ok(id) = remote_conn.get_queued_prompts().await {
+                                            self.queue_snapshot_request_id = Some(id);
+                                        }
+                                    }
                                     super::wake_stats::note("server:pong");
                                 }
                                 crate::tui::backend::RemoteRead::Event(event) => super::wake_stats::note_debug("server", event),
                                 crate::tui::backend::RemoteRead::Disconnected(_) => super::wake_stats::note("server:closed"),
+                            }
+                            // Queue contents may change when the agent consumes a prompt,
+                            // independently of a queue-control reply.
+                            let queue_may_have_changed = match &event {
+                                crate::tui::backend::RemoteRead::Event(crate::protocol::ServerEvent::TurnStarted { .. }
+                                    | crate::protocol::ServerEvent::Done { .. }
+                                    | crate::protocol::ServerEvent::SoftInterruptInjected { .. }) => true,
+                                crate::tui::backend::RemoteRead::Event(crate::protocol::ServerEvent::TurnEvent { event, .. }) => {
+                                    matches!(&**event, crate::protocol::ServerEvent::Done { .. }
+                                        | crate::protocol::ServerEvent::SoftInterruptInjected { .. })
+                                }
+                                _ => false,
+                            };
+                            if queue_may_have_changed && remote_conn.supports_queued_prompts() {
+                                let _ = remote_conn.get_queued_prompts().await;
                             }
                             let (outcome, event_redraw) = remote::handle_remote_event(
                                 &mut self,

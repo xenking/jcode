@@ -164,6 +164,29 @@ pub(in crate::tui::app) fn handle_server_event(
     event: ServerEvent,
     remote: &mut impl RemoteEventState,
 ) -> bool {
+    if let ServerEvent::Error { id, message, .. } = &event
+        && let Some(index) = app
+            .pending_queue_requests
+            .iter()
+            .position(|(request_id, _)| request_id == id)
+    {
+        let (_, payload) = app.pending_queue_requests.remove(index);
+        if let Some(prompt) = payload {
+            app.restore_failover_payload(app_mod::FallbackResendPayload {
+                content: prompt.content,
+                images: prompt.images,
+                is_system: false,
+                system_reminder: None,
+                auto_retry: false,
+                retry_attempts: 0,
+                raw_input: None,
+            });
+        }
+        app.push_display_message(DisplayMessage::error(format!(
+            "Queue request failed: {message}"
+        )));
+        return true;
+    }
     // Route mutation errors are control responses, not failed conversation
     // turns. Handle them before the scoped-turn terminal fence.
     if let ServerEvent::Error { id, message, .. } = &event
@@ -1024,20 +1047,59 @@ fn handle_server_event_inner(
             });
             true
         }
-        ServerEvent::QueuedPrompts { prompts, .. } => {
-            let selected_id = app.selected_queued_prompt
+        ServerEvent::QueuedPrompts { id, prompts } => {
+            if app.queue_snapshot_request_id == Some(id) {
+                app.queue_snapshot_request_id = None;
+                let uncertain = std::mem::take(&mut app.uncertain_queue_prompts);
+                for prompt in uncertain {
+                    if !prompts
+                        .iter()
+                        .any(|queued| queued.client_id == prompt.client_id)
+                    {
+                        app.restore_failover_payload(app_mod::FallbackResendPayload {
+                            content: prompt.content,
+                            images: prompt.images,
+                            is_system: false,
+                            system_reminder: None,
+                            auto_retry: false,
+                            retry_attempts: 0,
+                            raw_input: None,
+                        });
+                        app.push_display_message(DisplayMessage::system(
+                            "Queue delivery was unconfirmed before reconnect. The prompt may already have run; check the conversation before sending the recovered draft again."
+                        ));
+                    }
+                }
+            }
+            let selected_id = app
+                .selected_queued_prompt
                 .and_then(|index| app.server_queued_prompts.get(index))
                 .map(|prompt| prompt.client_id.clone());
             let mut seen = std::collections::HashSet::new();
-            app.server_queued_prompts = prompts.into_iter()
+            app.server_queued_prompts = prompts
+                .into_iter()
                 .filter(|prompt| seen.insert(prompt.client_id.clone()))
+                .filter(|prompt| {
+                    !app.sent_soft_interrupts.iter().any(|(id, _)| {
+                        crate::tui::backend::soft_interrupt_client_id(*id) == prompt.client_id
+                    })
+                })
                 .collect();
             app.selected_queued_prompt = selected_id.and_then(|id| {
-                app.server_queued_prompts.iter().position(|prompt| prompt.client_id == id)
+                app.server_queued_prompts
+                    .iter()
+                    .position(|prompt| prompt.client_id == id)
             });
             true
         }
         ServerEvent::Ack { id } => {
+            if let Some(index) = app
+                .pending_queue_requests
+                .iter()
+                .position(|(request_id, _)| *request_id == id)
+            {
+                app.pending_queue_requests.remove(index);
+            }
             let _ = app.acknowledge_pending_soft_interrupt(id);
             false
         }
@@ -1638,6 +1700,8 @@ fn handle_server_event_inner(
         ServerEvent::SessionId { session_id } => {
             if app.remote_session_id.as_deref() != Some(session_id.as_str()) {
                 app.remote_available_service_tiers = None;
+                app.server_queued_prompts.clear();
+                app.selected_queued_prompt = None;
             }
             remote.set_session_id(session_id.clone());
             app.cloud_environment_session_changed(&session_id);
@@ -1813,7 +1877,8 @@ fn handle_server_event_inner(
                     prefix
                         .into_iter()
                         .map(|msg| crate::protocol::HistoryMessage {
-                            response_stats: None, timestamp_ms: None,
+                            response_stats: None,
+                            timestamp_ms: None,
                             role: msg.role,
                             content: msg.content,
                             tool_calls: (!msg.tool_calls.is_empty()).then_some(msg.tool_calls),
@@ -3421,7 +3486,10 @@ fn handle_server_event_inner(
             );
             false
         }
-        ServerEvent::CompactionStarted { trigger, pre_tokens } => {
+        ServerEvent::CompactionStarted {
+            trigger,
+            pre_tokens,
+        } => {
             app.show_compaction_running(trigger, pre_tokens);
             false
         }

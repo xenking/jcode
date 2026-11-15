@@ -1259,6 +1259,12 @@ pub(super) fn handle_disconnect(
     state: &mut RemoteRunState,
     reason: Option<RemoteDisconnectReason>,
 ) {
+    app.uncertain_queue_prompts.extend(
+        app.pending_queue_requests
+            .drain(..)
+            .filter_map(|(_, prompt)| prompt),
+    );
+    app.queue_snapshot_request_id = None;
     // The daemon may have applied the switch, but the acknowledgement was
     // lost. Never wait on an old connection's request ID or blindly resend.
     if app.pending_automatic_failover_request_id.is_some() {

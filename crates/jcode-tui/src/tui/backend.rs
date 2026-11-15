@@ -282,6 +282,7 @@ pub struct RemoteConnection {
     /// The connected server accepts `Request::ClientFocus`. Learned from its
     /// Pong, so an older server is never sent a request it would reject.
     server_accepts_focus: bool,
+    server_accepts_queued_prompts: bool,
     /// Last (focused, hidden) state reported to this server, if any.
     reported_focus: Option<(bool, bool)>,
     last_account_usage_poll: Option<Instant>,
@@ -474,6 +475,7 @@ impl RemoteConnection {
             protocol_bytes_scanned: 0,
             has_loaded_history: false,
             server_accepts_focus: false,
+            server_accepts_queued_prompts: false,
             reported_focus: None,
             last_account_usage_poll: None,
             call_output_tokens_seen: 0,
@@ -946,10 +948,20 @@ impl RemoteConnection {
     pub fn note_server_capabilities(&mut self, capabilities: &[String]) {
         if capabilities
             .iter()
+            .any(|capability| capability == "queued_prompts")
+        {
+            self.server_accepts_queued_prompts = true;
+        }
+        if capabilities
+            .iter()
             .any(|capability| capability == crate::protocol::CLIENT_FOCUS_CAPABILITY)
         {
             self.server_accepts_focus = true;
         }
+    }
+
+    pub fn supports_queued_prompts(&self) -> bool {
+        self.server_accepts_queued_prompts
     }
 
     /// Tell the server whether this window has focus, and whether an
@@ -1042,6 +1054,9 @@ impl RemoteConnection {
         // History application replaces the display vector, so repeated payloads
         // remain idempotent rather than appending duplicate messages.
         self.has_loaded_history = false;
+        if self.server_accepts_queued_prompts {
+            self.get_queued_prompts().await?;
+        }
         Ok(())
     }
 
@@ -1389,35 +1404,49 @@ impl RemoteConnection {
         Ok(id)
     }
 
-    pub async fn queue_prompt(
+    pub async fn queue_prompt(&mut self, prompt: crate::protocol::QueuedPrompt) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::QueuePrompt {
+            id,
+            client_id: prompt.client_id,
+            content: prompt.content,
+            images: prompt.images,
+            mode: prompt.mode,
+        })
+        .await?;
+        Ok(id)
+    }
+
+    pub async fn set_queued_prompt_mode(
         &mut self,
-        content: String,
-        images: Vec<(String, String)>,
+        client_id: String,
         mode: crate::protocol::QueuedPromptMode,
     ) -> Result<u64> {
         let id = self.next_request_id;
         self.next_request_id += 1;
-        let client_id = crate::id::new_id("prompt");
-        self.send_request(Request::QueuePrompt { id, client_id, content, images, mode }).await?;
+        self.send_request(Request::SetQueuedPromptMode {
+            id,
+            client_id,
+            mode,
+        })
+        .await?;
         Ok(id)
     }
 
-    pub async fn set_queued_prompt_mode(&mut self, client_id: String, mode: crate::protocol::QueuedPromptMode) -> Result<()> {
+    pub async fn interrupt_queued_prompt(&mut self, client_id: String) -> Result<u64> {
         let id = self.next_request_id;
         self.next_request_id += 1;
-        self.send_request(Request::SetQueuedPromptMode { id, client_id, mode }).await
+        self.send_request(Request::InterruptQueuedPrompt { id, client_id })
+            .await?;
+        Ok(id)
     }
 
-    pub async fn interrupt_queued_prompt(&mut self, client_id: String) -> Result<()> {
+    pub async fn get_queued_prompts(&mut self) -> Result<u64> {
         let id = self.next_request_id;
         self.next_request_id += 1;
-        self.send_request(Request::InterruptQueuedPrompt { id, client_id }).await
-    }
-
-    pub async fn get_queued_prompts(&mut self) -> Result<()> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::GetQueuedPrompts { id }).await
+        self.send_request(Request::GetQueuedPrompts { id }).await?;
+        Ok(id)
     }
 
     /// Cancel only the named soft interrupts. The server answers with
@@ -1738,6 +1767,7 @@ impl RemoteConnection {
             protocol_bytes_scanned: 0,
             has_loaded_history: false,
             server_accepts_focus: false,
+            server_accepts_queued_prompts: false,
             reported_focus: None,
             last_account_usage_poll: None,
             call_output_tokens_seen: 0,

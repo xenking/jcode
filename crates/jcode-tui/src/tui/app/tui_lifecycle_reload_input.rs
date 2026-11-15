@@ -77,6 +77,7 @@ impl App {
 
         self.queued_messages = queued_messages;
         self.queued_commands = restored.queued_commands;
+        self.uncertain_queue_prompts = restored.uncertain_queue_prompts;
         if self.has_queued_followups() {
             if self.is_remote {
                 // Do not synthesize a processing turn for restored remote follow-ups.

@@ -195,6 +195,73 @@ pub(super) async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    // Queue focus takes precedence over global Alt-arrow shortcuts, but not modals.
+    if modifiers == KeyModifiers::ALT
+        && matches!(code, KeyCode::Up | KeyCode::Down)
+        && !app.server_queued_prompts.is_empty()
+    {
+        let last = app.server_queued_prompts.len() - 1;
+        app.selected_queued_prompt = Some(match (app.selected_queued_prompt, code) {
+            (None, KeyCode::Up) => last,
+            (None, _) => 0,
+            (Some(index), KeyCode::Up) => index.saturating_sub(1),
+            (Some(index), _) => (index + 1).min(last),
+        });
+        app.set_status_notice("Queue: Alt+↑/↓ select · m mode · Enter interrupt · Esc unfocus");
+        return Ok(());
+    }
+    if let Some(index) = app.selected_queued_prompt {
+        if modifiers.is_empty() {
+            match code {
+                KeyCode::Esc => {
+                    app.selected_queued_prompt = None;
+                    return Ok(());
+                }
+                KeyCode::Char('m') => {
+                    if let Some(prompt) = app.server_queued_prompts.get(index) {
+                        let mode = match prompt.mode {
+                            crate::protocol::QueuedPromptMode::Steer => {
+                                crate::protocol::QueuedPromptMode::AfterYield
+                            }
+                            crate::protocol::QueuedPromptMode::AfterYield => {
+                                crate::protocol::QueuedPromptMode::Steer
+                            }
+                        };
+                        match remote
+                            .set_queued_prompt_mode(prompt.client_id.clone(), mode)
+                            .await
+                        {
+                            Ok(id) => app.pending_queue_requests.push((id, None)),
+                            Err(error) => app.push_display_message(DisplayMessage::error(format!(
+                                "Failed to change queued prompt mode: {error}"
+                            ))),
+                        }
+                    }
+                    return Ok(());
+                }
+                KeyCode::Enter => {
+                    if let Some(prompt) = app.server_queued_prompts.get(index) {
+                        match remote
+                            .interrupt_queued_prompt(prompt.client_id.clone())
+                            .await
+                        {
+                            Ok(id) => {
+                                app.pending_queue_requests.push((id, None));
+                                app.selected_queued_prompt = None;
+                                app.set_status_notice("Interrupting for selected queued prompt");
+                            }
+                            Err(error) => app.push_display_message(DisplayMessage::error(format!(
+                                "Failed to interrupt for queued prompt: {error}"
+                            ))),
+                        }
+                    }
+                    return Ok(());
+                }
+                _ => app.selected_queued_prompt = None,
+            }
+        }
+    }
+
     // Inline hotkey feedback: when a known-but-rarely-used chord is pressed,
     // show "you just pressed X → does Y". Placed after the overlay handlers so
     // overlay-local keys stay silent. Unknown chords are reported at the
@@ -506,50 +573,6 @@ pub(super) async fn handle_remote_key_internal(
         }
     }
 
-    // Alt+Up/Down enters and moves queue focus without consuming the draft.
-    if modifiers == KeyModifiers::ALT && matches!(code, KeyCode::Up | KeyCode::Down)
-        && !app.server_queued_prompts.is_empty()
-    {
-        let last = app.server_queued_prompts.len() - 1;
-        app.selected_queued_prompt = Some(match (app.selected_queued_prompt, code) {
-            (None, KeyCode::Up) => last,
-            (None, _) => 0,
-            (Some(index), KeyCode::Up) => index.saturating_sub(1),
-            (Some(index), _) => (index + 1).min(last),
-        });
-        app.set_status_notice("Queue: Alt+↑/↓ select · m mode · Enter interrupt · Esc unfocus");
-        return Ok(());
-    }
-    if let Some(index) = app.selected_queued_prompt {
-        if modifiers.is_empty() {
-            match code {
-                KeyCode::Esc => {
-                    app.selected_queued_prompt = None;
-                    return Ok(());
-                }
-                KeyCode::Char('m') => {
-                    if let Some(prompt) = app.server_queued_prompts.get(index) {
-                        let mode = match prompt.mode {
-                            crate::protocol::QueuedPromptMode::Steer => crate::protocol::QueuedPromptMode::AfterYield,
-                            crate::protocol::QueuedPromptMode::AfterYield => crate::protocol::QueuedPromptMode::Steer,
-                        };
-                        remote.set_queued_prompt_mode(prompt.client_id.clone(), mode).await?;
-                    }
-                    return Ok(());
-                }
-                KeyCode::Enter => {
-                    if let Some(prompt) = app.server_queued_prompts.get(index) {
-                        remote.interrupt_queued_prompt(prompt.client_id.clone()).await?;
-                        app.selected_queued_prompt = None;
-                        app.set_status_notice("Interrupting for selected queued prompt");
-                    }
-                    return Ok(());
-                }
-                _ => app.selected_queued_prompt = None,
-            }
-        }
-    }
-
     if app.handle_command_suggestion_key(code, modifiers) {
         return Ok(());
     }
@@ -724,9 +747,9 @@ pub(super) async fn handle_remote_key_internal(
             KeyCode::Tab | KeyCode::Char('t') => {
                 app.queue_mode = !app.queue_mode;
                 let mode_str = if app.queue_mode {
-                    "Queue mode: messages wait until response completes"
+                    "Default send mode: after yield"
                 } else {
-                    "Immediate mode: messages send next (no interrupt)"
+                    "Default send mode: steer at the next safe point"
                 };
                 app.set_status_notice(mode_str);
                 return Ok(());
@@ -734,8 +757,13 @@ pub(super) async fn handle_remote_key_internal(
             KeyCode::Up => {
                 let had_server_interrupts = !app.pending_soft_interrupts.is_empty();
                 let legacy_ids = app.pending_soft_interrupt_client_ids();
-                if had_server_interrupts && legacy_ids.is_none() && !app.server_queued_prompts.is_empty() {
-                    app.set_status_notice("Cannot recall legacy follow-ups while server queue is nonempty");
+                if had_server_interrupts
+                    && legacy_ids.is_none()
+                    && (remote.supports_queued_prompts() || !app.server_queued_prompts.is_empty())
+                {
+                    app.set_status_notice(
+                        "Cannot recall legacy follow-ups while server queue is nonempty",
+                    );
                     return Ok(());
                 }
                 let had_pending = app.retrieve_pending_message_for_edit();
@@ -784,7 +812,14 @@ pub(super) async fn handle_remote_key_internal(
             match app.send_action(true) {
                 SendAction::Submit => submit_prepared_remote_input(app, remote, prepared).await?,
                 SendAction::Queue => {
-                    super::update::send_queued_prompt(app, prepared.expanded, prepared.images, crate::protocol::QueuedPromptMode::AfterYield, remote).await;
+                    super::update::send_queued_prompt(
+                        app,
+                        prepared.expanded,
+                        prepared.images,
+                        crate::protocol::QueuedPromptMode::AfterYield,
+                        remote,
+                    )
+                    .await;
                 }
                 SendAction::Interleave => {
                     app.send_interleave_now(prepared.expanded, prepared.images, remote)
