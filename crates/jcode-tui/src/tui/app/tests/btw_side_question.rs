@@ -394,3 +394,76 @@ fn btw_on_a_daemon_session_opens_a_card_with_a_hidden_fork() {
         );
     });
 }
+
+#[test]
+fn btw_server_turn_events_are_unwrapped_into_the_card() {
+    let mut app = create_test_app();
+    app.btw = Some(crate::tui::app::btw::BtwCard {
+        question: "wrapped?".to_string(),
+        child: Some("child-session".to_string()),
+        streaming: true,
+        ..Default::default()
+    });
+    app.sync_btw_card();
+
+    let identity = crate::protocol::TurnIdentity {
+        runtime_generation: "gen".to_string(),
+        turn_id: 3,
+    };
+    let wrapped = |event: crate::protocol::ServerEvent| crate::protocol::ServerEvent::TurnEvent {
+        identity: identity.clone(),
+        event: Box::new(event),
+    };
+
+    assert!(!app.apply_btw_server_event(wrapped(
+        crate::protocol::ServerEvent::TextDelta {
+            text: "It rides in a turn_event.".to_string(),
+        }
+    )));
+    assert_eq!(
+        app.btw_card().expect("card").answer,
+        "It rides in a turn_event.",
+        "turn_event-scoped deltas must reach the card"
+    );
+
+    assert!(app.apply_btw_server_event(wrapped(
+        crate::protocol::ServerEvent::MessageEnd { stop_reason: None }
+    )) == false);
+    assert!(app.apply_btw_server_event(wrapped(crate::protocol::ServerEvent::Done {
+        id: 9
+    })));
+    assert!(!app.btw_card().expect("card").streaming);
+}
+
+#[test]
+fn btw_remote_child_copies_the_conversation_the_user_is_looking_at() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_session_id = Some(app.session.id.clone());
+        app.push_display_message(DisplayMessage::user("Reply with exactly: ready"));
+        app.push_display_message(DisplayMessage::assistant("ready"));
+
+        let child_id = app.create_btw_child_session().expect("hidden child session");
+        let child = Session::load(&child_id).expect("child session file");
+        let transcript = child
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            transcript.contains("Reply with exactly: ready"),
+            "the hidden fork carries what the user asked: {transcript}"
+        );
+        assert!(
+            transcript.lines().any(|line| line.trim() == "ready"),
+            "and what the assistant answered: {transcript}"
+        );
+    });
+}

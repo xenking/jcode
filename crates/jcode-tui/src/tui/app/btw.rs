@@ -45,8 +45,8 @@ impl BtwCard {
     fn display_text(&self) -> String {
         match self.error.as_deref() {
             Some(error) => format!("side question failed: {error}"),
-            None if self.answer.is_empty() => "…".to_string(),
-            None => self.answer.clone(),
+            None if self.answer.trim().is_empty() => "…".to_string(),
+            None => self.answer.trim_start().to_string(),
         }
     }
 }
@@ -122,6 +122,7 @@ impl App {
             self.inline_view_state = None;
             self.inline_view_is_btw = false;
         }
+        self.force_full_repaint = true;
         self.set_status_notice("Side question closed");
     }
 
@@ -188,11 +189,37 @@ impl App {
     pub(super) fn create_btw_child_session(&self) -> anyhow::Result<String> {
         let parent_session_id = super::commands::active_session_id(self);
         let mut child = Session::create(Some(parent_session_id), None);
-        // A remote client holds the conversation as provider messages (its
-        // session file is only a stub), so copy from the same list a turn would
-        // send. Hidden reminders keep their hidden role in the child.
-        for message in self.materialized_provider_messages() {
-            child.add_message(message.role, message.content);
+        // A remote client's session file is a stub and its provider list only
+        // holds the startup context, so its real conversation lives in the
+        // transcript it renders. Copy what the user is actually looking at;
+        // an in-process session can copy the richer provider messages.
+        if self.is_remote {
+            for message in self.materialized_provider_messages() {
+                // Keep the session context (date, cwd) the daemon wrote.
+                if message.role == Role::User
+                    && message.is_internal_system_reminder()
+                {
+                    child.add_message(message.role, message.content);
+                }
+            }
+            for message in self.display_messages() {
+                if message.content.trim().is_empty() {
+                    continue;
+                }
+                let role = match message.role.as_str() {
+                    "user" => Role::User,
+                    "assistant" => Role::Assistant,
+                    _ => continue,
+                };
+                child.add_message(role, vec![ContentBlock::Text {
+                    text: message.content.clone(),
+                    cache_control: None,
+                }]);
+            }
+        } else {
+            for message in self.materialized_provider_messages() {
+                child.add_message(message.role, message.content);
+            }
         }
         child.compaction = self.session.compaction.clone();
         child.system_prompt = self.session.system_prompt.clone();
@@ -333,16 +360,14 @@ impl App {
     /// Apply one server event from the side question's hidden session. Returns
     /// true when the turn is over (done, provider error, or card closed).
     pub(super) fn apply_btw_server_event(&mut self, event: crate::protocol::ServerEvent) -> bool {
-        let kind = match &event {
-            crate::protocol::ServerEvent::TextDelta { .. } => "text_delta",
-            crate::protocol::ServerEvent::Done { .. } => "done",
-            crate::protocol::ServerEvent::History { .. } => "history",
-            crate::protocol::ServerEvent::Error { .. } => "error",
-            _ => "other",
-        };
-        crate::logging::info(&format!("btw: server event {kind}"));
         let Some(card) = self.btw.as_mut() else {
             return true;
+        };
+        // The daemon scopes a turn's output inside `TurnEvent`; a side-question
+        // turn is the same wire shape as any other, so unwrap it first.
+        let event = match event {
+            crate::protocol::ServerEvent::TurnEvent { event, .. } => *event,
+            other => other,
         };
         let mut finished = false;
         let mut failed = false;

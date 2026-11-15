@@ -22,7 +22,13 @@ pub(crate) fn inline_ui_height(app: &dyn TuiState) -> u16 {
             let rows_needed = visible_rows + 1 + 2; // header + rounded border
             // The `/btw` side-question card streams an answer and pays for its
             // rows; every other inline view stays a compact notice.
-            rows_needed.min(if app.btw_card_open() { 18 } else { 10 })
+            if app.btw_card_open() {
+                // A streamed answer wraps, so a card with few logical lines
+                // still needs room; cap it so it never eats the transcript.
+                rows_needed.clamp(10, 18)
+            } else {
+                rows_needed.min(10)
+            }
         }
         None => 0,
     }
