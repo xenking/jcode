@@ -1736,3 +1736,105 @@ impl Provider for OpenRouterSlotProvider {
 
 #[path = "commands/tests/memory_tests.rs"]
 mod memory;
+
+#[test]
+fn run_actionable_todos_skip_work_assigned_to_another_session() {
+    let mut lane = dependency_todo("lane", &[]);
+    lane.assigned_to = Some("swarm-worker".into());
+    let own = dependency_todo("own", &[]);
+    let actionable = run_actionable_todos(&[lane.clone(), own], &[], "coordinator");
+    assert_eq!(actionable.len(), 1);
+    assert_eq!(actionable[0].id, "own");
+    for owner in ["@self", "", "coordinator"] {
+        lane.assigned_to = Some(owner.into());
+        assert_eq!(
+            run_actionable_todos(&[lane.clone()], &[], "coordinator").len(),
+            1,
+            "{owner:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn run_waits_for_working_swarm_members_instead_of_poking() {
+    use todo_followup::{RunSwarmWait, wait_for_run_swarm_members};
+    let open = vec![dependency_todo("open", &[])];
+    let done = {
+        let mut todo = dependency_todo("done", &[]);
+        todo.status = "completed".into();
+        vec![todo]
+    };
+    let poll = std::time::Duration::from_millis(1);
+
+    // No members: normal poke policy.
+    assert_eq!(
+        wait_for_run_swarm_members(&open, true, poll, || async { Vec::new() }).await,
+        RunSwarmWait::Clear
+    );
+    // Nothing unfinished: never wait.
+    assert_eq!(
+        wait_for_run_swarm_members(&done, true, poll, || async { vec!["w".to_string()] }).await,
+        RunSwarmWait::Clear
+    );
+    // At the turn limit a working member blocks instead of waiting forever.
+    assert_eq!(
+        wait_for_run_swarm_members(&open, false, poll, || async { vec!["w".to_string()] }).await,
+        RunSwarmWait::Blocked(vec!["w".to_string()])
+    );
+    // Otherwise wait until members finish, then resume with a report prompt.
+    let polls = std::sync::atomic::AtomicUsize::new(0);
+    let outcome = wait_for_run_swarm_members(&open, true, poll, || {
+        let remaining =
+            3usize.saturating_sub(polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
+        async move { vec!["w".to_string(); usize::from(remaining > 0)] }
+    })
+    .await;
+    match outcome {
+        RunSwarmWait::Resume(message) => {
+            assert!(message.contains("w finished") || message.contains("w"))
+        }
+        other => panic!("expected resume, got {other:?}"),
+    }
+    assert!(polls.load(std::sync::atomic::Ordering::SeqCst) >= 4);
+}
+
+#[test]
+fn run_turn_tool_call_detection_only_looks_at_new_messages() {
+    use crate::message::{ContentBlock, Role};
+    let stored = |content: Vec<ContentBlock>| crate::session::StoredMessage {
+        id: "m".into(),
+        role: Role::Assistant,
+        content,
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    };
+    let text = || ContentBlock::Text {
+        text: "nothing to do".into(),
+        cache_control: None,
+    };
+    let tool = || ContentBlock::ToolUse {
+        id: "t".into(),
+        name: "bash".into(),
+        input: serde_json::json!({}),
+        thought_signature: None,
+    };
+    let history = vec![stored(vec![tool()]), stored(vec![text()])];
+    assert!(!todo_followup::run_turn_had_tool_calls(&history, 2));
+    let mut with_tool = history.clone();
+    with_tool.push(stored(vec![tool()]));
+    assert!(todo_followup::run_turn_had_tool_calls(&with_tool, 2));
+    assert!(todo_followup::run_turn_had_tool_calls(&history, 9));
+}
+
+#[test]
+fn run_budget_stops_repeating_after_a_poke_turn_without_tool_calls() {
+    let mut budget = crate::todo::IncompleteTodoBudget::default();
+    let todos = vec![dependency_todo("stuck", &[])];
+    assert!(budget.allow_follow_up(&todos));
+    budget.record_turn(false);
+    assert!(!budget.allow_follow_up(&todos));
+    let changed = vec![dependency_todo("other", &[])];
+    assert!(budget.allow_follow_up(&changed));
+}

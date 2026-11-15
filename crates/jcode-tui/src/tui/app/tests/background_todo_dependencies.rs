@@ -378,3 +378,108 @@ fn background_dependency_reload_reads_session_scoped_task_state() {
         std::fs::remove_file(path).unwrap();
     });
 }
+
+fn swarm_member(id: &str, status: &str, parent: Option<&str>) -> crate::protocol::SwarmMemberStatus {
+    crate::protocol::SwarmMemberStatus {
+        session_id: id.to_string(),
+        friendly_name: Some(id.to_string()),
+        status: status.to_string(),
+        detail: None,
+        task_label: None,
+        role: None,
+        is_headless: Some(true),
+        live_attachments: None,
+        status_age_secs: Some(1),
+        output_tail: None,
+        report_back_to_session_id: parent.map(str::to_string),
+        todo_progress: None,
+        todo_items: Vec::new(),
+        runtime: crate::protocol::SwarmMemberRuntime::default(),
+    }
+}
+
+#[test]
+fn todo_assigned_to_a_swarm_worker_is_never_poked() {
+    with_temp_jcode_home(|| {
+        let mut app = waiting_dependency_test_app();
+        let mut lane = dependency_todo("worker-lane", "unused");
+        lane.waiting_on.clear();
+        lane.assigned_to = Some("swarm-worker-1".into());
+        crate::todo::save_todos(&app.session.id, std::slice::from_ref(&lane)).unwrap();
+        assert!(app.todo_is_paused_for_auto_followup(&lane));
+        for _ in 0..5 {
+            assert!(!app.schedule_turn_end_followups());
+            assert!(!app.schedule_auto_poke_followup_if_needed());
+            assert!(app.queued_messages.is_empty());
+        }
+        // Own work (`@self`, or no owner) is still poked.
+        lane.assigned_to = Some("@self".into());
+        crate::todo::save_todos(&app.session.id, std::slice::from_ref(&lane)).unwrap();
+        assert!(!app.todo_is_paused_for_auto_followup(&lane));
+        assert!(app.schedule_turn_end_followups());
+    });
+}
+
+#[test]
+fn running_spawned_swarm_members_suppress_poke_until_they_finish() {
+    with_temp_jcode_home(|| {
+        let mut app = waiting_dependency_test_app();
+        let mut own = dependency_todo("own-work", "unused");
+        own.waiting_on.clear();
+        crate::todo::save_todos(&app.session.id, std::slice::from_ref(&own)).unwrap();
+        let me = app.session.id.clone();
+        app.remote_swarm_members = vec![
+            swarm_member("worker", "running", Some(&me)),
+            swarm_member("stranger", "running", Some("someone-else")),
+        ];
+        for _ in 0..5 {
+            assert!(!app.schedule_turn_end_followups());
+            assert!(app.queued_messages.is_empty());
+        }
+        // Only the spawner's members count, and only while working.
+        app.remote_swarm_members = vec![
+            swarm_member("worker", "completed", Some(&me)),
+            swarm_member("stranger", "running", Some("someone-else")),
+        ];
+        assert!(app.schedule_turn_end_followups());
+    });
+}
+
+#[test]
+fn poke_turn_without_tool_calls_blocks_repeat_until_todos_change() {
+    with_temp_jcode_home(|| {
+        let mut app = waiting_dependency_test_app();
+        let mut own = dependency_todo("own-work", "unused");
+        own.waiting_on.clear();
+        crate::todo::save_todos(&app.session.id, std::slice::from_ref(&own)).unwrap();
+        assert!(app.schedule_turn_end_followups());
+        // The poke turn replied "nothing to do" and called no tool.
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+        for _ in 0..4 {
+            assert!(!app.schedule_turn_end_followups());
+            assert!(app.queued_messages.is_empty());
+        }
+        // A changed todo set is a new situation.
+        own.content.push_str(" (rescoped)");
+        crate::todo::save_todos(&app.session.id, std::slice::from_ref(&own)).unwrap();
+        assert!(app.schedule_turn_end_followups());
+    });
+}
+
+#[test]
+fn poke_turn_with_tool_calls_keeps_the_normal_budget() {
+    with_temp_jcode_home(|| {
+        let mut app = waiting_dependency_test_app();
+        let mut own = dependency_todo("own-work", "unused");
+        own.waiting_on.clear();
+        crate::todo::save_todos(&app.session.id, std::slice::from_ref(&own)).unwrap();
+        for _ in 0..crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS {
+            assert!(app.schedule_turn_end_followups());
+            app.queued_messages.clear();
+            app.pending_queued_dispatch = false;
+            app.turn_tool_call_seen = true;
+        }
+        assert!(!app.schedule_turn_end_followups());
+    });
+}

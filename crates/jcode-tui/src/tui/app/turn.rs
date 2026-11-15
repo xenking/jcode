@@ -631,6 +631,7 @@ impl App {
                                     }
                                     StreamEvent::ToolUseStart { id, name } => {
                                         self.streaming.response_output.tool();
+                                        self.turn_tool_call_seen = true;
                                         self.usage_reset.openai_quota_rejected = false;
                                         // Tool input JSON is still provider-generated output and is
                                         // included in provider output-token usage. Keep the TPS timer

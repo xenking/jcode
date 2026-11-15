@@ -110,6 +110,39 @@ async fn fetch_swarm_members(session_id: &str) -> Result<Vec<AgentInfo>> {
     }
 }
 
+/// Members this session spawned that are still working, per the daemon. Their
+/// completion wakes the spawner, so a headless runner must not poke meanwhile.
+/// Fails open: with no daemon or no swarm there is nothing to wait for.
+pub async fn working_members_spawned_by(session_id: &str) -> Vec<String> {
+    let members = match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        fetch_swarm_members(session_id),
+    )
+    .await
+    {
+        Ok(Ok(members)) => members,
+        _ => return Vec::new(),
+    };
+    spawned_working_member_ids(&members, session_id)
+}
+
+fn spawned_working_member_ids(members: &[AgentInfo], session_id: &str) -> Vec<String> {
+    let mut working: Vec<String> = members
+        .iter()
+        .filter(|member| {
+            member.session_id != session_id
+                && member.report_back_to_session_id.as_deref() == Some(session_id)
+                && member
+                    .status
+                    .as_deref()
+                    .is_some_and(crate::todo::swarm_member_is_working)
+        })
+        .map(|member| member.session_id.clone())
+        .collect();
+    working.sort();
+    working
+}
+
 #[cfg(test)]
 fn swarm_member_is_in_flight(member: &AgentInfo) -> bool {
     matches!(

@@ -1461,6 +1461,7 @@ impl App {
         if self.all_open_todos_are_paused() {
             self.last_auto_poke_fingerprint = None;
             self.auto_poke_attempts = 0;
+            self.auto_poke_outcome_pending = false;
             return false;
         }
         self.schedule_auto_poke_followup_after_response(final_response_delivered)
@@ -1515,6 +1516,16 @@ impl App {
             return false;
         }
 
+        // A poke whose turn made no tool calls achieved nothing (the model
+        // answered "nothing to do"). Asking again for the same open state only
+        // loops, so spend the budget until the todo set or member state changes.
+        if std::mem::take(&mut self.auto_poke_outcome_pending) && !self.turn_tool_call_seen {
+            crate::logging::info(
+                "AUTO_POKE_DECISION action=idle reason=poke_turn_without_tool_calls",
+            );
+            self.auto_poke_attempts = crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS;
+        }
+
         let todos = super::commands::poke_todos(self);
         let incomplete: Vec<_> = todos
             .iter()
@@ -1527,6 +1538,7 @@ impl App {
             // completion. Do not spend work or assessment review budgets.
             self.last_auto_poke_fingerprint = None;
             self.auto_poke_attempts = 0;
+            self.auto_poke_outcome_pending = false;
             return false;
         }
         let todo_session_id = self
@@ -1756,6 +1768,8 @@ impl App {
         self.todo_completion_gate_attempts = 0;
         self.last_auto_poke_fingerprint = Some(fingerprint);
         self.auto_poke_attempts += 1;
+        self.auto_poke_outcome_pending = true;
+        self.turn_tool_call_seen = false;
         self.queued_messages.push(poke_message);
         self.pending_queued_dispatch = true;
         true

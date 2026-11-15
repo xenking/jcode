@@ -271,6 +271,10 @@ impl App {
             .as_deref()
             .unwrap_or(&self.session.id);
         crate::todo::todo_requires_user_auth(todo)
+            // Handed to a swarm worker: the owner works it and reports back.
+            || crate::todo::todo_assigned_elsewhere(todo, session_id)
+            // Spawned workers still running will wake this session when done.
+            || self.has_working_swarm_members(session_id)
             || crate::todo::todo_goal_cannot_complete(
                 todo,
                 &crate::todo::load_goals(session_id).unwrap_or_default(),
@@ -279,6 +283,15 @@ impl App {
                 self.running_todo_await_dependency(task_id)
                     || self.running_todo_background_dependency(task_id).is_some()
             })
+    }
+
+    /// Whether any swarm member spawned by `session_id` is still working.
+    pub(super) fn has_working_swarm_members(&self, session_id: &str) -> bool {
+        self.remote_swarm_members.iter().any(|member| {
+            member.session_id != session_id
+                && member.report_back_to_session_id.as_deref() == Some(session_id)
+                && crate::todo::swarm_member_is_working(&member.status)
+        })
     }
 
     pub(super) fn running_todo_await_dependency(&self, task_id: &str) -> bool {

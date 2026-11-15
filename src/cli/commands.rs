@@ -2858,9 +2858,10 @@ fn run_command_auto_poke_limit_reached(turns_completed: usize, max_turns: Option
 
 mod todo_followup;
 use todo_followup::{
-    RunAutoPokeFollowUp, build_run_auto_poke_follow_up_from_todos, prepare_run_todo_follow_up,
-    run_actionable_poke_message, run_blocked_notice, run_cannot_complete_notice, run_goals,
-    run_todos, run_user_auth_notice, take_run_gate_digest_if_turn_ended,
+    RunAutoPokeFollowUp, RunSwarmWait, build_run_auto_poke_follow_up_from_todos,
+    prepare_run_todo_follow_up, run_actionable_poke_message, run_blocked_notice,
+    run_cannot_complete_notice, run_goals, run_todos, run_turn_had_tool_calls,
+    run_user_auth_notice, take_run_gate_digest_if_turn_ended, wait_for_run_swarm_members_live,
 };
 #[cfg(test)]
 use todo_followup::{run_actionable_todos, take_run_gate_digest};
@@ -2876,7 +2877,9 @@ async fn run_single_message_command_plain_with_auto_poke(
     let mut gate_digest_delivered = false;
     let mut incomplete_budget = crate::todo::IncompleteTodoBudget::default();
     loop {
+        let messages_before = agent.messages().len();
         agent.run_once(&next_message).await?;
+        incomplete_budget.record_turn(run_turn_had_tool_calls(agent.messages(), messages_before));
         turns_completed += 1;
         if !run_command_auto_poke_enabled() {
             break;
@@ -2894,6 +2897,28 @@ async fn run_single_message_command_plain_with_auto_poke(
             gate_digest_delivered = false;
             next_message = message;
             continue;
+        }
+        match wait_for_run_swarm_members_live(
+            agent.session_id(),
+            &todos,
+            !run_command_auto_poke_limit_reached(turns_completed, max_turns),
+        )
+        .await
+        {
+            RunSwarmWait::Resume(message) => {
+                incomplete_budget = crate::todo::IncompleteTodoBudget::default();
+                gate_digest_delivered = false;
+                next_message = message;
+                continue;
+            }
+            RunSwarmWait::Blocked(members) => {
+                eprintln!(
+                    "Stopped at the turn limit while swarm member(s) {} are still working.",
+                    members.join(", ")
+                );
+                break;
+            }
+            RunSwarmWait::Clear => {}
         }
         if todos.iter().any(crate::todo::is_incomplete_todo)
             && !actionable_todos.iter().any(crate::todo::is_incomplete_todo)
@@ -2994,7 +3019,9 @@ async fn run_single_message_command_capture_with_auto_poke(
     let mut gate_digest_delivered = false;
     let mut incomplete_budget = crate::todo::IncompleteTodoBudget::default();
     loop {
+        let messages_before = agent.messages().len();
         outputs.push(agent.run_once_capture(&next_message).await?);
+        incomplete_budget.record_turn(run_turn_had_tool_calls(agent.messages(), messages_before));
         turns_completed += 1;
         if !run_command_auto_poke_enabled() {
             break;
@@ -3012,6 +3039,28 @@ async fn run_single_message_command_capture_with_auto_poke(
             gate_digest_delivered = false;
             next_message = message;
             continue;
+        }
+        match wait_for_run_swarm_members_live(
+            agent.session_id(),
+            &todos,
+            !run_command_auto_poke_limit_reached(turns_completed, max_turns),
+        )
+        .await
+        {
+            RunSwarmWait::Resume(message) => {
+                incomplete_budget = crate::todo::IncompleteTodoBudget::default();
+                gate_digest_delivered = false;
+                next_message = message;
+                continue;
+            }
+            RunSwarmWait::Blocked(members) => {
+                outputs.push(format!(
+                    "Stopped at the turn limit while swarm member(s) {} are still working.",
+                    members.join(", ")
+                ));
+                break;
+            }
+            RunSwarmWait::Clear => {}
         }
         if todos.iter().any(crate::todo::is_incomplete_todo)
             && !actionable_todos.iter().any(crate::todo::is_incomplete_todo)
@@ -3135,6 +3184,7 @@ async fn run_single_message_command_ndjson(
     let mut gate_digest_delivered = false;
     let mut incomplete_budget = crate::todo::IncompleteTodoBudget::default();
     loop {
+        let messages_before = agent.messages().len();
         let turn_result = {
             let mut run_future = std::pin::pin!(agent.run_once_streaming_mpsc(
                 &next_message,
@@ -3169,6 +3219,7 @@ async fn run_single_message_command_ndjson(
             result = Err(err);
             break;
         }
+        incomplete_budget.record_turn(run_turn_had_tool_calls(agent.messages(), messages_before));
         turns_completed += 1;
         if !run_command_auto_poke_enabled() {
             break;
@@ -3194,6 +3245,42 @@ async fn run_single_message_command_ndjson(
                 }),
             )?;
             continue;
+        }
+        match wait_for_run_swarm_members_live(
+            &session_id,
+            &todos,
+            !run_command_auto_poke_limit_reached(turns_completed, max_turns),
+        )
+        .await
+        {
+            RunSwarmWait::Resume(message) => {
+                incomplete_budget = crate::todo::IncompleteTodoBudget::default();
+                gate_digest_delivered = false;
+                next_message = message;
+                write_json_line(
+                    &mut stdout,
+                    &serde_json::json!({
+                        "type": "auto_poke_swarm_resolved",
+                        "session_id": session_id,
+                        "message": next_message,
+                    }),
+                )?;
+                continue;
+            }
+            RunSwarmWait::Blocked(members) => {
+                write_json_line(
+                    &mut stdout,
+                    &serde_json::json!({
+                        "type": "auto_poke_stopped",
+                        "session_id": session_id,
+                        "reason": "swarm_members_working",
+                        "members": members,
+                        "max_turns": max_turns,
+                    }),
+                )?;
+                break;
+            }
+            RunSwarmWait::Clear => {}
         }
         if todos.iter().any(crate::todo::is_incomplete_todo)
             && !actionable_todos.iter().any(crate::todo::is_incomplete_todo)

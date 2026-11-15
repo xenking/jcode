@@ -585,6 +585,7 @@ fn handle_server_event_inner(
         }
         ServerEvent::ToolStart { id, name } => {
             app.streaming.response_output.tool();
+            app.turn_tool_call_seen = true;
             app.usage_reset.openai_quota_rejected = false;
             // Tool-call JSON is provider-generated output and is included in output-token
             // usage. Keep the TPS timer running until the server reports ToolExec; actual
@@ -623,6 +624,7 @@ fn handle_server_event_inner(
             // A reconnect can resume during execution, without replaying the
             // ToolStart event that normally marks this response as tool work.
             app.streaming.response_output.tool();
+            app.turn_tool_call_seen = true;
             // Provider output generation for this tool call is complete, but final usage
             // snapshots often arrive later. Keep collecting deltas while excluding tool
             // runtime from the elapsed TPS denominator.

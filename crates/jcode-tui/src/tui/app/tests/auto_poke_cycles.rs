@@ -104,13 +104,16 @@ fn auto_poke_retries_three_times_until_incomplete_todos_change() {
         assert!(app.schedule_auto_poke_followup_if_needed());
 
         // Simulate dispatch and completion of the automatically poked turn.
+        // Productive turns call tools. A tool-less turn is covered separately.
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
+        app.turn_tool_call_seen = true;
         for expected in 2..=3 {
             assert!(app.schedule_auto_poke_followup_if_needed());
             assert_eq!(app.auto_poke_attempts, expected);
             app.queued_messages.clear();
             app.pending_queued_dispatch = false;
+            app.turn_tool_call_seen = true;
         }
         assert!(
             !app.schedule_auto_poke_followup_if_needed(),

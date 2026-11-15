@@ -1095,6 +1095,11 @@ pub struct App {
     /// Last incomplete state and its bounded automatic continuation budget.
     last_auto_poke_fingerprint: Option<String>,
     auto_poke_attempts: u8,
+    /// An incomplete-todo poke was queued and the turn it starts has not ended.
+    auto_poke_outcome_pending: bool,
+    /// A tool was called since that poke was queued. A poke turn that calls no
+    /// tool changed nothing, so the same open todos must not be poked again.
+    turn_tool_call_seen: bool,
     /// Set when the current turn ended with a provider guardrail/refusal stop
     /// (ServerEvent::ProviderGuardrail). Consumed by the Done handler to
     /// update `consecutive_guardrail_stops`.
