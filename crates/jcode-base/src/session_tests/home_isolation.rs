@@ -44,13 +44,13 @@ fn unset_home_never_persists_a_session_into_the_real_home() {
 #[test]
 fn an_explicit_real_home_is_refused_by_a_test_build() {
     let _guard = lock_env();
-    let real_home = dirs::home_dir()
-        .expect("home directory")
-        .join(".jcode");
+    let real_home = dirs::home_dir().expect("home directory").join(".jcode");
     let _home = EnvVarGuard::set("JCODE_HOME", &real_home);
 
     let session_id = format!("session_real_home_write_probe_{}", std::process::id());
-    let leaked = real_home.join("sessions").join(format!("{session_id}.json"));
+    let leaked = real_home
+        .join("sessions")
+        .join(format!("{session_id}.json"));
     assert!(
         !leaked.exists(),
         "test fixture id must not already exist in the real home: {}",
@@ -69,5 +69,9 @@ fn an_explicit_real_home_is_refused_by_a_test_build() {
         message.contains("real jcode home"),
         "refusal should name the problem: {message}"
     );
-    assert!(!leaked.exists(), "nothing may be written: {}", leaked.display());
+    assert!(
+        !leaked.exists(),
+        "nothing may be written: {}",
+        leaked.display()
+    );
 }

@@ -2064,7 +2064,10 @@ fn idle_precompaction_arms_at_the_configured_ratio_of_the_threshold() {
         "fixture must sit above the idle target: tokens={tokens} target={target}"
     );
     let now = Instant::now();
-    assert!(case.manager.plan_idle_precompaction_with(&case.messages, now, None));
+    assert!(
+        case.manager
+            .plan_idle_precompaction_with(&case.messages, now, None)
+    );
 }
 
 #[test]

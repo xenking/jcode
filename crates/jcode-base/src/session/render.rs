@@ -926,7 +926,11 @@ fn compact_token_count(tokens: u64) -> String {
 /// `12s` / `12.4s` / `2m14s` for compact labels.
 fn compaction_duration_label(duration_ms: u64) -> String {
     if duration_ms >= 60_000 {
-        format!("{}m{}s", duration_ms / 60_000, (duration_ms % 60_000) / 1_000)
+        format!(
+            "{}m{}s",
+            duration_ms / 60_000,
+            (duration_ms % 60_000) / 1_000
+        )
     } else if duration_ms >= 10_000 {
         format!("{}s", duration_ms / 1_000)
     } else {

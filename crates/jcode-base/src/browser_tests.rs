@@ -41,7 +41,12 @@ fn test_paths() {
     // The browser lives inside the resolved jcode home, which a test build keeps
     // outside the developer's real `~/.jcode`.
     let home = crate::storage::jcode_dir().expect("jcode home");
-    assert!(bdir.starts_with(&home), "{} not under {}", bdir.display(), home.display());
+    assert!(
+        bdir.starts_with(&home),
+        "{} not under {}",
+        bdir.display(),
+        home.display()
+    );
     assert!(bdir.to_string_lossy().ends_with("browser"));
 
     let bin = browser_binary_path();

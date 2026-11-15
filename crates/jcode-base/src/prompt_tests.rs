@@ -73,7 +73,11 @@ fn codemode_prompt_module_follows_capability() {
         },
     );
     assert!(!disabled.static_part.contains("# Tool calls"));
-    assert!(!disabled.static_part.contains("`codemode` runs one JavaScript"));
+    assert!(
+        !disabled
+            .static_part
+            .contains("`codemode` runs one JavaScript")
+    );
 }
 
 #[test]
@@ -91,7 +95,10 @@ fn codemode_prompt_names_the_conditions_where_it_beats_other_tools() {
             "CODEMODE_PROMPT must steer with: {clause}"
         );
     }
-    assert!(CODEMODE_PROMPT.len() <= 900, "prompt module must stay cheap");
+    assert!(
+        CODEMODE_PROMPT.len() <= 900,
+        "prompt module must stay cheap"
+    );
 }
 
 /// Verify skill prompts don't accidentally introduce "Claude Code" identity

@@ -3488,11 +3488,8 @@ fn compaction_divider_renders_from_a_stored_session() {
 /// while nothing was running.
 #[test]
 fn idle_compaction_divider_says_it_compacted_while_waiting() {
-    let mut session = Session::create_with_id(
-        "session_compaction_divider_idle".to_string(),
-        None,
-        None,
-    );
+    let mut session =
+        Session::create_with_id("session_compaction_divider_idle".to_string(), None, None);
     session.record_compaction_event(
         &crate::compaction::CompactionEvent {
             trigger: crate::compaction::IDLE_PRECOMPACTION_TRIGGER.to_string(),
@@ -3523,11 +3520,8 @@ fn idle_compaction_divider_says_it_compacted_while_waiting() {
 /// must not claim a summary happened.
 #[test]
 fn hard_compaction_divider_labels_the_drop() {
-    let mut session = Session::create_with_id(
-        "session_compaction_divider_drop".to_string(),
-        None,
-        None,
-    );
+    let mut session =
+        Session::create_with_id("session_compaction_divider_drop".to_string(), None, None);
     session.record_compaction_event(
         &crate::compaction::CompactionEvent {
             trigger: "hard_compact".to_string(),

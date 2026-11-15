@@ -1204,3 +1204,69 @@ fn missing_refreshable_credentials_are_not_configured() {
         AuthState::NotConfigured
     );
 }
+
+/// An empty or whitespace `OPENROUTER_API_KEY`, an empty `openrouter.env`, or
+/// a value that is really another provider's key (a launcher copied the
+/// OpenCode Go key into it) is not an OpenRouter account. Auth status, the
+/// model catalog and usage must all agree on "not configured".
+#[test]
+fn empty_or_borrowed_openrouter_key_is_not_configured() {
+    let sandbox = super::test_sandbox::AuthTestSandbox::new().unwrap();
+    std::fs::write(sandbox.env_file_path("openrouter.env"), "").unwrap();
+    let openrouter_state = || {
+        AuthStatus::invalidate_cache();
+        let fast = AuthStatus::check_fast().openrouter;
+        AuthStatus::invalidate_cache();
+        let full = AuthStatus::check().openrouter;
+        assert_eq!(fast, full, "fast and full status agree");
+        full
+    };
+    for (case, value) in [
+        ("unset", None),
+        ("empty", Some("")),
+        ("whitespace", Some("   ")),
+        ("quoted empty", Some("\"\"")),
+    ] {
+        match value {
+            Some(value) => crate::env::set_var("OPENROUTER_API_KEY", value),
+            None => crate::env::remove_var("OPENROUTER_API_KEY"),
+        }
+        assert_eq!(openrouter_state(), AuthState::NotConfigured, "{case}");
+        assert!(
+            !crate::provider::openrouter::has_openrouter_credentials(),
+            "{case}"
+        );
+        assert!(
+            crate::provider::openrouter::get_api_key().is_none(),
+            "{case}"
+        );
+    }
+    std::fs::write(
+        sandbox.env_file_path("openrouter.env"),
+        "OPENROUTER_API_KEY=\n",
+    )
+    .unwrap();
+    crate::env::remove_var("OPENROUTER_API_KEY");
+    assert_eq!(
+        openrouter_state(),
+        AuthState::NotConfigured,
+        "empty assignment"
+    );
+
+    // The OpenCode Go key copied into OPENROUTER_API_KEY is not OpenRouter.
+    sandbox
+        .write_openai_compatible_api_key(
+            crate::provider_catalog::OPENCODE_GO_PROFILE,
+            "test-opencode-go-key",
+        )
+        .unwrap();
+    crate::env::set_var("OPENROUTER_API_KEY", "test-opencode-go-key");
+    assert_eq!(openrouter_state(), AuthState::NotConfigured, "borrowed key");
+    assert!(!crate::provider::openrouter::has_openrouter_credentials());
+
+    // A real key of its own still counts.
+    crate::env::set_var("OPENROUTER_API_KEY", "sk-or-test-own-key");
+    assert_eq!(openrouter_state(), AuthState::Available, "own key");
+    assert!(crate::provider::openrouter::has_openrouter_credentials());
+    AuthStatus::invalidate_cache();
+}

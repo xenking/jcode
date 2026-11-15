@@ -35,12 +35,12 @@ pub use jcode_compaction_core::{
     MIN_TURNS_TO_KEEP, PAYLOAD_IMAGE_CHAR_BUDGET, RECENT_TURNS_TO_KEEP,
     SEMANTIC_EMBED_CACHE_CAPACITY, SUMMARY_PROMPT, SYSTEM_OVERHEAD_TOKENS, Summary,
     TOKEN_HISTORY_WINDOW, TOOL_IMAGE_DECAY_KEEP_CHARS, build_compaction_prompt,
-    build_emergency_summary_text,
-    compacted_summary_text_block, content_char_count, effective_context_tokens_from_usage,
-    emergency_strip_large_images, emergency_truncate_large_payloads, estimate_compaction_tokens,
-    is_image_rejection_error, is_request_payload_too_large_error, mean_embedding,
-    message_char_count, reusable_cache_tokens_from_usage, safe_compaction_cutoff,
-    semantic_cache_key, semantic_goal_text, semantic_message_text, strip_large_images_in_contents,
+    build_emergency_summary_text, compacted_summary_text_block, content_char_count,
+    effective_context_tokens_from_usage, emergency_strip_large_images,
+    emergency_truncate_large_payloads, estimate_compaction_tokens, is_image_rejection_error,
+    is_request_payload_too_large_error, mean_embedding, message_char_count,
+    reusable_cache_tokens_from_usage, safe_compaction_cutoff, semantic_cache_key,
+    semantic_goal_text, semantic_message_text, strip_large_images_in_contents,
     summary_payload_char_count,
 };
 
@@ -1383,8 +1383,8 @@ impl CompactionManager {
         if !cfg.idle_precompact {
             return None;
         }
-        let basis_points = (f64::from(cfg.idle_precompact_ratio.clamp(0.0, 1.0)) * 10_000.0)
-            .round() as u128;
+        let basis_points =
+            (f64::from(cfg.idle_precompact_ratio.clamp(0.0, 1.0)) * 10_000.0).round() as u128;
         self.resolved_compaction_threshold_tokens()
             .map(|threshold| (threshold as u128 * basis_points / 10_000) as usize)
     }

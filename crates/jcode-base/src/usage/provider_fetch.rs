@@ -517,20 +517,7 @@ pub(super) fn openrouter_rejected_key(
 }
 
 pub(super) fn openrouter_api_key() -> Option<String> {
-    std::env::var("OPENROUTER_API_KEY")
-        .ok()
-        .or_else(|| {
-            let config_path = crate::storage::app_config_dir()
-                .ok()?
-                .join("openrouter.env");
-            crate::storage::harden_secret_file_permissions(&config_path);
-            let content = std::fs::read_to_string(config_path).ok()?;
-            content
-                .lines()
-                .find_map(|line| line.strip_prefix("OPENROUTER_API_KEY="))
-                .map(|k| k.trim().to_string())
-        })
-        .filter(|k| !k.is_empty())
+    crate::provider::openrouter::standard_openrouter_api_key()
 }
 
 /// Antigravity per-model quota report. The backend's `fetchAvailableModels`

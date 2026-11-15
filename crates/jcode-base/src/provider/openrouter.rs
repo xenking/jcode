@@ -70,6 +70,29 @@ pub fn has_credentials() -> bool {
     get_api_key().is_some()
 }
 
+/// The user's own OpenRouter key, if one is really configured.
+///
+/// Empty or whitespace values (env var or `openrouter.env`) are not a key.
+/// Neither is a value identical to another provider's configured key: a
+/// launcher that copied, say, the OpenCode Go key into `OPENROUTER_API_KEY`
+/// would otherwise make OpenRouter look connected and route sessions to an
+/// account the user never added.
+pub fn standard_openrouter_api_key() -> Option<String> {
+    let key = load_api_key_from_env_or_config(DEFAULT_API_KEY_NAME, DEFAULT_ENV_FILE)?;
+    (!openrouter_key_is_borrowed(&key)).then_some(key)
+}
+
+/// Whether `key` is another OpenAI-compatible profile's configured key.
+pub fn openrouter_key_is_borrowed(key: &str) -> bool {
+    openai_compatible_profiles()
+        .iter()
+        .filter(|profile| profile.api_key_env != DEFAULT_API_KEY_NAME)
+        .any(|profile| {
+            load_api_key_from_env_or_config(profile.api_key_env, profile.env_file)
+                .is_some_and(|other| other == key)
+        })
+}
+
 /// Whether the shared transport is configured as native OpenRouter BYOK.
 /// Direct OpenAI-compatible endpoints reuse this transport but must not be
 /// reported as OpenRouter.
@@ -81,6 +104,9 @@ pub fn has_openrouter_credentials() -> bool {
 pub fn get_api_key() -> Option<String> {
     let key_name = configured_api_key_name();
     let env_file = configured_env_file_name();
+    if key_name == DEFAULT_API_KEY_NAME && env_file == DEFAULT_ENV_FILE {
+        return standard_openrouter_api_key();
+    }
     crate::provider_catalog::load_runtime_api_key(&key_name, &env_file)
 }
 
@@ -107,7 +133,7 @@ fn autodetected_openai_compatible_profile()
         return None;
     }
 
-    if load_api_key_from_env_or_config(DEFAULT_API_KEY_NAME, DEFAULT_ENV_FILE).is_some() {
+    if standard_openrouter_api_key().is_some() {
         return None;
     }
 

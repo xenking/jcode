@@ -287,11 +287,7 @@ fn direct_openai_compatible_profile_routes(
 }
 
 fn standard_openrouter_profile_configured() -> bool {
-    crate::provider_catalog::load_env_value_from_env_or_config(
-        "OPENROUTER_API_KEY",
-        "openrouter.env",
-    )
-    .is_some()
+    crate::provider::openrouter::standard_openrouter_api_key().is_some()
 }
 
 fn configured_standard_openrouter_profile_routes() -> Vec<ModelRoute> {
