@@ -314,11 +314,21 @@ codegen-units = 16
 incremental = false
 
 [profile.dev]
-debug = 0
+# Line tables keep `file:line` in panic backtraces; full DWARF is what costs
+# size, and this is +0.2% on a measured clean check+test (8.42 GB -> 8.44 GB).
+# Dependencies stay at no debug info at all (see the "*" override below).
+#
+# Do not add keys that equal a default here (or in [profile.test]): cargo puts
+# an explicitly written value on the rustc command line even when it matches
+# the default, and that flag string is part of the unit hash, so a redundant
+# value makes artifacts that are otherwise identical hash differently. See the
+# [profile.test] note near the bottom of this file.
+debug = "line-tables-only"
 incremental = true
 
 [profile.dev.package."*"]
 opt-level = 0
+debug = false
 
 # Keep the idle-animation math kernels fully optimized even in debug-style
 # builds. This crate is pure, dependency-free numeric code (the trig-heavy 3D
@@ -357,10 +367,20 @@ opt-level = 3
 [profile.dev.package.serde_json]
 opt-level = 3
 
+# Same override for `cargo test`: profile package overrides are NOT inherited
+# from the profile a test/bench profile inherits (cargo only inherits the
+# top-level keys), so without this line every test build compiles serde_json a
+# second time, unoptimized, next to the dev-profile copy.
+[profile.test.package.serde_json]
+opt-level = 3
+
 [profile.selfdev.package.serde_json]
 opt-level = 3
 
 [profile.dev.package.serde]
+opt-level = 3
+
+[profile.test.package.serde]
 opt-level = 3
 
 [profile.selfdev.package.serde]
@@ -632,10 +652,23 @@ opt-level = 3
 [profile.test.package.tokenizers]
 opt-level = 3
 
+# Keep this table to keys that change nothing but still reach rustc. Cargo puts
+# an explicitly written value on the rustc command line even when it equals the
+# default, and the resulting flag string is part of the unit hash, so a
+# redundant `codegen-units = 256` here made every `cargo test` artifact
+# incompatible with the identical `cargo build` artifact: each dependency was
+# compiled twice, and a `cargo build` after a `cargo test` recompiled ~500
+# crates (272s -> 46s and 1.9 GB of duplicates once removed). Values that test
+# inherits from dev (debug, incremental, codegen-units) belong in [profile.dev]
+# only. Per-package overrides are the exception: cargo does not inherit the
+# package tables, so [profile.test.package.*] has to repeat them.
 [profile.test]
-debug = 0
+debug = "line-tables-only"
 incremental = true
-codegen-units = 256
+
+[profile.test.package."*"]
+opt-level = 0
+debug = false
 
 [dev-dependencies]
 async-stream = "0.3"
