@@ -51,6 +51,7 @@ const CAPABILITIES: &[Capability] = &[
     cap("clear", "clear"),
     cap("rewind", "rewind"),
     cap("rewind_undo", "rewindUndo"),
+    cap("respond_to_ask", "respondToAsk"),
     cap("respond_to_permission", "respondToPermission"),
     cap("list_models", "listModels"),
     cap("get_runtime_info", "getRuntimeInfo"),

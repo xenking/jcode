@@ -51,6 +51,9 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("CancelSoftInterrupts", Covered),
     ("Clear", Covered),
     ("ClientDebugResponse", ClientInternal),
+    // Window-focus report that lets the server batch its stream coarsely for a
+    // hidden TUI. Unacknowledged and purely a wakeup optimization.
+    ("ClientFocus", ClientInternal),
     ("Compact", Covered),
     ("ConfigureTools", Covered),
     ("CycleModel", ClientInternal),

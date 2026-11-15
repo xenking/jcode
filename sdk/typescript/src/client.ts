@@ -25,6 +25,7 @@ import {
   type AnyApiEvent,
   type ApiEvent,
   type ApiRequest,
+  type AskResponse,
   type HistoryMessage,
   type ImageAttachment,
   type ModelRouteInfo,
@@ -758,6 +759,25 @@ export class JcodeClient extends EventEmitter {
 
   async rewind(sessionId: string, messageIndex: number): Promise<void> {
     await this.requestOk({ req: "rewind", session_id: sessionId, message_index: messageIndex });
+  }
+
+  /**
+   * Answer an `ask` tool request. Omit `answers` (or pass `{}`) to decline.
+   *
+   * The runtime is blocked on this reply, so a client that renders ask cards
+   * must answer every `ask_request` it shows.
+   */
+  async respondToAsk(
+    sessionId: string,
+    requestId: string,
+    response: AskResponse,
+  ): Promise<void> {
+    await this.requestOk({
+      req: "ask_response",
+      session_id: sessionId,
+      request_id: requestId,
+      response,
+    });
   }
 
   async respondToPermission(
