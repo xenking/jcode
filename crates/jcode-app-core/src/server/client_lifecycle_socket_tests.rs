@@ -3,6 +3,128 @@ use crate::message::Role;
 
 #[cfg(unix)]
 #[tokio::test]
+async fn daemon_delivers_switched_steer_before_ordered_followups() {
+    use crate::server::runtime::ServerRuntime;
+    use serde_json::json;
+    let _lock = crate::storage::lock_test_env();
+    let home = IsolatedReloadRecoveryEnv::new();
+    let provider = TerminalSocketProvider::default();
+    provider.steer_tool.store(true, Ordering::SeqCst);
+    let socket = home._runtime.path().join("order.sock");
+    let server = crate::server::Server::new_with_paths(
+        Arc::new(provider.clone()),
+        socket.clone(),
+        home._runtime.path().join("order-debug.sock"),
+    );
+    let runtime = ServerRuntime::from_server(&server);
+    let handle = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
+    let (reader, mut writer) = crate::transport::Stream::connect(&socket)
+        .await
+        .unwrap()
+        .into_split();
+    let mut reader = BufReader::new(reader);
+    async fn send(writer: &mut crate::transport::WriteHalf, value: serde_json::Value) {
+        writer
+            .write_all(format!("{value}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+    async fn until(
+        reader: &mut BufReader<crate::transport::ReadHalf>,
+        predicate: impl Fn(&ServerEvent) -> bool,
+    ) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                let event: ServerEvent = serde_json::from_str(&line).unwrap();
+                if predicate(&event) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("daemon event timeout");
+    }
+    send(
+        &mut writer,
+        json!({"type":"subscribe","id":1,"working_dir":home._home.path()}),
+    )
+    .await;
+    until(&mut reader, |e| matches!(e, ServerEvent::Done { id: 1 })).await;
+    send(
+        &mut writer,
+        json!({"type":"message","id":2,"content":"first"}),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(5), provider.first_started.notified())
+        .await
+        .unwrap();
+    for (id, text) in [(3, "later-one"), (4, "switch-to-steer"), (5, "later-two")] {
+        send(&mut writer, json!({"type":"queue_prompt","id":id,"client_id":text,"content":text,"mode":"after_yield"})).await;
+        until(
+            &mut reader,
+            |event| matches!(event, ServerEvent::Ack { id: ack } if *ack == id),
+        )
+        .await;
+    }
+    send(&mut writer, json!({"type":"set_queued_prompt_mode","id":6,"client_id":"switch-to-steer","mode":"steer"})).await;
+    until(&mut reader, |event| {
+        matches!(event, ServerEvent::Ack { id: 6 })
+    })
+    .await;
+    provider.finish_first.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while provider.calls.load(Ordering::SeqCst) < 4 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("ordered prompts not delivered");
+    let messages = provider.messages.lock().unwrap().clone();
+    let count =
+        |turn: usize, text: &str| messages[turn].iter().filter(|s| s.ends_with(text)).count();
+    assert_eq!(messages.len(), 4, "{messages:?}");
+    assert_eq!(
+        (
+            count(0, "switch-to-steer"),
+            count(0, "later-one"),
+            count(0, "later-two")
+        ),
+        (0, 0, 0)
+    );
+    assert_eq!(
+        (
+            count(1, "switch-to-steer"),
+            count(1, "later-one"),
+            count(1, "later-two")
+        ),
+        (1, 0, 0)
+    );
+    assert_eq!(
+        (
+            count(2, "switch-to-steer"),
+            count(2, "later-one"),
+            count(2, "later-two")
+        ),
+        (1, 1, 0)
+    );
+    assert_eq!(
+        (
+            count(3, "switch-to-steer"),
+            count(3, "later-one"),
+            count(3, "later-two")
+        ),
+        (1, 1, 1)
+    );
+    drop(writer);
+    drop(reader);
+    runtime.shutdown().await;
+    handle.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn daemon_restart_restores_and_delivers_pending_prompt_once() {
     use crate::server::runtime::ServerRuntime;
     use serde_json::json;

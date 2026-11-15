@@ -775,6 +775,63 @@ async fn queued_soft_interrupt_images_are_injected_as_image_blocks() {
 }
 
 #[tokio::test]
+async fn steering_recovery_filters_committed_ids_after_crash_window() {
+    use jcode_agent_runtime::{QueuedMessageMode, SoftInterruptMessage};
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    let queue = agent.soft_interrupt_queue();
+    let initial: Vec<_> = [
+        ("steer-a", QueuedMessageMode::Steer),
+        ("steer-b", QueuedMessageMode::Steer),
+        ("later", QueuedMessageMode::AfterYield),
+    ]
+    .into_iter()
+    .map(|(id, mode)| SoftInterruptMessage {
+        content: id.into(),
+        images: vec![],
+        urgent: false,
+        source: SoftInterruptSource::User,
+        mode,
+        client_id: Some(id.into()),
+    })
+    .collect();
+    *queue.lock().unwrap() = initial.clone();
+    crate::soft_interrupt_store::overwrite(agent.session_id(), &initial).unwrap();
+    assert_eq!(agent.inject_soft_interrupts().len(), 1);
+    // Crash immediately after the session commit, before the queue rename.
+    crate::soft_interrupt_store::overwrite(agent.session_id(), &initial).unwrap();
+    queue.lock().unwrap().clear();
+    assert_eq!(agent.restore_persisted_soft_interrupts(), 1);
+    let pending = crate::soft_interrupt_store::load(agent.session_id()).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].client_id.as_deref(), Some("later"));
+    assert!(agent.inject_soft_interrupts().is_empty());
+    let saved = crate::session::Session::load(agent.session_id()).unwrap();
+    assert_eq!(
+        saved
+            .messages
+            .iter()
+            .filter(|message| message.id.starts_with("queued:"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn steering_injection_preserves_after_yield_messages_in_order() {
     use jcode_agent_runtime::{QueuedMessageMode, SoftInterruptMessage};
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
