@@ -1317,7 +1317,7 @@ async fn restore_agent_session_if_requested_restores_resumed_session() {
 }
 
 #[tokio::test]
-async fn incomplete_todo_followups_stop_after_three_in_all_output_modes() {
+async fn tool_less_poke_turn_stops_followups_in_all_output_modes() {
     let _guard = crate::storage::lock_test_env();
     let _saved = SavedEnv::capture(&[
         "JCODE_HOME",
@@ -1368,7 +1368,9 @@ async fn incomplete_todo_followups_stop_after_three_in_all_output_modes() {
                 .count();
             assert_eq!(
                 followups,
-                if enabled { 3 } else { 0 },
+                // TestProvider never calls a tool, so the first poke turn changes
+                // nothing and the same open todos must not be poked again.
+                if enabled { 1 } else { 0 },
                 "{mode}, enabled={enabled}"
             );
         }

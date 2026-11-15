@@ -46,7 +46,20 @@ pub(super) struct LaneDispatchContext {
 
 static CONTEXT: OnceLock<LaneDispatchContext> = OnceLock::new();
 
+/// The live swarm member map of the most recently started server. Unlike the
+/// once-only dispatch context it is replaced on every start, so a process that
+/// hosts several servers in turn (tests, embedders) never reads a dead one.
+fn live_members() -> &'static StdMutex<Option<Arc<RwLock<HashMap<String, SwarmMember>>>>> {
+    static MEMBERS: OnceLock<StdMutex<Option<Arc<RwLock<HashMap<String, SwarmMember>>>>>> =
+        OnceLock::new();
+    MEMBERS.get_or_init(|| StdMutex::new(None))
+}
+
 pub(super) fn register_context(context: LaneDispatchContext) {
+    *live_members()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+        Some(Arc::clone(&context.swarm_state.members));
     if CONTEXT.set(context).is_err() {
         crate::logging::warn(
             "lane dispatch context already registered, retaining original context",
@@ -102,10 +115,14 @@ pub(super) fn working_members_spawned_by(
 /// Live working members spawned by `session_id`. Empty without a registered
 /// server context (tests, embedders), which preserves the previous behavior.
 pub(super) async fn running_members_for(session_id: &str) -> Vec<String> {
-    let Some(context) = CONTEXT.get() else {
+    let Some(members) = live_members()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+    else {
         return Vec::new();
     };
-    let members = context.swarm_state.members.read().await;
+    let members = members.read().await;
     working_members_spawned_by(&members, session_id)
 }
 
