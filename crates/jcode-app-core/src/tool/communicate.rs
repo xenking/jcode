@@ -902,6 +902,12 @@ impl Tool for CommunicateTool {
             .agents
             .validate_swarm_model_request(params.model.as_deref())
             .map_err(anyhow::Error::msg)?;
+        // Hard worker allowlist: any agent-chosen worker model must be on
+        // `agents.spawn_allowed_models`. The error names the allowed set.
+        crate::config::config()
+            .agents
+            .validate_spawn_allowed_model(params.model.as_deref())
+            .map_err(anyhow::Error::msg)?;
 
         // `to_session` and `target_session` both name a single session id. Historically
         // different actions required different field names (e.g. `dm` wanted `to_session`

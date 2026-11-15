@@ -533,6 +533,29 @@ impl Session {
         })
     }
 
+    /// Models that only mean "not resolved yet". Persisting one makes the
+    /// session resume on a placeholder name (unroutable, and shown as
+    /// "unknown" in swarm/session lists), so they are dropped instead.
+    pub fn is_placeholder_model(model: &str) -> bool {
+        let model = model.trim();
+        model.is_empty() || model.eq_ignore_ascii_case("unknown")
+    }
+
+    /// Drop a placeholder model so an attach re-resolves it from the provider
+    /// instead of resuming as "unknown".
+    pub fn normalize_placeholder_model(&mut self) {
+        if self
+            .model
+            .as_deref()
+            .is_some_and(Self::is_placeholder_model)
+        {
+            self.model = None;
+            // Route metadata described the placeholder, not a real model.
+            self.provider_key = None;
+            self.route_api_method = None;
+        }
+    }
+
     fn journal_meta(&self) -> SessionJournalMeta {
         SessionJournalMeta {
             parent_id: self.parent_id.clone(),
@@ -756,6 +779,7 @@ impl Session {
             self.route_api_method = meta.route_api_method;
         }
         self.model = meta.model;
+        self.normalize_placeholder_model();
         self.reasoning_effort = meta.reasoning_effort;
         self.context_cap = meta.context_cap;
         self.subagent_model = meta.subagent_model;

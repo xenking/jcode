@@ -174,6 +174,38 @@ pub(super) fn selection_for_concrete_model(
     }
 }
 
+/// Filter worker fallbacks down to the models the worker is allowed to use.
+///
+/// `agents.spawn_allowed_models` is a hard boundary: a worker whose primary
+/// fails may only move to a configured fallback that is on the list, never to
+/// an arbitrary pool-approved route. A skipped entry is logged so a
+/// misconfigured list is visible instead of silently shrinking.
+pub(crate) fn worker_allowed_fallbacks(
+    allowed_models: &[String],
+    fallbacks: &[String],
+) -> Vec<String> {
+    if allowed_models.is_empty() {
+        return fallbacks.to_vec();
+    }
+    let agents = crate::config::AgentsConfig {
+        spawn_allowed_models: allowed_models.to_vec(),
+        ..Default::default()
+    };
+    fallbacks
+        .iter()
+        .filter(|fallback| {
+            let allowed = agents.worker_may_use_model(fallback);
+            if !allowed {
+                crate::logging::warn(&format!(
+                    "Swarm failover: skipping fallback {fallback:?} outside agents.spawn_allowed_models"
+                ));
+            }
+            allowed
+        })
+        .cloned()
+        .collect()
+}
+
 pub(super) async fn session_swarm_model(
     req_session_id: &str,
     sessions: &SessionAgents,

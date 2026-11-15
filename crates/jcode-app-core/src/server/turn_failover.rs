@@ -114,6 +114,40 @@ pub(super) fn pick_failover_target(agent: &Agent, error: &str) -> Option<Failove
         })
 }
 
+/// Effective worker model allowlist for a turn whose caller has no spawn-time
+/// knowledge (server wake, followup poke): the configured allowlist applies
+/// whenever the session already runs a model inside it, which is true of every
+/// spawned worker. A user-started session on any other model stays
+/// unrestricted.
+pub(super) fn effective_worker_allowed_models(agent: &Agent) -> Vec<String> {
+    let configured = crate::config::config().agents.spawn_allowed_models.clone();
+    if configured.is_empty() {
+        return Vec::new();
+    }
+    let agents = crate::config::AgentsConfig {
+        spawn_allowed_models: configured.clone(),
+        ..Default::default()
+    };
+    if agents.worker_may_use_model(&agent.provider_model()) {
+        configured
+    } else {
+        Vec::new()
+    }
+}
+
+/// Whether an account-router target is inside the worker model allowlist.
+/// A non-worker turn passes an empty list and is unrestricted.
+fn worker_target_allowed(target: &FailoverTarget, allowed_models: &[String]) -> bool {
+    if allowed_models.is_empty() {
+        return true;
+    }
+    let agents = crate::config::AgentsConfig {
+        spawn_allowed_models: allowed_models.to_vec(),
+        ..Default::default()
+    };
+    agents.worker_may_use_model(&target.spec)
+}
+
 /// Apply `target` to the agent and tell every attached client.
 pub(super) fn apply_failover_target(
     agent: &mut Agent,
@@ -199,7 +233,8 @@ pub(super) async fn process_reserved_message_with_server_failover(
     if !enabled && result.is_err() {
         return result;
     }
-    retry_turn_with_server_failover(&mut guard, lease, result, reminder, event_tx.clone()).await?;
+    retry_turn_with_server_failover(&mut guard, lease, result, reminder, event_tx.clone(), &[])
+        .await?;
     super::runtime_ssh_loops::run_reserved_followups(&mut guard, lease, event_tx).await
 }
 
@@ -242,6 +277,7 @@ pub(super) async fn process_reserved_locked_message_with_server_failover(
         system_reminder,
         event_tx,
         &[],
+        &[],
     )
     .await
 }
@@ -251,6 +287,10 @@ pub(super) async fn process_reserved_locked_message_with_server_failover(
 /// had its chance, any remaining failure of the turn (region/entitlement 400,
 /// auth, transport) moves the worker to the next configured fallback model and
 /// retries the same turn, instead of leaving a dead worker on the primary.
+///
+/// `allowed_models` is the worker's hard model allowlist
+/// (`agents.spawn_allowed_models`). When it is non-empty, neither the account
+/// router nor the configured fallbacks may move the worker outside it.
 pub(super) async fn process_reserved_locked_message_with_swarm_fallbacks(
     agent: &mut Agent,
     lease: &crate::agent::TurnLease,
@@ -259,6 +299,7 @@ pub(super) async fn process_reserved_locked_message_with_swarm_fallbacks(
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
     fallbacks: &[String],
+    allowed_models: &[String],
 ) -> anyhow::Result<()> {
     agent.validate_server_turn(lease)?;
     let reminder = system_reminder.clone();
@@ -271,11 +312,25 @@ pub(super) async fn process_reserved_locked_message_with_swarm_fallbacks(
         event_tx.clone(),
     )
     .await;
-    let result =
-        retry_turn_with_server_failover(agent, lease, result, reminder.clone(), event_tx.clone())
-            .await;
-    retry_turn_with_model_fallbacks(agent, lease, result, reminder, event_tx.clone(), fallbacks)
-        .await?;
+    let result = retry_turn_with_server_failover(
+        agent,
+        lease,
+        result,
+        reminder.clone(),
+        event_tx.clone(),
+        allowed_models,
+    )
+    .await;
+    retry_turn_with_model_fallbacks(
+        agent,
+        lease,
+        result,
+        reminder,
+        event_tx.clone(),
+        fallbacks,
+        allowed_models,
+    )
+    .await?;
     super::runtime_ssh_loops::run_reserved_followups(agent, lease, event_tx).await
 }
 
@@ -378,9 +433,17 @@ async fn retry_turn_with_model_fallbacks(
     reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
     fallbacks: &[String],
+    allowed_models: &[String],
 ) -> anyhow::Result<()> {
+    // Defence in depth: the spawn path already filters the configured
+    // fallbacks, but a config change mid-turn must not leak a model outside the
+    // worker allowlist.
+    let fallbacks = super::comm_session::spawn_model_selection::worker_allowed_fallbacks(
+        allowed_models,
+        fallbacks,
+    );
     let mut tried: Vec<FallbackTarget> = vec![current_target(agent)];
-    for fallback in fallbacks {
+    for fallback in &fallbacks {
         let Err(error) = &result else {
             break;
         };
@@ -455,7 +518,15 @@ pub(super) async fn process_reserved_locked_context_with_server_failover(
             std::time::Duration::from_secs(30),
         );
     }
-    retry_turn_with_server_failover(agent, lease, result, reminder, event_tx.clone()).await?;
+    retry_turn_with_server_failover(
+        agent,
+        lease,
+        result,
+        reminder,
+        event_tx.clone(),
+        &effective_worker_allowed_models(agent),
+    )
+    .await?;
     super::runtime_ssh_loops::run_reserved_followups(agent, lease, event_tx).await
 }
 
@@ -489,6 +560,7 @@ pub(super) async fn retry_turn_with_server_failover(
     mut result: anyhow::Result<()>,
     reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
+    allowed_models: &[String],
 ) -> anyhow::Result<()> {
     agent.validate_server_turn(lease)?;
     let mut attempts = 0;
@@ -506,6 +578,15 @@ pub(super) async fn retry_turn_with_server_failover(
         let Some(target) = pick_failover_target(agent, &message) else {
             break;
         };
+        // A worker may only ever move inside its allowlist, even when the
+        // account router found a pool-approved route outside it.
+        if !worker_target_allowed(&target, allowed_models) {
+            crate::logging::warn(&format!(
+                "Server account failover: refusing {} for a worker outside agents.spawn_allowed_models",
+                target.spec
+            ));
+            break;
+        }
         if let Err(switch_error) = apply_failover_target(agent, &target, &event_tx) {
             crate::logging::warn(&format!(
                 "Server account failover to {} failed: {switch_error}",
@@ -902,6 +983,7 @@ mod tests {
                     None,
                     tx,
                     &fallbacks,
+                    &[],
                 )
                 .await;
 
@@ -917,6 +999,92 @@ mod tests {
                      active-route identity to compare against, and the distinct model answers"
                 );
             });
+    }
+
+    #[test]
+    fn swarm_worker_never_falls_back_outside_the_spawn_allowlist() {
+        let _guard = crate::storage::lock_test_env();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let provider = RejectingPrimaryProvider {
+                    model: Arc::new(StdMutex::new("deepseek-v4.1-flash".into())),
+                    calls: Arc::new(StdMutex::new(Vec::new())),
+                };
+                let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+                let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+                let session = crate::session::Session::create_with_id(
+                    "session_swarm_allowlist_fallback".into(),
+                    None,
+                    None,
+                );
+                let mut agent = Agent::new_with_session(provider_dyn, registry, session, None);
+                let lease = agent.claim_server_turn().unwrap();
+                let (tx, _rx) = mpsc::unbounded_channel();
+                let allowed = vec![
+                    "opencode-go:deepseek-v4.1-flash".to_string(),
+                    "claude:claude-opus-5-5".to_string(),
+                ];
+                // A stale or hand-edited config names fable: the worker must
+                // keep failing on its allowed model rather than escape the list.
+                let fallbacks = vec![
+                    "claude:claude-fable-5".to_string(),
+                    "claude:claude-astra-5".to_string(),
+                ];
+
+                let result = process_reserved_locked_message_with_swarm_fallbacks(
+                    &mut agent,
+                    &lease,
+                    "swarm task",
+                    Vec::new(),
+                    None,
+                    tx,
+                    &fallbacks,
+                    &allowed,
+                )
+                .await;
+
+                assert!(result.is_err(), "no allowed fallback could answer");
+                assert_eq!(
+                    provider.calls.lock().unwrap().clone(),
+                    vec!["deepseek-v4.1-flash"],
+                    "fable/astra must never be tried for a worker"
+                );
+                assert_eq!(agent.provider_model(), "deepseek-v4.1-flash");
+            });
+    }
+
+    #[test]
+    fn worker_allowed_fallbacks_keeps_order_and_drops_outside_models() {
+        let fallbacks = vec![
+            "claude:claude-sonnet-5-5".to_string(),
+            "claude:claude-fable-5".to_string(),
+            "claude:claude-opus-5-5".to_string(),
+        ];
+        let allowed = vec![
+            "opencode-go:deepseek-v4.1-flash".to_string(),
+            "claude:claude-opus-5-5".to_string(),
+            "claude:claude-sonnet-5-5".to_string(),
+        ];
+        assert_eq!(
+            super::super::comm_session::spawn_model_selection::worker_allowed_fallbacks(
+                &allowed, &fallbacks
+            ),
+            vec![
+                "claude:claude-sonnet-5-5".to_string(),
+                "claude:claude-opus-5-5".to_string()
+            ]
+        );
+        // No allowlist configured keeps the legacy behaviour exactly.
+        assert_eq!(
+            super::super::comm_session::spawn_model_selection::worker_allowed_fallbacks(
+                &[],
+                &fallbacks
+            ),
+            fallbacks
+        );
     }
 
     /// Records the (route, model) of each request so a fallback that re-asks
@@ -1078,6 +1246,7 @@ mod tests {
                     None,
                     tx,
                     &fallbacks,
+                    &[],
                 )
                 .await;
 
@@ -1135,6 +1304,7 @@ mod tests {
                     None,
                     tx,
                     &fallbacks,
+                    &[],
                 )
                 .await;
 

@@ -93,6 +93,58 @@ fn schema_only_exposes_exact_allowlisted_worker_models_when_enabled() {
 }
 
 #[test]
+fn schema_exposes_only_spawn_allowed_models_to_agents() {
+    let mut schema = CommunicateTool::new().parameters_schema();
+    let agents = crate::config::AgentsConfig {
+        spawn_allowed_models: vec![
+            "opencode-go:deepseek-v4.1-flash".to_string(),
+            "claude:claude-opus-5-5".to_string(),
+        ],
+        ..Default::default()
+    };
+    super::super::apply_swarm_model_policy(&mut schema, &agents);
+    assert_eq!(
+        schema["properties"]["model"]["enum"],
+        json!(["opencode-go:deepseek-v4.1-flash", "claude:claude-opus-5-5"])
+    );
+}
+
+#[test]
+fn spawn_allowlist_rejects_fable_and_astra_for_worker_actions() {
+    let agents = crate::config::AgentsConfig {
+        spawn_allowed_models: vec![
+            "opencode-go:deepseek-v4.1-flash".to_string(),
+            "claude:claude-sonnet-5-5".to_string(),
+            "claude:claude-opus-5-5".to_string(),
+        ],
+        ..Default::default()
+    };
+    for action in ["spawn", "assign_task", "assign_next", "retry", "resume"] {
+        let input: CommunicateInput = serde_json::from_value(json!({
+            "action": action, "model": "claude:claude-opus-5-5"
+        }))
+        .unwrap();
+        assert!(
+            agents
+                .validate_spawn_allowed_model(input.model.as_deref())
+                .is_ok()
+        );
+        for denied in [
+            "claude:claude-fable-5",
+            "claude:claude-fable-5-2",
+            "claude:claude-astra-5",
+        ] {
+            let error = agents
+                .validate_spawn_allowed_model(Some(denied))
+                .expect_err(denied);
+            assert!(error.contains("claude:claude-opus-5-5"), "{error}");
+        }
+        // Omitting the model means "use agents.swarm_model", never fable.
+        assert!(agents.validate_spawn_allowed_model(None).is_ok());
+    }
+}
+
+#[test]
 fn spawning_actions_cannot_bypass_worker_model_policy() {
     let mut agents = crate::config::AgentsConfig {
         swarm_model_allowlist: vec!["claude:claude-opus-4-8".to_string()],

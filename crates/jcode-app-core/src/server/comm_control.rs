@@ -550,13 +550,23 @@ fn spawn_assigned_task_run(
         );
         let event_tx = progress_events.sender();
         let start_message_index = agent.message_count();
-        let result = super::turn_failover::process_reserved_locked_message_with_server_failover(
+        // A planned task runs on a spawned worker: keep its failover inside the
+        // worker model allowlist exactly like the spawn path does.
+        let agents_config = crate::config::config().agents.clone();
+        let worker_allowed_models = agents_config.spawn_allowed_models.clone();
+        let worker_fallbacks = super::comm_session::spawn_model_selection::worker_allowed_fallbacks(
+            &worker_allowed_models,
+            &agents_config.swarm_model_fallbacks,
+        );
+        let result = super::turn_failover::process_reserved_locked_message_with_swarm_fallbacks(
             &mut agent,
             &turn_lease,
             &assignment_text,
             vec![],
             None,
             event_tx,
+            &worker_fallbacks,
+            &worker_allowed_models,
         )
         .await;
         let completion_report = agent.recent_assistant_output_tail_after(start_message_index);

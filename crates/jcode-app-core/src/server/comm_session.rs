@@ -174,7 +174,7 @@ fn spawn_visible_session_window_with_context(
 }
 
 #[path = "spawn_model_selection.rs"]
-mod spawn_model_selection;
+pub(super) mod spawn_model_selection;
 use spawn_model_selection::{
     CoordinatorSpawnIdentity, SwarmSpawnSelection, pick_available_swarm_model,
     provider_key_for_spawn_model, resolve_coordinator_spawn_identity,
@@ -399,6 +399,12 @@ pub(super) async fn spawn_swarm_agent(
     agents_config
         .validate_swarm_model_request(requested_model.as_deref())
         .map_err(anyhow::Error::msg)?;
+    // Hard worker allowlist: an agent may only ask for a model the user has
+    // listed in `agents.spawn_allowed_models`. The error names the allowed set
+    // so the agent can retry correctly (or omit the model for swarm_model).
+    agents_config
+        .validate_spawn_allowed_model(requested_model.as_deref())
+        .map_err(anyhow::Error::msg)?;
     let resolved_working_dir =
         resolve_spawn_working_dir(working_dir, req_session_id, sessions, swarm_members).await;
     let coordinator = resolve_coordinator_spawn_identity(req_session_id, sessions).await;
@@ -436,9 +442,14 @@ pub(super) async fn spawn_swarm_agent(
         };
     let resolved_spawn_mode = resolve_swarm_spawn_mode(spawn_mode, agents_config.swarm_spawn_mode);
     // Only a worker running on the configured default model gets the configured
-    // fallbacks at runtime. An explicit per-spawn model choice is honoured as-is.
+    // fallbacks at runtime. An explicit per-spawn model choice is honoured as-is,
+    // and every configured fallback is filtered by `agents.spawn_allowed_models`
+    // so a failing worker can never be moved to a model outside the allowlist.
     let worker_fallbacks: Vec<String> = if requested_model.is_none() {
-        agents_config.swarm_model_fallbacks.clone()
+        spawn_model_selection::worker_allowed_fallbacks(
+            &agents_config.spawn_allowed_models,
+            &agents_config.swarm_model_fallbacks,
+        )
     } else {
         Vec::new()
     };
@@ -645,6 +656,7 @@ pub(super) async fn spawn_swarm_agent(
         if let Some(agent_arc) = agent_arc {
             let sid_clone = new_session_id.clone();
             let worker_fallbacks = worker_fallbacks.clone();
+            let worker_allowed_models = agents_config.spawn_allowed_models.clone();
             let swarm_members2 = Arc::clone(swarm_members);
             let swarms_by_id2 = Arc::clone(swarms_by_id);
             let event_history2 = Arc::clone(event_history);
@@ -682,6 +694,7 @@ pub(super) async fn spawn_swarm_agent(
                     None,
                     events.sender(),
                     &worker_fallbacks,
+                    &worker_allowed_models,
                 )
                 .await;
                 let completion_report =

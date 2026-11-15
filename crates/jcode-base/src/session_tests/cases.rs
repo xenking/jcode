@@ -314,6 +314,52 @@ fn existing_non_empty_session_does_not_get_retroactive_session_context() {
 }
 
 #[test]
+fn placeholder_model_is_never_persisted_and_resumes_unresolved() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-placeholder-model-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let session_id = "session_placeholder_model";
+    let mut session = Session::create_with_id(
+        session_id.to_string(),
+        None,
+        Some("placeholder model".to_string()),
+    );
+    // A stub provider (or a resumed session whose model was never resolved)
+    // reports "unknown". Persisting it makes the session unroutable and shows
+    // every swarm/session list the literal word instead of the real model.
+    session.model = Some("unknown".to_string());
+    session.provider_key = Some("claude".to_string());
+    session.route_api_method = Some("claude-oauth".to_string());
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.save()?;
+
+    let raw = std::fs::read_to_string(crate::session::storage_paths::session_path(session_id)?)?;
+    assert!(
+        !raw.contains("\"model\":\"unknown\""),
+        "placeholder model reached disk: {raw}"
+    );
+
+    let restored = Session::load_startup_stub(session_id)?;
+    assert_eq!(
+        restored.model, None,
+        "a placeholder must load as unresolved"
+    );
+    assert_eq!(restored.provider_key, None);
+    assert_eq!(restored.route_api_method, None);
+    Ok(())
+}
+
+#[test]
 fn load_startup_stub_preserves_metadata_but_skips_heavy_vectors() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()

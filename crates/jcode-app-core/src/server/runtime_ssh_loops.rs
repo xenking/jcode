@@ -480,12 +480,14 @@ pub(super) async fn run_reserved_followups(
             event_tx.clone(),
         )
         .await;
+        let allowed_models = super::turn_failover::effective_worker_allowed_models(agent);
         let result = super::turn_failover::retry_turn_with_server_failover(
             agent,
             lease,
             result,
             None,
             event_tx.clone(),
+            &allowed_models,
         )
         .await;
         if result.is_ok() {

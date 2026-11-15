@@ -355,6 +355,60 @@ fn test_env_override_swarm_model() {
 }
 
 #[test]
+fn spawn_allowed_models_is_a_hard_worker_allowlist() {
+    // Unset: no restriction, so the configured swarm_model is trusted.
+    let agents = Config::default().agents;
+    assert!(agents.spawn_allowed_models.is_empty());
+    assert!(agents.validate_spawn_allowed_model(None).is_ok());
+    assert!(
+        agents
+            .validate_spawn_allowed_model(Some("claude:claude-fable-5"))
+            .is_ok()
+    );
+    assert!(agents.worker_may_use_model("claude:claude-fable-5"));
+
+    let cfg: Config = toml::from_str(
+        "[agents]\nspawn_allowed_models = [\"opencode-go:deepseek-v4.1-flash\", \"claude:claude-sonnet-5-5\", \"claude:claude-opus-5-5\"]\n",
+    )
+    .unwrap();
+    let agents = cfg.agents;
+    assert_eq!(agents.spawn_allowed_models.len(), 3);
+    // No model at all means "use agents.swarm_model", which is configured.
+    assert!(agents.validate_spawn_allowed_model(None).is_ok());
+    assert!(agents.validate_spawn_allowed_model(Some("   ")).is_ok());
+    for allowed in [
+        "opencode-go:deepseek-v4.1-flash",
+        "claude:claude-sonnet-5-5",
+        "claude:claude-opus-5-5",
+        // A bare model id names the allowed entry's model.
+        "claude-opus-5-5",
+    ] {
+        assert!(
+            agents.validate_spawn_allowed_model(Some(allowed)).is_ok(),
+            "{allowed}"
+        );
+        assert!(agents.worker_may_use_model(allowed), "{allowed}");
+    }
+    for denied in [
+        "claude:claude-fable-5",
+        "claude:claude-astra-5",
+        "claude-fable-5",
+        // A provider swap for an allowed model is still outside the list.
+        "openrouter:z-ai/glm-5.2",
+    ] {
+        let error = agents
+            .validate_spawn_allowed_model(Some(denied))
+            .expect_err(denied);
+        assert!(error.contains(denied), "{error}");
+        // The rejection must tell the agent what it may use instead.
+        for allowed in &agents.spawn_allowed_models {
+            assert!(error.contains(allowed), "{error} must list {allowed}");
+        }
+        assert!(!agents.worker_may_use_model(denied), "{denied}");
+    }
+}
+
+#[test]
 fn swarm_model_selection_defaults_off_even_with_an_allowlist() {
     let agents = Config::default().agents;
     assert!(!agents.swarm_model_selection);

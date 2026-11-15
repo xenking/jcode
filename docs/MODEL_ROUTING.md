@@ -10,6 +10,7 @@ the active model.
 | Main agent | `[provider] default_model` / `default_provider` | `/model`, Ctrl+B saves | provider default |
 | Swarm workers, `/subagent` | `[agents] swarm_model` (env `JCODE_SWARM_MODEL`) | `/agents swarm <model>` | inherit coordinator |
 | Worker fallback chain | `[agents] swarm_model_fallbacks` | none | none |
+| Hard worker allowlist | `[agents] spawn_allowed_models` (exact strings) | none | unset = unrestricted |
 | Agent-chosen worker model (swarm tool `model` param) | `[agents] swarm_model_selection` + `swarm_model_allowlist` (exact strings) | none | denied |
 | Worker effort | `[agents] swarm_effort` | none | `low` |
 | `/review`, autoreview | `[autoreview] model` | `/agents review <model>` | inherit |
@@ -24,13 +25,32 @@ models. `/agents global <role> <model>` persists into config. `inherit` or
 
 Resolution for a swarm spawn (`server/spawn_model_selection.rs`):
 
-1. Explicit swarm tool `model` (only if allowed by `swarm_model_selection` +
-   allowlist, else the call is rejected).
+1. Explicit swarm tool `model` (only if allowed by `swarm_model_selection` /
+   `swarm_model_allowlist`, and always inside `spawn_allowed_models`; else the
+   call is rejected with the allowed list).
 2. Session override (`/agents swarm ...`, persisted as `subagent_model`).
 3. `[agents] swarm_model`; if `swarm_model_fallbacks` is non-empty and the
    coordinator's route catalog shows no *available* (logged-in) route for it,
    the first available fallback is used. Unknown catalog keeps `swarm_model`.
 4. Otherwise inherit the coordinator's model, provider key and auth route.
+
+### `spawn_allowed_models`: the hard worker boundary
+
+`[agents] spawn_allowed_models` is a worker-only allowlist, enforced in all
+three places a worker model can change:
+
+1. **Spawn** - the server rejects any agent-requested worker model outside the
+   list, and the swarm tool's `model` field is advertised with exactly those
+   entries. No model given means `swarm_model`, never a picker default.
+2. **Failover** - worker fallbacks are filtered to the list at spawn, and the
+   retry loop re-checks it, so a stale config or an account-router choice can
+   never move a worker to fable/astra/another provider's route.
+3. **Session restore** - a persisted session model always resolves to a real
+   model; the `unknown` placeholder is dropped instead of being saved.
+
+An empty list keeps the legacy behaviour (`swarm_model` plus its configured
+fallbacks are trusted). A user-started session is never restricted: only
+spawned workers are.
 
 ## Route prefixes
 

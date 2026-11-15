@@ -629,6 +629,9 @@ impl Session {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let guard_ms = pre_start.elapsed().as_millis();
         self.refresh_agent_model_overrides()?;
+        // A placeholder model must never reach disk: it would resume as
+        // "unknown" and hide the session's real route from swarm lists.
+        self.normalize_placeholder_model();
         let overrides_ms = pre_start.elapsed().as_millis() - guard_ms;
         // A session that migrated to another machine (or whose on-disk copy was
         // replaced by a newer returned transcript) must not be overwritten by

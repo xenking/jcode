@@ -721,6 +721,14 @@ pub struct AgentsConfig {
     pub swarm_model_selection: bool,
     /// Exact model/route strings the agent may request. Empty denies all overrides.
     pub swarm_model_allowlist: Vec<String>,
+    /// Models a spawned worker is allowed to run on.
+    ///
+    /// This is the hard allowlist for agent-initiated choices: a spawn or
+    /// model-switch request for anything outside it is rejected, and worker
+    /// failover never steps outside it. Empty disables the restriction (legacy
+    /// behaviour: `swarm_model` plus its fallbacks are trusted as configured).
+    /// Only a user-started session (not a worker) is free to use any model.
+    pub spawn_allowed_models: Vec<String>,
     /// Ordered fallbacks tried when `swarm_model`'s route is not logged in
     /// (no available route in the coordinator's model catalog). The first
     /// available entry wins; if none is available, `swarm_model` is used as-is.
@@ -859,6 +867,7 @@ impl Default for AgentsConfig {
             swarm_model: None,
             swarm_model_selection: false,
             swarm_model_allowlist: Vec::new(),
+            spawn_allowed_models: Vec::new(),
             swarm_model_fallbacks: Vec::new(),
             swarm_effort: None,
             swarm_root_effort: None,
@@ -888,6 +897,53 @@ impl Default for AgentsConfig {
 }
 
 impl AgentsConfig {
+    /// Validate an agent-supplied worker model against the hard
+    /// `spawn_allowed_models` allowlist. An empty allowlist leaves workers
+    /// unrestricted (the configured default is trusted), while a non-empty one
+    /// rejects every other model with an error naming the allowed set.
+    pub fn validate_spawn_allowed_model(&self, requested: Option<&str>) -> Result<(), String> {
+        let Some(requested) = requested.map(str::trim).filter(|m| !m.is_empty()) else {
+            return Ok(());
+        };
+        if self.spawn_allowed_models.is_empty() || self.worker_may_use_model(requested) {
+            return Ok(());
+        }
+        Err(format!(
+            "Model '{requested}' is not allowed for spawned workers (agents.spawn_allowed_models). Allowed: {}. Omit model to use agents.swarm_model.",
+            self.spawn_allowed_models.join(", ")
+        ))
+    }
+
+    /// Whether a spawned worker may run on `model`. Empty allowlist means
+    /// unrestricted. Matching is exact on the configured spec, plus the bare
+    /// model id when the request carries no provider prefix of its own.
+    pub fn worker_may_use_model(&self, model: &str) -> bool {
+        if self.spawn_allowed_models.is_empty() {
+            return true;
+        }
+        let model = model.trim();
+        if model.is_empty() {
+            return false;
+        }
+        let bare_request = model.split_once(':').map(|(_, bare)| bare.trim());
+        self.spawn_allowed_models.iter().any(|allowed| {
+            let allowed = allowed.trim();
+            if allowed == model {
+                return true;
+            }
+            // A request without its own provider prefix may name the allowed
+            // entry by bare model id ("claude-opus-5-5" for
+            // "claude:claude-opus-5-5"); a prefixed request must match exactly.
+            match bare_request {
+                None => allowed
+                    .split_once(':')
+                    .map(|(_, bare)| bare.trim() == model)
+                    .unwrap_or(false),
+                Some(_) => false,
+            }
+        })
+    }
+
     /// Validate an agent-supplied override before resolving any provider route.
     /// Matching is exact: a bare model never authorizes another provider's route.
     pub fn validate_swarm_model_request(&self, model: Option<&str>) -> Result<(), &'static str> {

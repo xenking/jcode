@@ -655,6 +655,15 @@ swarm_model_allowlist = []
 # swarm_model_selection = true
 # swarm_model_allowlist = ["openai:gpt-5.5", "claude:claude-sonnet-4-6"]
 #
+# Hard worker allowlist. When non-empty, a spawned worker may only run on these
+# exact model/route strings: an agent asking for anything else is rejected with
+# the list, and worker failover never steps outside it. Omit the model on spawn
+# to use swarm_model. Leave empty to trust swarm_model and its fallbacks.
+# User-started sessions are never restricted by this list.
+spawn_allowed_models = []
+# Example: cheap primary, Claude fallbacks, never fable/astra or other routes.
+# spawn_allowed_models = ["opencode-go:deepseek-v4.1-flash", "claude:claude-sonnet-5-5", "claude:claude-opus-5-5"]
+#
 # Reasoning effort for spawned swarm workers ("low", "medium", "high", ...).
 # Agents cannot choose worker effort through the swarm tool. Unset = "low".
 # Env override: JCODE_SWARM_EFFORT
