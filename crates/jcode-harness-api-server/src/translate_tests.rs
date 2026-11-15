@@ -965,10 +965,11 @@ fn queued_prompt_bridge_forwards_and_correlates_controls_and_snapshots() {
         queued_prompts_supported: true,
         ..Default::default()
     };
-    let out = state.api_request_to_legacy(&json!({"req":"queue_prompt","id":9,"session_id":"s1","client_id":"p1","content":"next","mode":"after_yield","images":[]}));
+    let out = state.api_request_to_legacy(&json!({"req":"queue_prompt","id":9,"session_id":"s1","client_id":"p1","content":"next","mode":"after_yield","images":[],"system_reminder":"hidden collection"}));
     let legacy = legacy_out(&out);
     assert_eq!(legacy["client_id"], "p1");
     assert_eq!(legacy["mode"], "after_yield");
+    assert_eq!(legacy["system_reminder"], "hidden collection");
     let id = legacy["id"].as_u64().unwrap();
     let ack = state.legacy_event_to_api(&json!({"type":"ack","id":id}));
     assert!(
