@@ -536,30 +536,81 @@ fn assess_find(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFindi
     }
 }
 
+/// Programs whose only effect is to read their operands and print a
+/// description of them. A `find -exec` running one of these inspects the search
+/// roots instead of modifying them, so walking even a protected root
+/// (`~/.ssh`, `/`) stays harmless.
+///
+/// Anything that can write, rename or execute is deliberately absent: `rm`,
+/// `mv`, `cp`, `chmod`, `tee`, `xargs`, `sh`, and any unknown program.
+const READ_ONLY_FIND_PAYLOADS: &[&str] = &[
+    "cat",
+    "readlink",
+    "stat",
+    "wc",
+    "head",
+    "tail",
+    "grep",
+    "egrep",
+    "fgrep",
+    "rg",
+    "ls",
+    "file",
+    "du",
+    "md5",
+    "md5sum",
+    "shasum",
+    "sha256sum",
+    "b3sum",
+    "basename",
+    "dirname",
+    "echo",
+    "printf",
+    "test",
+    "[",
+];
+
+/// Options that turn an otherwise read-only program into something that writes
+/// or executes, so the program cannot be trusted as a `find` payload.
+fn find_payload_option_escapes(program: &str, args: &[&str]) -> bool {
+    match program {
+        // `rg --pre COMMAND` runs a program for every file it searches.
+        "rg" => args
+            .iter()
+            .any(|arg| *arg == "--pre" || arg.starts_with("--pre=")),
+        // `file -C` compiles the magic database in place. Short options may be
+        // bundled (`-bC`), and `--compile` is the long spelling.
+        "file" => args.iter().any(|arg| {
+            *arg == "--compile"
+                || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('C'))
+        }),
+        _ => false,
+    }
+}
+
 fn read_only_find_payload(tokens: &[Token]) -> bool {
     let Some(program) = tokens.first() else {
         return false;
     };
-    match program.basename().as_str() {
-        "cat" | "readlink" => true,
-        // Sed can execute commands or write files even without -i. Recognize
-        // only simple print scripts rather than guessing about arbitrary code.
-        "sed" => {
-            let args: Vec<_> = tokens.iter().skip(1).map(|t| t.text.as_str()).collect();
-            let script_index = if args.first() == Some(&"-n") { 1 } else { 0 };
-            let Some(script) = args.get(script_index) else {
-                return false;
-            };
-            script.ends_with('p')
-                && script[..script.len() - 1]
-                    .chars()
-                    .all(|c| c.is_ascii_digit() || matches!(c, ',' | '$'))
-                && args[script_index + 1..]
-                    .iter()
-                    .all(|arg| !arg.starts_with('-'))
-        }
-        _ => false,
+    let args: Vec<_> = tokens.iter().skip(1).map(|t| t.text.as_str()).collect();
+    let program = program.basename();
+    // Sed can execute commands or write files even without -i. Recognize only
+    // simple print scripts rather than guessing about arbitrary code.
+    if program == "sed" {
+        let script_index = if args.first() == Some(&"-n") { 1 } else { 0 };
+        let Some(script) = args.get(script_index) else {
+            return false;
+        };
+        return script.ends_with('p')
+            && script[..script.len() - 1]
+                .chars()
+                .all(|c| c.is_ascii_digit() || matches!(c, ',' | '$'))
+            && args[script_index + 1..]
+                .iter()
+                .all(|arg| !arg.starts_with('-'));
     }
+    READ_ONLY_FIND_PAYLOADS.contains(&program.as_str())
+        && !find_payload_option_escapes(&program, &args)
 }
 
 /// Conventional bit buckets are safe *redirect* destinations. They remain

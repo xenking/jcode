@@ -106,6 +106,10 @@ mod tests {
             "command -v sudo && sudo -n true",
             "find /sys -type l -exec readlink {} \\;",
             "find /etc -type f -exec sed -n '1,10p' {} \\;",
+            // The live false positive: a size-ordered listing was refused as
+            // "`find` action may modify files".
+            "find /tmp -type f -exec stat -f '%z %N' {} + | sort -rn | head -3",
+            "find . -type f -exec wc -l {} + | sort -n | tail -3",
         ] {
             assert!(
                 destructive_command_refusal(command, None, cwd.clone()).is_none(),

@@ -691,6 +691,94 @@ fn find_output_actions_write_only_their_destinations() {
 }
 
 #[test]
+fn read_only_find_exec_payloads_cover_inspection_programs() {
+    // A live false positive on an installed build: listing the largest files
+    // was refused as "`find` action may modify files" because only `cat`,
+    // `readlink` and print-only `sed` were recognized.
+    for action in ["-exec", "-execdir", "-ok", "-okdir"] {
+        for payload in [
+            "stat -f '%z %N' {}",
+            "stat {}",
+            "wc -l {}",
+            "head -3 {}",
+            "tail -n 5 {}",
+            "grep -n TODO {}",
+            "egrep 'a|b' {}",
+            "fgrep literal {}",
+            "rg --no-heading TODO {}",
+            "ls -la {}",
+            "file {}",
+            "du -k {}",
+            "md5 {}",
+            "md5sum {}",
+            "shasum -a 256 {}",
+            "sha256sum {}",
+            "b3sum {}",
+            "basename {}",
+            "dirname {}",
+            "echo {}",
+            "printf '%s\\n' {}",
+            "test -f {}",
+            "[ -d {} ]",
+        ] {
+            for root in ["/", "~", "~/.ssh", "/etc"] {
+                for terminator in [r"\;", "+"] {
+                    let command = format!("find {root} -type f {action} {payload} {terminator}");
+                    assert_eq!(level(&command), RiskLevel::Safe, "{command}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_reported_stat_find_pipeline_is_safe() {
+    for command in [
+        r"find /home/u/proj -type f -exec stat -f '%z %N' {} + | sort -rn | head -3",
+        r"find . -type f -exec stat -c '%s %n' {} \; | sort -rn | head -3",
+    ] {
+        assert_eq!(level(command), RiskLevel::Safe, "{command}");
+    }
+}
+
+#[test]
+fn find_exec_still_refuses_payloads_that_write_or_execute() {
+    for action in ["-exec", "-execdir", "-ok", "-okdir"] {
+        for payload in [
+            "rm -rf {}",
+            "mv {} /tmp",
+            "sh -c 'rm -rf ~' {}",
+            "sed -i 's/a/b/' {}",
+            "xargs rm {}",
+        ] {
+            for terminator in [r"\;", "+"] {
+                let command = format!("find ~ -type f {action} {payload} {terminator}");
+                assert!(level(&command) >= RiskLevel::Confirm, "{command}");
+            }
+        }
+    }
+}
+
+#[test]
+fn find_exec_refuses_read_only_programs_with_executing_flags() {
+    // `rg --pre` runs a program per file and `file -C` writes magic.mgc.
+    for command in [
+        r#"find / -type f -exec rg --pre 'sh -c "rm -rf ~"' TODO {} \;"#,
+        r"find / -type f -exec rg --pre=./hook TODO {} +",
+        r"find / -type f -exec file -C {} \;",
+        r"find / -type f -exec file --compile {} +",
+    ] {
+        assert!(level(command) >= RiskLevel::Confirm, "{command}");
+    }
+    for command in [
+        r"find / -type f -exec rg -n TODO {} \;",
+        r"find / -type f -exec file {} \;",
+    ] {
+        assert_eq!(level(command), RiskLevel::Safe, "{command}");
+    }
+}
+
+#[test]
 fn issue_1753_substitutions_are_assessed_like_top_level_commands() {
     for command in [
         "echo $(rm -rf ~)",
