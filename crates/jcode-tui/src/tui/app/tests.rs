@@ -1,4 +1,39 @@
 #![cfg_attr(test, allow(clippy::clone_on_copy))]
+#[test]
+fn prompt_stash_returns_after_send() {
+    let mut app = create_test_app();
+    app.input = "saved draft".into();
+    app.cursor_pos = 5;
+    app.handle_key(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert!(app.input.is_empty());
+    assert!(app.stashed_input.is_some());
+    app.input = "send this".into();
+    app.cursor_pos = app.input.len();
+    app.submit_input();
+    assert_eq!(app.input, "saved draft");
+    assert_eq!(app.cursor_pos, 5);
+    assert!(app.stashed_input.is_none());
+}
+
+#[test]
+fn prompt_stash_preserves_pastes_and_images() {
+    let mut app = create_test_app();
+    app.input = "[paste 1] [image 1]".into();
+    app.cursor_pos = app.input.len();
+    app.pasted_contents.push("saved large paste".into());
+    app.pending_images.push(("image/png".into(), "data".into()));
+    app.toggle_input_stash();
+    assert!(app.pending_images.is_empty());
+    assert!(app.pasted_contents.is_empty());
+    app.input = "other prompt".into();
+    app.cursor_pos = app.input.len();
+    input::queue_message(&mut app);
+    assert_eq!(app.input, "[paste 1] [image 1]");
+    assert_eq!(app.pasted_contents, ["saved large paste"]);
+    assert_eq!(app.pending_images, [("image/png".into(), "data".into())]);
+    assert_eq!(app.queued_messages, ["other prompt"]);
+}
 mod tool_duration;
 include!("tests/provider_env.rs");
 include!("tests/cache_diagnostics.rs");
@@ -791,16 +826,16 @@ fn compaction_invalidates_kv_cache_baseline_and_stale_completion_cannot_restore_
     let old_generation = app.kv_cache.cache_generation;
     app.handle_compaction_event(
         crate::compaction::CompactionEvent {
-        trigger: "semantic".to_string(),
-        method: Some("snapcompact".to_string()),
-        pre_tokens: Some(80_169),
-        post_tokens: Some(27_641),
-        tokens_saved: Some(52_528),
-        duration_ms: Some(500),
-        messages_dropped: None,
-        messages_compacted: Some(173),
-        summary_chars: Some(10_000),
-        active_messages: Some(3),
+            trigger: "semantic".to_string(),
+            method: Some("snapcompact".to_string()),
+            pre_tokens: Some(80_169),
+            post_tokens: Some(27_641),
+            tokens_saved: Some(52_528),
+            duration_ms: Some(500),
+            messages_dropped: None,
+            messages_compacted: Some(173),
+            summary_chars: Some(10_000),
+            active_messages: Some(3),
         },
         None,
     );

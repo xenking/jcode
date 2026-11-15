@@ -169,9 +169,13 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
         title: None,
         tool_data: None,
     });
-    let _ = app
+    if app
         .begin_remote_send(remote, prepared.expanded, prepared.images, false)
-        .await;
+        .await
+        .is_ok()
+    {
+        app.restore_stash_after_send();
+    }
     Ok(())
 }
 

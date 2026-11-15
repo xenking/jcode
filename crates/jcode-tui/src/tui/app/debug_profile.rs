@@ -213,7 +213,7 @@ impl App {
         let stashed_input_bytes = self
             .stashed_input
             .as_ref()
-            .map(|(text, _)| text.capacity())
+            .map(|stash| stash.text.capacity())
             .unwrap_or(0);
         let pending_soft_interrupts_bytes: usize = self
             .pending_soft_interrupts

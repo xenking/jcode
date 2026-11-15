@@ -2077,6 +2077,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             SendAction::Submit => submit_prepared_remote_input(app, remote, prepared).await?,
             SendAction::Queue => {
                 app.queued_messages.push(prepared.expanded);
+                app.restore_stash_after_send();
             }
             SendAction::Interleave => {
                 app.send_interleave_now(prepared.expanded, prepared.images, remote)

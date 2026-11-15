@@ -24,6 +24,7 @@ pub(in crate::tui::app) async fn send_interleave_now(
         Ok(request_id) => {
             app.track_pending_soft_interrupt(request_id, msg_clone);
             app.set_status_notice("⏭ Interleave sent");
+            app.restore_stash_after_send();
         }
     }
 }
