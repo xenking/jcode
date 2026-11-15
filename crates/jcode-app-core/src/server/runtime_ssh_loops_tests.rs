@@ -449,3 +449,20 @@ async fn remote_loop_runtime_executes_turns_persists_controls_and_recovers_actua
     assert_eq!(other_status["poke_enabled"], false);
     assert!(!state_path(other).unwrap().exists(), "status is read-only");
 }
+
+#[test]
+fn live_background_merge_keeps_running_await_dependencies() {
+    let mut snapshot = open_snapshot();
+    snapshot.todos[0].waiting_on = vec!["await-swarm-1".into()];
+    // load_snapshot already resolved the durable await as running.
+    snapshot.running_background_tasks = vec!["await-swarm-1".into()];
+    merge_live_background_tasks(&mut snapshot, vec!["bg-other".into()]);
+    assert!(
+        snapshot
+            .running_background_tasks
+            .iter()
+            .any(|id| id == "await-swarm-1")
+    );
+    let mut state = enabled_state();
+    assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
+}

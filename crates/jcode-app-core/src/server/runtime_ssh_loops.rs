@@ -331,6 +331,25 @@ fn snapshot(session_id: &str) -> Result<todo::followup::TodoSnapshot> {
     ))
 }
 
+/// `load_snapshot` already resolved durable `await_members` dependencies.
+/// Live process-backed tasks extend that set and must never replace it, or a
+/// todo waiting on a pending swarm await is poked as actionable.
+fn merge_live_background_tasks(snapshot: &mut todo::followup::TodoSnapshot, live: Vec<String>) {
+    for id in live {
+        if !snapshot.running_background_tasks.contains(&id) {
+            snapshot.running_background_tasks.push(id);
+        }
+    }
+}
+
+/// A turn that ended with a background await in flight is waiting, not idle.
+/// The await's wake re-enters this loop with fresh state.
+fn session_has_pending_await(session_id: &str) -> bool {
+    super::pending_await_members_for_session(session_id)
+        .iter()
+        .any(|state| state.background && state.wake && state.is_pending())
+}
+
 fn apply_effects(session_id: &str, effects: &todo::followup::TodoEffects) -> Result<()> {
     if effects.clear_gate_observations {
         todo::clear_gate_observations(session_id)?;
@@ -392,7 +411,7 @@ pub(super) async fn run_reserved_followups(
             return Ok(());
         }
         let mut snapshot = snapshot(&session_id)?;
-        snapshot.running_background_tasks = crate::background::global()
+        let live = crate::background::global()
             .list()
             .await
             .into_iter()
@@ -402,6 +421,13 @@ pub(super) async fn run_reserved_followups(
             })
             .map(|task| task.task_id)
             .collect();
+        merge_live_background_tasks(&mut snapshot, live);
+        if session_has_pending_await(&session_id) {
+            crate::logging::info(&format!(
+                "Remote continuation deferred for session {session_id}: await_members in flight"
+            ));
+            return Ok(());
+        }
         let decision = update_state(&session_id, |state| Ok(next_followup(state, &snapshot)))?;
         apply_effects(&session_id, &decision.effects)?;
         let Some(followup) = decision.follow_up else {
