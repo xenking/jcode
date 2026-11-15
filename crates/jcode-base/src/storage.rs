@@ -95,6 +95,12 @@ pub fn jcode_dir() -> Result<std::path::PathBuf> {
     #[cfg(any(test, feature = "test-support"))]
     {
         if std::env::var_os("JCODE_HOME").is_none() {
+            // A child process test that needs a specific home (rather than the
+            // per-process default) pins it here; HOME-derived behaviour stays
+            // intact for the builders under test.
+            if let Some(pinned) = std::env::var_os("JCODE_TEST_ISOLATED_HOME") {
+                return Ok(std::path::PathBuf::from(pinned));
+            }
             return Ok(isolated_test_home().to_path_buf());
         }
     }

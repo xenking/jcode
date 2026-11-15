@@ -41,10 +41,10 @@ fn public_prompt_builders_deduplicate_home_and_aliases_but_preserve_distinct_fil
             ])
             .current_dir(cwd)
             .env("HOME", &home)
-            // The child is a test binary too, so its home resolution would be
-            // isolated away from $HOME. Name the home under test explicitly and
-            // let the alias/distinct cases exercise deduplication by real path.
-            .env("JCODE_HOME", cwd.join(".jcode"))
+            // The child is a test binary too, so its home resolution is isolated
+            // away from $HOME by default. Pin the home under test; the cases then
+            // still exercise deduplication by real path via cwd.
+            .env("JCODE_TEST_ISOLATED_HOME", home.join(".jcode"))
             .env("XDG_CONFIG_HOME", home.join(".config"))
             .env("XDG_CACHE_HOME", home.join(".cache"))
             .env("JCODE_PROMPT_ACCEPTANCE_CASE", case)
