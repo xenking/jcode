@@ -146,7 +146,19 @@ struct UsageProviderReport {
     extra_info: Vec<(String, String)>,
     #[serde(skip_serializing_if = "Option::is_none")]
     banked_reset: Option<UsageBankedResetReport>,
+    /// Dry-run auto-reset decision under current config. Never spends.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_reset: Option<UsageAutoResetReport>,
     error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct UsageAutoResetReport {
+    enabled: bool,
+    trigger: &'static str,
+    min_wait_minutes: u64,
+    decision: &'static str,
+    reason: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -536,6 +548,16 @@ pub(super) async fn run_usage_command(emit_json: bool) -> Result<()> {
                 println!("{}: {}", key, value);
             }
         }
+        if let Some(auto) = &provider.auto_reset {
+            println!(
+                "auto-reset ({}{}, >{}m): {} ({})",
+                auto.trigger,
+                if auto.enabled { "" } else { ", disabled" },
+                auto.min_wait_minutes,
+                auto.decision,
+                auto.reason
+            );
+        }
     }
 
     Ok(())
@@ -585,8 +607,38 @@ fn usage_provider_report(provider: &crate::usage::ProviderUsage) -> UsageProvide
             .collect(),
         extra_info: provider.extra_info.clone(),
         banked_reset: banked_reset_report(provider),
+        auto_reset: auto_reset_report(provider),
         error: provider.error.clone(),
     }
+}
+
+fn auto_reset_report(provider: &crate::usage::ProviderUsage) -> Option<UsageAutoResetReport> {
+    use crate::provider::auto_reset_trigger as trigger;
+    if provider.error.is_some() {
+        return None;
+    }
+    let config = crate::config::Config::load().provider;
+    let enabled = if provider.openai_reset_credits.is_some() {
+        config.openai_auto_banked_reset
+    } else if provider.anthropic_banked_resets.is_some() || provider.anthropic_limit_reset.is_some()
+    {
+        config.anthropic_auto_fable_reset
+    } else {
+        return None;
+    };
+    let decision = trigger::decide(
+        config.auto_reset_trigger,
+        config.auto_reset_min_wait_minutes,
+        &trigger::input_from_report(provider),
+        chrono::Utc::now(),
+    );
+    Some(UsageAutoResetReport {
+        enabled,
+        trigger: config.auto_reset_trigger.as_str(),
+        min_wait_minutes: config.auto_reset_min_wait_minutes,
+        decision: if decision.is_redeem() { "redeem" } else { "wait" },
+        reason: decision.reason().to_string(),
+    })
 }
 
 fn banked_reset_report(provider: &crate::usage::ProviderUsage) -> Option<UsageBankedResetReport> {

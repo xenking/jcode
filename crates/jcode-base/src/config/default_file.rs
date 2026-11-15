@@ -582,6 +582,11 @@ anthropic_retry_recoverable_rate_limits = true
 # Preserve earned resets while another approved pool route is ready (default: true).
 # Set false to redeem before account/provider failover instead.
 # auto_reset_only_when_no_routes = true
+# When automatic resets fire: "blocked_wait_over" (default) spends one only
+# while blocked and the window reset is more than auto_reset_min_wait_minutes
+# away. "exhausted" spends one as soon as a window hits 100%.
+# auto_reset_trigger = "blocked_wait_over"
+# auto_reset_min_wait_minutes = 10
 cross_provider_failover = "countdown"
 # Copilot premium mode: "normal" (default), "one" (first msg only), "zero" (all free)
 # Set to "zero" if you have premium Copilot and want free requests

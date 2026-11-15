@@ -4,6 +4,7 @@ mod account_selection;
 pub mod activation;
 pub mod anthropic;
 pub mod antigravity;
+pub mod auto_reset_trigger;
 pub mod bedrock;
 mod catalog_memo;
 mod catalog_refresh;
@@ -502,6 +503,38 @@ impl MultiProvider {
         let account = self
             .selected_account_for_provider(provider)
             .or_else(|| active_account_label_for_provider(provider));
+        let decision = account_failover::multi_account_provider_kind(provider).map(|kind| {
+            auto_reset_trigger::decide(
+                config.auto_reset_trigger,
+                config.auto_reset_min_wait_minutes,
+                &auto_reset_trigger::cached_input(kind, account.as_deref(), true),
+                chrono::Utc::now(),
+            )
+        });
+        let Some(decision) = decision else {
+            return Ok(false);
+        };
+        let account_name = account.clone().unwrap_or_else(|| "default".into());
+        crate::logging::info(&format!(
+            "Automatic earned reset decision for {} ({}): {} [trigger={}, min_wait={}m]: {}",
+            Self::provider_label(provider),
+            account_name,
+            if decision.is_redeem() {
+                "redeem"
+            } else {
+                "wait"
+            },
+            config.auto_reset_trigger.as_str(),
+            config.auto_reset_min_wait_minutes,
+            decision.reason()
+        ));
+        if !decision.is_redeem() {
+            return Ok(false);
+        }
+        if std::env::var_os("JCODE_AUTO_RESET_DRY_RUN").is_some_and(|v| !v.is_empty() && v != "0") {
+            crate::logging::info("Automatic earned reset: dry run, not redeeming");
+            return Ok(false);
+        }
         let reset = match provider {
             ActiveProvider::OpenAI => crate::usage::auto_reset_weekly_usage(account).await,
             ActiveProvider::Claude => crate::usage::auto_reset_fable_usage(account).await,
@@ -509,12 +542,20 @@ impl MultiProvider {
         };
         Ok(match reset {
             Ok(true) => {
+                crate::logging::info(&format!(
+                    "Automatic earned reset REDEEMED for {} ({}): {}",
+                    Self::provider_label(provider),
+                    account_name,
+                    decision.reason()
+                ));
                 self.startup_notices
                     .write()
                     .unwrap_or_else(|p| p.into_inner())
                     .push(format!(
-                        "{} usage is available again after earned-reset recovery. Continuing automatically.",
-                        Self::provider_label(provider)
+                        "{} ({}) redeemed one earned usage reset ({}). Continuing automatically.",
+                        Self::provider_label(provider),
+                        account_name,
+                        decision.reason()
                     ));
                 true
             }
