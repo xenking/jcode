@@ -710,7 +710,8 @@ fn test_definitive_exhaustion_immediate_switch_and_manual_safety() {
             ));
             assert_eq!(
                 active.lock().unwrap().as_str(),
-                if immediate { "openai" } else { "claude" }
+                if immediate { "openai" } else { "claude" },
+                "{mode} enabled={enabled} reason={reason}"
             );
             assert_eq!(app.pending_turn, immediate);
             assert_eq!(
