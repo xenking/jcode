@@ -15,6 +15,7 @@ the active model.
 | `/review`, autoreview | `[autoreview] model` | `/agents review <model>` | inherit |
 | `/judge`, autojudge | `[autojudge] model` | `/agents judge <model>` | inherit |
 | Memory extraction | `[agents] memory_model` | `/agents memory <model>` | inherit |
+| Session titles | `[agents] title_model` (env `JCODE_TITLE_MODEL`) | none | `claude-haiku-5-5`, then `opencode-go:deepseek-v4.1-flash` |
 | Ambient runner | `[ambient] model` | `/agents ambient <model>` | inherit |
 
 `/agents` with no args prints defaults, session overrides and available
@@ -54,6 +55,7 @@ swarm_model = "openai:gpt-6.1-terra"
 swarm_model_fallbacks = ["openai:gpt-6.1-terra", "claude:claude-sonnet-5-5"]
 swarm_effort = "low"
 memory_model = "claude-haiku-5-5"
+title_model = "claude-haiku-5-5"
 
 [autoreview]
 model = "claude-haiku-5-5"
@@ -124,3 +126,28 @@ The effective values are logged on every switch:
 `compaction effective: provider=... model=... reactive_threshold=... max_context_tokens=... budget=...`.
 There is no env override for `[compaction]` keys. Per-session ceiling:
 `/context cap <tokens>` still wins over `max_context_tokens`.
+
+## Session titles
+
+Titles are a tiny side call, not a turn, so they use their own chain and never
+take the main model:
+
+1. `[agents] title_model` / `JCODE_TITLE_MODEL` when set;
+2. `claude-haiku-5-5`;
+3. `opencode-go:deepseek-v4.1-flash`.
+
+Each candidate is tried on a fresh provider fork until one answers, so the
+title keeps working while OpenAI is paused or the first provider is down.
+Generation runs after the first real user turn and is refined once at the end
+of the third turn. A manual rename or bookmark label always wins, internal
+turns (system reminders, scheduled tasks, poke text, swarm lane assignments)
+are never titled, and answers that are not 3-6 words in the user's language
+fall back to the previous title.
+
+Existing sessions can be renamed in bulk, dry-run first:
+
+```bash
+jcode titles backfill                 # report only
+jcode titles backfill --apply         # write
+jcode titles backfill --sessions-dir /path/to/copy --limit 20
+```

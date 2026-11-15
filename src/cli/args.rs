@@ -318,6 +318,12 @@ pub(crate) enum Command {
         json: bool,
     },
 
+    /// Maintain generated session titles
+    Titles {
+        #[command(subcommand)]
+        action: TitlesCommand,
+    },
+
     /// Inspect or change usage telemetry settings
     #[command(subcommand)]
     Telemetry(TelemetryCommand),
@@ -675,6 +681,36 @@ pub(crate) enum TelemetryCommand {
     Enable,
     /// Disable all telemetry persistently
     Disable,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum TitlesCommand {
+    /// Regenerate session titles that were truncated prompts or internal text.
+    ///
+    /// Dry-run by default: prints what would change and writes nothing.
+    Backfill {
+        /// Write the new titles.
+        #[arg(long)]
+        apply: bool,
+        /// Regenerate every session without a manual title, not just bad ones.
+        #[arg(long)]
+        all: bool,
+        /// Process at most this many sessions, newest first.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Process only this session id.
+        #[arg(long)]
+        session: Option<String>,
+        /// Sessions directory to read (defaults to JCODE_HOME/sessions).
+        #[arg(long)]
+        sessions_dir: Option<std::path::PathBuf>,
+        /// Include sessions owned by a running daemon (risk of a write race).
+        #[arg(long)]
+        include_active: bool,
+        /// Emit one JSON object per processed session.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]

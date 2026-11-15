@@ -3627,6 +3627,7 @@ dependencies = [
  "jcode-provider-openai-runtime",
  "jcode-provider-openrouter-runtime",
  "jcode-selfdev-types",
+ "jcode-session-types",
  "jcode-terminal-prompt",
  "jcode-tui",
  "jcode-tui-session-picker",

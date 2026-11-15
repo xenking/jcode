@@ -95,19 +95,17 @@ impl App {
             .unwrap_or_else(|| session_id.to_string());
         let session_icon = crate::id::session_icon(&session_name);
         // Keep the live terminal title aligned with /resume: an explicit rename
-        // wins, then the model's current todo/goal title, then the generated title.
-        let todo_title = self
-            .session
-            .custom_title
-            .is_none()
+        // wins, then the generated title. A todo group is a lane label, so it is
+        // only a last resort for sessions that have no title at all.
+        let todo_title = (self.session.custom_title.is_none() && self.session.title.is_none())
             .then(|| crate::todo::load_session_title(session_id))
             .flatten();
         let display_title = self
             .session
             .custom_title
             .as_deref()
-            .or(todo_title.as_deref())
             .or(self.session.title.as_deref());
+        let display_title = display_title.or(todo_title.as_deref());
         let is_canary = if self.is_remote {
             self.remote_is_canary.unwrap_or(self.session.is_canary)
         } else {

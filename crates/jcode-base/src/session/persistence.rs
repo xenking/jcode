@@ -601,6 +601,18 @@ impl Session {
         self.save_inner(false)
     }
 
+    /// Write a full snapshot to an explicit path, collapsing its journal.
+    ///
+    /// Offline tools (session title backfill) load a snapshot through
+    /// [`Session::load_from_path`] and must persist back to the same file, which
+    /// is not necessarily under `JCODE_HOME`. The snapshot already contains the
+    /// replayed journal state, so the journal is removed instead of being
+    /// extended.
+    pub fn save_snapshot_to(&mut self, snapshot_path: &Path) -> Result<()> {
+        let journal_path = session_journal_path_from_snapshot(snapshot_path);
+        self.checkpoint_snapshot(snapshot_path, &journal_path)
+    }
+
     /// Persist the session even when it has no visible conversation message
     /// yet. Use this for sessions prepared by one process and attached to by
     /// another (for example visible swarm spawns), where caller-configured

@@ -15,6 +15,7 @@ mod prompting;
 mod provider;
 mod response_recovery;
 mod runtime_recovery;
+mod session_title;
 mod status;
 mod streaming;
 #[cfg(test)]
@@ -299,6 +300,9 @@ pub struct Agent {
     background_tool_signal: InterruptSignal,
     /// Signal to gracefully stop generation (checkpoint partial response and exit)
     graceful_shutdown: InterruptSignal,
+    /// Whether this process generated the stored session title. Lets the third
+    /// turn refine its own title without ever replacing a caller-chosen one.
+    auto_title_owned: bool,
     /// Client-side cache tracking for detecting append-only violations
     cache_tracker: CacheTracker,
     /// Classifies provider-reported KV cache misses for every client.
@@ -480,6 +484,7 @@ impl Agent {
             soft_interrupt_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             background_tool_signal: InterruptSignal::new(),
             graceful_shutdown: InterruptSignal::new(),
+            auto_title_owned: false,
             cache_tracker: CacheTracker::new(),
             kv_cache_monitor: Default::default(),
             last_usage: TokenUsage::default(),

@@ -68,6 +68,9 @@ impl Agent {
         // `jcode run` uses this path, so headless turns fire the same
         // lifecycle hooks as streaming turns (docs/HOOKS.md).
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
+        if result.is_ok() {
+            self.refresh_session_title(None).await;
+        }
         result
     }
 
@@ -104,7 +107,11 @@ impl Agent {
         if trace_enabled() {
             eprintln!("[trace] session_id {}", self.session.id);
         }
-        self.run_turn(false).await
+        let result = self.run_turn(false).await;
+        if result.is_ok() {
+            self.refresh_session_title(None).await;
+        }
+        result
     }
 
     /// Run one conversation turn with streaming events via mpsc channel (per-client)
@@ -222,8 +229,12 @@ impl Agent {
         let turn_started_at = Instant::now();
         let start_message_index = self.message_count();
         self.fire_turn_start_hook("chat");
+        let title_event_tx = event_tx.clone();
         let result = self.run_turn_streaming_mpsc(event_tx).await;
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
+        if result.is_ok() {
+            self.refresh_session_title(Some(&title_event_tx)).await;
+        }
         result
     }
 
@@ -247,8 +258,12 @@ impl Agent {
         let turn_started_at = Instant::now();
         let start_message_index = self.message_count();
         self.fire_turn_start_hook("failover");
+        let title_event_tx = event_tx.clone();
         let result = self.run_turn_streaming_mpsc(event_tx).await;
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
+        if result.is_ok() {
+            self.refresh_session_title(Some(&title_event_tx)).await;
+        }
         result
     }
 
@@ -1398,7 +1413,8 @@ impl Agent {
         crate::session::render_messages(&self.session)
             .into_iter()
             .map(|msg| HistoryMessage {
-                response_stats: msg.response_stats, timestamp_ms: msg.timestamp_ms,
+                response_stats: msg.response_stats,
+                timestamp_ms: msg.timestamp_ms,
                 role: msg.role,
                 content: msg.content,
                 tool_calls: if msg.tool_calls.is_empty() {
@@ -1424,7 +1440,8 @@ impl Agent {
         let history = messages
             .into_iter()
             .map(|msg| HistoryMessage {
-                response_stats: msg.response_stats, timestamp_ms: msg.timestamp_ms,
+                response_stats: msg.response_stats,
+                timestamp_ms: msg.timestamp_ms,
                 role: msg.role,
                 content: msg.content,
                 tool_calls: if msg.tool_calls.is_empty() {
@@ -1454,7 +1471,8 @@ impl Agent {
         let history = messages
             .into_iter()
             .map(|msg| HistoryMessage {
-                response_stats: msg.response_stats, timestamp_ms: msg.timestamp_ms,
+                response_stats: msg.response_stats,
+                timestamp_ms: msg.timestamp_ms,
                 role: msg.role,
                 content: msg.content,
                 tool_calls: if msg.tool_calls.is_empty() {

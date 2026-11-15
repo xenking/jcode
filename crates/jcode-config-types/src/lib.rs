@@ -735,6 +735,13 @@ pub struct AgentsConfig {
     pub memory_jev_threshold: f32,
     /// Optional model override for memory extraction only, never recall.
     pub memory_model: Option<String>,
+    /// Optional model override for generated session titles.
+    ///
+    /// Titles are a tiny side call, so this defaults to the cheap non-OpenAI
+    /// chain in `jcode_session_types::DEFAULT_TITLE_MODELS` (Claude Haiku, then
+    /// the cheap DeepSeek flash route). The fallback chain keeps naming working
+    /// when OpenAI is paused or the first provider is unavailable.
+    pub title_model: Option<String>,
     /// Whether optional automatic memory extraction may use a text-generating
     /// sidecar. Recall always uses Jev and is independent of this setting.
     #[serde(default = "default_memory_sidecar_enabled")]
@@ -839,6 +846,7 @@ impl Default for AgentsConfig {
             voice_jev_model: None,
             memory_jev_threshold: default_memory_jev_threshold(),
             memory_model: None,
+            title_model: None,
             memory_sidecar_enabled: default_memory_sidecar_enabled(),
             memory_rerank_cadence: default_memory_rerank_cadence(),
             memory_rerank_votes: default_memory_rerank_votes(),

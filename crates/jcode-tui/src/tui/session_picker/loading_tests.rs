@@ -1134,7 +1134,7 @@ fn load_sessions_prefers_custom_title_over_generated_title() {
 }
 
 #[test]
-fn load_sessions_prefers_todo_group_over_generated_title() {
+fn load_sessions_prefers_generated_title_over_todo_lane_label() {
     let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("temp dir");
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
@@ -1196,8 +1196,24 @@ fn load_sessions_prefers_todo_group_over_generated_title() {
         .iter()
         .find(|session| session.id == session_id)
         .expect("todo-titled session present");
-    assert_eq!(loaded.title, "Improve resume session names");
+    assert_eq!(loaded.title, "Generated first prompt");
     assert_eq!(loaded.todo_statuses, ["in_progress"]);
+    assert!(loaded.search_index.contains("generated first prompt"));
+    assert!(!loaded.search_index.contains("improve resume session names"));
+
+    // A todo group is a lane label, so it only names sessions that have no
+    // generated title at all.
+    let mut untitled = Session::load(session_id).expect("load session");
+    untitled.title = None;
+    untitled.save().expect("save untitled session");
+    invalidate_session_list_cache();
+
+    let sessions = load_sessions().expect("load sessions");
+    let loaded = sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .expect("todo-titled session present");
+    assert_eq!(loaded.title, "Improve resume session names");
     assert!(loaded.search_index.contains("improve resume session names"));
 
     let mut legacy = serde_json::to_value(loaded).expect("serialize picker session");

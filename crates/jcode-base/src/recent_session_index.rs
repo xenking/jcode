@@ -36,8 +36,10 @@ impl RecentSessionMetadata {
                     .then(|| self.save_label.as_deref().and_then(non_empty))
                     .flatten()
             })
-            .or_else(|| self.todo_title.as_deref().and_then(non_empty))
             .or_else(|| self.generated_title.as_deref().and_then(non_empty))
+            // Todo groups are lane labels ("session-titles"), not conversation
+            // titles. Only sessions with no generated title fall back to them.
+            .or_else(|| self.todo_title.as_deref().and_then(non_empty))
     }
 }
 
@@ -414,7 +416,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn display_title_uses_custom_then_todo_then_generated() {
+    fn display_title_prefers_generated_over_todo_lane_labels() {
         let mut entry = RecentSessionMetadata {
             session_id: "session_test".into(),
             working_dir: None,
@@ -426,6 +428,8 @@ mod tests {
             updated_at_ms: 1,
             last_active_at_ms: None,
         };
+        assert_eq!(entry.display_title(), Some("Generated"));
+        entry.generated_title = None;
         assert_eq!(entry.display_title(), Some("Todo goal"));
         entry.custom_title = Some("Renamed".into());
         assert_eq!(entry.display_title(), Some("Renamed"));
@@ -449,6 +453,8 @@ mod tests {
         assert_eq!(entry.display_title(), Some("Renamed"));
         entry.custom_title = None;
         entry.saved = false;
+        assert_eq!(entry.display_title(), Some("Generated"));
+        entry.generated_title = None;
         assert_eq!(entry.display_title(), Some("Todo goal"));
     }
 }
