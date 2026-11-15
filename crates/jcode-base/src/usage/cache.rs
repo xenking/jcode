@@ -887,29 +887,107 @@ pub(super) fn openai_snapshot_from_usage(
     }
 }
 
+/// Ratio of one Anthropic window, or `None` when the sample cannot speak for
+/// the window right now.
+///
+/// Error timestamps alone are not evidence of known quota: failed first probes
+/// contain default zeroes. Only a real last-good sample with a still-open,
+/// explicitly dated window is safe to show as stale.
+fn anthropic_window_ratio(usage: &UsageData, value: f32, reset: Option<&str>) -> Option<f32> {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return None;
+    }
+    let future_reset = reset
+        .and_then(|reset| chrono::DateTime::parse_from_rfc3339(reset).ok())
+        .is_some_and(|reset| reset > chrono::Utc::now());
+    if usage.last_error.is_none() {
+        // A success can remain cached across a reset while polling backs
+        // off. Never route or display the rolled-over window as current.
+        return (reset.is_none() || future_reset).then_some(value);
+    }
+    (usage.last_success_at.is_some() && usage.fetched_at.is_some() && future_reset).then_some(value)
+}
+
+/// Every Anthropic window with the deadline that belongs to that window.
+/// Reset policy needs each window's own deadline: the display snapshot keeps a
+/// single shared deadline, which cannot express a five-hour window with
+/// headroom next to an exhausted weekly window.
+fn anthropic_usage_windows(usage: &UsageData) -> Vec<(f32, Option<String>)> {
+    let mut windows = Vec::new();
+    if let Some(ratio) =
+        anthropic_window_ratio(usage, usage.five_hour, usage.five_hour_resets_at.as_deref())
+    {
+        windows.push((ratio, usage.five_hour_resets_at.clone()));
+    }
+    if let Some(ratio) =
+        anthropic_window_ratio(usage, usage.seven_day, usage.seven_day_resets_at.as_deref())
+    {
+        windows.push((ratio, usage.seven_day_resets_at.clone()));
+    }
+    for window in &usage.model_scoped {
+        if let Some(ratio) =
+            anthropic_window_ratio(usage, window.utilization, window.resets_at.as_deref())
+        {
+            windows.push((ratio, window.resets_at.clone()));
+        }
+    }
+    if let Some(value) = usage.seven_day_opus
+        && let Some(ratio) =
+            anthropic_window_ratio(usage, value, usage.seven_day_resets_at.as_deref())
+    {
+        windows.push((ratio, usage.seven_day_resets_at.clone()));
+    }
+    windows
+}
+
+fn openai_usage_windows(usage: &OpenAIUsageData) -> Vec<(f32, Option<String>)> {
+    usage
+        .five_hour
+        .iter()
+        .chain(usage.seven_day.iter())
+        .chain(usage.spark.iter())
+        .chain(usage.additional_windows.iter())
+        .map(|window| (window.usage_ratio, window.resets_at.clone()))
+        .collect()
+}
+
+/// Windows with their own deadlines for reset policy, from the same caches the
+/// account snapshot reads. A remote snapshot carries only the shared display
+/// deadline, so it keeps the snapshot mapping.
+/// Never probes or blocks on a contended cache lock.
+pub fn cached_account_usage_windows(
+    provider: super::MultiAccountProviderKind,
+    label: &str,
+) -> Option<Vec<(f32, Option<String>)>> {
+    if let Some(remote) = super::remote_accounts::cached(provider, label) {
+        return remote.map(|snapshot| snapshot.window_ratios());
+    }
+    let label = label.trim();
+    if label.is_empty() {
+        return None;
+    }
+    match provider {
+        super::MultiAccountProviderKind::Anthropic => {
+            let usage = cached_anthropic_usage_for_label(label)?;
+            (usage.last_error.is_none() && !usage.is_stale())
+                .then(|| anthropic_usage_windows(&usage))
+        }
+        super::MultiAccountProviderKind::OpenAI => {
+            let usage = cached_openai_usage(&format!("label:{label}"))?;
+            usage
+                .last_error
+                .is_none()
+                .then(|| openai_usage_windows(&usage))
+        }
+    }
+}
+
 pub(super) fn anthropic_snapshot_from_usage(
     label: String,
     email: Option<String>,
     usage: &UsageData,
 ) -> AccountUsageSnapshot {
-    // Error timestamps alone are not evidence of known quota: failed first
-    // probes contain default zeroes. Only a real last-good sample with a
-    // still-open, explicitly dated window is safe to show as stale.
-    let ratio = |value: f32, reset: Option<&str>| {
-        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
-            return None;
-        }
-        let future_reset = reset
-            .and_then(|reset| chrono::DateTime::parse_from_rfc3339(reset).ok())
-            .is_some_and(|reset| reset > chrono::Utc::now());
-        if usage.last_error.is_none() {
-            // A success can remain cached across a reset while polling backs
-            // off. Never route or display the rolled-over window as current.
-            return (reset.is_none() || future_reset).then_some(value);
-        }
-        (usage.last_success_at.is_some() && usage.fetched_at.is_some() && future_reset)
-            .then_some(value)
-    };
+    let ratio = |value: f32, reset: Option<&str>| anthropic_window_ratio(usage, value, reset);
     let five_hour_ratio = ratio(usage.five_hour, usage.five_hour_resets_at.as_deref());
     let seven_day_ratio = ratio(usage.seven_day, usage.seven_day_resets_at.as_deref());
     AccountUsageSnapshot {

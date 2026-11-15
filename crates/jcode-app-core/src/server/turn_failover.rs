@@ -279,9 +279,94 @@ pub(super) async fn process_reserved_locked_message_with_swarm_fallbacks(
     super::runtime_ssh_loops::run_reserved_followups(agent, lease, event_tx).await
 }
 
-/// Bare model id of a `route:model` spec.
-fn bare_model(spec: &str) -> &str {
-    spec.split_once(':').map_or(spec, |(_, bare)| bare).trim()
+/// Route identity of a fallback selection.
+///
+/// `claude-oauth:opus` and `claude-api:opus` are the same model on two
+/// credential routes, and only one of them may be out of quota, so a repeat is
+/// decided on the route as well as the model.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FallbackTarget {
+    route: Option<String>,
+    model: String,
+}
+
+impl FallbackTarget {
+    /// Parse a `route:model` spec or a `model@route-pin` selection.
+    fn parse(spec: &str) -> Self {
+        let spec = spec.trim();
+        let (route, model) = match spec.split_once(':') {
+            Some((route, model)) if !route.trim().is_empty() && !model.trim().is_empty() => {
+                (Some(route), model)
+            }
+            _ => (None, spec),
+        };
+        // An explicit provider pin (`model@openai`) is a route identity too.
+        let (route, model) = match model.split_once('@') {
+            Some((model, pin)) if !pin.trim().is_empty() && !model.trim().is_empty() => {
+                (Some(pin), model)
+            }
+            _ => (route, model),
+        };
+        Self {
+            route: route.map(|route| normalize_route(route)),
+            model: model.trim().to_string(),
+        }
+    }
+
+    /// Whether this target already covers `candidate`, so attempting the
+    /// candidate could not reach a route that has not been tried.
+    fn covers(&self, candidate: &Self) -> bool {
+        if self.model != candidate.model {
+            return false;
+        }
+        match (self.route.as_deref(), candidate.route.as_deref()) {
+            (Some(tried), Some(next)) => same_route(tried, next),
+            // A spec without a route re-uses whatever route is active.
+            (_, None) => true,
+            // The active route is unknown, so an explicit route may differ.
+            (None, Some(_)) => false,
+        }
+    }
+}
+
+/// Whether two route names select the same credential route. The vocabularies
+/// overlap (`claude` is the OAuth route in automatic mode, `claude-api` and
+/// `anthropic-api` both name the API key), so compare canonically.
+fn same_route(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    match (
+        jcode_provider_core::AuthRoute::parse(left),
+        jcode_provider_core::AuthRoute::parse(right),
+    ) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// Compare route names without their account suffix (`claude-oauth@work`) or
+/// provider profile (`openai-compatible:nvidia-nim`).
+fn normalize_route(route: &str) -> String {
+    let route = route.split_once(':').map_or(route, |(base, _)| base);
+    let route = route.split_once('@').map_or(route, |(base, _)| base);
+    route.trim().to_ascii_lowercase()
+}
+
+/// The model and route the agent is running right now.
+fn current_target(agent: &Agent) -> FallbackTarget {
+    let mut target = FallbackTarget::parse(&agent.provider_model());
+    if target.route.is_none() {
+        target.route = [
+            agent.session_route_api_method(),
+            agent.session_provider_key(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|method| normalize_route(&method))
+        .find(|route| !route.is_empty());
+    }
+    target
 }
 
 /// While the turn keeps failing, switch to each configured fallback model in
@@ -294,7 +379,7 @@ async fn retry_turn_with_model_fallbacks(
     event_tx: mpsc::UnboundedSender<ServerEvent>,
     fallbacks: &[String],
 ) -> anyhow::Result<()> {
-    let mut tried: Vec<String> = vec![agent.provider_model()];
+    let mut tried: Vec<FallbackTarget> = vec![current_target(agent)];
     for fallback in fallbacks {
         let Err(error) = &result else {
             break;
@@ -303,11 +388,10 @@ async fn retry_turn_with_model_fallbacks(
         if agent.last_message_role() != Some(crate::message::Role::User) {
             break;
         }
-        let bare = bare_model(fallback);
-        if bare.is_empty() || tried.iter().any(|model| model == bare) {
+        let candidate = FallbackTarget::parse(fallback);
+        if candidate.model.is_empty() || tried.iter().any(|target| target.covers(&candidate)) {
             continue;
         }
-        tried.push(bare.to_string());
         crate::logging::warn(&format!(
             "Swarm worker turn failed on {}: {}; falling back to {fallback}",
             agent.provider_model(),
@@ -317,8 +401,11 @@ async fn retry_turn_with_model_fallbacks(
             crate::logging::warn(&format!(
                 "Swarm fallback model {fallback} unavailable: {switch_error}"
             ));
+            // No request was made on this route, so it stays untried: a later
+            // candidate that reaches it again must still get its chance.
             continue;
         }
+        tried.push(candidate);
         agent.reset_provider_session();
         let _ = event_tx.send(ServerEvent::ConnectionPhase {
             phase: format!("retrying on fallback {fallback}"),
@@ -522,6 +609,25 @@ mod tests {
                 usage: None,
             }]
         }
+
+        /// Post-turn session titles spend one cheap side completion on a provider
+        /// fork. Answer it here so it is not counted as a turn request.
+        async fn complete_simple_with_usage(
+            &self,
+            _prompt: &str,
+            _system: &str,
+        ) -> anyhow::Result<(String, jcode_provider_core::SimpleCompletionUsage)> {
+            Ok((
+                "Swarm fallback".to_string(),
+                jcode_provider_core::SimpleCompletionUsage {
+                    input_tokens: None,
+                    output_tokens: None,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                },
+            ))
+        }
+
         fn fork(&self) -> Arc<dyn Provider> {
             Arc::new(self.clone())
         }
@@ -723,6 +829,25 @@ mod tests {
             *self.model.lock().unwrap() = bare.to_string();
             Ok(())
         }
+
+        /// Post-turn session titles spend one cheap side completion on a provider
+        /// fork. Answer it here so it is not counted as a turn request.
+        async fn complete_simple_with_usage(
+            &self,
+            _prompt: &str,
+            _system: &str,
+        ) -> anyhow::Result<(String, jcode_provider_core::SimpleCompletionUsage)> {
+            Ok((
+                "Swarm fallback".to_string(),
+                jcode_provider_core::SimpleCompletionUsage {
+                    input_tokens: None,
+                    output_tokens: None,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                },
+            ))
+        }
+
         fn fork(&self) -> Arc<dyn Provider> {
             Arc::new(self.clone())
         }
@@ -769,8 +894,246 @@ mod tests {
                 assert!(result.is_ok(), "worker should fall back: {result:?}");
                 assert_eq!(
                     provider.calls.lock().unwrap().clone(),
-                    vec!["deepseek-v4.1-flash", "claude-sonnet-5-5"],
-                    "primary fails once, then exactly one retry on the first distinct fallback"
+                    vec![
+                        "deepseek-v4.1-flash",
+                        "deepseek-v4.1-flash",
+                        "claude-sonnet-5-5"
+                    ],
+                    "the fallback naming the running model is retried because this test has no \
+                     active-route identity to compare against, and the distinct model answers"
+                );
+            });
+    }
+
+    /// Records the (route, model) of each request so a fallback that re-asks
+    /// the same model on a different credential route is visible, and lets a
+    /// `set_model` fail before any request is made.
+    #[derive(Clone)]
+    struct RouteSwitchingProvider {
+        route: Arc<StdMutex<String>>,
+        model: Arc<StdMutex<String>>,
+        /// Routes whose requests fail with a plain entitlement error.
+        failing_routes: Arc<StdMutex<Vec<String>>>,
+        /// Number of upcoming `set_model` calls that fail, as when a model or
+        /// credential is not available on that route yet. One agent-level
+        /// switch retries once after reloading auth, so this counts calls.
+        reject_switches: Arc<StdMutex<u32>>,
+        calls: Arc<StdMutex<Vec<(String, String)>>>,
+    }
+
+    impl RouteSwitchingProvider {
+        fn new(route: &str, model: &str, failing_routes: &[&str]) -> Self {
+            Self {
+                route: Arc::new(StdMutex::new(route.into())),
+                model: Arc::new(StdMutex::new(model.into())),
+                failing_routes: Arc::new(StdMutex::new(
+                    failing_routes
+                        .iter()
+                        .map(|route| route.to_string())
+                        .collect(),
+                )),
+                reject_switches: Arc::new(StdMutex::new(0)),
+                calls: Arc::new(StdMutex::new(Vec::new())),
+            }
+        }
+
+        fn calls(&self) -> Vec<(String, String)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl Provider for RouteSwitchingProvider {
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<EventStream> {
+            let route = self.route.lock().unwrap().clone();
+            let model = self.model.lock().unwrap().clone();
+            self.calls.lock().unwrap().push((route.clone(), model));
+            if self
+                .failing_routes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|failing| *failing == route)
+            {
+                anyhow::bail!(
+                    "400 Bad Request: this credential route is not entitled for the model"
+                );
+            }
+            let events = vec![
+                Ok(StreamEvent::TextDelta(
+                    "answered on the fallback route".into(),
+                )),
+                Ok(StreamEvent::MessageEnd { stop_reason: None }),
+            ];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+
+        fn name(&self) -> &str {
+            "Claude"
+        }
+
+        fn model(&self) -> String {
+            self.model.lock().unwrap().clone()
+        }
+
+        /// Report the active OAuth account so the agent knows which route is
+        /// running, exactly as a real saved login does.
+        fn oauth_account_label(&self) -> Option<String> {
+            Some("work".into())
+        }
+
+        fn set_model(&self, spec: &str) -> anyhow::Result<()> {
+            {
+                let mut remaining = self.reject_switches.lock().unwrap();
+                if *remaining > 0 {
+                    *remaining -= 1;
+                    anyhow::bail!("model is not available on this route yet");
+                }
+            }
+            let (route, model) = spec.split_once(':').unwrap_or(("claude", spec));
+            *self.route.lock().unwrap() = route.to_string();
+            *self.model.lock().unwrap() = model.to_string();
+            Ok(())
+        }
+
+        /// Post-turn session titles spend one cheap side completion on a provider
+        /// fork. Answer it here so it is not counted as a turn request.
+        async fn complete_simple_with_usage(
+            &self,
+            _prompt: &str,
+            _system: &str,
+        ) -> anyhow::Result<(String, jcode_provider_core::SimpleCompletionUsage)> {
+            Ok((
+                "Swarm fallback".to_string(),
+                jcode_provider_core::SimpleCompletionUsage {
+                    input_tokens: None,
+                    output_tokens: None,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                },
+            ))
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(self.clone())
+        }
+    }
+
+    /// `claude-oauth:opus` and `claude-api:opus` are the same model on two
+    /// credential routes. Dedup on the bare model skipped the second route and
+    /// left the worker dead while the API-key route would have answered.
+    #[test]
+    fn swarm_fallback_retries_the_same_model_on_a_second_route() {
+        let _guard = crate::storage::lock_test_env();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let provider = RouteSwitchingProvider::new(
+                    "claude-oauth",
+                    "claude-opus-5-5",
+                    &["claude-oauth"],
+                );
+                let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+                let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+                let session = crate::session::Session::create_with_id(
+                    "session_swarm_route_fallback".into(),
+                    None,
+                    None,
+                );
+                let mut agent = Agent::new_with_session(provider_dyn, registry, session, None);
+                let lease = agent.claim_server_turn().unwrap();
+                let (tx, _rx) = mpsc::unbounded_channel();
+                let fallbacks = vec![
+                    "claude-oauth:claude-opus-5-5".to_string(),
+                    "claude-api:claude-opus-5-5".to_string(),
+                ];
+
+                let result = process_reserved_locked_message_with_swarm_fallbacks(
+                    &mut agent,
+                    &lease,
+                    "swarm task",
+                    Vec::new(),
+                    None,
+                    tx,
+                    &fallbacks,
+                )
+                .await;
+
+                assert!(
+                    result.is_ok(),
+                    "the API-key route must be attempted for the same model: {result:?}"
+                );
+                assert_eq!(
+                    provider.calls(),
+                    vec![
+                        ("claude-oauth".to_string(), "claude-opus-5-5".to_string()),
+                        ("claude-api".to_string(), "claude-opus-5-5".to_string()),
+                    ],
+                    "the second route is a new attempt, not a repeat of the first"
+                );
+            });
+    }
+
+    /// A `set_model` that fails before any request must not consume the
+    /// candidate: the same spec later in the list still gets its chance.
+    #[test]
+    fn rejected_fallback_switch_does_not_consume_the_next_candidate() {
+        let _guard = crate::storage::lock_test_env();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let provider = RouteSwitchingProvider::new(
+                    "claude-oauth",
+                    "claude-opus-5-5",
+                    &["claude-oauth"],
+                );
+                *provider.reject_switches.lock().unwrap() = 2;
+                let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+                let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+                let session = crate::session::Session::create_with_id(
+                    "session_swarm_switch_retry".into(),
+                    None,
+                    None,
+                );
+                let mut agent = Agent::new_with_session(provider_dyn, registry, session, None);
+                let lease = agent.claim_server_turn().unwrap();
+                let (tx, _rx) = mpsc::unbounded_channel();
+                let fallbacks = vec![
+                    "claude-api:claude-sonnet-5-5".to_string(),
+                    "claude-api:claude-sonnet-5-5".to_string(),
+                ];
+
+                let result = process_reserved_locked_message_with_swarm_fallbacks(
+                    &mut agent,
+                    &lease,
+                    "swarm task",
+                    Vec::new(),
+                    None,
+                    tx,
+                    &fallbacks,
+                )
+                .await;
+
+                assert!(
+                    result.is_ok(),
+                    "a failed switch must not blacklist the fallback: {result:?}"
+                );
+                assert_eq!(
+                    provider.calls(),
+                    vec![
+                        ("claude-oauth".to_string(), "claude-opus-5-5".to_string()),
+                        ("claude-api".to_string(), "claude-sonnet-5-5".to_string()),
+                    ]
                 );
             });
     }

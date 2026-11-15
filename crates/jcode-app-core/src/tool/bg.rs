@@ -431,6 +431,70 @@ fn task_wait_reason(task: &background::TaskStatusFile) -> String {
 
 const USER_MESSAGE_NOTE: &str = "A user message arrived while waiting, so the wait ended early. The user's message is delivered right after this result: handle it first. The task keeps running; resume the wait later if still needed.";
 
+/// State of one durable `await-*` dependency inside a multi-target wait.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AwaitWaitStatus {
+    Running,
+    Resolved,
+    Expired,
+}
+
+impl AwaitWaitStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Resolved => "completed",
+            Self::Expired => "expired",
+        }
+    }
+
+    fn is_terminal(self) -> bool {
+        !matches!(self, Self::Running)
+    }
+
+    /// An expired wait will never resolve, so `first_failure` stops on it.
+    fn is_failure(self) -> bool {
+        matches!(self, Self::Expired)
+    }
+}
+
+/// One durable dependency observed during a multi-target wait.
+#[derive(Clone, Debug)]
+struct AwaitWaitState {
+    id: String,
+    status: AwaitWaitStatus,
+    summary: Option<String>,
+}
+
+impl AwaitWaitState {
+    /// Read the durable state without requiring a live process. A record that
+    /// is gone (expired, superseded, or never written) is unknown, not finished.
+    fn observe(id: &str) -> Option<Self> {
+        let dependency = crate::todo::await_dependency::load(&crate::storage::runtime_dir(), id)?;
+        let summary = await_dependency_summary(&dependency);
+        let status = match (summary.is_some(), dependency.is_running()) {
+            (true, _) => AwaitWaitStatus::Resolved,
+            (false, true) => AwaitWaitStatus::Running,
+            (false, false) => AwaitWaitStatus::Expired,
+        };
+        Some(Self {
+            id: id.to_string(),
+            status,
+            summary,
+        })
+    }
+}
+
+/// Result of a wait over more than one target, process-backed or durable.
+#[derive(Debug)]
+struct WaitManyOutcome {
+    reason: String,
+    tasks: Vec<background::TaskStatusFile>,
+    dependencies: Vec<AwaitWaitState>,
+    /// Ids that matched neither a task nor a durable dependency.
+    unknown: Vec<String>,
+}
+
 async fn wait_many_polling(
     manager: &background::BackgroundTaskManager,
     session_id: &str,
@@ -438,7 +502,7 @@ async fn wait_many_polling(
     max_wait: Duration,
     return_on_progress: bool,
     mode: &str,
-) -> Result<(String, Vec<background::TaskStatusFile>)> {
+) -> Result<WaitManyOutcome> {
     let incoming = crate::incoming_message::watch(session_id);
     let deadline = Instant::now() + max_wait;
     let mut last_progress = std::collections::HashMap::new();
@@ -451,39 +515,75 @@ async fn wait_many_polling(
 
     loop {
         let mut tasks = Vec::new();
+        let mut dependencies = Vec::new();
+        let mut unknown = Vec::new();
         for task_id in task_ids {
-            if let Some(task) = manager.status(task_id).await {
-                tasks.push(task);
+            // A durable `await-*` dependency has no process-backed status.
+            // Dropping it would let `all` report a pending swarm wait as
+            // finished because the list of status files came back empty.
+            if is_await_dependency_id(task_id) {
+                match AwaitWaitState::observe(task_id) {
+                    Some(state) => dependencies.push(state),
+                    None => unknown.push(task_id.clone()),
+                }
+                continue;
+            }
+            match manager.status(task_id).await {
+                Some(task) => tasks.push(task),
+                None => unknown.push(task_id.clone()),
             }
         }
 
+        let outcome = |reason: &str| WaitManyOutcome {
+            reason: reason.to_string(),
+            tasks: tasks.clone(),
+            dependencies: dependencies.clone(),
+            unknown: unknown.clone(),
+        };
+        if tasks.is_empty() && dependencies.is_empty() {
+            // Nothing to observe is not the same as everything finished.
+            return Ok(outcome("missing"));
+        }
         if mode == "first_failure"
-            && tasks
+            && (tasks
                 .iter()
                 .any(|task| matches!(task.status, BackgroundTaskStatus::Failed))
+                || dependencies
+                    .iter()
+                    .any(|dependency| dependency.status.is_failure()))
         {
-            return Ok(("first_failure".to_string(), tasks));
+            return Ok(outcome("first_failure"));
         }
-        if mode == "all" && tasks.iter().all(|task| is_terminal(&task.status)) {
-            return Ok(("all_finished".to_string(), tasks));
+        if mode == "all"
+            && tasks.iter().all(|task| is_terminal(&task.status))
+            && dependencies
+                .iter()
+                .all(|dependency| dependency.status.is_terminal())
+        {
+            return Ok(outcome("all_finished"));
         }
-        if mode != "all" && tasks.iter().any(|task| is_terminal(&task.status)) {
-            return Ok(("any_finished".to_string(), tasks));
+        if mode != "all"
+            && (tasks.iter().any(|task| is_terminal(&task.status))
+                || dependencies
+                    .iter()
+                    .any(|dependency| dependency.status.is_terminal()))
+        {
+            return Ok(outcome("any_finished"));
         }
         if return_on_progress {
             for task in &tasks {
                 let previous = last_progress.get(&task.task_id).cloned().unwrap_or(None);
                 if task.progress != previous {
-                    return Ok(("progress".to_string(), tasks));
+                    return Ok(outcome("progress"));
                 }
             }
         }
 
         if max_wait > Duration::ZERO && incoming.is_pending() {
-            return Ok(("user_message".to_string(), tasks));
+            return Ok(outcome("user_message"));
         }
         if Instant::now() >= deadline {
-            return Ok(("timeout".to_string(), tasks));
+            return Ok(outcome("timeout"));
         }
         for task in &tasks {
             last_progress.insert(task.task_id.clone(), task.progress.clone());
@@ -493,14 +593,23 @@ async fn wait_many_polling(
                 .iter()
                 .filter(|task| !is_terminal(&task.status))
                 .collect();
+            let running_dependencies: Vec<_> = dependencies
+                .iter()
+                .filter(|dependency| !dependency.status.is_terminal())
+                .collect();
             let reason = match running.as_slice() {
-                [task] => task_wait_reason(task),
+                [task] if running_dependencies.is_empty() => task_wait_reason(task),
                 _ => format!(
                     "Waiting for {} background tasks: {}",
-                    running.len(),
+                    running.len() + running_dependencies.len(),
                     running
                         .iter()
                         .map(|task| task_label(task))
+                        .chain(
+                            running_dependencies
+                                .iter()
+                                .map(|dependency| format!("swarm members ({})", dependency.id))
+                        )
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
@@ -791,7 +900,7 @@ impl Tool for BgTool {
                     } else {
                         "any"
                     };
-                    let (reason, tasks) = wait_many_polling(
+                    let outcome = wait_many_polling(
                         manager,
                         &ctx.session_id,
                         &task_ids,
@@ -802,13 +911,14 @@ impl Tool for BgTool {
                         mode,
                     )
                     .await?;
+                    let reason = outcome.reason.clone();
                     let mut output =
                         format!("Multi-task wait returned: {}\nMode: {}\n\n", reason, mode);
                     if reason == "user_message" {
                         output.push_str(USER_MESSAGE_NOTE);
                         output.push_str("\n\n");
                     }
-                    for task in &tasks {
+                    for task in &outcome.tasks {
                         output.push_str(&format!(
                             "- {} · {} · {}\n",
                             task.task_id,
@@ -819,12 +929,28 @@ impl Tool for BgTool {
                             status_label(&task.status)
                         ));
                     }
+                    for dependency in &outcome.dependencies {
+                        output.push_str(&format!(
+                            "- {} · await dependency · {}\n",
+                            dependency.id,
+                            dependency.status.label()
+                        ));
+                    }
+                    for missing in &outcome.unknown {
+                        output.push_str(&format!("- {} · not found\n", missing));
+                    }
                     return Ok(ToolOutput::new(output).with_title("bg wait multiple").with_metadata(json!({
                         "wait_reason": reason,
                         "wait_mode": mode,
                         "timed_out": reason == "timeout",
                         "max_wait_seconds": capped_wait,
-                        "tasks": tasks.iter().map(|task| task_metadata(manager, task)).collect::<Vec<_>>(),
+                        "tasks": outcome.tasks.iter().map(|task| task_metadata(manager, task)).collect::<Vec<_>>(),
+                        "await_dependencies": outcome.dependencies.iter().map(|dependency| json!({
+                            "task_id": dependency.id,
+                            "status": dependency.status.label(),
+                            "summary": dependency.summary,
+                        })).collect::<Vec<_>>(),
+                        "missing_task_ids": outcome.unknown,
                     })));
                 }
 
@@ -1005,7 +1131,7 @@ mod tests {
         let result = wait_many_polling(&manager, sid, &ids, Duration::ZERO, false, "all")
             .await
             .unwrap();
-        assert_eq!(result.0, "timeout");
+        assert_eq!(result.reason, "timeout");
         assert_eq!(crate::wait_registry::current(sid), None);
 
         let mut future = Box::pin(wait_many_polling(
@@ -1148,10 +1274,10 @@ mod tests {
             crate::incoming_message::notify(sid);
         });
         let started = Instant::now();
-        let (reason, _) =
-            wait_many_polling(&manager, sid, &ids, Duration::from_secs(120), false, "all")
-                .await
-                .unwrap();
+        let reason = wait_many_polling(&manager, sid, &ids, Duration::from_secs(120), false, "all")
+            .await
+            .unwrap()
+            .reason;
         notifier.await.unwrap();
         assert_eq!(reason, "user_message");
         assert!(started.elapsed() < Duration::from_secs(5));

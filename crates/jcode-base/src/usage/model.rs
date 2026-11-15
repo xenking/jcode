@@ -451,6 +451,34 @@ impl AccountUsageSnapshot {
         }
     }
 
+    /// Windows as (utilization 0.0..=1.0, reset time) for reset policy.
+    ///
+    /// The snapshot carries one shared display deadline (the five-hour one
+    /// first), so a full weekly window can only borrow it when no five-hour
+    /// window exists. A full window without its own time is an unknown wait,
+    /// never a zero one. Callers that can read the raw cached report should
+    /// prefer [`crate::usage::cached_account_usage_windows`], which keeps each
+    /// window's own deadline.
+    pub fn window_ratios(&self) -> Vec<(f32, Option<String>)> {
+        let mut out = Vec::new();
+        if let Some(ratio) = self.five_hour_ratio {
+            out.push((ratio, self.resets_at.clone()));
+        }
+        if let Some(ratio) = self.seven_day_ratio {
+            let at = self
+                .five_hour_ratio
+                .is_none()
+                .then(|| self.resets_at.clone());
+            out.push((ratio, at.flatten()));
+        }
+        out.extend(
+            self.additional_windows
+                .iter()
+                .map(|window| (window.usage_ratio, window.resets_at.clone())),
+        );
+        out
+    }
+
     fn preference_score(&self) -> f32 {
         if self.error.is_some() {
             return f32::INFINITY;

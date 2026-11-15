@@ -117,36 +117,19 @@ pub(super) fn cached_input(
     let Some(label) = label else {
         return input;
     };
-    if let Some(snapshot) = crate::usage::cached_account_usage_snapshot(kind, label) {
-        input.windows = snapshot_windows(&snapshot);
-    }
+    // Prefer the raw cached report: every window keeps its own reset deadline,
+    // so an exhausted weekly window that resets in a minute is not mistaken
+    // for an undated block. The display snapshot is the fallback because it
+    // carries a single shared deadline.
+    input.windows = crate::usage::cached_account_usage_windows(kind, label)
+        .or_else(|| {
+            crate::usage::cached_account_usage_snapshot(kind, label)
+                .map(|snapshot| snapshot.window_ratios())
+        })
+        .unwrap_or_default();
     input.available_resets =
         crate::usage::cached_account_banked_resets(kind, label).map(|b| b.available);
     input
-}
-
-fn snapshot_windows(snapshot: &crate::usage::AccountUsageSnapshot) -> Vec<(f32, Option<String>)> {
-    // The snapshot carries one reset time (five-hour first). Attribute it to
-    // the five-hour window; a full weekly window without its own date is an
-    // unknown (long) wait rather than borrowing the five-hour time.
-    let mut out = Vec::new();
-    if let Some(ratio) = snapshot.five_hour_ratio {
-        out.push((ratio, snapshot.resets_at.clone()));
-    }
-    if let Some(ratio) = snapshot.seven_day_ratio {
-        let at = snapshot
-            .five_hour_ratio
-            .is_none()
-            .then(|| snapshot.resets_at.clone());
-        out.push((ratio, at.flatten()));
-    }
-    out.extend(
-        snapshot
-            .additional_windows
-            .iter()
-            .map(|w| (w.usage_ratio, w.resets_at.clone())),
-    );
-    out
 }
 
 /// Input from a full `/usage` report, used by the dry-run CLI.
@@ -250,6 +233,63 @@ mod tests {
         // A clock past the reset means it already rolled over: wait.
         let passed = input(true, vec![(1.0, at(-1))], Some(1));
         assert!(!decide(BlockedWaitOver, 10, &passed, now()).is_redeem());
+    }
+
+    /// A weekly window that is exhausted while the five-hour window still has
+    /// headroom must keep its own reset deadline. Without it the block looks
+    /// undated and `BlockedWaitOver` spends a banked reset even when the
+    /// weekly window resets in a minute.
+    #[test]
+    fn weekly_exhaustion_keeps_its_own_deadline_with_five_hour_headroom() {
+        use crate::usage::MultiAccountProviderKind;
+
+        let _guard = crate::storage::lock_test_env();
+        let dir = tempfile::tempdir().unwrap();
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => crate::env::set_var("JCODE_HOME", value),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", dir.path());
+
+        let now_unix = Utc::now().timestamp();
+        let five_reset = (now_unix + 4 * 3600).to_string();
+        let seven_reset = (now_unix + 60).to_string();
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (name, value) in [
+            ("anthropic-ratelimit-unified-5h-utilization", "0.20"),
+            ("anthropic-ratelimit-unified-7d-utilization", "1.00"),
+            ("anthropic-ratelimit-unified-5h-reset", five_reset.as_str()),
+            ("anthropic-ratelimit-unified-7d-reset", seven_reset.as_str()),
+        ] {
+            headers.insert(name, value.parse().unwrap());
+        }
+        crate::usage::record_anthropic_response_limits("fixture", Some("weekly-block"), &headers);
+
+        let cached = cached_input(
+            MultiAccountProviderKind::Anthropic,
+            Some("weekly-block"),
+            true,
+        );
+        assert!(
+            cached
+                .windows
+                .iter()
+                .any(|(ratio, at)| *ratio >= FULL && at.is_some()),
+            "the exhausted weekly window must keep its own deadline, got {:?}",
+            cached.windows
+        );
+        let decision = decide(BlockedWaitOver, 10, &cached, Utc::now());
+        assert!(
+            !decision.is_redeem(),
+            "a weekly window that resets in 1m must not spend a banked reset: {}",
+            decision.reason()
+        );
     }
 
     #[test]
