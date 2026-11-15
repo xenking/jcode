@@ -704,6 +704,7 @@ pub(super) async fn handle_client(
     // subscribe. Under heavy swarm file-activity load, ignored bus frames can
     // otherwise monopolize the select loop before the initial subscribe/read.
     let mut client_subscribed = false;
+    let mut stdin_attachment: Option<crate::tool::interactive::Attachment> = None;
     // A waiting session produces no requests, so nothing else would ever trigger
     // an opportunistic compaction. Slow on purpose: the check reads persisted
     // await state and the background registry.
@@ -3442,6 +3443,11 @@ pub(super) async fn handle_client(
                 handle_client_debug_response(id, output, &client_debug_response_tx);
             }
         }
+        if client_subscribed
+            && stdin_attachment.as_ref().is_none_or(|route| !route.session_is(&client_session_id))
+        {
+            stdin_attachment = Some(crate::tool::interactive::attach(&client_session_id, stdin_req_tx.clone()));
+        }
         if let Some(name) = connection_client_name.as_deref() {
             crate::mobile_push::note_client_attached(&client_session_id, name);
         }
@@ -3471,6 +3477,7 @@ pub(super) async fn handle_client(
     Ok(())
     }.await;
 
+    drop(stdin_attachment);
     drop(_sdk_connection_guard);
 
     super::client_disconnect_cleanup::record_transport_closed(
