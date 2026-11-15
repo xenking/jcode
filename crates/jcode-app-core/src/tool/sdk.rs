@@ -45,6 +45,25 @@ impl Drop for ConnectionGuard {
     }
 }
 
+/// Release the tool ownership this connection holds for sessions it has left.
+///
+/// An overlay's sender is one connection's event stream, so after a connection
+/// switches to another session, the overlay for the old session would deliver
+/// the old session's tool callbacks to a client that is no longer showing it.
+/// The overlay keeps its definitions and denies, like a disconnect, but stops
+/// answering callbacks: the old session's tools are unavailable, not rerouted.
+pub(crate) fn release_other_sessions(owner: &str, keep_session: &str) {
+    let mut state = STATE.write().unwrap_or_else(|e| e.into_inner());
+    for (session, overlay) in state.overlays.iter_mut() {
+        if overlay.owner == owner && session != keep_session {
+            overlay.sender = None;
+        }
+    }
+    state
+        .pending
+        .retain(|_, pending| !(pending.owner == owner && pending.session != keep_session));
+}
+
 pub(crate) fn remove_session(session: &str) {
     let mut state = STATE.write().unwrap_or_else(|e| e.into_inner());
     state.overlays.remove(session);
