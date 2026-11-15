@@ -110,6 +110,13 @@ mod tests {
             // "`find` action may modify files".
             "find /tmp -type f -exec stat -f '%z %N' {} + | sort -rn | head -3",
             "find . -type f -exec wc -l {} + | sort -n | tail -3",
+            // Three false positives from a coordinator session: a redirect
+            // through a variable assigned on the same line, worktree cleanup
+            // loops, and a read-only pipeline quoting a path variable.
+            "R=$HOME/.jcode/scratch/cm-check; mkdir -p $R; cargo test > $R/out.ndjson 2> $R/err.log",
+            "for w in gro sar; do rm -rf ~/.jcode/wt/$w/target; done",
+            "ps eww -p 1 | grep -o 'JCODE_HOME=[^ ]*'",
+            "ps eww -p 1 | grep JCODE_HOME",
         ] {
             assert!(
                 destructive_command_refusal(command, None, cwd.clone()).is_none(),
@@ -125,6 +132,11 @@ mod tests {
             "echo bad > /etc/passwd",
             "find /etc -type f -exec rm {} \\;",
             "echo test > \"$UNKNOWN/tests.log\"",
+            // Genuinely irreversible operations stay refused.
+            "rm -rf ~/.jcode/sessions",
+            "git reset --hard",
+            "git push --force origin main",
+            "rm -rf $UNKNOWN_DIR/x",
         ] {
             assert!(
                 destructive_command_refusal(command, None, std::env::current_dir().ok()).is_some(),

@@ -1057,10 +1057,11 @@ async fn bash_holds_a_risky_delete_until_justified_then_runs_it() {
     std::fs::create_dir_all(&target).expect("target");
     std::fs::write(target.join("f.txt"), "x").expect("file");
 
-    // Temp paths are deliberately low risk. Use a shell-expanded target to
-    // exercise Confirm for a target the static assessor cannot resolve.
+    // Temp paths are deliberately low risk, and a literal path assigned on the
+    // same line is now resolved (so it is bounded). Use a command substitution
+    // to exercise Confirm for a target the static assessor cannot resolve.
     let command = format!(
-        "fixture_target=\"{}\"; rm -rf \"$fixture_target\"/* && rmdir \"$fixture_target\"",
+        "fixture_target=\"$(printf %s '{}')\"; rm -rf \"$fixture_target\"/* && rmdir \"$fixture_target\"",
         target.display()
     );
     let tool = BashTool::new();

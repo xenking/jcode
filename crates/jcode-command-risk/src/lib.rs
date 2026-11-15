@@ -31,10 +31,23 @@
 //! [`RiskLevel::Confirm`] is a reflection prompt rather than a hard block, and
 //! why the catastrophic tier is a small, absolute, path-based deny that does
 //! not depend on parsing the command correctly.
+//!
+//! # Same-command variables
+//!
+//! A target spelled `$R/out.ndjson` is unknowable in general, but the shell
+//! idiom that assigns `R` earlier on the same line is not a guess: the value is
+//! right there. Assignments and `for NAME in <literal words>` lists are
+//! therefore resolved before classification, while anything read from the
+//! environment, a command substitution, or a glob stays unresolved and stays at
+//! the Confirm tier. Disposable locations (the scratch directory, `TMPDIR`, and
+//! `~/.jcode/wt/<name>/target`) are exempt outright, and every refusal names the
+//! token that tripped it so the next attempt can be made to pass deliberately
+//! rather than by adding a hollow justification.
 
 mod gate;
 mod paths;
 mod tokenize;
+mod vars;
 
 pub use gate::{GateOutcome, Justification, gate};
 pub use paths::{ProtectedPaths, is_catastrophic_target};
@@ -128,6 +141,8 @@ pub struct RiskContext {
     pub home_dir: Option<std::path::PathBuf>,
     /// Dedicated scratch directory supplied to the command.
     pub scratch_dir: Option<std::path::PathBuf>,
+    /// The session's private temporary directory (`TMPDIR`).
+    pub temp_dir: Option<std::path::PathBuf>,
 }
 
 impl RiskContext {
@@ -135,11 +150,16 @@ impl RiskContext {
         Self {
             working_dir,
             home_dir: dirs_home(),
-            scratch_dir: std::env::var_os("JCODE_SCRATCH_DIR")
-                .filter(|value| !value.is_empty())
-                .map(std::path::PathBuf::from),
+            scratch_dir: env_path("JCODE_SCRATCH_DIR"),
+            temp_dir: env_path("TMPDIR"),
         }
     }
+}
+
+fn env_path(name: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
 }
 
 fn dirs_home() -> Option<std::path::PathBuf> {
@@ -204,35 +224,51 @@ const CONDITIONALLY_DESTRUCTIVE: &[(&str, &[&str])] =
 /// including garbage, produces an assessment rather than an error.
 pub fn assess(command: &str, ctx: &RiskContext) -> RiskAssessment {
     let mut findings = Vec::new();
-    // Keep the trusted context for literal protected paths, but never approve
-    // commands whose own assignments can invalidate known-variable expansion.
-    if command.contains("HOME=") || command.contains("JCODE_SCRATCH_DIR=") {
-        findings.push(RiskFinding {
-            level: RiskLevel::Confirm,
-            reason: "command reassigns a path variable used by risk assessment".into(),
-            target: None,
-        });
+    collect_findings(command, ctx, &mut findings);
+    if findings.is_empty() {
+        return RiskAssessment::safe();
     }
+    RiskAssessment::from_findings(findings)
+}
 
-    for segment in tokenize::split_segments(command) {
-        assess_segment(&segment, ctx, &mut findings);
+fn collect_findings(command: &str, ctx: &RiskContext, findings: &mut Vec<RiskFinding>) {
+    let segments = tokenize::split_segments(command);
+    // Values assigned on this command line (`R=$HOME/scratch/x`) and loop
+    // variables with literal word lists (`for w in a b`) are known to the shell
+    // that will run, so resolving them is not a guess. Unknown values stay
+    // unresolved and therefore stay guarded. The environment is folded in as
+    // segments are reached, so a variable used before it is assigned stays
+    // unresolved just as the shell would see it unset.
+    let mut env = vars::VarEnv::default();
+    for segment in &segments {
+        // Assigning a variable the guard trusts is judged on the assignment
+        // token itself; ordinary commands that merely print such a variable
+        // (`grep JCODE_HOME=`) are untouched.
+        for finding in vars::reassignment_findings(segment) {
+            push_finding(findings, finding);
+        }
+        env.absorb(segment);
+        for expanded in env.expand_segment(segment) {
+            assess_segment(&expanded, ctx, findings);
+        }
     }
 
     // `"$(...)"`, backticks and unquoted heredoc bodies run commands the
     // word tokenizer flattens into literals (#1753). Each body is strictly
     // shorter than its parent, so the recursion terminates.
     for source in tokenize::embedded_substitutions(command) {
-        for finding in assess(&source, ctx).findings {
-            if !findings.contains(&finding) {
-                findings.push(finding);
-            }
+        let mut nested = Vec::new();
+        collect_findings(&source, ctx, &mut nested);
+        for finding in nested {
+            push_finding(findings, finding);
         }
     }
+}
 
-    if findings.is_empty() {
-        return RiskAssessment::safe();
+fn push_finding(findings: &mut Vec<RiskFinding>, finding: RiskFinding) {
+    if !findings.contains(&finding) {
+        findings.push(finding);
     }
-    RiskAssessment::from_findings(findings)
 }
 
 fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFinding>) {
@@ -254,6 +290,11 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
             .first()
             .is_some_and(|token| SHELL_CONTROL_PREFIXES.contains(&token.text.as_str()))
     {
+        tokens = &tokens[1..];
+    }
+    // `X=1 rm -rf ~` puts an assignment where the program name belongs. Skip
+    // those words, or the destructive verb is never seen at all.
+    while tokens.len() > 1 && vars::starts_with_assignment(tokens) {
         tokens = &tokens[1..];
     }
     let mut wrapped_by: Option<String> = None;
@@ -374,6 +415,12 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
         .find(|(name, _)| *name == program_name)
         .map(|(_, flags)| *flags);
 
+    if program_name == "git"
+        && let Some(finding) = irreversible_git_finding(tokens)
+    {
+        findings.push(finding);
+    }
+
     let triggered = if is_destructive {
         true
     } else if let Some(flags) = conditional_flags {
@@ -400,10 +447,11 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
         findings.push(RiskFinding {
             level: RiskLevel::Confirm,
             reason: format!(
-                "`{program_name}` deletes paths supplied by a pipe, so the set \
-                 of affected files cannot be checked before it runs"
+                "`{program_name}` takes its operands from the preceding pipe, so the set of \
+                 affected paths cannot be checked before it runs; list the paths explicitly \
+                 instead of piping them in"
             ),
-            target: None,
+            target: Some(program_name.clone()),
         });
     }
 
@@ -413,10 +461,10 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
         findings.push(RiskFinding {
             level: RiskLevel::Confirm,
             reason: format!(
-                "`{program_name}` is destructive but its target could not be \
-                 determined statically, so its blast radius is unknown"
+                "`{program_name}` is destructive but no target token could be read, so its \
+                 blast radius is unknown; name the path explicitly so it can be checked"
             ),
-            target: None,
+            target: Some(program_name.clone()),
         });
         return;
     }
@@ -439,6 +487,60 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
             findings.push(finding);
         }
     }
+}
+
+/// Interactive git operations that discard work or rewrite published history.
+/// These are irreversible in the same way `rm -rf` is: the blobs are gone, and
+/// no later command brings them back.
+fn irreversible_git_finding(tokens: &[Token]) -> Option<RiskFinding> {
+    let subcommand = tokens
+        .iter()
+        .skip(1)
+        .find(|token| !token.is_flag() && !token.is_operator)?;
+    match subcommand.text.as_str() {
+        "reset" if tokens.iter().any(|token| token.text == "--hard") => Some(RiskFinding {
+            level: RiskLevel::Confirm,
+            reason: "`git reset --hard` discards uncommitted work irreversibly; commit or \
+                     stash it first, or reset a narrower path instead"
+                .into(),
+            target: Some("--hard".into()),
+        }),
+        "push" => {
+            let force = tokens
+                .iter()
+                .find(|token| is_force_push_token(&token.text))?;
+            Some(RiskFinding {
+                level: RiskLevel::Confirm,
+                reason: format!(
+                    "`git push {}` rewrites published history; push a normal ref instead, or \
+                     ask the user before forcing",
+                    force.text
+                ),
+                target: Some(force.text.clone()),
+            })
+        }
+        "clean" if tokens.iter().any(is_forced_clean_flag) => Some(RiskFinding {
+            level: RiskLevel::Confirm,
+            reason: "`git clean -f` permanently removes untracked files; preview it with \
+                     `git clean -n` first, or name the paths explicitly instead"
+                .into(),
+            target: Some("git clean".into()),
+        }),
+        _ => None,
+    }
+}
+
+/// `clean` only deletes when forced (`-f`, bundled as in `-fdx`); `git clean -n`
+/// is a dry run and must stay usable.
+fn is_forced_clean_flag(token: &Token) -> bool {
+    token.is_flag() && !token.text.starts_with("--") && token.text[1..].contains('f')
+}
+
+fn is_force_push_token(text: &str) -> bool {
+    matches!(text, "-f" | "--force" | "--force-if-includes")
+        || text.starts_with("--force-with-lease")
+        // `push origin +main` is a forced refspec.
+        || (text.starts_with('+') && text.len() > 1)
 }
 
 /// Find actions run a separate argv. Search roots are deletion targets only
@@ -480,8 +582,10 @@ fn assess_find(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFindi
                 } else {
                     findings.push(RiskFinding {
                         level: RiskLevel::Confirm,
-                        reason: "`find` output target cannot be identified statically".into(),
-                        target: None,
+                        reason: "`find` writes its output to a target that could not be \
+                                 identified statically; name the output file explicitly"
+                            .into(),
+                        target: Some("-fprint".into()),
                     });
                 }
                 index += if tokens[index].text == "-fprintf" {
@@ -522,10 +626,18 @@ fn assess_find(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFindi
                         }
                     }
                     findings.extend(nested);
+                    let payload_program = payload
+                        .first()
+                        .map(|token| token.basename())
+                        .unwrap_or_default();
                     findings.push(RiskFinding {
                         level: RiskLevel::Confirm,
-                        reason: "`find` action may modify files and its full effects cannot be determined statically".into(),
-                        target: None,
+                        reason: format!(
+                            "`find -exec` runs `{payload_program}`, which may modify files, so \
+                             the effect cannot be determined statically; use a read-only program \
+                             there or list the files explicitly"
+                        ),
+                        target: Some(payload_program),
                     });
                 }
                 index = end;

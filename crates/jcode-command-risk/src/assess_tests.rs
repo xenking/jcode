@@ -12,7 +12,23 @@ fn ctx() -> RiskContext {
         working_dir: Some(PathBuf::from("/home/u/proj")),
         home_dir: Some(PathBuf::from("/home/u")),
         scratch_dir: None,
+        temp_dir: None,
     }
+}
+
+/// The context a real agent session runs with: a scratch directory and a
+/// private TMPDIR, both disposable.
+fn ctx_with_scratch() -> RiskContext {
+    RiskContext {
+        working_dir: Some(PathBuf::from("/home/u/proj")),
+        home_dir: Some(PathBuf::from("/home/u")),
+        scratch_dir: Some(PathBuf::from("/home/u/.jcode/scratch")),
+        temp_dir: Some(PathBuf::from("/var/folders/xy/T")),
+    }
+}
+
+fn level_in(ctx: &RiskContext, command: &str) -> RiskLevel {
+    assess(command, ctx).level
 }
 
 fn level(command: &str) -> RiskLevel {
@@ -809,5 +825,211 @@ fn issue_1753_inert_text_stays_safe() {
         "git commit -m \"$(cat <<'EOF'\nfix: thing\n\nrm -rf ~ is mentioned here\nEOF\n)\"",
     ] {
         assert!(level(command).runs_immediately(), "{command:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// False positives reported from a live coordinator session. Each of these was
+// refused with "target is computed at runtime", which trains an agent to add a
+// hollow justification. They must run without a reflection turn.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn redirect_into_scratch_through_a_same_command_variable_runs_immediately() {
+    let ctx = ctx_with_scratch();
+    for command in [
+        "R=$HOME/.jcode/scratch/cm-check; mkdir -p $R; cargo test > $R/out.ndjson 2> $R/err.log",
+        "R=$JCODE_SCRATCH_DIR/cm-check; cargo test > $R/out.ndjson 2> $R/err.log",
+        "S=$HOME/.jcode/scratch; R=$S/cm-check; cargo test > $R/out.ndjson",
+        "cargo test > /home/u/.jcode/scratch/cm-check/out.ndjson 2> /home/u/.jcode/scratch/cm-check/err.log",
+        "cargo test > /var/folders/xy/T/jcode-test.log 2>&1",
+    ] {
+        let level = level_in(&ctx, command);
+        assert!(
+            level.runs_immediately(),
+            "{command:?} should run, got {level:?}: {}",
+            assess(command, &ctx).explanation()
+        );
+    }
+}
+
+#[test]
+fn worktree_cleanup_loops_over_known_names_run_immediately() {
+    let ctx = ctx_with_scratch();
+    for command in [
+        "for w in gro sar wcm; do rm -rf ~/.jcode/wt/$w/target; done",
+        "for w in /home/u/.jcode/wt/gro/target /home/u/.jcode/wt/sar/target; do rm -rf \"$w\"; done",
+        "w=/home/u/.jcode/wt/gro; rm -rf $w/target",
+        "for w in gro sar; do echo $w; done",
+    ] {
+        let level = level_in(&ctx, command);
+        assert!(
+            level.runs_immediately(),
+            "{command:?} should run, got {level:?}: {}",
+            assess(command, &ctx).explanation()
+        );
+    }
+}
+
+#[test]
+fn read_only_pipelines_quoting_a_path_variable_are_not_reassignments() {
+    let ctx = ctx_with_scratch();
+    for command in [
+        "ps eww -p $pid | grep -o 'JCODE_HOME=[^ ]*'",
+        "ps eww -p $pid | grep JCODE_HOME",
+        "lsof -p $pid | grep HOME=",
+        "env | grep '^HOME='",
+        "grep -rn 'HOME=' src",
+        "grep -rn JCODE_SCRATCH_DIR= docs",
+        "rg -n 'JCODE_SCRATCH_DIR=' crates",
+    ] {
+        let assessment = assess(command, &ctx);
+        assert_eq!(
+            assessment.level,
+            RiskLevel::Safe,
+            "{command}: {assessment:#?}"
+        );
+    }
+}
+
+/// Resolution must not launder a protected path through a variable.
+#[test]
+fn resolved_variables_do_not_launder_protected_targets() {
+    let ctx = ctx_with_scratch();
+    for command in [
+        "R=/; rm -rf $R",
+        "R=/etc; rm -rf $R/passwd",
+        "S=/home/u/.jcode/sessions; rm -rf $S",
+        "R=$HOME; rm -rf $R",
+        "R=/home/u; rm -rf $R",
+        "R=/home/u/.ssh; rm -rf $R",
+        "P=rm; $P -rf /",
+    ] {
+        assert_eq!(
+            level_in(&ctx, command),
+            RiskLevel::Catastrophic,
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn unknown_variables_still_require_justification_after_resolution() {
+    let ctx = ctx_with_scratch();
+    for command in [
+        "rm -rf $UNKNOWN",
+        "rm -rf $wd/target",
+        "for w in $(ls); do rm -rf $w; done",
+        "X=$UNKNOWN; rm -rf $X",
+    ] {
+        assert!(level_in(&ctx, command) >= RiskLevel::Confirm, "{command}");
+    }
+}
+
+#[test]
+fn irreversible_git_operations_require_justification() {
+    for command in [
+        "git reset --hard",
+        "git reset --hard HEAD~3",
+        "git push --force origin main",
+        "git push -f",
+        "git push --force-with-lease origin main",
+        "git clean -fdx",
+    ] {
+        assert!(level(command) >= RiskLevel::Confirm, "{command}");
+    }
+    for command in [
+        "git status",
+        "git push origin main",
+        "git reset HEAD file.txt",
+        "git reset --soft HEAD~1",
+        "git log --oneline -3",
+    ] {
+        assert!(
+            level(command).runs_immediately(),
+            "{command} -> {:?}",
+            level(command)
+        );
+    }
+}
+
+#[test]
+fn deleting_a_repository_or_the_session_store_is_refused() {
+    for command in [
+        "rm -rf ~/.jcode/sessions",
+        "rm -rf /home/u/.jcode/sessions",
+        "rm -rf .git",
+        "rm -rf /home/u/proj/.git",
+    ] {
+        assert!(level(command) >= RiskLevel::Confirm, "{command}");
+    }
+    assert!(level("rm -rf target").runs_immediately());
+    assert!(level("rm -rf /home/u/proj/src/generated").runs_immediately());
+}
+
+#[test]
+fn assignment_prefixed_commands_are_still_assessed() {
+    // `X=1` in the program position used to hide the destructive verb entirely.
+    for command in [
+        "X=1 rm -rf ~",
+        "HOME=/tmp rm -rf ~/.ssh",
+        "FOO=bar shred /etc/passwd",
+        "A=1 B=2 rm -rf /",
+        "X=1 sudo rm -rf ~",
+        "RUST_LOG=debug find /home/u -delete",
+    ] {
+        assert_eq!(level(command), RiskLevel::Catastrophic, "{command}");
+    }
+    // ...while an environment prefix on ordinary work stays quiet.
+    for command in [
+        "X=1 cargo build",
+        "RUST_LOG=debug cargo test",
+        "PATH=/opt/bin:$PATH cargo build",
+        "EDITOR=vim git commit -m msg",
+    ] {
+        assert!(
+            level(command).runs_immediately(),
+            "{command} -> {:?}",
+            level(command)
+        );
+    }
+}
+
+#[test]
+fn a_variable_used_before_it_is_assigned_stays_guarded() {
+    // The shell sees `$R` unset here, so resolving it from a later assignment
+    // would describe a different command than the one that runs.
+    assert!(level("rm -rf $R/target; R=/tmp") >= RiskLevel::Confirm);
+}
+
+/// A refusal is only useful if it names the token that tripped it and says how
+/// to make the command pass.
+#[test]
+fn every_refusal_names_the_offending_token_and_a_way_forward() {
+    let ctx = ctx_with_scratch();
+    for (command, token) in [
+        ("rm -rf $UNKNOWN", "$UNKNOWN"),
+        ("echo x > $UNKNOWN", "$UNKNOWN"),
+        ("find ~ -delete", "~"),
+        ("git reset --hard", "--hard"),
+        ("HOME=/etc; rm -rf $HOME/cache", "HOME=/etc"),
+        ("rm -rf", "rm"),
+        ("cat paths.txt | xargs rm -rf", "rm"),
+        ("find / -exec mystery {} \\;", "mystery"),
+    ] {
+        let assessment = assess(command, &ctx);
+        assert!(
+            !assessment.level.runs_immediately(),
+            "{command} should be refused"
+        );
+        let text = assessment.explanation();
+        assert!(
+            text.contains(token),
+            "{command:?} refusal lacks {token:?}: {text}"
+        );
+        assert!(
+            text.contains("instead") || text.contains("explicitly") || text.contains("literal"),
+            "{command:?} refusal offers no way forward: {text}"
+        );
     }
 }
