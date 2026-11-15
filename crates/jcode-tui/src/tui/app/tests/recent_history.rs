@@ -26,7 +26,7 @@ fn recent_history_bootstrap_renders_latest_frame_without_older_transcript() {
             content: message.content,
             tool_calls: None,
             tool_data: None,
-            response_stats: None,
+            response_stats: None, timestamp_ms: None,
         })
         .collect();
     let rt = tokio::runtime::Runtime::new().unwrap();

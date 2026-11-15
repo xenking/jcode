@@ -7,7 +7,7 @@ use crate::session::{RenderedImage, RenderedImageSource};
 
 fn message(role: &str, content: &str) -> HistoryMessage {
     HistoryMessage {
-        response_stats: None,
+        response_stats: None, timestamp_ms: None,
         role: role.to_string(),
         content: content.to_string(),
         tool_calls: None,

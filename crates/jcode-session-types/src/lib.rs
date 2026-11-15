@@ -78,6 +78,10 @@ pub struct ResponseStats {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderedMessage {
+    /// Unix epoch milliseconds when the stored message was recorded, so
+    /// clients show when it arrived rather than when they rendered it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_ms: Option<i64>,
     /// Execution duration for a completed tool row, when recorded by the runner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_duration_ms: Option<u64>,

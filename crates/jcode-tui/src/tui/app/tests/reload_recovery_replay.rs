@@ -6,7 +6,7 @@ fn reload_replay_history(
         id: 1,
         session_id: session_id.to_string(),
         messages: vec![crate::protocol::HistoryMessage {
-            response_stats: None,
+            response_stats: None, timestamp_ms: None,
             role: "assistant".to_string(),
             content: "Work interrupted by reload".to_string(),
             tool_calls: None,

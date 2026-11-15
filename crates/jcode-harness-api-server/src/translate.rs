@@ -2335,6 +2335,7 @@ impl BridgeState {
                             .map(|m| HistoryMessage {
                                 response_stats: serde_json::from_value(m["response_stats"].clone())
                                     .unwrap_or(None),
+                                timestamp_ms: m["timestamp_ms"].as_i64(),
                                 role: m["role"].as_str().unwrap_or("").to_string(),
                                 content: m["content"].as_str().unwrap_or("").to_string(),
                                 tool: Self::history_tool(m),
@@ -3527,7 +3528,7 @@ impl BridgeState {
                 }
                 let content = flatten_content(&message["content"]);
                 (!content.trim().is_empty()).then(|| HistoryMessage {
-                    response_stats: None,
+                    response_stats: None, timestamp_ms: None,
                     role: role.to_string(),
                     content,
                     tool: None,

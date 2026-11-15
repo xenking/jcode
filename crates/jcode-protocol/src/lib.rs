@@ -275,6 +275,10 @@ impl<'a> From<&'a HistoryMessage> for HistoryMessageRef<'a> {
 /// A message in conversation history (for sync)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryMessage {
+    /// Unix epoch milliseconds when the stored message was recorded, so
+    /// clients show when it arrived rather than when they rendered it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_stats: Option<jcode_session_types::ResponseStats>,
     pub role: String,

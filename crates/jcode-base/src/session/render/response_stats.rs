@@ -121,6 +121,7 @@ mod tests {
             tool_data: None,
             response_stats: None,
             tool_duration_ms: None,
+            timestamp_ms: None,
         }
     }
     fn tool_call(message: &mut StoredMessage) {

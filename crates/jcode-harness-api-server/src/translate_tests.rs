@@ -3382,6 +3382,7 @@ fn history_response_stats_cross_real_render_protocol_and_sdk_boundary() {
             tool_calls: None,
             tool_data: row.tool_data,
             response_stats: row.response_stats,
+            timestamp_ms: row.timestamp_ms,
         })
         .collect();
     let mut state = state_with_session();
@@ -3400,6 +3401,9 @@ fn history_response_stats_cross_real_render_protocol_and_sdk_boundary() {
     assert_eq!(stats.cache_read_tokens, Some(7));
     assert_eq!(stats.cache_creation_tokens, Some(8));
     assert_eq!(stats.duration_secs, None);
+    // Arrival times come from the stored record, not from when a client renders.
+    assert_eq!(messages[0].timestamp_ms, Some(1_794_720_060_000));
+    assert_eq!(messages[1].timestamp_ms, Some(1_794_720_074_000));
 }
 
 fn recovery_attach(state: &mut BridgeState, target: Option<&str>) -> (Value, Value) {

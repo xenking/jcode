@@ -1398,7 +1398,7 @@ impl Agent {
         crate::session::render_messages(&self.session)
             .into_iter()
             .map(|msg| HistoryMessage {
-                response_stats: msg.response_stats,
+                response_stats: msg.response_stats, timestamp_ms: msg.timestamp_ms,
                 role: msg.role,
                 content: msg.content,
                 tool_calls: if msg.tool_calls.is_empty() {
@@ -1424,7 +1424,7 @@ impl Agent {
         let history = messages
             .into_iter()
             .map(|msg| HistoryMessage {
-                response_stats: msg.response_stats,
+                response_stats: msg.response_stats, timestamp_ms: msg.timestamp_ms,
                 role: msg.role,
                 content: msg.content,
                 tool_calls: if msg.tool_calls.is_empty() {
@@ -1454,7 +1454,7 @@ impl Agent {
         let history = messages
             .into_iter()
             .map(|msg| HistoryMessage {
-                response_stats: msg.response_stats,
+                response_stats: msg.response_stats, timestamp_ms: msg.timestamp_ms,
                 role: msg.role,
                 content: msg.content,
                 tool_calls: if msg.tool_calls.is_empty() {

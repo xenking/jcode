@@ -516,7 +516,7 @@ mod tests {
     #[test]
     fn tool_duration_restored_metadata_wins_and_missing_stays_unknown() {
         let mut row = RenderedMessage {
-            response_stats: None,
+            response_stats: None, timestamp_ms: None,
             tool_duration_ms: Some(1234),
             role: "tool".into(),
             content: "[tool timing: duration=2s] body".into(),
@@ -549,7 +549,7 @@ mod tests {
     #[test]
     fn rendered_messages_convert_to_display_messages() {
         let rendered = RenderedMessage {
-            response_stats: None,
+            response_stats: None, timestamp_ms: None,
             tool_duration_ms: None,
             role: "assistant".to_string(),
             content: "done".to_string(),

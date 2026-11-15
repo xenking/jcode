@@ -1771,7 +1771,7 @@ fn handle_server_event_inner(
                     prefix
                         .into_iter()
                         .map(|msg| crate::protocol::HistoryMessage {
-                            response_stats: None,
+                            response_stats: None, timestamp_ms: None,
                             role: msg.role,
                             content: msg.content,
                             tool_calls: (!msg.tool_calls.is_empty()).then_some(msg.tool_calls),
