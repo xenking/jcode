@@ -27,8 +27,9 @@ impl Tool for AskTool {
 
     fn description(&self) -> &str {
         "Ask the user 1-4 multiple-choice questions, blocking until they answer. For a genuine \
-         owner decision you cannot research; batch pending decisions into one call and label your \
-         recommended option \"(Recommended)\"."
+         owner decision you cannot research, instead of a free-text question; never for facts you \
+         can look up. Batch pending decisions into one call and label your recommended option \
+         \"(Recommended)\"."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -169,7 +170,7 @@ mod description_tests {
     #[test]
     fn description_invites_use_for_owner_decisions_and_bounds_overuse() {
         let d = AskTool.description();
-        assert!(d.contains("instead of ending your turn with a free-text question"));
-        assert!(d.contains("Never use it for facts you can research"));
+        assert!(d.contains("instead of a free-text question"));
+        assert!(d.contains("never for facts you can look up"));
     }
 }
