@@ -32,6 +32,8 @@ The attached Desktop case executes the real `jcode-desktop-harness` worker throu
 
 The complete nine-row suite passed together at 2026-11-16 15:28 UTC against implementation revision `19dece0d7` with canonical admission `1dc1be8f6`. The pinned daemon SHA-256 was `311baa0fb04a20655b4c41c8643e4b58a5b71a8cf1954f88ccdfe8f35c72250a` (task `795681om78`). The crash case recorded two attempts but only one continuation turn.
 
+The final integrated nine-row matrix also passed together on `811d0b4afcd03155b6392043837b6f1c95be3e0f` at 2026-11-16 15:33 UTC, including the canonical activity reader migration and follow-up checkpoint tests (task `053017cccp`). Its pinned daemon SHA-256 was `b76e1b5d50e6621718e530815e3ac6813f4763e7a0f1d1f745375919d0cde044`. Every successful continuation had one canonical `TURN_START`; the crash-after-claim case reused its UUID across two attempts.
+
 The independent combined bash/ask runtime trace on integrated revision `1c2a1bdc6` also passed: `InTool` and `AskBlocked` were captured, durable checkpoints cleared every outstanding obligation, and the replacement process reached socket readiness after actual exec. Evidence: `turn-activity-acceptance-1794842970.json` in the session scratch directory (task `92791619i3`).
 
 ## Red-first evidence
@@ -52,7 +54,7 @@ The independent combined bash/ask runtime trace on integrated revision `1c2a1bdc
 - App core: 51 recovery tests passed, 2 ignored.
 - Bridge: all 241 library tests passed, 1 ignored.
 - TUI: 77 reload tests passed.
-- Desktop harness: 8 recovery tests passed on the integrated runtime-generation head.
+- Desktop harness: 8 recovery tests passed on integrated Desktop `e7ab01c`; strict harness/model lint also passed (task `071835o8lt`).
 - Strict `clippy --all-targets -- -D warnings`: app-core, TUI, bridge, Desktop harness and Desktop model passed. The integrated core/TUI/bridge gate passed on `1c2a1bdc6` at 15:30 UTC (task `992189vhe5`).
 - Rust incremental query corruption was bypassed with `CARGO_INCREMENTAL=0`. justrust repaired inconsistent native dependency artifacts before the successful strict gates.
 
