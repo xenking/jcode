@@ -43,6 +43,7 @@ const CAPABILITIES: &[Capability] = &[
     cap("send_message_with_reminder", "sendMessageWithReminder"),
     cap("send_system_reminder", "sendSystemReminder"),
     cap("cancel", "cancel"),
+    cap("force_stop_turn", "forceStopTurn"),
     cap("soft_interrupt", "softInterrupt"),
     cap("soft_interrupt_with_images", "softInterruptWithImages"),
     cap("queue_prompt", "queuePrompt"),
