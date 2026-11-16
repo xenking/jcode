@@ -36,7 +36,7 @@
 use jcode_harness_api::{
     SessionSearchHighlight, SessionSearchHit, SessionSearchResults, SessionSearchRole,
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -118,6 +118,8 @@ impl SessionSource {
     }
 }
 
+// Missing/disappearing files have no fingerprint. Do not stamp a failed read as
+// current: preserving the previous rows makes the next successful sync retry.
 fn file_fingerprint(path: &Path) -> Option<(u64, i64)> {
     let metadata = std::fs::metadata(path).ok()?;
     let modified = metadata.modified().ok()?;
@@ -168,14 +170,16 @@ impl SearchIndex {
 
     pub fn open_at(db_path: &Path, sessions_dir: &Path) -> rusqlite::Result<Self> {
         if let Some(parent) = db_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent)
+                .inspect_err(|error| report_error("cannot create database directory", error))
+                .map_err(|_| rusqlite::Error::InvalidPath(parent.to_path_buf()))?;
         }
         let connection = Connection::open(db_path)?;
         // WAL keeps a query from blocking the write that follows a turn, and
         // the bridge may serve several clients from one process.
-        let _ = connection.pragma_update(None, "journal_mode", "WAL");
-        let _ = connection.pragma_update(None, "synchronous", "NORMAL");
-        let _ = connection.busy_timeout(std::time::Duration::from_secs(5));
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.pragma_update(None, "synchronous", "NORMAL")?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
         Self::prepare(&connection)?;
         Ok(Self {
             connection,
@@ -224,7 +228,10 @@ impl SearchIndex {
             .query_row("SELECT COUNT(*) FROM search_sessions", [], |row| {
                 row.get::<_, i64>(0)
             })
-            .unwrap_or_default()
+            .unwrap_or_else(|error| {
+                report_error("cannot count indexed sessions", error);
+                0
+            })
             .max(0) as u64
     }
 
@@ -233,7 +240,10 @@ impl SearchIndex {
         let mut stats = SyncStats::default();
         let sources = match self.session_sources() {
             Ok(sources) => sources,
-            Err(_) => return stats,
+            Err(error) => {
+                report_error("cannot enumerate sessions", error);
+                return stats;
+            }
         };
         stats.scanned = sources.len();
         let known = self.known_fingerprints();
@@ -260,11 +270,9 @@ impl SearchIndex {
         let indexed = index_sources(pending);
         let mut written = 0usize;
         for (source_id, fingerprint, payload) in indexed {
-            if self
-                .write_session(&source_id, &fingerprint, &payload)
-                .is_ok()
-            {
-                written += 1;
+            match self.write_session(&source_id, &fingerprint, &payload) {
+                Ok(()) => written += 1,
+                Err(error) => report_error("cannot update session rows", error),
             }
         }
         stats.indexed = written;
@@ -284,28 +292,39 @@ impl SearchIndex {
         if known == fingerprint.encode() {
             return;
         }
-        if let Some((_, _, payload)) = index_sources(vec![(source, fingerprint)]).pop() {
-            let _ = self.write_session(session_id, &fingerprint, &payload);
+        if let Some((_, _, payload)) = index_sources(vec![(source, fingerprint)]).pop()
+            && let Err(error) = self.write_session(session_id, &fingerprint, &payload)
+        {
+            report_error("cannot index live session", error);
         }
     }
 
     /// Record a title the runtime just set, without re-reading the snapshot.
     pub fn note_title(&mut self, session_id: &str, title: &str) {
-        let _ = self.connection.execute(
+        let result = (|| -> rusqlite::Result<()> {
+            // The index is externally serialized. All title representations must
+            // commit together, even when the insert or FTS write fails.
+            let transaction = self.connection.transaction()?;
+            transaction.execute(
             "INSERT INTO search_sessions (session_id, title, activity_ms, fingerprint, indexed_messages)
              VALUES (?1, ?2, ?3, '', 0)
              ON CONFLICT(session_id) DO UPDATE SET title = excluded.title",
             params![session_id, title, now_ms()],
-        );
-        let _ = self.connection.execute(
-            "DELETE FROM search_titles WHERE session_id = ?1",
-            params![session_id],
-        );
-        if !title.trim().is_empty() {
-            let _ = self.connection.execute(
-                "INSERT INTO search_titles (session_id, title) VALUES (?1, ?2)",
-                params![session_id, title],
-            );
+        )?;
+            transaction.execute(
+                "DELETE FROM search_titles WHERE session_id = ?1",
+                params![session_id],
+            )?;
+            if !title.trim().is_empty() {
+                transaction.execute(
+                    "INSERT INTO search_titles (session_id, title) VALUES (?1, ?2)",
+                    params![session_id, title],
+                )?;
+            }
+            transaction.commit()
+        })();
+        if let Err(error) = result {
+            report_error("cannot update session title", error);
         }
     }
 
@@ -434,7 +453,7 @@ impl SearchIndex {
                 ))
             },
         )?;
-        let mut scored: Vec<(SessionSearchHit, f64)> = rows.filter_map(Result::ok).collect();
+        let mut scored: Vec<(SessionSearchHit, f64)> = rows.collect::<rusqlite::Result<_>>()?;
         scored.sort_by(|(left, left_rank), (right, right_rank)| {
             let left_score = boost(left.role) * -left_rank;
             let right_score = boost(right.role) * -right_rank;
@@ -507,13 +526,10 @@ impl SearchIndex {
 
     fn session_sources(&self) -> std::io::Result<Vec<SessionSource>> {
         let mut ids: BTreeMap<String, SessionSource> = BTreeMap::new();
-        for entry in std::fs::read_dir(&self.sessions_dir)?.flatten() {
+        for entry in std::fs::read_dir(&self.sessions_dir)? {
+            let entry = entry?;
             let path = entry.path();
-            if !entry
-                .file_type()
-                .map(|kind| kind.is_file())
-                .unwrap_or(false)
-            {
+            if !entry.file_type()?.is_file() {
                 continue;
             }
             let Some(name) = path
@@ -565,18 +581,25 @@ impl SearchIndex {
     }
 
     fn known_fingerprints(&self) -> BTreeMap<String, String> {
-        let Ok(mut statement) = self
+        let mut statement = match self
             .connection
             .prepare("SELECT session_id, fingerprint FROM search_sessions")
-        else {
-            return BTreeMap::new();
+        {
+            Ok(statement) => statement,
+            Err(error) => {
+                report_error("cannot prepare fingerprint census", error);
+                return BTreeMap::new();
+            }
         };
         statement
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
             .and_then(|rows| rows.collect::<rusqlite::Result<_>>())
-            .unwrap_or_default()
+            .unwrap_or_else(|error| {
+                report_error("cannot read fingerprint census", error);
+                BTreeMap::new()
+            })
     }
 
     fn known_fingerprint(&self, session_id: &str) -> Option<String> {
@@ -586,39 +609,53 @@ impl SearchIndex {
                 params![session_id],
                 |row| row.get(0),
             )
-            .ok()
+            .optional()
+            .unwrap_or_else(|error| {
+                report_error("cannot read session fingerprint", error);
+                None
+            })
     }
 
     /// Drop sessions whose files are gone, so a deleted session cannot keep
     /// answering queries forever.
     fn prune_missing(&mut self, known: &BTreeMap<String, String>) -> Option<usize> {
-        let present: Vec<String> = self
-            .session_sources()
-            .ok()?
-            .into_iter()
-            .map(|s| s.id)
-            .collect();
-        let mut pruned = 0;
-        for session_id in known.keys() {
-            if present.iter().any(|present| present == session_id) {
-                continue;
+        let result = (|| -> anyhow::Result<usize> {
+            let present: Vec<String> = self.session_sources()?.into_iter().map(|s| s.id).collect();
+            let transaction = self.connection.transaction()?;
+            let mut pruned = 0;
+            for session_id in known.keys() {
+                if present.iter().any(|present| present == session_id) {
+                    continue;
+                }
+                transaction.execute(
+                    "DELETE FROM search_messages WHERE session_id = ?1",
+                    params![session_id],
+                )?;
+                transaction.execute(
+                    "DELETE FROM search_titles WHERE session_id = ?1",
+                    params![session_id],
+                )?;
+                transaction.execute(
+                    "DELETE FROM search_sessions WHERE session_id = ?1",
+                    params![session_id],
+                )?;
+                pruned += 1;
             }
-            let _ = self.connection.execute(
-                "DELETE FROM search_messages WHERE session_id = ?1",
-                params![session_id],
-            );
-            let _ = self.connection.execute(
-                "DELETE FROM search_titles WHERE session_id = ?1",
-                params![session_id],
-            );
-            let _ = self.connection.execute(
-                "DELETE FROM search_sessions WHERE session_id = ?1",
-                params![session_id],
-            );
-            pruned += 1;
+            transaction.commit()?;
+            Ok(pruned)
+        })();
+        match result {
+            Ok(pruned) => Some(pruned),
+            Err(error) => {
+                report_error("cannot prune missing sessions", error);
+                None
+            }
         }
-        Some(pruned)
     }
+}
+
+fn report_error(context: &str, error: impl std::fmt::Display) {
+    eprintln!("harness API bridge: search index {context}: {error}");
 }
 
 fn boost(role: SessionSearchRole) -> f64 {
@@ -716,7 +753,13 @@ fn index_sources(
                     chunk
                         .iter()
                         .filter_map(|(source, fingerprint)| {
-                            let payload = read_session(source).ok()?;
+                            let payload = match read_session(source) {
+                                Ok(payload) => payload,
+                                Err(error) => {
+                                    report_error("cannot read session for indexing", error);
+                                    return None;
+                                }
+                            };
                             Some((source.id.clone(), *fingerprint, payload))
                         })
                         .collect::<Vec<_>>()
@@ -725,7 +768,16 @@ fn index_sources(
             .collect();
         workers
             .into_iter()
-            .filter_map(|worker| worker.join().ok())
+            .filter_map(|worker| match worker.join() {
+                Ok(rows) => Some(rows),
+                Err(_) => {
+                    report_error(
+                        "indexing worker panicked",
+                        "unchanged sessions will be retried",
+                    );
+                    None
+                }
+            })
             .flatten()
             .collect()
     });
@@ -1091,10 +1143,17 @@ fn jcode_home() -> Option<PathBuf> {
 static INDEX: OnceLock<Mutex<Option<SearchIndex>>> = OnceLock::new();
 
 fn global_index() -> MutexGuard<'static, Option<SearchIndex>> {
-    let mutex = INDEX.get_or_init(|| Mutex::new(SearchIndex::open_default().ok()));
-    mutex
+    let mutex = INDEX.get_or_init(|| Mutex::new(None));
+    let mut guard = mutex
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.is_none() {
+        match SearchIndex::open_default() {
+            Ok(index) => *guard = Some(index),
+            Err(error) => report_error("cannot open database; next request will retry", error),
+        }
+    }
+    guard
 }
 
 /// Warm the persistent index after bridge startup without blocking the listener.
@@ -1120,12 +1179,13 @@ pub fn search(query: &str, limit: Option<u32>) -> SessionSearchResults {
     };
     let started = Instant::now();
     let stats = index.sync();
-    let results = index
-        .search(query, limit)
-        .unwrap_or_else(|_| SessionSearchResults {
+    let results = index.search(query, limit).unwrap_or_else(|error| {
+        report_error("query failed", error);
+        SessionSearchResults {
             query: query.to_string(),
             ..Default::default()
-        });
+        }
+    });
     if stats.indexed > 0 {
         eprintln!(
             "harness API bridge: search index synced {} session(s) ({} unchanged) in {:.1}ms",

@@ -90,6 +90,51 @@ fn session_ids(results: &SessionSearchResults) -> Vec<String> {
         .collect()
 }
 
+#[test]
+fn failed_prune_preserves_all_previous_search_rows() {
+    let dir = test_dir("prune-atomicity");
+    let snapshot = write_session(
+        &dir,
+        "session_prune",
+        "retainedtitle",
+        vec![user_message("m", "retainedmessage", "2026-01-02T03:04:05Z")],
+    );
+    let mut index = index_for(&dir);
+    fs::remove_file(snapshot).unwrap();
+    index.connection.execute_batch(
+        "CREATE TRIGGER reject_prune BEFORE DELETE ON search_sessions BEGIN SELECT RAISE(FAIL, 'injected prune failure'); END;"
+    ).unwrap();
+    assert_eq!(index.sync().pruned, 0);
+    assert_eq!(index.search("retainedtitle", None).unwrap().titles.len(), 1);
+    assert_eq!(
+        index
+            .search("retainedmessage", None)
+            .unwrap()
+            .messages
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn failed_title_write_preserves_previous_searchable_title() {
+    let dir = test_dir("title-atomicity");
+    write_session(&dir, "session_title", "originaltitle", vec![]);
+    let mut index = index_for(&dir);
+    index.connection.execute_batch(
+        "CREATE TRIGGER reject_title BEFORE INSERT ON search_sessions BEGIN SELECT RAISE(FAIL, 'injected title failure'); END;"
+    ).unwrap();
+    index.note_title("session_title", "replacementtitle");
+    assert_eq!(index.search("originaltitle", None).unwrap().titles.len(), 1);
+    assert!(
+        index
+            .search("replacementtitle", None)
+            .unwrap()
+            .titles
+            .is_empty()
+    );
+}
+
 /// Harness instructions ride the user role. Indexing them as "You" makes the
 /// search screen attribute the runtime's own nudges to the human.
 #[test]
