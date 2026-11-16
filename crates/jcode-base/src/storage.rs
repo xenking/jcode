@@ -40,6 +40,8 @@ fn isolated_test_home() -> &'static Path {
                 Err(error) => last_error = format!("{}: {error}", dir.display()),
             }
         }
+        // Only test/test-support builds compile this fail-closed guard. Never
+        // fall back to the real home when every isolated temp base is unavailable.
         panic!(
             "no temporary directory outside the real jcode home is available for test isolation ({last_error})"
         );
@@ -117,6 +119,8 @@ pub fn assert_not_real_home(path: &Path) {
     #[cfg(any(test, feature = "test-support"))]
     {
         if is_real_home_state(path) {
+            // Unreachable in production: this entire gate is test-only. A
+            // failed isolation invariant must stop before touching user state.
             panic!(
                 "a test build is about to write {} inside the real jcode home: isolate JCODE_HOME instead of persisting there",
                 path.display()

@@ -50,18 +50,20 @@ struct ArchiveRef {
 }
 
 pub(super) fn archive_marker(id: &str, media_type: &str) -> String {
-    let reference = ArchiveRef {
-        image_id: id.into(),
-        media_type: media_type.into(),
-    };
-    format!(
-        "{ARCHIVE_PREFIX}{}]",
-        serde_json::to_string(&reference).expect("archive reference serializes")
-    )
+    let reference = serde_json::Value::Object(serde_json::Map::from_iter([
+        ("image_id".into(), serde_json::Value::String(id.into())),
+        (
+            "media_type".into(),
+            serde_json::Value::String(media_type.into()),
+        ),
+    ]));
+    format!("{ARCHIVE_PREFIX}{reference}]")
 }
 
 fn parse_archive_marker(text: &str) -> Option<ArchiveRef> {
     let json = text.strip_prefix(ARCHIVE_PREFIX)?.strip_suffix(']')?;
+    // A prefix-like prose fragment is not an archive reference unless the
+    // complete typed payload validates. Leave such text untouched.
     serde_json::from_str(json).ok()
 }
 
@@ -86,14 +88,25 @@ fn archive_path(id: &str) -> anyhow::Result<std::path::PathBuf> {
 
 pub(super) fn write_archived_image(id: &str, data: &str) -> anyhow::Result<()> {
     let path = archive_path(id)?;
-    if std::fs::read_to_string(&path).ok().as_deref() != Some(data) {
-        crate::storage::write_text_secret(&path, data)?;
+    match std::fs::read_to_string(&path) {
+        Ok(existing) if existing == data => return Ok(()),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
+    crate::storage::write_text_secret(&path, data)?;
     Ok(())
 }
 
 fn read_archived_image(id: &str) -> Option<String> {
-    std::fs::read_to_string(archive_path(id).ok()?).ok()
+    let result = archive_path(id).and_then(|path| Ok(std::fs::read_to_string(path)?));
+    match result {
+        Ok(data) => Some(data),
+        Err(error) => {
+            crate::logging::warn(&format!("Cannot read archived session image {id}: {error}"));
+            None
+        }
+    }
 }
 
 fn remap_ask_images(content: &str, labels: &[(String, String)]) -> String {
@@ -345,5 +358,41 @@ impl Session {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+
+    #[test]
+    fn unreadable_archive_is_not_overwritten() {
+        let _lock = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().unwrap();
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(home) => crate::env::set_var("JCODE_HOME", home),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+            }
+        }
+        let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", temp.path());
+        let id = image_id("archive-read-error", "message", 0);
+        let path = archive_path(&id).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, [0xff]).unwrap();
+        assert!(write_archived_image(&id, "replacement").is_err());
+        assert_eq!(std::fs::read(path).unwrap(), [0xff]);
+    }
+
+    #[test]
+    fn archive_marker_escapes_reference_fields() {
+        let marker = archive_marker("quote\"\\ёж", "image/\"test\n");
+        let reference = parse_archive_marker(&marker).unwrap();
+        assert_eq!(reference.image_id, "quote\"\\ёж");
+        assert_eq!(reference.media_type, "image/\"test\n");
     }
 }

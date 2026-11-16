@@ -8,9 +8,14 @@ const INDEX_LIMIT: usize = 120_000;
 const BUCKETS: usize = 20;
 
 fn interesting(line: &str, user: bool) -> bool {
-    static FACT: OnceLock<Regex> = OnceLock::new();
-    let re = FACT.get_or_init(|| Regex::new(r"(?i)(\b[0-9a-f]{7,40}\b|(?:[~/]|[\w.-]+/)[\w./~-]+|\b[\w.-]+\s*[:=]\s*[^\s,;]+|\b\d+(?:\.\d+)?%?\b|\b(worker|decision|decided|because|reason|must|never|avoid|prefer|should|do not|don't|rule|task|result)\b)").expect("valid index regex"));
-    user || re.is_match(line)
+    static FACT: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
+    let re = FACT.get_or_init(|| {
+        Regex::new(r"(?i)(\b[0-9a-f]{7,40}\b|(?:[~/]|[\w.-]+/)[\w./~-]+|\b[\w.-]+\s*[:=]\s*[^\s,;]+|\b\d+(?:\.\d+)?%?\b|\b(worker|decision|decided|because|reason|must|never|avoid|prefer|should|do not|don't|rule|task|result)\b)")
+            .inspect_err(|error| crate::logging::warn(&format!("Invalid snap index fact matcher: {error}")))
+    });
+    // Classification only prioritizes excerpts within INDEX_LIMIT. If a future
+    // matcher is invalid, retaining all candidates is safer than dropping facts.
+    user || re.as_ref().map_or(true, |re| re.is_match(line))
 }
 
 /// Excerpts come from raw messages. A page is cited only when its normalized
