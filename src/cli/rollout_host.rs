@@ -110,7 +110,7 @@ impl MacHost {
     }
 
     /// Detached checkout of `sha` in the rollout worktree, created on demand.
-    /// A dirty worktree is refused, never reset.
+    /// Only an unstaged, generated Cargo.lock change may be discarded.
     fn checkout(&self, repo: Repo, sha: &str) -> Result<()> {
         let worktree = self.worktree(repo);
         if !worktree.exists() {
@@ -121,8 +121,11 @@ impl MacHost {
                 .arg(sha))?;
             return Ok(());
         }
-        let dirty = output(git(worktree).args(["status", "--porcelain", "--untracked-files=no"]))?;
-        if !dirty.trim().is_empty() {
+        let dirty =
+            output(git(worktree).args(["status", "--porcelain", "-z", "--untracked-files=all"]))?;
+        if dirty == " M Cargo.lock\0" {
+            run(git(worktree).args(["checkout", "--", "Cargo.lock"]))?;
+        } else if !dirty.is_empty() {
             bail!(
                 "{} has uncommitted changes; refusing to build it",
                 worktree.display()
@@ -137,6 +140,21 @@ impl MacHost {
             .current_dir(dir)
             .env("CARGO_TARGET_DIR", &self.layout.target_dir)
             .env("DEVELOPER_DIR", DEVELOPER_DIR);
+        command
+    }
+
+    fn cli_build_command(&self, pair: &Pair) -> Command {
+        let mut command = self.cargo(&self.layout.jcode_worktree);
+        // build-meta watches this input. Pinning it also refreshes git date,
+        // tag and changelog when the detached checkout advances.
+        command.env("JCODE_BUILD_GIT_HASH", &pair.cli).args([
+            "build",
+            "--release",
+            "--target",
+            TARGET,
+            "--bin",
+            "jcode",
+        ]);
         command
     }
 
@@ -352,14 +370,7 @@ impl Host for MacHost {
 
     fn build_cli(&mut self, pair: &Pair) -> Result<PathBuf> {
         self.checkout(Repo::Jcode, &pair.cli)?;
-        run(self.cargo(&self.layout.jcode_worktree).args([
-            "build",
-            "--release",
-            "--target",
-            TARGET,
-            "--bin",
-            "jcode",
-        ]))?;
+        run(&mut self.cli_build_command(pair))?;
         self.built_cli(pair).with_context(|| {
             format!(
                 "{} does not report {}",
@@ -392,12 +403,25 @@ impl Host for MacHost {
         self.checkout(Repo::Jcode, &pair.cli)?;
         self.checkout(Repo::Desktop, &pair.desktop)?;
         let worktree = self.layout.desktop_worktree.clone();
-        run(Command::new(worktree.join("scripts/package-macos.sh"))
+        let packaged = run(Command::new(worktree.join("scripts/package-macos.sh"))
             .current_dir(&worktree)
             .env("JCODE_REPO", &self.layout.jcode_worktree)
             .env("PACKAGE_TARGETS", TARGET)
             .env("CARGO_TARGET_DIR", &self.layout.target_dir)
-            .env("DEVELOPER_DIR", DEVELOPER_DIR))?;
+            .env("DEVELOPER_DIR", DEVELOPER_DIR));
+        // Cargo may rewrite the tracked lockfile even when packaging fails.
+        // Restore only an unstaged lockfile change, never other modifications.
+        let status =
+            output(git(&worktree).args(["status", "--porcelain", "-z", "--", "Cargo.lock"]))?;
+        if status == " M Cargo.lock\0" {
+            run(git(&worktree).args(["checkout", "--", "Cargo.lock"]))?;
+        } else if !status.is_empty() {
+            bail!(
+                "{} has unexpected Cargo.lock changes after packaging",
+                worktree.display()
+            );
+        }
+        packaged?;
         self.packaged_app(pair).with_context(|| {
             format!(
                 "{} is not desktop {} + jcode {} after packaging",
@@ -739,6 +763,135 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
+
+    fn checkout_fixture() -> (tempfile::TempDir, MacHost, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let repo = root.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        run(Command::new("git").arg("init").arg("-q").arg(&repo)).unwrap();
+        std::fs::write(repo.join("Cargo.lock"), "original\n").unwrap();
+        std::fs::write(repo.join("other"), "original\n").unwrap();
+        std::fs::create_dir(repo.join("scripts")).unwrap();
+        let script = repo.join("scripts/package-macos.sh");
+        std::fs::write(&script, "#!/bin/sh\necho generated > Cargo.lock\nexit 1\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        run(git(&repo).args(["add", "."])).unwrap();
+        run(git(&repo).args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "initial",
+        ]))
+        .unwrap();
+        let sha = output(git(&repo).args(["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_owned();
+        let worktree = root.join("worktree");
+        run(git(&repo)
+            .args(["worktree", "add", "--detach", "--quiet"])
+            .arg(&worktree)
+            .arg(&sha))
+        .unwrap();
+        let host = MacHost {
+            layout: Layout {
+                jcode_repo: repo.clone(),
+                desktop_repo: repo,
+                jcode_worktree: worktree.clone(),
+                desktop_worktree: worktree,
+                target_dir: root.join("target"),
+                dist_dir: root.join("dist"),
+                app: root.join("app"),
+                app_backup: root.join("backup"),
+                builds: root.join("builds"),
+            },
+            jcode_home: root.to_owned(),
+            own_session: None,
+            daemon_socket: root.join("daemon"),
+            bridge_socket: root.join("bridge"),
+        };
+        (dir, host, sha)
+    }
+
+    #[test]
+    fn checkout_restores_generated_lockfile_but_refuses_other_changes() {
+        let (_dir, host, sha) = checkout_fixture();
+        let worktree = host.worktree(Repo::Desktop);
+        std::fs::write(worktree.join("Cargo.lock"), "generated\n").unwrap();
+        host.checkout(Repo::Desktop, &sha).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("Cargo.lock")).unwrap(),
+            "original\n"
+        );
+        std::fs::write(worktree.join("Cargo.lock"), "generated\n").unwrap();
+        std::fs::write(worktree.join("other"), "user change\n").unwrap();
+        assert!(host.checkout(Repo::Desktop, &sha).is_err());
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("Cargo.lock")).unwrap(),
+            "generated\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("other")).unwrap(),
+            "user change\n"
+        );
+    }
+
+    #[test]
+    fn failed_packaging_restores_lockfile() {
+        let (_dir, mut host, sha) = checkout_fixture();
+        let pair = Pair {
+            cli: sha.clone(),
+            desktop: sha,
+        };
+        assert!(host.package_desktop(&pair).is_err());
+        assert_eq!(
+            std::fs::read_to_string(host.worktree(Repo::Desktop).join("Cargo.lock")).unwrap(),
+            "original\n"
+        );
+        assert!(
+            output(git(host.worktree(Repo::Desktop)).args(["status", "--porcelain"]))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn checkout_refuses_untracked_and_staged_files() {
+        let (_dir, host, sha) = checkout_fixture();
+        let worktree = host.worktree(Repo::Desktop);
+        std::fs::write(worktree.join("new-file"), "keep\n").unwrap();
+        assert!(host.checkout(Repo::Desktop, &sha).is_err());
+        std::fs::remove_file(worktree.join("new-file")).unwrap();
+        std::fs::write(worktree.join("Cargo.lock"), "staged\n").unwrap();
+        run(git(worktree).args(["add", "Cargo.lock"])).unwrap();
+        assert!(host.checkout(Repo::Desktop, &sha).is_err());
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("Cargo.lock")).unwrap(),
+            "staged\n"
+        );
+    }
+
+    #[test]
+    fn cli_build_pins_metadata_to_checkout() {
+        let (_dir, host, sha) = checkout_fixture();
+        let pair = Pair {
+            cli: sha.clone(),
+            desktop: sha.clone(),
+        };
+        let command = host.cli_build_command(&pair);
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(key, _)| *key == "JCODE_BUILD_GIT_HASH")
+                .and_then(|(_, value)| value),
+            Some(sha.as_ref())
+        );
+    }
 
     #[test]
     fn runtime_dir_ignores_agent_tmpdir() {
