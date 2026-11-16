@@ -71,6 +71,9 @@ pub(super) async fn launch(app: &Path) -> Result<()> {
     } else {
         // An overridden Applications path never invokes global launch services.
         Command::new(app.join("Contents/MacOS/jcode-desktop"))
+            .env_remove(jcode_build_support::runtime_generation::TARGET_ENV)
+            .env_remove(jcode_build_support::runtime_generation::RELOAD_ID_ENV)
+            .env_remove(jcode_build_support::runtime_generation::GENERATION_ENV)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

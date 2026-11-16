@@ -1,3 +1,4 @@
+pub use jcode_build_support::runtime_generation;
 pub use jcode_build_support::{
     BinaryChoice, BinaryVersionReport, BuildInfo, BuildManifest, CanaryStatus, CrashInfo,
     DevBinarySourceMetadata, MigrationContext, PendingActivation, PublishedBuild,

@@ -70,7 +70,7 @@ int main(int argc, char **argv) {
     fprintf(launches, "%d\n", getpid()); fclose(launches);
     char bridge[4096]; snprintf(bridge, sizeof(bridge), "%s/Contents/MacOS/jcode", getenv("JCODE_ROLLOUT_APP"));
     pid_t child = fork();
-    if (child == 0) { execl(bridge, bridge, "api-bridge", NULL); _exit(3); }
+    if (child == 0) { execl(bridge, bridge, "--no-update", "api-bridge", NULL); _exit(3); }
     waitpid(child, NULL, 0); return 0;
 }
 '''
@@ -95,7 +95,7 @@ class Host:
         self.launches = root / "desktop-launches"
         self.children = []
         for directory in (self.home, self.jcode_home, self.runtime, self.app, self.package / "Contents/MacOS"):
-            directory.mkdir(parents=True)
+            directory.mkdir(parents=True, exist_ok=True)
         (self.app / "old-bundle").write_text("previous bundle must never disappear")
         builds = self.jcode_home / "builds"
         previous = builds / "versions" / self.old_label / "jcode"
@@ -112,6 +112,10 @@ class Host:
         source = root / "desktop.c"
         source.write_text(DESKTOP_C)
         subprocess.run(["cc", str(source), "-o", str(self.package / "Contents/MacOS/jcode-desktop")], check=True)
+        (self.app / "Contents/MacOS").mkdir(parents=True)
+        shutil.copy2(old, self.app / "Contents/MacOS/jcode")
+        shutil.copy2(self.package / "Contents/MacOS/jcode-desktop", self.app / "Contents/MacOS/jcode-desktop")
+        shutil.copy2(self.package / "Contents/Info.plist", self.app / "Contents/Info.plist")
         self.env = dict(os.environ)
         for key in ("JCODE_TEST_SESSION", "JCODE_READY_FD", "JCODE_SESSION_ID", "JCODE_RELOAD_AUTH_STATUS",
                     "JCODE_RUNTIME_TARGET", "JCODE_RUNTIME_RELOAD_ID", "JCODE_RUNTIME_GENERATION"):
@@ -248,6 +252,30 @@ def dead_generation(root, old, new):
         host.stop()
 
 
+def verification_failure(root, old, new):
+    host = Host(root, old, new)
+    try:
+        host.start()
+        (host.package / "Contents/Info.plist").write_text("<plist><dict/></plist>")
+        host.submit()
+
+        def rolled_back():
+            state = host.state()
+            assert state["phase"] != "failed", state
+            return state if state["phase"] == "rolled_back" else None
+
+        state = wait_for("verification failure rollback", rolled_back)
+        assert state["serving"] and "Sparkle" in state["error"], state
+        assert (host.app / "old-bundle").exists()
+        assert version(host.app / "Contents/MacOS/jcode", root) == host.old_label
+        wait_for("previous daemon generation after rollback", lambda: request(host.socket, {"type": "ping", "id": 1}).get("daemon_identity", {}).get("git_hash", "").startswith(host.old_label))
+        assert (host.jcode_home / "builds/current/jcode").resolve().parent.name == host.old_label
+        assert (host.jcode_home / "builds/shared-server/jcode").resolve().parent.name == host.old_label
+        return {"verification_rollback_pair": "passed", "rollout_id": state["id"]}
+    finally:
+        host.stop()
+
+
 class ObservedChild:
     def __init__(self, pid):
         self.pid = pid
@@ -269,7 +297,8 @@ def main():
     scratch.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix="rollout-accept-", dir=scratch))
     results = {"root": str(root), "old": str(args.old), "new": str(args.new), "checks": []}
-    for name, check in (("caller-exec", caller_death_and_exec), ("backup-crash", backup_crash), ("dead-generation", dead_generation)):
+    print(json.dumps({"sandbox_root": str(root)}), flush=True)
+    for name, check in (("caller-exec", caller_death_and_exec), ("backup-crash", backup_crash), ("dead-generation", dead_generation), ("verify-rollback", verification_failure)):
         directory = root / name
         directory.mkdir()
         result = check(directory, args.old.resolve(), args.new.resolve())

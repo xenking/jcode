@@ -152,11 +152,7 @@ impl MacHost {
 
     fn daemon(&self) -> Option<(u32, Option<String>)> {
         let identity = daemon_identity(&self.daemon_socket)?;
-        let label = if valid_git_hash(&identity.git_hash) {
-            Some(identity.git_hash.chars().take(9).collect())
-        } else {
-            installed_daemon_label(identity.pid, &identity.binary_path, &self.layout.builds)
-        };
+        let label = Some(identity.git_hash.chars().take(9).collect());
         Some((identity.pid, label))
     }
 }
@@ -410,177 +406,8 @@ fn submit_intent(_socket: &Path, _intent: &crate::server::rollout::Intent) -> Re
     bail!("daemon-owned rollout requires Unix")
 }
 
-fn valid_git_hash(hash: &str) -> bool {
-    (7..=40).contains(&hash.len()) && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-#[cfg(unix)]
 fn daemon_identity(socket: &Path) -> Option<crate::protocol::DaemonIdentity> {
-    use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixStream;
-
-    let mut stream = UnixStream::connect(socket).ok()?;
-    // Capture the peer before sending: a legacy one-shot server may exit as
-    // soon as it replies. A client's PID can never be mistaken for the listener.
-    let pid = socket_peer_pid(&stream);
-    let executable = pid.and_then(executable_of);
-    let timeout = Duration::from_secs(2);
-    stream.set_read_timeout(Some(timeout)).ok()?;
-    stream.set_write_timeout(Some(timeout)).ok()?;
-    let reply = (|| -> Result<serde_json::Value> {
-        writeln!(stream, "{{\"type\":\"ping\",\"id\":1}}")?;
-        let mut reader = BufReader::new(stream);
-        let deadline = std::time::Instant::now() + timeout;
-        loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                bail!("daemon ping timed out");
-            }
-            reader.get_ref().set_read_timeout(Some(remaining))?;
-            let mut line = String::new();
-            if reader.read_line(&mut line)? == 0 {
-                bail!("daemon disconnected before pong");
-            }
-            let event: serde_json::Value = serde_json::from_str(&line)?;
-            if event["id"] == 1 && event["type"] == "pong" {
-                return Ok(event);
-            }
-        }
-    })();
-    if let Ok(reply) = reply
-        && let Some(value) = reply.get("daemon_identity")
-        && !value.is_null()
-    {
-        let identity: crate::protocol::DaemonIdentity =
-            serde_json::from_value(value.clone()).ok()?;
-        if identity.pid == 0
-            || pid.is_some_and(|peer| peer != identity.pid)
-            || !identity.binary_path.is_absolute()
-            || !valid_git_hash(&identity.git_hash)
-        {
-            return None;
-        }
-        return Some(identity);
-    }
-    // Legacy daemons do not report their build. Only inspect the kernel-proven
-    // listening peer, never any process whose lsof socket pathname happens to match.
-    let pid = pid.filter(|pid| *pid != std::process::id())?;
-    Some(crate::protocol::DaemonIdentity {
-        pid,
-        binary_path: executable?,
-        git_hash: String::new(),
-        version_label: None,
-        reload_id: None,
-        generation: 0,
-    })
-}
-
-#[cfg(not(unix))]
-fn daemon_identity(_socket: &Path) -> Option<crate::protocol::DaemonIdentity> {
-    None
-}
-
-#[cfg(unix)]
-fn socket_peer_pid(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
-    use std::os::fd::AsRawFd;
-    #[cfg(target_os = "macos")]
-    {
-        let mut pid: libc::pid_t = 0;
-        let mut len = std::mem::size_of_val(&pid) as libc::socklen_t;
-        // SAFETY: pid and len are writable buffers of the size supplied to getsockopt.
-        let rc = unsafe {
-            libc::getsockopt(
-                stream.as_raw_fd(),
-                libc::SOL_LOCAL,
-                libc::LOCAL_PEERPID,
-                (&mut pid as *mut libc::pid_t).cast(),
-                &mut len,
-            )
-        };
-        (rc == 0 && pid > 0).then_some(pid as u32)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        // SAFETY: ucred is a plain C struct whose zero representation is valid.
-        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
-        let mut len = std::mem::size_of_val(&cred) as libc::socklen_t;
-        // SAFETY: cred and len are writable buffers of the size supplied to getsockopt.
-        let rc = unsafe {
-            libc::getsockopt(
-                stream.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_PEERCRED,
-                (&mut cred as *mut libc::ucred).cast(),
-                &mut len,
-            )
-        };
-        (rc == 0 && cred.pid > 0).then_some(cred.pid as u32)
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = stream;
-        None
-    }
-}
-
-#[cfg(unix)]
-fn installed_daemon_label(pid: u32, executable: &Path, builds: &Path) -> Option<String> {
-    use std::os::unix::fs::MetadataExt;
-    let (device, inode) = process_image_file_id(pid, executable)?;
-    let mut matches = Vec::new();
-    for entry in std::fs::read_dir(builds.join("versions")).ok()?.flatten() {
-        let binary = entry.path().join(crate::build::binary_name());
-        if std::fs::metadata(binary).is_ok_and(|file| file.dev() == device && file.ino() == inode) {
-            matches.push(entry.file_name().to_str()?.to_owned());
-        }
-    }
-    // Multiple labels for one image do not establish which label the daemon runs.
-    (matches.len() == 1).then(|| matches.remove(0))
-}
-
-#[cfg(not(unix))]
-fn installed_daemon_label(_pid: u32, _executable: &Path, _builds: &Path) -> Option<String> {
-    None
-}
-
-#[cfg(target_os = "macos")]
-fn process_image_file_id(pid: u32, executable: &Path) -> Option<(u64, u64)> {
-    // proc_pidpath is a vnode pathname cache, not an immutable launch path.
-    // Executing a hardlink (built_cli's version check) can change it to target/.
-    // lsof reads the running image's vnode inode, even if target/ was replaced.
-    let listing = output(Command::new("lsof").args([
-        "-a",
-        "-p",
-        &pid.to_string(),
-        "-d",
-        "txt",
-        "-F",
-        "fDin",
-    ]))
-    .ok()?;
-    let (mut device, mut inode) = (None, None);
-    for line in listing.lines() {
-        if line.starts_with('f') {
-            device = None;
-            inode = None;
-        } else if let Some(value) = line.strip_prefix('D') {
-            device = u64::from_str_radix(value.trim_start_matches("0x"), 16).ok();
-        } else if let Some(value) = line.strip_prefix('i') {
-            inode = value.parse::<u64>().ok();
-        } else if let Some(name) = line.strip_prefix('n')
-            && Path::new(name).file_name() == executable.file_name()
-        {
-            return device.zip(inode);
-        }
-    }
-    None
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn process_image_file_id(pid: u32, _executable: &Path) -> Option<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
-    let file = std::fs::metadata(format!("/proc/{pid}/exe")).ok()?;
-    Some((file.dev(), file.ino()))
+    crate::build::runtime_generation::probe_socket_identity(socket, Duration::from_secs(2)).ok()
 }
 
 fn live_workers(socket: &Path, own: Option<&str>) -> Result<Vec<(String, String)>> {
@@ -737,7 +564,7 @@ fn output(command: &mut Command) -> Result<String> {
 }
 
 /// The executable a process runs, from the kernel rather than its argv.
-#[cfg(target_os = "macos")]
+#[cfg(all(test, target_os = "macos"))]
 fn executable_of(pid: u32) -> Option<PathBuf> {
     let mut buffer = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     let length = unsafe {
@@ -754,7 +581,7 @@ fn executable_of(pid: u32) -> Option<PathBuf> {
     Some(PathBuf::from(String::from_utf8(buffer).ok()?))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(test, not(target_os = "macos")))]
 fn executable_of(pid: u32) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/exe")).ok()
 }
@@ -940,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_daemon_hardlink_alias_still_identifies_installed_version() {
+    fn legacy_daemon_without_identity_stays_unknown_across_hardlink_aliases() {
         const CHILD: &str = "JCODE_ROLLOUT_HARDLINK_TEST_SOCKET";
         if let Some(socket) = std::env::var_os(CHILD) {
             let listener = UnixListener::bind(socket).unwrap();
@@ -962,7 +789,7 @@ mod tests {
         std::fs::hard_link(std::env::current_exe().unwrap(), &version).unwrap();
         std::fs::hard_link(&version, &alias).unwrap();
         let mut child = Command::new(&alias)
-            .args(["--exact", "cli::rollout_host::tests::legacy_daemon_hardlink_alias_still_identifies_installed_version", "--nocapture"])
+            .args(["--exact", "cli::rollout_host::tests::legacy_daemon_without_identity_stays_unknown_across_hardlink_aliases", "--nocapture"])
             .env(CHILD, &host.daemon_socket)
             .stdout(Stdio::null())
             .spawn().unwrap();
@@ -983,11 +810,10 @@ mod tests {
             Some(alias.as_path()),
             "fixture must reproduce the non-versioned proc_pidpath alias"
         );
-        assert_eq!(deployed.daemon_pid, Some(pid));
+        assert_eq!(deployed.daemon_pid, None);
         assert_eq!(
-            deployed.daemon_label.as_deref(),
-            Some("483d7848f"),
-            "hardlinked daemon exe was {observed_exe:?}"
+            deployed.daemon_label, None,
+            "legacy identity must stay unknown, kernel alias was {observed_exe:?}"
         );
     }
 

@@ -125,10 +125,13 @@ pub(super) async fn await_reload_signal(
     // it started listening, never to a stale one left over from a previous run.
     // Without this, in-process e2e servers (which share the global channel) would
     // each immediately re-process the last test's reload signal on startup.
-    let mut last_request_id: Option<String> = rx
-        .borrow_and_update()
-        .as_ref()
-        .map(|signal| signal.request_id.clone());
+    let mut last_request_id: Option<String> = if cfg!(test) {
+        rx.borrow_and_update()
+            .as_ref()
+            .map(|signal| signal.request_id.clone())
+    } else {
+        None
+    };
 
     loop {
         let signal = match receive_reload_signal(&mut rx, &mut last_request_id).await {
@@ -167,6 +170,25 @@ pub(super) async fn await_reload_signal(
         {
             crate::logging::info(
                 "Server: JCODE_TEST_SESSION set, skipping process exec for reload test",
+            );
+            continue;
+        }
+
+        let Some(target) = signal.target.as_ref() else {
+            super::write_reload_state(
+                &signal.request_id,
+                &signal.hash,
+                super::ReloadPhase::Failed,
+                Some("reload request has no immutable target".into()),
+            );
+            continue;
+        };
+        if let Err(error) = jcode_build_support::runtime_generation::validate_target(target) {
+            super::write_reload_state(
+                &signal.request_id,
+                &signal.hash,
+                super::ReloadPhase::Failed,
+                Some(format!("{error:#}")),
             );
             continue;
         }
@@ -229,9 +251,9 @@ pub(super) async fn await_reload_signal(
             serde_json::json!({ "count": aborted }),
         );
 
-        let prefers_selfdev = signal.prefer_selfdev_binary;
-
-        if let Some((binary, label)) = super::reload_exec_target(prefers_selfdev) {
+        let binary = &target.binary_path;
+        let label = target.version_label.as_deref().unwrap_or("pinned-target");
+        {
             if binary.exists() {
                 let socket = super::socket_path();
                 crate::logging::info(&format!(
@@ -252,10 +274,8 @@ pub(super) async fn await_reload_signal(
                         "elapsed_ms": reload_started.elapsed().as_millis(),
                     }),
                 );
-                let mut cmd = ProcessCommand::new(&binary);
-                if label == "managed-cloud" {
-                    cmd.args(inherited_serve_flags(std::env::args()));
-                }
+                let mut cmd = ProcessCommand::new(binary);
+                cmd.args(inherited_serve_flags(std::env::args()));
                 cmd.arg("serve").arg("--socket").arg(socket.as_os_str());
                 // Auto provider detection is dominated by credential-file probes.
                 // The replacement process is the same trusted daemon with the same
@@ -267,6 +287,22 @@ pub(super) async fn await_reload_signal(
                     serde_json::to_string(&crate::auth::AuthStatus::check_fast())
                 {
                     cmd.env("JCODE_RELOAD_AUTH_STATUS", auth_status);
+                }
+                if let Err(error) = jcode_build_support::runtime_generation::prepare_exec(
+                    &mut cmd,
+                    target,
+                    &signal.request_id,
+                ) {
+                    super::write_reload_state(
+                        &signal.request_id,
+                        &signal.hash,
+                        super::ReloadPhase::Failed,
+                        Some(format!("{error:#}")),
+                    );
+                    crate::logging::error(&format!(
+                        "Pinned reload target validation failed before exec: {error:#}"
+                    ));
+                    std::process::exit(42);
                 }
                 prepare_server_exec(&mut cmd, &socket);
                 let err = crate::platform::replace_process(&mut cmd);
@@ -288,13 +324,6 @@ pub(super) async fn await_reload_signal(
                     Some(format!("missing binary: {}", binary.display())),
                 );
             }
-        } else {
-            crate::server::write_reload_state(
-                &signal.request_id,
-                &signal.hash,
-                crate::server::ReloadPhase::Failed,
-                Some("no reloadable binary found".to_string()),
-            );
         }
         std::process::exit(42);
     }

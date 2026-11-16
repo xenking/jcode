@@ -359,7 +359,7 @@ pub(super) fn reconcile_on_startup(members: Members) -> Result<()> {
     Ok(())
 }
 
-async fn execute(store: &Store, journal: &mut Journal, members: &Members) -> Result<()> {
+async fn execute(store: &Store, journal: &mut Journal, _members: &Members) -> Result<()> {
     if matches!(journal.phase, Phase::Submitted | Phase::Staging) {
         store.phase(journal, Phase::Staging)?;
         preflight(&journal.intent.binary, &journal.intent.cli).await?;
@@ -380,15 +380,7 @@ async fn execute(store: &Store, journal: &mut Journal, members: &Members) -> Res
         let deadline =
             tokio::time::Instant::now() + Duration::from_secs(journal.intent.drain_timeout_secs);
         loop {
-            let mut busy = crate::turn_cancel_registry::active_session_ids();
-            busy.extend(
-                members
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|(_, member)| member.status == "running")
-                    .map(|(id, _)| id.clone()),
-            );
+            let mut busy = crate::turn_activity::global().snapshot().busy_sessions();
             busy.retain(|id| Some(id) != journal.intent.triggering_session.as_ref());
             busy.sort();
             busy.dedup();
@@ -421,7 +413,18 @@ async fn execute(store: &Store, journal: &mut Journal, members: &Members) -> Res
             store.save(journal)?;
             // Keep the transaction lock until exec, not just until the request
             // is acknowledged. Startup of the replacement owns the next step.
-            std::future::pending::<()>().await;
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if let Some(state) = super::recent_reload_state(Duration::from_secs(60))
+                    && Some(&state.request_id) == journal.reload_id.as_ref()
+                    && state.phase == super::ReloadPhase::Failed
+                {
+                    bail!(
+                        "pinned reload failed: {}",
+                        state.detail.as_deref().unwrap_or("unknown error")
+                    );
+                }
+            }
         }
     }
     if matches!(journal.phase, Phase::Serving | Phase::DesktopSwap) {
@@ -578,7 +581,15 @@ async fn launch_desktop(store: &Store, journal: &mut Journal) -> Result<()> {
 
 async fn rollback(store: &Store, journal: &mut Journal) -> Result<()> {
     store.phase(journal, Phase::RollingBack)?;
+    if journal.backup_ready {
+        store.before(journal, "quit_failed_desktop")?;
+        super::rollout_desktop::quit(&journal.intent.app).await?;
+        store.after(journal, "failed desktop stopped")?;
+    }
     restore_bundle(store, journal)?;
+    if journal.backup_ready {
+        launch_desktop(store, journal).await?;
+    }
     restore_links(store, journal)?;
     store.phase(journal, Phase::RolledBack)?;
     if !same_commit(jcode_build_meta::git_hash(), &journal.previous_shared) {

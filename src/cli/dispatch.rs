@@ -1417,7 +1417,9 @@ async fn spawn_server_with_lifetime(
         })
         .or_else(|| std::env::current_exe().ok())
         .ok_or_else(|| anyhow::anyhow!("Could not determine executable path for server spawn"))?;
-    let mut cmd = ProcessCommand::new(&exe);
+    let target = crate::build::runtime_generation::pin_path(&exe)?;
+    let mut cmd = ProcessCommand::new(&target.binary_path);
+    crate::build::runtime_generation::prepare_launch(&mut cmd, &target)?;
     cmd.env_remove(selfdev::CLIENT_SELFDEV_ENV);
     if client_requested_selfdev {
         cmd.env("JCODE_DEBUG_CONTROL", "1");
