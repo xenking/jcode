@@ -872,6 +872,18 @@ impl SessionControlHandle {
             "session queue unavailable while reconnecting"
         );
         anyhow::ensure!(!client_id.trim().is_empty(), "client_id must not be empty");
+        if content.trim().is_empty()
+            && images.is_empty()
+            && system_reminder.as_deref().is_some_and(|reminder| {
+                super::reload_recovery::is_delivered_continuation(&self.session_id, reminder)
+                    .unwrap_or(false)
+            })
+        {
+            return Ok(true);
+        }
+        if !content.trim().is_empty() || !images.is_empty() {
+            super::reload_recovery::supersede(&self.session_id)?;
+        }
         let mut queue = self
             .soft_interrupt_queue
             .lock()
@@ -1336,6 +1348,12 @@ impl SessionControlHandle {
     /// "Interrupting..." while the model kept generating for minutes
     /// (issue #428).
     pub fn request_cancel(&self) -> u64 {
+        if let Err(error) = super::reload_recovery::cancel(&self.session_id) {
+            crate::logging::warn(&format!(
+                "Cannot persist recovery cancellation for {}: {error}",
+                self.session_id
+            ));
+        }
         crate::logging::info(&format!(
             "SESSION_CANCEL_SIGNAL_FIRE session={}",
             self.session_id

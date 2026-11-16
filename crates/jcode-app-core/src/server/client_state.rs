@@ -696,9 +696,7 @@ fn history_reload_recovery_snapshot_with(
             if super::reload_recovery::peek_for_session(session_id)
                 .ok()
                 .flatten()
-                .is_some_and(|record| {
-                    record.status == super::reload_recovery::ReloadRecoveryStatus::Delivered
-                })
+                .is_some_and(|record| !record.status.needs_admission())
             {
                 return None;
             }

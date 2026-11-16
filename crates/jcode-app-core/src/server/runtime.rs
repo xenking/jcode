@@ -119,6 +119,9 @@ pub(super) struct ServerRuntime {
 }
 
 impl ServerRuntime {
+    pub(super) fn cancellation_token(&self) -> CancellationToken {
+        self.tasks.cancellation.child_token()
+    }
     pub(super) fn from_server(server: &super::Server) -> Self {
         Self {
             sessions: Arc::clone(&server.sessions),

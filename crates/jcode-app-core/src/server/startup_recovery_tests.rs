@@ -204,7 +204,8 @@ async fn startup_recovery_rechecks_coordinator_stopped_after_load() -> Result<()
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn startup_recovery_does_not_resume_open_lane_of_stopped_coordinator() -> Result<()> {
+async fn startup_recovery_does_not_resume_cancelled_intent_or_open_lane_of_stopped_coordinator()
+-> Result<()> {
     let _storage_guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new()?;
     let _env = configure_test_env(&temp);
@@ -260,6 +261,7 @@ async fn startup_recovery_does_not_resume_open_lane_of_stopped_coordinator() -> 
         },
         "previous reload",
     )?;
+    super::super::reload_recovery::cancel(&worker.id)?;
     crate::server::write_reload_state(
         "current-reload",
         "test",
@@ -479,6 +481,10 @@ async fn startup_recovery_honors_pending_intent_for_stopped_worker() -> Result<(
             "test-completed-recovery",
         )?
     );
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("recovered attached work".to_string()),
+        StreamEvent::MessageEnd { stop_reason: None },
+    ]);
     let swarm_id = "swarm-stopped-recovery";
     crate::server::write_reload_state(
         "reload-stopped-worker",
@@ -514,7 +520,9 @@ async fn startup_recovery_honors_pending_intent_for_stopped_worker() -> Result<(
     timeout(Duration::from_secs(5), async {
         loop {
             if !super::super::reload_recovery::has_pending_for_session(&worker.id)
+                && !super::super::reload_recovery::has_pending_for_session(&headed.id)
                 && server.swarm_state.members.read().await[&worker.id].status == "ready"
+                && server.swarm_state.members.read().await[&headed.id].status == "ready"
             {
                 break;
             }
@@ -529,16 +537,15 @@ async fn startup_recovery_honors_pending_intent_for_stopped_worker() -> Result<(
         "idle workers must not be resurrected"
     );
     assert!(
-        !sessions.contains_key(&headed.id),
-        "headed recovery belongs to reconnect"
+        sessions.contains_key(&headed.id),
+        "attached recovery belongs to the same daemon owner"
     );
     let agent = sessions[&worker.id].clone();
     drop(sessions);
     assert!(agent.lock().await.messages().iter().any(|message| {
-        message.role == Role::Assistant
-            && message.content_preview().contains("recovered durable work")
+        message.role == Role::Assistant && message.content_preview().contains("recovered ")
     }));
-    assert!(super::super::reload_recovery::has_pending_for_session(
+    assert!(!super::super::reload_recovery::has_pending_for_session(
         &headed.id
     ));
     Ok(())

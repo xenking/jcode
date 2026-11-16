@@ -216,13 +216,23 @@ impl Agent {
         self.emit_context_messages_since(announcement_start, &event_tx);
         let input_start = self.session.messages.len();
         if !resuming_ask {
-            self.append_user_context_message_with_display_role(
-                &user_message,
-                images,
-                display_role,
-                continues_turn,
+            let session_id = self.session.id.clone();
+            if !crate::server::reload_recovery::admit_input(
+                &session_id,
+                lease.identity(),
                 queued_client_id.as_deref(),
-            )?;
+                || {
+                    self.append_user_context_message_with_display_role(
+                        &user_message,
+                        images,
+                        display_role,
+                        continues_turn,
+                        queued_client_id.as_deref(),
+                    )
+                },
+            )? {
+                return Ok(());
+            }
         }
         if let Some(client_ids) = queued_client_id {
             let mut queue = self

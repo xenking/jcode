@@ -54,7 +54,8 @@ mod live_turn;
 mod mobile_local;
 mod provider_control;
 mod reload;
-mod reload_recovery;
+pub(crate) mod reload_recovery;
+pub use reload_recovery::{ReloadRecoverySummary, recovery_summary as reload_recovery_summary};
 mod reload_state;
 mod reload_trace;
 mod runtime;
@@ -465,16 +466,6 @@ fn worker_has_live_coordinator(
         })
 }
 
-fn pending_headless_recovery_for_reload(session_id: &str, reload_id: Option<&str>) -> bool {
-    reload_recovery::peek_for_session(session_id)
-        .ok()
-        .flatten()
-        .is_some_and(|record| {
-            record.status == reload_recovery::ReloadRecoveryStatus::Pending
-                && reload_id.is_none_or(|id| record.reload_id == id)
-        })
-}
-
 fn headless_reload_continuation_message(reload_ctx: Option<ReloadContext>) -> Option<String> {
     ReloadContext::recovery_directive(reload_ctx.as_ref(), true, "", None)
         .map(|directive| directive.continuation_message)
@@ -495,14 +486,6 @@ fn configured_server_name_from_env() -> Option<String> {
                 .ok()
                 .and_then(|value| normalize_configured_server_name(&value))
         })
-}
-
-#[derive(Default)]
-struct HeadlessRecoveryStats {
-    candidates: usize,
-    resumed: usize,
-    skipped: usize,
-    failed_to_load: usize,
 }
 
 #[path = "server/runtime_memory_sampling.rs"]
@@ -812,20 +795,17 @@ impl Server {
     }
 
     async fn recover_headless_sessions_on_startup(&self) {
+        // Migrate legacy snapshots into the same durable owner. An existing
+        // record, including Stop/superseded tombstones, is authoritative.
         let current_reload_id = recent_reload_state(Duration::from_secs(600))
             .filter(|state| state.pid == std::process::id())
             .map(|state| state.request_id);
-        let sessions_to_restore = {
+        let candidates = {
             let coordinators = self.swarm_state.coordinators.read().await.clone();
             let members = self.swarm_state.members.read().await;
             members
                 .values()
                 .filter(|member| {
-                    // Shutdown can persist `ready` after recording recovery
-                    // intent. On load that becomes `stopped`, but the durable
-                    // continuation must still take priority over that status.
-                    // A worker that still owns open todos had work in
-                    // flight even if its last turn ended before shutdown.
                     let owner_live = worker_has_live_coordinator(
                         member,
                         &members,
@@ -833,420 +813,103 @@ impl Server {
                         &self.live_before_restart,
                         self.swarm_restore_completed_at,
                     );
-                    member.is_headless
-                        && ((owner_live
-                            || current_reload_id.is_some()
-                            || self.running_before_restart.contains(&member.session_id))
-                            && pending_headless_recovery_for_reload(
-                                &member.session_id,
-                                current_reload_id.as_deref(),
-                            )
-                            || ((owner_live
-                                || self.running_before_restart.contains(&member.session_id))
-                                && headless_member_should_restore(&member.status, true))
-                            || (owner_live && worker_revive::has_open_lane(&member.session_id)))
+                    self.running_before_restart.contains(&member.session_id)
+                        || (member.is_headless
+                            && owner_live
+                            && (headless_member_should_restore(&member.status, true)
+                                || worker_revive::has_open_lane(&member.session_id)))
                 })
                 .map(|member| member.session_id.clone())
                 .collect::<Vec<_>>()
         };
-
-        if sessions_to_restore.is_empty() {
-            return;
-        }
-
-        crate::logging::info(&format!(
-            "Recovering {} headless session(s) after startup: {:?}",
-            sessions_to_restore.len(),
-            sessions_to_restore
-        ));
-
         if let Some(delay) = startup_headless_recovery_test_delay() {
-            crate::logging::info(&format!(
-                "Applying test-only headless startup recovery delay of {}ms",
-                delay.as_millis()
-            ));
             tokio::time::sleep(delay).await;
         }
-
-        let mcp_pool = get_shared_mcp_pool(&self.mcp_pool).await;
-        let recovery_started = Instant::now();
-        let mut stats = HeadlessRecoveryStats::default();
-        let mut swarms_to_persist = HashSet::new();
-
-        for session_id in sessions_to_restore {
-            let runtime_slot = self.sessions.reserve(&session_id).await;
-            if runtime_slot.existing().await.is_some() {
-                continue;
-            }
-            if let Err(error) = runtime_slot.ensure_vacant() {
-                crate::logging::warn(&format!("Cannot recover session {session_id}: {error}"));
-                continue;
-            }
-            stats.candidates += 1;
-            let session = match crate::session::Session::load(&session_id) {
-                Ok(session) => session,
-                Err(error) => {
-                    stats.failed_to_load += 1;
-                    crate::logging::warn(&format!(
-                        "Failed to load headless session {} during startup recovery: {}",
-                        session_id, error
-                    ));
-                    update_member_status(
-                        &session_id,
-                        "failed",
-                        Some(truncate_detail(&error.to_string(), 120)),
-                        &self.swarm_state.members,
-                        &self.swarm_state.swarms_by_id,
-                        Some(&self.event_history),
-                        Some(&self.event_counter),
-                        Some(&self.swarm_event_tx),
-                    )
-                    .await;
-                    if let Some(swarm_id) = {
-                        let members = self.swarm_state.members.read().await;
-                        members
-                            .get(&session_id)
-                            .and_then(|member| member.swarm_id.clone())
-                    } {
-                        persist_swarm_state_for(&swarm_id, &self.swarm_state).await;
-                    }
-                    continue;
-                }
-            };
-
-            let previous_status = session.status.clone();
-            let provider = self.provider.fork();
-            let registry = crate::tool::Registry::new(provider.clone()).await;
-            if session.is_canary {
-                registry.register_selfdev_tools().await;
-            }
-            registry
-                .register_mcp_tools_for_dir(
-                    None,
-                    Some(Arc::clone(&mcp_pool)),
-                    Some("headless".to_string()),
-                    session.working_dir.as_ref().map(std::path::PathBuf::from),
-                )
-                .await;
-
-            let agent = Arc::new(Mutex::new(Agent::new_with_session(
-                provider, registry, session, None,
-            )));
-
-            if let Err(error) = runtime_slot.publish(Arc::clone(&agent)).await {
-                crate::logging::warn(&format!(
-                    "Cannot publish recovered session {session_id}: {error}"
-                ));
-                continue;
-            }
-            drop(runtime_slot);
-
-            {
-                let agent_guard = agent.lock().await;
-                register_session_interrupt_queue(
-                    &self.soft_interrupt_queues,
-                    &session_id,
-                    agent_guard.soft_interrupt_queue(),
-                )
-                .await;
-                let mut shutdown_signals = self.shutdown_signals.write().await;
-                shutdown_signals.insert(session_id.clone(), agent_guard.graceful_shutdown_signal());
-                register_background_tool_signal(&session_id, agent_guard.background_tool_signal());
-            }
-
-            let stored_recovery_record = reload_recovery::peek_for_session(&session_id)
+        for session_id in candidates {
+            if reload_recovery::peek_for_session(&session_id)
                 .ok()
-                .flatten();
-            let owner_live = {
+                .flatten()
+                .is_some()
+            {
+                continue;
+            }
+            let Ok(session) = crate::session::Session::load(&session_id) else {
+                continue;
+            };
+            let (owner_live, headless) = {
                 let coordinators = self.swarm_state.coordinators.read().await.clone();
                 let members = self.swarm_state.members.read().await;
-                members.get(&session_id).is_some_and(|member| {
+                let Some(member) = members.get(&session_id) else {
+                    continue;
+                };
+                (
                     worker_has_live_coordinator(
                         member,
                         &members,
                         &coordinators,
                         &self.live_before_restart,
                         self.swarm_restore_completed_at,
-                    )
-                })
+                    ),
+                    member.is_headless,
+                )
             };
-            let has_stored_recovery_intent = (owner_live
-                || current_reload_id.is_some()
-                || self.running_before_restart.contains(&session_id))
-                && stored_recovery_record.as_ref().is_some_and(|record| {
-                    record.status == reload_recovery::ReloadRecoveryStatus::Pending
-                        && current_reload_id
-                            .as_deref()
-                            .is_none_or(|id| record.reload_id == id)
-                });
+            if headless && !owner_live && !self.running_before_restart.contains(&session_id) {
+                continue;
+            }
+            let interrupted = session.messages.last().is_some_and(|message| {
+                message.role == crate::message::Role::User
+                    || self::client_session::last_message_has_pending_tool(message)
+                    || message.content.iter().any(|block| match block {
+                        crate::message::ContentBlock::Text { text, .. } => {
+                            text.contains("server reloading")
+                        }
+                        crate::message::ContentBlock::ToolResult { content, .. } => {
+                            content.contains("server reload")
+                                || content.contains("Reload initiated.")
+                        }
+                        _ => false,
+                    })
+            });
             let open_lane = owner_live
                 .then(|| worker_revive::open_lane_continuation(&session_id))
                 .flatten();
-            let was_interrupted = (owner_live || self.running_before_restart.contains(&session_id))
-                && {
-                    let agent_guard = agent.lock().await;
-                    self::client_session::restored_session_was_interrupted(
-                        &session_id,
-                        &previous_status,
-                        &agent_guard,
-                    )
+            let reminder = if interrupted {
+                headless_reload_continuation_message(
+                    ReloadContext::peek_for_session(&session_id).ok().flatten(),
+                )
+            } else {
+                open_lane
+            };
+            if let Some(reminder) = reminder {
+                let reload_id = current_reload_id
+                    .clone()
+                    .unwrap_or_else(|| format!("startup-{}", std::process::id()));
+                let role = if headless {
+                    reload_recovery::ReloadRecoveryRole::Headless
+                } else {
+                    reload_recovery::ReloadRecoveryRole::InterruptedPeer
                 };
-            let should_resume =
-                has_stored_recovery_intent || open_lane.is_some() || was_interrupted;
-            if let Some(record) = stored_recovery_record.as_ref() {
-                reload_trace::record_value(
-                    &record.reload_id,
-                    "startup_recovery_decision",
-                    serde_json::json!({
-                        "session_id": session_id,
-                        "has_stored_recovery_intent": has_stored_recovery_intent,
-                        "should_resume": should_resume,
-                        "previous_status": previous_status,
-                        "is_headless": true,
-                    }),
-                );
-            }
-
-            if !should_resume {
-                ReloadContext::log_recovery_outcome(
-                    "server_startup_headless",
+                if let Err(error) = reload_recovery::persist_intent(
+                    &reload_id,
                     &session_id,
-                    "skipped",
-                    "restored session was not interrupted by reload",
-                );
-                stats.skipped += 1;
-                update_member_status(
-                    &session_id,
-                    "ready",
-                    None,
-                    &self.swarm_state.members,
-                    &self.swarm_state.swarms_by_id,
-                    Some(&self.event_history),
-                    Some(&self.event_counter),
-                    Some(&self.swarm_event_tx),
-                )
-                .await;
-                if let Some(swarm_id) = {
-                    let members = self.swarm_state.members.read().await;
-                    members
-                        .get(&session_id)
-                        .and_then(|member| member.swarm_id.clone())
-                } {
-                    swarms_to_persist.insert(swarm_id);
-                }
-                continue;
-            }
-
-            let stored_directive = if has_stored_recovery_intent {
-                reload_recovery::pending_directive_for_session(&session_id)
-                    .ok()
-                    .flatten()
-            } else {
-                None
-            };
-            let reload_ctx = if stored_directive.is_none() && was_interrupted {
-                ReloadContext::load_for_session(&session_id).ok().flatten()
-            } else {
-                None
-            };
-            let reminder = stored_directive
-                .map(|directive| directive.continuation_message)
-                .or_else(|| {
-                    if was_interrupted {
-                        headless_reload_continuation_message(reload_ctx)
-                    } else {
-                        None
-                    }
-                })
-                .or(open_lane);
-            let Some(reminder) = reminder else {
-                ReloadContext::log_recovery_outcome(
-                    "server_startup_headless",
-                    &session_id,
-                    "failed",
-                    "recovery directive missing for interrupted headless session",
-                );
-                continue;
-            };
-            stats.resumed += 1;
-            ReloadContext::log_recovery_outcome(
-                "server_startup_headless",
-                &session_id,
-                "resuming",
-                "restored interrupted headless session after reload",
-            );
-            let recover_swarm_members = Arc::clone(&self.swarm_state.members);
-            let recover_swarms_by_id = Arc::clone(&self.swarm_state.swarms_by_id);
-            let recover_event_history = Arc::clone(&self.event_history);
-            let recover_event_counter = Arc::clone(&self.event_counter);
-            let recover_swarm_event_tx = self.swarm_event_tx.clone();
-            let recover_swarm_state = self.swarm_state.clone();
-            let recovery_reload_id = stored_recovery_record
-                .filter(|_| has_stored_recovery_intent)
-                .map(|record| record.reload_id);
-
-            let lease = match agent.lock().await.claim_server_turn() {
-                Ok(lease) => lease,
-                Err(error) => {
-                    crate::logging::info(&format!(
-                        "Skipping duplicate startup recovery for {session_id}: {error}"
-                    ));
-                    continue;
-                }
-            };
-            // Publish the recovered status before returning from startup
-            // recovery, so resumed await watchers never see the temporary
-            // stopped status left by snapshot restoration.
-            update_member_status(
-                &session_id,
-                "running",
-                Some("resuming after reload".to_string()),
-                &recover_swarm_members,
-                &recover_swarms_by_id,
-                Some(&recover_event_history),
-                Some(&recover_event_counter),
-                Some(&recover_swarm_event_tx),
-            )
-            .await;
-            if let Some(swarm_id) = {
-                let members = recover_swarm_members.read().await;
-                members
-                    .get(&session_id)
-                    .and_then(|member| member.swarm_id.clone())
-            } {
-                persist_swarm_state_for(&swarm_id, &recover_swarm_state).await;
-            }
-
-            tokio::spawn(async move {
-                if let Some(reload_id) = recovery_reload_id.as_deref() {
-                    reload_trace::record_value(
-                        reload_id,
-                        "continuation_started",
-                        serde_json::json!({
-                            "session_id": session_id,
-                            "source": "server_startup_headless",
-                        }),
-                    );
-                }
-                match reload_recovery::mark_delivered_if_matching_continuation(
-                    &session_id,
-                    &reminder,
-                    "server_startup_headless",
-                ) {
-                    Ok(true) => {}
-                    Ok(false) => {}
-                    Err(error) => crate::logging::warn(&format!(
-                        "Failed to mark headless reload recovery intent delivered for {}: {}",
-                        session_id, error
-                    )),
-                }
-
-                let (fallback, _) = mpsc::unbounded_channel();
-                let events = self::state::TurnEventChannel::new(
-                    session_id.clone(),
-                    Arc::clone(&recover_swarm_members),
-                    fallback,
-                    &lease,
-                );
-                let result = self::turn_failover::process_reserved_message_with_server_failover(
-                    Arc::clone(&agent),
-                    &lease,
-                    "",
-                    vec![],
-                    Some(reminder),
-                    events.sender(),
-                    true,
-                    None,
-                )
-                .await;
-
-                let terminal = match &result {
-                    Ok(()) => ServerEvent::Done { id: 0 },
-                    Err(error) => ServerEvent::Error {
-                        id: 0,
-                        message: crate::util::format_error_chain(error),
-                        retry_after_secs: None,
+                    role,
+                    crate::tool::selfdev::ReloadRecoveryDirective {
+                        continuation_message: reminder,
+                        reconnect_notice: Some("Resumed after reload".into()),
                     },
-                };
-
-                let (status, detail) = match result {
-                    Ok(()) => {
-                        if let Some(reload_id) = recovery_reload_id.as_deref() {
-                            reload_trace::record_value(
-                                reload_id,
-                                "continuation_finished",
-                                serde_json::json!({
-                                    "session_id": session_id,
-                                    "source": "server_startup_headless",
-                                    "status": "ready",
-                                }),
-                            );
-                        }
-                        ReloadContext::log_recovery_outcome(
-                            "server_startup_headless",
-                            &session_id,
-                            "resumed",
-                            "continuation dispatched successfully",
-                        );
-                        ("ready", None)
-                    }
-                    Err(error) => {
-                        if let Some(reload_id) = recovery_reload_id.as_deref() {
-                            reload_trace::record_value(
-                                reload_id,
-                                "continuation_failed",
-                                serde_json::json!({
-                                    "session_id": session_id,
-                                    "source": "server_startup_headless",
-                                    "error": error.to_string(),
-                                }),
-                            );
-                        }
-                        ReloadContext::log_recovery_outcome(
-                            "server_startup_headless",
-                            &session_id,
-                            "failed",
-                            &error.to_string(),
-                        );
-                        ("failed", Some(truncate_detail(&error.to_string(), 120)))
-                    }
-                };
-                update_member_status(
-                    &session_id,
-                    status,
-                    detail,
-                    &recover_swarm_members,
-                    &recover_swarms_by_id,
-                    Some(&recover_event_history),
-                    Some(&recover_event_counter),
-                    Some(&recover_swarm_event_tx),
-                )
-                .await;
-                if let Some(swarm_id) = {
-                    let members = recover_swarm_members.read().await;
-                    members
-                        .get(&session_id)
-                        .and_then(|member| member.swarm_id.clone())
-                } {
-                    persist_swarm_state_for(&swarm_id, &recover_swarm_state).await;
+                    "migrated interrupted startup snapshot",
+                ) {
+                    crate::logging::warn(&format!(
+                        "Cannot migrate recovery intent for {session_id}: {error}"
+                    ));
                 }
-                let _ = events.sender().send(terminal);
-                events.finish().await;
-            });
+            }
         }
-
-        for swarm_id in swarms_to_persist {
-            persist_swarm_state_for(&swarm_id, &self.swarm_state).await;
-        }
-
-        crate::logging::info(&format!(
-            "[TIMING] headless reload startup recovery: candidates={}, resumed={}, skipped={}, failed_to_load={}, total={}ms",
-            stats.candidates,
-            stats.resumed,
-            stats.skipped,
-            stats.failed_to_load,
-            recovery_started.elapsed().as_millis()
-        ));
+        // Both attached and headless sessions, including records whose session
+        // is absent from the swarm snapshot, enter this one admission path.
+        reload_recovery::RecoveryOwner::new(self)
+            .reconcile_once()
+            .await;
     }
 
     async fn finish_startup_after_bind(
@@ -1319,6 +982,7 @@ impl Server {
         // Startup recovery can be expensive in multi-session reloads. Run it
         // only after the replacement daemon is already accepting reconnects.
         self.recover_headless_sessions_on_startup().await;
+        reload_recovery::RecoveryOwner::new(self).spawn(runtime.cancellation_token());
 
         // Restored running workers initially appear stopped in durable swarm
         // snapshots. Resume their turns before evaluating persisted awaits,

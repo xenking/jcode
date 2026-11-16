@@ -1086,10 +1086,10 @@ pub(super) async fn handle_resume_all_sessions(
     id: u64,
     sessions: &SessionAgents,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
-    event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
-    event_counter: &Arc<std::sync::atomic::AtomicU64>,
-    swarm_event_tx: &broadcast::Sender<SwarmEvent>,
+    _swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    _event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
+    _event_counter: &Arc<std::sync::atomic::AtomicU64>,
+    _swarm_event_tx: &broadcast::Sender<SwarmEvent>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     // Snapshot live sessions (those with at least one live client attachment).
@@ -1136,34 +1136,32 @@ pub(super) async fn handle_resume_all_sessions(
             .map(str::to_string)
             .unwrap_or_else(|| session_id[..8.min(session_id.len())].to_string());
 
-        // Best-effort: record that the durable recovery intent was delivered.
-        if let Err(error) = super::reload_recovery::mark_delivered_if_matching_continuation(
-            &session_id,
-            &reminder,
-            "resume_all_sessions",
-        ) {
-            crate::logging::warn(&format!(
-                "resume_all_sessions: failed to mark recovery intent delivered for {}: {}",
-                session_id, error
-            ));
+        // Manual resume submits intent, just like reload capture. It must not
+        // create a competing client-owned continuation path.
+        if super::reload_recovery::peek_for_session(&session_id)
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            let reload_id = format!("manual-resume-{}", uuid::Uuid::new_v4());
+            if let Err(error) = super::reload_recovery::persist_intent(
+                &reload_id,
+                &session_id,
+                super::reload_recovery::ReloadRecoveryRole::InterruptedPeer,
+                crate::tool::selfdev::ReloadRecoveryDirective {
+                    continuation_message: reminder,
+                    reconnect_notice: None,
+                },
+                "explicit resume-all request",
+            ) {
+                crate::logging::warn(&format!(
+                    "Cannot schedule manual recovery for {session_id}: {error}"
+                ));
+                skipped += 1;
+                continue;
+            }
         }
-
-        super::live_turn::spawn_tracked_live_turn(
-            &session_id,
-            agent_guard,
-            String::new(),
-            Some(reminder),
-            None,
-            Some("resuming interrupted session".to_string()),
-            super::live_turn::LiveTurnSwarmContext::new(
-                swarm_members,
-                swarms_by_id,
-                event_history,
-                event_counter,
-                swarm_event_tx,
-            ),
-        )
-        .await;
+        drop(agent_guard);
 
         resumed_sessions.push(display_name);
     }

@@ -42,6 +42,10 @@ fn interrupted_ask(messages: &[StoredMessage]) -> Option<InterruptedAsk> {
 }
 
 impl Agent {
+    pub(crate) fn interrupted_ask_tool_id(session: &crate::session::Session) -> Option<String> {
+        interrupted_ask(&session.messages).map(|ask| ask.id)
+    }
+
     pub(super) fn has_interrupted_ask(&self) -> bool {
         interrupted_ask(&self.session.messages).is_some()
     }
@@ -80,7 +84,8 @@ impl Agent {
                     // No attached user or another transient failure is not an answer.
                     // Leave the durable marker intact for the next recovery attempt.
                     let output = result?;
-                    (output, false)
+                    let declined = output.title.as_deref() == Some("User declined");
+                    (output, declined)
                 }
             };
             let mut side_pane_images =
@@ -112,6 +117,17 @@ impl Agent {
             content.splice(index..=index, blocks);
             self.session.replace_messages(messages);
             self.persist_session_now()?;
+            if is_error {
+                crate::server::reload_recovery::cancel(&self.session.id)?;
+            } else if let Some(identity) = self.server_turn_observer().snapshot().1
+                && !crate::server::reload_recovery::admit_ask_answer(
+                    &self.session,
+                    &identity,
+                    &ask.id,
+                )?
+            {
+                return Ok(false);
+            }
             let stored = &self.session.messages[ask.result_index];
             label_session_images(
                 &self.session.id,

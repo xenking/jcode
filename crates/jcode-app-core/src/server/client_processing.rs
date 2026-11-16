@@ -314,29 +314,6 @@ pub(super) async fn start_processing_message(
         return;
     }
 
-    if *state.client_is_processing {
-        let _ = client_event_tx.send(ServerEvent::Error {
-            id,
-            message: "Already processing a message".to_string(),
-            retry_after_secs: None,
-        });
-        return;
-    }
-
-    // Serialize recovery acceptance with the agent lock across connections.
-    // A stale History frame may submit the same reminder after its first turn.
-    let mut agent_guard = agent.lock().await;
-    let turn_lease = match agent_guard.claim_server_turn() {
-        Ok(lease) => lease,
-        Err(error) => {
-            let _ = client_event_tx.send(ServerEvent::Error {
-                id,
-                message: error.to_string(),
-                retry_after_secs: None,
-            });
-            return;
-        }
-    };
     let reminder_already_delivered = match system_reminder.as_deref() {
         Some(reminder) => {
             match super::super::reload_recovery::is_delivered_continuation(
@@ -377,6 +354,36 @@ pub(super) async fn start_processing_message(
         ));
         system_reminder = None;
     }
+    if (!content.trim().is_empty() || !images.is_empty())
+        && let Err(error) = super::super::reload_recovery::supersede(client_session_id)
+    {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: format!("Cannot supersede recovery: {error}"),
+            retry_after_secs: None,
+        });
+        return;
+    }
+    if *state.client_is_processing {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: "Already processing a message".into(),
+            retry_after_secs: None,
+        });
+        return;
+    }
+    let mut agent_guard = agent.lock().await;
+    let turn_lease = match agent_guard.claim_server_turn() {
+        Ok(lease) => lease,
+        Err(error) => {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: error.to_string(),
+                retry_after_secs: None,
+            });
+            return;
+        }
+    };
     if !agent_guard.set_remote_active_skill(active_skill.clone()) {
         let skill_name = active_skill.as_deref().unwrap_or_default();
         let _ = client_event_tx.send(ServerEvent::Error {
@@ -387,18 +394,6 @@ pub(super) async fn start_processing_message(
         return;
     }
 
-    if let Some(reminder) = system_reminder.as_deref()
-        && let Err(error) = super::super::reload_recovery::mark_delivered_if_matching_continuation(
-            client_session_id,
-            reminder,
-            "client_message_accepted",
-        )
-    {
-        crate::logging::warn(&format!(
-            "Failed to mark reload recovery intent delivered for accepted message session={} id={}: {}",
-            client_session_id, id, error
-        ));
-    }
     let status_title = agent_guard.session_display_title_or_name();
     drop(agent_guard);
 
@@ -655,6 +650,12 @@ pub(super) async fn cancel_processing_message(
     request_decoded_at: Option<Instant>,
     sessions: Option<&SessionAgents>,
 ) {
+    if let Err(error) = super::super::reload_recovery::cancel(&session_control.session_id) {
+        crate::logging::warn(&format!(
+            "Cannot persist recovery Stop for {}: {error}",
+            session_control.session_id
+        ));
+    }
     // Capture before cancellation releases the reservation. Modern clients
     // reject unscoped terminal events to protect newer turns from stale ones.
     let identity = sessions
