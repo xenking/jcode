@@ -670,8 +670,12 @@ pub(super) async fn handle_remote_key_internal(
             }
             KeyCode::Char('c') | KeyCode::Char('d') => {
                 if app.is_processing {
-                    remote.cancel_with_reason("keyboard_ctrl_c_or_d").await?;
-                    app.set_status_notice("Interrupting...");
+                    let forced = remote.keyboard_cancel("keyboard_ctrl_c_or_d").await?;
+                    app.set_status_notice(if forced {
+                        "Force stopping..."
+                    } else {
+                        "Interrupting..."
+                    });
                 } else {
                     app.handle_quit_request();
                 }
@@ -942,9 +946,7 @@ pub(super) async fn handle_remote_key_internal(
                 // leaves an unsent soft interrupt queued on cancel, and the
                 // follow-up recovery path sends it as the next turn. Auto-poke
                 // stays on: this is a redirect, not "stop everything".
-                remote
-                    .cancel_with_reason("keyboard_escape_redirect")
-                    .await?;
+                remote.keyboard_cancel("keyboard_escape_redirect").await?;
                 app.remote_interrupt_ack_deadline =
                     Some(Instant::now() + std::time::Duration::from_secs(3));
                 app.set_status_notice("Interrupting... sending your next prompt");
@@ -954,8 +956,10 @@ pub(super) async fn handle_remote_key_internal(
                         .queued_messages
                         .iter()
                         .any(|message| app_mod::commands::is_poke_message(message));
-                remote.cancel_with_reason("keyboard_escape").await?;
-                if disabled_auto_poke {
+                let forced = remote.keyboard_cancel("keyboard_escape").await?;
+                if forced {
+                    app.set_status_notice("Force stopping...");
+                } else if disabled_auto_poke {
                     app_mod::commands::disable_auto_poke(app);
                     app.set_status_notice("Interrupting... Auto-poke OFF");
                 } else {

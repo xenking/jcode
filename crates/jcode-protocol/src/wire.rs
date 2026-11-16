@@ -97,6 +97,10 @@ pub enum Request {
     #[serde(rename = "cancel")]
     Cancel { id: u64 },
 
+    /// Abort the current turn of the attached session, without waiting for it.
+    #[serde(rename = "force_stop_turn")]
+    ForceStopTurn { id: u64, session_id: String },
+
     /// Move the currently executing tool to background
     #[serde(rename = "background_tool")]
     BackgroundTool { id: u64 },

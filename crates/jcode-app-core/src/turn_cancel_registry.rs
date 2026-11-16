@@ -34,6 +34,56 @@ type SessionTurnSignals = Vec<(u64, InterruptSignal, Arc<AtomicU8>)>;
 static ACTIVE_TURNS: LazyLock<Mutex<HashMap<String, SessionTurnSignals>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+static FORCE_STOPS: LazyLock<Mutex<HashMap<String, (u64, futures::future::AbortHandle)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The supervisor owns this registration until the turn and its cleanup finish.
+pub struct ForceStopGuard {
+    token: u64,
+}
+
+pub fn register_force_stop(
+    session_id: &str,
+    handle: futures::future::AbortHandle,
+) -> ForceStopGuard {
+    let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
+    FORCE_STOPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(session_id.to_owned(), (token, handle));
+    ForceStopGuard { token }
+}
+
+pub fn force_stop(session_id: &str) -> bool {
+    let handle = FORCE_STOPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(session_id)
+        .map(|(_, handle)| handle.clone());
+    if let Some(handle) = handle {
+        handle.abort();
+        true
+    } else {
+        false
+    }
+}
+
+/// True after an abort request until the supervisor has finished cleanup.
+pub fn force_stop_in_progress(session_id: &str) -> bool {
+    FORCE_STOPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(session_id)
+        .is_some_and(|(_, handle)| handle.is_aborted())
+}
+
+impl Drop for ForceStopGuard {
+    fn drop(&mut self) {
+        let mut map = FORCE_STOPS.lock().unwrap_or_else(|e| e.into_inner());
+        map.retain(|_, (token, _)| *token != self.token);
+    }
+}
+
 /// RAII registration for one running turn. Dropping the guard removes the
 /// signal from the registry, so signals never outlive the turn that owns them.
 ///
@@ -145,6 +195,12 @@ pub fn active_session_ids() -> Vec<String> {
 pub fn rename_active_turns(old_session_id: &str, new_session_id: &str) {
     if old_session_id == new_session_id {
         return;
+    }
+    {
+        let mut force = FORCE_STOPS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = force.remove(old_session_id) {
+            force.insert(new_session_id.to_owned(), entry);
+        }
     }
     let moved = match ACTIVE_TURNS.lock() {
         Ok(mut map) => match map.remove(old_session_id) {

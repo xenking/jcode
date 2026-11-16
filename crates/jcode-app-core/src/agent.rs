@@ -1254,6 +1254,47 @@ impl Agent {
     }
 
     fn repair_missing_tool_outputs(&mut self) -> usize {
+        self.repair_missing_tool_outputs_with(TOOL_OUTPUT_MISSING_TEXT, true)
+    }
+
+    /// Called only after the stopped turn future has been dropped. Its
+    /// foreground tool has been aborted and cannot publish a result anymore.
+    pub(crate) fn repair_force_stopped_tools(
+        &mut self,
+        start_index: usize,
+    ) -> Vec<(String, String)> {
+        let results: std::collections::HashSet<String> = self
+            .session
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                _ => None,
+            })
+            .collect();
+        let pending = self
+            .session
+            .messages
+            .iter()
+            .skip(start_index)
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::ToolUse { id, name, .. } if !results.contains(id) => {
+                    Some((id.clone(), name.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        self.reset_tool_output_tracking();
+        self.tool_output_scan_index = start_index.min(self.session.messages.len());
+        if self.repair_missing_tool_outputs_with("[Tool stopped by user]", false) == 0 {
+            self.persist_session_best_effort("force-stopped turn");
+        }
+        pending
+    }
+
+    fn repair_missing_tool_outputs_with(&mut self, text: &str, skip_inflight: bool) -> usize {
         if self.tool_output_scan_index > self.session.messages.len() {
             self.reset_tool_output_tracking();
         }
@@ -1301,7 +1342,7 @@ impl Agent {
                 // its real result is on the way, and synthesizing a
                 // placeholder now produces a duplicate tool_result that
                 // Anthropic rejects outright. See `tool::inflight`.
-                if crate::tool::inflight::is_tool_in_flight(&id) {
+                if skip_inflight && crate::tool::inflight::is_tool_in_flight(&id) {
                     logging::info(&format!(
                         "Skipping missing tool-output repair for {id}: tool is still executing"
                     ));
@@ -1322,7 +1363,7 @@ impl Agent {
             for (offset, id) in missing_for_message.iter().enumerate() {
                 let tool_block = ContentBlock::ToolResult {
                     tool_use_id: id.clone(),
-                    content: TOOL_OUTPUT_MISSING_TEXT.to_string(),
+                    content: text.to_string(),
                     is_error: Some(true),
                 };
                 let stored_message = StoredMessage {

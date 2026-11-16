@@ -166,6 +166,11 @@ pub enum ApiRequest {
         session_id: String,
     },
 
+    /// Abort a nonresponsive turn. Requires `force_stop_turn_v1`.
+    ForceStopTurn {
+        session_id: String,
+    },
+
     /// Inject a message at the next safe point without cancelling.
     SoftInterrupt {
         session_id: String,

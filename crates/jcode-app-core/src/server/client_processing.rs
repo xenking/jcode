@@ -469,27 +469,55 @@ pub(super) async fn start_processing_message(
         queue: pending_queue.clone(),
         client_ids: queued_client_id.clone().unwrap_or_default(),
     };
+    let (force_handle, force_registration) = futures::future::AbortHandle::new_pair();
+    let force_guard =
+        crate::turn_cancel_registry::register_force_stop(client_session_id, force_handle);
     *state.task = crate::runtime_activity::spawn_session(client_session_id, async move {
+        let _force_guard = force_guard;
         let _queued_claim = queued_claim;
         let event_tx = tx.clone();
         let mut stop_reason = crate::protocol::TurnStopReason::Failure;
-        let result = match std::panic::AssertUnwindSafe(crate::hooks::with_client_terminal_env(
-            client_terminal_env,
-            super::super::turn_failover::process_reserved_message_with_server_failover(
-                agent,
-                &turn_lease,
-                &content,
-                images,
-                system_reminder,
-                event_tx,
-                server_failover,
-                queued_client_id,
+        let outcome = std::panic::AssertUnwindSafe(futures::future::Abortable::new(
+            crate::hooks::with_client_terminal_env(
+                client_terminal_env,
+                super::super::turn_failover::process_reserved_message_with_server_failover(
+                    agent,
+                    &turn_lease,
+                    &content,
+                    images,
+                    system_reminder,
+                    event_tx,
+                    server_failover,
+                    queued_client_id,
+                ),
             ),
+            force_registration,
         ))
         .catch_unwind()
-        .await
-        {
-            Ok(result) => result,
+        .await;
+        let result = match outcome {
+            Ok(Ok(result)) => result,
+            Ok(Err(_aborted)) => {
+                let stopped_tools = report_agent
+                    .lock()
+                    .await
+                    .repair_force_stopped_tools(start_message_index);
+                for (id, name) in stopped_tools {
+                    let _ = tx.send(ServerEvent::ToolDone {
+                        id,
+                        name,
+                        output: "[Tool stopped by user]".into(),
+                        error: Some("stopped by user".into()),
+                    });
+                }
+                let _ = tx.send(ServerEvent::TurnStopped {
+                    reason: crate::protocol::TurnStopReason::Interrupted,
+                    message: "Turn force stopped by user".into(),
+                    provider_stop_reason: None,
+                });
+                let _ = tx.send(ServerEvent::Interrupted);
+                Ok(())
+            }
             Err(panic_payload) => {
                 stop_reason = crate::protocol::TurnStopReason::Crash;
                 let msg = if let Some(text) = panic_payload.downcast_ref::<&str>() {
@@ -703,19 +731,6 @@ pub(super) async fn cancel_processing_message(
             *state.task = Some(handle);
             return;
         }
-        let stopped = ServerEvent::TurnStopped {
-            reason: crate::protocol::TurnStopReason::Interrupted,
-            message: "The turn was interrupted by a cancellation request.".into(),
-            provider_stop_reason: None,
-        };
-        // Publish before signalling: the worker can finish cooperatively and
-        // emit Done immediately after request_cancel.
-        if super::super::state::fanout_session_event(swarm.members, &session_label, stopped.clone())
-            .await
-            == 0
-        {
-            let _ = client_event_tx.send(stopped);
-        }
         let cancel_epoch = session_control.request_cancel();
         crate::logging::info(&format!(
             "SERVER_INTERRUPT_CANCEL_SIGNALLED request_id={:?} session={} message_id={:?} wait_ms=500",
@@ -739,20 +754,21 @@ pub(super) async fn cancel_processing_message(
                     *state.message_id,
                     cancel_start.elapsed().as_millis()
                 ));
-                handle.abort();
-                match tokio::time::timeout(std::time::Duration::from_millis(2000), handle).await {
+                // Keep the supervisor alive to repair and persist tool calls.
+                crate::turn_cancel_registry::force_stop(&session_label);
+                match tokio::time::timeout(std::time::Duration::from_millis(500), &mut handle).await
+                {
                     Ok(_) => crate::logging::info(&format!(
                         "SERVER_INTERRUPT_CANCEL_ABORT_RELEASED request_id={:?} session={} elapsed_ms={}",
                         request_id,
                         session_label,
                         cancel_start.elapsed().as_millis()
                     )),
-                    Err(_) => crate::logging::warn(&format!(
-                        "SERVER_INTERRUPT_CANCEL_ABORT_RELEASE_TIMEOUT request_id={:?} session={} elapsed_ms={} wait_ms=2000",
-                        request_id,
-                        session_label,
-                        cancel_start.elapsed().as_millis()
-                    )),
+                    Err(_) => {
+                        // Do not report a stop while the turn is still running.
+                        *state.task = Some(handle);
+                        return;
+                    }
                 }
             }
         }
@@ -814,19 +830,6 @@ pub(super) async fn cancel_processing_message(
             }
             return;
         }
-        let stopped = ServerEvent::TurnStopped {
-            reason: crate::protocol::TurnStopReason::Interrupted,
-            message: "The turn was interrupted by a cancellation request.".into(),
-            provider_stop_reason: None,
-        };
-        // Publish before signalling: the worker can finish cooperatively and
-        // emit Done immediately after request_cancel.
-        if super::super::state::fanout_session_event(swarm.members, &session_label, stopped.clone())
-            .await
-            == 0
-        {
-            let _ = client_event_tx.send(stopped);
-        }
         let cancel_epoch = session_control.request_cancel();
         let reset_control = session_control.clone();
         tokio::spawn(async move {
@@ -851,40 +854,8 @@ pub(super) async fn cancel_processing_message(
                 reset_control.reset_cancel_if_epoch(cancel_epoch);
             }
         });
-        *state.client_is_processing = false;
-        let status_session_id = state
-            .session_id
-            .take()
-            .unwrap_or_else(|| session_control.session_id.clone());
-        update_member_status(
-            &status_session_id,
-            "stopped",
-            Some("cancelled".to_string()),
-            swarm.members,
-            swarm.swarms_by_id,
-            Some(swarm.event_history),
-            Some(swarm.event_counter),
-            Some(swarm.event_tx),
-        )
-        .await;
-        let _ = client_event_tx.send(scoped(ServerEvent::Interrupted));
-        if let Some(message_id) = state.message_id.take() {
-            let _ = client_event_tx.send(scoped(ServerEvent::Done { id: message_id }));
-            crate::logging::info(&format!(
-                "SERVER_INTERRUPT_CANCEL_EVENTS_EMITTED request_id={:?} session={} interrupted=true done_id={} total_ms={}",
-                request_id,
-                session_label,
-                message_id,
-                cancel_start.elapsed().as_millis()
-            ));
-        } else {
-            crate::logging::info(&format!(
-                "SERVER_INTERRUPT_CANCEL_EVENTS_EMITTED request_id={:?} session={} interrupted=true done_id=None total_ms={}",
-                request_id,
-                session_label,
-                cancel_start.elapsed().as_millis()
-            ));
-        }
+        // The owning connection publishes terminal events when the turn
+        // actually exits. Do not report a detached cancellation as confirmed.
     }
 }
 

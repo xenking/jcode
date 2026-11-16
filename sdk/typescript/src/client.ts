@@ -705,6 +705,14 @@ export class JcodeClient extends EventEmitter {
     this.toolCallbacks.abort(sessionId);
   }
 
+  async forceStopTurn(sessionId: string): Promise<void> {
+    if (!this.supports("force_stop_turn_v1")) {
+      throw new HarnessError("unsupported", "This harness does not support force_stop_turn_v1.");
+    }
+    await this.requestOk({ req: "force_stop_turn", session_id: sessionId });
+    this.toolCallbacks.abort(sessionId);
+  }
+
   async softInterrupt(sessionId: string, content: string, urgent = false): Promise<void> {
     await this.softInterruptWithImages(sessionId, content, [], urgent);
   }

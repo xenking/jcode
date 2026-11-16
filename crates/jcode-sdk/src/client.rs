@@ -986,6 +986,13 @@ impl JcodeClient {
         .map(drop)
     }
 
+    pub fn force_stop_turn(&self, session_id: &str) -> Result<()> {
+        self.request_ok(ApiRequest::ForceStopTurn {
+            session_id: session_id.to_string(),
+        })
+        .map(drop)
+    }
+
     pub fn soft_interrupt(&self, session_id: &str, content: &str, urgent: bool) -> Result<()> {
         self.soft_interrupt_with_images(session_id, content, Vec::new(), urgent)
     }

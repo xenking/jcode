@@ -988,6 +988,38 @@ pub(super) async fn handle_client(
             );
             continue;
         }
+        if let Request::ForceStopTurn { id, session_id } = &request {
+            if !client_subscribed || session_id != &client_session_id {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id: *id,
+                    message: "Force stop requires the matching attached session".into(),
+                    retry_after_secs: None,
+                });
+            } else if !crate::turn_cancel_registry::force_stop(session_id)
+                && crate::turn_cancel_registry::has_active_turn(session_id)
+            {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id: *id,
+                    message: "This active turn does not support force stop".into(),
+                    retry_after_secs: None,
+                });
+            } else {
+                let _ = client_event_tx.send(ServerEvent::Ack { id: *id });
+            }
+            continue;
+        }
+        // An ACK means the abort was requested, not that the supervisor has
+        // finished releasing the reservation. Let an immediately-following
+        // message wait briefly for that cleanup before reconciling the turn.
+        // The wait is bounded so this socket can still service another stop.
+        if matches!(&request, Request::Message { no_reply: false, .. }) {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
+            while crate::turn_cancel_registry::force_stop_in_progress(&client_session_id)
+                && tokio::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        }
         if session_control.needs_queue_refresh() && let Ok(agent_guard) = agent.try_lock() {
             session_control = SessionControlHandle::new(
                 &client_session_id,
@@ -1375,6 +1407,7 @@ pub(super) async fn handle_client(
             connection_client_name = Some(name.clone());
         }
         match request {
+            Request::ForceStopTurn { .. } => unreachable!("force stop is dispatched before reconciliation"),
             Request::QueuePrompt { .. } | Request::SetQueuedPromptMode { .. } | Request::InterruptQueuedPrompt { .. } | Request::InterruptQueuedPrompts { .. } | Request::GetQueuedPrompts { .. } | Request::RemoveQueuedPrompt { .. } | Request::ReorderQueuedPrompts { .. } => unreachable!("queue controls dispatched before acknowledgment"),
             Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. } => unreachable!("SDK controls dispatched before acknowledgment"),
             Request::Message {

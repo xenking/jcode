@@ -75,10 +75,20 @@ async fn interrupt_queued_batch_delivers_one_turn_promptly() {
         .await;
     }
     let session_id = server.sessions.read().await.keys().next().unwrap().clone();
-    let (peer_reader, mut peer_writer) = crate::transport::Stream::connect(&socket).await.unwrap().into_split();
+    let (peer_reader, mut peer_writer) = crate::transport::Stream::connect(&socket)
+        .await
+        .unwrap()
+        .into_split();
     let mut peer_reader = BufReader::new(peer_reader);
-    send(&mut peer_writer, json!({"type":"subscribe","id":10,"target_session_id":session_id})).await;
-    until(&mut peer_reader, |e| matches!(e, ServerEvent::Done { id: 10 })).await;
+    send(
+        &mut peer_writer,
+        json!({"type":"subscribe","id":10,"target_session_id":session_id}),
+    )
+    .await;
+    until(&mut peer_reader, |e| {
+        matches!(e, ServerEvent::Done { id: 10 })
+    })
+    .await;
     send(
         &mut peer_writer,
         json!({"type":"interrupt_queued_prompts","id":5,"ids":["a","b"]}),
@@ -768,6 +778,29 @@ async fn daemon_listener_delivers_all_queue_modes_once() {
 struct SdkCallbackProvider {
     calls: Arc<std::sync::atomic::AtomicUsize>,
 }
+
+struct NeverReturningTool(Arc<tokio::sync::Notify>);
+
+#[async_trait]
+impl crate::tool::Tool for NeverReturningTool {
+    fn name(&self) -> &str {
+        "bash"
+    }
+    fn description(&self) -> &str {
+        "A test tool that never returns"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    async fn execute(
+        &self,
+        _: serde_json::Value,
+        _: crate::tool::ToolContext,
+    ) -> Result<crate::tool::ToolOutput> {
+        self.0.notify_one();
+        std::future::pending().await
+    }
+}
 #[async_trait]
 impl Provider for SdkCallbackProvider {
     async fn complete(
@@ -1091,6 +1124,36 @@ async fn catalog_failure_preserves_remote_socket_owner_and_next_turn() {
 }
 
 #[tokio::test]
+async fn force_stop_pending_ask_over_socket_releases_session() {
+    sdk_socket_cancel_workflow(
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        Some("force_stop"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn force_stop_never_returning_tool_over_socket_releases_session() {
+    sdk_socket_cancel_workflow(
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        Some("force_stop_tool"),
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn live_reattached_socket_answers_ask_in_existing_turn() {
     sdk_socket_cancel_workflow(false, true, true, false, false, false, true, None).await;
 }
@@ -1123,12 +1186,16 @@ async fn sdk_socket_cancel_workflow(
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
     let terminal_provider = TerminalSocketProvider::default();
-    terminal_provider
-        .ask_after_reattach
-        .store(ask_reattach, Ordering::SeqCst);
+    terminal_provider.ask_after_reattach.store(
+        ask_reattach || queued_test == Some("force_stop"),
+        Ordering::SeqCst,
+    );
     terminal_provider
         .steer_tool
         .store(queued_test == Some("steer"), Ordering::SeqCst);
+    terminal_provider
+        .long_tool
+        .store(queued_test == Some("force_stop_tool"), Ordering::SeqCst);
     let provider_template: Arc<dyn Provider> = if terminal_race {
         Arc::new(terminal_provider.clone())
     } else {
@@ -1342,6 +1409,17 @@ async fn sdk_socket_cancel_workflow(
     }
     if identity_capability {
         let session_id = sessions.read().await.keys().next().unwrap().clone();
+        let tool_started = Arc::new(tokio::sync::Notify::new());
+        if queued_test == Some("force_stop_tool") {
+            let agent = sessions.read().await.get(&session_id).unwrap().clone();
+            let registry = agent.lock().await.registry();
+            registry
+                .register(
+                    "bash".into(),
+                    Arc::new(NeverReturningTool(tool_started.clone())),
+                )
+                .await;
+        }
         let (legacy_task, legacy_stream) = connect();
         let (legacy_reader, mut legacy_writer) = legacy_stream.into_split();
         let mut legacy_reader = BufReader::new(legacy_reader);
@@ -1401,6 +1479,96 @@ async fn sdk_socket_cancel_workflow(
                     && available_model_routes.iter().any(|r| r.model == "fixture-future-model")
             )).await;
             assert!(matches!(event, ServerEvent::AvailableModelsUpdated { .. }));
+            drop(client_writer);
+            drop(client_reader);
+            drop(legacy_writer);
+            drop(legacy_reader);
+            server_task.abort();
+            legacy_task.abort();
+            return;
+        }
+        if matches!(queued_test, Some("force_stop" | "force_stop_tool")) {
+            terminal_provider.finish_first.notify_one();
+            if queued_test == Some("force_stop") {
+                until(&mut legacy_reader, |event| {
+                    matches!(event, ServerEvent::AskUserRequest { .. })
+                })
+                .await;
+            } else {
+                until(
+                    &mut legacy_reader,
+                    |event| matches!(event, ServerEvent::ToolExec { name, .. } if name == "bash"),
+                )
+                .await;
+                tool_started.notified().await;
+                let agent = sessions.read().await.get(&session_id).unwrap().clone();
+                assert!(agent.try_lock().is_err(), "turn must hold the agent lock");
+            }
+            let start = Instant::now();
+            if queued_test == Some("force_stop_tool") {
+                send(
+                    &mut client_writer,
+                    json!({"type":"force_stop_turn","id":77,"session_id":session_id}),
+                )
+                .await;
+                tokio::time::timeout(
+                    Duration::from_secs(1),
+                    until(&mut client_reader, |event| {
+                        matches!(event, ServerEvent::Ack { id: 77 })
+                    }),
+                )
+                .await
+                .expect("force stop on the owner socket must reply without the agent lock");
+            } else {
+                send(
+                    &mut legacy_writer,
+                    json!({"type":"force_stop_turn","id":77,"session_id":session_id}),
+                )
+                .await;
+                tokio::time::timeout(
+                    Duration::from_secs(1),
+                    until(&mut legacy_reader, |event| {
+                        matches!(event, ServerEvent::Ack { id: 77 })
+                    }),
+                )
+                .await
+                .expect("force stop on an attached socket must reply without the agent lock");
+            }
+            assert!(start.elapsed() < Duration::from_secs(1));
+            if queued_test == Some("force_stop_tool") {
+                // The same connection must be able to submit immediately after
+                // ACK, before the old turn's terminal frame is consumed.
+                send(
+                    &mut client_writer,
+                    json!({"type":"message","id":78,"content":"next message"}),
+                )
+                .await;
+            } else {
+                send(
+                    &mut legacy_writer,
+                    json!({"type":"message","id":78,"content":"next message"}),
+                )
+                .await;
+            }
+            tokio::time::timeout(Duration::from_secs(1), until(&mut client_reader, |event| matches!(event, ServerEvent::TurnEvent { event, .. } if matches!(event.as_ref(), ServerEvent::Done { id: 2 })))).await.expect("force stop must release the turn promptly");
+            if queued_test == Some("force_stop_tool") {
+                tokio::time::timeout(Duration::from_secs(1), until(&mut client_reader, |event| matches!(event, ServerEvent::TurnEvent { event, .. } if matches!(event.as_ref(), ServerEvent::Done { id: 78 })))).await.expect("next turn on the owner connection must start promptly");
+            } else {
+                tokio::time::timeout(
+                    Duration::from_secs(1),
+                    until(&mut legacy_reader, |event| {
+                        matches!(event, ServerEvent::Done { id: 78 })
+                    }),
+                )
+                .await
+                .expect("next turn on a second connection must start promptly");
+            }
+            let history = crate::session::Session::load(&session_id).unwrap();
+            assert!(
+                serde_json::to_string(&history.messages)
+                    .unwrap()
+                    .contains("stopped by user")
+            );
             drop(client_writer);
             drop(client_reader);
             drop(legacy_writer);

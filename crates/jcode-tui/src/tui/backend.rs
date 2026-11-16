@@ -283,6 +283,8 @@ pub struct RemoteConnection {
     /// Pong, so an older server is never sent a request it would reject.
     server_accepts_focus: bool,
     server_accepts_queued_prompts: bool,
+    server_accepts_force_stop: bool,
+    last_keyboard_cancel: Option<Instant>,
     /// Last (focused, hidden) state reported to this server, if any.
     reported_focus: Option<(bool, bool)>,
     last_account_usage_poll: Option<Instant>,
@@ -460,6 +462,8 @@ impl RemoteConnection {
             outbound_pending: Default::default(),
             _dummy_peer: None,
             session_id: None,
+            server_accepts_force_stop: false,
+            last_keyboard_cancel: None,
             cloud_authority: None,
             cloud_callbacks: Vec::new(),
             client_instance_id: client_instance_id.map(str::to_string),
@@ -854,6 +858,7 @@ impl RemoteConnection {
         active_skill: Option<String>,
     ) -> Result<u64> {
         // Output token usage snapshots are cumulative within a single API call.
+        self.last_keyboard_cancel = None;
         // Reset per-call watermark before sending the next user request.
         self.reset_call_output_tokens_seen();
 
@@ -946,6 +951,9 @@ impl RemoteConnection {
     /// Record the capability list from a Pong. Stream keepalive Pongs carry
     /// none and must not clear what the server already advertised.
     pub fn note_server_capabilities(&mut self, capabilities: &[String]) {
+        if capabilities.iter().any(|cap| cap == "force_stop_turn_v1") {
+            self.server_accepts_force_stop = true;
+        }
         if capabilities
             .iter()
             .any(|capability| capability == "queued_prompts")
@@ -1370,6 +1378,28 @@ impl RemoteConnection {
             .await
     }
 
+    /// A repeated keyboard stop within five seconds escalates when supported.
+    pub async fn keyboard_cancel(&mut self, reason: &'static str) -> Result<bool> {
+        let now = Instant::now();
+        let force = self.server_accepts_force_stop
+            && self
+                .last_keyboard_cancel
+                .is_some_and(|last| now.duration_since(last) <= Duration::from_secs(5));
+        self.last_keyboard_cancel = Some(now);
+        if force && let Some(session_id) = self.session_id.clone() {
+            let request = Request::ForceStopTurn {
+                id: self.next_request_id,
+                session_id,
+            };
+            self.next_request_id += 1;
+            self.send_request_with_interrupt_trigger(request, Some(reason))
+                .await?;
+            return Ok(true);
+        }
+        self.cancel_with_reason(reason).await?;
+        Ok(false)
+    }
+
     /// Move the currently executing tool to background
     pub async fn background_tool(&mut self) -> Result<()> {
         let request = Request::BackgroundTool {
@@ -1754,6 +1784,8 @@ impl RemoteConnection {
             outbound_pending: Default::default(),
             _dummy_peer: Some(b),
             session_id: None,
+            server_accepts_force_stop: false,
+            last_keyboard_cancel: None,
             cloud_authority: None,
             cloud_callbacks: Vec::new(),
             client_instance_id: None,

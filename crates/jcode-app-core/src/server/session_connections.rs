@@ -37,6 +37,7 @@ pub(super) async fn connection_presence_pong(
         native_ssh_protocol: Some(1),
         capabilities: vec![
             "session_tools".into(),
+            "force_stop_turn_v1".into(),
             "soft_interrupt_ids".into(),
             "queued_prompts".into(),
             "queued_prompt_batch_interrupt_v1".into(),

@@ -48,6 +48,7 @@ const REQUIRES_ATTACH: &[&str] = &[
     "tool_result",
     "send_message",
     "cancel",
+    "force_stop_turn",
     "soft_interrupt",
     "queue_prompt",
     "set_queued_prompt_mode",
@@ -142,6 +143,7 @@ pub struct BridgeState {
     pub runtime_commands_supported: bool,
     /// Set only after a safe legacy ping capability probe succeeds.
     pub session_tools_supported: bool,
+    pub force_stop_turn_supported: bool,
     /// The daemon accepts soft interrupt ids and per-id cancellation, and
     /// replies to `background_tool` with a result.
     pub queued_prompts_supported: bool,
@@ -725,6 +727,20 @@ impl BridgeState {
                 let id = self.legacy_id();
                 self.pending_simple.push((id, api_id, SimpleKind::Ok));
                 vec![Outbound::Legacy(json!({"type": "cancel", "id": id}))]
+            }
+            "force_stop_turn" => {
+                if !self.force_stop_turn_supported {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::UnknownRequest,
+                        "daemon does not advertise force_stop_turn_v1",
+                    );
+                }
+                let id = self.legacy_id();
+                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                vec![Outbound::Legacy(
+                    json!({"type": "force_stop_turn", "id": id, "session_id": request["session_id"]}),
+                )]
             }
             "soft_interrupt" => {
                 let id = self.legacy_id();

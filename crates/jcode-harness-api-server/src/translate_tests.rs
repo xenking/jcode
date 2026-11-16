@@ -1,6 +1,24 @@
 use super::*;
 
 #[test]
+fn force_stop_is_capability_gated_and_ack_correlated() {
+    let mut state = state_with_session();
+    let request = json!({"req":"force_stop_turn", "id":73, "session_id":"s1"});
+    let denied = state.api_request_to_legacy(&request);
+    assert!(!denied.iter().any(|out| matches!(out, Outbound::Legacy(_))));
+    state.force_stop_turn_supported = true;
+    let out = state.api_request_to_legacy(&request);
+    let wire = legacy_out(&out);
+    assert_eq!(wire["type"], "force_stop_turn");
+    assert_eq!(wire["session_id"], "s1");
+    let id = wire["id"].as_u64().unwrap();
+    assert_eq!(
+        state.legacy_event_to_api(&json!({"type":"ack", "id":id})),
+        vec![ServerFrame::reply(73, ApiEvent::Ok)]
+    );
+}
+
+#[test]
 fn bounded_desktop_attach_suppresses_unpaged_bootstrap_only_when_negotiated() {
     for (client, supported, empty) in [
         ("jcode-desktop-test", true, true),

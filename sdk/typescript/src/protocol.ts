@@ -228,6 +228,7 @@ export type ApiRequest =
       system_reminder?: string;
     }
   | { req: "cancel"; session_id: string }
+  | { req: "force_stop_turn"; session_id: string }
   | {
       req: "soft_interrupt";
       session_id: string;
@@ -659,6 +660,7 @@ export const KNOWN_REQUEST_KINDS = [
   "tool_result",
   "send_message",
   "cancel",
+  "force_stop_turn",
   "soft_interrupt",
   "queue_prompt",
   "set_queued_prompt_mode",

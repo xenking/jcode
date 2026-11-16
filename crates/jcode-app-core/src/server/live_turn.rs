@@ -177,10 +177,13 @@ pub(super) async fn spawn_tracked_live_turn_with_images(
     );
     let event_tx = events.sender();
     let session_id = session_id.to_string();
+    let (force_handle, force_registration) = futures::future::AbortHandle::new_pair();
+    let force_guard = crate::turn_cancel_registry::register_force_stop(&session_id, force_handle);
     crate::runtime_activity::spawn_session(&session_id.clone(), async move {
+        let _force_guard = force_guard;
         let start_message_index = agent.message_count();
         let pending_queue = agent.soft_interrupt_queue();
-        let (result, stop_reason) = catch_live_turn_panic(async {
+        let outcome = futures::future::Abortable::new(catch_live_turn_panic(async {
             if !images.is_empty() {
                 return super::turn_failover::process_reserved_locked_message_with_server_failover(
                     &mut agent,
@@ -201,8 +204,27 @@ pub(super) async fn spawn_tracked_live_turn_with_images(
                 event_tx.clone(),
             )
             .await
-        })
-        .await;
+        }), force_registration).await;
+        let (result, stop_reason) = match outcome {
+            Ok(result) => result,
+            Err(_) => {
+                for (id, name) in agent.repair_force_stopped_tools(start_message_index) {
+                    let _ = event_tx.send(ServerEvent::ToolDone {
+                        id,
+                        name,
+                        output: "[Tool stopped by user]".into(),
+                        error: Some("stopped by user".into()),
+                    });
+                }
+                let _ = event_tx.send(ServerEvent::TurnStopped {
+                    reason: crate::protocol::TurnStopReason::Interrupted,
+                    message: "Turn force stopped by user".into(),
+                    provider_stop_reason: None,
+                });
+                let _ = event_tx.send(ServerEvent::Interrupted);
+                (Ok(()), crate::protocol::TurnStopReason::Interrupted)
+            }
+        };
         let completion_report = agent.recent_assistant_output_tail_after(start_message_index);
         // Keep the reservation until after the terminal status is published.
         // Releasing it earlier lets a follow-up wake reserve the agent and

@@ -10,6 +10,17 @@ use tool_handoff::{
     auto_background_allowed, incomplete_turn_stop, reload_interrupted_tool_result,
     wait_for_tool_handoff,
 };
+
+struct ForegroundToolAbortGuard(Option<tokio::task::AbortHandle>);
+
+impl Drop for ForegroundToolAbortGuard {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+
 impl Agent {
     pub(super) async fn run_turn_streaming_mpsc(
         &mut self,
@@ -1650,6 +1661,8 @@ impl Agent {
                 let tool_result;
                 let mut automatic_background = false;
                 let mut tool_handle = tool_handle;
+                let mut abort_tool_on_drop =
+                    ForegroundToolAbortGuard(Some(tool_handle.abort_handle()));
                 let running_tool_guard =
                     crate::running_tool_registry::register(self.session_id(), &tc.id, &tc.name);
                 tokio::select! {
@@ -1879,6 +1892,7 @@ impl Agent {
                             tool_handle,
                         )
                         .await;
+                    abort_tool_on_drop.0 = None;
 
                     let reason = if automatic_background {
                         tool_handoff::automatic_handoff_reason(foreground_budget)

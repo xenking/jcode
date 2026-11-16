@@ -868,6 +868,7 @@ impl Request {
             | Request::ToolResult { id, .. } => *id,
             Request::Message { id, .. } => *id,
             Request::Cancel { id } => *id,
+            Request::ForceStopTurn { id, .. } => *id,
             Request::BackgroundTool { id } => *id,
             Request::QueuePrompt { id, .. }
             | Request::SetQueuedPromptMode { id, .. }

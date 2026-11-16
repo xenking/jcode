@@ -376,24 +376,11 @@ async fn cancel_without_local_task_still_signals_session_control() {
     .await;
 
     assert!(stop_signal.is_set());
-    assert!(!client_is_processing);
-    assert!(message_id.is_none());
-    assert!(session_id.is_none());
-    assert!(matches!(
-        client_event_rx.recv().await,
-        Some(ServerEvent::TurnStopped {
-            reason: crate::protocol::TurnStopReason::Interrupted,
-            ..
-        })
-    ));
-    assert!(matches!(
-        client_event_rx.recv().await,
-        Some(ServerEvent::Interrupted)
-    ));
-    assert!(matches!(
-        client_event_rx.recv().await,
-        Some(ServerEvent::Done { id: 99 })
-    ));
+    // A signal is not confirmation: the detached turn still owns the agent.
+    assert!(client_is_processing);
+    assert_eq!(message_id, Some(99));
+    assert_eq!(session_id.as_deref(), Some("session_detached_cancel"));
+    assert!(client_event_rx.try_recv().is_err());
     tokio::time::sleep(Duration::from_millis(650)).await;
     assert!(stop_signal.is_set(), "a running turn must retain cancellation until it observes it");
     drop(active_turn);

@@ -1,6 +1,40 @@
 use super::*;
 use std::time::Duration;
 
+#[tokio::test]
+async fn repeated_keyboard_cancel_escalates_only_with_capability() {
+    for supported in [false, true] {
+        let mut remote = RemoteConnection::dummy();
+        remote.set_session_id("test-session".into());
+        if supported {
+            remote.note_server_capabilities(&["force_stop_turn_v1".into()]);
+        }
+        assert!(!remote.keyboard_cancel("keyboard_escape").await.unwrap());
+        assert_eq!(
+            remote.keyboard_cancel("keyboard_escape").await.unwrap(),
+            supported
+        );
+        let peer = remote.take_dummy_peer().unwrap();
+        let mut reader = BufReader::new(peer);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<Request>(&line).unwrap(),
+            Request::Cancel { .. }
+        ));
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        let second = serde_json::from_str::<Request>(&line).unwrap();
+        if supported {
+            assert!(
+                matches!(second, Request::ForceStopTurn { session_id, .. } if session_id == "test-session")
+            );
+        } else {
+            assert!(matches!(second, Request::Cancel { .. }));
+        }
+    }
+}
+
 #[test]
 fn recent_history_negotiation_preserves_local_verified_prefix() {
     let base = HistoryBase {
