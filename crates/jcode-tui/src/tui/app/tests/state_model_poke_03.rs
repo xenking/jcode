@@ -1978,6 +1978,32 @@ GPT:
 
 #[test]
 fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
+    const CHILD_ENV: &str = "JCODE_LOGIN_SMOKE_PICKER_CHILD";
+    if std::env::var_os(CHILD_ENV).is_none() {
+        let home = tempfile::tempdir().expect("isolated model picker home");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("tui::app::tests::test_login_smoke_model_picker_renders_unstacked_provider_rows")
+            .arg("--exact")
+            .arg("--test-threads=1")
+            .arg("--nocapture")
+            .env(CHILD_ENV, "1")
+            .env("JCODE_HOME", home.path())
+            .env_remove("JCODE_SSH_REMOTE")
+            .output()
+            .expect("run isolated model picker test");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "isolated model picker test was not executed"
+        );
+        return;
+    }
+    let _provider_env = ProviderEnvGuard::clear();
     let mut app = create_login_smoke_model_app();
     app.display_messages = vec![DisplayMessage::system("seed render state")];
     app.bump_display_messages_version();
@@ -1997,9 +2023,8 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
         render_and_snap(app, &mut terminal)
     };
 
-    // Effort-capable routes now expand into multiple rows. Render focused
-    // slices so each provider remains observable without assuming the complete
-    // catalog fits in one terminal viewport.
+    // Render focused slices so each provider remains observable without
+    // assuming the complete catalog fits in one terminal viewport.
     let openai_text = render_filtered(&mut app, "gpt-5.4");
     let comtegra_text = render_filtered(&mut app, "glm-51-nvfp4");
     let copilot_text = render_filtered(&mut app, "claude-opus-4.6");
