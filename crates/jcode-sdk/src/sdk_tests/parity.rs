@@ -48,6 +48,7 @@ const CAPABILITIES: &[Capability] = &[
     cap("soft_interrupt_with_images", "softInterruptWithImages"),
     cap("queue_prompt", "queuePrompt"),
     cap("queue_prompt_with_reminder", "queuePromptWithReminder"),
+    cap("queue_prompt_with_skill", "queuePromptWithSkill"),
     cap("set_queued_prompt_mode", "setQueuedPromptMode"),
     cap("interrupt_queued_prompt", "interruptQueuedPrompt"),
     cap("interrupt_queued_prompts", "interruptQueuedPrompts"),

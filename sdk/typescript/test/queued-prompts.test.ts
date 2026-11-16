@@ -64,7 +64,7 @@ test("queued skills are never sent without the capability", async (t) => {
   const prompt = { client_id: "q", content: "hello", mode: "steer" as const, active_skill: "verification" };
   await assert.rejects(() => client.queuePrompt("s", prompt), (error: unknown) => error instanceof HarnessError && error.code === "unsupported");
   await assert.rejects(() => client.request({ req: "queue_prompt", session_id: "s", ...prompt }), (error: unknown) => error instanceof HarnessError && error.code === "unsupported");
-  await client.queuePrompt("s", { ...prompt, active_skill: undefined });
+  await client.queuePromptWithSkill("s", prompt);
   assert.equal(requests.length, 1);
   assert.equal(requests[0].active_skill, undefined);
 });

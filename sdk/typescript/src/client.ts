@@ -761,6 +761,11 @@ export class JcodeClient extends EventEmitter {
     await this.queuePromptWithReminder(sessionId, prompt);
   }
 
+  /** Queue with an explicitly selected skill, or clear it when omitted. */
+  async queuePromptWithSkill(sessionId: string, prompt: QueuedPrompt, activeSkill?: string): Promise<void> {
+    await this.queuePrompt(sessionId, { ...prompt, active_skill: activeSkill });
+  }
+
   async queuePromptWithReminder(sessionId: string, prompt: QueuedPrompt, systemReminder?: string): Promise<void> {
     await this.requestOk({
       req: "queue_prompt", session_id: sessionId, client_id: prompt.client_id,
