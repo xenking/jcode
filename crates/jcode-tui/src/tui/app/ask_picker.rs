@@ -87,6 +87,7 @@ impl AskPickerState {
                         .collect(),
                     other: Some(self.other[q].trim().to_string()).filter(|s| !s.is_empty()),
                     comments: Default::default(),
+                        ..Default::default()
                 }
             })
             .collect();

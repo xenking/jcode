@@ -161,6 +161,7 @@ mod tests {
                         selected: vec!["B".into()],
                         other: None,
                         comments: Default::default(),
+                        ..Default::default()
                     }]),
                 },
                 "1. Which? -> B",

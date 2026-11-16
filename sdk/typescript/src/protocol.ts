@@ -669,6 +669,10 @@ export interface AskQuestion {
 export interface AskAnswer {
   selected: string[];
   other?: string;
+  comments?: Record<string, string>;
+  /** Images as [media type, base64], matching QueuePrompt. */
+  other_images?: [string, string][];
+  comment_images?: Record<string, [string, string][]>;
 }
 
 /** `answers` absent means the user declined. */

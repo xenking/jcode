@@ -669,11 +669,15 @@ fn test_ask_user_request_and_response_roundtrip() -> Result<()> {
             selected: vec!["SQLite".to_string()],
             other: Some("libsql".to_string()),
             comments: Default::default(),
+            other_images: vec![("image/png".into(), "YWJj".into())],
+            comment_images: [("SQLite".into(), vec![("image/jpeg".into(), "ZGVm".into())])].into_iter().collect(),
         }]),
     };
     let req = Request::AskUserResponse { id: 7, request_id: "ask-1".to_string(), response: response.clone() };
     let json = serde_json::to_string(&req)?;
     assert!(json.contains("\"type\":\"ask_user_response\""));
+    assert!(json.contains("\"other_images\":[[\"image/png\",\"YWJj\"]]"));
+    assert!(json.contains("\"comment_images\":{\"SQLite\":[[\"image/jpeg\",\"ZGVm\"]]}"));
     let decoded = parse_request_json(&json)?;
     assert_eq!(decoded.id(), 7);
     let Request::AskUserResponse { response: r, .. } = decoded else {

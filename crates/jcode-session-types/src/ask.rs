@@ -39,6 +39,12 @@ pub struct AskAnswer {
     /// Optional notes keyed by the selected option label. Older clients omit this.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub comments: std::collections::BTreeMap<String, String>,
+    /// Images attached to the free-text answer, as (media type, base64).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub other_images: Vec<(String, String)>,
+    /// Images attached to option comments, keyed by option label.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub comment_images: std::collections::BTreeMap<String, Vec<(String, String)>>,
 }
 
 /// Client reply. `answers` is `None` when the user declined (Esc/cancel).
