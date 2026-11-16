@@ -139,6 +139,7 @@
 
 mod auth;
 mod bounded_history;
+pub mod bundle_bridge;
 mod client;
 /// Jcode Cloud account sign-in and managed host connection (feature `cloud`).
 #[cfg(feature = "cloud")]

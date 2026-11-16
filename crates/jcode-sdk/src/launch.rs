@@ -566,8 +566,48 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
     {
         shared_upgrade::offer(&legacy, &jcode, options.start_timeout, progress);
     }
+    // Bundle clients must not mistake a previous bundle's surviving listener
+    // for their packaged bridge. Remote/custom SDK clients without an explicit
+    // local executable retain their existing endpoint semantics.
+    let bridge_target =
+        if options.api_socket.is_some() && options.binary.is_some() && jcode.is_file() {
+            Some(
+                jcode_build_support::runtime_generation::pin_path(&jcode)
+                    .map_err(|error| Error::new(ErrorKind::LaunchFailed, error.to_string()))?,
+            )
+        } else {
+            None
+        };
     if socket_accepts(&api) {
-        return Ok(());
+        if let Some(target) = &bridge_target {
+            match crate::bundle_bridge::verify_bundle_bridge(&api, target, options.start_timeout) {
+                Ok(()) => return Ok(()),
+                Err(identity_error) => {
+                    crate::bundle_bridge::retire_bridge(&api, options.start_timeout).map_err(
+                        |error| {
+                            Error::new(
+                                ErrorKind::HandshakeFailed,
+                                format!(
+                                    "{identity_error}; cannot retire stale bridge safely: {error}"
+                                ),
+                            )
+                        },
+                    )?;
+                    let deadline = Instant::now() + options.start_timeout;
+                    while socket_accepts(&api) {
+                        if Instant::now() >= deadline {
+                            return Err(Error::new(
+                                ErrorKind::LaunchFailed,
+                                "stale bridge did not withdraw its listener",
+                            ));
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            }
+        } else {
+            return Ok(());
+        }
     }
     if !socket_accepts(&legacy) {
         progress("starting jcode runtime...");
@@ -591,13 +631,20 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
         options.binary.is_some(),
         CLI_SERVES_API_BRIDGE,
     );
-    spawn_detached(bridge, bridge_args).map_err(|error| {
-        Error::new(
-            ErrorKind::LaunchFailed,
-            format!("could not start the harness API bridge: {error}"),
-        )
-    })?;
-    wait_for_socket(&api, "harness API bridge", options.start_timeout)
+    let target = jcode_build_support::runtime_generation::pin_path(bridge).ok();
+    spawn_detached_at(bridge, bridge_args, target.as_ref(), Some((&api, &legacy))).map_err(
+        |error| {
+            Error::new(
+                ErrorKind::LaunchFailed,
+                format!("could not start the harness API bridge: {error}"),
+            )
+        },
+    )?;
+    wait_for_socket(&api, "harness API bridge", options.start_timeout)?;
+    if let Some(target) = &bridge_target {
+        crate::bundle_bridge::verify_bundle_bridge(&api, target, options.start_timeout)?;
+    }
+    Ok(())
 }
 
 /// Whether the `jcode` CLI on this platform has the `api-bridge` subcommand.
@@ -643,6 +690,15 @@ fn spawn_detached_inner(
     args: &[&str],
     target: Option<&jcode_build_support::runtime_generation::ImmutableTarget>,
 ) -> std::io::Result<()> {
+    spawn_detached_at(program, args, target, None)
+}
+
+fn spawn_detached_at(
+    program: &Path,
+    args: &[&str],
+    target: Option<&jcode_build_support::runtime_generation::ImmutableTarget>,
+    sockets: Option<(&Path, &Path)>,
+) -> std::io::Result<()> {
     use jcode_build_support::runtime_generation as generation;
     let mut command = Command::new(target.map_or(program, |target| target.binary_path.as_path()));
     command
@@ -651,6 +707,11 @@ fn spawn_detached_inner(
         .env_remove(generation::GENERATION_ENV);
     if let Some(target) = target {
         generation::prepare_launch(&mut command, target).map_err(std::io::Error::other)?;
+    }
+    if let Some((api, legacy)) = sockets {
+        command
+            .env("JCODE_API_SOCKET", api)
+            .env("JCODE_SOCKET", legacy);
     }
     command
         .args(args)
@@ -904,6 +965,41 @@ fn launch_io(error: std::io::Error) -> Error {
 #[cfg(test)]
 mod executable_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_unidentified_bundle_bridge_is_not_reused() {
+        use std::os::unix::net::UnixListener;
+        let root = tempfile::tempdir().unwrap();
+        let api = root.path().join("old.sock");
+        let listener = UnixListener::bind(&api).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while Instant::now() < deadline {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    use std::io::Write;
+                    let _ = stream.write_all(b"{\"v\":1,\"reply_to\":1,\"ev\":\"hello_ok\",\"version\":1,\"server\":\"old\",\"capabilities\":[]}\n");
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let result = ensure_runtime(
+            &LaunchOptions {
+                binary: Some(std::env::current_exe().unwrap()),
+                api_socket: Some(api),
+                start_timeout: Duration::from_millis(100),
+                ..Default::default()
+            },
+            &|_| {},
+        );
+        server.join().unwrap();
+        assert!(
+            result.is_err(),
+            "an accepting socket is not bundle identity evidence"
+        );
+    }
 
     #[test]
     fn selected_runtime_bridge_wins_over_stale_standalone() {
