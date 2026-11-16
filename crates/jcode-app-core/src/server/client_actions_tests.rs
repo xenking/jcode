@@ -929,100 +929,123 @@ fn live_member(session_id: &str) -> (SwarmMember, mpsc::UnboundedReceiver<Server
 async fn resume_all_continues_interrupted_idle_live_session() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
-
+    struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            for (key, previous) in self.0.drain(..) {
+                match previous {
+                    Some(value) => crate::env::set_var(key, value),
+                    None => crate::env::remove_var(key),
+                }
+            }
+        }
+    }
+    let _restore = RestoreEnv(
+        ["JCODE_HOME", "JCODE_RUNTIME_DIR"]
+            .into_iter()
+            .map(|key| {
+                let previous = std::env::var_os(key);
+                crate::env::set_var(key, temp.path());
+                (key, previous)
+            })
+            .collect(),
+    );
     let provider = Arc::new(StreamingMockProvider::default());
     provider.queue_response(vec![
         StreamEvent::TextDelta("Continuing where I left off.".to_string()),
         StreamEvent::MessageEnd { stop_reason: None },
     ]);
-    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let provider_dyn: Arc<dyn Provider> = provider;
     let registry = Registry::new(provider_dyn.clone()).await;
-    let agent = Arc::new(Mutex::new(Agent::new(provider_dyn, registry)));
-    let session_id = {
-        let mut guard = agent.lock().await;
-        // Leave the session with a pending user turn the assistant never answered
-        // (simulating a turn that errored / was interrupted mid-generation).
-        guard.add_message(
-            Role::User,
-            vec![ContentBlock::Text {
-                text: "please keep going on the refactor".to_string(),
-                cache_control: None,
-            }],
-        );
-        guard.session_id().to_string()
-    };
-
-    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
-        HashMap::<String, Arc<Mutex<Agent>>>::from([(session_id.clone(), agent.clone())]),
-    ));
-    let (member, mut attach_rx) = live_member(&session_id);
-    let swarm_members = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), member)])));
-    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
-
-    let (swarms_by_id, event_history, event_counter, swarm_event_tx) = empty_swarm_status_state();
-    handle_resume_all_sessions(
-        91,
-        &sessions,
-        &swarm_members,
-        &swarms_by_id,
-        &event_history,
-        &event_counter,
-        &swarm_event_tx,
-        &client_event_tx,
-    )
-    .await;
-
-    // The session should resume and stream the continuation.
-    let streamed = timeout(Duration::from_secs(2), async {
+    let mut agent = Agent::new(provider_dyn.clone(), registry);
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "please keep going on the refactor".to_string(),
+            cache_control: None,
+        }],
+    );
+    agent
+        .persist_session_now()
+        .expect("persist interrupted input");
+    let session_id = agent.session_id().to_string();
+    let socket = temp.path().join("resume.sock");
+    let server = crate::server::Server::new_with_paths(
+        provider_dyn,
+        socket.clone(),
+        temp.path().join("resume-debug.sock"),
+    );
+    server
+        .sessions
+        .register_new(session_id.clone(), Arc::new(Mutex::new(agent)))
+        .await
+        .unwrap();
+    let runtime = crate::server::runtime::ServerRuntime::from_server(&server);
+    let accept = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
+    // Resume-all records durable intent. The same daemon owner used at startup
+    // admits it, not the requesting client or a second continuation path.
+    crate::server::reload_recovery::RecoveryOwner::new(&server)
+        .spawn(runtime.cancellation_token(), Vec::new());
+    let mut client = crate::server::Client::connect_with_path(socket)
+        .await
+        .unwrap();
+    let subscribe = client
+        .subscribe_with_info(
+            Some(temp.path().to_string_lossy().into_owned()),
+            None,
+            Some(session_id.clone()),
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(2), async {
         loop {
-            match attach_rx.recv().await.map(unwrap_test_turn_event) {
-                Some(ServerEvent::TextDelta { text })
-                    if text.contains("Continuing where I left off.") =>
-                {
-                    return text;
+            if matches!(client.read_event().await.unwrap(), ServerEvent::Done { id } if id == subscribe) {
+                break;
+            }
+        }
+    }).await.expect("subscribe should complete");
+    let request = client.resume_all_sessions().await.unwrap();
+    timeout(Duration::from_secs(2), async {
+        let mut streamed = String::new();
+        let mut summary = false;
+        loop {
+            match unwrap_test_turn_event(client.read_event().await.unwrap()) {
+                ServerEvent::TextDelta { text } => streamed.push_str(&text),
+                ServerEvent::ResumeAllResult {
+                    id,
+                    resumed,
+                    skipped,
+                    ..
+                } if id == request => {
+                    assert_eq!((resumed, skipped), (1, 0));
+                    summary = true;
                 }
-                Some(_) => continue,
-                None => panic!("live attachment closed before continuation streamed"),
+                ServerEvent::Done { id: 0 } => {
+                    assert!(summary, "resume summary must precede completion");
+                    assert_eq!(streamed, "Continuing where I left off.");
+                    break;
+                }
+                ServerEvent::Error { message, .. } => panic!("resume failed: {message}"),
+                _ => {}
             }
         }
     })
     .await
     .expect("interrupted session should resume promptly");
-    assert!(streamed.contains("Continuing where I left off."));
-
-    // The requesting client receives a summary describing one resumed session.
-    let result = timeout(Duration::from_secs(2), async {
-        loop {
-            match client_event_rx.recv().await.map(unwrap_test_turn_event) {
-                Some(event @ ServerEvent::ResumeAllResult { .. }) => return event,
-                Some(_) => continue,
-                None => panic!("client channel closed before resume-all result"),
-            }
-        }
-    })
-    .await
-    .expect("resume-all result should be emitted");
-    match result {
-        ServerEvent::ResumeAllResult {
-            id,
-            resumed,
-            skipped,
-            ..
-        } => {
-            assert_eq!(id, 91);
-            assert_eq!(resumed, 1);
-            assert_eq!(skipped, 0);
-        }
-        other => panic!("expected ResumeAllResult, got {other:?}"),
-    }
-
-    if let Some(home) = prev_home {
-        crate::env::set_var("JCODE_HOME", home);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
+    let saved = crate::session::Session::load(&session_id).unwrap();
+    assert_eq!(
+        saved.messages.iter().filter(|message| message.role == Role::Assistant)
+            .flat_map(|message| message.content.iter())
+            .filter(|block| matches!(block, ContentBlock::Text { text, .. } if text == "Continuing where I left off."))
+            .count(),
+        1,
+        "continuation must be persisted exactly once",
+    );
+    drop(client);
+    runtime.shutdown().await;
+    accept.await.unwrap();
 }
 
 #[tokio::test]
