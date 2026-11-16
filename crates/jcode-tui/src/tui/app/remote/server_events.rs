@@ -3733,7 +3733,7 @@ fn handle_server_event_inner(
         ServerEvent::UserImageIds {
             original_content,
             content,
-            ..
+            image_ids,
         } => {
             if let Some(index) = app
                 .display_messages
@@ -3741,6 +3741,25 @@ fn handle_server_event_inner(
                 .position(|message| message.role == "user" && message.content == original_content)
             {
                 app.replace_display_message_content(index, content);
+            } else if let Some(index) = app.display_messages.iter().position(|message| {
+                message.role == "user"
+                    && message.content.contains("[pasted ")
+                    && image_ids.iter().enumerate().all(|(index, _)| {
+                        message.content.contains(&format!("[image {}]", index + 1))
+                            || message.content.contains(&format!("[#image {}]", index + 1))
+                    })
+                    && !image_ids.is_empty()
+            }) {
+                // The sent content may expand a large paste while the echo
+                // retains its compact [pasted N lines] placeholder.
+                let mut display = app.display_messages[index].content.clone();
+                for (index, id) in image_ids.iter().enumerate() {
+                    let marker = format!("[#{id}]");
+                    display = display
+                        .replace(&format!("[image {}]", index + 1), &marker)
+                        .replace(&format!("[#image {}]", index + 1), &marker);
+                }
+                app.replace_display_message_content(index, display);
             }
             true
         }

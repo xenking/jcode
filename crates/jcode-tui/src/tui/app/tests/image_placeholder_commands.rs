@@ -18,6 +18,27 @@ fn attach_test_image(app: &mut App) {
 }
 
 #[test]
+fn live_image_ids_update_echo_with_collapsed_paste() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.push_display_message(DisplayMessage::user("[pasted 50 lines] [image 1]"));
+    app.handle_server_event(
+        crate::protocol::ServerEvent::UserImageIds {
+            original_content: "expanded paste [image 1]".into(),
+            content: "expanded paste [#img_test]".into(),
+            image_ids: vec!["img_test".into()],
+        },
+        &mut remote,
+    );
+    assert_eq!(
+        app.display_messages()[0].content,
+        "[pasted 50 lines] [#img_test]"
+    );
+}
+
+#[test]
 fn submitted_image_previews_anchor_and_deduplicate_per_prompt() {
     use crate::session::{RenderedImageAnchor, RenderedImageSource};
     use crate::tui::TuiState;
