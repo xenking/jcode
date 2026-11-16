@@ -20,6 +20,8 @@ struct Fake {
     reload_takes: bool,
     rollback_takes: bool,
     bridge_ok: bool,
+    bridge_candidates: Vec<super::super::rollout_host::BridgeCandidate>,
+    searched_socket: RefCell<Option<PathBuf>>,
     swap_sparkle: bool,
     state: Option<RolloutState>,
     calls: Vec<String>,
@@ -72,6 +74,8 @@ impl Fake {
             reload_takes: true,
             rollback_takes: true,
             bridge_ok: true,
+            bridge_candidates: vec![],
+            searched_socket: RefCell::new(None),
             swap_sparkle: true,
             state: None,
             calls: Vec::new(),
@@ -181,21 +185,35 @@ impl Host for Fake {
         deployed.sparkle_key = self.swap_sparkle;
         Ok(())
     }
-    fn bridge_search(&self) -> Result<()> {
+    fn bridge_search(&self, desktop: bool) -> Result<()> {
+        if desktop && !self.bridge_candidates.is_empty() {
+            let socket = super::super::rollout_host::select_bundle_bridge(
+                &self.bridge_candidates,
+                &self.layout.app,
+                Path::new("/home/user"),
+                Path::new("/runtime/user"),
+            )
+            .ok_or_else(|| anyhow::anyhow!("no eligible Desktop bridge"))?;
+            *self.searched_socket.borrow_mut() = Some(socket);
+        }
         if self.bridge_ok {
             Ok(())
         } else {
             bail!("bridge did not answer")
         }
     }
-    fn rollback_cli(&mut self, current: &str, shared: &str) -> Result<()> {
+    fn rollback_daemon(&mut self, shared: &str) -> Result<()> {
+        self.calls.push(format!("rollback daemon {shared}"));
+        if self.rollback_takes {
+            self.deployed.borrow_mut().daemon_label = Some(shared.into());
+        }
+        Ok(())
+    }
+    fn restore_cli_links(&mut self, current: &str, shared: &str) -> Result<()> {
         self.calls.push(format!("rollback cli {current} {shared}"));
         let mut deployed = self.deployed.borrow_mut();
         deployed.cli_current = Some(current.into());
         deployed.cli_shared = Some(shared.into());
-        if self.rollback_takes {
-            deployed.daemon_label = Some(shared.into());
-        }
         Ok(())
     }
     fn rollback_desktop(&mut self) -> Result<()> {
@@ -471,7 +489,85 @@ fn rollback_must_not_restore_old_desktop_if_daemon_did_not_downgrade() {
         "rollback must reject the new daemon: {output}"
     );
     assert!(output.contains("rollback FAILED"), "{output}");
+    assert!(
+        output.contains("daemon 2838f516c, current 2838f516c, shared 2838f516c"),
+        "{output}"
+    );
     assert!(!fake.mutations().contains(&"rollback desktop"));
+    assert!(
+        !fake
+            .mutations()
+            .contains(&"rollback cli 22774c334 22774c334")
+    );
+    let deployed = fake.deployed.borrow();
+    assert_eq!(deployed.cli_current, deployed.daemon_label, "{output}");
+    assert_eq!(deployed.cli_shared, deployed.daemon_label, "{output}");
+}
+
+#[test]
+fn verify_uses_desktop_bridge_not_foreign_isolated_bridge() {
+    use super::super::rollout_host::BridgeCandidate;
+    let mut fake = Fake::new();
+    let bridge = |home: &str, runtime: &str, socket: &str| BridgeCandidate {
+        executable: "/Applications/Jcode.app/Contents/MacOS/jcode".into(),
+        parent_executable: "/Applications/Jcode.app/Contents/MacOS/jcode-desktop".into(),
+        home: home.into(),
+        runtime: runtime.into(),
+        socket: socket.into(),
+    };
+    fake.bridge_candidates = vec![
+        bridge(
+            "/scratch/home",
+            "/scratch/runtime",
+            "/scratch/runtime/jcode-api.sock",
+        ),
+        bridge(
+            "/home/user",
+            "/runtime/user",
+            "/runtime/user/jcode-api.sock",
+        ),
+    ];
+    let (outcome, output) = rollout(&mut fake, &opts());
+    assert!(
+        matches!(outcome, Ok(Outcome::Deployed)),
+        "{outcome:?} {output}"
+    );
+    assert_eq!(
+        fake.searched_socket.borrow().as_deref(),
+        Some(Path::new("/runtime/user/jcode-api.sock"))
+    );
+}
+
+#[test]
+fn desktop_bridge_rejects_wrong_parent_home_runtime_and_socket() {
+    use super::super::rollout_host::{BridgeCandidate, select_bundle_bridge};
+    let app = Path::new("/Applications/Jcode.app");
+    let home = Path::new("/home/user");
+    let runtime = Path::new("/runtime/user");
+    let good = BridgeCandidate {
+        executable: app.join("Contents/MacOS/jcode"),
+        parent_executable: app.join("Contents/MacOS/jcode-desktop"),
+        home: home.into(),
+        runtime: runtime.into(),
+        socket: runtime.join("jcode-api.sock"),
+    };
+    let mut wrong_parent = good.clone();
+    wrong_parent.parent_executable = "/other/jcode-desktop".into();
+    let mut wrong_home = good.clone();
+    wrong_home.home = "/home/user-isolated".into();
+    let mut wrong_runtime = good.clone();
+    wrong_runtime.runtime = "/runtime/isolated".into();
+    let mut wrong_socket = good.clone();
+    wrong_socket.socket = "/runtime/isolated/jcode-api.sock".into();
+    assert!(
+        select_bundle_bridge(
+            &[wrong_parent, wrong_home, wrong_runtime, wrong_socket],
+            app,
+            home,
+            runtime
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -485,6 +581,7 @@ fn verify_catches_a_stale_bundle_bridge() {
         let mut deployed = fake.deployed.borrow_mut();
         deployed.daemon_label = Some(pair.label().into());
         deployed.cli_current = Some(pair.label().into());
+        deployed.cli_shared = Some(pair.label().into());
         deployed.desktop_sha = Some("b7adb60".into());
         deployed.desktop_cli = Some("2838f516c".into());
         deployed.bridge_paths = vec![

@@ -18,9 +18,9 @@
 //! 7. desktop-swap    graceful quit, kill only the old bundle's bridges, swap, relaunch
 //! 8. verify          versions, bridge answers search_sessions, Sparkle key
 //!
-//! A failed verify rolls back automatically: the previous CLI version is
-//! re-promoted and reloaded, and the previous bundle is restored from
-//! `~/.jcode/migration/Jcode.app.prev`.
+//! A failed verify restores the previous bundle only after the previous daemon
+//! is proven running and its channels match. If a safe targeted downgrade is
+//! unavailable, rollback leaves the running pair in place and reports its state.
 //!
 //! Re-running is safe: each phase checks the real state first and skips when
 //! it already holds, and a state file under `~/.jcode/rollout` remembers
@@ -204,8 +204,9 @@ pub trait Host {
     fn resume_worker(&mut self, session_id: &str) -> Result<()>;
     /// Quit, back up, swap and relaunch the bundle.
     fn swap_desktop(&mut self, app: &Path) -> Result<()>;
-    fn bridge_search(&self) -> Result<()>;
-    fn rollback_cli(&mut self, current: &str, shared: &str) -> Result<()>;
+    fn bridge_search(&self, desktop: bool) -> Result<()>;
+    fn rollback_daemon(&mut self, shared: &str) -> Result<()>;
+    fn restore_cli_links(&mut self, current: &str, shared: &str) -> Result<()>;
     fn rollback_desktop(&mut self) -> Result<()>;
     fn sleep(&mut self, duration: Duration);
     fn load_state(&self) -> Option<RolloutState>;
@@ -754,6 +755,12 @@ pub fn verify<H: Host>(host: &H, pair: &Pair, desktop: bool, layout: &Layout) ->
             opt(&now.cli_current)
         ));
     }
+    if now.cli_shared.as_deref() != Some(label) {
+        failures.push(format!(
+            "shared-server is {}, not {label}",
+            opt(&now.cli_shared)
+        ));
+    }
     if desktop {
         if !desktop_matches(&now, pair) {
             failures.push(format!(
@@ -784,7 +791,7 @@ pub fn verify<H: Host>(host: &H, pair: &Pair, desktop: bool, layout: &Layout) ->
             failures.push(format!("stale bundle bridge still running: {stale}"));
         }
     }
-    if let Err(error) = host.bridge_search() {
+    if let Err(error) = host.bridge_search(desktop) {
         failures.push(format!("bridge search_sessions failed: {error:#}"));
     }
     failures
@@ -794,7 +801,24 @@ fn roll_back<H: Host>(host: &mut H, state: &RolloutState, desktop: bool) -> Resu
     let mut done = Vec::new();
     match (state.prev_current.as_deref(), state.prev_shared.as_deref()) {
         (Some(current), Some(shared)) => {
-            host.rollback_cli(current, shared)?;
+            if current != shared {
+                let now = host.deployed();
+                bail!(
+                    "previous current {current} differs from shared {shared}; daemon {}, current {}, shared {}; Desktop not restored",
+                    opt(&now.daemon_label),
+                    opt(&now.cli_current),
+                    opt(&now.cli_shared)
+                );
+            }
+            if let Err(error) = host.rollback_daemon(shared) {
+                let now = host.deployed();
+                bail!(
+                    "rollback could not prove previous daemon {shared}: {error:#}; daemon {}, current {}, shared {}; Desktop not restored",
+                    opt(&now.daemon_label),
+                    opt(&now.cli_current),
+                    opt(&now.cli_shared)
+                );
+            }
             let mut now = host.deployed();
             for _ in 0..RELOAD_SETTLE_ATTEMPTS {
                 if now.daemon_label.as_deref() == Some(shared) {
@@ -803,6 +827,24 @@ fn roll_back<H: Host>(host: &mut H, state: &RolloutState, desktop: bool) -> Resu
                 host.sleep(RELOAD_SETTLE);
                 now = host.deployed();
             }
+            if now.daemon_label.as_deref() != Some(shared) {
+                bail!(
+                    "rollback could not prove previous daemon {shared}: daemon {}, current {}, shared {}; Desktop not restored",
+                    opt(&now.daemon_label),
+                    opt(&now.cli_current),
+                    opt(&now.cli_shared)
+                );
+            }
+            if let Err(error) = host.restore_cli_links(current, shared) {
+                let now = host.deployed();
+                bail!(
+                    "rollback could not restore links: {error:#}; daemon {}, current {}, shared {}; Desktop not restored",
+                    opt(&now.daemon_label),
+                    opt(&now.cli_current),
+                    opt(&now.cli_shared)
+                );
+            }
+            let now = host.deployed();
             if now.daemon_label.as_deref() != Some(shared)
                 || now.cli_current.as_deref() != Some(current)
                 || now.cli_shared.as_deref() != Some(shared)
@@ -815,7 +857,7 @@ fn roll_back<H: Host>(host: &mut H, state: &RolloutState, desktop: bool) -> Resu
                 );
             }
             done.push(format!(
-                "jcode current {current}, shared-server {shared}, reloaded"
+                "jcode current {current}, shared-server {shared}, daemon verified"
             ));
         }
         _ => bail!("no previous jcode version recorded; cannot safely restore Desktop"),

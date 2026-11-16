@@ -56,11 +56,10 @@ impl MacHost {
         let runtime_dir = rollout_runtime_dir()?;
         let bridge_socket = std::env::var_os("JCODE_API_SOCKET")
             .map(PathBuf::from)
-            .or_else(|| bundle_bridge_socket(Path::new(APP)))
             .unwrap_or_else(|| runtime_dir.join("jcode-api.sock"));
         let daemon_socket = std::env::var_os("JCODE_SOCKET")
             .map(PathBuf::from)
-            .unwrap_or_else(|| bridge_socket.with_file_name("jcode.sock"));
+            .unwrap_or_else(|| runtime_dir.join("jcode.sock"));
         Ok(Self {
             layout: Layout {
                 jcode_repo: projects.join("jcode"),
@@ -192,10 +191,14 @@ impl MacHost {
         let Ok(listing) = output(Command::new("ps").args(["-Ao", "pid=,command="])) else {
             return Vec::new();
         };
+        let (Ok(home), Ok(runtime)) = (system_user_home(), user_runtime_dir()) else {
+            return Vec::new();
+        };
         listing
             .lines()
             .filter(|line| line.contains("api-bridge"))
             .filter_map(|line| line.split_whitespace().next()?.parse::<u32>().ok())
+            .filter(|pid| process_has_user_environment(*pid, &home, &runtime))
             .filter_map(executable_of)
             .map(|exe| exe.display().to_string())
             .collect()
@@ -207,6 +210,9 @@ impl MacHost {
         let Ok(listing) = output(Command::new("ps").args(["-Ao", "pid=,command="])) else {
             return;
         };
+        let (Ok(home), Ok(runtime)) = (system_user_home(), user_runtime_dir()) else {
+            return;
+        };
         for line in listing.lines().filter(|line| line.contains("api-bridge")) {
             let Some(pid) = line
                 .split_whitespace()
@@ -215,8 +221,9 @@ impl MacHost {
             else {
                 continue;
             };
-            let from_bundle =
-                executable_of(pid as u32).is_some_and(|exe| exe.starts_with(&self.layout.app));
+            let from_bundle = executable_of(pid as u32)
+                .is_some_and(|exe| exe.starts_with(&self.layout.app))
+                && process_has_user_environment(pid as u32, &home, &runtime);
             if from_bundle {
                 unsafe {
                     libc::kill(pid, libc::SIGTERM);
@@ -312,9 +319,20 @@ impl Host for MacHost {
                 .arg("SUPublicEDKey"),
         )
         .is_ok_and(|key| !key.trim().is_empty());
+        let channel_label = |channel: &str| {
+            let binary = std::fs::canonicalize(
+                self.layout
+                    .builds
+                    .join(channel)
+                    .join(crate::build::binary_name()),
+            )
+            .ok()?;
+            let builds = std::fs::canonicalize(&self.layout.builds).ok()?;
+            version_label_of(&binary, &builds)
+        };
         Deployed {
-            cli_current: crate::build::read_current_version().ok().flatten(),
-            cli_shared: crate::build::read_shared_server_version().ok().flatten(),
+            cli_current: channel_label("current"),
+            cli_shared: channel_label("shared-server"),
             daemon_label: daemon.as_ref().and_then(|(_, exe)| {
                 let exe = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.clone());
                 let builds = std::fs::canonicalize(&self.layout.builds)
@@ -486,29 +504,56 @@ impl Host for MacHost {
         }
         run(Command::new("ditto").arg(app).arg(&self.layout.app))?;
         run(Command::new("open").arg(&self.layout.app))?;
-        let bundle = self.layout.app.clone();
+        let home = system_user_home()?;
+        let runtime = user_runtime_dir()?;
         self.wait_for(
-            "the new bundle's api-bridge",
+            "the new bundle's Desktop-owned api-bridge in the user runtime",
             Duration::from_secs(60),
-            || {
-                self.bridge_paths()
-                    .iter()
-                    .any(|path| Path::new(path).starts_with(&bundle))
-            },
+            || bundle_bridge_socket(&self.layout.app, &home, &runtime).is_some(),
         )
     }
 
-    fn bridge_search(&self) -> Result<()> {
-        jcode_harness_api_server_client(&self.bridge_socket)?
+    fn bridge_search(&self, desktop: bool) -> Result<()> {
+        let socket = if desktop {
+            let home = system_user_home()?;
+            let runtime = user_runtime_dir()?;
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                if let Some(socket) = bundle_bridge_socket(&self.layout.app, &home, &runtime) {
+                    break socket;
+                }
+                if std::time::Instant::now() >= deadline {
+                    bail!(
+                        "no Desktop-owned api-bridge with HOME {} and runtime {} after 30s",
+                        home.display(),
+                        runtime.display()
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        } else {
+            self.bridge_socket.clone()
+        };
+        jcode_harness_api_server_client(&socket)?
             .search_sessions("rollout", Some(1))
             .map(|_| ())
             .map_err(Into::into)
     }
 
-    fn rollback_cli(&mut self, current: &str, shared: &str) -> Result<()> {
+    fn rollback_daemon(&mut self, shared: &str) -> Result<()> {
+        // The daemon's reload protocol does not accept a target binary and its
+        // downgrade guard can re-exec the newer image even with --force. Never
+        // move either channel until the socket owner is already proven old.
+        if self.deployed().daemon_label.as_deref() != Some(shared) {
+            bail!("safe targeted daemon downgrade is unavailable; links were not changed");
+        }
+        Ok(())
+    }
+
+    fn restore_cli_links(&mut self, current: &str, shared: &str) -> Result<()> {
         crate::build::update_current_symlink(current)?;
-        crate::build::promote_version_to_shared_server(shared)?;
-        run(self.jcode().args(["server", "reload", "--force", "--json"]))
+        crate::build::update_shared_server_symlink(shared)?;
+        Ok(())
     }
 
     fn rollback_desktop(&mut self) -> Result<()> {
@@ -637,36 +682,213 @@ fn daemon_members(
     bail!("rollout requires Unix sockets")
 }
 
-fn bundle_bridge_socket(app: &Path) -> Option<PathBuf> {
-    let listing = output(Command::new("ps").args(["-Ao", "pid=,command="])).ok()?;
-    for line in listing.lines().filter(|line| line.contains("api-bridge")) {
-        let pid = line.split_whitespace().next()?.parse::<u32>().ok()?;
-        if !executable_of(pid).is_some_and(|exe| exe.starts_with(app)) {
+#[derive(Debug, Clone)]
+pub(super) struct BridgeCandidate {
+    pub executable: PathBuf,
+    pub parent_executable: PathBuf,
+    pub home: PathBuf,
+    pub runtime: PathBuf,
+    pub socket: PathBuf,
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    a == b
+        || std::fs::canonicalize(a)
+            .ok()
+            .zip(std::fs::canonicalize(b).ok())
+            .is_some_and(|(a, b)| a == b)
+}
+
+pub(super) fn select_bundle_bridge(
+    candidates: &[BridgeCandidate],
+    app: &Path,
+    home: &Path,
+    runtime: &Path,
+) -> Option<PathBuf> {
+    let executable = app.join("Contents/MacOS/jcode");
+    let parent = app.join("Contents/MacOS/jcode-desktop");
+    let socket = runtime.join("jcode-api.sock");
+    candidates
+        .iter()
+        .find(|c| {
+            same_path(&c.executable, &executable)
+                && same_path(&c.parent_executable, &parent)
+                && same_path(&c.home, home)
+                && same_path(&c.runtime, runtime)
+                && same_path(&c.socket, &socket)
+        })
+        .map(|c| c.socket.clone())
+}
+
+fn process_has_user_environment(pid: u32, home: &Path, runtime: &Path) -> bool {
+    let Some(environment) = process_environment(pid) else {
+        return false;
+    };
+    let has_env = |key: &str, value: &Path| {
+        let prefix = format!("{key}=");
+        environment
+            .iter()
+            .filter_map(|entry| entry.strip_prefix(&prefix))
+            .any(|actual| same_path(Path::new(actual), value))
+    };
+    has_env("HOME", home) && has_env("JCODE_RUNTIME_DIR", runtime)
+}
+
+#[cfg(target_os = "macos")]
+fn process_environment(pid: u32) -> Option<Vec<String>> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
+    let mut size: libc::size_t = 0;
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+        || size < 4
+    {
+        return None;
+    }
+    let mut bytes = vec![0u8; size];
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            bytes.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return None;
+    }
+    bytes.truncate(size);
+    let argc = i32::from_ne_bytes(bytes.get(..4)?.try_into().ok()?);
+    if argc < 0 {
+        return None;
+    }
+    let mut offset = 4 + bytes.get(4..)?.iter().position(|b| *b == 0)? + 1;
+    while bytes.get(offset) == Some(&0) {
+        offset += 1;
+    }
+    for _ in 0..argc {
+        offset += bytes.get(offset..)?.iter().position(|b| *b == 0)? + 1;
+    }
+    Some(
+        bytes
+            .get(offset..)?
+            .split(|b| *b == 0)
+            .filter_map(|entry| std::str::from_utf8(entry).ok().map(str::to_owned))
+            .collect(),
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn process_environment(pid: u32) -> Option<Vec<String>> {
+    let bytes = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    Some(
+        bytes
+            .split(|b| *b == 0)
+            .filter_map(|entry| std::str::from_utf8(entry).ok().map(str::to_owned))
+            .collect(),
+    )
+}
+
+fn bundle_bridge_socket(app: &Path, home: &Path, runtime: &Path) -> Option<PathBuf> {
+    let listing = output(Command::new("ps").args(["-Ao", "pid=,ppid=,command="])).ok()?;
+    let mut candidates = Vec::new();
+    for line in listing.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(pid) = parts.next().and_then(|v| v.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Some(ppid) = parts.next().and_then(|v| v.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Some(_argv0) = parts.next() else { continue };
+        if parts.next() != Some("api-bridge") {
             continue;
         }
-        let sockets =
-            output(Command::new("lsof").args(["-a", "-p", &pid.to_string(), "-U", "-Fn"])).ok()?;
-        if let Some(path) = sockets
+        let Some(executable) = executable_of(pid) else {
+            continue;
+        };
+        let Some(parent_executable) = executable_of(ppid) else {
+            continue;
+        };
+        if !same_path(&executable, &app.join("Contents/MacOS/jcode"))
+            || !same_path(
+                &parent_executable,
+                &app.join("Contents/MacOS/jcode-desktop"),
+            )
+        {
+            continue;
+        }
+        if !process_has_user_environment(pid, home, runtime) {
+            continue;
+        }
+        let Ok(sockets) =
+            output(Command::new("lsof").args(["-a", "-p", &pid.to_string(), "-U", "-Fn"]))
+        else {
+            continue;
+        };
+        for socket in sockets
             .lines()
             .filter_map(|line| line.strip_prefix('n'))
             .map(PathBuf::from)
-            .find(|path| {
-                path.is_absolute()
-                    && path
-                        .file_name()
-                        .is_some_and(|name| name == "jcode-api.sock")
-            })
         {
-            return Some(path);
+            candidates.push(BridgeCandidate {
+                executable: executable.clone(),
+                parent_executable: parent_executable.clone(),
+                home: home.into(),
+                runtime: runtime.into(),
+                socket,
+            });
         }
     }
-    None
+    select_bundle_bridge(&candidates, app, home, runtime)
+}
+
+#[cfg(unix)]
+fn system_user_home() -> Result<PathBuf> {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStrExt;
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut buffer = vec![0u8; 65536];
+    let mut result = std::ptr::null_mut();
+    let rc = unsafe {
+        libc::getpwuid_r(
+            libc::getuid(),
+            &mut pwd,
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 || result.is_null() || pwd.pw_dir.is_null() {
+        bail!("cannot determine user's home directory");
+    }
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(
+        unsafe { CStr::from_ptr(pwd.pw_dir) }.to_bytes(),
+    )))
+}
+
+#[cfg(not(unix))]
+fn system_user_home() -> Result<PathBuf> {
+    dirs::home_dir().context("no home directory")
 }
 
 fn rollout_runtime_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("JCODE_RUNTIME_DIR") {
         return Ok(PathBuf::from(dir));
     }
+    user_runtime_dir()
+}
+
+fn user_runtime_dir() -> Result<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         let len = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, std::ptr::null_mut(), 0) };
@@ -816,6 +1038,75 @@ mod tests {
             bridge_socket: root.join("bridge"),
         };
         (dir, host, sha)
+    }
+
+    #[test]
+    fn isolated_desktop_bridge_discovery_uses_real_processes_and_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("Jcode.app");
+        let macos = app.join("Contents/MacOS");
+        let runtime = dir.path().join("runtime");
+        let home = dir.path().join("home with space");
+        std::fs::create_dir_all(&macos).unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let source = dir.path().join("fixture.c");
+        std::fs::write(&source, r#"
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "api-bridge") == 0) {
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        struct sockaddr_un addr = {0}; addr.sun_family = AF_UNIX;
+        snprintf(addr.sun_path, sizeof(addr.sun_path), "%s/jcode-api.sock", getenv("JCODE_RUNTIME_DIR"));
+        if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) || listen(fd, 1)) return 2;
+        for (;;) pause();
+    }
+    pid_t child = fork();
+    if (child == 0) execl(getenv("BRIDGE_EXE"), getenv("BRIDGE_EXE"), "api-bridge", NULL);
+    FILE *file = fopen(getenv("BRIDGE_PID"), "w"); if (!file) return 3;
+    fprintf(file, "%d", child); fclose(file); waitpid(child, NULL, 0); return 0;
+}
+"#).unwrap();
+        let desktop = macos.join("jcode-desktop");
+        let bridge = macos.join("jcode");
+        run(Command::new("cc").arg(&source).arg("-o").arg(&desktop)).unwrap();
+        std::fs::copy(&desktop, &bridge).unwrap();
+        let pidfile = dir.path().join("pid");
+        let mut parent = Command::new(&desktop)
+            .env("HOME", &home)
+            .env("JCODE_RUNTIME_DIR", &runtime)
+            .env("BRIDGE_EXE", &bridge)
+            .env("BRIDGE_PID", &pidfile)
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let found = loop {
+            if let Some(socket) = bundle_bridge_socket(&app, &home, &runtime) {
+                break Some(socket);
+            }
+            if std::time::Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        if let Ok(pid) = std::fs::read_to_string(&pidfile)
+            .unwrap_or_default()
+            .parse::<i32>()
+        {
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
+        } else {
+            let _ = parent.kill();
+        }
+        let _ = parent.wait();
+        assert_eq!(found, Some(runtime.join("jcode-api.sock")));
     }
 
     #[test]
