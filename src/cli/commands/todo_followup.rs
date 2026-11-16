@@ -51,9 +51,9 @@ pub(super) fn run_actionable_todos(
     todos: &[crate::todo::TodoItem],
     tasks: &[crate::background::TaskStatusFile],
     session_id: &str,
-) -> Vec<crate::todo::TodoItem> {
-    let goals = run_goals(session_id);
-    todos
+) -> anyhow::Result<Vec<crate::todo::TodoItem>> {
+    let goals = run_goals(session_id)?;
+    Ok(todos
         .iter()
         .filter(|todo| {
             !crate::todo::is_incomplete_todo(todo)
@@ -72,7 +72,7 @@ pub(super) fn run_actionable_todos(
                     }))
         })
         .cloned()
-        .collect()
+        .collect())
 }
 
 pub(super) fn run_actionable_poke_message(
@@ -102,8 +102,8 @@ pub(super) fn run_actionable_poke_message(
     message
 }
 
-pub(super) fn run_goals(session_id: &str) -> Vec<crate::todo::TodoGoal> {
-    crate::todo::load_goals(session_id).unwrap_or_default()
+pub(super) fn run_goals(session_id: &str) -> anyhow::Result<Vec<crate::todo::TodoGoal>> {
+    crate::todo::load_goals(session_id)
 }
 
 pub(super) fn run_user_auth_notice(todos: &[crate::todo::TodoItem]) -> Option<String> {
@@ -160,7 +160,7 @@ pub(super) async fn prepare_run_todo_follow_up(
     session_id: &str,
     todos: &[crate::todo::TodoItem],
     may_resume: bool,
-) -> (Vec<crate::todo::TodoItem>, Option<String>) {
+) -> anyhow::Result<(Vec<crate::todo::TodoItem>, Option<String>)> {
     use futures::{FutureExt, StreamExt};
 
     let mut completion_messages = Vec::new();
@@ -205,7 +205,7 @@ pub(super) async fn prepare_run_todo_follow_up(
                 tasks.push(task);
             }
         }
-        let actionable = run_actionable_todos(todos, &tasks, session_id);
+        let actionable = run_actionable_todos(todos, &tasks, session_id)?;
         let waiting: Vec<_> = tasks
             .iter()
             .filter(|task| run_task_is_waitable(task, session_id))
@@ -230,10 +230,10 @@ pub(super) async fn prepare_run_todo_follow_up(
         let all_waiting = (!waiting.is_empty() || !awaits.is_empty())
             && !actionable.iter().any(crate::todo::is_incomplete_todo);
         if !all_waiting || !may_resume {
-            return (
+            return Ok((
                 actionable,
                 (!completion_messages.is_empty()).then(|| completion_messages.join("\n\n")),
-            );
+            ));
         }
 
         let mut waits = futures::stream::FuturesUnordered::new();
@@ -273,7 +273,7 @@ pub(super) async fn prepare_run_todo_follow_up(
         // list. Other tasks can remain in flight while newly unblocked work runs.
         let Some(resolved) = waits.next().await else {
             crate::logging::warn("Headless dependency wait set unexpectedly empty");
-            return (actionable, None);
+            return Ok((actionable, None));
         };
         let status = manager.status(&resolved).await;
         let mut message = format!(

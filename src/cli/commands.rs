@@ -2894,7 +2894,7 @@ async fn run_single_message_command_plain_with_auto_poke(
             &todos,
             !run_command_auto_poke_limit_reached(turns_completed, max_turns),
         )
-        .await;
+        .await?;
         if let Some(message) = dependency_resume {
             incomplete_budget = crate::todo::IncompleteTodoBudget::default();
             gate_digest_delivered = false;
@@ -2926,7 +2926,7 @@ async fn run_single_message_command_plain_with_auto_poke(
         if todos.iter().any(crate::todo::is_incomplete_todo)
             && !actionable_todos.iter().any(crate::todo::is_incomplete_todo)
         {
-            eprintln!("{}", run_blocked_notice(&todos, &run_goals(agent.session_id())).unwrap_or_else(||
+            eprintln!("{}", run_blocked_notice(&todos, &run_goals(agent.session_id())?).unwrap_or_else(||
                 "Stopped at the turn limit with unfinished todos waiting on background dependencies.".into()
             ));
             break;
@@ -3036,7 +3036,7 @@ async fn run_single_message_command_capture_with_auto_poke(
             &todos,
             !run_command_auto_poke_limit_reached(turns_completed, max_turns),
         )
-        .await;
+        .await?;
         if let Some(message) = dependency_resume {
             incomplete_budget = crate::todo::IncompleteTodoBudget::default();
             gate_digest_delivered = false;
@@ -3068,7 +3068,7 @@ async fn run_single_message_command_capture_with_auto_poke(
         if todos.iter().any(crate::todo::is_incomplete_todo)
             && !actionable_todos.iter().any(crate::todo::is_incomplete_todo)
         {
-            eprintln!("{}", run_blocked_notice(&todos, &run_goals(agent.session_id())).unwrap_or_else(||
+            eprintln!("{}", run_blocked_notice(&todos, &run_goals(agent.session_id())?).unwrap_or_else(||
                 "Stopped at the turn limit with unfinished todos waiting on background dependencies.".into()
             ));
             break;
@@ -3234,7 +3234,7 @@ async fn run_single_message_command_ndjson(
             &todos,
             !run_command_auto_poke_limit_reached(turns_completed, max_turns),
         )
-        .await;
+        .await?;
         if let Some(message) = dependency_resume {
             incomplete_budget = crate::todo::IncompleteTodoBudget::default();
             gate_digest_delivered = false;
@@ -3293,8 +3293,8 @@ async fn run_single_message_command_ndjson(
                 &serde_json::json!({
                     "type": "auto_poke_stopped",
                     "session_id": session_id,
-                    "reason": if run_user_auth_notice(&todos).is_some() { "requires_user_auth" } else if run_cannot_complete_notice(&todos, &run_goals(&session_id)).is_some() { "cannot_complete" } else { "turn_limit" },
-                    "message": run_blocked_notice(&todos, &run_goals(&session_id)),
+                    "reason": if run_user_auth_notice(&todos).is_some() { "requires_user_auth" } else if run_cannot_complete_notice(&todos, &run_goals(&session_id)?).is_some() { "cannot_complete" } else { "turn_limit" },
+                    "message": run_blocked_notice(&todos, &run_goals(&session_id)?),
                     "requires_user_auth": todos.iter().any(crate::todo::todo_requires_user_auth),
                     "waiting_on_background": todos.iter().any(|todo| !todo.waiting_on.is_empty()),
                     "max_turns": max_turns,

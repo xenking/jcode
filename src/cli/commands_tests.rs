@@ -297,7 +297,9 @@ async fn user_auth_cli_pauses_only_that_todo_and_keeps_peers_actionable() {
         reason: "Required source data no longer exists".into(),
     });
     let (actionable, resumed) =
-        prepare_run_todo_follow_up(&manager, "owner", &[blocked.clone()], true).await;
+        prepare_run_todo_follow_up(&manager, "owner", &[blocked.clone()], true)
+            .await
+            .unwrap();
     assert!(actionable.is_empty());
     assert!(resumed.is_none());
     let notice = run_blocked_notice(&[blocked.clone()], &[]).unwrap();
@@ -308,7 +310,9 @@ async fn user_auth_cli_pauses_only_that_todo_and_keeps_peers_actionable() {
 
     let independent = dependency_todo("independent", &[]);
     let all = vec![blocked.clone(), independent];
-    let (actionable, _) = prepare_run_todo_follow_up(&manager, "owner", &all, true).await;
+    let (actionable, _) = prepare_run_todo_follow_up(&manager, "owner", &all, true)
+        .await
+        .unwrap();
     assert_eq!(actionable.len(), 1);
     assert_eq!(actionable[0].id, "independent");
     let poke = run_actionable_poke_message("original".into(), &all, &actionable);
@@ -316,11 +320,34 @@ async fn user_auth_cli_pauses_only_that_todo_and_keeps_peers_actionable() {
     assert!(!poke.contains("Required source data"));
 
     blocked.requires_user_auth = None;
-    let (actionable, _) =
-        prepare_run_todo_follow_up(&manager, "owner", &[blocked.clone()], true).await;
+    let (actionable, _) = prepare_run_todo_follow_up(&manager, "owner", &[blocked.clone()], true)
+        .await
+        .unwrap();
     assert_eq!(actionable.len(), 1);
     assert_eq!(actionable[0].status, "pending");
     assert!(run_user_auth_notice(&[blocked]).is_none());
+}
+
+#[tokio::test]
+async fn corrupt_goals_stop_headless_continuation() {
+    let _guard = crate::storage::lock_test_env();
+    let session = format!("corrupt-cli-goals-{}", uuid::Uuid::new_v4());
+    let path = crate::todo::store::todo_file_path(
+        &crate::storage::jcode_dir().unwrap(),
+        &session,
+        crate::todo::store::TodoFile::Goals,
+    );
+    crate::storage::write_text_secret(&path, "{broken").unwrap();
+    let task_dir = tempfile::tempdir().unwrap();
+    let manager = crate::background::BackgroundTaskManager::with_output_dir(task_dir.path().into());
+    let todos = [dependency_todo("work", &[])];
+    let goals = run_goals(&session);
+    let actionable = run_actionable_todos(&todos, &[], &session);
+    let followup = prepare_run_todo_follow_up(&manager, &session, &todos, true).await;
+    std::fs::remove_file(path).unwrap();
+    assert!(goals.is_err());
+    assert!(actionable.is_err());
+    assert!(followup.is_err());
 }
 
 #[test]
@@ -347,7 +374,9 @@ fn cli_notice_reports_user_auth_and_goal_that_cannot_complete() {
         abandoned.status = status.into();
         assert!(run_blocked_notice(&[blocked.clone(), abandoned.clone()], &goals).is_none());
         assert_eq!(
-            run_actionable_todos(&[blocked.clone()], &[], "owner").len(),
+            run_actionable_todos(&[blocked.clone()], &[], "owner")
+                .unwrap()
+                .len(),
             1
         );
     }
@@ -374,10 +403,15 @@ async fn run_await_dependency_waits_without_poking_and_resumes_on_terminal_or_ti
         let todos = vec![dependency_todo("waiting", &[&id])];
         let mut mixed = todos.clone();
         mixed.push(dependency_todo("independent", &[]));
-        let (actionable, _) = prepare_run_todo_follow_up(&manager, "cli-await", &mixed, true).await;
+        let (actionable, _) = prepare_run_todo_follow_up(&manager, "cli-await", &mixed, true)
+            .await
+            .unwrap();
         assert_eq!(actionable.len(), 1);
         assert_eq!(actionable[0].id, "independent");
-        assert_eq!(run_actionable_todos(&todos, &[], "foreign").len(), 1);
+        assert_eq!(
+            run_actionable_todos(&todos, &[], "foreign").unwrap().len(),
+            1
+        );
         let mut followup = std::pin::pin!(prepare_run_todo_follow_up(
             &manager,
             "cli-await",
@@ -404,6 +438,7 @@ async fn run_await_dependency_waits_without_poking_and_resumes_on_terminal_or_ti
         let (actionable, resumed) =
             tokio::time::timeout(std::time::Duration::from_secs(2), &mut followup)
                 .await
+                .unwrap()
                 .unwrap();
         assert_eq!(actionable.len(), 1);
         assert!(resumed.unwrap().contains(&id));
@@ -426,8 +461,9 @@ async fn run_dependency_mixed_work_stays_actionable_and_scoped() {
         dependency_todo("waiting", &[&task.task_id]),
         dependency_todo("independent", &[]),
     ];
-    let (actionable, resumed) =
-        prepare_run_todo_follow_up(&manager, "cli-owned", &todos, true).await;
+    let (actionable, resumed) = prepare_run_todo_follow_up(&manager, "cli-owned", &todos, true)
+        .await
+        .unwrap();
     assert!(resumed.is_none());
     assert_eq!(actionable.len(), 1);
     assert_eq!(actionable[0].id, "independent");
@@ -445,14 +481,17 @@ async fn run_dependency_mixed_work_stays_actionable_and_scoped() {
     assert!(crate::todo::is_auto_poke_message(&message));
     let mut completed = dependency_todo("completed", &[&task.task_id]);
     completed.status = "completed".to_string();
-    let (finished, _) = prepare_run_todo_follow_up(&manager, "cli-owned", &[completed], true).await;
+    let (finished, _) = prepare_run_todo_follow_up(&manager, "cli-owned", &[completed], true)
+        .await
+        .unwrap();
     assert_eq!(
         finished.len(),
         1,
         "finished todos must retain completion validation"
     );
-    let (foreign, resumed) =
-        prepare_run_todo_follow_up(&manager, "other-session", &todos, true).await;
+    let (foreign, resumed) = prepare_run_todo_follow_up(&manager, "other-session", &todos, true)
+        .await
+        .unwrap();
     assert_eq!(
         foreign.len(),
         2,
@@ -511,6 +550,7 @@ async fn run_dependency_all_waits_resume_with_terminal_status_and_output() {
         let (actionable, resumed) =
             tokio::time::timeout(std::time::Duration::from_secs(3), &mut followup)
                 .await
+                .unwrap()
                 .unwrap();
         assert_eq!(actionable.len(), 1);
         let message = resumed.expect("completion resumes the model");
@@ -558,6 +598,7 @@ async fn run_dependency_waits_any_but_does_not_resume_still_blocked_todo() {
     finish_a.send(()).unwrap();
     let (_, resumed) = tokio::time::timeout(std::time::Duration::from_secs(3), &mut followup)
         .await
+        .unwrap()
         .unwrap();
     let message = resumed.unwrap();
     assert!(message.contains(&a.task_id));
@@ -604,6 +645,7 @@ async fn run_dependency_unknown_stale_and_cancelled_do_not_wait_forever() {
         prepare_run_todo_follow_up(&manager, "cli", &todos, true),
     )
     .await
+    .unwrap()
     .unwrap();
     assert_eq!(actionable.len(), 3);
     assert!(resumed.is_none());
@@ -621,6 +663,7 @@ async fn run_dependency_unknown_stale_and_cancelled_do_not_wait_forever() {
     manager.cancel(&task.task_id).await.unwrap();
     let (_, resumed) = tokio::time::timeout(std::time::Duration::from_secs(3), &mut followup)
         .await
+        .unwrap()
         .unwrap();
     assert!(resumed.unwrap().to_lowercase().contains("cancel"));
 }
@@ -1744,13 +1787,15 @@ fn run_actionable_todos_skip_work_assigned_to_another_session() {
     let mut lane = dependency_todo("lane", &[]);
     lane.assigned_to = Some("swarm-worker".into());
     let own = dependency_todo("own", &[]);
-    let actionable = run_actionable_todos(&[lane.clone(), own], &[], "coordinator");
+    let actionable = run_actionable_todos(&[lane.clone(), own], &[], "coordinator").unwrap();
     assert_eq!(actionable.len(), 1);
     assert_eq!(actionable[0].id, "own");
     for owner in ["@self", "", "coordinator"] {
         lane.assigned_to = Some(owner.into());
         assert_eq!(
-            run_actionable_todos(&[lane.clone()], &[], "coordinator").len(),
+            run_actionable_todos(&[lane.clone()], &[], "coordinator")
+                .unwrap()
+                .len(),
             1,
             "{owner:?}"
         );
