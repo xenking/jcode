@@ -6,6 +6,17 @@ use crate::tui::ui::tools_ui;
 use crate::tui::{TuiState, backend};
 use count_format::*;
 
+fn reload_field<T: serde::de::DeserializeOwned + Default>(
+    value: &serde_json::Value,
+    field: &str,
+) -> serde_json::Result<T> {
+    match value.get(field) {
+        // Older reload files predate these optional fields.
+        None | Some(serde_json::Value::Null) => Ok(T::default()),
+        Some(value) => serde_json::from_value(value.clone()),
+    }
+}
+
 pub(super) struct RestoredReloadInput {
     pub input: String,
     pub stashed_input: Option<StashedInput>,
@@ -501,13 +512,42 @@ impl App {
     pub(super) fn restore_input_for_reload(session_id: &str) -> Option<RestoredReloadInput> {
         let jcode_dir = crate::storage::jcode_dir().ok()?;
         let path = jcode_dir.join(format!("client-input-{}", session_id));
-        if !path.exists() {
-            return None;
-        }
-        let data = std::fs::read_to_string(&path).ok()?;
-        let _ = std::fs::remove_file(&path);
+        let data = match std::fs::read_to_string(&path) {
+            Ok(data) => data,
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    crate::logging::warn(&format!(
+                        "Failed to read reload input {}: {error}",
+                        path.display()
+                    ));
+                }
+                return None;
+            }
+        };
 
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
+            let stashed_input = match reload_field::<Option<StashedInput>>(&value, "stashed_input")
+            {
+                Ok(stashed) => stashed,
+                Err(error) => {
+                    crate::logging::warn(&format!(
+                        "Invalid reload stashed input for {session_id}: {error}"
+                    ));
+                    return None;
+                }
+            };
+            let uncertain_queue_prompts = match reload_field::<Vec<crate::protocol::QueuedPrompt>>(
+                &value,
+                "uncertain_queue_prompts",
+            ) {
+                Ok(prompts) => prompts,
+                Err(error) => {
+                    crate::logging::warn(&format!(
+                        "Invalid reload uncertain queue for {session_id}: {error}"
+                    ));
+                    return None;
+                }
+            };
             let input = value
                 .get("input")
                 .and_then(|v| v.as_str())
@@ -684,11 +724,15 @@ impl App {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let cursor = cursor.min(input.len());
+            if let Err(error) = std::fs::remove_file(&path) {
+                crate::logging::warn(&format!(
+                    "Failed to consume reload input {}: {error}",
+                    path.display()
+                ));
+            }
             return Some(RestoredReloadInput {
                 input,
-                stashed_input: value
-                    .get("stashed_input")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok()),
+                stashed_input,
                 cursor,
                 pending_images,
                 submit_on_restore,
@@ -700,10 +744,7 @@ impl App {
                 interleave_message,
                 pending_soft_interrupts,
                 pending_soft_interrupt_resend,
-                uncertain_queue_prompts: value
-                    .get("uncertain_queue_prompts")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .unwrap_or_default(),
+                uncertain_queue_prompts,
                 rate_limit_pending_message,
                 rate_limit_reset,
                 observe_mode_enabled,
@@ -733,6 +774,12 @@ impl App {
         }
 
         let (cursor_str, input) = data.split_once('\n')?;
+        if let Err(error) = std::fs::remove_file(&path) {
+            crate::logging::warn(&format!(
+                "Failed to consume legacy reload input {}: {error}",
+                path.display()
+            ));
+        }
         let cursor = cursor_str.parse::<usize>().unwrap_or(0);
         let cursor = cursor.min(input.len());
         Some(RestoredReloadInput {

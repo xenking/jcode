@@ -1266,6 +1266,24 @@ fn test_new_for_remote_restores_split_view_from_reload_state() {
 }
 
 #[test]
+fn corrupt_reload_queued_state_is_preserved_instead_of_consumed() {
+    with_temp_jcode_home(|| {
+        let session_id = "corrupt-reload-state";
+        let path = crate::storage::jcode_dir()
+            .unwrap()
+            .join(format!("client-input-{session_id}"));
+        for field in ["stashed_input", "uncertain_queue_prompts"] {
+            let mut data = serde_json::json!({"input": "unsent text", "cursor": 0});
+            data[field] = serde_json::json!("invalid structured state");
+            let encoded = data.to_string();
+            std::fs::write(&path, &encoded).unwrap();
+            assert!(App::restore_input_for_reload(session_id).is_none(), "{field}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), encoded);
+        }
+    });
+}
+
+#[test]
 fn test_restore_reload_state_supports_legacy_input_format() {
     let session_id = format!("test-reload-legacy-{}", std::process::id());
     let jcode_dir = crate::storage::jcode_dir().unwrap();

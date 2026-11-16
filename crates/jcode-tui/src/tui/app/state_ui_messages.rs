@@ -270,15 +270,21 @@ impl App {
             .remote_session_id
             .as_deref()
             .unwrap_or(&self.session.id);
+        let goals = match crate::todo::load_goals(session_id) {
+            Ok(goals) => goals,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "Cannot determine automatic followup eligibility for {session_id}: {error:#}"
+                ));
+                return true;
+            }
+        };
         crate::todo::todo_requires_user_auth(todo)
             // Handed to a swarm worker: the owner works it and reports back.
             || crate::todo::todo_assigned_elsewhere(todo, session_id)
             // Spawned workers still running will wake this session when done.
             || self.has_working_swarm_members(session_id)
-            || crate::todo::todo_goal_cannot_complete(
-                todo,
-                &crate::todo::load_goals(session_id).unwrap_or_default(),
-            )
+            || crate::todo::todo_goal_cannot_complete(todo, &goals)
             || crate::todo::todo_waits_on_running_task(todo, |task_id| {
                 self.running_todo_await_dependency(task_id)
                     || self.running_todo_background_dependency(task_id).is_some()

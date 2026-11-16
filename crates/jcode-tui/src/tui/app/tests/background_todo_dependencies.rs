@@ -43,6 +43,23 @@ fn complete_blocker_pauses_auto_pokes_until_cleared_but_not_independent_work() {
 }
 
 #[test]
+fn corrupt_goals_pause_automatic_followup_without_inventing_empty_state() {
+    with_temp_jcode_home(|| {
+        let app = waiting_dependency_test_app();
+        let mut todo = dependency_todo("acceptance", "unused");
+        todo.waiting_on.clear();
+        let home = crate::storage::jcode_dir().unwrap();
+        std::fs::create_dir_all(home.join("todos")).unwrap();
+        std::fs::write(
+            home.join("todos").join(format!("{}-goals.json", app.session.id)),
+            "{broken",
+        )
+        .unwrap();
+        assert!(app.todo_is_paused_for_auto_followup(&todo));
+    });
+}
+
+#[test]
 fn goal_that_cannot_complete_pauses_its_pokes_survives_reload_and_resumes_when_cleared() {
     with_temp_jcode_home(|| {
         let mut app = waiting_dependency_test_app();
