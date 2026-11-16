@@ -296,13 +296,26 @@ fn spawn_executor(store: Store, mut journal: Journal) {
     tokio::spawn(async move {
         if let Err(error) = execute(&store, &mut journal).await {
             journal.error = Some(format!("{error:#}"));
-            if journal.mutations.last().is_some_and(|m| m.result.is_none()) {
-                let _ = store.after(&mut journal, &format!("failed: {error:#}"));
+            if journal.mutations.last().is_some_and(|m| m.result.is_none())
+                && let Err(persist_error) = store.after(&mut journal, &format!("failed: {error:#}"))
+            {
+                crate::logging::error(&format!(
+                    "Cannot persist rollout mutation failure: {persist_error:#}; original failure: {error:#}"
+                ));
             }
-            let _ = store.log(&journal, &format!("failed: {error:#}"));
+            if let Err(log_error) = store.log(&journal, &format!("failed: {error:#}")) {
+                crate::logging::error(&format!(
+                    "Cannot journal rollout failure: {log_error:#}; original failure: {error:#}"
+                ));
+            }
             if let Err(rollback_error) = rollback(&store, &mut journal).await {
                 journal.error = Some(format!("{error:#}; rollback failed: {rollback_error:#}"));
-                let _ = store.phase(&mut journal, Phase::Failed);
+                if let Err(persist_error) = store.phase(&mut journal, Phase::Failed) {
+                    crate::logging::error(&format!(
+                        "Cannot persist failed rollout {}: {persist_error:#}; {:?}",
+                        journal.id, journal.error
+                    ));
+                }
             }
         }
     });
@@ -525,9 +538,12 @@ fn inode(_path: &Path) -> Result<u64> {
 
 async fn desktop_swap(store: &Store, journal: &mut Journal) -> Result<()> {
     if journal.desktop_swapped
-        || journal
-            .incoming_inode
-            .is_some_and(|expected| inode(&journal.intent.app).ok() == Some(expected))
+        || match journal.incoming_inode {
+            Some(expected) => {
+                journal.intent.app.try_exists()? && inode(&journal.intent.app)? == expected
+            }
+            None => false,
+        }
     {
         journal.desktop_swapped = true;
         store.save(journal)?;

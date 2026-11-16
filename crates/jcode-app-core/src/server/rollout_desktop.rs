@@ -6,22 +6,36 @@ use std::time::Duration;
 
 fn process_table() -> Result<Vec<(u32, u32, PathBuf)>> {
     let listing = output(Command::new("ps").args(["-Ao", "uid=,pid=,ppid="]))?;
-    Ok(listing
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let uid = fields.next()?.parse::<u32>().ok()?;
-            #[cfg(unix)]
-            if uid != unsafe { libc::geteuid() } {
-                return None;
-            }
-            #[cfg(not(unix))]
-            let _ = uid;
-            let pid = fields.next()?.parse::<u32>().ok()?;
-            let parent = fields.next()?.parse::<u32>().ok()?;
-            Some((pid, parent, executable_of(pid)?))
-        })
-        .collect())
+    let mut processes = Vec::new();
+    for line in listing.lines() {
+        let mut fields = line.split_whitespace();
+        let uid: u32 = fields
+            .next()
+            .context("process row missing uid")?
+            .parse()
+            .context("invalid process uid")?;
+        #[cfg(unix)]
+        if uid != unsafe { libc::geteuid() } {
+            continue;
+        }
+        #[cfg(not(unix))]
+        let _ = uid; // No ownership filtering is available on this platform.
+        let pid = fields
+            .next()
+            .context("process row missing pid")?
+            .parse()
+            .context("invalid process pid")?;
+        let parent = fields
+            .next()
+            .context("process row missing parent pid")?
+            .parse()
+            .context("invalid process parent pid")?;
+        // A process may exit between ps and the kernel executable lookup.
+        if let Some(executable) = executable_of(pid) {
+            processes.push((pid, parent, executable));
+        }
+    }
+    Ok(processes)
 }
 
 fn desktop_owned_pids(processes: &[(u32, u32, PathBuf)], app: &Path, owner: u32) -> Vec<u32> {
@@ -141,6 +155,7 @@ pub(super) async fn verify(app: &Path, cli: &str, desktop: &str) -> Result<()> {
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
+    // Failed resolution must never prove that a foreign executable is owned.
     a == b
         || std::fs::canonicalize(a)
             .ok()
@@ -449,15 +464,21 @@ fn bridges_from_listing(
     let mut processes = Vec::new();
     for line in listing.lines() {
         let mut parts = line.split_whitespace();
-        let Some(uid) = parts.next().and_then(|v| v.parse::<u32>().ok()) else {
-            continue;
-        };
-        let Some(pid) = parts.next().and_then(|v| v.parse::<u32>().ok()) else {
-            continue;
-        };
-        let Some(parent_pid) = parts.next().and_then(|v| v.parse::<u32>().ok()) else {
-            continue;
-        };
+        let uid: u32 = parts
+            .next()
+            .context("bridge row missing uid")?
+            .parse()
+            .context("invalid bridge uid")?;
+        let pid = parts
+            .next()
+            .context("bridge row missing pid")?
+            .parse()
+            .context("invalid bridge pid")?;
+        let parent_pid = parts
+            .next()
+            .context("bridge row missing parent pid")?
+            .parse()
+            .context("invalid bridge parent pid")?;
         if uid != owner_uid {
             continue;
         }
@@ -537,6 +558,8 @@ pub(super) async fn retire_stale_bridges(app: &Path, target_app: &Path) -> Resul
     .await?
 }
 
+// Missing, unreadable, or non-UTF-8 ownership fields fail closed below. Other
+// unrecognised environment entries are irrelevant to ownership.
 fn process_has_user_environment(pid: u32, home: &Path, runtime: &Path) -> Result<bool> {
     let environment = process_environment(pid)
         .with_context(|| format!("cannot inspect process {pid} environment"))?;
@@ -719,7 +742,8 @@ fn executable_of(pid: u32) -> Option<PathBuf> {
         return None;
     }
     buffer.truncate(length as usize);
-    Some(PathBuf::from(String::from_utf8(buffer).ok()?))
+    use std::os::unix::ffi::OsStringExt;
+    Some(PathBuf::from(std::ffi::OsString::from_vec(buffer)))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -730,6 +754,17 @@ fn executable_of(pid: u32) -> Option<PathBuf> {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_bridge_process_census_fails_closed() {
+        for listing in [
+            "bad 77 1 jcode api-bridge",
+            "501 bad 1 api-bridge",
+            "501 77 bad api-bridge",
+        ] {
+            assert!(bridges_from_listing(listing, 501, 1, |_, _| Ok(None)).is_err());
+        }
+    }
     const IDLE: &str = "p77\nf3\nd0x1\nn/fixture/run/jcode-api.sock\n";
     const CLIENT: &str = "p77\nf3\nd0x1\nn/fixture/run/jcode-api.sock\nf4\nd0x2\nn->0x3\n";
     const INCOMPLETE: &str = "p77\nf3\nd0x1\nn/fixture/run/jcode-api.sock\nf4\nd0x2\n";
