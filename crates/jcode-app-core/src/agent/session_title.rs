@@ -49,12 +49,19 @@ impl Agent {
                     "Session title set for {} ({stage:?}): {:?}",
                     self.session.id, generated
                 ));
-                if let Some(event_tx) = event_tx {
-                    let _ = event_tx.send(ServerEvent::SessionRenamed {
-                        session_id: self.session.id.clone(),
-                        title: Some(generated),
-                        display_title: self.session.display_title_or_name().to_string(),
-                    });
+                if let Some(event_tx) = event_tx
+                    && event_tx
+                        .send(ServerEvent::SessionRenamed {
+                            session_id: self.session.id.clone(),
+                            title: Some(generated),
+                            display_title: self.session.display_title_or_name().to_string(),
+                        })
+                        .is_err()
+                {
+                    logging::debug(&format!(
+                        "Session title persisted for {}, but rename event receiver disconnected",
+                        self.session.id
+                    ));
                 }
             }
             Ok(false) => {}

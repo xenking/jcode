@@ -33,7 +33,11 @@ pub(super) struct WorkerReviveContext {
 static CONTEXT: OnceLock<WorkerReviveContext> = OnceLock::new();
 
 pub(super) fn register_context(context: WorkerReviveContext) {
-    let _ = CONTEXT.set(context);
+    if CONTEXT.set(context).is_err() {
+        crate::logging::warn(
+            "Worker revival context already registered; retaining original authority",
+        );
+    }
 }
 
 /// Return the live agent for `session_id`, restoring it from disk when it is a
@@ -159,7 +163,15 @@ pub(super) fn has_open_lane(session_id: &str) -> bool {
 /// Build a continuation only when the worker has actionable unfinished work.
 /// A blocked worker is restored idle and woken by its dependency's completion.
 pub(super) fn open_lane_continuation(session_id: &str) -> Option<String> {
-    let home = crate::storage::jcode_dir().ok()?;
+    let home = match crate::storage::jcode_dir() {
+        Ok(home) => home,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Cannot prepare worker continuation for {session_id}: {error:#}"
+            ));
+            return None;
+        }
+    };
     let snapshot = crate::todo::store::load_snapshot(&home, session_id);
     let actionable: Vec<crate::todo::TodoItem> = snapshot
         .todos

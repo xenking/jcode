@@ -53,7 +53,15 @@ pub(super) async fn connection_presence_pong(
         daemon_identity: jcode_build_support::runtime_generation::serving_identity(
             jcode_build_meta::git_hash(),
         )
-        .ok(),
+        .map_or_else(
+            |error| {
+                crate::logging::warn(&format!(
+                    "Failed to read daemon identity for pong {id}: {error:#}"
+                ));
+                None
+            },
+            Some,
+        ),
     }
 }
 
