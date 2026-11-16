@@ -352,6 +352,52 @@ async fn memory_limit_is_enforced() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn resource_refusals_name_budget_and_recovery() {
+    let limits = Limits {
+        max_tool_calls: 1,
+        ..Limits::default()
+    };
+    let out = exec_with(
+        "await tools.echo({}); await tools.echo({});",
+        Map::new(),
+        limits,
+    )
+    .await;
+    let error = out.error.unwrap();
+    assert!(
+        error.contains("1 per run") && error.contains("new codemode run"),
+        "{error}"
+    );
+
+    let limits = Limits {
+        timeout: Duration::from_millis(300),
+        ..Limits::default()
+    };
+    let out = exec_with("while (true) {}", Map::new(), limits).await;
+    let error = out.error.unwrap();
+    assert!(
+        error.contains("300ms") && error.contains("split"),
+        "{error}"
+    );
+
+    let limits = Limits {
+        memory_bytes: 8 * 1024 * 1024,
+        ..Limits::default()
+    };
+    let out = exec_with(
+        "const a = []; while (true) a.push('x'.repeat(65536));",
+        Map::new(),
+        limits,
+    )
+    .await;
+    let error = out.error.unwrap();
+    assert!(
+        error.contains("8388608 bytes") && error.contains("smaller"),
+        "{error}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn tool_call_limit_is_enforced() {
     let limits = Limits {
         max_tool_calls: 3,

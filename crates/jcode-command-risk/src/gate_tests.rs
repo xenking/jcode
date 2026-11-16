@@ -68,6 +68,18 @@ fn first_attempt_at_a_risky_command_is_refused_with_a_reflection_prompt() {
 }
 
 #[test]
+fn reflection_explains_justification_length_rule() {
+    let assessment = assess("rm -rf $TARGET", &ctx());
+    let GateOutcome::Reflect { prompt } = gate(&assessment, &saying("too short")) else {
+        panic!("expected reflection");
+    };
+    assert!(
+        prompt.contains("25") && prompt.contains("bytes"),
+        "{prompt}"
+    );
+}
+
+#[test]
 fn a_blind_retry_does_not_satisfy_the_gate() {
     // This is the property that makes it more than a speed bump: repeating the
     // identical call, with no added reasoning, fails exactly as before.
