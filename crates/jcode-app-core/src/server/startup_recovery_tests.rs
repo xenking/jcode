@@ -1,6 +1,166 @@
 use super::*;
 
 #[tokio::test]
+#[ignore = "known formal finding: running-before-restart bypasses coordinator ownership"]
+#[allow(clippy::await_holding_lock)]
+async fn formal_recovery_running_worker_requires_owner() -> Result<()> {
+    let _storage_guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new()?;
+    let _env = configure_test_env(&temp);
+    let provider = Arc::new(StreamingMockProvider::default());
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("continued without owner".into()),
+        StreamEvent::MessageEnd { stop_reason: None },
+    ]);
+    let mut worker = crate::session::Session::create(None, Some("formal running worker".into()));
+    worker.add_message(
+        Role::User,
+        vec![crate::message::ContentBlock::ToolResult {
+            tool_use_id: "formal-interrupted-tool".into(),
+            content: "[Tool 'bash' interrupted by server reload]".into(),
+            is_error: Some(true),
+        }],
+    );
+    worker.save()?;
+    let swarm = "formal-running-without-owner";
+    let mut member = persisted_headless_member(&worker.id, swarm, "running", "interrupted");
+    member.report_back_to_session_id = Some("historical-owner".into());
+    let mut owner = persisted_headless_member(
+        "historical-owner",
+        swarm,
+        "stopped",
+        "client not attached after server restart",
+    );
+    owner.is_headless = false;
+    persist_swarm_state_snapshot(swarm, None, Some("historical-owner"), &[member, owner]);
+    let server = Server::new(provider);
+    server.recover_headless_sessions_on_startup().await;
+    let agent = server.sessions.read().await.get(&worker.id).cloned();
+    if let Some(agent) = agent {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if server.swarm_state.members.read().await[&worker.id].status == "ready" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert!(
+            !agent.lock().await.messages().iter().any(|message| {
+                message
+                    .content_preview()
+                    .contains("continued without owner")
+            }),
+            "interrupted work must not resume for a historical coordinator"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "known formal finding: recovery uses owner snapshot after coordinator stop"]
+#[allow(clippy::await_holding_lock)]
+async fn formal_recovery_stop_after_owner_read_prevents_continuation() -> Result<()> {
+    let _storage_guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new()?;
+    let _env = configure_test_env(&temp);
+    let provider = Arc::new(StreamingMockProvider::default());
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("continued after owner stopped".into()),
+        StreamEvent::MessageEnd { stop_reason: None },
+    ]);
+    let mut worker = crate::session::Session::create(None, Some("formal worker".into()));
+    worker.save()?;
+    crate::todo::save_todos(
+        &worker.id,
+        &[crate::todo::TodoItem {
+            id: "formal-open-lane".into(),
+            content: "unfinished work".into(),
+            status: "in_progress".into(),
+            priority: "high".into(),
+            ..Default::default()
+        }],
+    )?;
+    let swarm = "formal-stop-after-owner-read";
+    let mut member = persisted_headless_member(&worker.id, swarm, "ready", "between turns");
+    member.report_back_to_session_id = Some("formal-owner".into());
+    let mut owner = persisted_headless_member("formal-owner", swarm, "ready", "live");
+    owner.is_headless = false;
+    persist_swarm_state_snapshot(swarm, None, Some("formal-owner"), &[member, owner]);
+    let server = Arc::new(Server::new(provider));
+
+    let registration_gate = server.soft_interrupt_queues.write().await;
+    let recovering = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move { server.recover_headless_sessions_on_startup().await }
+    });
+    let agent = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(agent) = server.sessions.read().await.get(&worker.id).cloned() {
+                break agent;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    // Recovery holds the agent while registering its interrupt queue. Queue
+    // our lock first, then let it read owner_live and park at was_interrupted.
+    let agent_gate = agent.lock();
+    tokio::pin!(agent_gate);
+    assert!(futures::poll!(&mut agent_gate).is_pending());
+    drop(registration_gate);
+    let agent_gate = agent_gate.await;
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    let cancelled = crate::server::swarm::cancel_spawned_descendant_turns(
+        "formal-owner",
+        &server.swarm_state.members,
+        &server.swarm_state.swarms_by_id,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        cancelled.is_empty(),
+        "no worker turn exists at the stop boundary"
+    );
+    crate::server::update_member_status(
+        "formal-owner",
+        "stopped",
+        Some("stopped by user".into()),
+        &server.swarm_state.members,
+        &server.swarm_state.swarms_by_id,
+        None,
+        None,
+        None,
+    )
+    .await;
+    drop(agent_gate);
+    timeout(Duration::from_secs(5), recovering).await??;
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if server.swarm_state.members.read().await[&worker.id].status == "ready" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert!(
+        !agent.lock().await.messages().iter().any(|message| {
+            message
+                .content_preview()
+                .contains("continued after owner stopped")
+        }),
+        "a stopped coordinator must not authorize a new worker continuation"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn startup_recovery_rechecks_coordinator_stopped_after_load() -> Result<()> {
     let _storage_guard = crate::storage::lock_test_env();
