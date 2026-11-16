@@ -862,7 +862,7 @@ mod ssh_slash_tests {
                     assert_eq!(request["command"], "logout");
                     assert_eq!(request["args"], serde_json::json!(["openai"]));
                 }
-                if command.starts_with("/mode") {
+                if command.split_whitespace().next() == Some("/mode") {
                     assert_eq!(request["command"], "mode");
                     assert!(
                         app.active_skill.is_none(),
