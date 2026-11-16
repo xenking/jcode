@@ -260,7 +260,7 @@ fn bundle_bridge_socket(app: &Path, home: &Path, runtime: &Path) -> Option<PathB
             continue;
         };
         let Some(_argv0) = parts.next() else { continue };
-        if parts.next() != Some("api-bridge") {
+        if !parts.any(|argument| argument == "api-bridge") {
             continue;
         }
         let Some(executable) = executable_of(pid) else {
@@ -476,7 +476,7 @@ mod tests {
 #include <stdio.h>
 #include <string.h>
 int main(int argc, char **argv) {
-    if (argc == 2 && strcmp(argv[1], "api-bridge") == 0) {
+    if (argc == 3 && strcmp(argv[2], "api-bridge") == 0) {
         int fd = socket(AF_UNIX, SOCK_STREAM, 0);
         struct sockaddr_un addr = {0}; addr.sun_family = AF_UNIX;
         snprintf(addr.sun_path, sizeof(addr.sun_path), "%s/jcode-api.sock", getenv("JCODE_RUNTIME_DIR"));
@@ -484,7 +484,7 @@ int main(int argc, char **argv) {
         for (;;) pause();
     }
     pid_t child = fork();
-    if (child == 0) execl(getenv("BRIDGE_EXE"), getenv("BRIDGE_EXE"), "api-bridge", NULL);
+    if (child == 0) execl(getenv("BRIDGE_EXE"), getenv("BRIDGE_EXE"), "--no-update", "api-bridge", NULL);
     FILE *file = fopen(getenv("BRIDGE_PID"), "w"); if (!file) return 3;
     fprintf(file, "%d", child); fclose(file); waitpid(child, NULL, 0); return 0;
 }

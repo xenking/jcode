@@ -28,8 +28,11 @@ resumes the same journal, rather than submitting another rollout.
 1. Probe the candidate using `version --json`, checking the reported `git_hash`.
 2. Install the immutable version and probe the installed binary again.
 3. Journal and update the shared-server and current channels.
-4. Drain actual active turns and running members by default. `--now` is allowed
-   for agents because durable recovery owns continuation admission.
+4. Drain the canonical turn-activity snapshot by default, including the initiating
+   turn because submission already returned. No streaming-marker/roster union
+   decides quiescence. `server:turn_activity` exposes the snapshot and its derived
+   busy session IDs to CLI planning. `--now` is allowed for agents because durable
+   recovery owns continuation admission.
 5. Probe again, persist `exec_pending`, and request a pinned reload.
 6. Once the replacement accept loops are live, startup records `serving` and
    resumes Desktop swap and verification.
@@ -75,5 +78,15 @@ CLI generations with different compiled labels and a small fixture Desktop that
 owns a real bundled API bridge. It checks caller SIGKILL after acknowledgement,
 real daemon exec and startup replay, a SIGKILL after backup copy before swap,
 and a candidate that passes the version probe but exits immediately on serve.
+It additionally corrupts the incoming Sparkle metadata and proves verification
+failure restores both the previous application and previous daemon generation.
 A PATH-scoped fixture `ditto` creates the backup crash window without adding a
 fault-injection environment variable to production Rust code.
+
+Acceptance on November 17, 2026 passed all five outcomes using distinct actual
+CLI labels `a11111111` and `b22222222`: caller death, same-PID exec/startup resume,
+backup/swap crash replay, unserved-generation fallback, and pair rollback after
+verification failure. Pong confirmed the new hash, incremented generation and
+journal reload ID. The canonical activity endpoint and `rollout --status` were
+read through their real interfaces. The fixture Desktop owns a real bundled
+API bridge, not a simulated successful verification response.

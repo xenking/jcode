@@ -6,11 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
 
-use super::{SwarmMember, rollout_fs};
+use super::rollout_fs;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Intent {
@@ -211,13 +209,11 @@ impl Store {
     }
 }
 
-type Members = Arc<RwLock<std::collections::HashMap<String, SwarmMember>>>;
-
 pub(super) fn is_control_command(command: &str) -> bool {
     command == "rollout_status" || command.starts_with("rollout_submit:")
 }
 
-pub(super) fn control(command: &str, members: Members) -> Result<String> {
+pub(super) fn control(command: &str) -> Result<String> {
     if command == "rollout_status" {
         return Ok(serde_json::to_string(&status()?)?);
     }
@@ -225,12 +221,12 @@ pub(super) fn control(command: &str, members: Members) -> Result<String> {
         .strip_prefix("rollout_submit:")
         .context("unknown rollout control command")?;
     let intent: Intent = serde_json::from_str(raw).context("invalid rollout intent")?;
-    Ok(serde_json::to_string(&submit(intent, members)?)?)
+    Ok(serde_json::to_string(&submit(intent)?)?)
 }
 
 /// The intent is durable before acknowledgement. Dropping the submitting
 /// connection cannot cancel this daemon-owned task.
-pub(super) fn submit(intent: Intent, members: Members) -> Result<Journal> {
+pub(super) fn submit(intent: Intent) -> Result<Journal> {
     if intent.app != app_path() {
         bail!("rollout app path differs from daemon JCODE_ROLLOUT_APP");
     }
@@ -285,7 +281,7 @@ pub(super) fn submit(intent: Intent, members: Members) -> Result<Journal> {
         &journal,
         "intent accepted; build/package completed CLI-side",
     )?;
-    spawn_executor(store, journal.clone(), members);
+    spawn_executor(store, journal.clone());
     Ok(journal)
 }
 
@@ -296,9 +292,9 @@ fn validate_label(label: &str) -> Result<()> {
     Ok(())
 }
 
-fn spawn_executor(store: Store, mut journal: Journal, members: Members) {
+fn spawn_executor(store: Store, mut journal: Journal) {
     tokio::spawn(async move {
-        if let Err(error) = execute(&store, &mut journal, &members).await {
+        if let Err(error) = execute(&store, &mut journal).await {
             journal.error = Some(format!("{error:#}"));
             if journal.mutations.last().is_some_and(|m| m.result.is_none()) {
                 let _ = store.after(&mut journal, &format!("failed: {error:#}"));
@@ -314,7 +310,7 @@ fn spawn_executor(store: Store, mut journal: Journal, members: Members) {
 
 /// Called once the new daemon has live accept loops, before slow recovery.
 /// The lock is released by exec (CLOEXEC) and prevents two reconcilers running.
-pub(super) fn reconcile_on_startup(members: Members) -> Result<()> {
+pub(super) fn reconcile_on_startup() -> Result<()> {
     let path = journal_path()?;
     let Some(store) = Store::acquire(path.clone())? else {
         return Ok(());
@@ -341,7 +337,7 @@ pub(super) fn reconcile_on_startup(members: Members) -> Result<()> {
                 journal.intent.cli, journal.reload_id, identity
             ));
             store.phase(&mut journal, Phase::RollingBack)?;
-            spawn_executor(store, journal, members);
+            spawn_executor(store, journal);
             return Ok(());
         }
         journal.reload_id = journal.reload_id.or(identity.reload_id);
@@ -355,11 +351,11 @@ pub(super) fn reconcile_on_startup(members: Members) -> Result<()> {
         }
         store.phase(&mut journal, Phase::Serving)?;
     }
-    spawn_executor(store, journal, members);
+    spawn_executor(store, journal);
     Ok(())
 }
 
-async fn execute(store: &Store, journal: &mut Journal, _members: &Members) -> Result<()> {
+async fn execute(store: &Store, journal: &mut Journal) -> Result<()> {
     if matches!(journal.phase, Phase::Submitted | Phase::Staging) {
         store.phase(journal, Phase::Staging)?;
         preflight(&journal.intent.binary, &journal.intent.cli).await?;
@@ -381,7 +377,6 @@ async fn execute(store: &Store, journal: &mut Journal, _members: &Members) -> Re
             tokio::time::Instant::now() + Duration::from_secs(journal.intent.drain_timeout_secs);
         loop {
             let mut busy = crate::turn_activity::global().snapshot().busy_sessions();
-            busy.retain(|id| Some(id) != journal.intent.triggering_session.as_ref());
             busy.sort();
             busy.dedup();
             if journal.intent.now || busy.is_empty() {

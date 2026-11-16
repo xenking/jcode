@@ -476,11 +476,22 @@ pub(super) async fn handle_debug_client(
                 session_id: requested_session,
             } => {
                 let (namespace, rollout_command) = parse_namespaced_command(&command);
-                if namespace == "server" && super::rollout::is_control_command(rollout_command) {
-                    let (ok, output) = match super::rollout::control(
-                        rollout_command,
-                        Arc::clone(&swarm_members),
-                    ) {
+                let owner_response = match (namespace, rollout_command) {
+                    ("server", "turn_activity") => {
+                        let snapshot = crate::turn_activity::global().snapshot();
+                        Some(Ok(serde_json::json!({
+                            "busy_sessions": snapshot.busy_sessions(),
+                            "activity": snapshot,
+                        })
+                        .to_string()))
+                    }
+                    ("server", command) if super::rollout::is_control_command(command) => {
+                        Some(super::rollout::control(command))
+                    }
+                    _ => None,
+                };
+                if let Some(response) = owner_response {
+                    let (ok, output) = match response {
                         Ok(output) => (true, output),
                         Err(error) => (false, format!("{error:#}")),
                     };

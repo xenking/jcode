@@ -123,6 +123,7 @@ class Host:
         self.env.update(HOME=str(self.home), JCODE_HOME=str(self.jcode_home), JCODE_RUNTIME_DIR=str(self.runtime),
                         JCODE_SOCKET=str(self.socket), JCODE_API_SOCKET=str(self.runtime / "jcode-api.sock"),
                         JCODE_ROLLOUT_APP=str(self.app), JCODE_DEFERRED_AUTH_BOOTSTRAP="1",
+                        ANTHROPIC_API_KEY="rollout-fixture-not-a-real-key", JCODE_NO_TELEMETRY="1",
                         ROLLOUT_DESKTOP_LAUNCHES=str(self.launches))
         if pause_backup:
             commands = root / "commands"
@@ -134,10 +135,14 @@ class Host:
 
     def start(self, binary=None):
         log = open(self.root / f"daemon-{len(self.children)}.log", "wb")
-        child = subprocess.Popen([str(binary or self.old), "--no-update", "--provider", "anthropic", "serve", "--socket", str(self.socket)],
+        child = subprocess.Popen([str(binary or self.old), "--no-update", "--provider", "anthropic-api", "serve", "--socket", str(self.socket)],
                                  env=self.env, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
         self.children.append(child)
-        wait_for("isolated daemon Pong", lambda: request(self.socket, {"type": "ping", "id": 1}).get("type") == "pong")
+        def ready():
+            assert child.poll() is None, (self.root / f"daemon-{len(self.children) - 1}.log").read_text()
+            return request(self.socket, {"type": "ping", "id": 1}).get("type") == "pong"
+
+        wait_for("isolated daemon Pong", ready)
         return child
 
     def intent(self, binary=None, label=None):
@@ -190,6 +195,11 @@ def caller_death_and_exec(root, old, new):
         state = wait_for("rollout completion after caller SIGKILL and real exec", host.completed)
         assert state["owner_pid"] == daemon.pid, "exec should replace, not fork the serving daemon"
         assert state["serving"] and state["desktop_swapped"]
+        identity = request(host.socket, {"type": "ping", "id": 1})["daemon_identity"]
+        assert identity["git_hash"].startswith(host.new_label), identity
+        assert identity["generation"] >= 2 and identity["reload_id"] == state["reload_id"], identity
+        activity = request(host.debug, dict(type="debug_command", id=9, command="server:turn_activity"))
+        assert activity["ok"] and json.loads(activity["output"])["busy_sessions"] == [], activity
         assert (Path(state["backup_app"]) / "old-bundle").exists()
         assert not (host.app / "old-bundle").exists()
         assert host.launches.read_text().count("\n") == 1, "startup reconciliation duplicated Desktop launch"
@@ -233,7 +243,7 @@ def dead_generation(root, old, new):
         host.submit(intent)
         daemon.wait(timeout=90)
         assert host.state()["phase"] == "exec_pending", host.state()
-        result = subprocess.run([str(old), "--no-update", "--provider", "anthropic", "server", "start"], env=host.env, capture_output=True, text=True, timeout=120)
+        result = subprocess.run([str(old), "--no-update", "--provider", "anthropic-api", "server", "start"], env=host.env, capture_output=True, text=True, timeout=120)
         assert result.returncode == 0, (result.stdout, result.stderr)
         pong = wait_for("previous generation respawn", lambda: request(host.socket, {"type": "ping", "id": 1}))
         identity = pong.get("daemon_identity") or {}

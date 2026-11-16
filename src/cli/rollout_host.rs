@@ -10,8 +10,7 @@ use std::time::Duration;
 const TARGET: &str = "aarch64-apple-darwin";
 const DEVELOPER_DIR: &str = "/Applications/Xcode.app/Contents/Developer";
 
-/// `jcode rollout` entry point: map the flags, run on this machine, and
-/// fail the command when verify rolled the pair back.
+/// Prepare a selected pair, submit its durable intent, or inspect its journal.
 pub(crate) fn run_cli(args: super::args::RolloutArgs) -> Result<()> {
     if args.status {
         println!(
@@ -38,7 +37,7 @@ pub(crate) fn run_cli(args: super::args::RolloutArgs) -> Result<()> {
 pub struct MacHost {
     layout: Layout,
     jcode_home: PathBuf,
-    /// The session running this command, if any: never waited for.
+    /// The initiating session, used for durable reload recovery attribution.
     own_session: Option<String>,
     daemon_socket: PathBuf,
 }
@@ -150,6 +149,17 @@ impl MacHost {
         command
     }
 
+    fn control_socket(&self) -> Result<PathBuf> {
+        let filename = self
+            .daemon_socket
+            .file_name()
+            .and_then(|s| s.to_str())
+            .context("invalid daemon socket")?;
+        Ok(self
+            .daemon_socket
+            .with_file_name(filename.replace(".sock", "-debug.sock")))
+    }
+
     fn daemon(&self) -> Option<(u32, Option<String>)> {
         let identity = daemon_identity(&self.daemon_socket)?;
         let label = Some(identity.git_hash.chars().take(9).collect());
@@ -234,28 +244,9 @@ impl Host for MacHost {
     }
 
     fn busy_sessions(&self) -> Result<Vec<String>> {
-        // Streaming markers only cover the model call; a worker running a
-        // tool between calls is still mid-turn, and its swarm status says so.
-        let workers = self.workers()?;
-        let mut busy: Vec<String> = crate::storage::streaming_session_ids()
-            .into_iter()
-            .filter(|id| {
-                workers
-                    .iter()
-                    .find(|(worker, _)| worker == id)
-                    .is_none_or(|(_, status)| status == "running")
-            })
-            .chain(
-                workers
-                    .iter()
-                    .filter(|(_, status)| status == "running")
-                    .map(|(id, _)| id.clone()),
-            )
-            .filter(|id| Some(id) != self.own_session.as_ref())
-            .collect();
-        busy.sort();
-        busy.dedup();
-        Ok(busy)
+        let snapshot = daemon_control(&self.control_socket()?, "server:turn_activity")?;
+        serde_json::from_value(snapshot["busy_sessions"].clone())
+            .context("daemon did not expose canonical turn activity")
     }
 
     fn workers(&self) -> Result<Vec<(String, String)>> {
@@ -352,20 +343,20 @@ impl Host for MacHost {
             drain_timeout_secs: options.drain_timeout.as_secs(),
             triggering_session: self.own_session.clone(),
         };
-        let filename = self
-            .daemon_socket
-            .file_name()
-            .and_then(|s| s.to_str())
-            .context("invalid daemon socket")?;
-        let socket = self
-            .daemon_socket
-            .with_file_name(filename.replace(".sock", "-debug.sock"));
-        submit_intent(&socket, &intent)
+        submit_intent(&self.control_socket()?, &intent)
     }
 }
 
 #[cfg(unix)]
 fn submit_intent(socket: &Path, intent: &crate::server::rollout::Intent) -> Result<String> {
+    let command = format!("server:rollout_submit:{}", serde_json::to_string(intent)?);
+    let journal: crate::server::rollout::Journal =
+        serde_json::from_value(daemon_control(socket, &command)?)?;
+    Ok(journal.id)
+}
+
+#[cfg(unix)]
+fn daemon_control(socket: &Path, command: &str) -> Result<serde_json::Value> {
     use std::io::{BufRead, BufReader, Write};
     let mut stream = std::os::unix::net::UnixStream::connect(socket).with_context(|| {
         format!(
@@ -375,7 +366,6 @@ fn submit_intent(socket: &Path, intent: &crate::server::rollout::Intent) -> Resu
     })?;
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
-    let command = format!("server:rollout_submit:{}", serde_json::to_string(intent)?);
     writeln!(
         stream,
         "{}",
@@ -393,17 +383,22 @@ fn submit_intent(socket: &Path, intent: &crate::server::rollout::Intent) -> Resu
                 .unwrap_or("invalid response")
         );
     }
-    let journal: crate::server::rollout::Journal = serde_json::from_str(
+    serde_json::from_str(
         event["output"]
             .as_str()
-            .context("missing rollout journal")?,
-    )?;
-    Ok(journal.id)
+            .context("missing daemon control response")?,
+    )
+    .context("invalid daemon control JSON")
 }
 
 #[cfg(not(unix))]
 fn submit_intent(_socket: &Path, _intent: &crate::server::rollout::Intent) -> Result<String> {
     bail!("daemon-owned rollout requires Unix")
+}
+
+#[cfg(not(unix))]
+fn daemon_control(_socket: &Path, _command: &str) -> Result<serde_json::Value> {
+    bail!("daemon control requires Unix")
 }
 
 fn daemon_identity(socket: &Path) -> Option<crate::protocol::DaemonIdentity> {
