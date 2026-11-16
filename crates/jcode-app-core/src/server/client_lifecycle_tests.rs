@@ -314,6 +314,20 @@ async fn desktop_skill_message_crosses_real_bridge_and_daemon_into_journal() {
         .unwrap();
         assert!(client.supports("skill_message_v1"));
         let session = client.create_session(Some(project_path)).unwrap();
+        let catalog = client
+            .runtime_command(
+                &session.session_id,
+                jcode_sdk::api::RuntimeCommand::Skills,
+                vec![],
+            )
+            .unwrap();
+        assert!(
+            catalog.data["skills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|skill| skill["name"] == "poteto-mode")
+        );
         let events = client.events(Some(&session.session_id));
         client
             .send_skill_message(

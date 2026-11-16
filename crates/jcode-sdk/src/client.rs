@@ -958,7 +958,7 @@ impl JcodeClient {
         self.send_message_with_reminder(session_id, content, images, None, wait_for_accept)
     }
 
-    /// Send a prompt with a skill resolved and activated by the daemon.
+    /// Send a prompt with a skill resolved and activated by the daemon, not the client.
     pub fn send_skill_message(
         &self,
         session_id: &str,

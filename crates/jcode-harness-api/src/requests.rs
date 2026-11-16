@@ -143,7 +143,7 @@ pub enum ApiRequest {
         no_reply: bool,
     },
 
-    /// Send a user message with a daemon-resolved skill, like the TUI.
+    /// Send a user message with a daemon-resolved skill, preserving TUI journal semantics.
     SendSkillMessage {
         session_id: String,
         content: String,
