@@ -123,10 +123,10 @@ pub(super) fn render_background_compact(info: &BackgroundInfo, width: usize) -> 
 }
 
 fn swarm_member_label(member: &SwarmMemberStatus) -> String {
-    member
-        .friendly_name
-        .clone()
-        .unwrap_or_else(|| member.session_id.chars().take(8).collect())
+    member.friendly_name.clone().unwrap_or_else(|| {
+        jcode_tui_render::truncate_line_to_width(&Line::from(member.session_id.clone()), 8)
+            .to_string()
+    })
 }
 
 fn swarm_status_style(status: &str) -> (Color, &'static str) {

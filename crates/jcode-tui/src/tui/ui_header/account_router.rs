@@ -509,7 +509,10 @@ pub(super) fn fit_account_row(mut row: Line<'static>, budget: usize) -> Line<'st
             // These are the shared renderer's filled and empty spans. Preserve
             // its colors and convention, shrinking only their cell counts.
             for span in &mut quota[2..4] {
-                span.content = span.content.chars().take(1).collect::<String>().into();
+                span.content =
+                    jcode_tui_render::truncate_line_to_width(&Line::from(span.clone()), 1)
+                        .to_string()
+                        .into();
             }
         }
     }

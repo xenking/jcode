@@ -19,10 +19,10 @@ use ratatui::prelude::*;
 use std::collections::{HashMap, HashSet};
 
 fn member_label(member: &SwarmMemberStatus) -> String {
-    member
-        .friendly_name
-        .clone()
-        .unwrap_or_else(|| member.session_id.chars().take(8).collect())
+    member.friendly_name.clone().unwrap_or_else(|| {
+        jcode_tui_render::truncate_line_to_width(&Line::from(member.session_id.clone()), 8)
+            .to_string()
+    })
 }
 
 /// Session icon (emoji) for a member, derived from its friendly name (session

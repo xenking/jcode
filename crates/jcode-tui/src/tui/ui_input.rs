@@ -1982,12 +1982,12 @@ fn overscroll_git_branch(data: &crate::tui::info_widget::InfoWidgetData) -> Opti
     if branch.is_empty() {
         return None;
     }
-    let mut label: String = branch.chars().take(24).collect();
-    if branch.chars().count() > 24 {
-        label.push('…');
-    }
-    Some(label)
+    Some(overscroll_truncate_label(branch, 24))
 }
+
+#[cfg(test)]
+#[path = "ui_input/chrome_contract_tests.rs"]
+mod chrome_contract_tests;
 
 /// Git status counts using the git widget palette. Level 0 is the full
 /// `~modified +staged ?untracked ↑ahead ↓behind` form, level 1 collapses the

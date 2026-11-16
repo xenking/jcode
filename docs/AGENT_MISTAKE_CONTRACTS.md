@@ -24,6 +24,10 @@ and rejects production defaults or dependencies enabling test-only isolation.
 Runtime consumers need their own unconditional dev dependency, rather than
 accidentally borrowing feature unification from a workspace test run. Optional
 runtime dependencies remain optional for lightweight test configurations.
+The gate also rejects the lower-level `test-isolated-hooks` feature in
+production dependencies and defaults, including renamed and forwarded features.
+Its regression tests fail against the original gate, which only checked
+`test-support`.
 
 | Gate | Real bad tree | Expected failure | Current tree |
 | --- | --- | --- | --- |
@@ -42,3 +46,44 @@ python3 scripts/test_check_test_isolation.py
 No allowances or baseline increases are provided. A failure names the Cargo
 feature or dev dependency to fix. Existing behavioral home-isolation and
 hook-marker tests remain the runtime backstop.
+
+## Chrome measured in characters instead of terminal cells
+
+One corrective incident in the window: `776b05d05`. It fixed scalar-count
+truncation in compact status labels, but left the git branch label using the
+same pattern. Earlier originating fixes `3c8245b6c` and `d0b2a5e7b` corrected
+emoji and CJK overflow caused by counting characters instead of display cells.
+Those two commits precede the evidence window. Repository-session corrections
+also explicitly called out cell-bounded compact rows, not character bounds.
+
+The shared `jcode-tui-render` truncators already own cell-bounded truncation.
+Header, status and info-widget callers now use those helpers and
+`UnicodeWidthStr::width`. The git branch label uses the existing status fitter,
+which also replaces control characters so a branch cannot add rows.
+
+The lint rejects `.chars().count()` and `.chars().take()` in chrome renderers,
+including new info widgets and nested modules. A Rust string still needs scalar
+operations for text editing, so a global prohibition or a different string type
+would reject legitimate input and prose operations. The gate checks the
+presentation boundary instead. It ignores comments, literals and test-only code,
+and reports the file, line and replacement helper.
+
+| Gate | Real bad tree | Expected failure | Current tree |
+| --- | --- | --- | --- |
+| `python3 scripts/check_tui_chrome.py` | `2ad342b23edd00104d3bccc10b6f67ec11bf1d92` (parent of `776b05d05`) | exit 1, `ui_input.rs:1939` and `:1942`: use display cells and shared truncation | exit 0 |
+
+```bash
+past="$(mktemp -d)"
+git archive 2ad342b23edd00104d3bccc10b6f67ec11bf1d92 crates/jcode-tui/src/tui | tar -x -C "$past"
+python3 scripts/check_tui_chrome.py --root "$past" # exits 1
+python3 scripts/check_tui_chrome.py                # exits 0
+python3 scripts/test_check_tui_chrome.py
+justrust test -p jcode-tui --lib chrome_contract_tests
+```
+
+The renderer tests exercise CJK, emoji, combining characters and control
+characters at cell budgets from zero through 79. Both gates and their Python
+regression suites run in CI and `scripts/check_guardrails.sh`. Neither gate has
+an allowance list or an adjustable baseline. The broad no-wrap rule remains:
+scalar-width enforcement does not prove every future layout has only one row.
+The fully replaced scalar-count prose was removed from AGENTS.md.

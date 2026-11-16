@@ -134,6 +134,13 @@ jobs:
           python3 scripts/test_check_test_isolation.py
           python3 scripts/check_test_isolation.py
 
+      - name: Enforce display-cell chrome widths
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          python3 scripts/test_check_tui_chrome.py
+          python3 scripts/check_tui_chrome.py
+
   release-automation:
     name: Release Automation
     runs-on: ubuntu-latest

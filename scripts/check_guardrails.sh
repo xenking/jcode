@@ -31,6 +31,7 @@ done
 
 FAILED=()
 JOBS="${CARGO_BUILD_JOBS:-2}"
+RUST_RUNNER="${CARGO:-cargo}"
 
 run_gate() {
     local label=$1
@@ -42,7 +43,7 @@ run_gate() {
         return 0
     fi
     printf '\r❌ %s\n' "$label"
-    printf '%s\n' "$output" | tail -20 | sed 's/^/    /'
+    printf '%s\n' "$output"
     FAILED+=("$label")
     return 1
 }
@@ -73,9 +74,9 @@ if $SKIP_SLOW; then
     echo "⏭  cargo check / clippy / machete (--skip-slow)"
 else
     run_gate "cargo check --all-targets --all-features" \
-        cargo check --all-targets --all-features -j "$JOBS"
+        "$RUST_RUNNER" check --all-targets --all-features -j "$JOBS"
     run_gate "cargo clippy -- -D warnings" \
-        cargo clippy --all-targets --all-features -j "$JOBS" -- -D warnings
+        "$RUST_RUNNER" clippy --all-targets --all-features -j "$JOBS" -- -D warnings
 fi
 
 # Only the Windows CI jobs pass --locked, so a stale lockfile otherwise passes
@@ -90,6 +91,8 @@ run_gate "crate dependency boundaries" python3 scripts/check_dependency_boundari
 run_gate "wildcard re-export ratchet" python3 scripts/check_wildcard_reexport_budget.py
 run_gate "test isolation gate contracts" python3 scripts/test_check_test_isolation.py
 run_gate "test home and hook isolation" python3 scripts/check_test_isolation.py
+run_gate "chrome width gate contracts" python3 scripts/test_check_tui_chrome.py
+run_gate "chrome uses display cells" python3 scripts/check_tui_chrome.py
 
 # Onboarding state-space invariants. The onboarding flow is a graph, and the
 # properties that keep users unstuck (no dead ends, every failure has a recovery
@@ -98,7 +101,7 @@ run_gate "test home and hook isolation" python3 scripts/check_test_isolation.py
 # invariant that nobody could see by reading one screen's code, so this gate is
 # cheap insurance against the whole class.
 run_gate "onboarding state-space invariants" \
-    cargo test --profile selfdev -p jcode-tui -j "$JOBS" onboarding_graph::
+    "$RUST_RUNNER" test --profile selfdev -p jcode-tui -j "$JOBS" onboarding_graph::
 
 if $SKIP_SLOW; then
     :
