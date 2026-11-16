@@ -60,29 +60,6 @@ impl AskResponse {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn selected_comments_are_rendered_for_the_model() {
-        let questions = vec![AskQuestion {
-            question: "Which?".into(),
-            header: None,
-            options: vec![AskOption {
-                label: "A".into(),
-                description: None,
-            }],
-            multi_select: false,
-            allow_other: false,
-        }];
-        let response: AskResponse =
-            serde_json::from_str(r#"{"answers":[{"selected":["A"],"comments":{"A":"because"}}]}"#)
-                .unwrap();
-        assert!(format_ask_answers(&questions, &response).contains("because"));
-    }
-}
-
 /// Validate question shape; returns a model-facing error message.
 pub fn validate_ask_questions(questions: &[AskQuestion]) -> Result<(), String> {
     if questions.is_empty() || questions.len() > ASK_MAX_QUESTIONS {
@@ -159,4 +136,27 @@ pub fn format_ask_answers(questions: &[AskQuestion], response: &AskResponse) -> 
         out.push_str(&format!("{}. {} -> {}\n", i + 1, q.question, text));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selected_comments_are_rendered_for_the_model() {
+        let questions = vec![AskQuestion {
+            question: "Which?".into(),
+            header: None,
+            options: vec![AskOption {
+                label: "A".into(),
+                description: None,
+            }],
+            multi_select: false,
+            allow_other: false,
+        }];
+        let response: AskResponse =
+            serde_json::from_str(r#"{"answers":[{"selected":["A"],"comments":{"A":"because"}}]}"#)
+                .unwrap();
+        assert!(format_ask_answers(&questions, &response).contains("because"));
+    }
 }

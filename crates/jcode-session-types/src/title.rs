@@ -266,7 +266,7 @@ pub fn sanitize_title(raw: &str) -> Option<String> {
         return None;
     }
     let text = text
-        .trim_end_matches(|c: char| matches!(c, '.' | ',' | ':' | ';' | '!' | '?' | '…' | ' '))
+        .trim_end_matches(['.', ',', ':', ';', '!', '?', '…', ' '])
         .trim();
     if text.is_empty() {
         return None;
