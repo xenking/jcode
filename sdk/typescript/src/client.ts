@@ -772,6 +772,61 @@ export class JcodeClient extends EventEmitter {
     return messages;
   }
 
+  async getHistoryPage(sessionId: string, before: string | null = null): Promise<{ messages: HistoryMessage[]; images: RenderedImage[]; before: string | null }> {
+    let cursor = before;
+    const rows: string[] = [];
+    let partial: { index: number; start: number; total: number; pieces: string[] } | undefined;
+    do {
+      const frame = await this.expectReply({ req: "get_history_page", session_id: sessionId, before: cursor, limit: 128 }, "history_page");
+      if (!frame.fragments.length && frame.before !== null) throw new HarnessError("protocol", "Empty history page with cursor");
+      for (const fragment of frame.fragments) {
+        const end = fragment.start + Buffer.byteLength(fragment.text, "utf8");
+        if (fragment.start < 0 || end > fragment.total) throw new HarnessError("protocol", "Invalid history fragment");
+        if (partial) {
+          if (fragment.index !== partial.index || fragment.total !== partial.total || end !== partial.start) throw new HarnessError("protocol", "Discontinuous history fragment");
+          partial.pieces.push(fragment.text);
+          if (fragment.start === 0) {
+            rows.push(partial.pieces.reverse().join(""));
+            partial = undefined;
+          } else partial.start = fragment.start;
+        } else {
+          if (end !== fragment.total) throw new HarnessError("protocol", "Incomplete history fragment tail");
+          if (fragment.start === 0) rows.push(fragment.text);
+          else partial = { index: fragment.index, start: fragment.start, total: fragment.total, pieces: [fragment.text] };
+        }
+      }
+      cursor = frame.before;
+      if (partial && cursor === null) throw new HarnessError("protocol", "Truncated history record");
+    } while (partial);
+    const messages: HistoryMessage[] = [];
+    const images: RenderedImage[] = [];
+    let users = 0;
+    for (const row of rows.reverse()) {
+      const record = JSON.parse(row) as { message: HistoryMessage; images: RenderedImage[] };
+      for (const image of record.images) {
+        if (image.history_message_index != null) image.history_message_index += messages.length;
+        if (image.anchor?.kind === "user_prompt") image.anchor.ordinal += users;
+        images.push(image);
+      }
+      if (record.message.role === "user") users++;
+      messages.push(record.message);
+    }
+    return { messages, images, before: cursor };
+  }
+
+  async getHistoryImage(sessionId: string, key: string): Promise<string> {
+    let data = "";
+    let offset = 0;
+    for (;;) {
+      const frame = await this.expectReply({ req: "get_history_image_chunk", session_id: sessionId, key, offset }, "history_image_chunk");
+      const bytes = Buffer.byteLength(frame.data, "utf8");
+      if (frame.key !== key || frame.offset !== offset || (!bytes && offset < frame.total) || offset + bytes > frame.total) throw new HarnessError("protocol", "Invalid image chunk");
+      data += frame.data;
+      offset += bytes;
+      if (offset === frame.total) return data;
+    }
+  }
+
   async getCompactedHistory(sessionId: string, visibleMessages: number) {
     return this.expectReply(
       { req: "get_compacted_history", session_id: sessionId, visible_messages: visibleMessages },

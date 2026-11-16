@@ -57,6 +57,20 @@ pub enum ApiEvent {
         images: Vec<RenderedImage>,
     },
 
+    HistoryPage {
+        session_id: String,
+        fragments: Vec<serde_json::Value>,
+        before: Option<String>,
+    },
+
+    HistoryImageChunk {
+        session_id: String,
+        key: String,
+        offset: usize,
+        total: usize,
+        data: String,
+    },
+
     /// Expanded archived transcript window and its remaining history.
     CompactedHistory {
         session_id: String,

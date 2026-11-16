@@ -878,6 +878,8 @@ impl Request {
             Request::GetHistory { id } => *id,
             Request::GetModelCatalog { id, .. } => *id,
             Request::GetCompactedHistory { id, .. } => *id,
+            Request::GetHistoryPage { id, .. } => *id,
+            Request::GetHistoryImageChunk { id, .. } => *id,
             Request::Reload { id, .. } => *id,
             Request::UpgradeRuntime { id, .. } => *id,
             Request::ResumeSession { id, .. } => *id,

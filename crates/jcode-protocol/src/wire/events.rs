@@ -786,6 +786,24 @@ pub enum ServerEvent {
         applets: jcode_applet_types::AgentApplets,
     },
 
+    #[serde(rename = "history_page")]
+    HistoryPage {
+        id: u64,
+        session_id: String,
+        fragments: Vec<serde_json::Value>,
+        before: Option<String>,
+    },
+
+    #[serde(rename = "history_image_chunk")]
+    HistoryImageChunk {
+        id: u64,
+        session_id: String,
+        key: String,
+        offset: usize,
+        total: usize,
+        data: String,
+    },
+
     /// Expanded compacted-history window (response to GetCompactedHistory).
     #[serde(rename = "compacted_history")]
     CompactedHistory {

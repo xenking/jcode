@@ -26,6 +26,7 @@ use super::client_session::{
 };
 use super::client_state::{
     handle_get_compacted_history, handle_get_history, handle_get_model_catalog, handle_get_state,
+    handle_history_image_chunk, handle_history_page,
 };
 use super::client_writer::write_direct_event;
 use super::comm_await::{CommAwaitMembersContext, handle_comm_await_members};
@@ -2092,6 +2093,13 @@ pub(super) async fn handle_client(
                 if let Some(snapshot) = try_available_models_snapshot(&agent).await {
                     last_available_models_snapshot = Some(snapshot);
                 }
+            }
+
+            Request::GetHistoryPage { id, before, limit } => {
+                if handle_history_page(id, &client_session_id, &agent, &writer, before, limit).await.is_err() { break; }
+            }
+            Request::GetHistoryImageChunk { id, key, offset } => {
+                if handle_history_image_chunk(id, &client_session_id, &agent, &writer, key, offset).await.is_err() { break; }
             }
 
             Request::GetCompactedHistory {

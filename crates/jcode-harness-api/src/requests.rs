@@ -202,6 +202,18 @@ pub enum ApiRequest {
         session_id: String,
     },
 
+    GetHistoryPage {
+        session_id: String,
+        before: Option<String>,
+        limit: usize,
+    },
+
+    GetHistoryImageChunk {
+        session_id: String,
+        key: String,
+        offset: usize,
+    },
+
     /// Expand the archived portion of an attached session's transcript.
     GetCompactedHistory {
         session_id: String,

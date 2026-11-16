@@ -468,7 +468,9 @@ pub(super) async fn handle_get_model_catalog(
 
 #[path = "history_paging.rs"]
 mod history_paging;
-pub(super) use history_paging::handle_get_compacted_history;
+pub(super) use history_paging::{
+    handle_get_compacted_history, handle_history_image_chunk, handle_history_page,
+};
 
 /// Window canonical rendered entries, not raw provider messages. Images follow
 /// their rendered entry and the synthetic marker occupies its own index.
@@ -571,6 +573,9 @@ fn apply_recent_history_base(
             .filter(|base| base.count == 0)
             .and_then(|base| base.recent_messages)
     {
+        if visible == 0 {
+            return (Vec::new(), Vec::new());
+        }
         let (messages, images, _) = recent_history_window(messages, images, visible);
         return (messages, images);
     }

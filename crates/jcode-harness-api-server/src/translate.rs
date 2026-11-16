@@ -59,6 +59,8 @@ const REQUIRES_ATTACH: &[&str] = &[
     "rewind",
     "rewind_undo",
     "get_history",
+    "get_history_page",
+    "get_history_image_chunk",
     "get_compacted_history",
     "list_models",
     "set_model",
@@ -138,6 +140,7 @@ pub struct BridgeState {
     /// The daemon accepts soft interrupt ids and per-id cancellation, and
     /// replies to `background_tool` with a result.
     pub queued_prompts_supported: bool,
+    pub bounded_history_supported: bool,
     pub soft_interrupt_ids_supported: bool,
     /// Leftover queue size reported just before the current turn's `done`.
     pending_soft_interrupts_at_done: Option<u32>,
@@ -607,6 +610,15 @@ impl BridgeState {
                     "supports_server_failover": true,
                     "supports_turn_identity": true,
                 });
+                if self.bounded_history_supported
+                    && self
+                        .client_name
+                        .as_deref()
+                        .is_some_and(|name| name.starts_with("jcode-desktop-"))
+                {
+                    subscribe["history_base"] =
+                        json!({"count": 0, "fingerprint": 0, "recent_messages": 0});
+                }
                 // Mobile sockets disappear when the OS suspends the app or
                 // changes networks. The daemon must own their session lifetime.
                 // Preserve the existing desktop and unknown SDK client policy.
@@ -776,6 +788,22 @@ impl BridgeState {
                 let id = self.legacy_id();
                 self.pending_simple.push((id, api_id, SimpleKind::History));
                 vec![Outbound::Legacy(json!({"type": "get_history", "id": id}))]
+            }
+            "get_history_page" => {
+                let id = self.legacy_id();
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::HistoryPage));
+                vec![Outbound::Legacy(
+                    json!({"type":"get_history_page", "id":id, "before":request["before"], "limit":request["limit"]}),
+                )]
+            }
+            "get_history_image_chunk" => {
+                let id = self.legacy_id();
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::HistoryImageChunk));
+                vec![Outbound::Legacy(
+                    json!({"type":"get_history_image_chunk", "id":id, "key":request["key"], "offset":request["offset"]}),
+                )]
             }
             "get_compacted_history" => {
                 let id = self.legacy_id();
@@ -2405,6 +2433,45 @@ impl BridgeState {
                             .as_u64()
                             .unwrap_or(0)
                             as usize,
+                    },
+                )]
+            }
+            "history_page" => {
+                let Some(api_id) =
+                    self.take_simple(event["id"].as_u64().unwrap_or(0), SimpleKind::HistoryPage)
+                else {
+                    return vec![];
+                };
+                vec![ServerFrame::reply(
+                    api_id,
+                    ApiEvent::HistoryPage {
+                        session_id: event["session_id"]
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| session(self)),
+                        fragments: event["fragments"].as_array().cloned().unwrap_or_default(),
+                        before: event["before"].as_str().map(str::to_string),
+                    },
+                )]
+            }
+            "history_image_chunk" => {
+                let Some(api_id) = self.take_simple(
+                    event["id"].as_u64().unwrap_or(0),
+                    SimpleKind::HistoryImageChunk,
+                ) else {
+                    return vec![];
+                };
+                vec![ServerFrame::reply(
+                    api_id,
+                    ApiEvent::HistoryImageChunk {
+                        session_id: event["session_id"]
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| session(self)),
+                        key: event["key"].as_str().unwrap_or("").to_string(),
+                        offset: event["offset"].as_u64().unwrap_or(0) as usize,
+                        total: event["total"].as_u64().unwrap_or(0) as usize,
+                        data: event["data"].as_str().unwrap_or("").to_string(),
                     },
                 )]
             }

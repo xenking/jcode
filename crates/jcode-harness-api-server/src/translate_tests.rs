@@ -1,6 +1,43 @@
 use super::*;
 
 #[test]
+fn bounded_desktop_attach_suppresses_unpaged_bootstrap_only_when_negotiated() {
+    for (client, supported, empty) in [
+        ("jcode-desktop-test", true, true),
+        ("jcode-desktop-test", false, false),
+        ("other-client", true, false),
+    ] {
+        let mut state = BridgeState {
+            client_name: Some(client.into()),
+            bounded_history_supported: supported,
+            ..Default::default()
+        };
+        let out = state
+            .api_request_to_legacy(&json!({"req":"attach_session", "id":1, "session_id":"s1"}));
+        let subscribe = out
+            .iter()
+            .find_map(|o| match o {
+                Outbound::Legacy(v) if v["type"] == "subscribe" => Some(v),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(subscribe["history_base"]["recent_messages"] == 0, empty);
+    }
+}
+
+#[test]
+fn bounded_history_errors_resolve_only_their_request() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({"req":"get_history_page", "id":72, "session_id":"s1", "before":"stale", "limit":128}));
+    let id = legacy_out(&out)["id"].as_u64().unwrap();
+    let frames =
+        state.legacy_event_to_api(&json!({"type":"error", "id":id, "message":"stale cursor"}));
+    assert!(
+        matches!(&frames[..], [frame] if frame.reply_to == Some(72) && matches!(&frame.event, ApiEvent::Error { message, .. } if message == "stale cursor"))
+    );
+}
+
+#[test]
 fn session_mutations_correlate_interleaved_terminals_after_receipt() {
     for scoped in [false, true] {
         let mut state = state_with_session();

@@ -277,6 +277,18 @@ pub enum Request {
     #[serde(rename = "get_history")]
     GetHistory { id: u64 },
 
+    /// Cursor-based, byte-bounded transcript fragments.
+    #[serde(rename = "get_history_page")]
+    GetHistoryPage {
+        id: u64,
+        before: Option<String>,
+        limit: usize,
+    },
+
+    /// A bounded slice of a lazily loaded history image (base64 bytes).
+    #[serde(rename = "get_history_image_chunk")]
+    GetHistoryImageChunk { id: u64, key: String, offset: usize },
+
     /// Get only provider/model metadata and available models.
     #[serde(rename = "get_model_catalog")]
     GetModelCatalog {

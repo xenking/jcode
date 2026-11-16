@@ -149,6 +149,8 @@ export interface ResponseStats {
   cache_creation_tokens?: number;
 }
 
+export interface HistoryFragment { index: number; start: number; total: number; text: string }
+
 export interface HistoryMessage {
   /** Only on the final assistant row. Preview/old-server history may omit it. */
   response_stats?: ResponseStats;
@@ -240,6 +242,8 @@ export type ApiRequest =
   | { req: "get_queued_prompts"; session_id: string }
   | { req: "get_history"; session_id: string }
   | { req: "get_compacted_history"; session_id: string; visible_messages: number }
+  | { req: "get_history_page"; session_id: string; before: string | null; limit: number }
+  | { req: "get_history_image_chunk"; session_id: string; key: string; offset: number }
   | { req: "peek_session"; session_id: string; limit?: number }
   | { req: "clear"; session_id: string }
   | { req: "rewind"; session_id: string; message_index: number }
@@ -353,6 +357,8 @@ export type ApiEvent =
   | { ev: "session_forked"; session: SessionInfo }
   | { ev: "history"; session_id: string; messages: HistoryMessage[]; images?: RenderedImage[] }
   | { ev: "compacted_history"; session_id: string; messages: HistoryMessage[]; images?: RenderedImage[]; compacted_total: number; compacted_visible: number; compacted_remaining: number; compacted_hidden_prompts?: number }
+  | { ev: "history_page"; session_id: string; fragments: HistoryFragment[]; before: string | null }
+  | { ev: "history_image_chunk"; session_id: string; key: string; offset: number; total: number; data: string }
   | { ev: "pong" }
   | { ev: "text_delta"; session_id: string; text: string; message_id?: string }
   | { ev: "text_done"; session_id: string; message_id?: string }
@@ -568,6 +574,8 @@ export const KNOWN_EVENT_KINDS = [
   "session_forked",
   "history",
   "compacted_history",
+  "history_page",
+  "history_image_chunk",
   "queued_prompts",
   "side_pane_images",
   "side_panel_state",
@@ -641,6 +649,8 @@ export const KNOWN_REQUEST_KINDS = [
   "get_queued_prompts",
   "get_history",
   "get_compacted_history",
+  "get_history_page",
+  "get_history_image_chunk",
   "peek_session",
   "clear",
   "rewind",

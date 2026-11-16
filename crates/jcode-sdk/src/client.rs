@@ -1094,6 +1094,20 @@ impl JcodeClient {
             .map(|(messages, _)| messages)
     }
 
+    /// Fetch one bounded page, rebuilding records split over multiple frames.
+    pub fn get_history_page(
+        &self,
+        session_id: &str,
+        before: Option<String>,
+    ) -> Result<crate::HistoryPage> {
+        crate::bounded_history::page(self, session_id, before)
+    }
+
+    /// Fetch a lazy history image in bounded chunks.
+    pub fn get_history_image(&self, session_id: &str, key: &str) -> Result<String> {
+        crate::bounded_history::image(self, session_id, key)
+    }
+
     pub fn get_history_with_images(
         &self,
         session_id: &str,

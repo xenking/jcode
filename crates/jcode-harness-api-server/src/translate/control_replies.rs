@@ -12,6 +12,8 @@ pub(super) enum SimpleKind {
     ToolControl,
     Ping,
     History,
+    HistoryPage,
+    HistoryImageChunk,
     CompactedHistory,
     /// Receipt-only controls: cancel, soft interrupts, auth/usage invalidation,
     /// and the legacy background-tool fallback. Their handlers do not reject
@@ -59,6 +61,8 @@ impl BridgeState {
                             | SimpleKind::OkOnDone
                             | SimpleKind::OkOnHistory
                             | SimpleKind::CompactedHistory
+                            | SimpleKind::HistoryPage
+                            | SimpleKind::HistoryImageChunk
                     )
             })?;
         let (_, api_id, _) = self.pending_simple.remove(index);
