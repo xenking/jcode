@@ -1958,6 +1958,14 @@ struct RemoteStartupSessionSnapshot {
     save_label: Option<String>,
 }
 
+#[path = "session/images.rs"]
+mod images;
+pub use images::{SessionImage, SessionImageInfo, image_id};
+
+#[cfg(test)]
+#[path = "session/image_ids_tests.rs"]
+mod image_ids_tests;
+
 #[cfg(test)]
 #[path = "session_tests/mod.rs"]
 mod tests;
