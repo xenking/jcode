@@ -327,6 +327,24 @@ fn old_schema_is_rebuilt_and_failed_asks_are_not_answers() {
     assert_eq!(rebuilt.search("persimmon", None).unwrap().messages.len(), 1);
 }
 
+#[tokio::test]
+async fn startup_warm_indexes_sessions_without_a_query() {
+    let _lock = crate::translate::jcode_home_test_lock();
+    let dir = test_dir("startup-warm");
+    write_session(
+        &dir,
+        "session_warm",
+        "Warm",
+        vec![user_message("m", "orchid", "2026-01-02T03:10:00Z")],
+    );
+    let index = SearchIndex::open_at(&dir.join("search.db"), &dir.join("sessions")).unwrap();
+    assert_eq!(index.indexed_sessions(), 0);
+    install_global_for_tests(index);
+    warm_on_start().await.unwrap();
+    let guard = global_index();
+    assert_eq!(guard.as_ref().unwrap().indexed_sessions(), 1);
+}
+
 #[test]
 fn user_prompts_outrank_equally_matching_assistant_text() {
     let dir = test_dir("boost");

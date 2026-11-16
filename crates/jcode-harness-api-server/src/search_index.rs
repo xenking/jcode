@@ -10,7 +10,8 @@
 //!   system/reminder scaffolding are excluded: they dominate the byte count,
 //!   they are the least interesting thing to recall, and indexing them would
 //!   bury the sentence the user actually remembers under a hundred `bash`
-//!   invocations.
+//!   invocations. Successful `ask` results are the exception: they record
+//!   the human's answer and are indexed as user text.
 //! - only text the *human* wrote. The harness itself appends user-role messages
 //!   (auto-pokes, swarm await reports, background-task notices, reload
 //!   continuations, session reminders). They are model instructions, not the
@@ -22,7 +23,8 @@
 //! Freshness: [`SearchIndex::sync`] walks the sessions directory and reindexes
 //! only what changed, keyed on a file fingerprint (mtime + length of both the
 //! snapshot and its append journal). A restart therefore costs one `stat` per
-//! session, not one parse. [`SearchIndex::search`] syncs first, so a query is
+//! session, not one parse. The bridge syncs in the background at startup.
+//! [`search`] syncs first, so a query is
 //! always answered from the current transcript, and the bridge additionally
 //! calls [`SearchIndex::note_session`] on append/title events to keep the
 //! index warm without waiting for a query.
@@ -1093,6 +1095,16 @@ fn global_index() -> MutexGuard<'static, Option<SearchIndex>> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Warm the persistent index after bridge startup without blocking the listener.
+/// A schema change invalidates old rows on open; sync repopulates them here.
+pub(crate) fn warm_on_start() -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_blocking(|| {
+        if let Some(index) = global_index().as_mut() {
+            index.sync();
+        }
+    })
 }
 
 /// Run `query` against the process-wide index, syncing changed sessions first.

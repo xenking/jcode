@@ -279,6 +279,7 @@ pub async fn run_bridge(api_socket: PathBuf, legacy_socket: PathBuf) -> Result<(
         api_socket.display(),
         legacy_socket.display()
     );
+    drop(search_index::warm_on_start());
     loop {
         let (stream, _) = listener.accept().await?;
         let legacy = legacy_socket.clone();
@@ -304,6 +305,7 @@ async fn handle_api_client(stream: Stream, legacy_socket: PathBuf) -> Result<()>
 /// while SSH still holds stdin open. This entrypoint is for a CLI process only.
 #[cfg(unix)]
 pub async fn run_bridge_stdio(legacy_socket: PathBuf) -> Result<()> {
+    drop(search_index::warm_on_start());
     let (input, mut writer) = std::os::unix::net::UnixStream::pair()?;
     input.set_nonblocking(true)?;
     let input = tokio::net::UnixStream::from_std(input)?;
