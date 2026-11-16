@@ -204,6 +204,7 @@ fn unix_sockets(pid: u32) -> Result<UnixSockets> {
     Ok(parse_unix_sockets(&listing))
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn only_listener(sockets: &UnixSockets, socket: &Path) -> bool {
     sockets.descriptors == 1
         && sockets.peers.is_empty()
@@ -361,6 +362,7 @@ fn retire_with_fallback(process: &BridgeProcess, ops: &mut impl BridgeRetirement
     })
 }
 
+#[cfg(target_os = "macos")]
 fn process_start(pid: u32) -> Result<String> {
     output(Command::new("ps").args(["-p", &pid.to_string(), "-o", "lstart="]))
 }

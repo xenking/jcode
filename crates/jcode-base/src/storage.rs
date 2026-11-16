@@ -21,6 +21,7 @@ fn isolated_test_home() -> &'static Path {
         // `TMPDIR` is often redirected into the developer's home (jcode's own
         // runs point it at `~/.jcode/scratch`), which would put the "isolated"
         // home right back inside the real one. Only accept a base that is not.
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut bases = vec![std::env::temp_dir()];
         #[cfg(unix)]
         bases.push(std::path::PathBuf::from("/tmp"));

@@ -189,6 +189,7 @@ fn secure_file(file: &File, _path: &Path) -> Result<()> {
 }
 
 fn secret_options() -> OpenOptions {
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut options = OpenOptions::new();
     #[cfg(unix)]
     {

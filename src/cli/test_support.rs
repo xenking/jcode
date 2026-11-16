@@ -11,7 +11,9 @@ impl Drop for ReloadIdentityListener {
 }
 
 pub(crate) fn reload_identity_listener(socket: &Path, reload_id: &str) -> ReloadIdentityListener {
-    let listener = crate::transport::Listener::bind(socket).expect("bind replacement listener");
+    // Windows named-pipe listeners accept through `&mut self`.
+    #[allow(unused_mut)]
+    let mut listener = crate::transport::Listener::bind(socket).expect("bind replacement listener");
     let reload_id = reload_id.to_owned();
     ReloadIdentityListener(tokio::spawn(async move {
         loop {
