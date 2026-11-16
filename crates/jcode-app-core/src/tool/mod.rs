@@ -18,6 +18,7 @@ mod computer;
 mod config_edit_notice;
 mod conversation_search;
 mod debug_socket;
+mod desktop;
 mod desktop_selfdev;
 mod discover;
 mod discover_secrets;
@@ -595,6 +596,7 @@ impl Registry {
                 calendar::CalendarTool::new,
             );
             Self::insert_tool_timed(&mut m, &mut timings, "schedule", ambient::ScheduleTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "desktop", desktop::DesktopTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "selfdev", selfdev::SelfDevTool::new);
             Self::insert_tool_timed(
                 &mut m,

@@ -3778,6 +3778,7 @@ dependencies = [
  "jcode-provider-openai-runtime",
  "jcode-provider-openrouter-runtime",
  "jcode-schema-dialect",
+ "jcode-sdk",
  "jcode-selfdev-types",
  "jcode-session-types",
  "jcode-setup-hints",

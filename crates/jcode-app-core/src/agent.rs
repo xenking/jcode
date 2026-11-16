@@ -66,7 +66,7 @@ pub use jcode_agent_runtime::{
     SoftInterruptQueue, SoftInterruptSource, StreamError,
 };
 
-const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "desktop_selfdev", "communicate"];
+const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "desktop_selfdev", "desktop", "communicate"];
 static JCODE_REPO_SOURCE_STATE: LazyLock<(Option<String>, Option<bool>)> = LazyLock::new(|| {
     crate::build::get_repo_dir()
         .map(|repo_dir| {
