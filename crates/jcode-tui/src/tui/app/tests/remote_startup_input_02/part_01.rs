@@ -2259,7 +2259,7 @@ fn select_picker_entry(app: &mut App, matches: impl Fn(&crate::tui::PickerEntry)
     let index = picker
         .entries
         .iter()
-        .position(|entry| matches(entry))
+        .position(matches)
         .unwrap_or_else(|| {
             panic!(
                 "no row matched in {:?}",

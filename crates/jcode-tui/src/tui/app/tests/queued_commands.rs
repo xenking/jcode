@@ -113,7 +113,7 @@ fn send_modes_reload_reconciles_unconfirmed_prompt_by_id() {
     app.pending_queue_requests.push((41, Some(prompt.clone())));
     app.save_input_for_reload(&session_id);
     let mut restored = App::new_for_remote(Some(session_id));
-    assert_eq!(restored.uncertain_queue_prompts, [prompt.clone()]);
+    assert_eq!(restored.uncertain_queue_prompts.as_slice(), std::slice::from_ref(&prompt));
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();

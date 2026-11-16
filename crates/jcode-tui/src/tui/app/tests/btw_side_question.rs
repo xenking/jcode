@@ -426,9 +426,9 @@ fn btw_server_turn_events_are_unwrapped_into_the_card() {
         "turn_event-scoped deltas must reach the card"
     );
 
-    assert!(app.apply_btw_server_event(wrapped(
+    assert!(!app.apply_btw_server_event(wrapped(
         crate::protocol::ServerEvent::MessageEnd { stop_reason: None }
-    )) == false);
+    )));
     assert!(app.apply_btw_server_event(wrapped(crate::protocol::ServerEvent::Done {
         id: 9
     })));
