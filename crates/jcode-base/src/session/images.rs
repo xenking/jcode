@@ -256,7 +256,8 @@ pub(super) fn annotate_message(session_id: &str, stored: &mut super::StoredMessa
     let remaining = ids
         .iter()
         .zip(mapped)
-        .filter_map(|(id, mapped)| (!mapped).then(|| format!("[#{id}]")))
+        .filter(|(_, mapped)| !mapped)
+        .map(|(id, _)| format!("[#{id}]"))
         .collect::<Vec<_>>();
     if !remaining.is_empty() {
         stored.content.push(ContentBlock::Text {

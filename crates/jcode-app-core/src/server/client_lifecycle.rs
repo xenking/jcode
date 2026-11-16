@@ -234,7 +234,7 @@ async fn poll_agent_compaction_completion(agent: Arc<Mutex<Agent>>) -> Option<Se
 fn publish_compaction_completion(bus: &Bus, session_id: &str, event: ServerEvent) {
     bus.publish(BusEvent::CompactionApplied {
         session_id: session_id.to_owned(),
-        event,
+        event: Box::new(event),
     });
 }
 
@@ -253,11 +253,11 @@ fn forward_compaction_completion(
     if owner != session_id {
         return;
     }
-    let post_tokens = match event {
+    let post_tokens = match event.as_ref() {
         ServerEvent::Compaction { post_tokens, .. } => *post_tokens,
         _ => None,
     };
-    let _ = tx.send(event.clone());
+    let _ = tx.send(event.as_ref().clone());
     if let Some(usage) = crate::agent::compaction_context_usage_event(post_tokens, None) {
         let _ = tx.send(usage);
     }

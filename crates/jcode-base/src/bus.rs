@@ -491,7 +491,7 @@ pub enum BusEvent {
     /// need the same result, not only the client that consumed the worker.
     CompactionApplied {
         session_id: String,
-        event: crate::protocol::ServerEvent,
+        event: Box<crate::protocol::ServerEvent>,
     },
     /// A background compaction task started summarizing. Carries the trigger
     /// label so attached clients can render a running divider without polling.
