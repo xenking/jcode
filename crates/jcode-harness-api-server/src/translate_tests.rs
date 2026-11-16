@@ -3881,13 +3881,29 @@ fn attachment_recovery_ignores_wrong_session_and_request_without_consuming_inten
 }
 
 #[test]
-fn attachment_recovery_suppresses_empty_active_completed_and_blank_directives_once() {
-    for case in ["empty", "active", "completed", "blank"] {
+fn attachment_recovery_preserves_explicit_directive_with_zero_message_bootstrap() {
+    let mut state = BridgeState {
+        bounded_history_supported: true,
+        ..Default::default()
+    };
+    let (mut history, _) = recovery_attach(&mut state, Some("recover"));
+    history["messages"] = json!([]);
+    let frames = state.legacy_event_to_api(&history);
+    assert!(matches!(
+        &frames[0].event,
+        ApiEvent::SessionRecovery { session_id, continuation_message, .. }
+            if session_id == "recover" && continuation_message == "Continue the exact task"
+    ));
+    assert!(state.legacy_event_to_api(&history).is_empty());
+}
+
+#[test]
+fn attachment_recovery_suppresses_active_completed_and_blank_directives_once() {
+    for case in ["active", "completed", "blank"] {
         let mut state = BridgeState::default();
         let (mut history, _) = recovery_attach(&mut state, Some("recover"));
         let recoverable = history.clone();
         match case {
-            "empty" => history["messages"] = json!([]),
             "active" => history["activity"]["is_processing"] = json!(true),
             "completed" => {
                 history["was_interrupted"] = json!(false);

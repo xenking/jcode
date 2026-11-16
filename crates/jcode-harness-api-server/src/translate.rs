@@ -1602,9 +1602,7 @@ impl BridgeState {
     }
 
     fn attachment_recovery(event: &Value) -> Option<ServerFrame> {
-        if event["messages"].as_array().is_none_or(Vec::is_empty)
-            || event["activity"]["is_processing"].as_bool() == Some(true)
-        {
+        if event["activity"]["is_processing"].as_bool() == Some(true) {
             return None;
         }
         let directive = &event["reload_recovery"];
@@ -1615,7 +1613,11 @@ impl BridgeState {
                 message.to_string(),
                 directive["reconnect_notice"].as_str().map(str::to_string),
             )
-        } else if event["was_interrupted"].as_bool() == Some(true) {
+        } else if event["was_interrupted"].as_bool() == Some(true)
+            && event["messages"]
+                .as_array()
+                .is_some_and(|messages| !messages.is_empty())
+        {
             // Compatibility with daemons predating reload_recovery. Keep in
             // sync with ReloadContext::interrupted_session_continuation_message.
             ("Your session was interrupted by a server reload while a tool was running. The tool was aborted and results may be incomplete. Continue exactly where you left off and do not ask the user what to do next.".to_string(), None)
