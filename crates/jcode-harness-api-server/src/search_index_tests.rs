@@ -286,6 +286,48 @@ fn ask_answers_are_indexed_as_user_messages_not_tool_output() {
 }
 
 #[test]
+fn old_schema_is_rebuilt_and_failed_asks_are_not_answers() {
+    let dir = test_dir("ask-reindex");
+    write_session(
+        &dir,
+        "session_ask",
+        "Decisions",
+        vec![
+            assistant_message(
+                "call",
+                "2026-01-02T03:05:00Z",
+                serde_json::json!([
+                    {"type":"tool_use", "id":"ask1", "name":"ask", "input":{}},
+                    {"type":"tool_use", "id":"ask2", "name":"ask", "input":{}}
+                ]),
+            ),
+            serde_json::json!({"id":"answer", "role":"user", "content":[
+                {"type":"tool_result", "tool_use_id":"ask1", "content":"User answers:\n1. Pick? -> persimmon\n"},
+                {"type":"tool_result", "tool_use_id":"ask2", "content":"User answers:\n1. Pick? -> forbiddenfruit\n", "is_error":true}
+            ]}),
+        ],
+    );
+    let mut index = index_for(&dir);
+    assert_eq!(index.search("persimmon", None).unwrap().messages.len(), 1);
+    assert!(
+        index
+            .search("forbiddenfruit", None)
+            .unwrap()
+            .messages
+            .is_empty()
+    );
+    index
+        .connection
+        .pragma_update(None, "user_version", 2)
+        .unwrap();
+    drop(index);
+    let mut rebuilt = SearchIndex::open_at(&dir.join("search.db"), &dir.join("sessions")).unwrap();
+    assert_eq!(rebuilt.indexed_sessions(), 0);
+    rebuilt.sync();
+    assert_eq!(rebuilt.search("persimmon", None).unwrap().messages.len(), 1);
+}
+
+#[test]
 fn user_prompts_outrank_equally_matching_assistant_text() {
     let dir = test_dir("boost");
     write_session(

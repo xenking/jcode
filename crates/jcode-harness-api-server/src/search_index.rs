@@ -46,6 +46,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 ///
 /// v2: messages carry the model that produced them, and harness-injected
 /// user-role text is no longer indexed as a user prompt.
+/// v3: answered ask results are indexed as user turns.
 const SCHEMA_VERSION: i64 = 3;
 
 const DEFAULT_LIMIT: usize = 50;
@@ -771,10 +772,17 @@ enum ContentBlock {
         text: String,
     },
     #[serde(rename = "tool_use")]
-    ToolUse { id: String, name: String },
+    ToolUse {
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        name: String,
+    },
     #[serde(rename = "tool_result")]
     ToolResult {
+        #[serde(default)]
         tool_use_id: String,
+        #[serde(default)]
         content: String,
         #[serde(default)]
         is_error: Option<bool>,
@@ -890,6 +898,7 @@ fn push_message(
     for block in &message.content {
         if let ContentBlock::ToolUse { id, name } = block
             && name == "ask"
+            && !id.is_empty()
         {
             ask_ids.insert(id.clone());
         }

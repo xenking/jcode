@@ -21,13 +21,13 @@ pub fn stored_ask_answer_text(content: &str) -> Option<String> {
     for line in body.lines() {
         let question = line.split_once(". ").and_then(|(number, rest)| {
             number.parse::<usize>().ok()?;
-            rest.split_once(" -> ")
+            Some(rest)
         });
-        if let Some((question, answer)) = question {
+        if let Some(question) = question {
             has_question = true;
-            lines.push(format!("Q: {question} → {answer}"));
+            lines.push(format!("Q: {}", question.replacen(" -> ", " → ", 1)));
         } else {
-            lines.push(line.to_owned());
+            lines.push(line.replacen(" -> ", " → ", 1));
         }
     }
     has_question.then(|| lines.join("\n"))
