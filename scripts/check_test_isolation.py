@@ -15,6 +15,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "jcode-base"
+ISOLATION = {(BASE, "test-support"), (BASE, "test-isolated-hooks")}
 
 
 def feature_closure(packages: dict, name: str, features: list[str]) -> set[tuple[str, str]]:
@@ -59,15 +60,15 @@ def violations(metadata: dict) -> list[str]:
     }
     for name, package in sorted(packages.items()):
         location = package["manifest_path"]
-        if (BASE, "test-support") in feature_closure(packages, name, ["default"]):
+        if ISOLATION & feature_closure(packages, name, ["default"]):
             errors.append(f"{location}: default enables test isolation in production; move test-support to dev-dependencies")
         dependencies = package["dependencies"]
         for dependency in dependencies:
             target = dependency["name"]
             enabled = feature_closure(packages, target, dependency["features"])
             support = (BASE, "test-support") in enabled
-            if dependency["kind"] != "dev" and support:
-                errors.append(f"{location}: {target} enables test-support in a production dependency; move that feature to dev-dependencies")
+            if dependency["kind"] != "dev" and ISOLATION & enabled:
+                errors.append(f"{location}: {target} enables test isolation in a production dependency; move that feature to dev-dependencies")
             if target not in owners:
                 continue
             if dependency["kind"] == "dev":

@@ -64,6 +64,22 @@ class TestIsolationTests(unittest.TestCase):
         client["dependencies"].pop()
         self.assertIn("real app home/hooks", "\n".join(violations(data)))
 
+    def test_hook_only_feature_cannot_disable_production_hooks(self):
+        data = fixture()
+        data["packages"][1]["dependencies"][0]["features"] = ["test-isolated-hooks"]
+        self.assertIn("production dependency", "\n".join(violations(data)))
+        data = fixture()
+        data["packages"][0]["features"]["default"] = ["test-isolated-hooks"]
+        self.assertIn("default enables test isolation", "\n".join(violations(data)))
+
+    def test_forwarded_hook_only_default_is_also_rejected(self):
+        data = fixture()
+        app = data["packages"][1]
+        app["features"] = {"default": ["foundation/test-isolated-hooks"]}
+        for dep in app["dependencies"]:
+            dep["rename"] = "foundation"
+        self.assertIn("default enables test isolation", "\n".join(violations(data)))
+
     def test_target_specific_opt_in_does_not_protect_other_platforms(self):
         data = fixture()
         data["packages"][1]["dependencies"][1]["target"] = "cfg(unix)"
