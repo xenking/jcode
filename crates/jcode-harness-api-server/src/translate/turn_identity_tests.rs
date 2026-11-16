@@ -14,6 +14,14 @@ fn bridge() -> BridgeState {
 }
 
 #[test]
+fn daemon_started_turn_is_visible_without_client_submission() {
+    let mut state = bridge();
+    let frames = state.legacy_event_to_api(&started("runtime", 2));
+    assert!(frames.iter().any(|frame| matches!(&frame.event, ApiEvent::SessionStatus { session_id, status, .. } if session_id == "session" && status == "running")));
+    assert!(state.legacy_event_to_api(&started("runtime", 1)).is_empty());
+}
+
+#[test]
 fn request_rejection_does_not_settle_scoped_observer() {
     let mut state = bridge();
     state.legacy_event_to_api(&started("runtime", 1));

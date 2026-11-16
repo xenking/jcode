@@ -1781,6 +1781,18 @@ impl BridgeState {
                 if self.turn_fence.state(event) {
                     self.observed_turn_active = self.turn_fence.active();
                     self.activity_version += 1;
+                    if let Some(session_id) = self.session_id.clone() {
+                        return vec![ServerFrame::event(ApiEvent::SessionStatus {
+                            session_id,
+                            status: if self.observed_turn_active {
+                                "running"
+                            } else {
+                                "idle"
+                            }
+                            .into(),
+                            pending_soft_interrupts: None,
+                        })];
+                    }
                 }
                 vec![]
             }
@@ -1788,6 +1800,13 @@ impl BridgeState {
                 if self.turn_fence.start(&event["identity"]) {
                     self.observed_turn_active = true;
                     self.activity_version += 1;
+                    if let Some(session_id) = self.session_id.clone() {
+                        return vec![ServerFrame::event(ApiEvent::SessionStatus {
+                            session_id,
+                            status: "running".into(),
+                            pending_soft_interrupts: None,
+                        })];
+                    }
                 }
                 vec![]
             }
