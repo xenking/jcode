@@ -10,7 +10,7 @@ use crate::translate::{BridgeState, Outbound};
 use jcode_harness_api::{ApiEvent, ApiRequest, ServerFrame, SessionSearchRole};
 use serde_json::json;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 fn test_dir(label: &str) -> PathBuf {
@@ -25,7 +25,7 @@ fn test_dir(label: &str) -> PathBuf {
     path
 }
 
-fn write_session(dir: &PathBuf, id: &str, title: &str, prompt: &str, answer: &str) {
+fn write_session(dir: &Path, id: &str, title: &str, prompt: &str, answer: &str) {
     let snapshot = json!({
         "id": id,
         "title": title,
@@ -54,7 +54,7 @@ fn write_session(dir: &PathBuf, id: &str, title: &str, prompt: &str, answer: &st
 
 /// Install a corpus as the process-wide index. Serialized by the translate
 /// test lock because the slot is global.
-fn install_corpus(dir: &PathBuf) {
+fn install_corpus(dir: &Path) {
     let index =
         SearchIndex::open_at(&dir.join("search.db"), &dir.join("sessions")).expect("open index");
     install_global_for_tests(index);
@@ -67,8 +67,8 @@ fn request(state: &mut BridgeState, frame: serde_json::Value) -> Vec<Outbound> {
 fn reply_frames(outbound: Vec<Outbound>) -> Vec<ServerFrame> {
     outbound
         .into_iter()
-        .filter_map(|outbound| match outbound {
-            Outbound::Reply(frame) => Some(frame),
+        .map(|outbound| match outbound {
+            Outbound::Reply(frame) => frame,
             Outbound::Legacy(value) => panic!("search must not reach the daemon: {value}"),
         })
         .collect()
