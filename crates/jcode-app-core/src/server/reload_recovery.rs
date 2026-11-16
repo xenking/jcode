@@ -488,9 +488,8 @@ fn claim(
     }
     // The session save can win a crash race against the journal write. Its
     // queued input receipt is authoritative and prevents a second admission.
-    if let Ok(session) = crate::session::Session::load(&current.session_id)
-        && has_receipt(&session, &current)
-    {
+    let session = crate::session::Session::load(&current.session_id)?;
+    if has_receipt(&session, &current) {
         write_outcome(
             &mut current,
             ReloadRecoveryStatus::Started,
@@ -499,9 +498,7 @@ fn claim(
         return Ok(None);
     }
     if current.ask_tool_id.is_none() {
-        current.ask_tool_id = crate::session::Session::load(&current.session_id)
-            .ok()
-            .and_then(|session| crate::agent::Agent::interrupted_ask_tool_id(&session));
+        current.ask_tool_id = crate::agent::Agent::interrupted_ask_tool_id(&session);
     }
     current.status = ReloadRecoveryStatus::Claimed;
     current.attempt = Some(identity.clone());
@@ -696,11 +693,16 @@ impl RecoveryOwner {
                                 retired,
                             },
                         );
-                    if !peek_for_session(&session_id)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|record| record.status.needs_admission())
-                    {
+                    let pending = match peek_for_session(&session_id) {
+                        Ok(record) => record.is_some_and(|record| record.status.needs_admission()),
+                        Err(error) => {
+                            crate::logging::warn(&format!(
+                                "Recovery claim recheck failed for {session_id}: {error}"
+                            ));
+                            false
+                        }
+                    };
+                    if !pending {
                         stop.cancel();
                     }
                     tasks.push(tokio::spawn(async move {
@@ -748,10 +750,10 @@ impl RecoveryOwner {
         }
         let session_id = &record.session_id;
         if crate::tool::interactive::sender(session_id).is_none()
-            && crate::session::Session::load(session_id)
-                .ok()
-                .and_then(|session| crate::agent::Agent::interrupted_ask_tool_id(&session))
-                .is_some()
+            && crate::agent::Agent::interrupted_ask_tool_id(&crate::session::Session::load(
+                session_id,
+            )?)
+            .is_some()
         {
             // Keep the durable obligation, but do not start a model turn or
             // repeatedly execute an unanswered ask without an interactive owner.
@@ -829,15 +831,20 @@ impl RecoveryOwner {
                 _ = tokio::time::sleep(delay) => {}
             }
         }
-        if !peek_for_session(session_id)
-            .ok()
-            .flatten()
-            .is_some_and(|current| {
-                current.input_id() == record.input_id()
-                    && current.status == ReloadRecoveryStatus::Claimed
-                    && current.attempt.as_ref() == Some(lease.identity())
-            })
-        {
+        let current = match peek_for_session(session_id) {
+            Ok(current) => current,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "Recovery execution recheck failed for {session_id}: {error}"
+                ));
+                return;
+            }
+        };
+        if !current.is_some_and(|current| {
+            current.input_id() == record.input_id()
+                && current.status == ReloadRecoveryStatus::Claimed
+                && current.attempt.as_ref() == Some(lease.identity())
+        }) {
             return;
         }
         let (fallback, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -950,6 +957,12 @@ mod tests {
         }
     }
     fn intent(session: &str, reload: &str) -> Result<ReloadRecoveryRecord> {
+        let path = crate::session::session_path(session)?;
+        if !path.try_exists()? {
+            let mut fixture = crate::session::Session::create(None, None);
+            fixture.id = session.to_owned();
+            fixture.save_snapshot_to(&path)?;
+        }
         persist_intent(
             reload,
             session,
@@ -967,6 +980,23 @@ mod tests {
             runtime_generation: runtime.into(),
             turn_id,
         }
+    }
+
+    #[test]
+    fn claim_rejects_unreadable_session_before_publishing_admission() -> Result<()> {
+        let _lock = crate::storage::lock_test_env();
+        let _home = IsolatedHome::new();
+        let session = crate::session::Session::create(None, None);
+        let record = intent(&session.id, "reload")?;
+        let path = crate::session::session_path(&session.id)?;
+        std::fs::remove_file(&path)?;
+        std::fs::create_dir_all(&path)?;
+        assert!(claim(&record, &identity("runtime", 1)).is_err());
+        assert_eq!(
+            peek_for_session(&session.id)?.unwrap().status,
+            ReloadRecoveryStatus::Pending
+        );
+        Ok(())
     }
 
     #[test]

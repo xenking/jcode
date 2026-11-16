@@ -26,13 +26,24 @@
 use jcode_agent_runtime::InterruptSignal;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 /// All interrupt signals registered for one session's in-flight turns.
 type SessionTurnSignals = Vec<(u64, InterruptSignal, Arc<AtomicU8>)>;
 static ACTIVE_TURNS: LazyLock<Mutex<HashMap<String, SessionTurnSignals>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+// HashMap mutations retain valid entries during unwinding. Poison must not turn
+// a live turn into an apparently idle session or prevent its RAII cleanup.
+fn active_turns() -> MutexGuard<'static, HashMap<String, SessionTurnSignals>> {
+    ACTIVE_TURNS.lock().unwrap_or_else(|error| {
+        crate::logging::warn("Recovering poisoned active-turn cancellation registry");
+        let guard = error.into_inner();
+        ACTIVE_TURNS.clear_poison();
+        guard
+    })
+}
 
 static FORCE_STOPS: LazyLock<Mutex<HashMap<String, (u64, futures::future::AbortHandle)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -118,10 +129,9 @@ impl ActiveTurnGuard {
 
 /// Record the first interruption before firing the shared wake-up signal.
 pub fn mark_interruption(session_id: &str, reason: TurnInterruptionReason) {
-    if let Ok(map) = ACTIVE_TURNS.lock()
-        && let Some(entries) = map.get(session_id)
-    {
+    if let Some(entries) = active_turns().get(session_id) {
         for (_, _, stored) in entries {
+            // Failure means a prior interruption already won, which must be preserved.
             let _ = stored.compare_exchange(0, reason as u8, Ordering::Release, Ordering::Relaxed);
         }
     }
@@ -132,13 +142,11 @@ pub fn mark_interruption(session_id: &str, reason: TurnInterruptionReason) {
 pub fn register_active_turn(session_id: &str, signal: InterruptSignal) -> ActiveTurnGuard {
     let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
     let reason = Arc::new(AtomicU8::new(0));
-    let active = match ACTIVE_TURNS.lock() {
-        Ok(mut map) => {
-            let entry = map.entry(session_id.to_string()).or_default();
-            entry.push((token, signal.clone(), Arc::clone(&reason)));
-            entry.len()
-        }
-        Err(_) => 0,
+    let active = {
+        let mut map = active_turns();
+        let entry = map.entry(session_id.to_string()).or_default();
+        entry.push((token, signal.clone(), Arc::clone(&reason)));
+        entry.len()
     };
     crate::logging::info(&format!(
         "TURN_CANCEL_REGISTERED session={} active_turns={}",
@@ -155,16 +163,13 @@ pub fn register_active_turn(session_id: &str, signal: InterruptSignal) -> Active
 
 /// All cancel signals currently registered for turns in `session_id`.
 pub fn active_turn_signals(session_id: &str) -> Vec<InterruptSignal> {
-    ACTIVE_TURNS
-        .lock()
-        .ok()
-        .and_then(|map| {
-            map.get(session_id).map(|entries| {
-                entries
-                    .iter()
-                    .map(|(_, signal, _)| signal.clone())
-                    .collect()
-            })
+    active_turns()
+        .get(session_id)
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|(_, signal, _)| signal.clone())
+                .collect()
         })
         .unwrap_or_default()
 }
@@ -172,15 +177,11 @@ pub fn active_turn_signals(session_id: &str) -> Vec<InterruptSignal> {
 /// Snapshot the session IDs that currently own at least one running turn.
 /// Unlike swarm status, these registrations follow the actual turn lifetime.
 pub fn active_session_ids() -> Vec<String> {
-    ACTIVE_TURNS
-        .lock()
-        .map(|map| {
-            map.iter()
-                .filter(|(_, turns)| !turns.is_empty())
-                .map(|(session_id, _)| session_id.clone())
-                .collect()
-        })
-        .unwrap_or_default()
+    active_turns()
+        .iter()
+        .filter(|(_, turns)| !turns.is_empty())
+        .map(|(session_id, _)| session_id.clone())
+        .collect()
 }
 
 /// Move every in-flight turn registration from `old_session_id` to
@@ -205,8 +206,9 @@ pub fn rename_active_turns(old_session_id: &str, new_session_id: &str) {
         }
     }
     crate::turn_activity::global().rename_session(old_session_id, new_session_id);
-    let moved = match ACTIVE_TURNS.lock() {
-        Ok(mut map) => match map.remove(old_session_id) {
+    let moved = {
+        let mut map = active_turns();
+        match map.remove(old_session_id) {
             Some(entries) => {
                 let moved = entries.len();
                 map.entry(new_session_id.to_string())
@@ -215,8 +217,7 @@ pub fn rename_active_turns(old_session_id: &str, new_session_id: &str) {
                 moved
             }
             None => 0,
-        },
-        Err(_) => 0,
+        }
     };
     if moved > 0 {
         crate::logging::info(&format!(
@@ -228,25 +229,23 @@ pub fn rename_active_turns(old_session_id: &str, new_session_id: &str) {
 
 impl Drop for ActiveTurnGuard {
     fn drop(&mut self) {
-        let remaining = match ACTIVE_TURNS.lock() {
-            Ok(mut map) => {
-                // Remove by token across every session bucket: the turn may
-                // have been migrated to a new session id by
-                // [`rename_active_turns`] after this guard was created, so the
-                // guard's own `session_id` can be stale. Leaving an orphaned
-                // entry behind would let a finished turn's signal be fired by
-                // a later cancel.
-                let mut remaining = 0usize;
-                map.retain(|_, entries| {
-                    entries.retain(|(token, _, _)| *token != self.token);
-                    !entries.is_empty()
-                });
-                if let Some(entries) = map.get(&self.session_id) {
-                    remaining = entries.len();
-                }
-                remaining
+        let remaining = {
+            let mut map = active_turns();
+            // Remove by token across every session bucket: the turn may
+            // have been migrated to a new session id by
+            // [`rename_active_turns`] after this guard was created, so the
+            // guard's own `session_id` can be stale. Leaving an orphaned
+            // entry behind would let a finished turn's signal be fired by
+            // a later cancel.
+            let mut remaining = 0usize;
+            map.retain(|_, entries| {
+                entries.retain(|(token, _, _)| *token != self.token);
+                !entries.is_empty()
+            });
+            if let Some(entries) = map.get(&self.session_id) {
+                remaining = entries.len();
             }
-            Err(_) => 0,
+            remaining
         };
         // A turn's cancel flag must never outlive the turn: if a cancel fired
         // this signal (possibly through a stale control handle that nothing
@@ -270,15 +269,60 @@ impl Drop for ActiveTurnGuard {
 /// with no reply. The registry already knows whether a turn exists, so ask it
 /// rather than guessing.
 pub fn has_active_turn(session_id: &str) -> bool {
-    ACTIVE_TURNS
-        .lock()
-        .ok()
-        .is_some_and(|map| map.get(session_id).is_some_and(|turns| !turns.is_empty()))
+    active_turns()
+        .get(session_id)
+        .is_some_and(|turns| !turns.is_empty())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poisoned_turn_registry_preserves_live_cancellation_and_cleanup() {
+        const CHILD: &str = "JCODE_TEST_POISONED_TURN_REGISTRY";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "turn_cancel_registry::tests::poisoned_turn_registry_preserves_live_cancellation_and_cleanup", "--test-threads=1"])
+                .env(CHILD, "1")
+                .env("JCODE_HOME", home.path())
+                .env("JCODE_TEST_SESSION", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let _lock = crate::storage::lock_test_env();
+        let id = "poisoned_turn_registry";
+        let signal = InterruptSignal::new();
+        let guard = register_active_turn(id, signal.clone());
+        let poisoned = std::panic::catch_unwind(|| {
+            let _guard = ACTIVE_TURNS.lock().unwrap();
+            panic!("injected registry owner panic");
+        });
+        assert!(poisoned.is_err());
+        let listed = active_session_ids().iter().any(|session| session == id);
+        let signals = active_turn_signals(id);
+        let active = has_active_turn(id);
+        mark_interruption(id, TurnInterruptionReason::Cancel);
+        let reason_recorded = guard.interruption_reason() == Some(TurnInterruptionReason::Cancel);
+        drop(guard);
+        let cleaned = !ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains_key(id);
+        ACTIVE_TURNS.clear_poison();
+        assert!(listed && active, "poison hid a live turn");
+        assert_eq!(signals.len(), 1);
+        assert!(signals[0].same_instance(&signal));
+        assert!(reason_recorded && cleaned);
+    }
 
     #[test]
     fn interruption_reason_is_per_turn_and_first_signal_wins() {
