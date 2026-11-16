@@ -56,7 +56,7 @@
     "crates/jcode-tui/src/tui/ui_tests/prepare.rs": 1350,
     "crates/jcode-tui/src/tui/ui_tests/tools.rs": 1476,
     "crates/jcode-tui/src/tui/ui_todo_stages_tests.rs": 1230,
-    "src/cli/acp/tests.rs": 1282,
+    "src/cli/acp/tests.rs": 1284,
     "src/cli/args/tests.rs": 1227,
     "src/cli/commands_tests.rs": 1887
   },
