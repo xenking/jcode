@@ -804,7 +804,20 @@ pub(super) async fn cancel_processing_message(
             // an unconditional reset here used to erase rapid repeated Esc
             // cancels before the busy turn observed them (issue #428).
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            reset_control.reset_cancel_if_epoch(cancel_epoch);
+            // A reattached client may share the actual active turn's signal.
+            // Clearing it here can erase an unobserved cancellation while a
+            // long-running tool is still returning. The active-turn guard
+            // resets that signal when the turn really exits. Detached signals
+            // still need the bounded reset to avoid poisoning the next turn.
+            let control_signal = reset_control.stop_current_turn_signal();
+            let owned_by_active_turn = crate::turn_cancel_registry::active_turn_signals(
+                &reset_control.session_id,
+            )
+            .iter()
+            .any(|signal| signal.same_instance(&control_signal));
+            if !owned_by_active_turn {
+                reset_control.reset_cancel_if_epoch(cancel_epoch);
+            }
         });
         *state.client_is_processing = false;
         let status_session_id = state

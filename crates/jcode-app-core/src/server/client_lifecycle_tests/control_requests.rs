@@ -319,9 +319,9 @@ async fn cancel_without_local_task_still_signals_session_control() {
     // after reload, server-initiated turn). Without a registered active turn
     // the cancel is a deliberate no-op, because arming the signal with nothing
     // running only kills the *next* message.
-    let _active_turn = crate::turn_cancel_registry::register_active_turn(
+    let active_turn = crate::turn_cancel_registry::register_active_turn(
         "session_detached_cancel",
-        InterruptSignal::new(),
+        stop_signal.clone(),
     );
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let swarm_members = Arc::new(RwLock::new(HashMap::new()));
@@ -375,6 +375,10 @@ async fn cancel_without_local_task_still_signals_session_control() {
         client_event_rx.recv().await,
         Some(ServerEvent::Done { id: 99 })
     ));
+    tokio::time::sleep(Duration::from_millis(650)).await;
+    assert!(stop_signal.is_set(), "a running turn must retain cancellation until it observes it");
+    drop(active_turn);
+    assert!(!stop_signal.is_set(), "turn completion resets the signal for the next turn");
 }
 
 /// Regression for issue #428: the detached-turn cancel path schedules a
