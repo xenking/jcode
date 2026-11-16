@@ -143,14 +143,30 @@ pub(crate) fn page(
 pub(crate) fn image(client: &JcodeClient, session_id: &str, key: &str) -> Result<String> {
     let mut result = String::new();
     loop {
-        let frame = client.request(ApiRequest::GetHistoryImageChunk {
-            session_id: session_id.into(),
-            key: key.into(),
-            offset: result.len(),
-        })?;
+        let request = if key.starts_with("img_") {
+            ApiRequest::GetSessionImage {
+                session_id: session_id.into(),
+                image_id: key.into(),
+                offset: result.len(),
+            }
+        } else {
+            ApiRequest::GetHistoryImageChunk {
+                session_id: session_id.into(),
+                key: key.into(),
+                offset: result.len(),
+            }
+        };
+        let frame = client.request(request)?;
         match frame.event {
             ApiEvent::HistoryImageChunk {
                 key: actual,
+                offset,
+                total,
+                data,
+                ..
+            }
+            | ApiEvent::SessionImage {
+                image_id: actual,
                 offset,
                 total,
                 data,

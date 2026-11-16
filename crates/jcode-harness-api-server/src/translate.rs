@@ -61,6 +61,8 @@ const REQUIRES_ATTACH: &[&str] = &[
     "get_history",
     "get_history_page",
     "get_history_image_chunk",
+    "list_session_images",
+    "get_session_image",
     "get_compacted_history",
     "list_models",
     "set_model",
@@ -803,6 +805,22 @@ impl BridgeState {
                     .push((id, api_id, SimpleKind::HistoryImageChunk));
                 vec![Outbound::Legacy(
                     json!({"type":"get_history_image_chunk", "id":id, "key":request["key"], "offset":request["offset"]}),
+                )]
+            }
+            "list_session_images" => {
+                let id = self.legacy_id();
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::SessionImages));
+                vec![Outbound::Legacy(
+                    json!({"type":"list_session_images", "id":id, "session_id":request["session_id"]}),
+                )]
+            }
+            "get_session_image" => {
+                let id = self.legacy_id();
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::SessionImage));
+                vec![Outbound::Legacy(
+                    json!({"type":"get_session_image", "id":id, "session_id":request["session_id"], "image_id":request["image_id"], "offset":request["offset"]}),
                 )]
             }
             "get_compacted_history" => {
@@ -2486,6 +2504,38 @@ impl BridgeState {
                     },
                 )]
             }
+            "session_images" => {
+                let Some(api_id) =
+                    self.take_simple(event["id"].as_u64().unwrap_or(0), SimpleKind::SessionImages)
+                else {
+                    return vec![];
+                };
+                vec![ServerFrame::reply(
+                    api_id,
+                    ApiEvent::SessionImages {
+                        session_id: event["session_id"].as_str().unwrap_or("").to_owned(),
+                        images: event["images"].as_array().cloned().unwrap_or_default(),
+                    },
+                )]
+            }
+            "session_image" => {
+                let Some(api_id) =
+                    self.take_simple(event["id"].as_u64().unwrap_or(0), SimpleKind::SessionImage)
+                else {
+                    return vec![];
+                };
+                vec![ServerFrame::reply(
+                    api_id,
+                    ApiEvent::SessionImage {
+                        session_id: event["session_id"].as_str().unwrap_or("").to_owned(),
+                        image_id: event["image_id"].as_str().unwrap_or("").to_owned(),
+                        media_type: event["media_type"].as_str().unwrap_or("").to_owned(),
+                        offset: event["offset"].as_u64().unwrap_or(0) as usize,
+                        total: event["total"].as_u64().unwrap_or(0) as usize,
+                        data: event["data"].as_str().unwrap_or("").to_owned(),
+                    },
+                )]
+            }
             "history" => {
                 let id = event["id"].as_u64().unwrap_or(0);
                 // The daemon volunteers the full session set on `history`,
@@ -3846,6 +3896,10 @@ impl BridgeState {
 #[cfg(test)]
 #[path = "translate_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "session_image_bridge_tests.rs"]
+mod session_image_bridge_tests;
 
 #[cfg(test)]
 #[path = "user_response_capability_tests.rs"]

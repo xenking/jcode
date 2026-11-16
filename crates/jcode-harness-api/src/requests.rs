@@ -214,6 +214,15 @@ pub enum ApiRequest {
         offset: usize,
     },
 
+    ListSessionImages {
+        session_id: String,
+    },
+    GetSessionImage {
+        session_id: String,
+        image_id: String,
+        offset: usize,
+    },
+
     /// Expand the archived portion of an attached session's transcript.
     GetCompactedHistory {
         session_id: String,

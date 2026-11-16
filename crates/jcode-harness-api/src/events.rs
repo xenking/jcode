@@ -71,6 +71,19 @@ pub enum ApiEvent {
         data: String,
     },
 
+    SessionImages {
+        session_id: String,
+        images: Vec<serde_json::Value>,
+    },
+    SessionImage {
+        session_id: String,
+        image_id: String,
+        media_type: String,
+        offset: usize,
+        total: usize,
+        data: String,
+    },
+
     /// Expanded archived transcript window and its remaining history.
     CompactedHistory {
         session_id: String,
