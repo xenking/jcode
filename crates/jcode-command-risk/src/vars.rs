@@ -358,7 +358,7 @@ mod tests {
     fn trusted_variables_are_never_resolved_from_an_assignment() {
         let segments = tokens("HOME=/etc; rm -rf $HOME/cache");
         let env = VarEnv::collect(&segments);
-        assert!(env.values.get("HOME").is_none());
+        assert!(!env.values.contains_key("HOME"));
         assert!(!reassignment_findings(&segments[0]).is_empty());
     }
 }
