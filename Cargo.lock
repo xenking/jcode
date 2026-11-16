@@ -3775,6 +3775,7 @@ dependencies = [
  "jcode-pdf",
  "jcode-plan",
  "jcode-productivity-core",
+ "jcode-provider-anthropic-runtime",
  "jcode-provider-core",
  "jcode-provider-openai-runtime",
  "jcode-provider-openrouter-runtime",

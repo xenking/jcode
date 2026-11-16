@@ -2111,6 +2111,10 @@ fn soft_interrupt_dispatch_starts_idle_session_and_queues_busy_session() {
 #[path = "client_lifecycle_socket_tests.rs"]
 mod socket_workflows;
 
+#[cfg(unix)]
+#[path = "effort_oauth_socket_tests.rs"]
+mod effort_oauth_socket_tests;
+
 #[path = "ask_reload_socket_tests.rs"]
 mod ask_reload_socket_tests;
 

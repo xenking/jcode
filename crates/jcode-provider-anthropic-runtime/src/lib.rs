@@ -119,7 +119,7 @@ fn direct_auth_mode() -> String {
 #[derive(Clone)]
 struct DirectTransportConfig {
     api_url: String,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     oauth_api_url: Option<String>,
     headers: std::result::Result<HeaderMap, String>,
     auth_mode: String,
@@ -130,7 +130,7 @@ impl DirectTransportConfig {
     fn from_env() -> Self {
         Self {
             api_url: direct_api_url(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             oauth_api_url: None,
             headers: configured_direct_headers().map_err(|err| format!("{err:#}")),
             auth_mode: direct_auth_mode(),
@@ -644,6 +644,26 @@ impl AnthropicProvider {
             profile_api_key,
             profile_models,
         }
+    }
+
+    /// Route OAuth inference to a loopback fixture, without preflight or proxies.
+    /// Construct outside a Tokio runtime to avoid background usage prewarming.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_oauth_test_endpoint(mut self, endpoint: &str) -> Self {
+        let url = reqwest::Url::parse(endpoint).expect("OAuth fixture URL");
+        assert_eq!(url.scheme(), "http");
+        assert!(matches!(url.host_str(), Some("127.0.0.1" | "[::1]")));
+        self.client = Client::builder()
+            .no_proxy()
+            .build()
+            .expect("fixture client");
+        self.direct_transport.oauth_api_url = Some(endpoint.to_owned());
+        self.oauth_preflight_done.store(true, Ordering::Relaxed);
+        *self
+            .credential_mode
+            .try_write()
+            .expect("fixture credential mode") = AnthropicCredentialMode::OAuth;
+        self
     }
 
     fn direct_api_key(&self) -> Result<String> {
@@ -2386,7 +2406,7 @@ async fn stream_response(
     };
     // Local HTTP regressions exercise the real OAuth retry loop without
     // permitting a production environment override of the OAuth endpoint.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let url = if is_oauth {
         direct_transport.oauth_api_url.as_deref().unwrap_or(url)
     } else {
