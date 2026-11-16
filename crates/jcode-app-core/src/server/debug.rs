@@ -481,6 +481,7 @@ pub(super) async fn handle_debug_client(
                         let snapshot = crate::turn_activity::global().snapshot();
                         Some(Ok(serde_json::json!({
                             "busy_sessions": snapshot.busy_sessions(),
+                            "drain_sessions": snapshot.drain_sessions(),
                             "activity": snapshot,
                         })
                         .to_string()))

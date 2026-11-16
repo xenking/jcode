@@ -29,10 +29,13 @@ resumes the same journal, rather than submitting another rollout.
 2. Install the immutable version and probe the installed binary again.
 3. Journal and update the shared-server and current channels.
 4. Drain the canonical turn-activity snapshot by default, including the initiating
-   turn because submission already returned. No streaming-marker/roster union
-   decides quiescence. `server:turn_activity` exposes the snapshot and its derived
-   busy session IDs to CLI planning. `--now` is allowed for agents because durable
-   recovery owns continuation admission.
+   turn because submission already returned. The canonical `drain_sessions`
+   projection excludes checkpointable pending asks, which reload captures durably
+   without waiting for an answer. They remain busy for idle-upgrade policy. No
+   streaming-marker/roster union decides quiescence. `server:turn_activity` exposes
+   the snapshot and both derived busy/drain session lists to CLI planning.
+   `--now` is allowed for agents because durable recovery owns continuation
+   admission.
 5. Probe again, persist `exec_pending`, and request a pinned reload.
 6. Once the replacement accept loops are live, startup records `serving` and
    resumes Desktop swap and verification.

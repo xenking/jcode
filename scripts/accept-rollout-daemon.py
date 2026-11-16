@@ -199,13 +199,19 @@ def caller_death_and_exec(root, old, new):
         assert identity["git_hash"].startswith(host.new_label), identity
         assert identity["generation"] >= 2 and identity["reload_id"] == state["reload_id"], identity
         activity = request(host.debug, dict(type="debug_command", id=9, command="server:turn_activity"))
-        assert activity["ok"] and json.loads(activity["output"])["busy_sessions"] == [], activity
+        assert activity["ok"], activity
+        snapshot = json.loads(activity["output"])
+        assert snapshot["busy_sessions"] == [] and snapshot["drain_sessions"] == [], snapshot
         assert (Path(state["backup_app"]) / "old-bundle").exists()
         assert not (host.app / "old-bundle").exists()
         assert host.launches.read_text().count("\n") == 1, "startup reconciliation duplicated Desktop launch"
         execs = [m for m in state["mutations"] if m["name"] == "exec"]
         assert len(execs) == 1 and execs[0]["result"] == "new generation serving", execs
-        status = subprocess.run([str(new), "--no-update", "rollout", "--status"], env=host.env, check=True, capture_output=True, text=True)
+        status_env = {key: host.env[key] for key in (
+            "PATH", "HOME", "JCODE_HOME", "JCODE_RUNTIME_DIR", "JCODE_SOCKET",
+            "JCODE_ROLLOUT_APP", "JCODE_NO_TELEMETRY",
+        )}
+        status = subprocess.run([str(new), "--no-update", "rollout", "--status"], env=status_env, check=True, capture_output=True, text=True)
         assert json.loads(status.stdout)["id"] == state["id"]
         return {"caller_sigkill": "passed", "real_exec_resume": "passed", "rollout_id": state["id"]}
     finally:

@@ -245,7 +245,7 @@ impl Host for MacHost {
 
     fn busy_sessions(&self) -> Result<Vec<String>> {
         let snapshot = daemon_control(&self.control_socket()?, "server:turn_activity")?;
-        serde_json::from_value(snapshot["busy_sessions"].clone())
+        serde_json::from_value(snapshot["drain_sessions"].clone())
             .context("daemon did not expose canonical turn activity")
     }
 
@@ -639,6 +639,38 @@ mod tests {
             daemon_socket: root.join("daemon"),
         };
         (dir, host, sha)
+    }
+
+    #[test]
+    fn rollout_plan_reads_canonical_drain_without_dropping_initiator() {
+        let (_dir, mut host, _) = checkout_fixture();
+        host.own_session = Some("initiator".into());
+        let listener = UnixListener::bind(host.control_socket().unwrap()).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["command"], "server:turn_activity");
+            let snapshot = serde_json::json!({
+                "busy_sessions": ["ask-blocked", "initiator", "in-tool"],
+                "drain_sessions": ["initiator", "in-tool"],
+            });
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({
+                    "type": "debug_response", "id": 1, "ok": true,
+                    "output": snapshot.to_string(),
+                })
+            )
+            .unwrap();
+        });
+        let blocking = host.busy_sessions().unwrap();
+        server.join().unwrap();
+        assert_eq!(blocking, vec!["initiator", "in-tool"]);
     }
 
     #[test]

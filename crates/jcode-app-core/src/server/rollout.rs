@@ -376,9 +376,7 @@ async fn execute(store: &Store, journal: &mut Journal) -> Result<()> {
         let deadline =
             tokio::time::Instant::now() + Duration::from_secs(journal.intent.drain_timeout_secs);
         loop {
-            let mut busy = crate::turn_activity::global().snapshot().busy_sessions();
-            busy.sort();
-            busy.dedup();
+            let busy = crate::turn_activity::global().snapshot().drain_sessions();
             if journal.intent.now || busy.is_empty() {
                 break;
             }
