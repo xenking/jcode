@@ -2020,69 +2020,6 @@ impl SessionPicker {
         }
     }
 
-    /// Apply search-match highlighting to already-built preview lines in place.
-    /// Returns the index of the first line that contains a highlighted match, if
-    /// any. Each token highlights independently (matching the AND-token filter).
-    #[cfg(test)]
-    fn highlight_lines_in_place(lines: &mut [Line<'static>], tokens: &[String]) -> Option<usize> {
-        if tokens.is_empty() {
-            return None;
-        }
-        let mut first_match: Option<usize> = None;
-        for (idx, line) in lines.iter_mut().enumerate() {
-            let mut new_spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len());
-            let mut line_had_match = false;
-            for span in line.spans.drain(..) {
-                let lower = span.content.to_lowercase();
-                if tokens.iter().any(|token| lower.contains(token)) {
-                    line_had_match = true;
-                    new_spans.extend(Self::highlight_spans(
-                        span.content.as_ref(),
-                        tokens,
-                        span.style,
-                    ));
-                } else {
-                    new_spans.push(span);
-                }
-            }
-            line.spans = new_spans;
-            if line_had_match && first_match.is_none() {
-                first_match = Some(idx);
-            }
-        }
-        first_match
-    }
-
-    /// Lines for the pinned "previous prompt" header in the preview pane.
-    /// Mirrors the main chat viewport's `prompt_preview`: the last user prompt
-    /// whose wrapped start has scrolled above the viewport, drawn dimmed.
-    #[cfg(test)]
-    fn preview_prompt_header_lines(
-        &self,
-        scroll: usize,
-        width: u16,
-        align: Alignment,
-    ) -> Vec<Line<'static>> {
-        if scroll == 0 || !crate::config::config().display.prompt_preview {
-            return Vec::new();
-        }
-        // Read the wrapped prompt markers from the cached preview content so
-        // the header costs nothing extra during a scroll burst.
-        let Some(cache) = self.preview_cache.as_ref() else {
-            return Vec::new();
-        };
-        let Some((_, prompt_num, text)) = cache
-            .user_prompt_markers
-            .iter()
-            .rev()
-            .find(|(wrapped_start, _, _)| *wrapped_start < scroll)
-        else {
-            return Vec::new();
-        };
-
-        super::ui::viewport::prompt_preview_lines(*prompt_num, text, width, align)
-    }
-
     /// Label for the blank-session onboarding action, naming the directory
     /// the new session will start in (home abbreviated to `~`).
     fn onboarding_start_new_label(&self) -> String {

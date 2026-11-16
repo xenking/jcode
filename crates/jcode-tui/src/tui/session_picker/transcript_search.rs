@@ -89,17 +89,6 @@ pub(super) fn literal_metadata_rank(index: &str, tokens: &[String]) -> SearchRan
     }
 }
 
-#[cfg(test)]
-pub(super) fn exact_metadata_field(session: &SessionInfo, query: &str) -> bool {
-    [&session.title, &session.short_name, &session.id]
-        .iter()
-        .any(|field| normalized_equals(field, query))
-        || session
-            .save_label
-            .as_ref()
-            .is_some_and(|label| normalized_equals(label, query))
-}
-
 fn normalized_equals(field: &str, query: &str) -> bool {
     let field = field.trim();
     if field.is_ascii() && query.is_ascii() {
@@ -118,12 +107,6 @@ pub(super) fn lowercase_field(field: &str) -> std::borrow::Cow<'_, str> {
 }
 
 impl SearchRank {
-    #[cfg(test)]
-    pub(super) fn with_intent_terms(mut self, terms: usize) -> Self {
-        self.intent_terms = terms;
-        self
-    }
-
     pub(super) fn with_source_weight(mut self, weight: u32) -> Self {
         self.source_weight = weight;
         self
@@ -297,18 +280,6 @@ fn build_candidates(
         });
     }
     candidates
-}
-
-/// Per-token metadata origins for the UI-thread ranking of sessions the worker
-/// has not ranked yet. Uses the already lowercased intent fields.
-#[cfg(test)]
-pub(super) fn metadata_source_weight(
-    intent_fields: &[&str],
-    index: &str,
-    tokens: &[String],
-    idf: &[u32],
-) -> u32 {
-    source::weighted_source_weight(&source::metadata_sources(intent_fields, index, tokens), idf)
 }
 
 /// Transcript evidence: the first-match fuzzy score plus per-token origins.
@@ -587,12 +558,6 @@ impl TranscriptSearch {
             .get()
             .and_then(|identities| identities.get(id).copied())
             .unwrap_or((false, false, false))
-    }
-
-    /// Rarity weights for the current query, once the worker computed them.
-    #[cfg(test)]
-    pub(super) fn idf(&self) -> &[u32] {
-        self.idf.get().map_or(&[], Vec::as_slice)
     }
 
     /// The worker reported at least one match for the current query.
