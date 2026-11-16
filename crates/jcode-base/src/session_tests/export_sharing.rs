@@ -160,12 +160,15 @@ fn export_sharing_matches_eager_redaction_for_every_variant_and_json_value() {
                 // Test each variant independently, so a changed sibling cannot
                 // hide a false negative in the immutable inspection pass.
                 for block in blocks(text, json) {
-                    let mut expected = vec![block.clone()];
-                    legacy_redact(&mut expected);
-                    let changed = serde_json::to_vec(&expected).unwrap()
-                        != serde_json::to_vec(&vec![block.clone()]).unwrap();
                     let mut session = Session::create_with_id("export-sharing".into(), None, None);
                     session.add_message(Role::User, vec![block]);
+                    // Redaction starts from canonical stored content, including
+                    // image references assigned when the message is appended.
+                    let stored = &session.messages[0].content;
+                    let mut expected = stored.to_vec();
+                    legacy_redact(&mut expected);
+                    let changed = serde_json::to_vec(&expected).unwrap()
+                        != serde_json::to_vec(stored).unwrap();
                     let original = serde_json::to_vec(&session.messages).unwrap();
                     let exported = session.redacted_for_export();
                     assert_eq!(

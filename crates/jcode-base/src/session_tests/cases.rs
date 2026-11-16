@@ -2281,7 +2281,11 @@ fn test_render_messages_and_images_share_tool_resolution_and_labels() {
     // otherwise it leaks out as a bogus "last prompt".
     assert_eq!(rendered.len(), 1);
     assert_eq!(rendered[0].role, "tool");
-    assert_eq!(rendered[0].content, "rendered image");
+    let image_id = &session.session_images()[0].image_id;
+    assert_eq!(
+        rendered[0].content,
+        format!("rendered image\n\nAttached session images: [#{image_id}]")
+    );
     assert!(
         !rendered
             .iter()
