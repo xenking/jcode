@@ -355,6 +355,19 @@ pub enum ServerEvent {
     #[serde(rename = "connection_phase")]
     ConnectionPhase { phase: String },
 
+    /// A provider quota decision, with unknown fields explicitly reported as such.
+    #[serde(rename = "usage_limit")]
+    UsageLimit {
+        provider: String,
+        model: String,
+        account: Option<String>,
+        window: String,
+        reset: String,
+        action: String,
+        target: Option<String>,
+        message: String,
+    },
+
     /// Provider-supplied human-readable transport detail for the current stream.
     #[serde(rename = "status_detail")]
     StatusDetail { detail: String },

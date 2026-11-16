@@ -285,6 +285,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 | ServerEvent::ToolDone { .. }
                 | ServerEvent::BatchProgress { .. }
                 | ServerEvent::ConnectionPhase { .. }
+                | ServerEvent::UsageLimit { .. }
                 | ServerEvent::StatusDetail { .. }
         )
     {
@@ -475,6 +476,7 @@ fn handle_server_event_inner(
                 | ServerEvent::ToolDone { .. }
                 | ServerEvent::BatchProgress { .. }
                 | ServerEvent::ConnectionPhase { .. }
+                | ServerEvent::UsageLimit { .. }
                 | ServerEvent::StatusDetail { .. }
         );
     if externally_started_turn_event {
@@ -507,6 +509,7 @@ fn handle_server_event_inner(
             | ServerEvent::KvCacheRequest { .. }
             | ServerEvent::ConnectionType { .. }
             | ServerEvent::ConnectionPhase { .. }
+            | ServerEvent::UsageLimit { .. }
             | ServerEvent::StatusDetail { .. }
             | ServerEvent::MessageEnd { .. }
             | ServerEvent::RetryRollback { .. }
@@ -910,6 +913,10 @@ fn handle_server_event_inner(
             false
         }
         ServerEvent::Pong { .. } => false,
+        ServerEvent::UsageLimit { message, .. } => {
+            app.push_display_message(DisplayMessage::system(message));
+            false
+        }
         ServerEvent::ConnectionPhase { phase } => {
             let cp = match phase.as_str() {
                 "authenticating" => crate::message::ConnectionPhase::Authenticating,
@@ -1461,7 +1468,8 @@ fn handle_server_event_inner(
                 })
             {
                 app.rate_limit_reset = Some(Instant::now() + reset_duration);
-                let rate_limit_line = app.rate_limit_notice_with_nudge(reset_duration.as_secs());
+                let rate_limit_line =
+                    app.rate_limit_notice_with_nudge(reset_duration.as_secs(), &message);
                 app.push_display_message(DisplayMessage::system(rate_limit_line));
                 if is_system {
                     app.set_status_notice("Rate limited; queued system retry");
@@ -1496,7 +1504,12 @@ fn handle_server_event_inner(
             if !is_failover_prompt {
                 app.push_display_message(DisplayMessage {
                     role: "error".to_string(),
-                    content: App::compact_provider_failure(&message),
+                    content: match app.quota_cause(&message) {
+                        Some(detail) => {
+                            format!("{} ({detail})", App::compact_provider_failure(&message))
+                        }
+                        None => App::compact_provider_failure(&message),
+                    },
                     tool_calls: vec![],
                     duration_secs: None,
                     title: None,
@@ -1554,10 +1567,20 @@ fn handle_server_event_inner(
             if rate_limit_retry_exhausted {
                 // Do not fall through to the generic retry or turn-end
                 // auto-poke: either would immediately restart the loop.
+                let quota = app.quota_cause(&message);
+                if quota.is_some()
+                    && let Some(index) = app
+                        .display_messages
+                        .iter()
+                        .rposition(|entry| entry.role == "error")
+                {
+                    app.remove_display_message(index);
+                }
                 app.pause_exhausted_auto_resume(
                     format!(
-                        "Rate-limit retry limit reached after {} automatic resumes. The provider still reports a limit. Your message is back in the input box. Wait for the limit to reset, check the provider account, or switch with /model.",
-                        App::AUTO_RETRY_MAX_ATTEMPTS
+                        "Rate-limit retry limit reached after {} automatic resumes. {}; stopped. Your message is back in the input box. Wait for the limit to reset, check the provider account, or switch with /model.",
+                        App::AUTO_RETRY_MAX_ATTEMPTS,
+                        quota.unwrap_or_else(|| "The provider still reports a limit".to_string())
                     ),
                     "Paused: provider limit did not clear",
                 );
@@ -1692,7 +1715,21 @@ fn handle_server_event_inner(
                 // and resend (e.g. expired OpenAI OAuth session -> a provider
                 // that is known to work), instead of leaving the user to run
                 // /login or /model manually.
-                app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
+                let offered =
+                    app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
+                if !offered
+                    && app.quota_cause(&message).is_some()
+                    && let Some(index) = app
+                        .display_messages
+                        .iter()
+                        .rposition(|entry| entry.role == "error")
+                    && let Some(mut entry) = app.remove_display_message(index)
+                {
+                    entry.content.push_str(
+                        "; stopped. Wait for the reset or choose another route with /model.",
+                    );
+                    app.push_display_message(entry);
+                }
                 return app.schedule_turn_end_followups();
             }
             false
@@ -3668,7 +3705,11 @@ fn handle_server_event_inner(
         } => {
             if !tool_call_id.is_empty() {
                 let input = serde_json::json!({"questions": questions});
-                if let Some(tool) = app.streaming_tool_calls.iter_mut().find(|tool| tool.id == tool_call_id) {
+                if let Some(tool) = app
+                    .streaming_tool_calls
+                    .iter_mut()
+                    .find(|tool| tool.id == tool_call_id)
+                {
                     if tool.input.get("questions").is_none() {
                         tool.input = input;
                     }

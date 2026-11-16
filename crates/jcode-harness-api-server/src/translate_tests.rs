@@ -494,6 +494,24 @@ fn state_with_session() -> BridgeState {
 }
 
 #[test]
+fn usage_limit_outcome_is_structured_for_api_clients() {
+    let mut state = state_with_session();
+    let frames = state.legacy_event_to_api(&json!({
+        "type":"usage_limit", "provider":"Claude", "model":"sonnet", "account":"work",
+        "window":"weekly", "reset":"2026-11-20 00:00 UTC", "action":"failed_over",
+        "target":"gpt-6.1-sol", "message":"Claude weekly limit, failed over to gpt-6.1-sol"
+    }));
+    assert_eq!(frames.len(), 1);
+    assert!(
+        matches!(&frames[0].event, ApiEvent::UsageLimit { session_id, provider, model, account, window, reset, action, target, .. }
+        if session_id == "s1" && provider == "Claude" && model == "sonnet"
+        && account.as_deref() == Some("work") && window == "weekly"
+        && reset == "2026-11-20 00:00 UTC" && action == "failed_over"
+        && target.as_deref() == Some("gpt-6.1-sol"))
+    );
+}
+
+#[test]
 fn connection_phase_is_forwarded_to_api_clients() {
     let mut state = state_with_session();
     let frames = state.legacy_event_to_api(&json!({

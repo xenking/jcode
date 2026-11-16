@@ -10,6 +10,33 @@ use super::*;
 const GUARDRAIL_REROUTE_MODEL: &str = "claude-opus-4-8";
 
 impl App {
+    pub(super) fn quota_cause(&self, error: &str) -> Option<String> {
+        let details = jcode_provider_core::failover::usage_limit_details(error)?;
+        let provider = self
+            .remote_provider_name
+            .as_deref()
+            .unwrap_or("unknown provider");
+        let model = self
+            .remote_provider_model
+            .as_deref()
+            .unwrap_or("unknown model");
+        let account = self
+            .remote_provider_oauth_account_label
+            .as_deref()
+            .or_else(|| {
+                self.session
+                    .route_api_method
+                    .as_deref()
+                    .and_then(jcode_provider_core::oauth_account_label)
+            })
+            .unwrap_or("unknown account");
+        Some(format!(
+            "{provider} / {model} / {account}: {} usage window, reset {}",
+            details.window,
+            details.reset.as_deref().unwrap_or("unknown")
+        ))
+    }
+
     /// Keep the actionable cause visible without dumping nested transport errors
     /// or repeated request/configuration advice into the transcript.
     pub(super) fn compact_provider_failure(reason: &str) -> String {
@@ -429,15 +456,24 @@ impl App {
         self.remove_failover_switching_message();
         let usage_exhausted = self.display_messages.last().is_some_and(|message| {
             message.role == "error"
-                && jcode_provider_core::is_definitive_usage_exhaustion(&message.content)
+                && jcode_provider_core::failover::usage_limit_details(&message.content).is_some()
         });
-        let cause = if usage_exhausted {
+        let usage_cause = if usage_exhausted {
+            let error = self
+                .display_messages
+                .last()
+                .map(|message| message.content.clone())
+                .unwrap_or_default();
             self.remove_display_message(self.display_messages.len() - 1);
-            "Usage limit reached. "
+            Some(error)
         } else {
-            ""
+            None
         };
-        format!("✓ {cause}Switched to model: {model}{suffix}. Retrying.")
+        if let Some(error) = usage_cause {
+            format!("✓ Usage limit reached. Switched to model: {model}{suffix}. Retrying. {error}")
+        } else {
+            format!("✓ Switched to model: {model}{suffix}. Retrying.")
+        }
     }
 
     /// The countdown line is only meaningful while the countdown runs. Once the
@@ -694,9 +730,13 @@ impl App {
                     .last()
                     .is_none_or(|message| message.role != "error")
                 {
+                    let detail = self
+                        .quota_cause(&prompt.reason)
+                        .map(|detail| format!(" ({detail})"))
+                        .unwrap_or_default();
                     self.push_display_message(DisplayMessage::error(format!(
-                        "{}: {}",
-                        prompt.from_label, reason
+                        "{}: {}{}",
+                        prompt.from_label, reason, detail
                     )));
                 }
                 if immediate {

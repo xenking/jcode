@@ -104,6 +104,47 @@ fn issue_1685_stale_rate_limit_stops_after_bounded_resumes() {
 }
 
 #[test]
+fn quota_exhausted_retry_notice_is_single_actionable_line() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.remote_provider_name = Some("OpenAI".into());
+    app.rate_limit_pending_message = Some(issue_1685_user_turn(
+        "continue",
+        true,
+        App::AUTO_RETRY_MAX_ATTEMPTS,
+    ));
+    app.is_processing = true;
+    let before = app.display_messages().len();
+    app.handle_server_event(
+        issue_1685_error(
+            99,
+            "429 weekly usage limit. Resets at 2026-08-21T04:31:00Z",
+            Some(30),
+        ),
+        &mut remote,
+    );
+    let added = &app.display_messages()[before..];
+    let line = added
+        .iter()
+        .find(|m| m.content.contains("Rate-limit retry limit reached"))
+        .expect("stop notice");
+    assert!(
+        line.content.contains("OpenAI")
+            && line.content.contains("weekly")
+            && line.content.contains("2026-08-21")
+            && line.content.contains("stopped"),
+        "{}",
+        line.content
+    );
+    assert!(
+        !added.iter().any(|m| m.role == "error"),
+        "duplicate error: {added:?}"
+    );
+}
+
+#[test]
 fn issue_1685_provider_dns_failure_has_bounded_resumes() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();

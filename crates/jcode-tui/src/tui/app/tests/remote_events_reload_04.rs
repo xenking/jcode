@@ -122,6 +122,76 @@ fn test_remote_error_without_retry_recovers_pending_followups() {
 }
 
 #[test]
+fn quota_stopped_notice_names_route_window_reset_and_action() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.remote_provider_name = Some("OpenAI".into());
+    app.remote_provider_model = Some("future-model".into());
+    app.remote_model_options.clear();
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 41,
+            message: "HTTP 429 weekly rate limit".into(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    );
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|m| m.content.contains("OpenAI")
+                && m.content.contains("future-model")
+                && m.content.contains("weekly")
+                && m.content.contains("reset unknown")
+                && m.content.contains("stopped")),
+        "{:?}",
+        app.display_messages()
+    );
+}
+
+#[test]
+fn quota_wait_notice_names_route_window_reset_and_action() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.remote_provider_name = Some("OpenAI".into());
+    app.remote_provider_model = Some("future-model".into());
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "retry me".into(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: true,
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 41,
+            message: "HTTP 429 weekly rate limit".into(),
+            retry_after_secs: Some(60),
+        },
+        &mut remote,
+    );
+    let notice = app
+        .display_messages()
+        .iter()
+        .find(|m| m.content.contains("weekly") && m.content.contains("OpenAI"))
+        .expect("quota notice");
+    assert!(
+        notice.content.contains("future-model")
+            && notice.content.contains("UTC")
+            && notice.content.contains("retry"),
+        "{}",
+        notice.content
+    );
+    assert!(!notice.content.contains('\n'));
+}
+
+#[test]
 fn test_remote_error_with_retryable_pending_schedules_retry() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();

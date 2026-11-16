@@ -31,6 +31,37 @@ fn error_wants_failover(error: &str) -> bool {
     )
 }
 
+pub(super) fn usage_limit_event(
+    agent: &Agent,
+    error: &str,
+    action: &str,
+    target: Option<&str>,
+) -> Option<ServerEvent> {
+    let details = jcode_provider_core::failover::usage_limit_details(error)?;
+    let window = details.window;
+    let reset = details.reset.unwrap_or_else(|| "unknown".to_string());
+    let provider = agent.provider_name();
+    let model = agent.provider_model();
+    let account = agent.provider_handle().serving_oauth_account_label();
+    let account_display = account.as_deref().unwrap_or("unknown account");
+    let outcome = target
+        .map(|target| format!("failed over to {target}"))
+        .unwrap_or_else(|| "stopped".into());
+    let message = format!(
+        "{provider} / {model} / {account_display}: {window} usage window, reset {reset}; {outcome}."
+    );
+    Some(ServerEvent::UsageLimit {
+        provider,
+        model,
+        account,
+        window: window.into(),
+        reset,
+        action: action.into(),
+        target: target.map(str::to_string),
+        message,
+    })
+}
+
 /// One planned switch: how to apply it and how to describe it.
 pub(super) struct FailoverTarget {
     pub selection: Option<RouteSelection>,
@@ -482,6 +513,12 @@ async fn retry_turn_with_model_fallbacks(
             agent.provider_model(),
             crate::util::format_error_chain(error)
         ));
+        let limit_event = usage_limit_event(
+            agent,
+            &crate::util::format_error_chain(error),
+            "failed_over",
+            Some(fallback),
+        );
         if let Err(switch_error) = agent.set_model(fallback) {
             crate::logging::warn(&format!(
                 "Swarm fallback model {fallback} unavailable: {switch_error}"
@@ -489,6 +526,9 @@ async fn retry_turn_with_model_fallbacks(
             // No request was made on this route, so it stays untried: a later
             // candidate that reaches it again must still get its chance.
             continue;
+        }
+        if let Some(event) = limit_event {
+            let _ = event_tx.send(event);
         }
         tried.push(candidate);
         agent.reset_provider_session();
@@ -636,12 +676,16 @@ pub(super) async fn retry_turn_with_server_failover(
             ));
             break;
         }
+        let limit_event = usage_limit_event(agent, &message, "failed_over", Some(&target.label));
         if let Err(switch_error) = apply_failover_target(agent, &target, &event_tx) {
             crate::logging::warn(&format!(
                 "Server account failover to {} failed: {switch_error}",
                 target.spec
             ));
             break;
+        }
+        if let Some(event) = limit_event {
+            let _ = event_tx.send(event);
         }
         attempts += 1;
         result = agent
@@ -830,7 +874,7 @@ mod tests {
             if *self.on_openai.lock().unwrap() {
                 "gpt-6.1-sol".into()
             } else {
-                "claude-opus-5-5".into()
+                "claude-sonnet-4-6".into()
             }
         }
         fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
@@ -970,6 +1014,16 @@ mod tests {
                     event,
                     ServerEvent::ModelChanged { model, error: None, .. } if model == "gpt-6.1-sol"
                 )));
+                assert!(events.iter().any(|event| {
+                    let value = serde_json::to_value(event).unwrap();
+                    value["type"] == "usage_limit"
+                        && value["provider"] == "Claude"
+                        && value["model"] == "claude-sonnet-4-6"
+                        && value["window"] == "unknown"
+                        && value["reset"] == "unknown"
+                        && value["action"] == "failed_over"
+                        && value["target"].as_str().is_some_and(|target| target.contains("gpt-6.1-sol"))
+                }), "usage limit and actual failover must be published as structured data: {events:?}");
                 assert!(events.iter().any(|event| matches!(
                     event,
                     ServerEvent::ConnectionPhase { phase } if phase.starts_with("retrying on")
@@ -1049,6 +1103,7 @@ mod tests {
     struct RejectingPrimaryProvider {
         model: Arc<StdMutex<String>>,
         calls: Arc<StdMutex<Vec<String>>>,
+        quota_failure: bool,
     }
 
     #[async_trait]
@@ -1063,6 +1118,11 @@ mod tests {
             let model = self.model.lock().unwrap().clone();
             self.calls.lock().unwrap().push(model.clone());
             if model.contains("deepseek") {
+                if self.quota_failure {
+                    anyhow::bail!(
+                        "HTTP 429 weekly usage limit reached; resets at 2026-11-17T10:00:00Z"
+                    );
+                }
                 anyhow::bail!(
                     "OpenAI-compatible chat request failed status: 400 Bad Request: \
                      This OpenCode Go model is hosted outside Europe and the United States"
@@ -1195,6 +1255,7 @@ mod tests {
                     inner: RejectingPrimaryProvider {
                         model: Arc::new(StdMutex::new("deepseek-v4.1-flash".into())),
                         calls: Arc::new(StdMutex::new(Vec::new())),
+                        quota_failure: false,
                     },
                     effort: Arc::new(StdMutex::new("max".into())),
                     observed: Arc::new(StdMutex::new(Vec::new())),
@@ -1235,6 +1296,69 @@ mod tests {
     }
 
     #[test]
+    fn swarm_quota_model_fallback_reports_actual_route_and_reset() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(home) => crate::env::set_var("JCODE_HOME", home),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+                crate::config::Config::invalidate_cache();
+            }
+        }
+        let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", home.path());
+        crate::config::Config::invalidate_cache();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let provider = RejectingPrimaryProvider {
+                    model: Arc::new(StdMutex::new("deepseek-v4.1-flash".into())),
+                    calls: Arc::new(StdMutex::new(Vec::new())),
+                    quota_failure: true,
+                };
+                let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+                let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+                let session = crate::session::Session::create_with_id(
+                    "session_swarm_quota_fallback".into(),
+                    None,
+                    None,
+                );
+                let mut agent = Agent::new_with_session(provider_dyn, registry, session, None);
+                let lease = agent.claim_server_turn().unwrap();
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                let result = process_reserved_locked_message_with_swarm_fallbacks(
+                    &mut agent,
+                    &lease,
+                    "swarm task",
+                    Vec::new(),
+                    None,
+                    tx,
+                    &["claude:claude-sonnet-5-5".into()],
+                    &[],
+                )
+                .await;
+                assert!(result.is_ok(), "quota fallback should succeed: {result:?}");
+                let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+                assert!(
+                    events
+                        .iter()
+                        .any(|event| matches!(event, ServerEvent::UsageLimit {
+                model, window, reset, action, target: Some(target), ..
+            } if model == "deepseek-v4.1-flash" && window == "weekly"
+                && reset == "2026-11-17T10:00:00Z" && action == "failed_over"
+                && target.contains("claude-sonnet-5-5"))),
+                    "{events:?}"
+                );
+            });
+    }
+
+    #[test]
     fn swarm_worker_turn_falls_back_when_primary_fails_with_non_rate_limit_error() {
         let _guard = crate::storage::lock_test_env();
         tokio::runtime::Builder::new_current_thread()
@@ -1245,6 +1369,7 @@ mod tests {
                 let provider = RejectingPrimaryProvider {
                     model: Arc::new(StdMutex::new("deepseek-v4.1-flash".into())),
                     calls: Arc::new(StdMutex::new(Vec::new())),
+                    quota_failure: false,
                 };
                 let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
                 let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
@@ -1298,6 +1423,7 @@ mod tests {
                 let provider = RejectingPrimaryProvider {
                     model: Arc::new(StdMutex::new("deepseek-v4.1-flash".into())),
                     calls: Arc::new(StdMutex::new(Vec::new())),
+                    quota_failure: false,
                 };
                 let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
                 let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
@@ -1338,6 +1464,7 @@ mod tests {
                 let provider = RejectingPrimaryProvider {
                     model: Arc::new(StdMutex::new("deepseek-v4.1-flash".into())),
                     calls: Arc::new(StdMutex::new(Vec::new())),
+                    quota_failure: false,
                 };
                 let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
                 let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;

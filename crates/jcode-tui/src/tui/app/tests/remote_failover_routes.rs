@@ -1320,9 +1320,13 @@ fn test_remote_usage_limit_failover_collapses_into_one_line_with_account() {
         let added: Vec<_> = app.display_messages()[before..].to_vec();
         assert_eq!(added.len(), 1, "{added:?}");
         assert_eq!(added[0].role, "system");
-        assert_eq!(
-            added[0].content,
-            "✓ Usage limit reached. Switched to model: gpt-5.4 (via OAuth · j***y@gmail.com). Retrying."
+        assert!(
+            added[0].content.contains("Anthropic")
+                && added[0].content.contains("claude-sonnet-4")
+                && added[0].content.contains("reset unknown")
+                && added[0].content.contains("gpt-5.4"),
+            "{}",
+            added[0].content
         );
     });
 }

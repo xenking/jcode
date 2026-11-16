@@ -258,13 +258,34 @@ impl App {
 impl App {
     /// Rate-limit notice line, with the weekly-gated subscribe nudge appended
     /// when the gate allows (user is blocked on tokens right now).
-    pub(super) fn rate_limit_notice_with_nudge(&mut self, reset_secs: u64) -> String {
+    pub(super) fn rate_limit_notice_with_nudge(&mut self, reset_secs: u64, error: &str) -> String {
+        let provider = self
+            .remote_provider_name
+            .as_deref()
+            .unwrap_or("unknown provider");
+        let model = self
+            .remote_provider_model
+            .as_deref()
+            .unwrap_or("unknown model");
+        let account = self
+            .remote_provider_oauth_account_label
+            .as_deref()
+            .unwrap_or("unknown account");
+        let details = jcode_provider_core::failover::usage_limit_details(error);
+        let window = details.as_ref().map_or("unknown", |details| details.window);
+        let reset = details
+            .as_ref()
+            .and_then(|details| details.reset.as_deref())
+            .unwrap_or("unknown");
+        // Retry-After is a retry hint, not necessarily the provider's window reset.
+        let retry_at = chrono::Utc::now()
+            + chrono::Duration::seconds(i64::try_from(reset_secs).unwrap_or(i64::MAX).min(604_800));
         let mut line = format!(
-            "⏳ Rate limit hit. Will auto-retry in {} seconds...",
-            reset_secs
+            "{provider} / {model} / {account}: {window} usage window, reset {reset}; waiting. Will auto-retry in {reset_secs} seconds at {} UTC.",
+            retry_at.format("%Y-%m-%d %H:%M:%S")
         );
         if self.claim_subscribe_nudge(SubscribeNudgeTrigger::RateLimited) {
-            line.push_str(&format!("\n{}", RATE_LIMIT_NUDGE_LINE));
+            line.push_str(&format!("  {}", RATE_LIMIT_NUDGE_LINE));
         }
         line
     }

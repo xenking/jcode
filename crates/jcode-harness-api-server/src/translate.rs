@@ -2131,6 +2131,17 @@ impl BridgeState {
                 session_id: session(self),
                 phase: event["phase"].as_str().unwrap_or("connecting").to_string(),
             })],
+            "usage_limit" => vec![ServerFrame::event(ApiEvent::UsageLimit {
+                session_id: session(self),
+                provider: event["provider"].as_str().unwrap_or("unknown").to_string(),
+                model: event["model"].as_str().unwrap_or("unknown").to_string(),
+                account: event["account"].as_str().map(str::to_string),
+                window: event["window"].as_str().unwrap_or("unknown").to_string(),
+                reset: event["reset"].as_str().unwrap_or("unknown").to_string(),
+                action: event["action"].as_str().unwrap_or("unknown").to_string(),
+                target: event["target"].as_str().map(str::to_string),
+                message: event["message"].as_str().unwrap_or("").to_string(),
+            })],
             // Argument streaming is not an assistant-message boundary.
             "ask_user_request" => match serde_json::from_value(event["questions"].clone()) {
                 Ok(questions) => vec![ServerFrame::event(ApiEvent::AskRequest {

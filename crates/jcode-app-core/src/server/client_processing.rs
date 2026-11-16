@@ -551,6 +551,17 @@ pub(super) async fn start_processing_message(
                 ),
             }
         }
+        if server_failover && let Err(error) = &result {
+            let agent = report_agent.lock().await;
+            if let Some(event) = super::super::turn_failover::usage_limit_event(
+                &agent,
+                &crate::util::format_error_chain(error),
+                "stopped",
+                None,
+            ) {
+                let _ = tx.send(event);
+            }
+        }
         // Keep the terminal event on the same ordered fanout channel as the
         // stream. Sending it later from the owning client's event loop could
         // race ahead of the final MessageEnd for newly attached clients.

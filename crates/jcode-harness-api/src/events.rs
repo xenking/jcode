@@ -435,6 +435,19 @@ pub enum ApiEvent {
     /// avoid looking stuck before the model emits its first token.
     ConnectionPhase { session_id: String, phase: String },
 
+    /// Structured provider quota outcome for a turn.
+    UsageLimit {
+        session_id: String,
+        provider: String,
+        model: String,
+        account: Option<String>,
+        window: String,
+        reset: String,
+        action: String,
+        target: Option<String>,
+        message: String,
+    },
+
     /// The provider and model serving the attached session.
     ///
     /// Sent unsolicited after attach, and again whenever the model changes, so
