@@ -170,6 +170,14 @@ fn parse_generation(value: Option<&str>) -> Result<u64> {
     Ok(generation)
 }
 
+fn optional_identity_env(name: &str) -> Result<Option<String>> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("inherited {name} is unreadable")),
+    }
+}
+
 fn inherited_generation() -> Result<u64> {
     match std::env::var(GENERATION_ENV) {
         Ok(value) => parse_generation(Some(&value)),
@@ -182,8 +190,7 @@ fn capture_identity(git_hash: &str) -> Result<ServingIdentity> {
     let exe = std::env::current_exe().context("running executable path unavailable")?;
     // proc_pidpath may return another hardlink. Inherited target is authoritative
     // only when it is the same image, not merely because the environment says so.
-    let target: Option<ImmutableTarget> = std::env::var(TARGET_ENV)
-        .ok()
+    let target: Option<ImmutableTarget> = optional_identity_env(TARGET_ENV)?
         .map(|raw| serde_json::from_str(&raw))
         .transpose()?;
     let binary_path = if let Some(target) = &target {
@@ -209,9 +216,7 @@ fn capture_identity(git_hash: &str) -> Result<ServingIdentity> {
             .or_else(|| installed_label(&binary_path)),
         binary_path,
         git_hash: git_hash.to_owned(),
-        reload_id: std::env::var(RELOAD_ID_ENV)
-            .ok()
-            .filter(|id| !id.is_empty()),
+        reload_id: optional_identity_env(RELOAD_ID_ENV)?.filter(|id| !id.is_empty()),
         generation: inherited_generation()?,
     })
 }
@@ -459,13 +464,26 @@ pub struct ChannelDiagnostics {
 }
 
 pub fn channel_diagnostics(channel: &Path, marker: &Path) -> ChannelDiagnostics {
-    let resolved = std::fs::canonicalize(channel);
+    let (resolved_path, mut reason) = match std::fs::canonicalize(channel) {
+        Ok(path) => (Some(path), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
+    let marker = match std::fs::read_to_string(marker) {
+        Ok(text) => Some(text.trim().to_owned()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            let detail = format!("channel marker unavailable: {error}");
+            reason = Some(match reason {
+                Some(previous) => format!("{previous}; {detail}"),
+                None => detail,
+            });
+            None
+        }
+    };
     ChannelDiagnostics {
         channel: channel.to_path_buf(),
-        reason: resolved.as_ref().err().map(ToString::to_string),
-        resolved_path: resolved.ok(),
-        marker: std::fs::read_to_string(marker)
-            .ok()
-            .map(|s| s.trim().to_owned()),
+        reason,
+        resolved_path,
+        marker,
     }
 }

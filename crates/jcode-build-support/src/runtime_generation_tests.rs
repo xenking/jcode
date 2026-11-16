@@ -1,5 +1,45 @@
 use super::*;
 
+#[cfg(unix)]
+#[test]
+fn inherited_identity_rejects_non_utf8_environment() {
+    use std::os::unix::ffi::OsStringExt;
+    const CHILD: &str = "JCODE_TEST_INVALID_RUNTIME_IDENTITY";
+    if std::env::var_os(CHILD).is_some() {
+        assert!(capture_identity("abcdef123").is_err());
+        return;
+    }
+    for key in [TARGET_ENV, RELOAD_ID_ENV] {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime_generation::tests::inherited_identity_rejects_non_utf8_environment",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env_remove(TARGET_ENV)
+            .env_remove(RELOAD_ID_ENV)
+            .env_remove(GENERATION_ENV)
+            .env(key, std::ffi::OsString::from_vec(vec![0xff]))
+            .status()
+            .unwrap();
+        assert!(status.success(), "invalid {key} must fail closed");
+    }
+}
+
+#[test]
+fn unreadable_channel_marker_keeps_diagnostic_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let channel = dir.path().join("jcode");
+    std::fs::write(&channel, "binary").unwrap();
+    let marker = dir.path().join("marker");
+    std::fs::create_dir(&marker).unwrap();
+    let diagnostics = channel_diagnostics(&channel, &marker);
+    assert!(diagnostics.resolved_path.is_some());
+    assert!(diagnostics.marker.is_none());
+    assert!(diagnostics.reason.is_some());
+}
+
 fn serving() -> ServingIdentity {
     ServingIdentity {
         pid: 42,

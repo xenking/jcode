@@ -33,7 +33,7 @@ pub use version_gc::{
     prune_old_versions_in,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use jcode_storage as storage;
 use serde::{Deserialize, Serialize};
@@ -748,8 +748,10 @@ pub fn promote_version_to_shared_server(version: &str) -> Result<Option<String>>
         &shared_server_binary_path()?,
         &shared_server_version_file()?,
     );
+    let resolved_target = std::fs::canonicalize(&target)
+        .with_context(|| format!("cannot resolve installed runtime {}", target.display()))?;
     if previous.as_deref() == Some(version)
-        && selected.resolved_path == std::fs::canonicalize(&target).ok()
+        && selected.resolved_path.as_ref() == Some(&resolved_target)
     {
         return Ok(previous);
     }
