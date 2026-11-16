@@ -1175,6 +1175,8 @@ fn status_with_background_tasks(
     use crate::tui::BackgroundTaskRowStatus;
     use jcode_tui_render::truncate_line_with_ellipsis_to_width as fit;
 
+    let foreground = compact_status_fit(foreground, usize::MAX);
+
     let running: Vec<_> = tasks
         .iter()
         .filter(|task| task.status == BackgroundTaskRowStatus::Running)
@@ -1507,7 +1509,7 @@ fn notification_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     if spans.is_empty() || width == 0 {
         return Vec::new();
     }
-    let line = Line::from(spans);
+    let line = compact_status_fit(Line::from(spans), usize::from(width));
     // Notifications must never occupy a second row on narrow terminals.
     let lines = vec![line];
     lines
@@ -1916,7 +1918,7 @@ fn overscroll_fit_facts(facts: &OverscrollFacts, max_width: usize) -> (Vec<Span<
             }
             out.extend(group);
         }
-        out
+        compact_status_fit(Line::from(out), usize::MAX).spans
     };
     let width = |spans: &[Span<'static>]| spans.iter().map(|s| s.content.width()).sum::<usize>();
 
@@ -1935,58 +1937,28 @@ fn overscroll_fit_facts(facts: &OverscrollFacts, max_width: usize) -> (Vec<Span<
     (overscroll_truncate_spans(spans, max_width), false)
 }
 
-fn overscroll_truncate_label(label: &str, max_chars: usize) -> String {
-    if label.chars().count() <= max_chars {
-        return label.to_string();
-    }
-    let mut out: String = label.chars().take(max_chars.saturating_sub(1)).collect();
-    out.push('…');
-    out
+fn overscroll_truncate_label(label: &str, max_width: usize) -> String {
+    compact_status_fit(Line::from(label.to_owned()), max_width).to_string()
 }
 
 /// Truncate a list of spans to at most `max_width` display columns, appending a
 /// single-cell ellipsis when content is dropped. Preserves per-span styling.
 fn overscroll_truncate_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Span<'static>> {
-    use unicode_width::UnicodeWidthStr;
-    if max_width == 0 {
-        return Vec::new();
-    }
-    let total: usize = spans.iter().map(|s| s.content.width()).sum();
-    if total <= max_width {
-        return spans;
-    }
-    // Leave room for a trailing ellipsis.
-    let budget = max_width.saturating_sub(1);
-    let mut out: Vec<Span<'static>> = Vec::new();
-    let mut used = 0usize;
-    for span in spans {
-        let w = span.content.width();
-        if used + w <= budget {
-            used += w;
-            out.push(span);
-            continue;
+    compact_status_fit(Line::from(spans), max_width).spans
+}
+
+fn compact_status_fit(mut line: Line<'static>, width: usize) -> Line<'static> {
+    for span in &mut line.spans {
+        if span.content.chars().any(char::is_control) {
+            span.content = span
+                .content
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect::<String>()
+                .into();
         }
-        // Partial: take as many chars as fit within the remaining budget.
-        let remaining = budget - used;
-        if remaining > 0 {
-            let mut taken = String::new();
-            let mut tw = 0usize;
-            for ch in span.content.chars() {
-                let cw = UnicodeWidthStr::width(ch.to_string().as_str());
-                if tw + cw > remaining {
-                    break;
-                }
-                tw += cw;
-                taken.push(ch);
-            }
-            if !taken.is_empty() {
-                out.push(Span::styled(taken, span.style));
-            }
-        }
-        break;
     }
-    out.push(Span::styled("…", Style::default().fg(rgb(100, 100, 110))));
-    out
+    jcode_tui_render::truncate_line_with_ellipsis_to_width(&line, width)
 }
 
 /// Format a working dir path home-relative (~/foo/bar), keeping the last 2 segments.

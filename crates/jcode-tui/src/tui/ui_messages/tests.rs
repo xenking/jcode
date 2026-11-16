@@ -219,8 +219,12 @@ fn usage_card_compacts_padded_labels_in_narrow_terminals() {
     let lines = render_usage_message(&msg, 36, crate::config::DiffDisplayMode::Off);
     let rows: Vec<_> = lines.iter().map(extract_line_text).collect();
     assert!(
-        rows.iter()
-            .any(|row| row.contains("7-day window:") && row.contains("59%")),
+        rows.iter().any(|row| row.contains("7-day window")
+            && row.contains(if crate::config::config().display.usage_display_used() {
+                "59% used"
+            } else {
+                "41% left"
+            })),
         "{rows:#?}"
     );
     assert!(rows.iter().any(|row| row.contains("resets in 5d 4h")));
@@ -324,7 +328,10 @@ fn usage_card_keeps_narrow_gauges_and_words_together() {
     for width in [20, 40, 60] {
         let lines = render_usage_message(&msg, width, crate::config::DiffDisplayMode::Off);
         let texts: Vec<_> = lines.iter().map(extract_line_text).collect();
-        let gauges: Vec<_> = texts.iter().filter(|text| text.contains('█')).collect();
+        let gauges: Vec<_> = texts
+            .iter()
+            .filter(|text| text.contains('▰') || text.contains('▱'))
+            .collect();
         assert_eq!(gauges.len(), 1, "width {width}: {texts:?}");
         assert!(gauges[0].contains("50%"), "width {width}: {texts:?}");
         assert!(texts.iter().any(|text| text.contains("available")));
@@ -349,42 +356,21 @@ fn usage_card_compacts_long_summary_without_mutating_report() {
 
 #[test]
 fn usage_card_colors_utilization_and_dims_empty_bars_and_countdowns() {
-    use ratatui::style::Modifier;
-    for (percent, color) in [
-        (0, rgb(100, 220, 170)),
-        (69, rgb(100, 220, 170)),
-        (70, rgb(255, 200, 100)),
-        (89, rgb(255, 200, 100)),
-        (90, Color::Red),
-        (100, Color::Red),
-    ] {
-        let bar = if percent == 0 {
-            "░░░░"
-        } else {
-            "██░░"
-        };
-        let msg = DisplayMessage::system(format!("  Weekly: {bar} {percent}% · resets in 2h"));
-        let lines = render_usage_message(&msg, 120, crate::config::DiffDisplayMode::Off);
-        let spans: Vec<_> = lines.iter().flat_map(|line| &line.spans).collect();
-        let value = spans
-            .iter()
-            .find(|span| span.content == format!(" {percent}%"))
-            .unwrap();
-        assert_eq!(value.style.fg, Some(color));
-        assert!(value.style.add_modifier.contains(Modifier::BOLD));
-        for span in spans
-            .iter()
-            .filter(|span| span.content.contains('░') || span.content.contains("resets in"))
-        {
-            assert_eq!(span.style.fg, Some(dim_color()));
+    for percent in [0, 49, 50, 79, 80, 100] {
+        let raw = format!("  Weekly: ██░░ {percent}% · resets in 2h");
+        let actual = super::usage::usage_report_lines(&raw, 50);
+        let expected = crate::tui::info_widget::LimitBar {
+            label: "Weekly",
+            label_column: 8,
+            used_pct: percent,
+            left_pct: 100 - percent,
+            reset_time: Some("resets in 2h"),
+            width: 50,
+            display_used: crate::config::config().display.usage_display_used(),
+            columns: None,
         }
-        if percent > 0 {
-            assert!(
-                spans
-                    .iter()
-                    .any(|span| span.content == "██" && span.style.fg == Some(color))
-            );
-        }
+        .render();
+        assert_eq!(actual, vec![expected]);
     }
 }
 
@@ -3815,7 +3801,10 @@ fn compaction_divider_shows_the_summary_and_elided_details_when_expanded() {
         .join("\n");
     assert!(body.contains("trigger: reactive"), "{body}");
     assert!(body.contains("messages summarized: 84"), "{body}");
-    assert!(body.contains("The user asked for a compaction divider."), "{body}");
+    assert!(
+        body.contains("The user asked for a compaction divider."),
+        "{body}"
+    );
 }
 
 #[test]

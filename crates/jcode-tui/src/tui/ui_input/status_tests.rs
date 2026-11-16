@@ -1037,3 +1037,16 @@ fn effort_ink_is_a_heat_scale() {
     let (max_r, max_g, max_b) = channel("max");
     assert!(max_r > max_g && max_r > max_b, "max is hot");
 }
+#[test]
+fn compact_labels_fit_cells_and_status_never_contains_newlines() {
+    use unicode_width::UnicodeWidthStr;
+    for width in [1, 2, 20, 40, 80] {
+        let label = "工作😀\n".repeat(30);
+        let fitted = overscroll_truncate_label(&label, width);
+        assert!(fitted.width() <= width, "{width}: {fitted:?}");
+        assert!(!fitted.contains('\n'));
+        let line = status_with_background_tasks(Line::from(label), &[], width, true);
+        assert!(line.width() <= width);
+        assert!(!line.to_string().contains('\n'));
+    }
+}
