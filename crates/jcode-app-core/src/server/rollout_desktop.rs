@@ -190,7 +190,9 @@ fn unix_sockets(pid: u32) -> Result<UnixSockets> {
 }
 
 fn only_listener(sockets: &UnixSockets, socket: &Path) -> bool {
-    sockets.paths.len() == 1
+    sockets.descriptors == 1
+        && sockets.peers.is_empty()
+        && sockets.paths.len() == 1
         && same_path(&sockets.paths[0], socket)
         && sockets.devices.len() == sockets.descriptors
         && sockets.paths.len() + sockets.peers.len() == sockets.descriptors
@@ -728,8 +730,11 @@ fn executable_of(pid: u32) -> Option<PathBuf> {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+    const IDLE: &str = "p77\nf3\nd0x1\nn/fixture/run/jcode-api.sock\n";
+    const CLIENT: &str = "p77\nf3\nd0x1\nn/fixture/run/jcode-api.sock\nf4\nd0x2\nn->0x3\n";
+    const INCOMPLETE: &str = "p77\nf3\nd0x1\nn/fixture/run/jcode-api.sock\nf4\nd0x2\n";
     struct FakeBridge {
-        snapshots: std::collections::VecDeque<Option<bool>>,
+        snapshots: std::collections::VecDeque<Option<&'static str>>,
         signals: Vec<(i32, Duration)>,
         elapsed: Duration,
         alive: bool,
@@ -748,10 +753,15 @@ mod tests {
             Ok(self.alive)
         }
         fn no_clients(&mut self) -> Result<bool> {
-            self.snapshots
+            let listing = self
+                .snapshots
                 .pop_front()
                 .expect("missing lsof snapshot")
-                .context("lsof failed")
+                .context("lsof failed")?;
+            Ok(only_listener(
+                &parse_unix_sockets(listing),
+                Path::new("/fixture/run/jcode-api.sock"),
+            ))
         }
         fn signal(&mut self, signal: i32) -> Result<()> {
             self.signals.push((signal, self.elapsed));
@@ -765,7 +775,10 @@ mod tests {
         }
     }
 
-    fn fake_bridge(snapshots: &[Option<bool>], exit_on_term: bool) -> (BridgeProcess, FakeBridge) {
+    fn fake_bridge(
+        snapshots: &[Option<&'static str>],
+        exit_on_term: bool,
+    ) -> (BridgeProcess, FakeBridge) {
         (
             BridgeProcess {
                 pid: 77,
@@ -789,7 +802,7 @@ mod tests {
     fn legacy_clientless_exits_and_survivor_is_killed_after_five_seconds() {
         for exit_on_term in [true, false] {
             let (process, mut fake) =
-                fake_bridge(&[Some(true), Some(true), Some(true)], exit_on_term);
+                fake_bridge(&[Some(IDLE), Some(IDLE), Some(IDLE)], exit_on_term);
             retire_foreign_bridges(&[process], Path::new("/fixture/new/jcode"), |bridge| {
                 retire_with_fallback(bridge, &mut fake)
             })
@@ -807,16 +820,38 @@ mod tests {
                 );
             }
             assert!(!fake.alive);
+            let target = Path::new("/fixture/new/jcode");
+            let bridge = BridgeProcess {
+                pid: 88,
+                parent_pid: 1,
+                executable: target.into(),
+                sockets: vec!["/fixture/new.sock".into()],
+                devices: vec!["0x88".into()],
+            };
+            let desktop = UnixSockets {
+                peers: vec!["0x88".into()],
+                ..Default::default()
+            };
+            assert!(
+                verify_desktop_connections(
+                    &[desktop],
+                    &[bridge],
+                    target,
+                    Path::new("/fixture/new.sock")
+                )
+                .unwrap()
+            );
         }
     }
 
     #[test]
     fn legacy_clients_or_inconclusive_lsof_block_rollout_and_report_command() {
         for snapshots in [
-            &[Some(false)][..],
+            &[Some(CLIENT)][..],
             &[None][..],
-            &[Some(true), Some(false)][..],
-            &[Some(true), None][..],
+            &[Some(INCOMPLETE)][..],
+            &[Some(IDLE), Some(CLIENT)][..],
+            &[Some(IDLE), None][..],
         ] {
             let (process, mut fake) = fake_bridge(snapshots, false);
             let error =
@@ -837,7 +872,7 @@ mod tests {
 
     #[test]
     fn retirement_api_waits_before_fallback_and_rechecks_before_kill() {
-        let (process, mut fake) = fake_bridge(&[Some(true), Some(true), Some(false)], false);
+        let (process, mut fake) = fake_bridge(&[Some(IDLE), Some(IDLE), Some(CLIENT)], false);
         fake.request = None;
         assert!(retire_with_fallback(&process, &mut fake).is_err());
         assert_eq!(fake.signals, vec![(libc::SIGTERM, Duration::from_secs(6))]);
