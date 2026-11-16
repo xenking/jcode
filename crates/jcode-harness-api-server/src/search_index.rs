@@ -46,7 +46,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 ///
 /// v2: messages carry the model that produced them, and harness-injected
 /// user-role text is no longer indexed as a user prompt.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 200;
@@ -770,6 +770,15 @@ enum ContentBlock {
         #[serde(default)]
         text: String,
     },
+    #[serde(rename = "tool_use")]
+    ToolUse { id: String, name: String },
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        #[serde(default)]
+        is_error: Option<bool>,
+    },
     #[serde(other)]
     Other,
 }
@@ -812,6 +821,7 @@ fn read_session(source: &SessionSource) -> anyhow::Result<IndexedSession> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut latest_ms = 0;
     let mut model = snapshot.model.clone();
+    let mut ask_ids = std::collections::HashSet::new();
     for message in &snapshot.messages {
         push_message(
             &mut indexed.messages,
@@ -819,6 +829,7 @@ fn read_session(source: &SessionSource) -> anyhow::Result<IndexedSession> {
             &mut latest_ms,
             message,
             model.as_deref(),
+            &mut ask_ids,
         );
     }
     if let Some(updated_at) = snapshot.updated_at.as_deref() {
@@ -854,6 +865,7 @@ fn read_session(source: &SessionSource) -> anyhow::Result<IndexedSession> {
                     &mut latest_ms,
                     message,
                     model.as_deref(),
+                    &mut ask_ids,
                 );
             }
         }
@@ -873,7 +885,15 @@ fn push_message(
     latest_ms: &mut i64,
     message: &StoredMessage,
     model: Option<&str>,
+    ask_ids: &mut std::collections::HashSet<String>,
 ) {
+    for block in &message.content {
+        if let ContentBlock::ToolUse { id, name } = block
+            && name == "ask"
+        {
+            ask_ids.insert(id.clone());
+        }
+    }
     // System prompts, reminders and other display-only rows are scaffolding,
     // not something worth recalling.
     if message.display_role.is_some() {
@@ -888,8 +908,18 @@ fn push_message(
         .content
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            ContentBlock::Other => None,
+            ContentBlock::Text { text } => Some(text.clone()),
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } if role == SessionSearchRole::User
+                && ask_ids.contains(tool_use_id)
+                && *is_error != Some(true) =>
+            {
+                jcode_session_types::stored_ask_answer_text(content)
+            }
+            _ => None,
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -944,10 +974,7 @@ fn is_harness_injection(text: &str) -> bool {
         "Member statuses:",
         "Await satisfied.",
     ];
-    if PREFIXES
-        .iter()
-        .any(|prefix| trimmed.starts_with(prefix))
-    {
+    if PREFIXES.iter().any(|prefix| trimmed.starts_with(prefix)) {
         return true;
     }
     jcode_todo_policy::is_auto_poke_message(trimmed)

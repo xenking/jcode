@@ -8,6 +8,31 @@ pub const ASK_MAX_OPTIONS: usize = 6;
 /// Tool output returned when the user dismisses the prompt.
 pub const ASK_DECLINED_MESSAGE: &str = "User declined to answer the questions.";
 
+/// Project a successful persisted ask result into a compact human turn.
+/// Errors and unrelated tool outputs are not user answers.
+pub fn stored_ask_answer_text(content: &str) -> Option<String> {
+    let content = content.trim();
+    if content == ASK_DECLINED_MESSAGE {
+        return Some(content.to_owned());
+    }
+    let body = content.strip_prefix("User answers:\n")?;
+    let mut lines = Vec::new();
+    let mut has_question = false;
+    for line in body.lines() {
+        let question = line.split_once(". ").and_then(|(number, rest)| {
+            number.parse::<usize>().ok()?;
+            rest.split_once(" -> ")
+        });
+        if let Some((question, answer)) = question {
+            has_question = true;
+            lines.push(format!("Q: {question} → {answer}"));
+        } else {
+            lines.push(line.to_owned());
+        }
+    }
+    has_question.then(|| lines.join("\n"))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AskOption {
     pub label: String,

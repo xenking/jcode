@@ -141,7 +141,10 @@ fn harness_user_role_injections_are_not_indexed_as_prompts() {
     let results = index.search("zebra", None).unwrap();
     assert_eq!(results.messages.len(), 1, "{:?}", results.messages);
     assert_eq!(results.messages[0].role, SessionSearchRole::User);
-    assert_eq!(results.messages[0].message_id.as_deref(), Some("message_real_prompt"));
+    assert_eq!(
+        results.messages[0].message_id.as_deref(),
+        Some("message_real_prompt")
+    );
     assert_eq!(
         results.messages[0].model, None,
         "a prompt has no authoring model"
@@ -228,6 +231,58 @@ fn user_and_assistant_text_is_searchable_but_tool_traffic_is_not() {
     // `grep` and `/tmp/capacitor` only exist in the tool input.
     assert!(index.search("grep", None).unwrap().messages.is_empty());
     assert!(index.search("tmp", None).unwrap().messages.is_empty());
+}
+
+#[test]
+fn ask_answers_are_indexed_as_user_messages_not_tool_output() {
+    let dir = test_dir("ask-answer");
+    write_session(
+        &dir,
+        "session_ask",
+        "Decisions",
+        vec![
+            assistant_message(
+                "call",
+                "2026-01-02T03:05:00Z",
+                serde_json::json!([
+                    {"type":"tool_use", "id":"ask1", "name":"ask", "input":{"questions":[{"question":"Which fruit?"}]}},
+                    {"type":"tool_use", "id":"bash1", "name":"bash", "input":{}}
+                ]),
+            ),
+            serde_json::json!({"id":"answer", "role":"user", "timestamp":"2026-01-02T03:06:00Z", "content":[
+                {"type":"tool_result", "tool_use_id":"ask1", "content":"User answers:\n1. Which fruit? -> Mango (comment: ripe); Other: kumquat\n"},
+                {"type":"tool_result", "tool_use_id":"bash1", "content":"secrettooloutput"}
+            ]}),
+            assistant_message(
+                "call2",
+                "2026-01-02T03:07:00Z",
+                serde_json::json!([
+                    {"type":"tool_use", "id":"ask2", "name":"ask", "input":{"questions":[{"question":"Proceed?"}]}}
+                ]),
+            ),
+            serde_json::json!({"id":"declined", "role":"user", "content":[
+                {"type":"tool_result", "tool_use_id":"ask2", "content":"User declined to answer the questions."}
+            ]}),
+        ],
+    );
+    let mut index = index_for(&dir);
+    for needle in ["Mango", "ripe", "kumquat", "declined"] {
+        let results = index.search(needle, None).unwrap();
+        assert_eq!(
+            results.messages.len(),
+            1,
+            "{needle}: {:?}",
+            results.messages
+        );
+        assert_eq!(results.messages[0].role, SessionSearchRole::User);
+    }
+    assert!(
+        index
+            .search("secrettooloutput", None)
+            .unwrap()
+            .messages
+            .is_empty()
+    );
 }
 
 #[test]
