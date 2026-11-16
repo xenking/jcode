@@ -1959,6 +1959,17 @@ impl BridgeState {
             self.activity_version += 1;
         }
         let mut frames = match kind {
+            "peer_user_message" => event["content"]
+                .as_str()
+                .filter(|content| !content.trim().is_empty())
+                .map(|content| {
+                    ServerFrame::event(ApiEvent::PeerUserMessage {
+                        session_id: session(self),
+                        content: content.to_owned(),
+                    })
+                })
+                .into_iter()
+                .collect(),
             "user_image_ids" => vec![ServerFrame::event(ApiEvent::UserImageIds {
                 session_id: self.session_id.clone().unwrap_or_default(),
                 original_content: event["original_content"]

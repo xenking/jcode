@@ -563,6 +563,35 @@ fn model_switch_refusal_is_a_typed_error_not_a_success() {
 }
 
 #[test]
+fn peer_messages_are_filtered_by_session_over_sdk_transport() {
+    let client = fake_harness(|frame, writer| {
+        if let ApiRequest::Ping = frame.request {
+            reply(frame, ApiEvent::Pong, writer);
+            for session_id in ["other", "mine"] {
+                push(
+                    ApiEvent::PeerUserMessage {
+                        session_id: session_id.into(),
+                        content: "external prompt".into(),
+                    },
+                    writer,
+                );
+            }
+        }
+    });
+    let stream = client.events(Some("mine"));
+    let all = client.events(None);
+    client.ping().expect("ping");
+    assert!(
+        matches!(stream.next_timeout(Duration::from_secs(5)), Some(ApiEvent::PeerUserMessage { session_id, content }) if session_id == "mine" && content == "external prompt")
+    );
+    for expected in ["other", "mine"] {
+        assert!(
+            matches!(all.next_timeout(Duration::from_secs(5)), Some(ApiEvent::PeerUserMessage {session_id, ..}) if session_id == expected)
+        );
+    }
+}
+
+#[test]
 fn recovery_events_are_delivered_and_filtered_by_session() {
     let client = fake_harness(|frame, writer| {
         if let ApiRequest::Ping = frame.request {

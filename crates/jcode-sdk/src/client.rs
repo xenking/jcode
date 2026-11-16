@@ -2021,6 +2021,7 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | SoftInterruptInjected { session_id, .. }
         | TurnStopped { session_id, .. }
         | BackgroundProgress { session_id, .. }
+        | PeerUserMessage { session_id, .. }
         | MessageAccepted { session_id, .. }
         | AskRequest { session_id, .. }
         | PermissionRequest { session_id, .. }
@@ -2035,6 +2036,20 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | History { session_id, .. } => Some(session_id.as_str()),
         Attached { session } => Some(session.session_id.as_str()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod peer_message_tests {
+    use super::*;
+
+    #[test]
+    fn peer_message_is_scoped_to_its_session() {
+        let event = ApiEvent::PeerUserMessage {
+            session_id: "session-a".into(),
+            content: "hello".into(),
+        };
+        assert_eq!(event_session(&event), Some("session-a"));
     }
 }
 

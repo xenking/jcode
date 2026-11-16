@@ -3677,6 +3677,18 @@ fn history_image_boundaries_survive_loss_of_tool_data() {
 }
 
 #[test]
+fn peer_user_message_is_forwarded_to_attached_client() {
+    let mut state = state_with_session();
+    let frames = state
+        .legacy_event_to_api(&json!({"type":"peer_user_message", "content":"external prompt"}));
+    assert_eq!(frames.len(), 1);
+    let event = serde_json::to_value(&frames[0].event).unwrap();
+    assert_eq!(event["ev"], "peer_user_message");
+    assert_eq!(event["session_id"], "s1");
+    assert_eq!(event["content"], "external prompt");
+}
+
+#[test]
 fn history_response_stats_roundtrip_and_active_turn_suppression() {
     for active in [false, true] {
         let mut state = state_with_session();
@@ -3684,7 +3696,7 @@ fn history_response_stats_roundtrip_and_active_turn_suppression() {
         let Outbound::Legacy(request) = &out[0] else {
             panic!("expected history request")
         };
-        let stats = json!({"input_tokens":30,"output_tokens":4,"cache_read_tokens":6,"cache_creation_tokens":8});
+        let stats = json!({"input_tokens":30,"output_tokens":4,"cache_read_tokens":6,"cache_creation_tokens":8,"tool_calls":1});
         let frames = state.legacy_event_to_api(&json!({
             "type":"history", "id":request["id"], "session_id":"s1",
             "messages":[
@@ -3703,6 +3715,7 @@ fn history_response_stats_roundtrip_and_active_turn_suppression() {
         assert_eq!(previous.output_tokens, Some(4));
         assert_eq!(previous.cache_read_tokens, Some(6));
         assert_eq!(previous.cache_creation_tokens, Some(8));
+        assert_eq!(previous.tool_calls, Some(1));
         assert_eq!(previous.duration_secs, None);
         assert_eq!(messages[3].response_stats.is_some(), !active);
     }

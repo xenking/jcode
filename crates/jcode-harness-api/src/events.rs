@@ -397,6 +397,9 @@ pub enum ApiEvent {
         done: bool,
     },
 
+    /// A prompt submitted by another client attached to this session.
+    PeerUserMessage { session_id: String, content: String },
+
     /// The agent accepted a user message: it is in the session's queue and
     /// will be processed. Sent once per `SendMessage` that the daemon acks.
     ///
