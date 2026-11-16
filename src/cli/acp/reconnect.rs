@@ -71,13 +71,13 @@ impl ManagedConnection {
 }
 
 impl DaemonSession {
-    pub(super) fn maintain_connection(self, runtime: AcpRuntime) -> Self {
+    pub(super) fn maintain_connection(self, runtime: AcpRuntime) -> Result<Self> {
         let context = ReconnectSession {
             session_id: self.session_id.clone(),
             working_dir: self
                 .working_dir
                 .clone()
-                .expect("ACP session has a workspace"),
+                .context("cannot maintain ACP connection without a workspace")?,
             env: self.session_env.clone(),
             model: Arc::clone(&self.selected_model),
             ui_state: Arc::clone(&self.ui_state),
@@ -89,7 +89,7 @@ impl DaemonSession {
         let working_dir = self.working_dir.clone();
         let session_env = self.session_env.clone();
         let next_request_id = self.next_request_id.load(Ordering::Relaxed);
-        Self {
+        Ok(Self {
             session_id: self.session_id.clone(),
             transport: DaemonTransport::Managed(ManagedConnection {
                 requests,
@@ -105,7 +105,7 @@ impl DaemonSession {
             selected_model,
             working_dir,
             active_skill: Mutex::new(None),
-        }
+        })
     }
 }
 
@@ -136,11 +136,15 @@ async fn maintain(
                                 if !matches!(request.request, Request::Cancel { .. }) {
                                     pending = Some(request.request);
                                 }
-                                let _ = request.sent.send(Ok(()));
+                                if request.sent.send(Ok(())).is_err() {
+                                    crate::logging::info("ACP request acknowledgement receiver was dropped");
+                                }
                             }
                             Err(error) => {
                                 let cause = format!("Jcode daemon disconnected while sending request: {error:#}");
-                                let _ = request.sent.send(Err(anyhow::anyhow!(cause.clone())));
+                                if request.sent.send(Err(anyhow::anyhow!(cause.clone()))).is_err() {
+                                    crate::logging::warn(&format!("ACP request error receiver was dropped: {cause}"));
+                                }
                                 if pending.take().is_some()
                                     && events.send(Err(anyhow::anyhow!(cause.clone()))).await.is_err() {
                                     return;
@@ -194,11 +198,26 @@ async fn maintain(
                         let cause = format!(
                             "Failed to reconnect to Jcode daemon within {timeout:?}: {error:#}. Retry the ACP request to try again"
                         );
-                        if let Some(request) = retry_request.take() {
-                            let _ = request.sent.send(Err(anyhow::anyhow!(cause.clone())));
+                        if let Some(request) = retry_request.take()
+                            && request
+                                .sent
+                                .send(Err(anyhow::anyhow!(cause.clone())))
+                                .is_err()
+                        {
+                            crate::logging::warn(&format!(
+                                "ACP retry error receiver was dropped: {cause}"
+                            ));
                         }
                         while let Ok(request) = requests.try_recv() {
-                            let _ = request.sent.send(Err(anyhow::anyhow!(cause.clone())));
+                            if request
+                                .sent
+                                .send(Err(anyhow::anyhow!(cause.clone())))
+                                .is_err()
+                            {
+                                crate::logging::warn(&format!(
+                                    "ACP queued request error receiver was dropped: {cause}"
+                                ));
+                            }
                         }
                         reload_id = None;
                         state = ConnectionState::Failed { cause };

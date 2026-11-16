@@ -62,11 +62,18 @@ async fn backfill(
         None => storage::jcode_dir()?.join("sessions"),
     };
     let mut paths = session_files(&dir)?;
-    paths.sort_by_key(|path| {
+    paths.sort_by_cached_key(|path| {
         std::cmp::Reverse(
-            std::fs::metadata(path)
-                .and_then(|meta| meta.modified())
-                .ok(),
+            match std::fs::metadata(path).and_then(|meta| meta.modified()) {
+                Ok(modified) => Some(modified),
+                Err(error) => {
+                    crate::logging::warn(&format!(
+                        "Cannot read modification time for session {}: {error}",
+                        path.display()
+                    ));
+                    None
+                }
+            },
         )
     });
     if let Some(only_session) = only_session {

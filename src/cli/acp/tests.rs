@@ -964,7 +964,7 @@ impl AcpReconnectFixture {
     ) -> Self {
         let home = tempfile::tempdir().unwrap();
         let socket_path = home.path().join("acp.sock");
-        let mut listener = crate::transport::Listener::bind(&socket_path).unwrap();
+        let listener = crate::transport::Listener::bind(&socket_path).unwrap();
         let (output, client) = tokio::io::duplex(64 * 1024);
         let mut runtime = AcpRuntime::new(
             AcpProfile::Standard,

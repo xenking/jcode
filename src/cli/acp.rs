@@ -788,7 +788,11 @@ impl AcpRuntime {
             if session.prompt_running.load(Ordering::SeqCst) {
                 session.cancel_requested.store(true, Ordering::SeqCst);
                 let cancel_id = session.next_id();
-                let _ = session.send(&Request::Cancel { id: cancel_id }).await;
+                if let Err(error) = session.send(&Request::Cancel { id: cancel_id }).await {
+                    crate::logging::warn(&format!(
+                        "ACP cancel for session {session_id} failed: {error:#}"
+                    ));
+                }
             }
         }
         if let Some(id) = message.id {
@@ -811,7 +815,11 @@ impl AcpRuntime {
         };
         if let Some(session) = self.sessions.lock().await.remove(&session_id) {
             let cancel_id = session.next_id();
-            let _ = session.send(&Request::Cancel { id: cancel_id }).await;
+            if let Err(error) = session.send(&Request::Cancel { id: cancel_id }).await {
+                crate::logging::warn(&format!(
+                    "ACP close cancel for session {session_id} failed: {error:#}"
+                ));
+            }
         }
         self.write_result(id, json!({})).await?;
         Ok(())
@@ -1048,7 +1056,7 @@ impl AcpRuntime {
         let session = self
             .create_new_session_connected(cwd, reader, writer)
             .await?;
-        Ok(session.maintain_connection(self.clone()))
+        session.maintain_connection(self.clone())
     }
 
     async fn create_new_session_connected(
@@ -1139,7 +1147,7 @@ impl AcpRuntime {
                 writer,
             )
             .await?;
-        Ok(session.maintain_connection(self.clone()))
+        session.maintain_connection(self.clone())
     }
 
     async fn attach_existing_session_connected(
