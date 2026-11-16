@@ -216,8 +216,15 @@ pub struct Session {
 }
 
 #[derive(Debug, Deserialize)]
+struct SessionMessageId {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct SessionStartupStub {
     id: String,
+    #[serde(default)]
+    messages: Vec<SessionMessageId>,
     #[serde(default)]
     parent_id: Option<String>,
     #[serde(default)]

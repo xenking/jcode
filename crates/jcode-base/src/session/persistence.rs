@@ -77,9 +77,19 @@ struct JournalReplayDedupe {
 
 impl JournalReplayDedupe {
     fn new(session: &Session) -> Self {
+        Self::with_ids(
+            session.updated_at,
+            session.messages.iter().map(|message| message.id.clone()),
+        )
+    }
+
+    fn with_ids(
+        snapshot_updated_at: chrono::DateTime<Utc>,
+        message_ids: impl Iterator<Item = String>,
+    ) -> Self {
         Self {
-            seen_message_ids: session.messages.iter().map(|m| m.id.clone()).collect(),
-            snapshot_updated_at: session.updated_at,
+            seen_message_ids: message_ids.collect(),
+            snapshot_updated_at,
             in_stale_prefix: true,
             stale_entries: 0,
             dropped_messages: 0,
@@ -89,30 +99,44 @@ impl JournalReplayDedupe {
     /// Returns `None` when the entry is already contained in the snapshot,
     /// otherwise the entry with any already-present messages removed.
     fn filter(&mut self, mut entry: SessionJournalEntry) -> Option<SessionJournalEntry> {
-        let stale = self.in_stale_prefix
-            && if entry.append_messages.is_empty() {
-                // Without messages there is no id to compare. Snapshots stamp
-                // `updated_at` at write time, so an entry written no later than the
-                // snapshot was folded into it.
-                entry.meta.updated_at <= self.snapshot_updated_at
-            } else {
-                entry
-                    .append_messages
-                    .iter()
-                    .all(|m| self.seen_message_ids.contains(&m.id))
-            };
-        if stale {
-            self.stale_entries += 1;
-            self.dropped_messages += entry.append_messages.len();
+        if self.skip_stale(
+            entry.meta.updated_at,
+            entry
+                .append_messages
+                .iter()
+                .map(|message| message.id.as_str()),
+        ) {
             return None;
         }
-        self.in_stale_prefix = false;
         let before = entry.append_messages.len();
         entry
             .append_messages
             .retain(|m| self.seen_message_ids.insert(m.id.clone()));
         self.dropped_messages += before - entry.append_messages.len();
         Some(entry)
+    }
+
+    fn skip_stale<'a>(
+        &mut self,
+        updated_at: chrono::DateTime<Utc>,
+        mut message_ids: impl ExactSizeIterator<Item = &'a str>,
+    ) -> bool {
+        let messages_len = message_ids.len();
+        let stale = self.in_stale_prefix
+            && if messages_len == 0 {
+                // Legacy metadata-only records have no durable checkpoint
+                // position. Keep equal timestamps so a new tail is not lost.
+                updated_at < self.snapshot_updated_at
+            } else {
+                message_ids.all(|id| self.seen_message_ids.contains(id))
+            };
+        if stale {
+            self.stale_entries += 1;
+            self.dropped_messages += messages_len;
+        } else {
+            self.in_stale_prefix = false;
+        }
+        stale
     }
 
     fn found_duplicates(&self) -> bool {
@@ -187,20 +211,28 @@ fn salvage_glued_journal_entries<T: DeserializeOwned>(
 /// instead of rewriting the whole transcript.
 const METADATA_SNAPSHOT_MAX_BYTES: u64 = 1024 * 1024;
 
-/// Apply the metadata from the newest journal entry without deserializing
-/// any appended messages.
-fn apply_latest_journal_meta(session: &mut Session, journal_path: &Path) {
+/// Apply the newest journal metadata without deserializing message content.
+fn apply_latest_journal_meta(
+    session: &mut Session,
+    journal_path: &Path,
+    mut dedupe: JournalReplayDedupe,
+) {
     #[derive(serde::Deserialize)]
     struct MetaOnly {
         meta: super::journal::SessionJournalMeta,
+        #[serde(default)]
+        append_messages: Vec<super::SessionMessageId>,
     }
-    let snapshot_updated_at = session.updated_at;
-    let mut in_stale_prefix = true;
     let _ = replay_journal_lines(journal_path, |entry: MetaOnly| {
-        if in_stale_prefix && entry.meta.updated_at <= snapshot_updated_at {
+        if dedupe.skip_stale(
+            entry.meta.updated_at,
+            entry
+                .append_messages
+                .iter()
+                .map(|message| message.id.as_str()),
+        ) {
             return;
         }
-        in_stale_prefix = false;
         // Compatibility fields can retain an earlier entry's value, so
         // applying only the last metadata record loses that state.
         session.apply_journal_meta(entry.meta);
@@ -520,11 +552,21 @@ impl Session {
         // `from_reader` (which pulls bytes one at a time through io::Read) on
         // multi-MB sessions, and resume reads this on the first-frame path.
         let bytes = std::fs::read(&path)?;
-        let stub: SessionStartupStub = serde_json::from_slice(&bytes)?;
+        let mut stub: SessionStartupStub = serde_json::from_slice(&bytes)?;
+        let dedupe = JournalReplayDedupe::with_ids(
+            stub.updated_at,
+            std::mem::take(&mut stub.messages)
+                .into_iter()
+                .map(|message| message.id),
+        );
         let mut session = Self::session_from_startup_stub(stub);
         // Metadata changes on large sessions are journaled instead of forcing
         // a full snapshot rewrite, so the journal holds the latest metadata.
-        apply_latest_journal_meta(&mut session, &session_journal_path_from_snapshot(&path));
+        apply_latest_journal_meta(
+            &mut session,
+            &session_journal_path_from_snapshot(&path),
+            dedupe,
+        );
         session.reset_persist_state(true);
         session.refresh_agent_model_overrides()?;
         Ok(session)

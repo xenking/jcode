@@ -80,3 +80,102 @@ fn startup_stub_does_not_revert_route_after_interrupted_checkpoint() -> Result<(
     assert_eq!(stub.model.as_deref(), Some("new-model"));
     Ok(())
 }
+
+#[test]
+fn startup_route_matches_full_replay_when_journal_clock_does_not_advance() -> Result<()> {
+    let _lock = lock_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path());
+    for (id, rollback) in [
+        ("session_equal_clock", false),
+        ("session_rollback_clock", true),
+    ] {
+        let mut session = Session::create_with_id(id.into(), None, None);
+        session.provider_key = Some("old-provider".into());
+        session.add_message(Role::User, vec![text("snapshot turn")]);
+        session.save()?;
+        let snapshot_time = session.updated_at;
+        session.add_message(Role::Assistant, vec![text("journal turn")]);
+        session.save()?;
+        let path = session_journal_path(id)?;
+        let mut entry: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        entry["meta"]["provider_key"] = "new-provider".into();
+        entry["meta"]["model"] = "new-tail-model".into();
+        entry["meta"]["updated_at"] = serde_json::to_value(if rollback {
+            snapshot_time - chrono::Duration::days(1)
+        } else {
+            snapshot_time
+        })?;
+        std::fs::write(&path, serde_json::to_vec(&entry)?)?;
+
+        let full = Session::load(id)?;
+        let remote = Session::load_for_remote_startup(id)?;
+        let stub = Session::load_startup_stub(id)?;
+        assert_eq!(full.model.as_deref(), Some("new-tail-model"));
+        assert_eq!(stub.model, full.model, "{id}");
+        assert_eq!(stub.provider_key, full.provider_key, "{id}");
+        assert_eq!(remote.model, full.model, "{id}");
+        assert!(stub.messages.is_empty());
+    }
+    Ok(())
+}
+
+fn metadata_only_route_change(id: &str) -> Result<(Session, chrono::DateTime<chrono::Utc>)> {
+    let mut session = Session::create_with_id(id.into(), None, None);
+    session.provider_key = Some("old-provider".into());
+    session.model = Some("old-model".into());
+    session.add_message(Role::User, vec![text(&"x".repeat(1024 * 1024 + 1))]);
+    session.save()?;
+    let snapshot_time = session.updated_at;
+    session.provider_key = Some("new-provider".into());
+    session.model = Some("new-model".into());
+    session.save()?;
+    let entry: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(session_journal_path(id)?)?)?;
+    assert!(entry.get("append_messages").is_none());
+    assert_eq!(Session::load(id)?.model.as_deref(), Some("new-model"));
+    Ok((session, snapshot_time))
+}
+
+#[test]
+fn metadata_only_equal_clock_keeps_latest_route_in_all_loaders() -> Result<()> {
+    let _lock = lock_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path());
+    let id = "session_metadata_clock_collision";
+    let (_, snapshot_time) = metadata_only_route_change(id)?;
+    let path = session_journal_path(id)?;
+    let mut entry: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    entry["meta"]["updated_at"] = serde_json::to_value(snapshot_time)?;
+    std::fs::write(&path, serde_json::to_vec(&entry)?)?;
+    for loaded in [
+        Session::load(id)?,
+        Session::load_for_remote_startup(id)?,
+        Session::load_startup_stub(id)?,
+    ] {
+        assert_eq!(loaded.provider_key.as_deref(), Some("new-provider"));
+        assert_eq!(loaded.model.as_deref(), Some("new-model"));
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "needs journal generation + lock, see docs/session-journal-recovery-audit.md"]
+fn metadata_only_stale_checkpoint_with_rollback_does_not_revert_snapshot() -> Result<()> {
+    let _lock = lock_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path());
+    let id = "session_metadata_stale_checkpoint";
+    let (mut session, snapshot_time) = metadata_only_route_change(id)?;
+    let path = session_journal_path(id)?;
+    let stale = std::fs::read(&path)?;
+    session.provider_key = Some("checkpoint-provider".into());
+    session.model = Some("checkpoint-model".into());
+    session.updated_at = snapshot_time - chrono::Duration::days(1);
+    session.save_snapshot_to(&session_path(id)?)?;
+    std::fs::write(&path, stale)?;
+    for loaded in [Session::load(id)?, Session::load_startup_stub(id)?] {
+        assert_eq!(loaded.model.as_deref(), Some("checkpoint-model"));
+    }
+    Ok(())
+}
