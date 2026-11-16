@@ -52,7 +52,13 @@ class H(BaseHTTPRequestHandler):
         prompt = text_of(msgs[last_user]) if last_user >= 0 else ""
         has_tool_result = any(m.get("role") == "tool" for m in msgs[last_user + 1:])
         tool_calls = None
-        if CONTROL and "[e2e:todo]" in prompt and not has_tool_result:
+        if CONTROL and "[e2e:verify-write]" in prompt and not has_tool_result:
+            tool_calls = [{"id": "call_verification_write", "type": "function", "function": {
+                "name": "write", "arguments": json.dumps({
+                    "intent": "Prove a real tool side effect in the isolated workspace",
+                    "file_path": "verify-tool.txt", "content": "verification tool side effect\n",
+                })}}]
+        elif CONTROL and "[e2e:todo]" in prompt and not has_tool_result:
             # Go through the real tool executor, rather than mutating TUI state.
             tool_calls = [{"id": "call_acceptance_todo", "type": "function", "function": {
                 "name": "todo", "arguments": json.dumps({

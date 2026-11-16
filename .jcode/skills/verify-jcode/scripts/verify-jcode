@@ -1,0 +1,561 @@
+#!/usr/bin/env python3
+"""Drive the real Jcode CLI/TUI with a loopback-only deterministic provider."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+import uuid
+
+REPO = Path(__file__).resolve().parents[4]
+ACK = "[verify-jcode] ack. saw_cloud_notice=False"
+TOOL_CONTENT = "verification tool side effect\n"
+
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
+def dump(path, value):
+    temporary = path.with_name(path.name + ".next")
+    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n")
+    temporary.replace(path)
+
+
+def digest(path):
+    checksum = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            checksum.update(chunk)
+    return checksum.hexdigest()
+
+
+def run(argv, **kwargs):
+    return subprocess.run([str(x) for x in argv], check=True, capture_output=True,
+                          text=True, timeout=kwargs.pop("timeout", 30), **kwargs)
+
+
+def identity(pid):
+    result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart=", "-o", "pgid="],
+                            capture_output=True, text=True, timeout=5)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def alive(pid):
+    result = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
+                            capture_output=True, text=True, timeout=5)
+    return result.returncode == 0 and not result.stdout.strip().startswith("Z")
+
+
+def wait_for(predicate, description, timeout=45):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(0.1)
+    raise RuntimeError(f"Timeout: {description}")
+
+
+def completed_turn(messages, token):
+    users = [i for i, message in enumerate(messages)
+             if message.get("role") == "user" and token in json.dumps(message.get("content"))]
+    return bool(users) and any(message.get("role") == "assistant" and ACK in json.dumps(message.get("content"))
+                               for message in messages[users[-1] + 1:])
+
+
+def load_persisted(path):
+    """Read the snapshot plus append journal, matching session/persistence.rs."""
+    snapshot = path.read_bytes()
+    journal_path = path.with_suffix(".journal.jsonl")
+    journal = journal_path.read_bytes() if journal_path.exists() else b""
+    data = json.loads(snapshot)
+    messages = data.get("messages", [])
+    for line in journal.splitlines(keepends=True):
+        if not line.endswith(b"\n"):
+            continue  # A writer may still be appending the final line.
+        entry = json.loads(line)
+        messages.extend(entry.get("append_messages", []))
+    # A checkpoint can leave a stale journal briefly. Production also dedupes IDs.
+    seen = set()
+    data["messages"] = []
+    for message in messages:
+        message_id = message.get("id")
+        if message_id and message_id in seen:
+            continue
+        seen.add(message_id)
+        data["messages"].append(message)
+    return data if path.read_bytes() == snapshot else None
+
+
+class Harness:
+    def __init__(self, evidence):
+        self.evidence = Path(evidence).resolve()
+        self.state = json.loads((self.evidence / "run.json").read_text())
+        require(self.state["schema"] == 1, "Unsupported run manifest")
+        require(self.state["evidence"] == str(self.evidence), "Moved manifest, refusing to drive")
+        self.root = Path(self.state["runtime"])
+        require(self.evidence != self.root.resolve() and self.root.resolve() not in self.evidence.parents,
+                "Evidence must be outside disposable runtime")
+        if not self.state.get("cleaned"):
+            require((self.root / "owner").read_text() == self.state["owner"], "Runtime ownership mismatch")
+        self.env = self.state["env"]
+        self.binary = self.root / "jcode"
+
+    def save(self):
+        dump(self.evidence / "run.json", self.state)
+
+    def event(self, **data):
+        with (self.evidence / "actions.jsonl").open("a") as out:
+            out.write(json.dumps({"at": time.time(), **data}) + "\n")
+
+    def spawn(self, name, argv, env=None):
+        with (self.evidence / f"{name}.log").open("a") as out:
+            child = subprocess.Popen([str(x) for x in argv], env=env or self.env,
+                                     cwd=self.root / "workspace", stdin=subprocess.DEVNULL,
+                                     stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
+        self.state["processes"][name] = {"pid": child.pid, "identity": identity(child.pid)}
+        self.save()
+        self.event(action="spawn", name=name, argv=[str(x) for x in argv], pid=child.pid)
+        return child
+
+    def tmux(self, *args):
+        return run([self.state["tmux"], "-S", self.root / "tmux.sock", *args], env=self.env).stdout
+
+    def pane(self):
+        return self.tmux("capture-pane", "-p", "-S", "-1000", "-t", "verify")
+
+    def send(self, text):
+        self.event(action="terminal-input", text=text, keys=["Enter"])
+        self.tmux("send-keys", "-t", "verify", "-l", text)
+        self.tmux("send-keys", "-t", "verify", "Enter")
+
+    def observe(self, command):
+        require(command in {"state", "history", "side-panel:stats"}, "Not an observation")
+        return self.debug("client:" + command)
+
+    def debug(self, command):
+        require(command in {"server:info", "clients:map", "client:state", "client:history",
+                            "client:frame", "client:side-panel:stats"},
+                "Not a read-only server command")
+        with socket.socket(socket.AF_UNIX) as connection:
+            connection.settimeout(10)
+            connection.connect(str(self.root / "app-debug.sock"))
+            connection.sendall((json.dumps({"type": "debug_command", "id": 1,
+                                           "command": command}) + "\n").encode())
+            with connection.makefile("r") as reader:
+                response = json.loads(reader.readline())
+        require(response.get("ok"), f"Debug request failed: {response}")
+        return json.loads(response["output"])
+
+    def records(self):
+        path = self.evidence / "provider.jsonl"
+        if not path.exists():
+            return []
+        lines = path.read_text().splitlines()
+        return [json.loads(line) for line in lines if line.endswith("}")]
+
+    def request_after(self, text, start):
+        return wait_for(lambda: next((r for r in self.records()[start:]
+                                     if text in json.dumps(r["messages"])), None),
+                        f"fresh HTTP provider request containing {text}")
+
+    def persisted(self, session_id, text):
+        path = self.root / "data/sessions" / f"{session_id}.json"
+
+        def saved():
+            try:
+                data = load_persisted(path)
+                return data if data and completed_turn(data.get("messages", []), text) else None
+            except (FileNotFoundError, json.JSONDecodeError):
+                return None
+        return wait_for(saved, f"persisted transcript {session_id}: {text}")
+
+    def idle(self):
+        return wait_for(lambda: not (s := self.observe("state"))["processing"]
+                        and not s["queued_messages"], "idle TUI")
+
+    def frame(self, label):
+        require(re.fullmatch(r"[a-zA-Z0-9_-]+", label), "Frame label must be a basename")
+        dump(self.evidence / f"{label}.frame.json", self.debug("client:frame"))
+        text = self.pane()
+        (self.evidence / f"{label}.txt").write_text(text)
+        dump(self.evidence / f"{label}.state.json", self.observe("state"))
+        return text
+
+    def cli(self, label, prompt, mode="json", resume=None):
+        argv = [str(self.binary), "--no-update", "--no-selfdev", "--provider", "openai-compatible",
+                "--model", "fake-model", "--socket", str(self.root / "app.sock")]
+        if resume:
+            argv += ["--resume", resume]
+        argv += ["run", *([] if mode == "plain" else ["--" + mode]), "--", prompt]
+        self.event(action="cli", label=label, argv=argv)
+        try:
+            result = subprocess.run(argv, cwd=self.root / "workspace", env=self.env,
+                                    text=True, capture_output=True, timeout=60)
+            (self.evidence / f"{label}.stdout").write_text(result.stdout)
+            (self.evidence / f"{label}.stderr").write_text(result.stderr)
+            dump(self.evidence / f"{label}.command.json", {"argv": argv, "exit_code": result.returncode})
+            require(result.returncode == 0, f"CLI exit {result.returncode}, see {label}.stderr")
+            if mode == "json":
+                output = json.loads(result.stdout)
+                require(output.get("text") == ACK and output.get("session_id"), "Invalid JSON completion")
+                return output
+            if mode == "ndjson":
+                events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+                require(events and events[0].get("type") == "start", "Missing NDJSON start")
+                require(events[-1].get("type") == "done" and events[-1].get("text") == ACK,
+                        "Missing NDJSON completion")
+                require(events[0].get("session_id") == events[-1].get("session_id"),
+                        "NDJSON completion changed session")
+            else:
+                require(result.stdout.strip() == ACK, f"CLI reply mismatch, see {label}.stdout")
+            return result.stdout
+        except subprocess.TimeoutExpired as error:
+            dump(self.evidence / f"{label}.command.json", {"argv": argv, "timeout": True})
+            (self.evidence / f"{label}.stdout").write_bytes(error.stdout or b"")
+            (self.evidence / f"{label}.stderr").write_bytes(error.stderr or b"")
+            raise
+
+    def start_tui(self, resume=None):
+        argv = [str(self.binary), "--no-update", "--no-selfdev", "--provider", "openai-compatible",
+                "--model", "fake-model", "--debug-socket", "--socket", str(self.root / "app.sock")]
+        if resume:
+            argv += ["--resume", resume]
+        self.event(action="tui-launch", argv=argv)
+        command = shlex.join(["/usr/bin/env", "-i", *[f"{k}={v}" for k, v in self.env.items()], *argv])
+        self.tmux("-f", "/dev/null", "new-session", "-d", "-s", "verify",
+                  "-x", str(self.state["cols"]), "-y", str(self.state["rows"]),
+                  "-c", str(self.root / "workspace"), command)
+        pid = int(self.tmux("display-message", "-p", "#{pid}").strip())
+        self.state["processes"]["tmux"] = {"pid": pid, "identity": identity(pid)}
+        client_pid = int(self.tmux("display-message", "-p", "-t", "verify", "#{pane_pid}").strip())
+        self.state["processes"]["client"] = {"pid": client_pid, "identity": identity(client_pid)}
+        self.save()
+
+        def ready():
+            text = self.pane()
+            if "Welcome to jcode" in text:
+                self.event(action="onboarding", keys=["Right", "Enter"], purpose="skip optional setup")
+                self.tmux("send-keys", "-t", "verify", "Right", "Enter")
+            return "Ready to use" in text or (resume and ACK in text)
+        wait_for(ready, "usable TUI prompt")
+        wait_for(lambda: bool(self.observe("state").get("remote_session_id")), "TUI daemon attachment")
+        self.frame("launch" if not resume else "launch-resume-" + uuid.uuid4().hex[:8])
+
+    def doctor(self):
+        require(not self.state.get("cleaned"), "Instance has been cleaned. Launch a new run.")
+        require(digest(self.binary) == self.state["binary_sha256"], "Running binary digest changed")
+        require(digest(Path(__file__)) == self.state["helper_sha256"], "Helper changed; relaunch before driving")
+        require(digest(REPO / "scripts/fake_openai_server.py") == self.state["provider_sha256"],
+                "Fake-provider fixture changed; relaunch before driving")
+        for name, process in self.state["processes"].items():
+            require(alive(process["pid"]) and identity(process["pid"]) == process["identity"],
+                    f"Process no longer owned/alive: {name}")
+        # No inherited proxies and no authentication to external endpoints.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(self.env["JCODE_OPENAI_COMPAT_API_BASE"] + "/models", timeout=5) as response:
+            require(json.load(response)["data"][0]["id"] == "fake-model", "Wrong provider catalog")
+        server = self.debug("server:info")
+        require(server["git_hash"] and server["git_hash"] in self.state["binary_version"],
+                "Daemon build does not match launched binary")
+        state = self.observe("state")
+        require(state.get("remote_session_id"), "TUI not attached")
+        clients = self.debug("clients:map")["clients"]
+        require(len(clients) == 1 and clients[0]["session_id"] == state["remote_session_id"],
+                "Expected exactly our TUI client on the isolated daemon")
+        report = {"status": "ready", "binary_sha256": self.state["binary_sha256"],
+                  "binary_version": self.state["binary_version"], "server": server,
+                  "session_id": state["remote_session_id"], "model": state["model"],
+                  "runtime": str(self.root), "provider": self.env["JCODE_OPENAI_COMPAT_API_BASE"]}
+        dump(self.evidence / "doctor.json", report)
+        return report
+
+    def drive(self, feature, mode, text=None, keys=None, expect=None):
+        self.doctor()
+        self.state["drive_sequence"] = self.state.get("drive_sequence", 0) + 1
+        number = self.state["drive_sequence"]
+        self.save()
+        label = f"drive-{number:03d}-{feature}"
+        start = len(self.records())
+        token = f"verify_{feature}_{uuid.uuid4().hex[:10]}"
+        self.frame(label + "-before")
+        result = {"feature": feature, "entry_point": feature, "token": token, "status": "failed"}
+        try:
+            if feature in {"input", "keys"}:
+                require(expect, "Exploratory drives require --expect visible-text")
+                if feature == "input":
+                    require(text, "input requires --text")
+                    self.send(text)
+                else:
+                    require(keys, "keys requires --keys with tmux key names")
+                    self.event(action="terminal-keys", keys=keys)
+                    self.tmux("send-keys", "-t", "verify", *keys)
+                wait_for(lambda: expect in self.pane(), f"visible text {expect!r}")
+                self.frame(label + "-after")
+                result.update(status="observed", expected_text=expect)
+                return result
+            if feature == "cli":
+                output = self.cli(label, token, mode)
+                result["mode"] = mode
+                self.request_after(token, start)
+                sessions = list((self.root / "data/sessions").glob("session_*.json"))
+                matches = [p for p in sessions if token in p.read_text()]
+                require(matches, "CLI transcript was not persisted")
+                for path in matches:
+                    require(completed_turn(json.loads(path.read_text())["messages"], token),
+                            "CLI saved no completed reply for the fresh prompt")
+                    shutil.copy2(path, self.evidence / f"{label}-{path.name}")
+                result["output"] = output
+            elif feature == "resume":
+                self.send(token)
+                self.request_after(token, start)
+                self.idle()
+                sid = self.observe("state")["remote_session_id"]
+                self.persisted(sid, token)
+                self.frame(label + "-original")
+                self.tmux("kill-session", "-t", "verify")
+                wait_for(lambda: not alive(self.state["processes"]["tmux"]["pid"]), "old terminal shutdown", 10)
+                self.start_tui(resume=sid)
+                require(self.observe("state")["remote_session_id"] == sid, "Resume changed session ID")
+                require(token in self.pane(), "Resumed TUI did not restore original prompt")
+                self.send(token + "_continued")
+                self.request_after(token + "_continued", start)
+                self.idle()
+                result["session_id"] = sid
+                dump(self.evidence / f"{label}-session.json", self.persisted(sid, token + "_continued"))
+            else:
+                prompt = token
+                if feature == "tui":
+                    # Reset only this harness-owned fixture, so a previous write
+                    # cannot make a failed current tool execution look successful.
+                    (self.root / "workspace/verify-tool.txt").unlink(missing_ok=True)
+                    self.event(action="fixture-reset", path="verify-tool.txt")
+                    prompt += " [e2e:verify-write]"
+                elif feature == "slash":
+                    self.send("/help")
+                    wait_for(lambda: "Esc to close" in self.pane(), "help modal")
+                    self.frame(label + "-help")
+                    self.event(action="terminal-keys", keys=["Escape"], purpose="close help modal")
+                    self.tmux("send-keys", "-t", "verify", "Escape")
+                    wait_for(lambda: "Esc to close" not in self.pane(), "composer after help")
+                    prompt = "/verify-probe " + token
+                self.send(prompt)
+                self.request_after(token, start)
+                self.idle()
+                sid = self.observe("state")["remote_session_id"]
+                saved = self.persisted(sid, token)
+                dump(self.evidence / f"{label}-session.json", saved)
+                if feature == "tui":
+                    path = self.root / "workspace/verify-tool.txt"
+                    require(path.read_text() == TOOL_CONTENT, "Real write tool side effect missing")
+                    shutil.copy2(path, self.evidence / f"{label}-verify-tool.txt")
+                    require(any(m.get("role") == "tool" for r in self.records()[start:]
+                                for m in r["messages"]), "Tool result never reached provider")
+                elif feature == "slash":
+                    require("Activated skill: verify-probe" in self.pane(), "Skill activation not rendered")
+                    require(any("VERIFY_PROBE_SKILL_BODY" in json.dumps(r["messages"])
+                                for r in self.records()[start:]), "Skill body not delivered to provider")
+                elif feature == "side-panel":
+                    self.send("/splitview on")
+                    def panel_ready():
+                        self.debug("client:frame")
+                        panel = self.debug("client:side-panel:stats").get("live") or {}
+                        return (panel.get("page_id") == "split_view"
+                                and panel.get("pane_width_cells", 0) > 0
+                                and panel.get("total_lines", 0) > 0)
+                    wait_for(panel_ready, "visible populated split-view panel")
+                    dump(self.evidence / f"{label}-panel.json", self.debug("client:side-panel:stats"))
+                result["session_id"] = sid
+            text = self.frame(label + "-after")
+            if feature != "cli":
+                require(ACK in text and token in text, "Fresh prompt and assistant reply not visible in terminal")
+            if feature == "tui":
+                require("write · Prove a real tool side effect" in text, "Real tool row not rendered")
+            result["status"] = "passed"
+        except BaseException as error:
+            result["error"] = str(error)
+            try:
+                self.frame(label + "-failed")
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                pass
+            raise
+        finally:
+            dump(self.evidence / f"{label}.json", result)
+        return result
+
+    def cleanup(self):
+        if self.state.get("cleaned"):
+            return {"status": "already-cleaned", "evidence": str(self.evidence)}
+        errors = []
+        for name in ("client", "tmux", "server", "provider"):
+            process = self.state["processes"].get(name)
+            if not process or not alive(process["pid"]):
+                continue
+            if identity(process["pid"]) != process["identity"]:
+                errors.append(f"PID identity mismatch: {name}. Refusing to kill.")
+                continue
+            try:
+                if name == "tmux":
+                    self.tmux("kill-server")
+                elif name == "client":
+                    os.kill(process["pid"], signal.SIGTERM)
+                else:
+                    os.killpg(process["pid"], signal.SIGTERM)
+                deadline = time.monotonic() + 5
+                while alive(process["pid"]) and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                if alive(process["pid"]):
+                    require(identity(process["pid"]) == process["identity"], "PID reused during cleanup")
+                    if name == "client":
+                        os.kill(process["pid"], signal.SIGKILL)
+                    else:
+                        os.killpg(process["pid"], signal.SIGKILL)
+                wait_for(lambda: not alive(process["pid"]), f"{name} shutdown", 5)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                errors.append(str(error))
+        require(not errors, "; ".join(errors))
+        # All writers are stopped before the final independent disk snapshot.
+        if (self.root / "data/sessions").exists():
+            shutil.copytree(self.root / "data/sessions", self.evidence / "sessions", dirs_exist_ok=True)
+        require((self.root / "owner").read_text() == self.state["owner"], "Ownership changed")
+        shutil.rmtree(self.root)
+        self.state["cleaned"] = True
+        self.save()
+        report = {"status": "cleaned", "runtime_removed": not self.root.exists(),
+                  "evidence": str(self.evidence), "artifacts": len(list(self.evidence.iterdir()))}
+        dump(self.evidence / "cleanup.json", report)
+        return report
+
+
+def launch(args):
+    binary = Path(args.binary).resolve(strict=True)
+    require(args.cols >= 40 and args.rows >= 15, "Terminal must be at least 40x15")
+    require(binary.is_file() and os.access(binary, os.X_OK), "Binary must be executable")
+    tmux = shutil.which("tmux")
+    require(tmux, "Install tmux before launch")
+    binary_sha256 = digest(binary)
+    repo_head = run(["git", "-C", REPO, "rev-parse", "HEAD"]).stdout.strip()
+    evidence = Path(args.evidence).resolve()
+    evidence.mkdir(mode=0o700, parents=True, exist_ok=False)
+    os.chmod(evidence, 0o700)
+    root = Path(tempfile.mkdtemp(prefix="jv-", dir="/tmp"))
+    owner = uuid.uuid4().hex
+    (root / "owner").write_text(owner)
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(root / "home"),
+           "LANG": "en_US.UTF-8", "TERM": "xterm-256color", "TMPDIR": str(root),
+           "JCODE_HOME": str(root / "data"), "JCODE_RUNTIME_DIR": str(root),
+           "XDG_CONFIG_HOME": str(root / "home/.config"), "XDG_CACHE_HOME": str(root / "home/.cache"),
+           "JCODE_TEST_SESSION": "1", "JCODE_DEBUG_CONTROL": "1",
+           "JCODE_NO_TELEMETRY": "1", "JCODE_TELEMETRY": "off",
+           "JCODE_NO_AUTO_UPDATE": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+           "GIT_TERMINAL_PROMPT": "0", "OPENAI_COMPAT_API_KEY": "synthetic-verification-key",
+           "JCODE_OPENAI_COMPAT_DEFAULT_MODEL": "fake-model",
+           "JCODE_DEBUG_CMD_PATH": str(root / "debug.cmd"),
+           "JCODE_DEBUG_RESPONSE_PATH": str(root / "debug.response")}
+    state = {"schema": 1, "owner": owner, "evidence": str(evidence), "runtime": str(root),
+             "cols": args.cols, "rows": args.rows,
+             "source_binary": str(binary), "binary_sha256": binary_sha256, "tmux": tmux,
+             "helper_sha256": digest(Path(__file__)),
+             "provider_sha256": digest(REPO / "scripts/fake_openai_server.py"),
+             "processes": {}, "env": env, "repo_head": repo_head}
+    dump(evidence / "run.json", state)
+    harness = Harness(evidence)
+    try:
+        for name in ("home", "data", "workspace", "control"):
+            (root / name).mkdir()
+        shutil.copy2(binary, root / "jcode")
+        skill = root / "workspace/.jcode/skills/verify-probe"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            '---\nname: verify-probe\ndescription: Isolated verification fixture\n---\n'
+            'VERIFY_PROBE_SKILL_BODY\nAcknowledge the user prompt.\n')
+        harness.state["binary_version"] = run([root / "jcode", "--no-update", "--version"], env=env).stdout.strip()
+        harness.save()
+        (evidence / "source.diff").write_text(run(["git", "-C", REPO, "diff", "HEAD"]).stdout)
+        provider_env = dict(env, FAKE_LOG=str(evidence / "provider.jsonl"), FAKE_LABEL="verify-jcode",
+                            FAKE_PORT_FILE=str(root / "provider.port"), FAKE_CONTROL_DIR=str(root / "control"))
+        harness.spawn("provider", [sys.executable, REPO / "scripts/fake_openai_server.py", "0"], provider_env)
+        port = wait_for(lambda: (root / "provider.port").read_text().strip()
+                        if (root / "provider.port").exists() else None, "fake provider port")
+        harness.env["JCODE_OPENAI_COMPAT_API_BASE"] = f"http://127.0.0.1:{int(port)}/v1"
+        harness.save()
+        harness.spawn("server", [root / "jcode", "--no-update", "--no-selfdev", "--provider", "openai-compatible",
+                                  "--model", "fake-model", "--debug-socket", "--socket", root / "app.sock", "serve"])
+        wait_for(lambda: (root / "app-debug.sock").exists(), "isolated daemon debug socket")
+        # Usable means a completed real inference, not merely a listening socket.
+        harness.cli("launch-warm", "verify launch readiness")
+        harness.start_tui()
+        return harness.doctor()
+    except BaseException as error:
+        dump(evidence / "launch-failure.json", {"error": str(error)})
+        try:
+            (evidence / "launch-failure.txt").write_text(harness.pane())
+        except (OSError, subprocess.SubprocessError):
+            pass
+        harness.cleanup()
+        raise
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    start = sub.add_parser("launch", help="Launch an isolated daemon/provider/TUI from a built binary")
+    start.add_argument("--binary", required=True)
+    start.add_argument("--evidence", required=True, help="New evidence directory, survives cleanup")
+    start.add_argument("--cols", type=int, default=160)
+    start.add_argument("--rows", type=int, default=48)
+    for name in ("doctor", "drive", "frame", "cleanup"):
+        command = sub.add_parser(name)
+        command.add_argument("--evidence", required=True)
+        if name == "drive":
+            command.add_argument("feature", choices=["cli", "tui", "slash", "resume", "side-panel", "input", "keys"])
+            command.add_argument("--mode", choices=["plain", "json", "ndjson"], default="json")
+            command.add_argument("--text", help="Text for exploratory input drive")
+            command.add_argument("--keys", nargs="+", help="tmux keys, e.g. Escape or C-u")
+            command.add_argument("--expect", help="Required visible text for exploratory drives")
+        if name == "frame":
+            command.add_argument("--label", default="manual")
+    args = parser.parse_args()
+    os.umask(0o077)
+    if args.command == "launch":
+        print(json.dumps(launch(args), indent=2))
+        return
+    evidence = Path(args.evidence).resolve()
+    # Fail closed instead of racing file-debug requests from two agents.
+    lock = evidence / ".lock"
+    lock.mkdir()
+    try:
+        harness = Harness(evidence)
+        if args.command == "doctor":
+            result = harness.doctor()
+        elif args.command == "drive":
+            result = harness.drive(args.feature, args.mode, args.text, args.keys, args.expect)
+        elif args.command == "frame":
+            harness.doctor()
+            harness.frame(args.label)
+            result = {"frame": str(evidence / f"{args.label}.frame.json")}
+        else:
+            result = harness.cleanup()
+        print(json.dumps(result, indent=2))
+    finally:
+        lock.rmdir()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f"verify-jcode: {error}", file=sys.stderr)
+        sys.exit(1)
