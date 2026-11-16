@@ -530,7 +530,7 @@ mod newest_reload_candidate_integration_tests {
         let running_canonical = build::resolve_binary_payload(running);
         let mut candidates = std::collections::HashSet::new();
         for is_selfdev in [false, true] {
-            if let Some((candidate, _label)) = super::server_update_candidate(is_selfdev) {
+            if let Some((candidate, _label)) = build::shared_server_update_candidate(is_selfdev) {
                 candidates.insert(build::resolve_binary_payload(&candidate));
             }
         }
