@@ -303,11 +303,43 @@ class ObservedChild:
             pass
 
 
+def legacy_bootstrap(root, legacy, new):
+    host = Host(root, legacy, new)
+    try:
+        daemon = host.start()
+        environment = dict(host.env, JCODE_ROLLOUT_PROJECTS=str(root / "must-not-prepare"))
+        result = subprocess.run([str(new), "--no-update", "rollout", "--dry-run"], env=environment,
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode != 0, result.stdout
+        assert "bootstrap-legacy-rollout.py" in result.stderr and "--apply" in result.stderr, result.stderr
+        assert not (root / "must-not-prepare").exists()
+        assert not host.journal.exists()
+        assert (host.jcode_home / "builds/current/jcode").resolve().parent.name == host.old_label
+        helper = Path(__file__).with_name("bootstrap-legacy-rollout.py")
+        command = [sys.executable, str(helper), "--binary", str(new), "--legacy-cli", str(legacy), "--daemon-only"]
+        review = subprocess.run(command, env=host.env, capture_output=True, text=True, timeout=30)
+        assert review.returncode == 0, (review.stdout, review.stderr)
+        assert not (host.jcode_home / "builds/versions" / host.new_label).exists()
+        applied = subprocess.run(command + ["--apply"], env=host.env, capture_output=True, text=True, timeout=150)
+        assert applied.returncode == 0, (applied.stdout, applied.stderr)
+        identity = request(host.socket, {"type": "ping", "id": 1})["daemon_identity"]
+        assert identity["pid"] == daemon.pid and identity["git_hash"].startswith(host.new_label), identity
+        assert (host.app / "old-bundle").exists(), "manual daemon bootstrap unexpectedly swapped Desktop"
+        host.submit()
+        state = wait_for("first daemon-owned Desktop rollout after manual legacy bootstrap", host.completed)
+        assert Path(state["backup_app"]).joinpath("old-bundle").exists()
+        return {"legacy_guard": "passed", "manual_legacy_bootstrap": "passed",
+                "first_journal_owned_desktop_swap": "passed", "rollout_id": state["id"]}
+    finally:
+        host.stop()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--old", type=Path, required=True)
     parser.add_argument("--new", type=Path, required=True)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--legacy", type=Path, help="optional actual pre-rollout daemon, e.g. 483d7848f")
     args = parser.parse_args()
     scratch = Path(os.environ.get("JCODE_SCRATCH_DIR", Path.home() / ".jcode/scratch"))
     scratch.mkdir(parents=True, exist_ok=True)
@@ -318,6 +350,12 @@ def main():
         directory = root / name
         directory.mkdir()
         result = check(directory, args.old.resolve(), args.new.resolve())
+        results["checks"].append(result)
+        print(json.dumps(result), flush=True)
+    if args.legacy:
+        directory = root / "legacy-bootstrap"
+        directory.mkdir()
+        result = legacy_bootstrap(directory, args.legacy.resolve(), args.new.resolve())
         results["checks"].append(result)
         print(json.dumps(result), flush=True)
     if args.output:

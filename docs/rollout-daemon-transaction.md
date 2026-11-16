@@ -93,3 +93,103 @@ verification failure. Pong confirmed the new hash, incremented generation and
 journal reload ID. The canonical activity endpoint and `rollout --status` were
 read through their real interfaces. The fixture Desktop owns a real bundled
 API bridge, not a simulated successful verification response.
+
+## Bootstrap from a legacy daemon
+
+<a id="legacy-bootstrap"></a>
+
+The installed daemon on this Mac was `483d7848f`, before `rollout_submit`,
+`rollout_status`, and canonical turn activity existed. The new CLI probes
+read-only `server:rollout_status` before git fetch, checkout, build, package,
+stage, or channel changes. An unsupported daemon is rejected with exact manual
+commands. A disabled general debug socket is also diagnosed without trying to
+enable it or mutate the daemon.
+
+There is deliberately **no automatic legacy fallback**. The old Reload request
+contains only `id` and `force`, not an immutable target. Its normal reload path
+reselects the newest candidate from its channel/selfdev flavors during exec.
+Pretending that request was a pinned daemon-journal rollout would be false.
+This one-time operator migration is the explicit exception. Subsequent rollouts,
+including the first Desktop swap, use the new daemon journal normally.
+
+### Commands for this Mac
+
+Run these **by hand in a separate Terminal**, after active turns finish and
+concurrent builds stop. Do not run them from an agent bash tool: the legacy
+reload aborts that tool. The implementing agent does not execute these commands
+against the user's runtime or `/Applications/Jcode.app`.
+
+The validated candidate remains outside the deleted worktree as
+`~/.jcode/scratch/rid-rollout-binaries/bootstrap-jcode`. Its `version --json`
+reports the checked commit. The helper defaults to the existing legacy CLI
+`~/.jcode/builds/versions/483d7848f/jcode`.
+
+```bash
+repo="$HOME/projects/github.com/xenking/jcode"
+candidate="$HOME/.jcode/scratch/rid-rollout-binaries/bootstrap-jcode"
+helper="$HOME/.jcode/rollout/bootstrap-legacy-rollout.py"
+git -C "$repo" fetch origin
+mkdir -p "$HOME/.jcode/rollout"
+git -C "$repo" show origin/master:scripts/bootstrap-legacy-rollout.py > "$helper"
+python3 "$helper" --binary "$candidate"           # read-only review
+python3 "$helper" --binary "$candidate" --apply   # explicit operator migration
+```
+
+The `--apply` run prints resolved paths and commands, then:
+
+1. Validates the candidate's JSON label. Copies and syncs that exact binary to
+   `~/.jcode/builds/versions/<label>/jcode` through a private sibling, probes the
+   copy, and hard-links it into place without overwriting an existing immutable
+   version. Existing versions must report the same label.
+2. Saves previous current/shared-server targets and marker contents in
+   `~/.jcode/rollout/manual-bootstrap-previous.json`. Atomically replaces each
+   `~/.jcode/builds/{shared-server,current}/jcode` symlink with that immutable
+   binary, then atomically writes and syncs each `*-version` marker. The freshly
+   copied candidate must remain the newest legacy reload candidate. Stop other
+   builds until handoff finishes.
+3. Asks the **old** CLI to use its normal graceful legacy reload path:
+   `~/.jcode/builds/versions/483d7848f/jcode --no-update server reload --force --json`.
+   This is an explicit operator action, not `server stop --force`. It does not
+   deliberately kill live sessions, but does not claim recovery of sessions the
+   old generation never recorded.
+4. Waits for the selected socket's Pong to report the new label, immutable
+   executable path, and daemon PID matching the kernel socket peer PID. A
+   different fresh build selected by the legacy resolver is a hard failure, not
+   success based on marker files. The first new generation may be generation 1
+   because the old daemon did not carry the new identity envelope.
+5. Executes the new immutable CLI's
+   `--no-update rollout --jcode-ref <label>`. It prepares matched Desktop from the
+   fork's `origin/main` and submits to the now-compatible daemon. **The new
+   daemon**, not this helper, copies the bundle beside `/Applications/Jcode.app`,
+   retains `.Jcode.<rollout-id>.backup.app`, and uses atomic directory exchange.
+   There is never a remove-old-before-copy window. The helper waits for
+   `completed`, including actual bridge/Sparkle verification, and prints
+   `backup_app` and durable recovery receipt counts.
+
+`--daemon-only` deliberately stops after step 4, leaving Desktop unchanged. Run
+the printed rollout command later. `--legacy-cli <path>` supports isolated
+fixtures or another known legacy installation. The helper refuses `--apply`
+when `JCODE_SESSION_ID` is set. It never acts without explicit `--apply`.
+
+### Verification and failure handling
+
+After the helper completes:
+
+```bash
+candidate="$HOME/.jcode/scratch/rid-rollout-binaries/bootstrap-jcode"
+"$candidate" --no-update rollout --status
+"$HOME/.jcode/builds/current/jcode" version --json
+"/Applications/Jcode.app/Contents/MacOS/jcode" version --json
+"/Applications/Jcode.app/Contents/MacOS/jcode-desktop" --version
+```
+
+Status must have `phase: completed`, `serving: true`, `desktop_swapped: true`,
+the selected label, and an existing `backup_app`. Peer-verified
+`bootstrap_serving` output proves the daemon, rather than marker files, changed
+generation. A subsequent failed Desktop verification restores the pair through
+normal daemon compensation.
+
+If the **manual legacy handoff itself** fails, stop and inspect its error and
+`manual-bootstrap-previous.json` before another reload. That boundary cannot
+provide the new daemon's crash-loop guarantee before the new daemon starts.
+Do not report success or remove either application in that state.

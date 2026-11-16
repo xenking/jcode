@@ -29,6 +29,7 @@ pub(crate) fn run_cli(args: super::args::RolloutArgs) -> Result<()> {
     };
     let mut host = MacHost::new()?;
     tokio::task::block_in_place(|| {
+        host.ensure_rollout_daemon()?;
         super::rollout::run(&mut host, &options, &mut std::io::stdout())
     })?;
     Ok(())
@@ -165,6 +166,41 @@ impl MacHost {
         let label = Some(identity.git_hash.chars().take(9).collect());
         Some((identity.pid, label))
     }
+
+    fn bootstrap_help(&self) -> String {
+        let quote =
+            |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
+        let binary = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("jcode"));
+        let script = self.jcode_home.join("rollout/bootstrap-legacy-rollout.py");
+        format!(
+            "daemon does not support the durable rollout protocol; no rollout mutations were made. \
+             A legacy daemon needs one manual bootstrap from a separate terminal, after active turns finish.\n\
+             1. git -C {} fetch origin\n\
+             2. mkdir -p {}\n\
+             3. git -C {} show {}:scripts/bootstrap-legacy-rollout.py > {}\n\
+             4. python3 {} --binary {} # review only\n\
+             5. python3 {} --binary {} --apply\n\
+             The helper stages the immutable binary, atomically selects current/shared-server, \
+             asks the legacy CLI to reload, verifies the new serving hash and peer PID, then asks \
+             the new daemon to swap Desktop with its retained backup. It never runs automatically.\n\
+             See docs/rollout-daemon-transaction.md#legacy-bootstrap",
+            quote(&self.layout.jcode_repo),
+            quote(script.parent().unwrap_or(&self.jcode_home)),
+            quote(&self.layout.jcode_repo),
+            jcode_build_meta::git_hash(),
+            quote(&script),
+            quote(&script),
+            quote(&binary),
+            quote(&script),
+            quote(&binary),
+        )
+    }
+
+    fn ensure_rollout_daemon(&self) -> Result<()> {
+        daemon_control(&self.control_socket()?, "server:rollout_status")
+            .with_context(|| self.bootstrap_help())?;
+        Ok(())
+    }
 }
 
 impl Host for MacHost {
@@ -244,7 +280,8 @@ impl Host for MacHost {
     }
 
     fn busy_sessions(&self) -> Result<Vec<String>> {
-        let snapshot = daemon_control(&self.control_socket()?, "server:turn_activity")?;
+        let snapshot = daemon_control(&self.control_socket()?, "server:turn_activity")
+            .with_context(|| self.bootstrap_help())?;
         serde_json::from_value(snapshot["drain_sessions"].clone())
             .context("daemon did not expose canonical turn activity")
     }
@@ -639,6 +676,71 @@ mod tests {
             daemon_socket: root.join("daemon"),
         };
         (dir, host, sha)
+    }
+
+    #[test]
+    fn legacy_capability_probe_is_readonly_before_preparation() {
+        let (_dir, host, _) = checkout_fixture();
+        let listener = UnixListener::bind(host.control_socket().unwrap()).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["command"], "server:rollout_status");
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({
+                    "type": "debug_response", "id": 1, "ok": false,
+                    "output": "Debug control is disabled"
+                })
+            )
+            .unwrap();
+        });
+        let error = format!("{:#}", host.ensure_rollout_daemon().unwrap_err());
+        assert!(error.contains("bootstrap-legacy-rollout.py"), "{error}");
+        assert!(error.contains("--apply"), "{error}");
+        assert!(error.contains("separate terminal"), "{error}");
+        assert!(!host.layout.builds.exists());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn legacy_daemon_requires_explicit_bootstrap_without_mutation() {
+        let (_dir, host, _) = checkout_fixture();
+        let listener = UnixListener::bind(host.control_socket().unwrap()).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["command"], "server:turn_activity");
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({
+                    "type": "debug_response", "id": 1, "ok": false,
+                    "output": "Unknown server command: turn_activity"
+                })
+            )
+            .unwrap();
+        });
+        let error = format!("{:#}", host.busy_sessions().unwrap_err());
+        assert!(error.contains("legacy-bootstrap"), "{error}");
+        assert!(
+            !host.layout.builds.exists(),
+            "legacy rejection staged files"
+        );
+        assert!(
+            !host.layout.app.exists(),
+            "legacy rejection changed the app"
+        );
+        server.join().unwrap();
     }
 
     #[test]
