@@ -130,6 +130,25 @@ async fn refreshed_session_control_handle_does_not_wait_for_busy_agent_lock() {
 }
 
 #[tokio::test]
+async fn busy_missing_queue_fails_closed_without_waiting() {
+    let provider: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
+        forked: Arc::new(AtomicBool::new(false)),
+    });
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+    let _busy = agent.lock().await;
+    let queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
+    let signals = Arc::new(RwLock::new(HashMap::new()));
+    let control = tokio::time::timeout(Duration::from_millis(100),
+        refresh_session_control_handle("missing-queue-session", &agent, &signals, &queues)
+    ).await.expect("busy agent must not block attachment");
+    assert!(control.needs_queue_refresh());
+    assert!(!control.queue_soft_interrupt("hello".into(), Vec::new(), false, SoftInterruptSource::User));
+    assert!(control.enqueue_user_prompt("id".into(), "hello".into(), Vec::new(),
+        jcode_agent_runtime::QueuedMessageMode::Steer, None).is_err());
+}
+
+#[tokio::test]
 async fn busy_session_background_tool_signal_fires_via_registry_fallback() {
     // Regression: pressing Alt+B/Ctrl+B while a turn owns the agent mutex (e.g.
     // running `await_members`) used to silently no-op because the lock-free

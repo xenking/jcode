@@ -43,6 +43,14 @@ pub fn bind(session_id: &str, queue: &SoftInterruptQueue) {
     *entry.queue.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::downgrade(queue));
 }
 
+/// Obtain the live queue without taking the agent lock.
+pub(crate) fn bound_queue(session_id: &str) -> Option<SoftInterruptQueue> {
+    let entries = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
+    let entry = entries.get(session_id)?;
+    let queue = entry.queue.lock().unwrap_or_else(|e| e.into_inner());
+    queue.as_ref().and_then(Weak::upgrade)
+}
+
 /// A user message was queued for `session_id`: wake its blocking waits.
 pub fn notify(session_id: &str) {
     let entry = entry(session_id);

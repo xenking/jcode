@@ -269,49 +269,22 @@ async fn refresh_session_control_handle(
     shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
     soft_interrupt_queues: &SessionInterruptQueues,
 ) -> SessionControlHandle {
-    let started = Instant::now();
     let agent_guard = match agent.try_lock() {
         Ok(agent_guard) => agent_guard,
         Err(_) => {
-            crate::logging::warn(&format!(
-                "refresh_session_control_handle: waiting for busy agent lock for session {}; cancel/control requests on this connection may be delayed",
-                session_id
-            ));
-            let fallback_stop_signal = shutdown_signals.read().await.get(session_id).cloned();
-            let fallback_soft_interrupt_queue =
-                soft_interrupt_queues.read().await.get(session_id).cloned();
-            if let Some(soft_interrupt_queue) = fallback_soft_interrupt_queue {
-                // A missing shutdown-signal registration (e.g. a session created
-                // through the headless spawn path) must not force this connection
-                // to block on the busy agent mutex: cancels fired through the
-                // handle fan out to the running turn's own signal via the
-                // turn-cancel registry (issue #428), so a detached signal is a
-                // safe stand-in.
-                let stop_signal = fallback_stop_signal.unwrap_or_else(|| {
+            let stop_signal = shutdown_signals.read().await.get(session_id).cloned()
+                .unwrap_or_else(InterruptSignal::new);
+            let queue = soft_interrupt_queues.read().await.get(session_id).cloned()
+                .or_else(|| crate::incoming_message::bound_queue(session_id));
+            return match queue {
+                Some(queue) => SessionControlHandle::cancel_only(session_id, queue, stop_signal),
+                None => {
                     crate::logging::warn(&format!(
-                        "refresh_session_control_handle: no registered shutdown signal for busy session {}; using detached signal (cancels reach the running turn via the turn cancel registry)",
-                        session_id
+                        "refresh_session_control_handle: queue unavailable for busy session {}; queue commands will be rejected until it becomes available", session_id
                     ));
-                    InterruptSignal::new()
-                });
-                crate::logging::warn(&format!(
-                    "refresh_session_control_handle: using lock-free cancel-only control handle for busy session {} after {}ms",
-                    session_id,
-                    started.elapsed().as_millis()
-                ));
-                return SessionControlHandle::cancel_only(
-                    session_id,
-                    soft_interrupt_queue,
-                    stop_signal,
-                );
-            }
-            let agent_guard = agent.lock().await;
-            crate::logging::warn(&format!(
-                "refresh_session_control_handle: acquired agent lock for session {} after {}ms",
-                session_id,
-                started.elapsed().as_millis()
-            ));
-            agent_guard
+                    SessionControlHandle::queue_unavailable(session_id, stop_signal)
+                }
+            };
         }
     };
     SessionControlHandle::new(
@@ -1005,6 +978,14 @@ pub(super) async fn handle_client(
             );
             continue;
         }
+        if session_control.needs_queue_refresh() && let Ok(agent_guard) = agent.try_lock() {
+            session_control = SessionControlHandle::new(
+                &client_session_id,
+                agent_guard.soft_interrupt_queue(),
+                agent_guard.background_tool_signal(),
+                agent_guard.graceful_shutdown_signal(),
+            ).with_provider(agent_guard.provider_handle());
+        }
         let request_decoded_at = Instant::now();
         // Direct input wins the biased select above. A client may already have
         // observed Done/Error while this actor still holds the finished turn's
@@ -1590,6 +1571,13 @@ pub(super) async fn handle_client(
                 }
             }
 
+            Request::CancelSoftInterrupts { id, .. } if session_control.needs_queue_refresh() => {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: "Session queue unavailable while reconnecting".into(),
+                    retry_after_secs: None,
+                });
+            }
             Request::CancelSoftInterrupts { id, client_ids } => match client_ids {
                 Some(client_ids) => cancel_soft_interrupts_by_id(
                     id,

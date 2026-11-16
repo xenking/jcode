@@ -741,6 +741,7 @@ pub(super) fn enqueue_soft_interrupt_with_id(
 pub struct SessionControlHandle {
     pub session_id: String,
     soft_interrupt_queue: SoftInterruptQueue,
+    queue_available: bool,
     background_tool_signal: Option<InterruptSignal>,
     stop_current_turn_signal: InterruptSignal,
 }
@@ -786,6 +787,7 @@ impl SessionControlHandle {
         Self {
             session_id,
             soft_interrupt_queue,
+            queue_available: true,
             background_tool_signal: Some(background_tool_signal),
             stop_current_turn_signal,
         }
@@ -799,9 +801,21 @@ impl SessionControlHandle {
         Self {
             session_id: session_id.into(),
             soft_interrupt_queue,
+            queue_available: true,
             background_tool_signal: None,
             stop_current_turn_signal,
         }
+    }
+
+    /// Cancellation remains available while queue ownership is unresolved.
+    pub(super) fn queue_unavailable(session_id: &str, stop: InterruptSignal) -> Self {
+        let mut handle = Self::cancel_only(session_id, Arc::new(StdMutex::new(Vec::new())), stop);
+        handle.queue_available = false;
+        handle
+    }
+
+    pub(super) fn needs_queue_refresh(&self) -> bool {
+        !self.queue_available
     }
 
     pub fn queue_soft_interrupt(
@@ -811,6 +825,9 @@ impl SessionControlHandle {
         urgent: bool,
         source: SoftInterruptSource,
     ) -> bool {
+        if !self.queue_available {
+            return false;
+        }
         let queued =
             enqueue_soft_interrupt(&self.soft_interrupt_queue, content, images, urgent, source);
         self.wake_blocking_waits(queued, source);
@@ -825,6 +842,9 @@ impl SessionControlHandle {
         source: SoftInterruptSource,
         client_id: Option<String>,
     ) -> bool {
+        if !self.queue_available {
+            return false;
+        }
         let queued = enqueue_soft_interrupt_with_id(
             &self.soft_interrupt_queue,
             content,
@@ -847,6 +867,7 @@ impl SessionControlHandle {
         mode: jcode_agent_runtime::QueuedMessageMode,
         system_reminder: Option<String>,
     ) -> anyhow::Result<bool> {
+        anyhow::ensure!(self.queue_available, "session queue unavailable while reconnecting");
         anyhow::ensure!(!client_id.trim().is_empty(), "client_id must not be empty");
         let mut queue = self
             .soft_interrupt_queue
@@ -903,6 +924,7 @@ impl SessionControlHandle {
     }
 
     pub(super) fn queued_user_prompts(&self) -> anyhow::Result<Vec<crate::protocol::QueuedPrompt>> {
+        anyhow::ensure!(self.queue_available, "session queue unavailable while reconnecting");
         let queue = self
             .soft_interrupt_queue
             .lock()
@@ -1031,6 +1053,7 @@ impl SessionControlHandle {
         mode: jcode_agent_runtime::QueuedMessageMode,
         prioritize: bool,
     ) -> anyhow::Result<()> {
+        anyhow::ensure!(self.queue_available, "session queue unavailable while reconnecting");
         let mut queue = self
             .soft_interrupt_queue
             .lock()
@@ -1065,6 +1088,7 @@ impl SessionControlHandle {
         &self,
         interrupted_only: bool,
     ) -> anyhow::Result<Option<SoftInterruptMessage>> {
+        anyhow::ensure!(self.queue_available, "session queue unavailable while reconnecting");
         let mut queue = self
             .soft_interrupt_queue
             .lock()
@@ -1085,6 +1109,7 @@ impl SessionControlHandle {
     }
 
     pub(super) fn restore_user_prompt(&self, prompt: SoftInterruptMessage) -> anyhow::Result<()> {
+        anyhow::ensure!(self.queue_available, "session queue unavailable while reconnecting");
         let mut queue = self
             .soft_interrupt_queue
             .lock()
@@ -1126,6 +1151,9 @@ impl SessionControlHandle {
         &self,
         client_ids: &[String],
     ) -> (Vec<String>, Vec<String>) {
+        if !self.queue_available {
+            return (Vec::new(), client_ids.to_vec());
+        }
         let mut requested: Vec<String> = Vec::new();
         for id in client_ids {
             if !requested.contains(id) {
@@ -1190,6 +1218,9 @@ impl SessionControlHandle {
     }
 
     pub fn clear_soft_interrupts(&self) {
+        if !self.queue_available {
+            return;
+        }
         if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
             let cleared = queue.len();
             queue.clear();
