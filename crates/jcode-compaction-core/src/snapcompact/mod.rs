@@ -368,6 +368,8 @@ fn ideal_shape(model_id: &str) -> Option<(&'static str, Option<u32>)> {
 }
 
 /// `(major, minor)` of the first `N` / `N.M` version in a model id.
+/// Overflow is an unrecognized revision, not an operational error: callers use
+/// the conservative family fallback for arbitrary provider-supplied model IDs.
 fn model_revision(id: &str) -> Option<(u32, u32)> {
     let bytes = id.as_bytes();
     let mut index = 0;

@@ -74,11 +74,14 @@ fn image_token_cost(media_type: &str, data: &str) -> usize {
     let Ok(header) = base64::engine::general_purpose::STANDARD.decode(prefix) else {
         return IMAGE_TOKEN_COST;
     };
-    if header.len() < 24 || &header[..8] != b"\x89PNG\r\n\x1a\n" || &header[12..16] != b"IHDR" {
+    let Ok(header) = <[u8; 24]>::try_from(header.as_slice()) else {
+        return IMAGE_TOKEN_COST;
+    };
+    if &header[..8] != b"\x89PNG\r\n\x1a\n" || &header[12..16] != b"IHDR" {
         return IMAGE_TOKEN_COST;
     }
-    let width = u32::from_be_bytes(header[16..20].try_into().unwrap()) as usize;
-    let height = u32::from_be_bytes(header[20..24].try_into().unwrap()) as usize;
+    let width = u32::from_be_bytes([header[16], header[17], header[18], header[19]]) as usize;
+    let height = u32::from_be_bytes([header[20], header[21], header[22], header[23]]) as usize;
     IMAGE_TOKEN_COST
         .max(width.saturating_mul(height) / 750)
         .min(20_000)

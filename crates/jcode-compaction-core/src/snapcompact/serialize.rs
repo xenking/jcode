@@ -194,6 +194,8 @@ fn flush_assistant(
 
 fn render_tool_call(name: &str, input: &serde_json::Value, options: &SerializeOptions) -> String {
     let args = input.as_object();
+    // These are optional JSON fields, not fallible operations. A missing
+    // intent or argument object contributes no annotation to the compact call.
     let intent = args
         .and_then(|args| args.get("intent"))
         .and_then(|value| value.as_str())
@@ -498,6 +500,7 @@ fn find_elision_marker(text: &str, from: usize) -> Option<(usize, usize, usize)>
     if cursor == digits_start {
         return None;
     }
+    // An overflowing count is ordinary text, not a marker we can safely elide.
     let elided: usize = text[digits_start..cursor].parse().ok()?;
     if !text
         .get(cursor..)
