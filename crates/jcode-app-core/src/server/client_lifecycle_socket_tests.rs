@@ -120,6 +120,7 @@ async fn interrupt_queued_batch_delivers_one_turn_promptly() {
     let messages = provider.messages.lock().unwrap().clone();
     assert_eq!(messages.len(), 2, "{messages:?}");
     let journal = crate::session::Session::load(&session_id).unwrap();
+    assert_eq!(journal.pinned_skill.as_deref(), Some("batch-two"));
     let contents: Vec<_> = journal
         .messages
         .iter()
@@ -703,6 +704,7 @@ async fn daemon_restart_restores_and_delivers_pending_prompt_once() {
     .expect("restored prompt not delivered");
     let messages = provider2.messages.lock().unwrap().clone();
     let journal = crate::session::Session::load(&session_id).unwrap();
+    assert_eq!(journal.pinned_skill.as_deref(), Some("queued-test"));
     let skill_index = journal
         .messages
         .iter()
