@@ -62,6 +62,13 @@ fn session(id: &str) -> SessionInfo {
 /// Start a fake harness on one end of a socket pair. `handle` is called for
 /// every client frame with a writer for replies.
 fn fake_harness(handle: impl Fn(&ClientFrame, &mut dyn Write) + Send + 'static) -> JcodeClient {
+    fake_harness_with_identity(None, handle)
+}
+
+fn fake_harness_with_identity(
+    runtime_identity: Option<jcode_sdk::api::ServingIdentity>,
+    handle: impl Fn(&ClientFrame, &mut dyn Write) + Send + 'static,
+) -> JcodeClient {
     let (ours, theirs) = UnixStream::pair().expect("socket pair");
     std::thread::spawn(move || {
         let mut reader = BufReader::new(theirs.try_clone().expect("clone"));
@@ -73,7 +80,7 @@ fn fake_harness(handle: impl Fn(&ClientFrame, &mut dyn Write) + Send + 'static) 
                     v: API_VERSION_MAJOR,
                     reply_to: Some(frame.id),
                     event: ApiEvent::HelloOk {
-                        runtime_identity: None,
+                        runtime_identity: runtime_identity.clone(),
                         version: API_VERSION_MAJOR,
                         server: "fake-harness/1.0".to_string(),
                         capabilities: vec!["sessions".to_string()],
@@ -125,6 +132,22 @@ fn the_handshake_reports_the_server_and_its_capabilities() {
         !client.supports("permissions"),
         "a capability the server did not advertise must not be claimed"
     );
+}
+
+#[test]
+fn handshake_and_clone_retain_the_bridge_serving_generation() {
+    let identity = jcode_sdk::api::ServingIdentity {
+        pid: 42,
+        binary_path: "/bundle/jcode".into(),
+        git_hash: "bundle-hash".into(),
+        version_label: Some("bundle".into()),
+        reload_id: None,
+        generation: 1,
+    };
+    let client = fake_harness_with_identity(Some(identity.clone()), |_, _| {});
+    assert_eq!(client.runtime_identity.as_ref(), Some(&identity));
+    assert_eq!(client.clone().runtime_identity.as_ref(), Some(&identity));
+    assert!(fake_harness(|_, _| {}).runtime_identity.is_none());
 }
 
 #[path = "client_behavior/soft_interrupt_tests.rs"]
