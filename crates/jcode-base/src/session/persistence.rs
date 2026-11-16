@@ -161,8 +161,9 @@ fn dedupe_messages_by_id(messages: &mut Vec<super::StoredMessage>) -> usize {
 /// next successful append starts writing on the same line, producing
 /// `<torn json><complete entry json>\n` or `<entry json><entry json>\n`.
 /// Serialized entries always begin with `{"meta":` (struct field order), so
-/// scan for candidate starts and stream-parse consecutive complete entries
-/// from the first position that yields any.
+/// scan for candidate starts and stream-parse consecutive complete entries.
+/// After a corrupt span, resume searching past the last complete entry so
+/// repeated torn appends cannot hide later complete groups on the same line.
 fn salvage_glued_journal_entries<T: DeserializeOwned>(
     line: &[u8],
     mut apply: impl FnMut(T),
@@ -189,9 +190,10 @@ fn salvage_glued_journal_entries<T: DeserializeOwned>(
             for entry in parsed {
                 apply(entry);
             }
-            break;
+            search_from = candidate_start + stream.byte_offset();
+        } else {
+            search_from = candidate_start + ENTRY_START.len();
         }
-        search_from = candidate_start + ENTRY_START.len();
     }
     salvaged
 }
