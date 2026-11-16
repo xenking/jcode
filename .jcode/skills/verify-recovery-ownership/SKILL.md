@@ -10,7 +10,7 @@ Keep a worker from resuming after its coordinator stops or disappears. The curre
 ## Run the check
 
 1. Read `verification/recovery/README.md` for the modeled boundaries and the known findings.
-2. Compare the covered code below with sync commit `575fe984f0e2ee0025f21c3be85e2ce72caa47af`. Confirm that the final owner read, intervening awaits, turn claim, and continuation dispatch still match the model. The exporter follows expressions, not control-flow moves.
+2. Compare the covered code below with sync commit `0ada82a27f0928e275e01d6e5cd2beb05d1eebb2`. Confirm that the final owner read, intervening awaits, turn claim, and continuation dispatch still match the model. The exporter follows expressions, not control-flow moves.
 3. Run from the repository root.
 
    ```sh
@@ -40,7 +40,7 @@ If an intended change removes the known failures, update the model's scheduling 
 
 ## Coverage record
 
-Confirmed against `575fe984f0e2ee0025f21c3be85e2ce72caa47af` on 2026-11-16.
+Product code confirmed against `0ada82a27f0928e275e01d6e5cd2beb05d1eebb2` on 2026-11-16.
 
 | Source | Covered responsibility |
 | --- | --- |
