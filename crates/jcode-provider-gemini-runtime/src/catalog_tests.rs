@@ -182,6 +182,10 @@ fn developer_catalog_paginates_and_preserves_cache_on_failure() {
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let _endpoint = EnvVarGuard::set_value("GEMINI_API_ENDPOINT", &endpoint);
     let _version = EnvVarGuard::set_value("GEMINI_API_VERSION", "v1beta");
+    let _key = EnvVarGuard::set_value("GEMINI_API_KEY", "local-key");
+    let _force_oauth = EnvVarGuard::set_value("JCODE_GEMINI_FORCE_OAUTH", "0");
+    jcode_base::config::Config::invalidate_cache();
+    GeminiProvider::persist_catalog(&["gemini-old-fresh-cached".into()]);
     let server = std::thread::spawn(move || {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let responses = [
@@ -264,27 +268,32 @@ fn developer_catalog_paginates_and_preserves_cache_on_failure() {
             .timeout(Duration::from_secs(2))
             .build()
             .unwrap();
-        let models = provider
-            .refresh_available_models_api_key("local-key")
-            .await
-            .unwrap();
+        assert!(
+            provider
+                .available_models_display()
+                .contains(&"gemini-old-fresh-cached".to_string())
+        );
+        provider.refresh_model_catalog().await.unwrap();
+        let models = provider.fetched_models.read().unwrap().clone();
+        assert!(
+            provider
+                .available_models_for_switching()
+                .contains(&"gemini-new-pro".to_string())
+        );
+        assert!(
+            provider
+                .model_routes()
+                .iter()
+                .any(|route| route.model == "gemini-new-pro" && route.available)
+        );
         assert!(models.contains(&"gemini-new-pro".to_string()));
         assert!(models.contains(&"gemini-new-flash".to_string()));
         assert!(!models.contains(&"gemini-embedding-only".to_string()));
-        assert!(
-            provider
-                .refresh_available_models_api_key("local-key")
-                .await
-                .is_err()
-        );
+        assert!(provider.refresh_model_catalog().await.is_err());
         assert_eq!(*provider.fetched_models.read().unwrap(), models);
-        assert!(
-            provider
-                .refresh_available_models_api_key("local-key")
-                .await
-                .is_err()
-        );
+        assert!(provider.refresh_model_catalog().await.is_err());
         assert_eq!(*provider.fetched_models.read().unwrap(), models);
     });
     server.join().unwrap();
+    jcode_base::config::Config::invalidate_cache();
 }
