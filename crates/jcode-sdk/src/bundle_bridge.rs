@@ -71,22 +71,59 @@ pub fn verify_bundle_bridge(
 /// Ask a bridge to stop accepting new clients and drain existing connections.
 /// Legacy bridges may reject this request. Never kill their active clients.
 pub fn retire_bridge(socket: &Path, timeout: Duration) -> Result<()> {
-    let mut stream = jcode_transport::SyncStream::connect(socket).map_err(failed)?;
-    stream.set_read_timeout(Some(timeout)).map_err(failed)?;
-    stream.set_write_timeout(Some(timeout)).map_err(failed)?;
+    retire_bridge_inner(socket, None, timeout)
+}
+
+/// Retire only the process observed during discovery. The peer PID is checked
+/// on the same connection that carries the request, closing the discovery race.
+pub fn retire_bridge_if_pid(socket: &Path, expected_pid: u32, timeout: Duration) -> Result<()> {
+    retire_bridge_inner(socket, Some(expected_pid), timeout)
+}
+
+fn retire_bridge_inner(socket: &Path, expected_pid: Option<u32>, timeout: Duration) -> Result<()> {
+    let mut stream = jcode_transport::SyncStream::connect(socket).map_err(retirement_io)?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(retirement_io)?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(retirement_io)?;
+    if let Some(expected) = expected_pid
+        && generation::socket_peer_pid(&stream) != Some(expected)
+    {
+        return Err(failed(
+            "bridge socket peer changed since discovery; retirement not sent",
+        ));
+    }
     stream
         .write_all(b"{\"v\":1,\"id\":1,\"req\":\"retire_bridge\"}\n")
-        .map_err(failed)?;
+        .map_err(retirement_io)?;
     let mut line = String::new();
     BufReader::new(stream)
         .take(64 * 1024)
         .read_line(&mut line)
-        .map_err(failed)?;
-    let reply: serde_json::Value = serde_json::from_str(&line).map_err(failed)?;
+        .map_err(retirement_io)?;
+    let reply: serde_json::Value = serde_json::from_str(&line)
+        .map_err(|error| Error::new(ErrorKind::Protocol, error.to_string()))?;
     if reply["ev"] != "bridge_retiring" || reply["reply_to"] != 1 {
-        return Err(failed("bridge does not support graceful retirement"));
+        return Err(Error::new(
+            ErrorKind::UnsupportedCapability,
+            "bridge does not support graceful retirement",
+        ));
     }
     Ok(())
+}
+
+fn retirement_io(error: std::io::Error) -> Error {
+    let kind = if matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ) {
+        ErrorKind::Timeout
+    } else {
+        ErrorKind::Transport
+    };
+    Error::new(kind, error.to_string())
 }
 
 fn failed(error: impl std::fmt::Display) -> Error {
@@ -96,6 +133,30 @@ fn failed(error: impl std::fmt::Display) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn changed_peer_is_not_sent_a_retirement_request() {
+        let root = tempfile::tempdir().unwrap();
+        let api = root.path().join("api.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&api).unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut line = String::new();
+            assert_eq!(
+                BufReader::new(stream).read_line(&mut line).unwrap(),
+                0,
+                "retirement must not be sent to a replacement peer"
+            );
+        });
+        let error =
+            retire_bridge_if_pid(&api, std::process::id() + 1, Duration::from_secs(1)).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::HandshakeFailed);
+        server.join().unwrap();
+    }
 
     #[test]
     fn old_bundle_and_replaced_image_get_distinct_endpoints() {
