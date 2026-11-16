@@ -93,6 +93,261 @@ async fn manual_compaction_bounds_large_recent_tail() {
     );
 }
 
+#[tokio::test]
+async fn reactive_compaction_bounds_large_recent_tail() {
+    let mut manager = CompactionManager::new().with_budget(500_000);
+    manager.compaction_config.snapcompact = false;
+    let messages: Vec<_> = (0..13)
+        .map(|i| {
+            make_text_message(
+                if i % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                &"x".repeat(120_000),
+            )
+        })
+        .collect();
+    manager.seed_restored_messages_with(&messages);
+    let before = manager.token_estimate_with(&messages);
+    manager.start_background_compaction(
+        &messages,
+        Arc::new(MockSummaryProvider),
+        "reactive".into(),
+    );
+    while manager.is_compacting() {
+        tokio::task::yield_now().await;
+        manager.check_and_apply_compaction_with(&messages);
+    }
+    let after = manager.token_estimate_with(&messages);
+    assert!(
+        after <= 200_000,
+        "reactive tail too large: before={before}, after={after}"
+    );
+}
+
+#[test]
+fn snapcompact_request_caps_old_pages_without_discarding_archive() {
+    let mut manager = CompactionManager::new().with_budget(500_000);
+    manager.active_summary = Some(Summary {
+        text: "archive".into(),
+        openai_encrypted_content: None,
+        snapcompact: Some(jcode_message_types::SnapcompactArchive {
+            source: "history".into(),
+            pages: (0..74).map(|i| format!("page{i}")).collect(),
+            index: "[message 0, page 1 | user] earlier fact\n".into(),
+            decisions: String::new(),
+            page_ranges: Vec::new(),
+        }),
+        covers_up_to_turn: 0,
+        original_turn_count: 0,
+    });
+    let request = manager.messages_for_api_with_vision(&[], true);
+    let images: Vec<_> = request[0]
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Image { data, .. } => Some(data.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(images, ["page70", "page71", "page72", "page73"]);
+    assert!(
+        request[0]
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { text, .. } if text.contains("earlier fact")))
+    );
+    assert!(
+        request[0].content.iter().any(
+            |b| matches!(b, ContentBlock::Text { text, .. } if text.contains("70 older pages"))
+        )
+    );
+    assert_eq!(
+        manager
+            .active_summary
+            .as_ref()
+            .unwrap()
+            .snapcompact
+            .as_ref()
+            .unwrap()
+            .pages
+            .len(),
+        74
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires private trimmed session fixture in JCODE_COMPACTION_FIXTURE"]
+async fn copied_session_compaction_request_budget() {
+    #[derive(serde::Deserialize)]
+    struct Fixture {
+        messages: Vec<crate::session::StoredMessage>,
+        compaction: crate::session::StoredCompactionState,
+    }
+    let path = std::env::var("JCODE_COMPACTION_FIXTURE").expect("isolated fixture path");
+    let fixture: Fixture = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let messages: Vec<_> = fixture.messages.iter().map(|m| m.to_message()).collect();
+    let mut manager = CompactionManager::new().with_budget(500_000);
+    manager.compaction_config.snapcompact = true;
+    manager.restore_persisted_state_with(&fixture.compaction, &messages);
+    let count = |request: &[Message]| {
+        estimate_compaction_tokens(None, request.iter().map(message_char_count).sum(), 500_000)
+    };
+    let before_request = manager.messages_for_api_with_vision(&messages, true);
+    let before = count(&before_request);
+    // Reconstruct the previous implementation's request: it included every
+    // archive page. No private content is printed or checked into the repo.
+    let archive = fixture.compaction.snapcompact.as_ref().unwrap();
+    let omitted = archive
+        .pages
+        .len()
+        .saturating_sub(jcode_compaction_core::SNAPCOMPACT_REQUEST_PAGE_LIMIT);
+    let omitted_chars: usize = archive
+        .pages
+        .iter()
+        .take(omitted)
+        .map(|page| {
+            message_char_count(&Message {
+                content: vec![ContentBlock::Image {
+                    media_type: "image/png".into(),
+                    data: page.clone(),
+                }]
+                .into(),
+                ..Message::user("")
+            })
+        })
+        .sum();
+    let legacy_before = estimate_compaction_tokens(
+        None,
+        before_request.iter().map(message_char_count).sum::<usize>() + omitted_chars,
+        500_000,
+    );
+    let before_images = before_request
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter(|b| matches!(b, ContentBlock::Image { .. }))
+        .count();
+    manager.start_background_compaction(
+        &messages,
+        Arc::new(VisionSummaryProvider),
+        "reactive".into(),
+    );
+    while manager.is_compacting() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        manager.check_and_apply_compaction_with(&messages);
+    }
+    let after_request = manager.messages_for_api_with_vision(&messages, true);
+    let after = count(&after_request);
+    let after_images = after_request[0]
+        .content
+        .iter()
+        .filter(|b| matches!(b, ContentBlock::Image { .. }))
+        .count();
+    eprintln!(
+        "copied session: legacy_before={legacy_before} tokens/{} archive pages, capped_before={before} tokens/{before_images} total images, after={after} tokens/{after_images} archive pages, error={:?}",
+        archive.pages.len(),
+        manager.last_compaction_error
+    );
+    assert!(manager.last_compaction_error.is_none());
+    assert!(after_images <= 4, "too many archive pages: {after_images}");
+    assert!(
+        after <= 200_000,
+        "post-compaction estimate exceeds 40%: {after}"
+    );
+}
+
+#[tokio::test]
+async fn ineffective_snapcompact_escalates_to_text_summary() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let previous = Summary {
+        text: "old archive".into(),
+        openai_encrypted_content: None,
+        snapcompact: Some(jcode_message_types::SnapcompactArchive {
+            source: "old history ".repeat(5000),
+            pages: vec!["page".into(); 4],
+            index: String::new(),
+            decisions: String::new(),
+            page_ranges: Vec::new(),
+        }),
+        covers_up_to_turn: 1,
+        original_turn_count: 1,
+    };
+    let messages = vec![make_text_message(Role::User, &"recent ".repeat(100))];
+    let result = generate_effective_compaction_artifact(
+        Arc::new(CountingVisionProvider {
+            calls: calls.clone(),
+        }),
+        messages.clone(),
+        messages,
+        Some(previous),
+        true,
+        None,
+        None,
+        0,
+        500_000,
+    )
+    .await
+    .unwrap();
+    assert!(
+        result.snapcompact.is_none(),
+        "ineffective archive must not be accepted"
+    );
+    assert!(result.summary_text.starts_with("summary("));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn ineffective_text_compaction_is_reported_as_failure() {
+    let messages = vec![make_text_message(Role::User, "small history")];
+    let result = generate_effective_compaction_artifact(
+        Arc::new(MockSummaryProvider),
+        messages.clone(),
+        messages,
+        None,
+        false,
+        None,
+        None,
+        400_000,
+        500_000,
+    )
+    .await;
+    assert!(matches!(result, Err(error) if error.to_string().contains("at least 10%")));
+}
+
+#[tokio::test]
+async fn ineffective_compaction_leaves_manager_history_untouched() {
+    let mut manager = CompactionManager::new().with_budget(500_000);
+    manager.compaction_config.snapcompact = false;
+    let mut messages: Vec<_> = (0..11)
+        .map(|_| make_text_message(Role::User, "short"))
+        .collect();
+    messages.extend((0..2).map(|_| make_text_message(Role::User, &"x".repeat(80_000))));
+    manager.seed_restored_messages_with(&messages);
+    manager.start_background_compaction(
+        &messages,
+        Arc::new(MockSummaryProvider),
+        "reactive".into(),
+    );
+    while manager.is_compacting() {
+        tokio::task::yield_now().await;
+        manager.check_and_apply_compaction_with(&messages);
+    }
+    assert_eq!(manager.compacted_count(), 0);
+    assert!(manager.take_compaction_event().is_none());
+    assert!(
+        manager
+            .take_compaction_error()
+            .unwrap()
+            .contains("at least 10%")
+    );
+    assert_eq!(
+        manager.messages_for_api_with(&messages).len(),
+        messages.len()
+    );
+}
+
 #[test]
 fn test_new_manager() {
     let manager = CompactionManager::new();

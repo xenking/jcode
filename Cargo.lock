@@ -3975,6 +3975,7 @@ dependencies = [
 name = "jcode-compaction-core"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "fontdue",
  "jcode-message-types",
  "png 0.17.16",

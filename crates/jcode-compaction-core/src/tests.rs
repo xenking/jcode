@@ -353,6 +353,42 @@ fn image_token_cost_is_bounded_not_base64_length() {
 }
 
 #[test]
+fn dense_png_dimensions_and_archive_cap_are_counted_consistently() {
+    use base64::Engine as _;
+    let mut header = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    header.extend_from_slice(&1932u32.to_be_bytes());
+    header.extend_from_slice(&1920u32.to_be_bytes());
+    let page = base64::engine::general_purpose::STANDARD.encode(header);
+    let image = Message {
+        content: vec![ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: page.clone(),
+        }]
+        .into(),
+        ..Message::user("")
+    };
+    let cost = 1932 * 1920 / 750;
+    assert_eq!(message_char_count(&image), cost * CHARS_PER_TOKEN);
+    let summary = Summary {
+        text: String::new(),
+        openai_encrypted_content: None,
+        snapcompact: Some(jcode_message_types::SnapcompactArchive {
+            source: String::new(),
+            pages: vec![page; 74],
+            index: String::new(),
+            decisions: String::new(),
+            page_ranges: vec![],
+        }),
+        covers_up_to_turn: 0,
+        original_turn_count: 0,
+    };
+    assert_eq!(
+        summary_payload_char_count(&summary),
+        cost * CHARS_PER_TOKEN * SNAPCOMPACT_REQUEST_PAGE_LIMIT
+    );
+}
+
+#[test]
 fn summary_clone_shares_encrypted_body_when_text_changes() {
     let body: std::sync::Arc<str> = "encrypted-body-".repeat(128 * 1024).into();
     let summary = Summary {

@@ -562,6 +562,26 @@ impl CompactionManager {
         self.active_chars.reset_pending(count > 0);
     }
 
+    /// Keep a bounded recent suffix even when individual tool results are huge.
+    /// The minimum pair remains protected, including its tool dependencies.
+    fn bounded_recent_cutoff(&self, active: &[Message]) -> usize {
+        let mut keep = MIN_TURNS_TO_KEEP.min(active.len());
+        let mut tail_chars: usize = active[active.len() - keep..]
+            .iter()
+            .map(message_char_count)
+            .sum();
+        let tail_limit = MANUAL_RECENT_TAIL_TOKENS.min(self.token_budget / 10);
+        while keep < RECENT_TURNS_TO_KEEP && keep < active.len().saturating_sub(1) {
+            let next = message_char_count(&active[active.len() - keep - 1]);
+            if tail_chars.saturating_add(next) / CHARS_PER_TOKEN > tail_limit {
+                break;
+            }
+            tail_chars = tail_chars.saturating_add(next);
+            keep += 1;
+        }
+        active.len().saturating_sub(keep)
+    }
+
     /// Seed the manager from already-existing history with an exact rolling char
     /// estimate for the active suffix.
     pub fn seed_restored_messages_with(&mut self, all_messages: &[Message]) {
@@ -1491,9 +1511,22 @@ impl CompactionManager {
 
         // Calculate cutoff within active messages.
         // Semantic mode uses relevance scoring; other modes use recency.
+        let bounded_cutoff = self.bounded_recent_cutoff(active);
         let mut cutoff = match self.mode {
-            crate::config::CompactionMode::Semantic => self.semantic_cutoff(active),
-            _ => active.len().saturating_sub(RECENT_TURNS_TO_KEEP),
+            crate::config::CompactionMode::Semantic => {
+                let semantic = self.semantic_cutoff(active);
+                let tail_tokens = active[semantic..]
+                    .iter()
+                    .map(message_char_count)
+                    .sum::<usize>()
+                    / CHARS_PER_TOKEN;
+                if tail_tokens > MANUAL_RECENT_TAIL_TOKENS.min(self.token_budget / 10) {
+                    semantic.max(bounded_cutoff)
+                } else {
+                    semantic
+                }
+            }
+            _ => bounded_cutoff,
         };
         if cutoff == 0 {
             return;
@@ -1515,6 +1548,8 @@ impl CompactionManager {
         let snapcompact_shape = Some(self.compaction_config.snapcompact_shape.clone())
             .filter(|shape| !shape.trim().is_empty() && !shape.trim().eq_ignore_ascii_case("auto"));
         let shake_config = self.shake_config();
+        let remaining_chars: usize = active[cutoff..].iter().map(message_char_count).sum();
+        let token_budget = self.token_budget;
         let estimated_tokens = self.effective_token_count_with(all_messages);
         crate::logging::info(&format!(
             "[TIMING] compaction_start: trigger={}, active_messages={}, cutoff={}, estimated_tokens={}, has_existing_summary={}",
@@ -1540,7 +1575,7 @@ impl CompactionManager {
         // Spawn background task that notifies via Bus when done
         self.pending_task = crate::runtime_activity::spawn(async move {
             let start = std::time::Instant::now();
-            let result = generate_compaction_artifact_indexed(
+            let result = generate_effective_compaction_artifact(
                 provider,
                 messages_to_summarize,
                 archive_history,
@@ -1548,12 +1583,15 @@ impl CompactionManager {
                 snapcompact_enabled,
                 snapcompact_shape,
                 shake_config,
+                remaining_chars,
+                token_budget,
             )
             .await;
             let duration_ms = start.elapsed().as_millis() as u64;
             crate::logging::info(&format!(
-                "Compaction ({}) finished in {:.2}s ({} messages summarized)",
+                "Compaction ({}) {} in {:.2}s ({} messages processed)",
                 mode_label,
+                if result.is_ok() { "finished" } else { "failed" },
                 duration_ms as f64 / 1000.0,
                 msg_count,
             ));
@@ -1744,20 +1782,7 @@ impl CompactionManager {
             ));
         }
 
-        let mut keep = MIN_TURNS_TO_KEEP;
-        let mut tail_chars: usize = active[active.len() - keep..]
-            .iter()
-            .map(message_char_count)
-            .sum();
-        while keep < RECENT_TURNS_TO_KEEP && keep < active.len().saturating_sub(1) {
-            let next = message_char_count(&active[active.len() - keep - 1]);
-            if tail_chars.saturating_add(next) / CHARS_PER_TOKEN > MANUAL_RECENT_TAIL_TOKENS {
-                break;
-            }
-            tail_chars = tail_chars.saturating_add(next);
-            keep += 1;
-        }
-        let mut cutoff = active.len().saturating_sub(keep);
+        let mut cutoff = self.bounded_recent_cutoff(active);
         if cutoff == 0 {
             return Err("No messages available to compact after keeping recent turns".to_string());
         }
@@ -1776,6 +1801,8 @@ impl CompactionManager {
         let snapcompact_shape = Some(self.compaction_config.snapcompact_shape.clone())
             .filter(|shape| !shape.trim().is_empty() && !shape.trim().eq_ignore_ascii_case("auto"));
         let shake_config = self.shake_config();
+        let remaining_chars: usize = active[cutoff..].iter().map(message_char_count).sum();
+        let token_budget = self.token_budget;
 
         self.pending_cutoff = cutoff;
         self.pending_trigger = Some("manual".to_string());
@@ -1783,7 +1810,7 @@ impl CompactionManager {
 
         self.pending_task = crate::runtime_activity::spawn(async move {
             let start = std::time::Instant::now();
-            let result = generate_compaction_artifact_indexed(
+            let result = generate_effective_compaction_artifact(
                 provider,
                 messages_to_summarize,
                 archive_history,
@@ -1791,11 +1818,14 @@ impl CompactionManager {
                 snapcompact_enabled,
                 snapcompact_shape,
                 shake_config,
+                remaining_chars,
+                token_budget,
             )
             .await;
             let duration_ms = start.elapsed().as_millis() as u64;
             crate::logging::info(&format!(
-                "Compaction finished in {:.2}s ({} messages summarized)",
+                "Compaction {} in {:.2}s ({} messages processed)",
+                if result.is_ok() { "finished" } else { "failed" },
                 duration_ms as f64 / 1000.0,
                 msg_count,
             ));
@@ -2074,14 +2104,24 @@ impl CompactionManager {
                         cache_control: None,
                     });
                     if supports_image_input {
+                        let first = archive
+                            .pages
+                            .len()
+                            .saturating_sub(jcode_compaction_core::SNAPCOMPACT_REQUEST_PAGE_LIMIT);
                         content.push(ContentBlock::Text {
-                            text: "The following PNG pages contain earlier conversation history in chronological order.".to_string(),
+                            text: format!("Only archive pages {} through {} are included below, in chronological order. {} older pages are omitted from this request; use the index and session_search to retrieve their details. Page numbers in the index refer to the full archive, not the position in this request.", first + 1, archive.pages.len(), first),
                             cache_control: None,
                         });
-                        content.extend(archive.pages.iter().map(|data| ContentBlock::Image {
-                            media_type: "image/png".to_string(),
-                            data: data.clone(),
-                        }));
+                        for (i, data) in archive.pages.iter().enumerate().skip(first) {
+                            content.push(ContentBlock::Text {
+                                text: format!("Archive page {}:", i + 1),
+                                cache_control: None,
+                            });
+                            content.push(ContentBlock::Image {
+                                media_type: "image/png".to_string(),
+                                data: data.clone(),
+                            });
+                        }
                     }
                 }
                 let mut result = Vec::with_capacity(active.len() + 1);
@@ -2544,6 +2584,79 @@ async fn generate_compaction_artifact(
         shake_config,
     )
     .await
+}
+
+/// Reject results which don't materially reduce the actual estimated request.
+/// Snapshot-based comparison includes the unchanged suffix on both sides.
+#[allow(clippy::too_many_arguments)]
+async fn generate_effective_compaction_artifact(
+    provider: Arc<dyn Provider>,
+    messages: Vec<Message>,
+    archive_history: Vec<Message>,
+    existing_summary: Option<Summary>,
+    snapcompact_enabled: bool,
+    snapcompact_shape: Option<String>,
+    shake_config: Option<ShakeConfig>,
+    remaining_chars: usize,
+    token_budget: usize,
+) -> Result<CompactionResult> {
+    let before_chars = messages
+        .iter()
+        .map(message_char_count)
+        .sum::<usize>()
+        .saturating_add(remaining_chars);
+    let before = estimate_compaction_tokens(existing_summary.as_ref(), before_chars, token_budget);
+    let post = |result: &CompactionResult| {
+        let summary = Summary {
+            text: result.summary_text.clone(),
+            openai_encrypted_content: result.openai_encrypted_content.clone().map(Into::into),
+            snapcompact: result.snapcompact.clone(),
+            covers_up_to_turn: result.covers_up_to_turn,
+            original_turn_count: result.summarized_messages,
+        };
+        estimate_compaction_tokens(Some(&summary), remaining_chars, token_budget)
+    };
+    let insufficient = |after: usize| before.saturating_sub(after) < before / 10;
+    let target = token_budget / 5 * 2;
+    let mut result = generate_compaction_artifact_indexed(
+        provider.clone(),
+        messages.clone(),
+        archive_history.clone(),
+        existing_summary.clone(),
+        snapcompact_enabled,
+        snapcompact_shape,
+        shake_config,
+    )
+    .await?;
+    let mut after = post(&result);
+    if result.snapcompact.is_some() && (insufficient(after) || (before > target && after > target))
+    {
+        crate::logging::warn(&format!(
+            "[compaction] Snapcompact insufficient: estimated {before} -> {after} tokens; escalating to LLM summary"
+        ));
+        result = generate_compaction_artifact_indexed(
+            provider,
+            messages,
+            archive_history,
+            existing_summary,
+            false,
+            None,
+            shake_config,
+        )
+        .await?;
+        after = post(&result);
+    }
+    if insufficient(after) {
+        anyhow::bail!(
+            "Compaction failed to free at least 10% of estimated request tokens ({before} -> {after})"
+        );
+    }
+    if before > target && after > target {
+        anyhow::bail!(
+            "Compaction failed to reach 40% of the estimated context budget ({before} -> {after}, budget {token_budget}); the protected tail may be too large"
+        );
+    }
+    Ok(result)
 }
 
 async fn generate_compaction_artifact_indexed(

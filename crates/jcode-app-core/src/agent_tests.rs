@@ -42,6 +42,36 @@ struct DelayedProvider {
 
 struct NativeAutoCompactionProvider;
 
+struct ArchiveVisionProvider;
+
+#[async_trait]
+impl Provider for ArchiveVisionProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        panic!("this offline request preparation test must not call a provider")
+    }
+    fn name(&self) -> &str {
+        "archive-vision-test"
+    }
+    fn model(&self) -> String {
+        "claude-opus-5-5".into()
+    }
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+    fn supports_image_input(&self) -> bool {
+        true
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+}
+
 struct BoundSavedAccountProvider;
 
 #[tokio::test]
@@ -1326,6 +1356,51 @@ async fn run_turn_streaming_mpsc_emits_account_only_change_without_email() {
         }
     }
     assert_eq!(labels, vec![Some("personal".to_string())]);
+}
+
+#[tokio::test]
+async fn messages_for_provider_caps_restored_snapcompact_pages() {
+    let provider: Arc<dyn Provider> = Arc::new(ArchiveVisionProvider);
+    let mut agent = Agent::new(provider, Registry::empty());
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "live tail".into(),
+            cache_control: None,
+        }],
+    );
+    agent.session.compaction = Some(Arc::new(crate::session::StoredCompactionState {
+        summary_text: "archive".into(),
+        openai_encrypted_content: None,
+        snapcompact: Some(jcode_message_types::SnapcompactArchive {
+            source: "history".into(),
+            pages: (0..74).map(|i| format!("page{i}")).collect(),
+            index: "[message 0, page 1 | user] old fact\n".into(),
+            decisions: String::new(),
+            page_ranges: Vec::new(),
+        }),
+        covers_up_to_turn: 0,
+        original_turn_count: 0,
+        compacted_count: 0,
+    }));
+    agent.seed_compaction_from_session();
+    let (request, event) = agent.messages_for_provider();
+    assert!(event.is_none());
+    let images: Vec<_> = request
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| match b {
+            ContentBlock::Image { data, .. } => Some(data.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(images, ["page70", "page71", "page72", "page73"]);
+    assert!(
+        request
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .any(|b| matches!(b, ContentBlock::Text { text, .. } if text.contains("old fact")))
+    );
 }
 
 #[tokio::test]

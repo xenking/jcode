@@ -60,6 +60,34 @@ pub const CHARS_PER_TOKEN: usize = 4;
 /// We charge a flat, slightly conservative per-image token budget instead.
 pub const IMAGE_TOKEN_COST: usize = 1_600;
 
+/// Dense PNG archive pages are much larger than ordinary screenshots. Use the
+/// PNG header to avoid treating a 1932x1920 page as a 1600-token image. This is
+/// still an estimate: providers may resize or price images differently.
+fn image_token_cost(media_type: &str, data: &str) -> usize {
+    use base64::Engine as _;
+    if media_type != "image/png" {
+        return IMAGE_TOKEN_COST;
+    }
+    let Some(prefix) = data.get(..32) else {
+        return IMAGE_TOKEN_COST;
+    };
+    let Ok(header) = base64::engine::general_purpose::STANDARD.decode(prefix) else {
+        return IMAGE_TOKEN_COST;
+    };
+    if header.len() < 24 || &header[..8] != b"\x89PNG\r\n\x1a\n" || &header[12..16] != b"IHDR" {
+        return IMAGE_TOKEN_COST;
+    }
+    let width = u32::from_be_bytes(header[16..20].try_into().unwrap()) as usize;
+    let height = u32::from_be_bytes(header[20..24].try_into().unwrap()) as usize;
+    IMAGE_TOKEN_COST
+        .max(width.saturating_mul(height) / 750)
+        .min(20_000)
+}
+
+/// Number of most recent snapcompact pages replayed in a provider request.
+/// All pages remain in the persisted archive and older facts remain searchable.
+pub const SNAPCOMPACT_REQUEST_PAGE_LIMIT: usize = 4;
+
 /// Approximate token cost charged for an OpenAI native compaction payload.
 ///
 /// The payload is opaque ciphertext whose length bears no relation to the
@@ -367,7 +395,9 @@ pub fn content_char_count(content: &[ContentBlock]) -> usize {
             // payload length. See IMAGE_TOKEN_COST: counting base64 length here
             // overestimates context by ~100x and triggers spurious repeated
             // compactions.
-            ContentBlock::Image { .. } => IMAGE_TOKEN_COST * CHARS_PER_TOKEN,
+            ContentBlock::Image { media_type, data } => {
+                image_token_cost(media_type, data) * CHARS_PER_TOKEN
+            }
             ContentBlock::OpenAICompaction { .. } => OPENAI_COMPACTION_TOKEN_COST * CHARS_PER_TOKEN,
             // The provider expands a reference into the full definition, but
             // that definition is already accounted for by the tool catalog.
@@ -393,8 +423,11 @@ pub fn summary_payload_char_count(summary: &Summary) -> usize {
             .saturating_add(
                 archive
                     .pages
-                    .len()
-                    .saturating_mul(IMAGE_TOKEN_COST * CHARS_PER_TOKEN),
+                    .iter()
+                    .rev()
+                    .take(SNAPCOMPACT_REQUEST_PAGE_LIMIT)
+                    .map(|page| image_token_cost("image/png", page) * CHARS_PER_TOKEN)
+                    .sum::<usize>(),
             )
     }))
 }
