@@ -366,6 +366,29 @@ fn explicit_promotion_pins_installed_version_without_moving_client_channels() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn promotion_repairs_a_channel_even_when_its_marker_already_matches() {
+    with_temp_jcode_home(|| {
+        let old = "main-old";
+        let selected = "main-selected";
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), old).unwrap();
+        install_binary_at_version(std::env::current_exe().as_ref().unwrap(), selected).unwrap();
+        update_shared_server_symlink(old).unwrap();
+        std::fs::write(
+            builds_dir().unwrap().join("shared-server-version"),
+            selected,
+        )
+        .unwrap();
+        promote_version_to_shared_server(selected).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(shared_server_binary_path().unwrap()).unwrap(),
+            std::fs::canonicalize(version_binary_path(selected).unwrap()).unwrap(),
+            "a matching marker cannot prove the selected channel target"
+        );
+    });
+}
+
 #[test]
 fn explicit_promotion_rejects_missing_and_path_like_versions() {
     with_temp_jcode_home(|| {

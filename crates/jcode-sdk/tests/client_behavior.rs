@@ -73,6 +73,7 @@ fn fake_harness(handle: impl Fn(&ClientFrame, &mut dyn Write) + Send + 'static) 
                     v: API_VERSION_MAJOR,
                     reply_to: Some(frame.id),
                     event: ApiEvent::HelloOk {
+                        runtime_identity: None,
                         version: API_VERSION_MAJOR,
                         server: "fake-harness/1.0".to_string(),
                         capabilities: vec!["sessions".to_string()],
@@ -448,6 +449,7 @@ fn a_lost_connection_fails_requests_in_flight() {
                 v: API_VERSION_MAJOR,
                 reply_to: Some(hello.id),
                 event: ApiEvent::HelloOk {
+                    runtime_identity: None,
                     version: API_VERSION_MAJOR,
                     server: "fake/1.0".to_string(),
                     capabilities: vec![],
@@ -957,6 +959,7 @@ fn create_session_options_preserve_system_prompt_wire_values() {
                 reply(
                     &frame,
                     ApiEvent::HelloOk {
+                        runtime_identity: None,
                         version: API_VERSION_MAJOR,
                         server: "fake-harness/1.0".into(),
                         capabilities: vec!["sessions".into()],
@@ -1044,6 +1047,7 @@ fn set_session_env_sends_replacement_and_clear() {
                 reply(
                     &frame,
                     ApiEvent::HelloOk {
+                        runtime_identity: None,
                         version: API_VERSION_MAJOR,
                         server: "fake-harness/1.0".into(),
                         capabilities: vec!["sessions".into()],

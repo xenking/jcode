@@ -113,6 +113,7 @@ fn real_shared_master_concurrent_independent_channels_and_cleanup() {
     let hello = serde_json::to_string(&crate::api::ServerFrame::reply(
         1,
         crate::api::ApiEvent::HelloOk {
+            runtime_identity: None,
             version: crate::api::API_VERSION_MAJOR,
             server: "fixture".into(),
             capabilities: vec![],

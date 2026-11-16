@@ -33,6 +33,7 @@ fn context_cap_returns_budget_clears_and_preserves_errors() {
             &ServerFrame::reply(
                 hello.id,
                 ApiEvent::HelloOk {
+                    runtime_identity: None,
                     version: 1,
                     server: "context-cap-test".into(),
                     capabilities: vec![],

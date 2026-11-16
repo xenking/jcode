@@ -12,6 +12,9 @@ pub enum ApiEvent {
         version: u32,
         /// Server name and version, e.g. "jcode/0.55.1".
         server: String,
+        /// Executing bridge image, for detecting leftovers from an older bundle.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime_identity: Option<jcode_selfdev_types::ServingIdentity>,
         /// Optional capability strings for additive feature discovery.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         capabilities: Vec<String>,

@@ -3941,6 +3941,8 @@ dependencies = [
  "jcode-core",
  "jcode-selfdev-types",
  "jcode-storage",
+ "jcode-transport",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
@@ -4067,6 +4069,7 @@ name = "jcode-harness-api"
 version = "0.1.0"
 dependencies = [
  "jcode-applet-types",
+ "jcode-selfdev-types",
  "jcode-session-types",
  "jcode-side-panel-types",
  "jcode-todo-policy",
@@ -4082,6 +4085,8 @@ dependencies = [
  "anyhow",
  "jcode-background-types",
  "jcode-base",
+ "jcode-build-meta",
+ "jcode-build-support",
  "jcode-harness-api",
  "jcode-provider-metadata",
  "jcode-session-types",
@@ -4584,6 +4589,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "jcode-applet-types",
+ "jcode-build-support",
  "jcode-harness-api",
  "jcode-logging",
  "jcode-provider-metadata",

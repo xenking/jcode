@@ -401,6 +401,10 @@ where
     let hello_ok = ServerFrame::reply(
         reply_to,
         ApiEvent::HelloOk {
+            runtime_identity: jcode_build_support::runtime_generation::serving_identity(
+                jcode_build_meta::git_hash(),
+            )
+            .ok(),
             version: API_VERSION_MAJOR,
             server: format!("jcode-harness-api-bridge/{}", env!("CARGO_PKG_VERSION")),
             capabilities: [

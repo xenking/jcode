@@ -10,9 +10,13 @@ chrono = { version = "0.4", features = ["serde"] }
 jcode-core = { path = "../jcode-core" }
 jcode-selfdev-types = { path = "../jcode-selfdev-types" }
 jcode-storage = { path = "../jcode-storage" }
+jcode-transport = { path = "../jcode-transport" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

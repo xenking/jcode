@@ -192,6 +192,7 @@ fn serve_connection(
             ApiRequest::Hello { .. } => reply(
                 frame.id,
                 ApiEvent::HelloOk {
+                    runtime_identity: None,
                     version: API_VERSION_MAJOR,
                     server: "fake-global/1.0".into(),
                     capabilities: vec!["sessions".into()],

@@ -620,6 +620,7 @@ mod tests {
                 v: API_VERSION_MAJOR,
                 reply_to: hello["id"].as_u64(),
                 event: ApiEvent::HelloOk {
+                    runtime_identity: None,
                     version: API_VERSION_MAJOR,
                     server: "fake".into(),
                     capabilities: vec![],

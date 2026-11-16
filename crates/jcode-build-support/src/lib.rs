@@ -740,11 +740,17 @@ pub fn promote_version_to_shared_server(version: &str) -> Result<Option<String>>
         anyhow::bail!("Invalid installed version label: {version:?}");
     }
     let previous = read_shared_server_version()?;
-    if previous.as_deref() == Some(version) {
-        let target = version_binary_path(version)?;
-        if !target.exists() {
-            anyhow::bail!("Version binary not found at {:?}", target);
-        }
+    let target = version_binary_path(version)?;
+    if !target.is_file() {
+        anyhow::bail!("Version binary not found at {:?}", target);
+    }
+    let selected = runtime_generation::channel_diagnostics(
+        &shared_server_binary_path()?,
+        &shared_server_version_file()?,
+    );
+    if previous.as_deref() == Some(version)
+        && selected.resolved_path == std::fs::canonicalize(&target).ok()
+    {
         return Ok(previous);
     }
     update_shared_server_symlink(version)?;

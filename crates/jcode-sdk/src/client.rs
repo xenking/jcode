@@ -359,6 +359,8 @@ pub struct JcodeClient {
     pub instance_home: Option<std::path::PathBuf>,
     /// Server identity from the handshake, e.g. "jcode-harness-api-bridge/0.1.0".
     pub server: String,
+    /// Self-reported executing bridge image, absent on older bridges.
+    pub runtime_identity: Option<crate::api::ServingIdentity>,
     /// Capability strings advertised by the server.
     pub capabilities: Vec<String>,
 }
@@ -372,6 +374,7 @@ impl Clone for JcodeClient {
             instance: self.instance.clone(),
             instance_home: self.instance_home.clone(),
             server: self.server.clone(),
+            runtime_identity: self.runtime_identity.clone(),
             capabilities: self.capabilities.clone(),
         }
     }
@@ -540,6 +543,7 @@ impl JcodeClient {
             instance: None,
             instance_home: None,
             server: String::new(),
+            runtime_identity: None,
             capabilities: Vec::new(),
         };
         let frame = client.request_with_timeout(
@@ -555,9 +559,11 @@ impl JcodeClient {
             ApiEvent::HelloOk {
                 server,
                 capabilities,
+                runtime_identity,
                 ..
             } => {
                 client.server = server;
+                client.runtime_identity = runtime_identity;
                 client.capabilities = capabilities;
                 Ok(client)
             }

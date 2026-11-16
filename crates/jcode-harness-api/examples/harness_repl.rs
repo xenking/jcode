@@ -111,6 +111,7 @@ fn run_demo() {
                 "hello" => reply(&ServerFrame::reply(
                     id,
                     ApiEvent::HelloOk {
+                        runtime_identity: None,
                         version: API_VERSION_MAJOR,
                         server: "jcode-demo/0".into(),
                         capabilities: vec!["sessions".into()],

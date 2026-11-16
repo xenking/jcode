@@ -9,6 +9,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+#[path = "runtime_generation_selection.rs"]
+pub mod selection;
+
+#[path = "runtime_generation_socket.rs"]
+mod socket_adapter;
+pub use socket_adapter::{probe_socket_identity, socket_peer_pid};
+
 #[cfg(test)]
 #[path = "runtime_generation_tests.rs"]
 mod tests;
@@ -26,15 +33,23 @@ pub fn resolve(selection: DesiredSelection) -> Result<ImmutableTarget> {
         DesiredSelection::Path(path) => (path, None),
         DesiredSelection::SharedServer => (crate::shared_server_binary_path()?, None),
     };
-    let binary_path = std::fs::canonicalize(&path)
+    let mut target = pin_path(&path)?;
+    target.version_label = label.or(target.version_label);
+    target.git_hash = crate::read_binary_version_report(&target.binary_path)?.git_hash;
+    validate_target(&target)?;
+    Ok(target)
+}
+
+/// Pin a known executable without executing a version probe (e.g. bridge launch).
+pub fn pin_path(path: &Path) -> Result<ImmutableTarget> {
+    let binary_path = std::fs::canonicalize(path)
         .with_context(|| format!("requested runtime target is missing: {}", path.display()))?;
     let selected_identity = Some(file_identity(&binary_path)?);
-    let version_label = label.or_else(|| installed_label(&binary_path));
-    let report = crate::read_binary_version_report(&binary_path)?;
+    let version_label = installed_label(&binary_path);
     Ok(ImmutableTarget {
         payload_identity: Some(file_identity(&crate::resolve_binary_payload(&binary_path))?),
         binary_path,
-        git_hash: report.git_hash,
+        git_hash: None,
         version_label,
         file_identity: selected_identity,
     })
@@ -170,6 +185,9 @@ fn capture_identity(git_hash: &str) -> Result<ServingIdentity> {
 /// Validate before quiescence and again immediately before exec. No re-selection.
 pub fn prepare_exec(cmd: &mut Command, target: &ImmutableTarget, reload_id: &str) -> Result<()> {
     validate_target(target)?;
+    if cmd.get_program() != target.binary_path.as_os_str() {
+        bail!("command executable differs from the immutable runtime target");
+    }
     if reload_id.is_empty() {
         bail!("reload id must not be empty");
     }
@@ -186,6 +204,18 @@ pub fn prepare_exec(cmd: &mut Command, target: &ImmutableTarget, reload_id: &str
                 .context("runtime generation overflow")?
                 .to_string(),
         );
+    Ok(())
+}
+
+/// Pin an independent daemon/bridge launch without inheriting another handoff.
+pub fn prepare_launch(cmd: &mut Command, target: &ImmutableTarget) -> Result<()> {
+    validate_target(target)?;
+    if cmd.get_program() != target.binary_path.as_os_str() {
+        bail!("command executable differs from the immutable runtime target");
+    }
+    cmd.env(TARGET_ENV, serde_json::to_string(target)?)
+        .env_remove(RELOAD_ID_ENV)
+        .env(GENERATION_ENV, "1");
     Ok(())
 }
 
@@ -271,6 +301,44 @@ pub fn assess_serving_target(
     {
         return GenerationVerdict::Mismatch {
             reason: "bridge hash differs from the selected bundle".into(),
+        };
+    }
+    GenerationVerdict::Ready(serving.clone())
+}
+
+/// Reconnect observes the currently serving image and, when a recent marker
+/// belongs to that process, requires that listener to confirm its handoff id.
+/// The marker only supplies the expected id, never a readiness verdict.
+pub fn assess_reconnect(
+    serving: &ServingIdentity,
+    max_age: std::time::Duration,
+) -> GenerationVerdict {
+    if serving.generation == 0 {
+        return GenerationVerdict::Unknown {
+            reason: "listener does not report runtime generations".into(),
+        };
+    }
+    let marker = jcode_storage::runtime_dir().join("jcode.reload");
+    let recent = std::fs::metadata(&marker)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age <= max_age);
+    if recent
+        && let Ok(raw) = std::fs::read_to_string(&marker)
+        && let Ok(marker) = serde_json::from_str::<serde_json::Value>(&raw)
+        && marker["pid"].as_u64() == Some(u64::from(serving.pid))
+    {
+        if marker["phase"] == "failed" {
+            return GenerationVerdict::Mismatch {
+                reason: format!("reload failed: {}", marker["detail"]),
+            };
+        }
+        if let Some(id) = marker["request_id"].as_str() {
+            return assess_handoff(id, None, Some(serving));
+        }
+        return GenerationVerdict::Unknown {
+            reason: "recent reload marker has no request identity".into(),
         };
     }
     GenerationVerdict::Ready(serving.clone())

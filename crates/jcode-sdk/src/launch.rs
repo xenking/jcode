@@ -610,7 +610,24 @@ fn shared_bridge_launch<'a>(
 }
 
 fn spawn_detached(program: &Path, args: &[&str]) -> std::io::Result<()> {
-    let mut command = Command::new(program);
+    use jcode_build_support::runtime_generation as generation;
+    let target = if program.is_file() {
+        Some(generation::pin_path(program).map_err(std::io::Error::other)?)
+    } else {
+        None
+    };
+    let mut command = Command::new(
+        target
+            .as_ref()
+            .map_or(program, |target| target.binary_path.as_path()),
+    );
+    command
+        .env_remove(generation::TARGET_ENV)
+        .env_remove(generation::RELOAD_ID_ENV)
+        .env_remove(generation::GENERATION_ENV);
+    if let Some(target) = &target {
+        generation::prepare_launch(&mut command, target).map_err(std::io::Error::other)?;
+    }
     command
         .args(args)
         .stdin(Stdio::null())

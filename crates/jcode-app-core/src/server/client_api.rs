@@ -10,7 +10,6 @@ pub struct Client {
     reader: BufReader<ReadHalf>,
     writer: WriteHalf,
     next_id: u64,
-    peer_pid: Option<u32>,
 }
 
 impl Client {
@@ -20,20 +19,11 @@ impl Client {
 
     pub async fn connect_with_path(path: PathBuf) -> Result<Self> {
         let stream = connect_socket(&path).await?;
-        #[cfg(unix)]
-        let peer_pid = stream
-            .peer_cred()
-            .ok()
-            .and_then(|credentials| credentials.pid())
-            .map(|pid| pid as u32);
-        #[cfg(not(unix))]
-        let peer_pid = None;
         let (reader, writer) = stream.into_split();
         Ok(Self {
             reader: BufReader::new(reader),
             writer,
             next_id: 1,
-            peer_pid,
         })
     }
 
@@ -43,20 +33,11 @@ impl Client {
 
     pub async fn connect_debug_with_path(path: PathBuf) -> Result<Self> {
         let stream = connect_socket(&path).await?;
-        #[cfg(unix)]
-        let peer_pid = stream
-            .peer_cred()
-            .ok()
-            .and_then(|credentials| credentials.pid())
-            .map(|pid| pid as u32);
-        #[cfg(not(unix))]
-        let peer_pid = None;
         let (reader, writer) = stream.into_split();
         Ok(Self {
             reader: BufReader::new(reader),
             writer,
             next_id: 1,
-            peer_pid,
         })
     }
 
@@ -155,38 +136,6 @@ impl Client {
                 ServerEvent::Ack { id: ack_id } if ack_id == id => continue,
                 ServerEvent::Error { id: error_id, .. } if error_id == id => return Ok(false),
                 _ => return Ok(false),
-            }
-        }
-    }
-
-    pub async fn serving_identity(&mut self) -> Result<Option<crate::protocol::DaemonIdentity>> {
-        let id = self.next_id;
-        self.next_id += 1;
-        let json = serde_json::to_string(&Request::Ping { id })? + "\n";
-        self.writer.write_all(json.as_bytes()).await?;
-        loop {
-            match self.read_event().await? {
-                ServerEvent::Pong {
-                    id: pong_id,
-                    daemon_identity,
-                    ..
-                } if pong_id == id => {
-                    if let Some(identity) = &daemon_identity
-                        && self.peer_pid.is_some_and(|peer| peer != identity.pid)
-                    {
-                        anyhow::bail!(
-                            "listener identity PID {} does not match socket peer {:?}",
-                            identity.pid,
-                            self.peer_pid
-                        );
-                    }
-                    return Ok(daemon_identity);
-                }
-                ServerEvent::Ack { id: ack_id } if ack_id == id => continue,
-                ServerEvent::Error { message, .. } => {
-                    anyhow::bail!("serving identity probe: {message}")
-                }
-                _ => anyhow::bail!("listener did not answer the serving identity probe"),
             }
         }
     }

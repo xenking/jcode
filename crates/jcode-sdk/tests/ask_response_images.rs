@@ -32,6 +32,7 @@ fn ask_images_require_server_capability_before_any_socket_write() {
                 &ServerFrame::reply(
                     hello.id,
                     ApiEvent::HelloOk {
+                        runtime_identity: None,
                         version: API_VERSION_MAJOR,
                         server: "fake".into(),
                         capabilities: if supported {

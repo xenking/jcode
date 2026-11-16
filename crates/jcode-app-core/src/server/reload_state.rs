@@ -216,15 +216,15 @@ pub async fn inspect_reload_wait_status(
 pub async fn probe_serving_identity(
     socket_path: &std::path::Path,
 ) -> anyhow::Result<crate::protocol::DaemonIdentity> {
-    tokio::time::timeout(Duration::from_millis(200), async {
-        let mut client = super::Client::connect_with_path(socket_path.to_path_buf()).await?;
-        client
-            .serving_identity()
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("listener is too old to report its serving identity"))
+    let socket = socket_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        jcode_build_support::runtime_generation::probe_socket_identity(
+            &socket,
+            Duration::from_millis(200),
+        )
     })
     .await
-    .map_err(|_| anyhow::anyhow!("listener serving identity probe timed out"))?
+    .map_err(|error| anyhow::anyhow!("serving identity observer failed: {error}"))?
 }
 
 pub async fn inspect_reload_wait_status_for(
