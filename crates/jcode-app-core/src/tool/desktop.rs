@@ -27,9 +27,9 @@ impl Tool for DesktopTool {
             "target":{"type":"object","required":["window_id","session_id"],"properties":{"window_id":{"type":"string"},"session_id":{"type":"string"}},"additionalProperties":false},
             "session_id":{"type":"string","description":"Session to open."},
             "destination":{"oneOf":[{"type":"string","enum":["new_window"]},{"type":"object","required":["background_panel"],"properties":{"background_panel":{"type":"object","required":["window_id"],"properties":{"window_id":{"type":"string"}},"additionalProperties":false}},"additionalProperties":false}]},
-            "selector":{"type":"string"}, "text":{"type":"string"}, "key":{"type":"string"}, "query":{"type":"string"}, "path":{"type":"string"},
+            "selector":{"type":"string", "description":"Supported: tool:<call_id>, row:<revision>:<index> (render/wait), composer.send (click only)."}, "text":{"type":"string"}, "key":{"type":"string", "description":"Enter or Return only."}, "query":{"type":"string"}, "path":{"type":"string"},
             "allow_user_window":{"type":"boolean","description":"Explicitly allow acting on the user's focused composer or existing draft."},
-            "condition":{"type":"object"},"timeout_ms":{"type":"integer","minimum":1,"maximum":120000}
+            "condition":{"type":"object", "required":["kind"], "properties":{"kind":{"type":"string", "enum":["selector_visible","text_contains","session_idle"]}, "selector":{"type":"string"}, "text":{"type":"string"}}, "additionalProperties":false},"timeout_ms":{"type":"integer","minimum":1,"maximum":120000}
         }})
     }
     async fn execute(&self, mut input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
@@ -103,8 +103,11 @@ fn execute_with_paths(action: DesktopAction, paths: Vec<std::path::PathBuf>) -> 
         if !(1..=120_000).contains(&timeout_ms) {
             bail!("timeout_ms must be between 1 and 120000");
         }
-        if matches!(condition, WaitCondition::SelectorVisible { .. }) {
-            bail!("selector visibility is not implemented");
+        if let WaitCondition::SelectorVisible { selector } = &condition
+            && !selector.starts_with("tool:")
+            && !selector.starts_with("row:")
+        {
+            bail!("only transcript tool: and row: selector visibility is supported");
         }
         let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
         loop {
@@ -158,7 +161,12 @@ fn condition_met(condition: &WaitCondition, state: &Value) -> bool {
             contains(&panel["loaded_transcript_items"], text)
                 || contains(&panel["streaming_text"], text)
         }
-        WaitCondition::SelectorVisible { .. } => false,
+        WaitCondition::SelectorVisible { selector } => panel["visible_transcript_items"]
+            .as_array()
+            .is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row["selector"].as_str() == Some(selector))
+            }),
     }
 }
 #[cfg(not(unix))]
@@ -192,6 +200,23 @@ mod tests {
         assert!(!condition_met(
             &WaitCondition::TextContains {
                 text: "not transcript".into()
+            },
+            &state
+        ));
+    }
+
+    #[test]
+    fn wait_matches_only_visible_tool_selector() {
+        let state = json!({"panel":{"visible_transcript_items":[{"selector":"tool:c1"}]}});
+        assert!(condition_met(
+            &WaitCondition::SelectorVisible {
+                selector: "tool:c1".into()
+            },
+            &state
+        ));
+        assert!(!condition_met(
+            &WaitCondition::SelectorVisible {
+                selector: "tool:c2".into()
             },
             &state
         ));
