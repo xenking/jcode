@@ -2,6 +2,20 @@ use super::idle_animation_repaint::{copy_cells_in, idle_animation_partial_repain
 use super::spinner_ticker::SpinnerTicker;
 use super::*;
 
+fn should_start_remote_btw(pending: bool, connected: bool) -> bool {
+    pending && !connected
+}
+
+#[cfg(test)]
+mod btw_start_tests {
+    #[test]
+    fn remote_side_question_starts_while_parent_is_busy() {
+        assert!(super::should_start_remote_btw(true, false));
+        assert!(!super::should_start_remote_btw(false, false));
+        assert!(!super::should_start_remote_btw(true, true));
+    }
+}
+
 fn report_reload_interaction_gap() {
     let Ok(started) = std::env::var("JCODE_RELOAD_GAP_STARTED_MS") else {
         return;
@@ -1125,9 +1139,9 @@ impl App {
                     continue;
                 }
 
-                // Start the side question once the parent has no turn running,
-                // so its own connection never competes with a live parent turn.
-                if self.pending_btw_turn && btw_conn.is_none() && !self.is_processing {
+                // The hidden child has its own agent and must not wait for the
+                // parent's turn to finish.
+                if should_start_remote_btw(self.pending_btw_turn, btw_conn.is_some()) {
                     self.pending_btw_turn = false;
                     crate::logging::info("btw: starting the side question");
                     match self.begin_btw_remote().await {
