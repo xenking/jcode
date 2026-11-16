@@ -544,11 +544,26 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
         .clone()
         .unwrap_or_else(|| sibling_exe("jcode"));
     let legacy = jcode_harness_api::legacy_socket_path();
+    let fallback = if api == jcode_harness_api::api_socket_path() {
+        jcode_build_support::runtime_generation::fallback_before_spawn(&legacy).map_err(
+            |error| {
+                Error::new(
+                    ErrorKind::LaunchFailed,
+                    format!("shared runtime generation selection failed: {error:#}"),
+                )
+            },
+        )?
+    } else {
+        None
+    };
     // A custom API socket may be a forwarded remote endpoint. Only the normal
     // local shared runtime can be offered our explicit packaged companion. A
     // PATH fallback is intentionally not an upgrade candidate.
     #[cfg(unix)]
-    if shared_upgrade::is_local_shared(&api, &legacy, &jcode) && socket_accepts(&legacy) {
+    if fallback.is_none()
+        && shared_upgrade::is_local_shared(&api, &legacy, &jcode)
+        && socket_accepts(&legacy)
+    {
         shared_upgrade::offer(&legacy, &jcode, options.start_timeout, progress);
     }
     if socket_accepts(&api) {
@@ -556,7 +571,11 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
     }
     if !socket_accepts(&legacy) {
         progress("starting jcode runtime...");
-        spawn_detached(&jcode, &["serve"]).map_err(|error| {
+        let spawn = match &fallback {
+            Some(target) => spawn_detached_inner(&target.binary_path, &["serve"], Some(target)),
+            None => spawn_detached(&jcode, &["serve"]),
+        };
+        spawn.map_err(|error| {
             Error::new(
                 ErrorKind::LaunchFailed,
                 format!("could not start the jcode runtime: {error}"),
@@ -616,16 +635,21 @@ fn spawn_detached(program: &Path, args: &[&str]) -> std::io::Result<()> {
     } else {
         None
     };
-    let mut command = Command::new(
-        target
-            .as_ref()
-            .map_or(program, |target| target.binary_path.as_path()),
-    );
+    spawn_detached_inner(program, args, target.as_ref())
+}
+
+fn spawn_detached_inner(
+    program: &Path,
+    args: &[&str],
+    target: Option<&jcode_build_support::runtime_generation::ImmutableTarget>,
+) -> std::io::Result<()> {
+    use jcode_build_support::runtime_generation as generation;
+    let mut command = Command::new(target.map_or(program, |target| target.binary_path.as_path()));
     command
         .env_remove(generation::TARGET_ENV)
         .env_remove(generation::RELOAD_ID_ENV)
         .env_remove(generation::GENERATION_ENV);
-    if let Some(target) = &target {
+    if let Some(target) = target {
         generation::prepare_launch(&mut command, target).map_err(std::io::Error::other)?;
     }
     command
