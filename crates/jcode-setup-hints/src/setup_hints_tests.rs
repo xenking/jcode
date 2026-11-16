@@ -1,6 +1,117 @@
 use super::*;
 
 #[test]
+fn macos_hotkey_launchctl_is_never_called_from_isolated_context() {
+    use std::cell::Cell;
+    let temp = tempfile::tempdir().unwrap();
+    let real_home = temp.path().join("real");
+    let plist_dir = real_home.join("Library/LaunchAgents");
+    let jcode_home = real_home.join(".jcode");
+    let current = jcode_home.join("builds/current/jcode");
+    let stable = jcode_home.join("builds/stable/jcode");
+    let isolated = temp.path().join("isolated");
+    for path in [
+        &plist_dir,
+        current.parent().unwrap(),
+        stable.parent().unwrap(),
+        &isolated,
+    ] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    std::fs::write(&current, b"current").unwrap();
+    std::fs::write(&stable, b"stable").unwrap();
+    let foreign_exe = isolated.join("jcode");
+    std::fs::write(&foreign_exe, b"test").unwrap();
+    let calls = Cell::new(0);
+    let invoke = |home: &std::path::Path,
+                  target: &std::path::Path,
+                  data: Option<&std::path::Path>,
+                  exe: &std::path::Path| {
+        with_macos_hotkey_authorization(home, target, data, exe, || {
+            calls.set(calls.get() + 1);
+            Ok(())
+        })
+    };
+    for exe in [&current, &stable] {
+        assert!(invoke(&real_home, &plist_dir, None, exe).is_ok());
+        assert!(invoke(&real_home, &plist_dir, Some(&jcode_home), exe).is_ok());
+    }
+    assert_eq!(calls.get(), 4);
+    #[cfg(unix)]
+    {
+        let alias = temp.path().join("alias-jcode");
+        std::os::unix::fs::symlink(&current, &alias).unwrap();
+        assert!(invoke(&real_home, &plist_dir, Some(&jcode_home), &alias).is_ok());
+    }
+    let permitted_calls = calls.get();
+    assert!(invoke(&real_home, &isolated, None, &current).is_err());
+    assert!(invoke(&real_home, &plist_dir, Some(&isolated), &current).is_err());
+    assert!(invoke(&real_home, &plist_dir, None, &foreign_exe).is_err());
+    assert_eq!(
+        calls.get(),
+        permitted_calls,
+        "fake launchctl must not run in a sandbox"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_hotkey_install_and_uninstall_reject_sandbox_before_launchctl() {
+    use std::os::unix::fs::PermissionsExt;
+    if std::env::var_os("JCODE_HOTKEY_GUARD_CHILD").is_some() {
+        assert_ne!(
+            real_macos_home().unwrap(),
+            PathBuf::from(std::env::var_os("HOME").unwrap())
+        );
+        assert!(install_macos_hotkey_listener(None).is_err());
+        assert!(uninstall_macos_hotkey_listener().is_err());
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let data = temp.path().join("data");
+    let bin = temp.path().join("bin");
+    let plist = home.join("Library/LaunchAgents/com.jcode.hotkey.plist");
+    std::fs::create_dir_all(plist.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(&plist, "sandbox sentinel").unwrap();
+    let launchctl = bin.join("launchctl");
+    std::fs::write(
+        &launchctl,
+        "#!/bin/sh\necho called >> \"$JCODE_FAKE_LAUNCHCTL_LOG\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&launchctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let marker = temp.path().join("launchctl.log");
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "setup_hints_tests::macos_hotkey_install_and_uninstall_reject_sandbox_before_launchctl",
+            "--nocapture",
+        ])
+        .env("HOME", &home)
+        .env("JCODE_HOME", &data)
+        .env("PATH", &bin)
+        .env("JCODE_HOTKEY_GUARD_CHILD", "1")
+        .env("JCODE_FAKE_LAUNCHCTL_LOG", &marker)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "child failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "child did not run the test"
+    );
+    assert!(!marker.exists(), "fake launchctl was invoked");
+    assert_eq!(std::fs::read_to_string(plist).unwrap(), "sandbox sentinel");
+}
+
+#[test]
 fn first_three_launches_do_not_show_alignment_tips() {
     for launch_count in 1..=3 {
         let state = SetupHintsState {
@@ -32,6 +143,7 @@ fn first_three_launches_can_include_hotkey_notice_too() {
     let state = SetupHintsState {
         launch_count: 2,
         hotkey_configured: true,
+        startup_spawn_hint_dismissed: false,
         ..SetupHintsState::default()
     };
 

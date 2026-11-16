@@ -414,55 +414,16 @@ fn should_record_last_dir(dir: &std::path::Path, home: Option<&std::path::Path>)
     home != Some(dir)
 }
 
-#[cfg(target_os = "macos")]
-fn mac_hotkey_launch_agent_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("Could not find home directory")?;
-    Ok(home
-        .join("Library")
-        .join("LaunchAgents")
-        .join("com.jcode.hotkey.plist"))
-}
-
 #[cfg(any(test, target_os = "macos"))]
-fn mac_hotkey_launch_agent_plist(
-    exe: &str,
-    stdout_path: &str,
-    stderr_path: &str,
-    terminal: &str,
-) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.jcode.hotkey</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{exe}</string>
-        <string>setup-hotkey</string>
-        <string>--listen-macos-hotkey</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>LimitLoadToSessionType</key>
-    <string>Aqua</string>
-    <key>StandardOutPath</key>
-    <string>{stdout_path}</string>
-    <key>StandardErrorPath</key>
-    <string>{stderr_path}</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>JCODE_PREFERRED_TERMINAL</key>
-        <string>{terminal}</string>
-    </dict>
-</dict>
-</plist>
-"#,
-    )
-}
+mod macos_hotkey_guard;
+#[cfg(any(test, target_os = "macos"))]
+use macos_hotkey_guard::mac_hotkey_launch_agent_plist;
+#[cfg(all(test, target_os = "macos"))]
+use macos_hotkey_guard::real_macos_home;
+#[cfg(test)]
+use macos_hotkey_guard::with_macos_hotkey_authorization;
+#[cfg(target_os = "macos")]
+use macos_hotkey_guard::{mac_hotkey_launch_agent_path, with_current_macos_hotkey_authorization};
 
 /// Launch a new jcode window in the user's preferred macOS terminal, passing
 /// `extra_args` (e.g. `["--resume", "<session-id>"]`) to the jcode invocation.
@@ -554,6 +515,15 @@ fn write_hotkey_launch_scripts(
 
 #[cfg(target_os = "macos")]
 fn install_macos_hotkey_listener(
+    preferred_terminal: Option<MacTerminalKind>,
+) -> Result<MacTerminalKind> {
+    with_current_macos_hotkey_authorization(|| {
+        install_macos_hotkey_listener_inner(preferred_terminal)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn install_macos_hotkey_listener_inner(
     preferred_terminal: Option<MacTerminalKind>,
 ) -> Result<MacTerminalKind> {
     let terminal = preferred_terminal.unwrap_or_else(effective_macos_terminal);
@@ -2545,6 +2515,11 @@ fn create_desktop_shortcut(state: &mut SetupHintsState) -> Result<()> {
 /// Idempotent: a missing plist is treated as already-uninstalled.
 #[cfg(target_os = "macos")]
 fn uninstall_macos_hotkey_listener() -> Result<()> {
+    with_current_macos_hotkey_authorization(uninstall_macos_hotkey_listener_inner)
+}
+
+#[cfg(target_os = "macos")]
+fn uninstall_macos_hotkey_listener_inner() -> Result<()> {
     let plist_path = mac_hotkey_launch_agent_path()?;
     if !plist_path.exists() {
         return Ok(());

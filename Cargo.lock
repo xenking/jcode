@@ -4638,6 +4638,7 @@ dependencies = [
  "jcode-logging",
  "jcode-storage",
  "jcode-terminal-launch",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
