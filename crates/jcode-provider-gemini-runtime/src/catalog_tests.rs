@@ -140,6 +140,38 @@ fn available_models_display_seeds_from_persisted_catalog() {
 }
 
 #[test]
+fn persisted_catalog_is_isolated_by_endpoint_and_retains_each_last_good() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _oauth = EnvVarGuard::set_value("JCODE_GEMINI_FORCE_OAUTH", "1");
+    let first = EnvVarGuard::set_value("CODE_ASSIST_ENDPOINT", "https://fixture-a.invalid");
+    GeminiProvider::persist_catalog(&["gemini-future-only-a".into()]);
+    {
+        let _second = EnvVarGuard::set_value("CODE_ASSIST_ENDPOINT", "https://fixture-b.invalid");
+        let b = GeminiProvider::new();
+        assert!(
+            !b.available_models_display()
+                .iter()
+                .any(|m| m == "gemini-future-only-a")
+        );
+        GeminiProvider::persist_catalog(&["gemini-future-only-b".into()]);
+    }
+    let a = GeminiProvider::new();
+    assert!(
+        a.available_models_display()
+            .iter()
+            .any(|m| m == "gemini-future-only-a")
+    );
+    assert!(
+        !a.available_models_display()
+            .iter()
+            .any(|m| m == "gemini-future-only-b")
+    );
+    drop(first);
+}
+
+#[test]
 fn developer_catalog_paginates_and_preserves_cache_on_failure() {
     use std::io::{BufRead, Write};
     let _lock = jcode_base::storage::lock_test_env();

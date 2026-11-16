@@ -3,8 +3,28 @@
 use super::*;
 
 impl GeminiProvider {
+    fn catalog_scope(api_key: bool) -> String {
+        if api_key {
+            format!("developer:{}", Self::developer_api_base_url())
+        } else {
+            format!("code-assist:{}", Self::base_url())
+        }
+    }
+
+    fn active_catalog_scope() -> String {
+        Self::catalog_scope(matches!(Self::auth_mode(), GeminiAuthMode::ApiKey(_)))
+    }
+
+    fn persisted_catalog_path_for_scope(scope: &str) -> Result<std::path::PathBuf> {
+        use sha2::{Digest, Sha256};
+        // Hash rather than persist the URL, which may contain credentials.
+        let digest = Sha256::digest(scope.as_bytes());
+        let name = format!("gemini_models_cache_{digest:x}.json");
+        Ok(jcode_base::storage::app_config_dir()?.join(name))
+    }
+
     pub(super) fn persisted_catalog_path() -> Result<std::path::PathBuf> {
-        Ok(jcode_base::storage::app_config_dir()?.join("gemini_models_cache.json"))
+        Self::persisted_catalog_path_for_scope(&Self::active_catalog_scope())
     }
 
     pub(super) fn load_persisted_catalog() -> Option<PersistedCatalog> {
@@ -34,10 +54,14 @@ impl GeminiProvider {
     }
 
     pub(super) fn persist_catalog(models: &[String]) {
+        Self::persist_catalog_for_scope(models, &Self::active_catalog_scope());
+    }
+
+    fn persist_catalog_for_scope(models: &[String], scope: &str) {
         if models.is_empty() {
             return;
         }
-        let Ok(path) = Self::persisted_catalog_path() else {
+        let Ok(path) = Self::persisted_catalog_path_for_scope(scope) else {
             return;
         };
         let payload = PersistedCatalog {
@@ -154,7 +178,7 @@ impl GeminiProvider {
             if let Ok(mut guard) = self.fetched_models.write() {
                 *guard = models.clone();
             }
-            Self::persist_catalog(&models);
+            Self::persist_catalog_for_scope(&models, &Self::catalog_scope(true));
         }
         Ok(models)
     }
