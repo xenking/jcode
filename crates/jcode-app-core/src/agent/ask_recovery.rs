@@ -4,7 +4,7 @@ use super::*;
 struct InterruptedAsk {
     id: String,
     input: serde_json::Value,
-    result_index: usize,
+    result_index: Option<usize>,
 }
 
 fn interrupted_ask(messages: &[StoredMessage]) -> Option<InterruptedAsk> {
@@ -21,22 +21,36 @@ fn interrupted_ask(messages: &[StoredMessage]) -> Option<InterruptedAsk> {
         if name != "ask" {
             continue;
         }
-        for (index, message) in messages.iter().enumerate().skip(assistant_index + 1).rev() {
-            if let Some(ContentBlock::ToolResult { content, is_error, .. }) = message.content.iter().rev().find(|block| {
-                matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id)
-            }) {
+        let result = messages
+            .iter()
+            .enumerate()
+            .skip(assistant_index + 1)
+            .rev()
+            .find_map(|(index, message)| {
+                message.content.iter().rev().find_map(|block| match block {
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } if tool_use_id == id => Some((index, content, is_error)),
+                    _ => None,
+                })
+            });
+        let result_index = match result {
+            Some((index, content, is_error))
                 if is_error.unwrap_or(false)
-                    && content.starts_with("[Tool 'ask' interrupted by server reload after ")
-                {
-                    return Some(InterruptedAsk {
-                        id: id.clone(),
-                        input: input.clone(),
-                        result_index: index,
-                    });
-                }
-                break;
+                    && content.starts_with("[Tool 'ask' interrupted by server reload after ") =>
+            {
+                Some(index)
             }
-        }
+            Some(_) => continue,
+            None => None,
+        };
+        return Some(InterruptedAsk {
+            id: id.clone(),
+            input: input.clone(),
+            result_index,
+        });
     }
     None
 }
@@ -59,6 +73,20 @@ impl Agent {
         turn: &crate::turn_cancel_registry::ActiveTurnGuard,
     ) -> Result<bool> {
         while let Some(ask) = interrupted_ask(&self.session.messages) {
+            let result_index = match ask.result_index {
+                Some(index) => index,
+                None => {
+                    // A process can die before writing the interrupted result.
+                    // Preserve the original unanswered call before presenting it.
+                    self.add_message(Role::User, vec![ContentBlock::ToolResult {
+                        tool_use_id: ask.id.clone(),
+                        content: "[Tool 'ask' interrupted by server reload after an uncheckpointed turn]".into(),
+                        is_error: Some(true),
+                    }]);
+                    self.persist_session_now()?;
+                    self.session.messages.len() - 1
+                }
+            };
             let ctx = ToolContext {
                 session_id: self.session.id.clone(),
                 message_id: self.session.id.clone(),
@@ -98,7 +126,7 @@ impl Agent {
                 *error = is_error.then_some(true);
             }
             let mut messages = self.session.messages.clone();
-            let content = &mut messages[ask.result_index].content;
+            let content = &mut messages[result_index].content;
             let index = content
                 .iter()
                 .rposition(|block| {
@@ -128,7 +156,7 @@ impl Agent {
             {
                 return Ok(false);
             }
-            let stored = &self.session.messages[ask.result_index];
+            let stored = &self.session.messages[result_index];
             label_session_images(
                 &self.session.id,
                 &stored.id,
@@ -252,9 +280,27 @@ mod tests {
             Some(InterruptedAsk {
                 id: "ask-1".into(),
                 input,
-                result_index: 1
+                result_index: Some(1)
             })
         );
+    }
+
+    #[test]
+    fn dangling_ask_survives_reload_without_an_interrupted_result() {
+        let mut session = Session::create_with_id("ask-uncheckpointed".into(), None, None);
+        session.add_message(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "original-ask".into(),
+                name: "ask".into(),
+                input: json!({"questions": []}),
+                thought_signature: None,
+            }],
+        );
+        let ask = interrupted_ask(&session.messages)
+            .expect("unanswered ask must never become a model continuation");
+        assert_eq!(ask.id, "original-ask");
+        assert_eq!(ask.result_index, None);
     }
 
     #[test]
