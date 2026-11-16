@@ -502,7 +502,7 @@ fn should_spawn_background_update_check_with_config(args: &Args, check_updates: 
             Some(Command::Update { .. })
                 | Some(Command::Serve { .. })
                 | Some(Command::Server { .. })
-                | Some(Command::Acp)
+                | Some(Command::Acp { .. })
         )
         && args.resume.is_none()
 }

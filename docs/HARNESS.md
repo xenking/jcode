@@ -30,6 +30,29 @@ overrides before submitting resumed work, including after reconnecting to a
 restarted daemon. Automatic recovery may run without them: this feature adds no
 fail-closed recovery barrier and must not be treated as one.
 
+The ACP adapter defaults to `jcode acp --session-env none`, which leaves session
+overrides unchanged. `jcode acp --session-env inherit` or
+`JCODE_ACP_SESSION_ENV=inherit` replaces the overrides with the ACP process's own
+environment after each `session/new`, `session/load`, or `session/resume`
+subscription, before the request succeeds. The adapter drops `JCODE_*` keys
+case-insensitively and names that are empty or contain `=` or NUL. Environment
+names and values must be UTF-8, and values cannot contain NUL. An invalid value,
+daemon rejection, or disconnect fails session setup instead of proceeding without
+the requested environment. An explicit `--session-env` flag takes precedence over
+the environment variable.
+
+ACP does not reconnect existing session connections after a daemon restart or
+reload. A read from the disconnected daemon fails with `Jcode daemon disconnected`.
+Restart the seat's ACP process and load or resume the session to reapply its
+environment before submitting more work.
+
+For `session/new`, an explicit ACP `--model` selects the session's model even
+when the daemon is already running. A bare model uses `--provider-profile` or an
+explicit non-`auto` `--provider` as its route. An explicitly routed model such as
+`openai:gpt-5.5` keeps its route. The adapter waits for model confirmation and fails
+session setup if the daemon rejects the model. `session/load` and `session/resume`
+keep the existing session's model instead of applying the ACP launch model.
+
 This is environment isolation, not a security sandbox or secret-redaction system.
 The registry does not intentionally log or persist values, but a command can print
 its environment into tool output, write it to disk, or transmit it elsewhere.

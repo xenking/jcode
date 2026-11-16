@@ -1,6 +1,331 @@
 use super::*;
 use std::path::Path;
 
+#[test]
+fn acp_session_env_filter_keeps_seat_vars_and_drops_reserved_or_invalid_names() {
+    let env = inherited_session_env(
+        [
+            ("FOO_SEAT", "xyz"),
+            ("OPENRIG_SEAT_ID", "seat-1"),
+            ("PATH", "/seat/bin:/usr/bin"),
+            ("EMPTY_VALUE", ""),
+            ("JCODE_SOCKET", "private"),
+            ("jcode_home", "private"),
+            ("JcOdE_ACP_SESSION_ENV", "inherit"),
+            ("JCODE", "not-reserved"),
+            ("", "invalid"),
+            ("BAD=NAME", "invalid"),
+            ("BAD\0NAME", "invalid"),
+        ]
+        .map(|(key, value)| (key.into(), value.into())),
+    )
+    .unwrap();
+    assert_eq!(
+        env,
+        HashMap::from([
+            ("FOO_SEAT".into(), "xyz".into()),
+            ("OPENRIG_SEAT_ID".into(), "seat-1".into()),
+            ("PATH".into(), "/seat/bin:/usr/bin".into()),
+            ("EMPTY_VALUE".into(), "".into()),
+            ("JCODE".into(), "not-reserved".into()),
+        ])
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn acp_session_env_filter_fails_closed_for_non_utf8_values() {
+    use std::os::unix::ffi::OsStringExt;
+    let error =
+        inherited_session_env([("FOO_SEAT".into(), std::ffi::OsString::from_vec(vec![0xff]))])
+            .unwrap_err();
+    assert!(error.to_string().contains("non-UTF-8"));
+}
+
+#[test]
+fn acp_session_env_cli_accepts_modes_and_rejects_unknown_modes() {
+    use clap::Parser;
+    for (mode, expected) in [
+        ("none", SessionEnvMode::None),
+        ("inherit", SessionEnvMode::Inherit),
+    ] {
+        let args =
+            super::super::args::Args::try_parse_from(["jcode", "acp", "--session-env", mode])
+                .unwrap();
+        assert!(matches!(
+            args.command,
+            Some(super::super::args::Command::Acp { session_env: Some(mode) }) if mode == expected
+        ));
+    }
+    assert!(
+        super::super::args::Args::try_parse_from(["jcode", "acp", "--session-env", "everything",])
+            .is_err()
+    );
+    assert_eq!(SessionEnvMode::default(), SessionEnvMode::None);
+}
+
+#[test]
+fn acp_session_env_defaults_to_none_and_explicit_flags_override_env() {
+    assert_eq!(
+        SessionEnvMode::resolve(None, None).unwrap(),
+        SessionEnvMode::None
+    );
+    assert_eq!(
+        SessionEnvMode::resolve(None, Some("inherit".into())).unwrap(),
+        SessionEnvMode::Inherit
+    );
+    assert_eq!(
+        SessionEnvMode::resolve(None, Some("none".into())).unwrap(),
+        SessionEnvMode::None
+    );
+    assert_eq!(
+        SessionEnvMode::resolve(Some(SessionEnvMode::None), Some("inherit".into())).unwrap(),
+        SessionEnvMode::None
+    );
+    assert_eq!(
+        SessionEnvMode::resolve(Some(SessionEnvMode::Inherit), Some("invalid".into())).unwrap(),
+        SessionEnvMode::Inherit
+    );
+    assert!(SessionEnvMode::resolve(None, Some("invalid".into())).is_err());
+}
+
+async fn acp_daemon_request(reader: &mut BufReader<ReadHalf>) -> Request {
+    let mut line = String::new();
+    assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+    serde_json::from_str(&line).unwrap()
+}
+
+async fn acp_daemon_event(writer: &mut WriteHalf, event: Value) {
+    writer
+        .write_all(format!("{event}\n").as_bytes())
+        .await
+        .unwrap();
+}
+
+#[test]
+fn acp_new_session_model_qualifies_bare_models_without_rewriting_explicit_routes() {
+    for (provider, profile, model, expected) in [
+        (ProviderChoice::Auto, None, "future-model", "future-model"),
+        (
+            ProviderChoice::Openai,
+            None,
+            "future-model",
+            "openai:future-model",
+        ),
+        (
+            ProviderChoice::Auto,
+            Some("seat-profile"),
+            "future-model",
+            "seat-profile:future-model",
+        ),
+        (
+            ProviderChoice::Claude,
+            None,
+            "openai:future-model",
+            "openai:future-model",
+        ),
+        (ProviderChoice::Ollama, None, "qwen:32b", "ollama:qwen:32b"),
+        (
+            ProviderChoice::Openai,
+            None,
+            "openai-oauth@work:future-model",
+            "openai-oauth@work:future-model",
+        ),
+    ] {
+        let runtime = AcpRuntime::new(
+            AcpProfile::Standard,
+            provider,
+            Some(model.into()),
+            profile.map(str::to_string),
+            SessionEnvMode::None,
+        );
+        assert_eq!(runtime.new_session_model().as_deref(), Some(expected));
+    }
+}
+
+#[tokio::test]
+async fn acp_explicit_model_is_confirmed_for_new_sessions_but_not_applied_to_attached_sessions() {
+    for resume in [false, true] {
+        for reject in [false, true] {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let (client, daemon) = crate::transport::stream_pair().unwrap();
+                let (reader, writer) = client.into_split();
+                let mut setup = tokio::spawn(async move {
+                    let runtime = AcpRuntime::new(AcpProfile::Standard, ProviderChoice::Openai, Some("future-model".into()), None, SessionEnvMode::None);
+                    let cwd = PathBuf::from("/acp-test");
+                    if resume {
+                        runtime.attach_existing_session_connected("existing".into(), cwd, false, reader, writer).await
+                    } else {
+                        runtime.create_new_session_connected(cwd, reader, writer).await
+                    }
+                });
+                let (reader, mut writer) = daemon.into_split();
+                let mut reader = BufReader::new(reader);
+                let Request::Subscribe { id, .. } = acp_daemon_request(&mut reader).await else { panic!("expected subscription"); };
+                if resume {
+                    acp_daemon_event(&mut writer, json!({"type": "history", "id": id, "session_id": "existing", "messages": [], "provider_model": "saved-model"})).await;
+                }
+                acp_daemon_event(&mut writer, json!({"type": "done", "id": id})).await;
+                if !resume {
+                    let Request::SetModel { id, model } = acp_daemon_request(&mut reader).await else { panic!("new session must select explicit launch model before returning"); };
+                    assert_eq!(model, "openai:future-model");
+                    acp_daemon_event(&mut writer, json!({"type": "ack", "id": id})).await;
+                    assert!(tokio::time::timeout(std::time::Duration::from_millis(20), &mut setup).await.is_err(), "model selection must wait for confirmation");
+                    acp_daemon_event(&mut writer, json!({"type": "model_changed", "id": id, "model": "future-model", "provider_name": "openai", "error": reject.then_some("model rejected")})).await;
+                    if reject {
+                        let error = setup.await.unwrap().err().expect("rejected model must fail session/new");
+                        let message = format!("{error:#}");
+                        assert!(message.contains("failed to select ACP session model"));
+                        assert!(message.contains("model rejected"));
+                        return;
+                    }
+                    let Request::GetHistory { id } = acp_daemon_request(&mut reader).await else { panic!("expected history after model confirmation"); };
+                    acp_daemon_event(&mut writer, json!({"type": "history", "id": id, "session_id": "new", "messages": [], "provider_model": "future-model"})).await;
+                }
+                let session = setup.await.unwrap().unwrap();
+                assert_eq!(session.ui_state.lock().await.model.as_deref(), Some(if resume { "saved-model" } else { "future-model" }));
+                drop(session);
+                let mut extra = String::new();
+                assert_eq!(reader.read_line(&mut extra).await.unwrap(), 0, "attached session must not receive launch model override");
+            }).await.expect("ACP model handshake timed out");
+        }
+    }
+}
+
+#[tokio::test]
+async fn acp_session_env_is_acknowledged_before_new_or_attach_returns() {
+    for resume in [false, true] {
+        for mode in [SessionEnvMode::None, SessionEnvMode::Inherit] {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let (client, daemon) = crate::transport::stream_pair().unwrap();
+                let (reader, writer) = client.into_split();
+                let mut setup = tokio::spawn(async move {
+                    let runtime = AcpRuntime::new(
+                        AcpProfile::Standard,
+                        ProviderChoice::Claude,
+                        None,
+                        None,
+                        mode,
+                    );
+                    let cwd = PathBuf::from("/acp-test");
+                    if resume {
+                        runtime
+                            .attach_existing_session_connected("existing".into(), cwd, false, reader, writer)
+                            .await
+                    } else {
+                        runtime.create_new_session_connected(cwd, reader, writer).await
+                    }
+                });
+                let (reader, mut writer) = daemon.into_split();
+                let mut reader = BufReader::new(reader);
+                let Request::Subscribe { id, target_session_id, .. } = acp_daemon_request(&mut reader).await else {
+                    panic!("expected subscription before session environment");
+                };
+                assert_eq!(target_session_id.as_deref(), resume.then_some("existing"));
+                if resume {
+                    acp_daemon_event(&mut writer, json!({"type": "history", "id": id, "session_id": "existing", "messages": []})).await;
+                }
+                acp_daemon_event(&mut writer, json!({"type": "done", "id": id})).await;
+
+                if mode == SessionEnvMode::Inherit {
+                    let Request::SetSessionEnv { id, env } = acp_daemon_request(&mut reader).await else {
+                        panic!("inherit must send session environment immediately after subscription");
+                    };
+                    assert!(env.keys().all(|key| !key.to_ascii_uppercase().starts_with("JCODE_")));
+                    assert_eq!(env.get("PATH"), std::env::var("PATH").ok().as_ref());
+                    acp_daemon_event(&mut writer, json!({"type": "ack", "id": id})).await;
+                    acp_daemon_event(&mut writer, json!({"type": "done", "id": id + 100})).await;
+                    acp_daemon_event(&mut writer, json!({"type": "error", "id": id + 100, "message": "unrelated"})).await;
+                    assert!(tokio::time::timeout(std::time::Duration::from_millis(20), &mut setup).await.is_err(), "session must not succeed before environment confirmation");
+                    acp_daemon_event(&mut writer, json!({"type": "done", "id": id})).await;
+                }
+
+                if !resume {
+                    let Request::GetHistory { id } = acp_daemon_request(&mut reader).await else {
+                        panic!("expected history, with no environment request in none mode");
+                    };
+                    acp_daemon_event(&mut writer, json!({"type": "history", "id": id, "session_id": "new", "messages": []})).await;
+                }
+                let session = setup.await.unwrap().unwrap();
+                assert_eq!(session.session_id, if resume { "existing" } else { "new" });
+                drop(session);
+                let mut extra = String::new();
+                assert_eq!(reader.read_line(&mut extra).await.unwrap(), 0, "unexpected extra request, including environment in none mode");
+            }).await.expect("ACP session environment handshake timed out");
+        }
+    }
+}
+
+#[tokio::test]
+async fn acp_session_env_rejection_or_disconnect_fails_new_and_attach() {
+    for resume in [false, true] {
+        for disconnect in [false, true] {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let (client, daemon) = crate::transport::stream_pair().unwrap();
+                let (reader, writer) = client.into_split();
+                let setup = tokio::spawn(async move {
+                    let runtime = AcpRuntime::new(
+                        AcpProfile::Standard,
+                        ProviderChoice::Claude,
+                        None,
+                        None,
+                        SessionEnvMode::Inherit,
+                    );
+                    let cwd = PathBuf::from("/acp-test");
+                    if resume {
+                        runtime
+                            .attach_existing_session_connected(
+                                "existing".into(),
+                                cwd,
+                                false,
+                                reader,
+                                writer,
+                            )
+                            .await
+                    } else {
+                        runtime
+                            .create_new_session_connected(cwd, reader, writer)
+                            .await
+                    }
+                });
+                let (reader, mut writer) = daemon.into_split();
+                let mut reader = BufReader::new(reader);
+                let Request::Subscribe { id, .. } = acp_daemon_request(&mut reader).await else {
+                    panic!("expected subscription");
+                };
+                acp_daemon_event(&mut writer, json!({"type": "done", "id": id})).await;
+                let Request::SetSessionEnv { id, .. } = acp_daemon_request(&mut reader).await
+                else {
+                    panic!("expected session environment");
+                };
+                if !disconnect {
+                    acp_daemon_event(
+                        &mut writer,
+                        json!({"type": "error", "id": id, "message": "environment rejected"}),
+                    )
+                    .await;
+                }
+                drop(writer);
+                drop(reader);
+                let error = setup
+                    .await
+                    .unwrap()
+                    .err()
+                    .expect("environment failure must reject session setup");
+                let message = format!("{error:#}");
+                assert!(message.contains("failed to apply ACP session environment"));
+                assert!(message.contains(if disconnect {
+                    "Jcode daemon disconnected"
+                } else {
+                    "environment rejected"
+                }));
+            })
+            .await
+            .expect("ACP session environment failure timed out");
+        }
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn acp_new_and_resumed_sessions_advertise_server_failover() {
@@ -34,7 +359,13 @@ async fn acp_new_and_resumed_sessions_advertise_server_failover() {
                 .await
                 .unwrap();
         });
-        let runtime = AcpRuntime::new(AcpProfile::Standard, ProviderChoice::Claude, None, None);
+        let runtime = AcpRuntime::new(
+            AcpProfile::Standard,
+            ProviderChoice::Claude,
+            None,
+            None,
+            SessionEnvMode::None,
+        );
         let cwd = PathBuf::from("/acp-test");
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             if resume {

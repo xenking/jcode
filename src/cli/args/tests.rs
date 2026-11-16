@@ -933,7 +933,7 @@ fn quiet_global_flag_parses() {
 fn acp_subcommand_parses() {
     let args = Args::try_parse_from(["jcode", "acp"]).unwrap();
     match args.command {
-        Some(Command::Acp) => {}
+        Some(Command::Acp { .. }) => {}
         other => panic!("unexpected command: {:?}", other),
     }
 }

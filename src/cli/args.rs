@@ -189,7 +189,11 @@ pub(crate) enum Command {
     },
 
     /// Run as an Agent Client Protocol (ACP) adapter backed by the Jcode daemon
-    Acp,
+    Acp {
+        /// Session subprocess environment (default: none, env: JCODE_ACP_SESSION_ENV)
+        #[arg(long, value_enum, value_name = "MODE")]
+        session_env: Option<super::acp::SessionEnvMode>,
+    },
 
     /// Manage the background server daemon (e.g. `jcode server stop`).
     Server {

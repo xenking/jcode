@@ -177,12 +177,13 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             ));
             server.run().await?;
         }
-        Some(Command::Acp) => {
+        Some(Command::Acp { session_env }) => {
             acp::run_acp_command(
                 args.provider,
                 args.model.clone(),
                 args.provider_profile.clone(),
                 args.tool_profile.is_some(),
+                session_env,
             )
             .await?;
         }

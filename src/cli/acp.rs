@@ -20,6 +20,56 @@ const JSONRPC_INVALID_PARAMS: i64 = -32602;
 const JSONRPC_INTERNAL_ERROR: i64 = -32603;
 const JSONRPC_SERVER_ERROR: i64 = -32000;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum SessionEnvMode {
+    #[default]
+    None,
+    Inherit,
+}
+
+impl SessionEnvMode {
+    fn resolve(flag: Option<Self>, env: Option<std::ffi::OsString>) -> Result<Self> {
+        use clap::ValueEnum;
+
+        if let Some(mode) = flag {
+            return Ok(mode);
+        }
+        let Some(value) = env else {
+            return Ok(Self::default());
+        };
+        value
+            .into_string()
+            .ok()
+            .and_then(|value| Self::from_str(&value, false).ok())
+            .ok_or_else(|| anyhow::anyhow!("JCODE_ACP_SESSION_ENV must be 'none' or 'inherit'"))
+    }
+}
+
+fn inherited_session_env(
+    env: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Result<HashMap<String, String>> {
+    let mut overrides = HashMap::new();
+    for (key, value) in env {
+        let key = key
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("cannot inherit a non-UTF-8 environment variable name"))?;
+        if key.is_empty()
+            || key.contains(['=', '\0'])
+            || key.to_ascii_uppercase().starts_with("JCODE_")
+        {
+            continue;
+        }
+        let value = value.into_string().map_err(|_| {
+            anyhow::anyhow!("cannot inherit a non-UTF-8 environment variable value")
+        })?;
+        if value.contains('\0') {
+            anyhow::bail!("cannot inherit an environment variable value containing NUL");
+        }
+        overrides.insert(key, value);
+    }
+    Ok(overrides)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AcpProfile {
     Standard,
@@ -387,6 +437,7 @@ struct AcpRuntime {
     provider_choice: ProviderChoice,
     model: Option<String>,
     provider_profile: Option<String>,
+    session_env: SessionEnvMode,
 }
 
 impl AcpRuntime {
@@ -395,6 +446,7 @@ impl AcpRuntime {
         provider_choice: ProviderChoice,
         model: Option<String>,
         provider_profile: Option<String>,
+        session_env: SessionEnvMode,
     ) -> Self {
         Self {
             stdout: Arc::new(Mutex::new(tokio::io::stdout())),
@@ -403,6 +455,7 @@ impl AcpRuntime {
             provider_choice,
             model,
             provider_profile,
+            session_env,
         }
     }
 
@@ -912,6 +965,45 @@ impl AcpRuntime {
         Ok(stream.into_split())
     }
 
+    async fn apply_session_env(&self, session: &DaemonSession) -> Result<()> {
+        if self.session_env == SessionEnvMode::None {
+            return Ok(());
+        }
+        async {
+            let env = inherited_session_env(std::env::vars_os())?;
+            let id = session.next_id();
+            session.send(&Request::SetSessionEnv { id, env }).await?;
+            wait_for_done(session, id).await
+        }
+        .await
+        .context("failed to apply ACP session environment (--session-env inherit)")
+    }
+
+    fn new_session_model(&self) -> Option<String> {
+        use clap::ValueEnum;
+
+        let model = self.model.as_deref()?.trim();
+        let explicit_route = model.split_once(':').is_some_and(|(prefix, _)| {
+            ProviderChoice::from_str(prefix, true).is_ok()
+                || crate::provider::oauth_account_label(prefix).is_some()
+                || crate::provider_catalog::resolve_openai_compatible_profile_selection(prefix)
+                    .is_some()
+                || crate::config::config().providers.contains_key(prefix)
+                || self.provider_profile.as_deref() == Some(prefix)
+        });
+        if explicit_route {
+            return Some(model.to_string());
+        }
+        let route = self.provider_profile.as_deref().or_else(|| {
+            (self.provider_choice != ProviderChoice::Auto)
+                .then(|| self.provider_choice.as_arg_value())
+        });
+        Some(match route {
+            Some(route) => format!("{route}:{model}"),
+            None => model.to_string(),
+        })
+    }
+
     async fn create_new_session(&self, cwd: PathBuf) -> Result<DaemonSession> {
         let (reader, writer) = self.connect_daemon().await?;
         self.create_new_session_connected(cwd, reader, writer).await
@@ -947,6 +1039,16 @@ impl AcpRuntime {
             })
             .await?;
         wait_for_done(&session, subscribe_id).await?;
+        self.apply_session_env(&session).await?;
+        if let Some(model) = self.new_session_model() {
+            async {
+                let id = session.next_id();
+                session.send(&Request::SetModel { id, model }).await?;
+                wait_for_model_changed(&session, id).await
+            }
+            .await
+            .context("failed to select ACP session model (--model)")?;
+        }
         let history = request_history(&session).await?;
         let (session_id, ui_state) = match history {
             ServerEvent::History {
@@ -1065,6 +1167,7 @@ impl AcpRuntime {
             }
         }
 
+        self.apply_session_env(&session).await?;
         Ok(DaemonSession::new(
             attached_id,
             session.reader.into_inner().into_inner(),
@@ -2083,7 +2186,10 @@ pub(crate) async fn run_acp_command(
     model: Option<String>,
     provider_profile: Option<String>,
     explicit_tool_profile: bool,
+    session_env: Option<SessionEnvMode>,
 ) -> Result<()> {
+    let session_env =
+        SessionEnvMode::resolve(session_env, std::env::var_os("JCODE_ACP_SESSION_ENV"))?;
     crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
     let acp_config = crate::config::config().acp.clone();
     if !explicit_tool_profile {
@@ -2091,9 +2197,15 @@ pub(crate) async fn run_acp_command(
         crate::config::invalidate_config_cache();
     }
     let profile = AcpProfile::parse(&acp_config.profile);
-    AcpRuntime::new(profile, provider_choice, model, provider_profile)
-        .run()
-        .await
+    AcpRuntime::new(
+        profile,
+        provider_choice,
+        model,
+        provider_profile,
+        session_env,
+    )
+    .run()
+    .await
 }
 
 #[cfg(test)]
