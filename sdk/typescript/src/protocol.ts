@@ -449,6 +449,7 @@ export type ApiEvent =
       label: string;
       percent?: number;
       summary: string;
+      detail?: string;
       done?: boolean;
     }
   | { ev: "message_accepted"; session_id: string }

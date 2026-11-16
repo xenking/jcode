@@ -956,17 +956,22 @@ impl SessionControlHandle {
             }
             return Ok(Outcome::Removed);
         }
-        let delivered = crate::session::Session::load(&self.session_id)
-            .ok()
-            .is_some_and(|session| {
-                session.messages.iter().any(|message| {
-                    message
-                        .id
-                        .strip_prefix("queued:")
-                        .and_then(|ids| serde_json::from_str::<Vec<String>>(ids).ok())
-                        .is_some_and(|ids| ids.iter().any(|id| id == prompt_id))
-                })
-            });
+        // A corrupted or unreadable history must not be reported as NotFound:
+        // the receipt could exist but be unavailable. A new session may not
+        // yet have a snapshot, in which case no delivery can have committed.
+        let path = crate::session::session_path(&self.session_id)?;
+        let delivered = if path.try_exists()? {
+            let session = crate::session::Session::load(&self.session_id)?;
+            session.messages.iter().any(|message| {
+                message
+                    .id
+                    .strip_prefix("queued:")
+                    .and_then(|ids| serde_json::from_str::<Vec<String>>(ids).ok())
+                    .is_some_and(|ids| ids.iter().any(|id| id == prompt_id))
+            })
+        } else {
+            false
+        };
         Ok(if delivered {
             Outcome::AlreadyDelivered
         } else {

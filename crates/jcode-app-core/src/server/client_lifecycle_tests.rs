@@ -104,6 +104,67 @@ fn queue_remove_and_reorder_are_atomic_against_claim() {
 }
 
 #[test]
+fn remove_racing_turn_claim_has_exactly_one_winner() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    for n in 0..32 {
+        let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let control = SessionControlHandle::cancel_only(
+            format!("queue_race_{n}"),
+            queue.clone(),
+            InterruptSignal::new(),
+        );
+        control
+            .enqueue_user_prompt(
+                "p".into(),
+                "message".into(),
+                vec![],
+                jcode_agent_runtime::QueuedMessageMode::AfterYield,
+                None,
+            )
+            .unwrap();
+        let guard = queue.lock().unwrap();
+        let gate = Arc::new(std::sync::Barrier::new(3));
+        std::thread::scope(|scope| {
+            let remove_control = control.clone();
+            let remove_gate = gate.clone();
+            let remove = scope.spawn(move || {
+                remove_gate.wait();
+                remove_control.remove_user_prompt("p").unwrap()
+            });
+            let claim_control = control.clone();
+            let claim_gate = gate.clone();
+            let claim = scope.spawn(move || {
+                claim_gate.wait();
+                claim_control.take_next_user_prompt(false).unwrap()
+            });
+            gate.wait();
+            drop(guard);
+            let outcome = remove.join().unwrap();
+            let claimed = claim.join().unwrap();
+            use crate::protocol::QueuedPromptRemovalOutcome as Outcome;
+            assert!(matches!(
+                (outcome, claimed),
+                (Outcome::Removed, None) | (Outcome::InFlight, Some(_))
+            ));
+        });
+    }
+}
+
+#[test]
+fn remove_does_not_hide_corrupt_delivery_history() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let sid = "queue_bad_history";
+    let path = crate::session::session_path(sid).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, b"not a session").unwrap();
+    let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let control = SessionControlHandle::cancel_only(sid, queue, InterruptSignal::new());
+    assert!(control.remove_user_prompt("p").is_err());
+}
+
+#[test]
 fn durable_steer_wakes_blocking_wait_but_follow_up_does_not() {
     let _lock = crate::storage::lock_test_env();
     let _env = IsolatedReloadRecoveryEnv::new();

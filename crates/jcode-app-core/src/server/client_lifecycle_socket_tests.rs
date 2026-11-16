@@ -60,6 +60,16 @@ async fn queue_mutations_survive_daemon_restart_over_socket() {
     tokio::time::timeout(Duration::from_secs(5), provider.first_started.notified())
         .await
         .unwrap();
+    let (peer_reader, mut peer_writer) = crate::transport::Stream::connect(&socket)
+        .await
+        .unwrap()
+        .into_split();
+    let mut peer_reader = BufReader::new(peer_reader);
+    send(&mut peer_writer, json!({"type":"subscribe","id":20,"target_session_id":session_id,"continue_on_disconnect":true})).await;
+    until(&mut peer_reader, |e| {
+        matches!(e, ServerEvent::Done { id: 20 })
+    })
+    .await;
     for (id, prompt) in [(3, "a"), (4, "b"), (5, "c")] {
         send(&mut writer, json!({"type":"queue_prompt","id":id,"client_id":prompt,"content":prompt,"mode":"after_yield"})).await;
         until(
@@ -74,6 +84,7 @@ async fn queue_mutations_survive_daemon_restart_over_socket() {
     )
     .await;
     until(&mut reader, |e| matches!(e, ServerEvent::Ack { id: 6 })).await;
+    until(&mut peer_reader, |e| matches!(e, ServerEvent::QueuedPrompts { id: 0, prompts } if prompts.iter().map(|p| p.client_id.as_str()).collect::<Vec<_>>() == ["c", "a", "b"])).await;
     send(
         &mut writer,
         json!({"type":"remove_queued_prompt","id":7,"client_id":"test","prompt_id":"a"}),
@@ -90,6 +101,9 @@ async fn queue_mutations_survive_daemon_restart_over_socket() {
         )
     })
     .await;
+    until(&mut peer_reader, |e| matches!(e, ServerEvent::QueuedPrompts { id: 0, prompts } if prompts.iter().map(|p| p.client_id.as_str()).collect::<Vec<_>>() == ["c", "b"])).await;
+    drop(peer_writer);
+    drop(peer_reader);
     drop(writer);
     drop(reader);
     tokio::time::timeout(Duration::from_secs(10), runtime.shutdown())
@@ -352,6 +366,18 @@ async fn daemon_delivers_switched_steer_before_ordered_followups() {
         ),
         (1, 1, 1)
     );
+    send(&mut writer, json!({"type":"remove_queued_prompt","id":7,"client_id":"test","prompt_id":"switch-to-steer"})).await;
+    until(&mut reader, |event| {
+        matches!(
+            event,
+            ServerEvent::QueuedPromptRemoved {
+                id: 7,
+                outcome: crate::protocol::QueuedPromptRemovalOutcome::AlreadyDelivered,
+                ..
+            }
+        )
+    })
+    .await;
     drop(writer);
     drop(reader);
     runtime.shutdown().await;
