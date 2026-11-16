@@ -664,7 +664,8 @@ fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
             "{}",
             added[0].content
         );
-        assert!(added[0].content.ends_with(". Retrying."));
+        assert!(added[0].content.contains(". Retrying. "), "{}", added[0].content);
+        assert!(added[0].content.contains("OAuth usage exhausted"));
         assert!(!added[0].content.contains('\n'));
         let last = app.display_messages.last().expect("display message");
         assert!(!last.content.contains("cross_provider_failover"));
