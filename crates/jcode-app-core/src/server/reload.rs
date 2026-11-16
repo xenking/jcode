@@ -123,15 +123,16 @@ pub(super) async fn await_reload_signal(
     // Treat any signal already sitting in the (process-global) reload channel as
     // already handled: a server should only react to reload signals issued after
     // it started listening, never to a stale one left over from a previous run.
-    // Without this, in-process e2e servers (which share the global channel) would
-    // each immediately re-process the last test's reload signal on startup.
-    let mut last_request_id: Option<String> = if cfg!(test) {
-        rx.borrow_and_update()
-            .as_ref()
-            .map(|signal| signal.request_id.clone())
-    } else {
-        None
-    };
+    // Without this, in-process servers sharing the global channel (e2e tests run
+    // several in one process) each re-process the last reload signal on startup,
+    // write a fresh `Starting` marker and reject every new message as reloading.
+    // This must not be gated on `cfg!(test)`: integration tests link the library
+    // without `cfg(test)`. A fresh production process starts with an empty
+    // channel, so this is a no-op there.
+    let mut last_request_id: Option<String> = rx
+        .borrow_and_update()
+        .as_ref()
+        .map(|signal| signal.request_id.clone());
 
     loop {
         let signal = match receive_reload_signal(&mut rx, &mut last_request_id).await {
