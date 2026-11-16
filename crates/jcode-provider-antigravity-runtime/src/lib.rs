@@ -404,42 +404,37 @@ impl AntigravityProvider {
     }
 }
 
-fn canonical_payload(request: &CodeAssistGenerateRequest) -> Value {
-    let mut payload = json!({
-        "model": &request.model,
-        "tool_config": &request.request.tool_config,
-    });
-    let object = payload
-        .as_object_mut()
-        .expect("canonical payload is an object");
+fn canonical_payload(request: &CodeAssistGenerateRequest) -> serde_json::Result<Value> {
+    let mut object = serde_json::Map::from_iter([
+        ("model".into(), json!(&request.model)),
+        ("tool_config".into(), json!(&request.request.tool_config)),
+    ]);
     object.insert(
         "contents".into(),
-        serde_json::to_value(&request.request.contents).unwrap_or(Value::Null),
+        serde_json::to_value(&request.request.contents)?,
     );
     object.insert(
         "system_instruction".into(),
-        request
-            .request
-            .system_instruction
-            .as_ref()
-            .and_then(|value| serde_json::to_value(value).ok())
-            .unwrap_or(Value::Null),
+        serde_json::to_value(&request.request.system_instruction)?,
     );
     object.insert(
         "tools".into(),
-        request
-            .request
-            .tools
-            .as_ref()
-            .and_then(|value| serde_json::to_value(value).ok())
-            .unwrap_or(Value::Null),
+        serde_json::to_value(&request.request.tools)?,
     );
-    payload
+    Ok(Value::Object(object))
 }
 
 // Keep diagnostic JSON trees in this synchronous frame, never across HTTP awaits.
 fn log_canonical_input(model: &str, request: &CodeAssistGenerateRequest) {
-    let payload = canonical_payload(request);
+    let payload = match canonical_payload(request) {
+        Ok(payload) => payload,
+        Err(error) => {
+            jcode_base::logging::warn(&format!(
+                "antigravity canonical diagnostic serialization failed: {error}"
+            ));
+            return;
+        }
+    };
     let items = payload["contents"]
         .as_array()
         .map(Vec::as_slice)
@@ -517,7 +512,7 @@ mod canonical_input_tests {
                 .as_ref()
                 .map(|value| serde_json::to_value(value).unwrap());
             let legacy = json!({"model": request.model, "contents": contents, "system_instruction": system.as_ref(), "tools": tools.as_ref(), "tool_config": request.request.tool_config});
-            let payload = canonical_payload(&request);
+            let payload = canonical_payload(&request).unwrap();
             assert_eq!(
                 serde_json::to_vec(&payload).unwrap(),
                 serde_json::to_vec(&legacy).unwrap()
