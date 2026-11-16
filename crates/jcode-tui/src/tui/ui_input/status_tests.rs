@@ -2,6 +2,58 @@ use super::*;
 use ratatui::style::Modifier;
 
 #[test]
+fn overscroll_window_percentages_use_shared_usage_wording() {
+    let account = crate::usage::AccountUsageSnapshot {
+        additional_windows: vec![],
+        label: "account".into(),
+        email: None,
+        exhausted: false,
+        primary_label: Some("5h".into()),
+        five_hour_ratio: Some(0.27),
+        secondary_label: None,
+        seven_day_ratio: None,
+        resets_at: None,
+        error: None,
+    };
+    let line = overscroll_multi_usage_windows(&[("Claude", account)]).unwrap();
+    let expected = crate::tui::info_widget::render_inline_limit_bar(
+        73,
+        0,
+        crate::config::config().display.usage_display_used(),
+    )
+    .iter()
+    .map(|span| span.content.as_ref())
+    .collect::<String>();
+    assert!(line.contains(expected.trim()), "{line:?} != {expected:?}");
+}
+
+#[test]
+fn overscroll_local_window_uses_shared_usage_wording() {
+    let expected = crate::tui::info_widget::render_inline_limit_bar(
+        73,
+        0,
+        crate::config::config().display.usage_display_used(),
+    )
+    .iter()
+    .map(|span| span.content.as_ref())
+    .collect::<String>();
+    use crate::tui::info_widget::{AuthMethod, InfoWidgetData, UsageInfo, UsageProvider};
+    let data = InfoWidgetData {
+        auth_method: AuthMethod::OpenAIOAuth,
+        usage_info: Some(UsageInfo {
+            provider: UsageProvider::OpenAI,
+            available: true,
+            primary_limit_label: Some("5h".into()),
+            five_hour: 0.27,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let local = overscroll_usage_windows(&data).unwrap();
+    assert!(local.contains(expected.trim()), "{local:?} != {expected:?}");
+}
+
+#[test]
 fn overscroll_multi_provider_windows_ignore_unknown_values() {
     let make = |primary, secondary| crate::usage::AccountUsageSnapshot {
         additional_windows: vec![],
@@ -20,8 +72,12 @@ fn overscroll_multi_provider_windows_ignore_unknown_values() {
         ("Codex", make(None, Some(0.95))),
     ];
     assert_eq!(
-        overscroll_multi_usage_windows(&accounts).as_deref(),
-        Some("Claude 7d 27% · Codex 7d 95%")
+        overscroll_multi_usage_windows(&accounts),
+        Some(format!(
+            "Claude 7d {} · Codex 7d {}",
+            overscroll_usage_percentage(27),
+            overscroll_usage_percentage(95)
+        ))
     );
 }
 
@@ -304,13 +360,25 @@ fn overscroll_context_shows_small_bar_and_counts_and_compacts_when_narrow() {
     }
     for (used, limit, expected, color) in [
         (0, 0, "0%", rgb(100, 200, 100)),
-        (50, 100, "50%", rgb(255, 200, 100)),
-        (80, 100, "80%", rgb(255, 100, 100)),
+        (50, 100, "50%", rgb(100, 200, 100)),
+        (80, 100, "80%", rgb(255, 200, 100)),
         (200, 100, "100%", rgb(255, 100, 100)),
     ] {
         let span = overscroll_context_percentage(used, limit);
         assert_eq!(span.content, expected);
         assert_eq!(span.style.fg, Some(color));
+    }
+}
+
+#[test]
+fn overscroll_context_uses_the_shared_usage_palette() {
+    for used in [0, 69, 70, 89, 90, 100] {
+        let span = overscroll_context_percentage(used, 100);
+        assert_eq!(
+            span.style.fg,
+            Some(crate::tui::info_widget::usage_limit_color(100 - used as u8)),
+            "{used}% used"
+        );
     }
 }
 
@@ -330,21 +398,22 @@ fn overscroll_window_labels_show_reported_usage_without_inventing_windows() {
         }),
         ..Default::default()
     };
-    assert_eq!(overscroll_usage_windows(&data), Some("7-day 94%".into()));
+    let expected = format!("7-day {}", overscroll_usage_percentage(94));
+    assert_eq!(overscroll_usage_windows(&data), Some(expected.clone()));
     let line = preview_overscroll_line(&data, 160);
     let text: String = line
         .spans
         .iter()
         .map(|span| span.content.as_ref())
         .collect();
-    assert!(text.contains("7-day 94%"), "{text}");
+    assert!(text.contains(&expected), "{text}");
     let line = preview_overscroll_line(&data, 16);
     let text: String = line
         .spans
         .iter()
         .map(|span| span.content.as_ref())
         .collect();
-    assert!(!text.contains("7-day 94%"), "{text}");
+    assert!(!text.contains(&expected), "{text}");
 }
 
 #[test]

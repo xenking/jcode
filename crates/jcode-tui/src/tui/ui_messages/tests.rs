@@ -302,10 +302,10 @@ fn usage_card_styles_heading_and_account_statuses() {
         assert!(span.style.add_modifier.contains(Modifier::BOLD));
     }
     for (status, color) in [
-        (" · available", rgb(100, 220, 170)),
+        (" · available", rgb(100, 200, 100)),
         (" · 70% used", rgb(255, 200, 100)),
-        (" · hard limit", Color::Red),
-        (" · error", Color::Red),
+        (" · hard limit", rgb(255, 100, 100)),
+        (" · error", rgb(255, 100, 100)),
     ] {
         assert!(
             spans
@@ -393,7 +393,7 @@ fn usage_card_highlights_reset_counts_and_handles_empty_reports() {
                 Some(if count == 0 {
                     dim_color()
                 } else {
-                    rgb(100, 220, 170)
+                    rgb(100, 200, 100)
                 })
             );
             assert!(

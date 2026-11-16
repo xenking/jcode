@@ -2219,10 +2219,27 @@ fn overscroll_usage_windows(data: &crate::tui::info_widget::InfoWidgetData) -> O
                 .map(crate::usage::format_reset_time)
                 .map(|value| format!(" {value}"))
                 .unwrap_or_default();
-            Some(format!("{label} {:.0}%{reset}", ratio.clamp(0., 1.) * 100.))
+            let used = (ratio.clamp(0., 1.) * 100.).round() as u8;
+            Some(format!(
+                "{label} {}{reset}",
+                overscroll_usage_percentage(used)
+            ))
         })
         .collect();
     (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+fn overscroll_usage_percentage(used: u8) -> String {
+    crate::tui::info_widget::render_inline_limit_bar(
+        100u8.saturating_sub(used),
+        0,
+        crate::config::config().display.usage_display_used(),
+    )
+    .iter()
+    .map(|span| span.content.as_ref())
+    .collect::<String>()
+    .trim()
+    .to_owned()
 }
 
 fn overscroll_multi_usage_windows(
@@ -2243,7 +2260,12 @@ fn overscroll_multi_usage_windows(
                 .filter_map(|(label, ratio)| {
                     let ratio =
                         ratio.filter(|ratio| ratio.is_finite() && (0.0..=1.0).contains(ratio))?;
-                    Some(format!("{} {:.0}%", label.as_deref()?, ratio * 100.0))
+                    let used = (ratio * 100.0).round() as u8;
+                    Some(format!(
+                        "{} {}",
+                        label.as_deref()?,
+                        overscroll_usage_percentage(used)
+                    ))
                 })
                 .collect();
             let reset = (parts.len() == 1)
@@ -2277,15 +2299,7 @@ fn overscroll_context_percentage(used: usize, limit: usize) -> Span<'static> {
     let ratio = (used as f64 / limit as f64).clamp(0.0, 1.0);
     let pct = (ratio * 100.0).round() as u16;
 
-    // Match the info widget usage bar palette (based on remaining context).
-    let left_pct = 100u16.saturating_sub(pct);
-    let fill_color = if left_pct <= 20 {
-        rgb(255, 100, 100)
-    } else if left_pct <= 50 {
-        rgb(255, 200, 100)
-    } else {
-        rgb(100, 200, 100)
-    };
+    let fill_color = crate::tui::info_widget::usage_limit_color(100u8.saturating_sub(pct as u8));
     Span::styled(format!("{}%", pct), Style::default().fg(fill_color).bold())
 }
 

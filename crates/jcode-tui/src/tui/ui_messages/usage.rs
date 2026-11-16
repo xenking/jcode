@@ -116,6 +116,26 @@ mod card_parse_error_tests {
     use super::*;
 
     #[test]
+    fn warning_card_status_stays_amber_at_shared_threshold() {
+        let card = ProviderCard::parse("*warn\tApproaching limit").unwrap();
+        assert_eq!(
+            card.status_spans(false)[0].style.fg,
+            Some(rgb(255, 200, 100))
+        );
+    }
+
+    #[test]
+    fn legacy_report_status_uses_shared_usage_palette() {
+        for used in [0, 69, 70, 89, 90, 100] {
+            let style = usage_utilization_style(used as f32);
+            assert_eq!(
+                style.fg,
+                Some(crate::tui::info_widget::usage_limit_color(100 - used))
+            );
+        }
+    }
+
+    #[test]
     fn legacy_gauge_uses_shared_limit_bar() {
         let raw = "  Weekly: █████░░░░░ 50% · resets in 2h";
         let actual = usage_report_lines(raw, 50);
@@ -260,7 +280,7 @@ impl<'a> ProviderCard<'a> {
             CardStatus::Level(level, text) => (
                 match level {
                     "ok" => usage_limit_color(100),
-                    "warn" => usage_limit_color(50),
+                    "warn" => usage_limit_color(30),
                     "crit" => usage_limit_color(0),
                     "busy" => rgb(ACCENT_STYLE.0, ACCENT_STYLE.1, ACCENT_STYLE.2),
                     _ => dim_color(),
@@ -864,13 +884,8 @@ pub(crate) fn usage_report_lines(raw: &str, width: usize) -> Vec<Line<'static>> 
 }
 
 pub(crate) fn usage_utilization_style(percent: f32) -> Style {
-    Style::default().fg(if percent >= 90.0 {
-        Color::Red
-    } else if percent >= 70.0 {
-        rgb(255, 200, 100)
-    } else {
-        rgb(100, 220, 170)
-    })
+    let used = percent.clamp(0.0, 100.0).round() as u8;
+    Style::default().fg(crate::tui::info_widget::usage_limit_color(100 - used))
 }
 
 pub(crate) fn usage_styled_line(raw: &str) -> Line<'static> {

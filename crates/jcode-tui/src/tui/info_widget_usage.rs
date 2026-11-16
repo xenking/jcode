@@ -335,9 +335,9 @@ pub(crate) fn render_labeled_bar(
 
 /// Color for a limit with `left_pct` remaining, shared by every usage bar.
 pub(crate) fn limit_color(left_pct: u8) -> Color {
-    if left_pct <= 20 {
+    if left_pct <= 10 {
         rgb(255, 100, 100)
-    } else if left_pct <= 50 {
+    } else if left_pct <= 30 {
         rgb(255, 200, 100)
     } else {
         rgb(100, 200, 100)
@@ -487,10 +487,11 @@ mod tests {
     fn inline_limit_bar_reuses_widget_colors_and_compacts_without_bar() {
         for (left, expected_color) in [
             (100, rgb(100, 200, 100)),
-            (51, rgb(100, 200, 100)),
-            (50, rgb(255, 200, 100)),
-            (21, rgb(255, 200, 100)),
-            (20, rgb(255, 100, 100)),
+            (50, rgb(100, 200, 100)),
+            (31, rgb(100, 200, 100)),
+            (30, rgb(255, 200, 100)),
+            (11, rgb(255, 200, 100)),
+            (10, rgb(255, 100, 100)),
             (0, rgb(255, 100, 100)),
         ] {
             for used in [false, true] {
@@ -565,6 +566,20 @@ mod tests {
     }
 
     #[test]
+    fn usage_bar_color_changes_at_seventy_and_ninety_percent_used() {
+        for (used, expected) in [
+            (0, rgb(100, 200, 100)),
+            (69, rgb(100, 200, 100)),
+            (70, rgb(255, 200, 100)),
+            (89, rgb(255, 200, 100)),
+            (90, rgb(255, 100, 100)),
+            (100, rgb(255, 100, 100)),
+        ] {
+            assert_eq!(limit_color(100 - used), expected, "{used}% used");
+        }
+    }
+
+    #[test]
     fn usage_bar_shows_reset_countdown_before_exhaustion() {
         let text = line_text(&render_labeled_bar(
             "5-hour",
@@ -603,7 +618,7 @@ mod tests {
 
         assert!(line_text(&left).contains("15% left"));
         assert!(line_text(&used).contains("85% used"));
-        assert_eq!(left.spans[1].style.fg, Some(rgb(255, 100, 100)));
+        assert_eq!(left.spans[1].style.fg, Some(rgb(255, 200, 100)));
         assert_eq!(used.spans[1].style.fg, left.spans[1].style.fg);
     }
 
