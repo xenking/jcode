@@ -640,6 +640,24 @@ export class JcodeClient extends EventEmitter {
     await accepted;
   }
 
+  /** Send a prompt with its skill resolved and activated by the daemon. */
+  async sendSkillMessage(
+    sessionId: string,
+    content: string,
+    activeSkill: string,
+    images: ImageAttachment[] = [],
+    systemReminder?: string,
+  ): Promise<void> {
+    this.notify({
+      req: "send_skill_message",
+      session_id: sessionId,
+      content,
+      active_skill: activeSkill,
+      images,
+      system_reminder: systemReminder,
+    });
+  }
+
   /** Submit a hidden recovery continuation without awaiting message acceptance. */
   async sendSystemReminder(sessionId: string, reminder: string): Promise<void> {
     this.notify({ req: "send_message", session_id: sessionId, content: "", system_reminder: reminder });

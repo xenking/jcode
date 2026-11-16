@@ -40,6 +40,7 @@ const CAPABILITIES: &[Capability] = &[
     cap("transfer_session", "transferSession"),
     cap("detach_session", "detachSession"),
     cap("send_message", "sendMessage"),
+    cap("send_skill_message", "sendSkillMessage"),
     cap("send_message_with_reminder", "sendMessageWithReminder"),
     cap("send_system_reminder", "sendSystemReminder"),
     cap("cancel", "cancel"),

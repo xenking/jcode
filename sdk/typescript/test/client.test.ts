@@ -28,6 +28,31 @@ test("ndjson decoder reassembles frames split across chunks", () => {
   ]);
 });
 
+test("sendSkillMessage forwards daemon-owned skill activation without awaiting an ack", async (t) => {
+  const received: unknown[] = [];
+  const server = await startMockHarness({
+    onRequest(request) {
+      const { v, id, ...message } = request;
+      assert.equal(v, 1);
+      assert.equal(typeof id, "number");
+      received.push(message);
+    },
+  });
+  t.after(() => server.close());
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  t.after(() => client.close());
+  await client.sendSkillMessage("s1", "inspect", "verify-probe", [], "keep context");
+  await waitFor(() => received.length === 1);
+  assert.deepEqual(received, [{
+    req: "send_skill_message",
+    session_id: "s1",
+    content: "inspect",
+    active_skill: "verify-probe",
+    images: [],
+    system_reminder: "keep context",
+  }]);
+});
+
 test("handshake records server identity and capabilities", async () => {
   const server = await startMockHarness();
   const client = await JcodeClient.connect({ socketPath: server.socketPath });
