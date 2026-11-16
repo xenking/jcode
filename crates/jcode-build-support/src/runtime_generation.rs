@@ -1,0 +1,298 @@
+//! Single owner of selection, immutable executable identity and handoff evidence.
+//! Channels and marker files select future launches. Only a daemon's Pong proves
+//! the serving generation. OS path/inode observations are diagnostics, not Ready.
+use anyhow::{Context, Result, bail};
+pub use jcode_selfdev_types::{
+    DesiredSelection, FileIdentity, GenerationVerdict, ImmutableTarget, ServingIdentity,
+};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::OnceLock;
+
+#[cfg(test)]
+#[path = "runtime_generation_tests.rs"]
+mod tests;
+
+pub const TARGET_ENV: &str = "JCODE_RUNTIME_TARGET";
+pub const RELOAD_ID_ENV: &str = "JCODE_RUNTIME_RELOAD_ID";
+pub const GENERATION_ENV: &str = "JCODE_RUNTIME_GENERATION";
+
+pub fn resolve(selection: DesiredSelection) -> Result<ImmutableTarget> {
+    let (path, label) = match selection {
+        DesiredSelection::InstalledVersion(label) => {
+            validate_label(&label)?;
+            (crate::version_binary_path(&label)?, Some(label))
+        }
+        DesiredSelection::Path(path) => (path, None),
+        DesiredSelection::SharedServer => (crate::shared_server_binary_path()?, None),
+    };
+    let binary_path = std::fs::canonicalize(&path)
+        .with_context(|| format!("requested runtime target is missing: {}", path.display()))?;
+    let selected_identity = Some(file_identity(&binary_path)?);
+    let version_label = label.or_else(|| installed_label(&binary_path));
+    let report = crate::read_binary_version_report(&binary_path)?;
+    Ok(ImmutableTarget {
+        payload_identity: Some(file_identity(&crate::resolve_binary_payload(&binary_path))?),
+        binary_path,
+        git_hash: report.git_hash,
+        version_label,
+        file_identity: selected_identity,
+    })
+}
+
+fn validate_label(label: &str) -> Result<()> {
+    if label.is_empty()
+        || label.trim() != label
+        || label == "."
+        || label == ".."
+        || label.contains(['/', '\\', ':'])
+    {
+        bail!("invalid installed version label: {label:?}");
+    }
+    Ok(())
+}
+
+pub fn installed_label(path: &Path) -> Option<String> {
+    let parent = path.parent()?;
+    (parent.parent()?.file_name()? == "versions")
+        .then(|| parent.file_name()?.to_str().map(str::to_owned))?
+}
+
+pub fn file_identity(path: &Path) -> Result<FileIdentity> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("requested runtime target is missing: {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("runtime target is not a file: {}", path.display());
+    }
+    #[cfg(unix)]
+    let (device, inode) = {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.dev(), metadata.ino())
+    };
+    #[cfg(not(unix))]
+    let (device, inode) = (0, 0);
+    Ok(FileIdentity {
+        device,
+        inode,
+        length: metadata.len(),
+        modified_ns: metadata
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos(),
+    })
+}
+
+pub fn validate_target(target: &ImmutableTarget) -> Result<()> {
+    let actual = std::fs::canonicalize(&target.binary_path).with_context(|| {
+        format!(
+            "requested runtime target is missing: {}",
+            target.binary_path.display()
+        )
+    })?;
+    if actual != target.binary_path {
+        bail!(
+            "immutable runtime target became a symlink: {}",
+            target.binary_path.display()
+        );
+    }
+    let observed = file_identity(&actual)?;
+    let expected = target
+        .file_identity
+        .as_ref()
+        .context("immutable runtime target has no file identity")?;
+    if &observed != expected {
+        bail!(
+            "immutable runtime target changed since selection: {}",
+            actual.display()
+        );
+    }
+    if let Some(expected) = &target.payload_identity
+        && &file_identity(&crate::resolve_binary_payload(&actual))? != expected
+    {
+        bail!(
+            "immutable runtime payload changed since selection: {}",
+            actual.display()
+        );
+    }
+    Ok(())
+}
+
+/// Freeze process image identity once, before any installation channel can move.
+pub fn serving_identity(git_hash: &str) -> Result<ServingIdentity> {
+    static IDENTITY: OnceLock<std::result::Result<ServingIdentity, String>> = OnceLock::new();
+    IDENTITY
+        .get_or_init(|| capture_identity(git_hash).map_err(|e| format!("{e:#}")))
+        .clone()
+        .map_err(anyhow::Error::msg)
+}
+
+fn capture_identity(git_hash: &str) -> Result<ServingIdentity> {
+    let exe = std::env::current_exe().context("running executable path unavailable")?;
+    // proc_pidpath may return another hardlink. Inherited target is authoritative
+    // only when it is the same image, not merely because the environment says so.
+    let target: Option<ImmutableTarget> = std::env::var(TARGET_ENV)
+        .ok()
+        .map(|raw| serde_json::from_str(&raw))
+        .transpose()?;
+    let binary_path = if let Some(target) = &target {
+        validate_target(target)?;
+        let observed = file_identity(&exe)?;
+        if Some(&observed)
+            != target
+                .payload_identity
+                .as_ref()
+                .or(target.file_identity.as_ref())
+        {
+            bail!("executing image does not match inherited immutable runtime target");
+        }
+        target.binary_path.clone()
+    } else {
+        std::fs::canonicalize(&exe).unwrap_or(exe)
+    };
+    Ok(ServingIdentity {
+        pid: std::process::id(),
+        version_label: target
+            .as_ref()
+            .and_then(|t| t.version_label.clone())
+            .or_else(|| installed_label(&binary_path)),
+        binary_path,
+        git_hash: git_hash.to_owned(),
+        reload_id: std::env::var(RELOAD_ID_ENV)
+            .ok()
+            .filter(|id| !id.is_empty()),
+        generation: std::env::var(GENERATION_ENV)
+            .ok()
+            .and_then(|g| g.parse().ok())
+            .unwrap_or(1),
+    })
+}
+
+/// Validate before quiescence and again immediately before exec. No re-selection.
+pub fn prepare_exec(cmd: &mut Command, target: &ImmutableTarget, reload_id: &str) -> Result<()> {
+    validate_target(target)?;
+    if reload_id.is_empty() {
+        bail!("reload id must not be empty");
+    }
+    let generation: u64 = std::env::var(GENERATION_ENV)
+        .ok()
+        .and_then(|g| g.parse().ok())
+        .unwrap_or(1);
+    cmd.env(TARGET_ENV, serde_json::to_string(target)?)
+        .env(RELOAD_ID_ENV, reload_id)
+        .env(
+            GENERATION_ENV,
+            generation
+                .checked_add(1)
+                .context("runtime generation overflow")?
+                .to_string(),
+        );
+    Ok(())
+}
+
+/// Compare self-reported serving identity. Missing information remains Unknown.
+pub fn assess_handoff(
+    reload_id: &str,
+    target: Option<&ImmutableTarget>,
+    serving: Option<&ServingIdentity>,
+) -> GenerationVerdict {
+    let Some(serving) = serving else {
+        return GenerationVerdict::Unknown {
+            reason: "listener did not report a serving identity".into(),
+        };
+    };
+    if serving.reload_id.as_deref() != Some(reload_id) {
+        return GenerationVerdict::Pending {
+            reason: format!(
+                "listener confirms reload {:?}, waiting for {reload_id}",
+                serving.reload_id
+            ),
+        };
+    }
+    if serving.generation == 0 {
+        return GenerationVerdict::Unknown {
+            reason: "listener did not report its exec generation".into(),
+        };
+    }
+    if let Some(target) = target {
+        if let Some(hash) = &target.git_hash
+            && serving.git_hash != *hash
+        {
+            return GenerationVerdict::Mismatch {
+                reason: format!(
+                    "serving hash {} differs from requested {hash}",
+                    serving.git_hash
+                ),
+            };
+        }
+        if let Some(label) = &target.version_label
+            && serving.version_label.as_ref() != Some(label)
+        {
+            return GenerationVerdict::Mismatch {
+                reason: format!(
+                    "serving label {:?} differs from requested {label}",
+                    serving.version_label
+                ),
+            };
+        }
+        if serving.binary_path != target.binary_path {
+            return GenerationVerdict::Mismatch {
+                reason: format!(
+                    "serving executable {} differs from requested {}",
+                    serving.binary_path.display(),
+                    target.binary_path.display()
+                ),
+            };
+        }
+    }
+    GenerationVerdict::Ready(serving.clone())
+}
+
+/// Bundle bridge provenance uses exactly the same immutable target comparison.
+pub fn assess_serving_target(
+    target: &ImmutableTarget,
+    serving: Option<&ServingIdentity>,
+) -> GenerationVerdict {
+    let Some(serving) = serving else {
+        return GenerationVerdict::Unknown {
+            reason: "bridge did not report serving identity".into(),
+        };
+    };
+    if serving.binary_path != target.binary_path {
+        return GenerationVerdict::Mismatch {
+            reason: format!(
+                "bridge belongs to another bundle: {} (expected {})",
+                serving.binary_path.display(),
+                target.binary_path.display()
+            ),
+        };
+    }
+    if let Some(hash) = &target.git_hash
+        && hash != &serving.git_hash
+    {
+        return GenerationVerdict::Mismatch {
+            reason: "bridge hash differs from the selected bundle".into(),
+        };
+    }
+    GenerationVerdict::Ready(serving.clone())
+}
+
+/// A marker is useful diagnostic evidence, never a serving version.
+#[derive(Debug, Clone)]
+pub struct ChannelDiagnostics {
+    pub channel: PathBuf,
+    pub resolved_path: Option<PathBuf>,
+    pub marker: Option<String>,
+    pub reason: Option<String>,
+}
+
+pub fn channel_diagnostics(channel: &Path, marker: &Path) -> ChannelDiagnostics {
+    let resolved = std::fs::canonicalize(channel);
+    ChannelDiagnostics {
+        channel: channel.to_path_buf(),
+        reason: resolved.as_ref().err().map(ToString::to_string),
+        resolved_path: resolved.ok(),
+        marker: std::fs::read_to_string(marker)
+            .ok()
+            .map(|s| s.trim().to_owned()),
+    }
+}

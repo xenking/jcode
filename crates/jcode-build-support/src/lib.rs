@@ -1,3 +1,5 @@
+pub mod runtime_generation;
+
 mod paths;
 mod platform_support;
 mod source_state;
