@@ -229,6 +229,7 @@ export type ApiRequest =
       no_reply?: boolean;
       system_reminder?: string;
     }
+  | { req: "send_skill_message"; session_id: string; content: string; active_skill: string; system_reminder?: string; images?: ImageAttachment[] }
   | { req: "cancel"; session_id: string }
   | { req: "force_stop_turn"; session_id: string }
   | {
@@ -663,6 +664,7 @@ export const KNOWN_REQUEST_KINDS = [
   "list_tools",
   "tool_result",
   "send_message",
+  "send_skill_message",
   "cancel",
   "force_stop_turn",
   "soft_interrupt",
