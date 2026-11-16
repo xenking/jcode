@@ -19,10 +19,10 @@ fn todo_state_path(session_id: &str, file: TodoFile) -> Result<PathBuf> {
 
 pub fn load_todos(session_id: &str) -> Result<Vec<TodoItem>> {
     let path = todo_path(session_id)?;
-    if !path.exists() {
+    if !path.try_exists()? {
         return Ok(Vec::new());
     }
-    storage::read_json(&path).or_else(|_| Ok(Vec::new()))
+    storage::read_json(&path)
 }
 
 pub fn todos_exist(session_id: &str) -> Result<bool> {
@@ -114,10 +114,10 @@ pub fn take_long_session_review_if_due(session_id: &str) -> Result<bool> {
 /// existing consumer.
 pub fn load_goals(session_id: &str) -> Result<Vec<TodoGoal>> {
     let path = goals_path(session_id)?;
-    if !path.exists() {
+    if !path.try_exists()? {
         return Ok(Vec::new());
     }
-    storage::read_json(&path).or_else(|_| Ok(Vec::new()))
+    storage::read_json(&path)
 }
 
 /// Load todo state for a session and derive its best title hint.
@@ -150,10 +150,10 @@ fn goals_path(session_id: &str) -> Result<PathBuf> {
 /// and per-group goals, so each format stays independently readable.
 pub fn load_plan(session_id: &str) -> Result<TodoPlan> {
     let path = plan_path(session_id)?;
-    if !path.exists() {
+    if !path.try_exists()? {
         return Ok(TodoPlan::default());
     }
-    storage::read_json(&path).or_else(|_| Ok(TodoPlan::default()))
+    storage::read_json(&path)
 }
 
 pub fn save_plan(session_id: &str, plan: &TodoPlan) -> Result<()> {
@@ -179,10 +179,10 @@ fn plan_path(session_id: &str) -> Result<PathBuf> {
 /// cleared once the digest has been delivered.
 pub fn load_gate_observations(session_id: &str) -> Result<Vec<GateObservation>> {
     let path = gate_observations_path(session_id)?;
-    if !path.exists() {
+    if !path.try_exists()? {
         return Ok(Vec::new());
     }
-    storage::read_json(&path).or_else(|_| Ok(Vec::new()))
+    storage::read_json(&path)
 }
 
 pub fn save_gate_observations(session_id: &str, observations: &[GateObservation]) -> Result<()> {
@@ -225,6 +225,35 @@ fn gate_observations_path(session_id: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn corrupt_todo_state_is_an_error_not_an_empty_plan() {
+        let _lock = crate::storage::lock_test_env();
+        let dir = tempfile::tempdir().unwrap();
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(home) => crate::env::set_var("JCODE_HOME", home),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+            }
+        }
+        let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", dir.path());
+        let session = "corrupt-todo-state";
+        assert!(load_todos(session).unwrap().is_empty());
+        assert!(load_goals(session).unwrap().is_empty());
+        assert_eq!(load_plan(session).unwrap(), TodoPlan::default());
+        for file in [TodoFile::Todos, TodoFile::Goals, TodoFile::Plan] {
+            let path = todo_state_path(session, file).unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "{broken").unwrap();
+        }
+        assert!(load_todos(session).is_err());
+        assert!(load_goals(session).is_err());
+        assert!(load_plan(session).is_err());
+    }
 
     fn intent_observation(state: Option<IntentUnderstanding>) -> GateObservation {
         GateObservation {
