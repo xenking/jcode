@@ -715,6 +715,7 @@ if __name__ == "__main__":
     def terminate(_signum, _frame):
         raise KeyboardInterrupt
 
+    signal.signal(signal.SIGINT, terminate)
     signal.signal(signal.SIGTERM, terminate)
     try:
         main()
