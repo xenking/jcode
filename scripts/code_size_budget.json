@@ -18,7 +18,7 @@
     "crates/jcode-app-core/src/server/debug_server_state.rs": 1496,
     "crates/jcode-app-core/src/server/jade_relay.rs": 1339,
     "crates/jcode-app-core/src/server/provider_control.rs": 1484,
-    "crates/jcode-app-core/src/server/state.rs": 1576,
+    "crates/jcode-app-core/src/server/state.rs": 1579,
     "crates/jcode-app-core/src/server/swarm.rs": 2217,
     "crates/jcode-app-core/src/server/turn_failover.rs": 1810,
     "crates/jcode-app-core/src/tool/bash.rs": 1563,
