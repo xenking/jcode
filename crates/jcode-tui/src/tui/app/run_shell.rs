@@ -846,7 +846,7 @@ impl App {
                     &mut event_stream,
                     &mut status_spinner_renderer,
                 )
-                .await;
+                .await?;
                 needs_redraw = true;
             } else if self.pending_queued_dispatch && !self.cloud_handoff_blocks_work() {
                 self.pending_queued_dispatch = false;

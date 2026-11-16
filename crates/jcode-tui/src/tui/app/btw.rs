@@ -468,14 +468,14 @@ pub(super) async fn process_btw_with_input(
     terminal: &mut DefaultTerminal,
     event_stream: &mut EventStream,
     status_spinner_renderer: &mut super::run_shell::StatusSpinnerRenderer,
-) {
+) -> anyhow::Result<()> {
     let Some(question) = app.btw.as_ref().map(|card| card.question.clone()) else {
-        return;
+        return Ok(());
     };
     // A daemon-backed card streams from its own hidden session, wired into the
     // remote run loop instead of this in-process turn.
     if app.btw.as_ref().is_some_and(|card| card.child.is_some()) {
-        return;
+        return Ok(());
     }
     let request = app.btw_request(&question);
     if let Some(card) = app.btw.as_mut() {
@@ -484,10 +484,7 @@ pub(super) async fn process_btw_with_input(
     }
     app.btw_cancel = false;
     app.sync_btw_card();
-    if status_spinner_renderer.draw_full(app, terminal).is_err() {
-        app.close_btw();
-        return;
-    }
+    status_spinner_renderer.draw_full(app, terminal)?;
 
     let provider = app.provider.clone();
     let mut api_future = std::pin::pin!(provider.complete_split(
@@ -510,12 +507,12 @@ pub(super) async fn process_btw_with_input(
                     Some(Ok(Event::Key(key))) => {
                         let key = jcode_tui_core::korean_input::normalize_key_event(key);
                         if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-                            let _ = app.handle_key_press_event(key);
+                            app.handle_key_press_event(key)?;
                         }
                         if !app.btw_open() {
-                            return;
+                            return Ok(());
                         }
-                        let _ = status_spinner_renderer.draw_full(app, terminal);
+                        status_spinner_renderer.draw_full(app, terminal)?;
                         super::run_shell::reset_status_spinner_interval(
                             &mut status_spinner_interval,
                             app,
@@ -523,14 +520,14 @@ pub(super) async fn process_btw_with_input(
                     }
                     Some(Ok(Event::Paste(text))) => {
                         app.handle_paste(text);
-                        let _ = status_spinner_renderer.draw_full(app, terminal);
+                        status_spinner_renderer.draw_full(app, terminal)?;
                         super::run_shell::reset_status_spinner_interval(
                             &mut status_spinner_interval,
                             app,
                         );
                     }
                     Some(Ok(Event::Resize(_, _))) => {
-                        let _ = status_spinner_renderer.draw_full(app, terminal);
+                        status_spinner_renderer.draw_full(app, terminal)?;
                     }
                     Some(Err(error)) => {
                         crate::logging::warn(&format!(
@@ -541,8 +538,8 @@ pub(super) async fn process_btw_with_input(
                 }
             }
             _ = status_spinner_interval.tick(), if status_spinner_renderer.spinner_only_available(app) => {
-                if !status_spinner_renderer.draw_status_spinner_only(app, terminal).unwrap_or(false) {
-                    let _ = status_spinner_renderer.draw_full(app, terminal);
+                if !status_spinner_renderer.draw_status_spinner_only(app, terminal)? {
+                    status_spinner_renderer.draw_full(app, terminal)?;
                     super::run_shell::reset_status_spinner_interval(
                         &mut status_spinner_interval,
                         app,
@@ -555,7 +552,7 @@ pub(super) async fn process_btw_with_input(
                     redraw_period = desired;
                     redraw_interval = super::run_shell::redraw_timer(redraw_period);
                 }
-                let _ = status_spinner_renderer.draw_full(app, terminal);
+                status_spinner_renderer.draw_full(app, terminal)?;
                 super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, app);
             }
             result = &mut api_future => {
@@ -568,8 +565,8 @@ pub(super) async fn process_btw_with_input(
                         }
                         app.sync_btw_card();
                         app.set_status_notice("Side question failed");
-                        let _ = status_spinner_renderer.draw_full(app, terminal);
-                        return;
+                        status_spinner_renderer.draw_full(app, terminal)?;
+                        return Ok(());
                     }
                 }
             }
@@ -585,12 +582,12 @@ pub(super) async fn process_btw_with_input(
                     Some(Ok(Event::Key(key))) => {
                         let key = jcode_tui_core::korean_input::normalize_key_event(key);
                         if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-                            let _ = app.handle_key_press_event(key);
+                            app.handle_key_press_event(key)?;
                         }
                         if !app.btw_open() {
-                            return;
+                            return Ok(());
                         }
-                        let _ = status_spinner_renderer.draw_full(app, terminal);
+                        status_spinner_renderer.draw_full(app, terminal)?;
                         super::run_shell::reset_status_spinner_interval(
                             &mut status_spinner_interval,
                             app,
@@ -598,10 +595,10 @@ pub(super) async fn process_btw_with_input(
                     }
                     Some(Ok(Event::Paste(text))) => {
                         app.handle_paste(text);
-                        let _ = status_spinner_renderer.draw_full(app, terminal);
+                        status_spinner_renderer.draw_full(app, terminal)?;
                     }
                     Some(Ok(Event::Resize(_, _))) => {
-                        let _ = status_spinner_renderer.draw_full(app, terminal);
+                        status_spinner_renderer.draw_full(app, terminal)?;
                     }
                     Some(Err(error)) => {
                         crate::logging::warn(&format!(
@@ -612,15 +609,15 @@ pub(super) async fn process_btw_with_input(
                 }
             }
             _ = redraw_interval.tick() => {
-                let _ = status_spinner_renderer.draw_full(app, terminal);
+                status_spinner_renderer.draw_full(app, terminal)?;
                 super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, app);
             }
             item = stream.next() => {
                 match item {
                     Some(Ok(event)) => {
                         if app.apply_btw_stream_event(event) {
-                            let _ = status_spinner_renderer.draw_full(app, terminal);
-                            return;
+                            status_spinner_renderer.draw_full(app, terminal)?;
+                            return Ok(());
                         }
                     }
                     Some(Err(error)) => {
@@ -630,8 +627,8 @@ pub(super) async fn process_btw_with_input(
                         }
                         app.sync_btw_card();
                         app.set_status_notice("Side question failed");
-                        let _ = status_spinner_renderer.draw_full(app, terminal);
-                        return;
+                        status_spinner_renderer.draw_full(app, terminal)?;
+                        return Ok(());
                     }
                     None => {
                         // Stream ended without a MessageEnd: keep what arrived.
@@ -639,7 +636,7 @@ pub(super) async fn process_btw_with_input(
                             card.streaming = false;
                         }
                         app.sync_btw_card();
-                        return;
+                        return Ok(());
                     }
                 }
             }
