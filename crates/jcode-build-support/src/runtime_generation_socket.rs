@@ -7,8 +7,15 @@ use std::path::Path;
 use std::time::Duration;
 
 pub fn probe_socket_identity(socket: &Path, timeout: Duration) -> Result<ServingIdentity> {
-    let mut stream = SyncStream::connect(socket)
+    let stream = SyncStream::connect(socket)
         .with_context(|| format!("cannot observe serving generation on {}", socket.display()))?;
+    probe_stream_identity(stream, timeout)
+}
+
+pub(super) fn probe_stream_identity(
+    mut stream: SyncStream,
+    timeout: Duration,
+) -> Result<ServingIdentity> {
     stream.set_read_timeout(Some(timeout))?;
     #[cfg(unix)]
     let peer = socket_peer_pid(&stream);
@@ -40,6 +47,7 @@ pub fn probe_socket_identity(socket: &Path, timeout: Duration) -> Result<Serving
             .filter(|value| !value.is_null())
             .context("listener does not report serving identity (legacy daemon)")?;
         let identity: ServingIdentity = serde_json::from_value(raw.clone())?;
+        validate_reported_identity(&identity)?;
         if peer.is_some_and(|pid| pid != identity.pid) {
             bail!(
                 "serving identity PID {} differs from socket peer {:?}",
@@ -50,6 +58,26 @@ pub fn probe_socket_identity(socket: &Path, timeout: Duration) -> Result<Serving
         return Ok(identity);
     }
     bail!("listener did not report serving generation within the bounded Ping response")
+}
+
+fn validate_reported_identity(identity: &ServingIdentity) -> Result<()> {
+    if identity.pid == 0 || !identity.binary_path.is_absolute() {
+        bail!("listener reports malformed serving identity (PID or executable path)");
+    }
+    if identity.git_hash.trim().is_empty() || identity.git_hash.eq_ignore_ascii_case("unknown") {
+        bail!("listener reports unknown serving git hash");
+    }
+    if identity.generation == 0 {
+        bail!("listener does not report a positive serving generation");
+    }
+    if identity
+        .reload_id
+        .as_ref()
+        .is_some_and(|id| id.trim().is_empty())
+    {
+        bail!("listener reports an empty reload id");
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -98,4 +126,37 @@ pub fn socket_peer_pid(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
 #[cfg(not(unix))]
 pub fn socket_peer_pid(_stream: &SyncStream) -> Option<u32> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_identity_is_unknown_not_a_serving_generation() {
+        let valid = ServingIdentity {
+            pid: 42,
+            binary_path: "/versions/current/jcode".into(),
+            git_hash: "abc123".into(),
+            version_label: None,
+            reload_id: Some("reload-id".into()),
+            generation: 2,
+        };
+        assert!(validate_reported_identity(&valid).is_ok());
+        let mut bad = valid.clone();
+        bad.binary_path = "relative/jcode".into();
+        assert!(validate_reported_identity(&bad).is_err());
+        bad = valid.clone();
+        bad.git_hash = "unknown".into();
+        assert!(validate_reported_identity(&bad).is_err());
+        bad = valid.clone();
+        bad.generation = 0;
+        assert!(validate_reported_identity(&bad).is_err());
+        bad = valid.clone();
+        bad.pid = 0;
+        assert!(validate_reported_identity(&bad).is_err());
+        bad = valid;
+        bad.reload_id = Some(" ".into());
+        assert!(validate_reported_identity(&bad).is_err());
+    }
 }

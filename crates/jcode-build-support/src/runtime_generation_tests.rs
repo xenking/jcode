@@ -31,6 +31,15 @@ fn old_listener_after_ack_never_confirms_new_reload() {
 }
 
 #[test]
+fn invalid_generation_is_explicit_not_an_invented_fresh_launch() {
+    assert_eq!(parse_generation(None).unwrap(), 1);
+    assert_eq!(parse_generation(Some("2")).unwrap(), 2);
+    for invalid in ["", "0", "-1", "unknown", "18446744073709551616"] {
+        assert!(parse_generation(Some(invalid)).is_err(), "{invalid:?}");
+    }
+}
+
+#[test]
 fn same_pid_after_exec_is_a_new_generation() {
     let mut old = serving();
     old.generation = 1;
@@ -63,6 +72,35 @@ fn bridge_left_from_previous_bundle_is_a_mismatch() {
         assess_serving_target(&target, Some(&bridge)),
         GenerationVerdict::Mismatch { .. }
     ));
+}
+
+#[test]
+fn reconnect_requires_self_confirmation_of_recent_own_handoff() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("jcode.reload");
+    let mut old = serving();
+    old.reload_id = None;
+    std::fs::write(
+        &marker,
+        serde_json::to_vec(&serde_json::json!({
+            "pid": old.pid, "request_id": "reload-new", "phase": "socket_ready"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        assess_reconnect_in(&old, std::time::Duration::from_secs(30), &marker),
+        GenerationVerdict::Pending { .. }
+    ));
+    assert!(matches!(
+        assess_reconnect_in(&serving(), std::time::Duration::from_secs(30), &marker),
+        GenerationVerdict::Ready(_)
+    ));
+    std::fs::write(&marker, b"interrupted-write").unwrap();
+    assert!(
+        matches!(assess_reconnect_in(&serving(), std::time::Duration::from_secs(30), &marker),
+        GenerationVerdict::Unknown { reason } if reason.contains("unreadable"))
+    );
 }
 
 #[cfg(unix)]

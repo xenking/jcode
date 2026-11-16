@@ -9,8 +9,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+#[path = "runtime_generation_fallback.rs"]
+mod fallback;
+pub use fallback::fallback_before_spawn;
+
 #[path = "runtime_generation_selection.rs"]
 pub mod selection;
+
+#[path = "runtime_generation_observation.rs"]
+mod observation;
+pub use observation::{SocketObservation, observe_socket, replacement_spawn_permission};
 
 #[path = "runtime_generation_socket.rs"]
 mod socket_adapter;
@@ -23,6 +31,16 @@ mod tests;
 pub const TARGET_ENV: &str = "JCODE_RUNTIME_TARGET";
 pub const RELOAD_ID_ENV: &str = "JCODE_RUNTIME_RELOAD_ID";
 pub const GENERATION_ENV: &str = "JCODE_RUNTIME_GENERATION";
+
+/// Socket-aware desired selection. Explicit requests never silently fall back.
+pub fn resolve_for_socket(selection: DesiredSelection, socket: &Path) -> Result<ImmutableTarget> {
+    if matches!(selection, DesiredSelection::SharedServer)
+        && let Some(target) = fallback_before_spawn(socket)?
+    {
+        return Ok(target);
+    }
+    resolve(selection)
+}
 
 pub fn resolve(selection: DesiredSelection) -> Result<ImmutableTarget> {
     let (path, label) = match selection {
@@ -141,6 +159,25 @@ pub fn serving_identity(git_hash: &str) -> Result<ServingIdentity> {
         .map_err(anyhow::Error::msg)
 }
 
+fn parse_generation(value: Option<&str>) -> Result<u64> {
+    let Some(value) = value else { return Ok(1) };
+    let generation: u64 = value
+        .parse()
+        .context("inherited runtime generation is not a counter")?;
+    if generation == 0 {
+        bail!("inherited runtime generation must be positive")
+    }
+    Ok(generation)
+}
+
+fn inherited_generation() -> Result<u64> {
+    match std::env::var(GENERATION_ENV) {
+        Ok(value) => parse_generation(Some(&value)),
+        Err(std::env::VarError::NotPresent) => parse_generation(None),
+        Err(error) => Err(error).context("inherited runtime generation is unreadable"),
+    }
+}
+
 fn capture_identity(git_hash: &str) -> Result<ServingIdentity> {
     let exe = std::env::current_exe().context("running executable path unavailable")?;
     // proc_pidpath may return another hardlink. Inherited target is authoritative
@@ -175,10 +212,7 @@ fn capture_identity(git_hash: &str) -> Result<ServingIdentity> {
         reload_id: std::env::var(RELOAD_ID_ENV)
             .ok()
             .filter(|id| !id.is_empty()),
-        generation: std::env::var(GENERATION_ENV)
-            .ok()
-            .and_then(|g| g.parse().ok())
-            .unwrap_or(1),
+        generation: inherited_generation()?,
     })
 }
 
@@ -191,10 +225,7 @@ pub fn prepare_exec(cmd: &mut Command, target: &ImmutableTarget, reload_id: &str
     if reload_id.is_empty() {
         bail!("reload id must not be empty");
     }
-    let generation: u64 = std::env::var(GENERATION_ENV)
-        .ok()
-        .and_then(|g| g.parse().ok())
-        .unwrap_or(1);
+    let generation = inherited_generation()?;
     cmd.env(TARGET_ENV, serde_json::to_string(target)?)
         .env(RELOAD_ID_ENV, reload_id)
         .env(
@@ -287,6 +318,11 @@ pub fn assess_serving_target(
             reason: "bridge did not report serving identity".into(),
         };
     };
+    if serving.generation == 0 {
+        return GenerationVerdict::Unknown {
+            reason: "bridge did not report its runtime generation".into(),
+        };
+    }
     if serving.binary_path != target.binary_path {
         return GenerationVerdict::Mismatch {
             reason: format!(
@@ -313,35 +349,78 @@ pub fn assess_reconnect(
     serving: &ServingIdentity,
     max_age: std::time::Duration,
 ) -> GenerationVerdict {
+    assess_reconnect_in(
+        serving,
+        max_age,
+        &jcode_storage::runtime_dir().join("jcode.reload"),
+    )
+}
+
+fn assess_reconnect_in(
+    serving: &ServingIdentity,
+    max_age: std::time::Duration,
+    marker_path: &Path,
+) -> GenerationVerdict {
     if serving.generation == 0 {
         return GenerationVerdict::Unknown {
             reason: "listener does not report runtime generations".into(),
         };
     }
-    let marker = jcode_storage::runtime_dir().join("jcode.reload");
-    let recent = std::fs::metadata(&marker)
-        .ok()
-        .and_then(|meta| meta.modified().ok())
-        .and_then(|modified| modified.elapsed().ok())
-        .is_some_and(|age| age <= max_age);
-    if recent
-        && let Ok(raw) = std::fs::read_to_string(&marker)
-        && let Ok(marker) = serde_json::from_str::<serde_json::Value>(&raw)
-        && marker["pid"].as_u64() == Some(u64::from(serving.pid))
-    {
-        if marker["phase"] == "failed" {
-            return GenerationVerdict::Mismatch {
-                reason: format!("reload failed: {}", marker["detail"]),
+    let metadata = match std::fs::metadata(marker_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return GenerationVerdict::Ready(serving.clone());
+        }
+        Err(error) => {
+            return GenerationVerdict::Unknown {
+                reason: format!("reload evidence metadata unavailable: {error}"),
             };
         }
-        if let Some(id) = marker["request_id"].as_str() {
-            return assess_handoff(id, None, Some(serving));
+    };
+    let age = match metadata
+        .modified()
+        .and_then(|modified| modified.elapsed().map_err(std::io::Error::other))
+    {
+        Ok(age) => age,
+        Err(error) => {
+            return GenerationVerdict::Unknown {
+                reason: format!("reload evidence age unavailable: {error}"),
+            };
         }
+    };
+    if age > max_age {
+        return GenerationVerdict::Ready(serving.clone());
+    }
+    let marker: serde_json::Value = match std::fs::read_to_string(marker_path)
+        .map_err(anyhow::Error::from)
+        .and_then(|raw| serde_json::from_str(&raw).map_err(anyhow::Error::from))
+    {
+        Ok(marker) => marker,
+        Err(error) => {
+            return GenerationVerdict::Unknown {
+                reason: format!("recent reload evidence is unreadable: {error:#}"),
+            };
+        }
+    };
+    let Some(pid) = marker["pid"].as_u64() else {
         return GenerationVerdict::Unknown {
-            reason: "recent reload marker has no request identity".into(),
+            reason: "reload evidence has no owner PID".into(),
+        };
+    };
+    if pid != u64::from(serving.pid) {
+        return GenerationVerdict::Ready(serving.clone());
+    }
+    if marker["phase"] == "failed" {
+        return GenerationVerdict::Mismatch {
+            reason: format!("reload failed: {}", marker["detail"]),
         };
     }
-    GenerationVerdict::Ready(serving.clone())
+    if let Some(id) = marker["request_id"].as_str().filter(|id| !id.is_empty()) {
+        return assess_handoff(id, None, Some(serving));
+    }
+    GenerationVerdict::Unknown {
+        reason: "recent reload evidence has no request identity".into(),
+    }
 }
 
 /// A marker is useful diagnostic evidence, never a serving version.
