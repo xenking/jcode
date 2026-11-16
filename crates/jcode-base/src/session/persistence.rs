@@ -218,14 +218,14 @@ fn apply_latest_journal_meta(
     session: &mut Session,
     journal_path: &Path,
     mut dedupe: JournalReplayDedupe,
-) {
+) -> Result<()> {
     #[derive(serde::Deserialize)]
     struct MetaOnly {
         meta: super::journal::SessionJournalMeta,
         #[serde(default)]
         append_messages: Vec<super::SessionMessageId>,
     }
-    let _ = replay_journal_lines(journal_path, |entry: MetaOnly| {
+    replay_journal_lines(journal_path, |entry: MetaOnly| {
         if dedupe.skip_stale(
             entry.meta.updated_at,
             entry
@@ -238,7 +238,8 @@ fn apply_latest_journal_meta(
         // Compatibility fields can retain an earlier entry's value, so
         // applying only the last metadata record loses that state.
         session.apply_journal_meta(entry.meta);
-    });
+    })?;
+    Ok(())
 }
 
 fn replay_journal_lines<T: DeserializeOwned>(
@@ -246,7 +247,7 @@ fn replay_journal_lines<T: DeserializeOwned>(
     mut apply: impl FnMut(T),
 ) -> Result<JournalReplayStats> {
     let mut stats = JournalReplayStats::default();
-    if !journal_path.exists() {
+    if !journal_path.try_exists()? {
         return Ok(stats);
     }
 
@@ -568,7 +569,7 @@ impl Session {
             &mut session,
             &session_journal_path_from_snapshot(&path),
             dedupe,
-        );
+        )?;
         session.reset_persist_state(true);
         session.refresh_agent_model_overrides()?;
         Ok(session)
