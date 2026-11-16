@@ -54,9 +54,11 @@ pub(super) fn records(session: &crate::session::Session) -> Result<Vec<String>, 
     let mut prompt_offset = 0usize;
     for (index, message) in messages.into_iter().enumerate() {
         let text = message.content.trim();
-        // Keep in sync with Desktop's is_pinnable_prompt: this offset counts
-        // visible user prompts, not background notices or continuation pokes.
-        let is_prompt = message.role == "user"
+        // Match Desktop's numbered user turns, including completed ask decisions.
+        let is_prompt = (message.role == "tool"
+            && message.tool_data.as_ref().is_some_and(|tool| tool.name == "ask")
+            && jcode_session_types::stored_ask_answer_text(text).is_some())
+            || (message.role == "user"
             && !text.is_empty()
             && !crate::todo::is_auto_poke_message(text)
             && ![
@@ -66,7 +68,7 @@ pub(super) fn records(session: &crate::session::Session) -> Result<Vec<String>, 
                 "**Background task stalled** `",
             ]
             .iter()
-            .any(|prefix| text.starts_with(prefix));
+            .any(|prefix| text.starts_with(prefix)));
         let tool = if message.role == "tool" {
             message.tool_data
         } else {

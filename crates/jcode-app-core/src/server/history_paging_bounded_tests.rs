@@ -43,6 +43,24 @@ fn cursor_survives_append_but_rejects_changed_boundary() {
 }
 
 #[test]
+fn prompt_offsets_count_answered_ask_results() {
+    use crate::message::{ContentBlock, Role};
+    let mut session = crate::session::Session::create_with_id("offset-test".into(), None, None);
+    session.add_message(Role::User, vec![ContentBlock::Text { text: "first".into(), cache_control: None }]);
+    session.add_message(Role::Assistant, vec![ContentBlock::ToolUse {
+        id: "ask-1".into(), name: "ask".into(), input: serde_json::json!({"questions": []}), thought_signature: None,
+    }]);
+    session.add_message(Role::User, vec![ContentBlock::ToolResult {
+        tool_use_id: "ask-1".into(), content: "User answers:\n1. Which? -> B\n".into(), is_error: None,
+    }]);
+    session.add_message(Role::User, vec![ContentBlock::Text { text: "last".into(), cache_control: None }]);
+    let records = super::bounded::records(&session).unwrap();
+    let last: serde_json::Value = serde_json::from_str(records.last().unwrap()).unwrap();
+    assert_eq!(last["message"]["content"], "last");
+    assert_eq!(last["prompt_offset"], 2);
+}
+
+#[test]
 fn complete_rows_are_returned_before_a_large_older_row() {
     let rows = vec!["large".repeat(200_000), "recent".into()];
     let page = page_records(&rows, None, 128).unwrap();
