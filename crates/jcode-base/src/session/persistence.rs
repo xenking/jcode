@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 use chrono::Utc;
+use serde::de::DeserializeOwned;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -138,17 +139,20 @@ fn dedupe_messages_by_id(messages: &mut Vec<super::StoredMessage>) -> usize {
 /// Serialized entries always begin with `{"meta":` (struct field order), so
 /// scan for candidate starts and stream-parse consecutive complete entries
 /// from the first position that yields any.
-fn salvage_glued_journal_entries(line: &str, mut apply: impl FnMut(SessionJournalEntry)) -> usize {
-    const ENTRY_START: &str = "{\"meta\":";
+fn salvage_glued_journal_entries<T: DeserializeOwned>(
+    line: &[u8],
+    mut apply: impl FnMut(T),
+) -> usize {
+    const ENTRY_START: &[u8] = b"{\"meta\":";
     let mut salvaged = 0usize;
     let mut search_from = 0usize;
-    while let Some(rel) = line
-        .get(search_from..)
-        .and_then(|rest| rest.find(ENTRY_START))
-    {
+    while let Some(rel) = line.get(search_from..).and_then(|rest| {
+        rest.windows(ENTRY_START.len())
+            .position(|part| part == ENTRY_START)
+    }) {
         let candidate_start = search_from + rel;
-        let mut stream = serde_json::Deserializer::from_str(&line[candidate_start..])
-            .into_iter::<SessionJournalEntry>();
+        let mut stream =
+            serde_json::Deserializer::from_slice(&line[candidate_start..]).into_iter::<T>();
         let mut parsed = Vec::new();
         for item in &mut stream {
             match item {
@@ -190,26 +194,22 @@ fn apply_latest_journal_meta(session: &mut Session, journal_path: &Path) {
     struct MetaOnly {
         meta: super::journal::SessionJournalMeta,
     }
-    let Ok(file) = std::fs::File::open(journal_path) else {
-        return;
-    };
-    for line in BufReader::new(file).lines() {
-        let Ok(line) = line else { break };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+    let snapshot_updated_at = session.updated_at;
+    let mut in_stale_prefix = true;
+    let _ = replay_journal_lines(journal_path, |entry: MetaOnly| {
+        if in_stale_prefix && entry.meta.updated_at <= snapshot_updated_at {
+            return;
         }
-        if let Ok(entry) = serde_json::from_str::<MetaOnly>(trimmed) {
-            // Compatibility fields can retain an earlier entry's value, so
-            // applying only the last metadata record loses that state.
-            session.apply_journal_meta(entry.meta);
-        }
-    }
+        in_stale_prefix = false;
+        // Compatibility fields can retain an earlier entry's value, so
+        // applying only the last metadata record loses that state.
+        session.apply_journal_meta(entry.meta);
+    });
 }
 
-fn replay_journal_lines(
+fn replay_journal_lines<T: DeserializeOwned>(
     journal_path: &Path,
-    mut apply: impl FnMut(SessionJournalEntry),
+    mut apply: impl FnMut(T),
 ) -> Result<JournalReplayStats> {
     let mut stats = JournalReplayStats::default();
     if !journal_path.exists() {
@@ -218,20 +218,19 @@ fn replay_journal_lines(
 
     let file = std::fs::File::open(journal_path)?;
     let reader = BufReader::new(file);
-    for (line_idx, line) in reader.lines().enumerate() {
+    for (line_idx, line) in reader.split(b'\n').enumerate() {
         let line = line?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        match serde_json::from_str::<SessionJournalEntry>(trimmed) {
+        match serde_json::from_slice::<T>(&line) {
             Ok(entry) => {
                 stats.entries += 1;
                 apply(entry);
             }
             Err(err) => {
                 stats.skipped_lines += 1;
-                let salvaged = salvage_glued_journal_entries(trimmed, &mut apply);
+                let salvaged = salvage_glued_journal_entries(&line, &mut apply);
                 stats.entries += salvaged;
                 stats.salvaged_entries += salvaged;
                 crate::logging::warn(&format!(
