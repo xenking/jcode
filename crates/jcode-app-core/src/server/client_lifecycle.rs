@@ -28,7 +28,9 @@ use super::client_state::{
     handle_get_compacted_history, handle_get_history, handle_get_model_catalog, handle_get_state,
     handle_history_image_chunk, handle_history_page, handle_session_images,
 };
-use super::client_writer::write_direct_event;
+use super::client_writer::{
+    event_for_transport, send_client_event_best_effort, write_direct_event,
+};
 use super::comm_await::{CommAwaitMembersContext, handle_comm_await_members};
 use super::comm_control::{
     handle_client_debug_command, handle_client_debug_response, handle_comm_assign_next,
@@ -85,22 +87,6 @@ const REQUEST_HANDLER_STALL_THRESHOLDS_MS: [u64; 3] = [2_000, 10_000, 60_000];
 #[path = "client_subscribe_context.rs"]
 mod subscribe_context;
 use subscribe_context::*;
-
-fn event_for_transport(
-    mut event: ServerEvent,
-    supports_turn_identity: bool,
-) -> Option<ServerEvent> {
-    if supports_turn_identity {
-        return Some(event);
-    }
-    loop {
-        event = match event {
-            ServerEvent::TurnEvent { event, .. } => *event,
-            ServerEvent::TurnStarted { .. } | ServerEvent::TurnState { .. } => return None,
-            event => return Some(event),
-        };
-    }
-}
 
 struct ProcessingMessage {
     id: u64,
@@ -717,11 +703,15 @@ pub(super) async fn handle_client(
                 if let Some(questions) = req.ask_questions {
                     match serde_json::from_value(questions) {
                         Ok(questions) => {
-                            let _ = client_event_tx.send(ServerEvent::AskUserRequest {
-                                request_id,
-                                questions,
-                                tool_call_id: req.prompt,
-                            });
+                            send_client_event_best_effort(
+                                &client_event_tx,
+                                ServerEvent::AskUserRequest {
+                                    request_id,
+                                    questions,
+                                    tool_call_id: req.prompt,
+                                },
+                                "client_lifecycle: AskUserRequest",
+                            );
                         }
                         // Dropping the sender fails the waiting tool call.
                         Err(_) => {
@@ -730,12 +720,16 @@ pub(super) async fn handle_client(
                     }
                     continue;
                 }
-                let _ = client_event_tx.send(ServerEvent::StdinRequest {
-                    request_id,
-                    prompt: req.prompt,
-                    is_password: req.is_password,
-                    tool_call_id: tool_call_id.clone(),
-                });
+                send_client_event_best_effort(
+                    &client_event_tx,
+                    ServerEvent::StdinRequest {
+                        request_id,
+                        prompt: req.prompt,
+                        is_password: req.is_password,
+                        tool_call_id: tool_call_id.clone(),
+                    },
+                    "client_lifecycle: StdinRequest",
+                );
             }
         })
     };
@@ -861,7 +855,7 @@ pub(super) async fn handle_client(
                 match bus_event {
                     Ok(BusEvent::ModelUsageUpdated(route)) => {
                         if model_usage_updates_enabled {
-                            let _ = client_event_tx.send(ServerEvent::ModelUsageUpdated { route });
+                            send_client_event_best_effort(&client_event_tx, ServerEvent::ModelUsageUpdated { route }, "client_lifecycle: ModelUsageUpdated");
                         }
                     }
                     Ok(BusEvent::ModelsUpdated) => {
@@ -879,7 +873,7 @@ pub(super) async fn handle_client(
                             let key = todos_event_key(&event);
                             if key != last_pushed_todos {
                                 last_pushed_todos = key;
-                                let _ = client_event_tx.send(event);
+                                send_client_event_best_effort(&client_event_tx, event, "client_lifecycle: forwarded event");
                             }
                         }
                     }
@@ -890,29 +884,29 @@ pub(super) async fn handle_client(
                         let key = todos_event_key(&event);
                         if key != last_pushed_todos {
                             last_pushed_todos = key;
-                            let _ = client_event_tx.send(event);
+                            send_client_event_best_effort(&client_event_tx, event, "client_lifecycle: forwarded event");
                         }
                     }
                     Ok(BusEvent::BatchProgress(progress)) => {
                         if progress.session_id == client_session_id {
-                            let _ = client_event_tx.send(ServerEvent::BatchProgress { progress });
+                            send_client_event_best_effort(&client_event_tx, ServerEvent::BatchProgress { progress }, "client_lifecycle: BatchProgress");
                         }
                     }
                     Ok(BusEvent::SidePanelUpdated(update)) => {
                         if update.session_id == client_session_id {
-                            let _ = client_event_tx.send(ServerEvent::SidePanelState {
+                            send_client_event_best_effort(&client_event_tx, ServerEvent::SidePanelState {
                                 snapshot: super::client_writer::side_panel_for_client(
                                     update.snapshot, supports_pdf_panels,
                                 ),
-                            });
+                            }, "client_lifecycle: SidePanelState");
                         }
                     }
                     Ok(BusEvent::AppletsUpdated(update)) => {
                         if update.session_id == client_session_id {
-                            let _ = client_event_tx.send(ServerEvent::AppletState {
+                            send_client_event_best_effort(&client_event_tx, ServerEvent::AppletState {
                                 session_id: update.session_id,
                                 snapshot: update.snapshot,
-                            });
+                            }, "client_lifecycle: AppletState");
                         }
                     }
                     Ok(BusEvent::CompactionFinished) => {
@@ -940,8 +934,7 @@ pub(super) async fn handle_client(
                         // it may be held by a tool awaiting this very socket.
                         let ours = agent.try_lock().is_ok_and(|agent| agent.is_compacting_now());
                         if ours {
-                            let _ = client_event_tx
-                                .send(ServerEvent::CompactionStarted { trigger, pre_tokens });
+                            send_client_event_best_effort(&client_event_tx, ServerEvent::CompactionStarted { trigger, pre_tokens }, "client_lifecycle: CompactionStarted");
                         }
                     }
                     _ => {}
@@ -1008,21 +1001,21 @@ pub(super) async fn handle_client(
         }
         if let Request::ForceStopTurn { id, session_id } = &request {
             if !client_subscribed || session_id != &client_session_id {
-                let _ = client_event_tx.send(ServerEvent::Error {
+                send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                     id: *id,
                     message: "Force stop requires the matching attached session".into(),
                     retry_after_secs: None,
-                });
+                }, "client_lifecycle: Error");
             } else if !crate::turn_cancel_registry::force_stop(session_id)
                 && crate::turn_cancel_registry::has_active_turn(session_id)
             {
-                let _ = client_event_tx.send(ServerEvent::Error {
+                send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                     id: *id,
                     message: "This active turn does not support force stop".into(),
                     retry_after_secs: None,
-                });
+                }, "client_lifecycle: Error");
             } else {
-                let _ = client_event_tx.send(ServerEvent::Ack { id: *id });
+                send_client_event_best_effort(&client_event_tx, ServerEvent::Ack { id: *id }, "client_lifecycle: Ack");
             }
             continue;
         }
@@ -1097,9 +1090,9 @@ pub(super) async fn handle_client(
             match activity {
                 Ok(activity) => Some(activity),
                 Err(error) => {
-                    let _ = client_event_tx.send(ServerEvent::Error {
+                    send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                         id: request.id(), message: error.to_string(), retry_after_secs: None,
-                    });
+                    }, "client_lifecycle: Error");
                     continue;
                 }
             }
@@ -1239,7 +1232,7 @@ pub(super) async fn handle_client(
                             locked.invalidate_sdk_tools();
                             // Queue the acknowledgment before releasing the session lock,
                             // so a second client cannot start a new-policy call first.
-                            let _ = client_event_tx.send(ServerEvent::Ack { id });
+                            send_client_event_best_effort(&client_event_tx, ServerEvent::Ack { id }, "client_lifecycle: Ack");
                             continue;
                         }
                         result.map(|()| ServerEvent::Ack { id })
@@ -1284,11 +1277,11 @@ pub(super) async fn handle_client(
                             &global, Some(std::path::Path::new(&working_dir)),
                         );
                         if effective.get(name).is_none() {
-                            let _ = client_event_tx.send(ServerEvent::QueuedPromptRejected {
+                            send_client_event_best_effort(&client_event_tx, ServerEvent::QueuedPromptRejected {
                                 id,
                                 reason: crate::protocol::QueuedPromptRejection::UnknownSkill,
                                 skill: name.to_owned(),
-                            });
+                            }, "client_lifecycle: QueuedPromptRejected");
                             continue;
                         }
                     }
@@ -1329,15 +1322,15 @@ pub(super) async fn handle_client(
             match result {
                 Ok(()) => {
                     if let Some((prompt_id, outcome)) = removal {
-                        let _ = client_event_tx.send(ServerEvent::QueuedPromptRemoved { id, prompt_id, outcome });
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::QueuedPromptRemoved { id, prompt_id, outcome }, "client_lifecycle: QueuedPromptRemoved");
                     } else {
-                        let _ = client_event_tx.send(ServerEvent::Ack { id });
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::Ack { id }, "client_lifecycle: Ack");
                     }
                     if let Some((client_id, content)) = already_delivered {
-                        let _ = client_event_tx.send(ServerEvent::SoftInterruptInjected { content, display_role: None, point: "already_delivered".into(), tools_skipped: None, client_ids: vec![client_id] });
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::SoftInterruptInjected { content, display_role: None, point: "already_delivered".into(), tools_skipped: None, client_ids: vec![client_id] }, "client_lifecycle: SoftInterruptInjected");
                     }
                     if let Ok(prompts) = session_control.queued_user_prompts() {
-                        let _ = client_event_tx.send(ServerEvent::QueuedPrompts { id, prompts: prompts.clone() });
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::QueuedPrompts { id, prompts: prompts.clone() }, "client_lifecycle: QueuedPrompts");
                         super::state::fanout_peer_client_event(&swarm_members, &client_session_id, &client_connection_id, ServerEvent::QueuedPrompts { id: 0, prompts }).await;
                     }
                     if interrupt {
@@ -1361,7 +1354,7 @@ pub(super) async fn handle_client(
                         dispatch_queued_prompt!(false);
                     }
                 }
-                Err(error) => { let _ = client_event_tx.send(ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None }); }
+                Err(error) => { send_client_event_best_effort(&client_event_tx, ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None }, "client_lifecycle: Error"); }
             }
             continue;
         }
@@ -1437,9 +1430,9 @@ pub(super) async fn handle_client(
         if let Err(message) = resolve_target_subscribe_working_dir(
             &mut request, &sessions, &swarm_members,
         ).await {
-            let _ = client_event_tx.send(ServerEvent::Error {
+            send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                 id: request.id(), message, retry_after_secs: None,
-            });
+            }, "client_lifecycle: Error");
             continue;
         }
         let sdk_session_before_request = client_session_id.clone();
@@ -1463,7 +1456,7 @@ pub(super) async fn handle_client(
                 if !no_reply
                     && crate::tool::interactive::answer_with_text(&client_session_id, &content, images.clone())
                 {
-                    let _ = client_event_tx.send(ServerEvent::Done { id });
+                    send_client_event_best_effort(&client_event_tx, ServerEvent::Done { id }, "client_lifecycle: Done");
                     continue;
                 }
                 if no_reply {
@@ -1578,13 +1571,13 @@ pub(super) async fn handle_client(
                 client_id,
             } => {
                 if crate::tool::interactive::answer_with_text(&client_session_id, &content, images.clone()) {
-                    let _ = client_event_tx.send(ServerEvent::SoftInterruptInjected {
+                    send_client_event_best_effort(&client_event_tx, ServerEvent::SoftInterruptInjected {
                         content,
                         display_role: None,
                         point: "ask_answer".to_string(),
                         tools_skipped: None,
                         client_ids: client_id.into_iter().collect(),
-                    });
+                    }, "client_lifecycle: SoftInterruptInjected");
                     continue;
                 }
                 // A soft interrupt has somewhere to go only while a turn is
@@ -1649,13 +1642,13 @@ pub(super) async fn handle_client(
                     // until this pickup event. Publish only after acceptance:
                     // a rejected prompt must remain recoverable by its caller.
                     if processing_message_id == Some(id) {
-                        let _ = client_event_tx.send(ServerEvent::SoftInterruptInjected {
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::SoftInterruptInjected {
                             content: accepted_content,
                             display_role: None,
                             point: "turn_start".to_string(),
                             tools_skipped: None,
                             client_ids: client_id.into_iter().collect(),
-                        });
+                        }, "client_lifecycle: SoftInterruptInjected");
                     }
                     if !client_is_processing {
                         let mut connections = client_connections.write().await;
@@ -1677,11 +1670,11 @@ pub(super) async fn handle_client(
             }
 
             Request::CancelSoftInterrupts { id, .. } if session_control.needs_queue_refresh() => {
-                let _ = client_event_tx.send(ServerEvent::Error {
+                send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                     id,
                     message: "Session queue unavailable while reconnecting".into(),
                     retry_after_secs: None,
-                });
+                }, "client_lifecycle: Error");
             }
             Request::CancelSoftInterrupts { id, client_ids } => match client_ids {
                 Some(client_ids) => cancel_soft_interrupts_by_id(
@@ -1749,11 +1742,11 @@ pub(super) async fn handle_client(
 
             Request::Rewind { id, message_index } => {
                 if client_is_processing {
-                    let _ = client_event_tx.send(ServerEvent::Error {
+                    send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                         id,
                         message: "Cannot rewind while a turn is processing.".to_string(),
                         retry_after_secs: None,
-                    });
+                    }, "client_lifecycle: Error");
                     continue;
                 }
 
@@ -1801,22 +1794,22 @@ pub(super) async fn handle_client(
                         .await;
                     }
                     Err(message) => {
-                        let _ = client_event_tx.send(ServerEvent::Error {
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                             id,
                             message,
                             retry_after_secs: None,
-                        });
+                        }, "client_lifecycle: Error");
                     }
                 }
             }
 
             Request::RewindUndo { id } => {
                 if client_is_processing {
-                    let _ = client_event_tx.send(ServerEvent::Error {
+                    send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                         id,
                         message: "Cannot undo rewind while a turn is processing.".to_string(),
                         retry_after_secs: None,
-                    });
+                    }, "client_lifecycle: Error");
                     continue;
                 }
 
@@ -1863,11 +1856,11 @@ pub(super) async fn handle_client(
                         .await;
                     }
                     Err(message) => {
-                        let _ = client_event_tx.send(ServerEvent::Error {
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                             id,
                             message,
                             retry_after_secs: None,
-                        });
+                        }, "client_lifecycle: Error");
                     }
                 }
             }
@@ -1895,7 +1888,7 @@ pub(super) async fn handle_client(
             Request::GetTodos { .. } => {
                 let event = super::client_writer::todos_snapshot_event(&client_session_id);
                 last_pushed_todos = todos_event_key(&event);
-                let _ = client_event_tx.send(event);
+                send_client_event_best_effort(&client_event_tx, event, "client_lifecycle: forwarded event");
             }
 
             Request::GetState { id } => {
@@ -1938,11 +1931,11 @@ pub(super) async fn handle_client(
                         subscribe_working_dir.as_deref(), requested_continuation,
                     )
                 {
-                    let _ = client_event_tx.send(ServerEvent::Error {
+                    send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                         id,
                         message,
                         retry_after_secs: None,
-                    });
+                    }, "client_lifecycle: Error");
                     continue;
                 }
                 // Overrides are creation-only. In particular, never apply one to
@@ -2247,11 +2240,11 @@ pub(super) async fn handle_client(
             }
 
             Request::DebugCommand { id, .. } => {
-                let _ = client_event_tx.send(ServerEvent::Error {
+                send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                     id,
                     message: "debug_command is only supported on the debug socket".to_string(),
                     retry_after_secs: None,
-                });
+                }, "client_lifecycle: Error");
             }
 
             Request::UpgradeRuntime { id, candidate } => {
@@ -2452,11 +2445,11 @@ pub(super) async fn handle_client(
                 if let Some(target_agent) = target_agent {
                     handle_set_context_cap(id, session_id, max_context_tokens, &target_agent, &client_event_tx).await;
                 } else {
-                    let _ = client_event_tx.send(ServerEvent::Error {
+                    send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                         id,
                         message: "target session not found".to_string(),
                         retry_after_secs: None,
-                    });
+                    }, "client_lifecycle: Error");
                 }
             }
 
@@ -2474,11 +2467,11 @@ pub(super) async fn handle_client(
                         handle_set_reasoning_effort(id, effort, is_swarm_worker, &target_agent, &target_session_id, SessionControlHandle::provider_for_session(&target_session_id), &client_event_tx)
                             .await;
                     } else {
-                        let _ = client_event_tx.send(ServerEvent::ReasoningEffortChanged {
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::ReasoningEffortChanged {
                             id,
                             effort: None,
                             error: Some(format!("target session not found: {target_session_id}")),
-                        });
+                        }, "client_lifecycle: ReasoningEffortChanged");
                     }
                 } else {
                     handle_set_reasoning_effort(id, effort, is_swarm_worker, &agent, &client_session_id, session_control.provider_handle(), &client_event_tx).await;
@@ -2499,14 +2492,14 @@ pub(super) async fn handle_client(
 
             Request::SetSessionEnv { id, env } => {
                 let result = super::set_live_session_env(&sessions, &client_session_id, env).await;
-                let _ = client_event_tx.send(match result {
+                send_client_event_best_effort(&client_event_tx, match result {
                     Ok(()) => ServerEvent::Done { id },
                     Err(_) => ServerEvent::Error {
                         id,
                         message: "Invalid session environment".to_string(),
                         retry_after_secs: None,
                     },
-                });
+                }, "client_lifecycle: reply result");
             }
 
             Request::SetSessionSaved { id, saved, label } => {
@@ -2536,14 +2529,14 @@ pub(super) async fn handle_client(
                 // Wait for the lock instead of rejecting: this runs at an idle
                 // turn boundary and must not fail spuriously.
                 let result = agent.lock().await.persist_session_now();
-                let _ = client_event_tx.send(match result {
+                send_client_event_best_effort(&client_event_tx, match result {
                     Ok(()) => ServerEvent::Done { id },
                     Err(error) => ServerEvent::Error {
                         id,
                         message: crate::util::format_error_chain(&error),
                         retry_after_secs: None,
                     },
-                });
+                }, "client_lifecycle: reply result");
             }
 
             Request::RenameSession { id, title } => {
@@ -2681,7 +2674,7 @@ pub(super) async fn handle_client(
 
             // Agent-to-agent communication
             Request::AgentRegister { id, .. } => {
-                let _ = client_event_tx.send(ServerEvent::Done { id });
+                send_client_event_best_effort(&client_event_tx, ServerEvent::Done { id }, "client_lifecycle: Done");
             }
 
             Request::StdinResponse {
@@ -2732,7 +2725,7 @@ pub(super) async fn handle_client(
             }
 
             Request::AgentCapabilities { id } => {
-                let _ = client_event_tx.send(ServerEvent::Done { id });
+                send_client_event_best_effort(&client_event_tx, ServerEvent::Done { id }, "client_lifecycle: Done");
             }
 
             Request::RuntimeCommand { id, command, args } => {
@@ -2768,9 +2761,9 @@ pub(super) async fn handle_client(
                     let parsed: jcode_harness_api::RuntimeCommand = serde_json::from_value(serde_json::json!(command))?;
                     if parsed == jcode_harness_api::RuntimeCommand::ServerReload {
                         if !args.is_empty() { anyhow::bail!("Server reload accepts no arguments. Forced reload is intentionally not exposed."); }
-                        let _ = client_event_tx.send(ServerEvent::RuntimeCommandResult { id, command: command.clone(),
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::RuntimeCommandResult { id, command: command.clone(),
                             data: serde_json::json!({"requested": true, "force": false}),
-                            message: "Requested a state-preserving server upgrade if a newer binary is available. Watch reload progress for completion.".into() });
+                            message: "Requested a state-preserving server upgrade if a newer binary is available. Watch reload progress for completion.".into() }, "client_lifecycle: RuntimeCommandResult");
                         handle_reload(id, false, &client_session_id, &agent, &swarm_members, &client_event_tx).await;
                         return Ok((serde_json::Value::Null, String::new()));
                     }
@@ -2833,7 +2826,7 @@ pub(super) async fn handle_client(
                                 .and_then(|value| value.as_str().map(str::to_owned))
                         } else { None };
                         if next_prompt.is_some() { data["started"] = serde_json::json!(true); }
-                        let _ = client_event_tx.send(ServerEvent::RuntimeCommandResult { id, command, data, message });
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::RuntimeCommandResult { id, command, data, message }, "client_lifecycle: RuntimeCommandResult");
                         if let Some(content) = next_prompt {
                             // The execute closure has returned and dropped its
                             // Agent guard. Reuse the actual message lifecycle:
@@ -2876,11 +2869,11 @@ pub(super) async fn handle_client(
                         }
                     },
                     Ok(_) => {},
-                    Err(error) => { let _ = client_event_tx.send(ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None }); },
+                    Err(error) => { send_client_event_best_effort(&client_event_tx, ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None }, "client_lifecycle: Error"); },
                 }
             }
             Request::AgentContext { id } => {
-                let _ = client_event_tx.send(ServerEvent::Done { id });
+                send_client_event_best_effort(&client_event_tx, ServerEvent::Done { id }, "client_lifecycle: Done");
             }
 
             Request::NotifySession {
@@ -2973,11 +2966,11 @@ pub(super) async fn handle_client(
             }
                     }
                     Err(error) => {
-                        let _ = client_event_tx.send(ServerEvent::Error {
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                             id,
                             message: error.to_string(),
                             retry_after_secs: None,
-                        });
+                        }, "client_lifecycle: Error");
                     }
                 }
             }
@@ -3459,12 +3452,12 @@ pub(super) async fn handle_client(
                     &swarm_coordinators,
                 )
                 .await;
-                let _ = client_event_tx.send(ServerEvent::CommReportResponse {
+                send_client_event_best_effort(&client_event_tx, ServerEvent::CommReportResponse {
                     id,
                     status,
                     message: "Report recorded and delivered to the coordinator when applicable."
                         .to_string(),
-                });
+                }, "client_lifecycle: CommReportResponse");
             }
 
             Request::CommPlanStatus {

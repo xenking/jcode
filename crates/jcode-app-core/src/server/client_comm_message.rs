@@ -4,6 +4,7 @@ use super::{
     fanout_session_event, queue_soft_interrupt_for_session, record_swarm_event, truncate_detail,
 };
 use crate::protocol::{CommDeliveryMode, NotificationType, ServerEvent};
+use crate::server::client_writer::send_client_event_best_effort;
 use jcode_agent_runtime::SoftInterruptSource;
 use jcode_swarm_core::ChannelIndex;
 use std::collections::{HashMap, HashSet};
@@ -234,11 +235,15 @@ pub(super) async fn handle_comm_message(
                     Ok(resolved) if resolved == swarm_id => None,
                     Ok(resolved) => Some(resolved),
                     Err(err) => {
-                        let _ = client_event_tx.send(ServerEvent::Error {
-                            id,
-                            message: format!("Cross-swarm DM failed: {err}"),
-                            retry_after_secs: None,
-                        });
+                        send_client_event_best_effort(
+                            client_event_tx,
+                            ServerEvent::Error {
+                                id,
+                                message: format!("Cross-swarm DM failed: {err}"),
+                                retry_after_secs: None,
+                            },
+                            "client_comm_message: Error",
+                        );
                         return;
                     }
                 }
@@ -246,11 +251,11 @@ pub(super) async fn handle_comm_message(
             _ => None,
         };
         if cross_swarm_id.is_some() && channel.is_some() && to_session.is_none() {
-            let _ = client_event_tx.send(ServerEvent::Error {
+            send_client_event_best_effort(client_event_tx, ServerEvent::Error {
                 id,
                 message: "Channels are swarm-local. Cross-swarm messages are DMs: pass to_swarm with an optional to_session.".to_string(),
                 retry_after_secs: None,
-            });
+            }, "client_comm_message: Error");
             return;
         }
         // Root (user-driven) sessions may DM any live session on the daemon by
@@ -292,11 +297,15 @@ pub(super) async fn handle_comm_message(
                             }
                             Ok(_) => None,
                             Err(err) => {
-                                let _ = client_event_tx.send(ServerEvent::Error {
-                                    id,
-                                    message: err.to_string(),
-                                    retry_after_secs: None,
-                                });
+                                send_client_event_best_effort(
+                                    client_event_tx,
+                                    ServerEvent::Error {
+                                        id,
+                                        message: err.to_string(),
+                                        retry_after_secs: None,
+                                    },
+                                    "client_comm_message: Error",
+                                );
                                 return;
                             }
                         }
@@ -363,11 +372,15 @@ pub(super) async fn handle_comm_message(
                             ("elapsed_ms", started.elapsed().as_millis().to_string()),
                         ],
                     );
-                    let _ = client_event_tx.send(ServerEvent::Error {
-                        id,
-                        message: message.to_string(),
-                        retry_after_secs: None,
-                    });
+                    send_client_event_best_effort(
+                        client_event_tx,
+                        ServerEvent::Error {
+                            id,
+                            message: message.to_string(),
+                            retry_after_secs: None,
+                        },
+                        "client_comm_message: Error",
+                    );
                     return;
                 }
             }
@@ -389,27 +402,35 @@ pub(super) async fn handle_comm_message(
                     ("elapsed_ms", started.elapsed().as_millis().to_string()),
                 ],
             );
-            let _ = client_event_tx.send(ServerEvent::Error {
-                id,
-                message: format!(
-                    "DM failed: session '{}' not in swarm '{}'",
-                    target,
-                    super::swarm_labels::swarm_display_name(&delivery_swarm_id)
-                ),
-                retry_after_secs: None,
-            });
+            send_client_event_best_effort(
+                client_event_tx,
+                ServerEvent::Error {
+                    id,
+                    message: format!(
+                        "DM failed: session '{}' not in swarm '{}'",
+                        target,
+                        super::swarm_labels::swarm_display_name(&delivery_swarm_id)
+                    ),
+                    retry_after_secs: None,
+                },
+                "client_comm_message: Error",
+            );
             return;
         }
 
         if cross_swarm_id.is_some() && resolved_to_session.is_none() {
-            let _ = client_event_tx.send(ServerEvent::Error {
-                id,
-                message: format!(
-                    "Cross-swarm DM failed: swarm '{}' has no reachable members.",
-                    super::swarm_labels::swarm_display_name(&delivery_swarm_id)
-                ),
-                retry_after_secs: None,
-            });
+            send_client_event_best_effort(
+                client_event_tx,
+                ServerEvent::Error {
+                    id,
+                    message: format!(
+                        "Cross-swarm DM failed: swarm '{}' has no reachable members.",
+                        super::swarm_labels::swarm_display_name(&delivery_swarm_id)
+                    ),
+                    retry_after_secs: None,
+                },
+                "client_comm_message: Error",
+            );
             return;
         }
         let sender_swarm_display = super::swarm_labels::swarm_display_name(&swarm_id);
@@ -434,11 +455,11 @@ pub(super) async fn handle_comm_message(
                 .get(&from_session)
                 .is_some_and(|member| member.role == "coordinator");
             if !sender_is_coordinator {
-                let _ = client_event_tx.send(ServerEvent::Error {
+                send_client_event_best_effort(client_event_tx, ServerEvent::Error {
                     id,
                     message: "message needs a target: pass to_session (the agent to message) or channel. Only the coordinator can message everyone without one.".to_string(),
                     retry_after_secs: None,
-                });
+                }, "client_comm_message: Error");
                 return;
             }
         }
@@ -655,7 +676,11 @@ pub(super) async fn handle_comm_message(
             .await;
         }
 
-        let _ = client_event_tx.send(ServerEvent::Done { id });
+        send_client_event_best_effort(
+            client_event_tx,
+            ServerEvent::Done { id },
+            "client_comm_message: Done",
+        );
         crate::logging::event_info(
             "COMM_LIFECYCLE",
             vec![
@@ -681,10 +706,15 @@ pub(super) async fn handle_comm_message(
                 ("elapsed_ms", started.elapsed().as_millis().to_string()),
             ],
         );
-        let _ = client_event_tx.send(ServerEvent::Error {
-            id,
-            message: "Not in a swarm. Use a git repository to enable swarm features.".to_string(),
-            retry_after_secs: None,
-        });
+        send_client_event_best_effort(
+            client_event_tx,
+            ServerEvent::Error {
+                id,
+                message: "Not in a swarm. Use a git repository to enable swarm features."
+                    .to_string(),
+                retry_after_secs: None,
+            },
+            "client_comm_message: Error",
+        );
     }
 }

@@ -2,6 +2,7 @@
 
 use super::{SwarmEvent, SwarmEventType, SwarmMember, fanout_session_event, record_swarm_event};
 use crate::protocol::{AgentInfo, ServerEvent};
+use crate::server::client_writer::send_client_event_best_effort;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast, mpsc};
@@ -21,7 +22,11 @@ pub(super) async fn handle_comm_list_swarms(
         Some(swarm_coordinators),
     )
     .await;
-    let _ = client_event_tx.send(ServerEvent::CommSwarms { id, swarms });
+    send_client_event_best_effort(
+        client_event_tx,
+        ServerEvent::CommSwarms { id, swarms },
+        "client_comm_swarms: CommSwarms",
+    );
 }
 
 #[expect(
@@ -48,11 +53,15 @@ pub(super) async fn handle_comm_set_swarm_label(
         }
     };
     let Some(swarm_id) = swarm_id else {
-        let _ = client_event_tx.send(ServerEvent::Error {
-            id,
-            message: "Not in a swarm, so there is no swarm to label.".to_string(),
-            retry_after_secs: None,
-        });
+        send_client_event_best_effort(
+            client_event_tx,
+            ServerEvent::Error {
+                id,
+                message: "Not in a swarm, so there is no swarm to label.".to_string(),
+                retry_after_secs: None,
+            },
+            "client_comm_swarms: Error",
+        );
         return;
     };
     let known: HashSet<String> = swarms_by_id.read().await.keys().cloned().collect();
@@ -85,11 +94,15 @@ pub(super) async fn handle_comm_set_swarm_label(
             .await;
         }
         Err(err) => {
-            let _ = client_event_tx.send(ServerEvent::Error {
-                id,
-                message: err.to_string(),
-                retry_after_secs: None,
-            });
+            send_client_event_best_effort(
+                client_event_tx,
+                ServerEvent::Error {
+                    id,
+                    message: err.to_string(),
+                    retry_after_secs: None,
+                },
+                "client_comm_swarms: Error",
+            );
         }
     }
 }
@@ -130,10 +143,14 @@ pub(super) async fn handle_comm_list_sessions(
             .cmp(&b.friendly_name)
             .then_with(|| a.session_id.cmp(&b.session_id))
     });
-    let _ = client_event_tx.send(ServerEvent::CommMembers {
-        id,
-        members: sessions,
-    });
+    send_client_event_best_effort(
+        client_event_tx,
+        ServerEvent::CommMembers {
+            id,
+            members: sessions,
+        },
+        "client_comm_swarms: CommMembers",
+    );
 }
 
 /// Raise another live session: tell its attached clients (Desktop selects the
@@ -153,11 +170,15 @@ pub(super) async fn handle_comm_focus_session(
     {
         Ok(target) => target,
         Err(err) => {
-            let _ = client_event_tx.send(ServerEvent::Error {
-                id,
-                message: err.to_string(),
-                retry_after_secs: None,
-            });
+            send_client_event_best_effort(
+                client_event_tx,
+                ServerEvent::Error {
+                    id,
+                    message: err.to_string(),
+                    retry_after_secs: None,
+                },
+                "client_comm_swarms: Error",
+            );
             return;
         }
     };
@@ -192,5 +213,9 @@ pub(super) async fn handle_comm_focus_session(
             "focus requested for {target_id} but no client is attached; only the focus hook ran"
         ));
     }
-    let _ = client_event_tx.send(ServerEvent::Done { id });
+    send_client_event_best_effort(
+        client_event_tx,
+        ServerEvent::Done { id },
+        "client_comm_swarms: Done",
+    );
 }

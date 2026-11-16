@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::client_writer::send_client_event_best_effort;
 
 /// Retire finished turns before interpreting a request against client-local state.
 /// The task publishes completion before its terminal event, and never waits on
@@ -306,11 +307,15 @@ pub(super) async fn start_processing_message(
             "Rejecting new message for session {} because server reload is starting",
             client_session_id
         ));
-        let _ = client_event_tx.send(ServerEvent::Reloading {
-            new_socket: None,
-            reload_id: crate::server::recent_reload_state(std::time::Duration::from_secs(30))
-                .map(|state| state.request_id),
-        });
+        send_client_event_best_effort(
+            client_event_tx,
+            ServerEvent::Reloading {
+                new_socket: None,
+                reload_id: crate::server::recent_reload_state(std::time::Duration::from_secs(30))
+                    .map(|state| state.request_id),
+            },
+            "client_processing: Reloading",
+        );
         return;
     }
 
@@ -338,7 +343,11 @@ pub(super) async fn start_processing_message(
                 "Suppressing delivered reload recovery replay session={} id={}",
                 client_session_id, id
             ));
-            let _ = client_event_tx.send(ServerEvent::Done { id });
+            send_client_event_best_effort(
+                client_event_tx,
+                ServerEvent::Done { id },
+                "client_processing: Done",
+            );
             return;
         }
         // After a reload the client combines a queued user follow-up with the
@@ -357,11 +366,15 @@ pub(super) async fn start_processing_message(
     if (!content.trim().is_empty() || !images.is_empty())
         && let Err(error) = super::super::reload_recovery::supersede(client_session_id)
     {
-        let _ = client_event_tx.send(ServerEvent::Error {
-            id,
-            message: format!("Cannot supersede recovery: {error}"),
-            retry_after_secs: None,
-        });
+        send_client_event_best_effort(
+            client_event_tx,
+            ServerEvent::Error {
+                id,
+                message: format!("Cannot supersede recovery: {error}"),
+                retry_after_secs: None,
+            },
+            "client_processing: Error",
+        );
         return;
     }
     if super::super::reload_recovery::wait_for_retired_attempt(client_session_id).await
@@ -370,32 +383,44 @@ pub(super) async fn start_processing_message(
         *state.client_is_processing = false;
     }
     if *state.client_is_processing {
-        let _ = client_event_tx.send(ServerEvent::Error {
-            id,
-            message: "Already processing a message".into(),
-            retry_after_secs: None,
-        });
+        send_client_event_best_effort(
+            client_event_tx,
+            ServerEvent::Error {
+                id,
+                message: "Already processing a message".into(),
+                retry_after_secs: None,
+            },
+            "client_processing: Error",
+        );
         return;
     }
     let mut agent_guard = agent.lock().await;
     let turn_lease = match agent_guard.claim_server_turn() {
         Ok(lease) => lease,
         Err(error) => {
-            let _ = client_event_tx.send(ServerEvent::Error {
-                id,
-                message: error.to_string(),
-                retry_after_secs: None,
-            });
+            send_client_event_best_effort(
+                client_event_tx,
+                ServerEvent::Error {
+                    id,
+                    message: error.to_string(),
+                    retry_after_secs: None,
+                },
+                "client_processing: Error",
+            );
             return;
         }
     };
     if !agent_guard.set_remote_active_skill(active_skill.clone()) {
         let skill_name = active_skill.as_deref().unwrap_or_default();
-        let _ = client_event_tx.send(ServerEvent::Error {
-            id,
-            message: crate::skill::unknown_skill_message(skill_name),
-            retry_after_secs: None,
-        });
+        send_client_event_best_effort(
+            client_event_tx,
+            ServerEvent::Error {
+                id,
+                message: crate::skill::unknown_skill_message(skill_name),
+                retry_after_secs: None,
+            },
+            "client_processing: Error",
+        );
         return;
     }
 
@@ -782,8 +807,16 @@ pub(super) async fn cancel_processing_message(
             .await;
         }
         if let Some(message_id) = state.message_id.take() {
-            let _ = client_event_tx.send(scoped(ServerEvent::Interrupted));
-            let _ = client_event_tx.send(scoped(ServerEvent::Done { id: message_id }));
+            send_client_event_best_effort(
+                client_event_tx,
+                scoped(ServerEvent::Interrupted),
+                "client_processing: Interrupted",
+            );
+            send_client_event_best_effort(
+                client_event_tx,
+                scoped(ServerEvent::Done { id: message_id }),
+                "client_processing: Done",
+            );
             crate::logging::info(&format!(
                 "SERVER_INTERRUPT_CANCEL_EVENTS_EMITTED request_id={:?} session={} interrupted=true done_id={} total_ms={}",
                 request_id,
@@ -814,9 +847,17 @@ pub(super) async fn cancel_processing_message(
                 request_id, session_label
             ));
             *state.client_is_processing = false;
-            let _ = client_event_tx.send(scoped(ServerEvent::Interrupted));
+            send_client_event_best_effort(
+                client_event_tx,
+                scoped(ServerEvent::Interrupted),
+                "client_processing: Interrupted",
+            );
             if let Some(message_id) = state.message_id.take() {
-                let _ = client_event_tx.send(scoped(ServerEvent::Done { id: message_id }));
+                send_client_event_best_effort(
+                    client_event_tx,
+                    scoped(ServerEvent::Done { id: message_id }),
+                    "client_processing: Done",
+                );
             }
             return;
         }
@@ -896,11 +937,15 @@ pub(super) fn cancel_soft_interrupts_by_id(
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     let (cancelled, not_queued) = session_control.cancel_soft_interrupts_by_id(client_ids);
-    let _ = client_event_tx.send(ServerEvent::SoftInterruptsCancelled {
-        id,
-        cancelled,
-        not_queued,
-    });
+    send_client_event_best_effort(
+        client_event_tx,
+        ServerEvent::SoftInterruptsCancelled {
+            id,
+            cancelled,
+            not_queued,
+        },
+        "client_processing: SoftInterruptsCancelled",
+    );
 }
 
 pub(super) fn clear_soft_interrupts(
@@ -951,12 +996,16 @@ pub(super) fn move_tool_to_background(
         Some(tool) => (Some(tool.call_id), Some(tool.name)),
         None => (None, None),
     };
-    let _ = client_event_tx.send(ServerEvent::BackgroundToolResult {
-        id,
-        moved,
-        tool_call_id,
-        tool_name,
-    });
+    send_client_event_best_effort(
+        client_event_tx,
+        ServerEvent::BackgroundToolResult {
+            id,
+            moved,
+            tool_call_id,
+            tool_name,
+        },
+        "client_processing: BackgroundToolResult",
+    );
     crate::logging::info(&format!(
         "SERVER_BACKGROUND_TOOL_RESULT id={} session={} signalled={} ack_queued={}",
         id, session_control.session_id, signalled, ack_queued
