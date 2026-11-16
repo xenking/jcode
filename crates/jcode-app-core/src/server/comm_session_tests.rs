@@ -173,6 +173,33 @@ async fn resolve_spawn_working_dir_falls_back_to_member_dir() {
     );
 }
 
+#[tokio::test]
+async fn resolve_spawn_working_dir_uses_persisted_session_when_agent_busy() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::TempDir::new().unwrap();
+    crate::env::set_var("JCODE_HOME", home.path());
+    let mut session = crate::session::Session::create_with_id("cwd_busy".into(), None, None);
+    session.working_dir = Some("/tmp/persisted-project".into());
+    session.save_prepared().unwrap();
+    let agent = test_agent_with_working_dir("cwd_busy", "/tmp/persisted-project").await;
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
+    sessions
+        .register_new("cwd_busy".into(), Arc::clone(&agent))
+        .await
+        .unwrap();
+    let _held = agent.lock().await;
+    let members = Arc::new(RwLock::new(HashMap::new()));
+    assert_eq!(
+        resolve_spawn_working_dir(None, "cwd_busy", &sessions, &members)
+            .await
+            .as_deref(),
+        Some("/tmp/persisted-project")
+    );
+    crate::env::remove_var("JCODE_HOME");
+}
+
 #[test]
 fn stop_permission_defaults_to_sessions_spawned_by_requesting_coordinator() {
     let (mut owned, _owned_rx) = member("worker-owned", Some("swarm-1"), "agent");

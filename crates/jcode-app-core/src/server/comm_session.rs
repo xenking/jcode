@@ -132,13 +132,19 @@ async fn resolve_spawn_working_dir(
         return Some(agent_dir);
     }
 
-    swarm_members
+    let member_dir = swarm_members
         .read()
         .await
         .get(req_session_id)
         .and_then(|member| member.working_dir.as_ref())
         .map(|dir| dir.display().to_string())
-        .filter(|dir| !dir.trim().is_empty())
+        .filter(|dir| !dir.trim().is_empty());
+    member_dir.or_else(|| {
+        Session::load_startup_stub(req_session_id)
+            .ok()
+            .and_then(|session| session.working_dir)
+            .filter(|dir| !dir.trim().is_empty())
+    })
 }
 
 /// Launch a headed window for `session_id`, exporting the given spawn context

@@ -791,7 +791,8 @@ impl Tool for CommunicateTool {
                     "description": "Spawn lane phase; defaults to active phase."
                 },
                 "working_dir": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Spawn working directory override. Omit to inherit the requesting session's working directory."
                 },
                 "prompt": {
                     "type": "string",
