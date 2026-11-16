@@ -638,7 +638,16 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
         wait_for_socket(&legacy, "jcode runtime", options.start_timeout)?;
     }
     progress("starting harness API bridge...");
-    let target = jcode_build_support::runtime_generation::pin_path(bridge).ok();
+    // A PATH-only companion has no local file to pin yet. Once a concrete
+    // image exists, identity failures must abort rather than launch it unpinned.
+    let target = if bridge.is_file() {
+        Some(
+            jcode_build_support::runtime_generation::pin_path(bridge)
+                .map_err(|error| Error::new(ErrorKind::LaunchFailed, error.to_string()))?,
+        )
+    } else {
+        None
+    };
     spawn_detached_at(bridge, bridge_args, target.as_ref(), Some((&api, &legacy))).map_err(
         |error| {
             Error::new(
