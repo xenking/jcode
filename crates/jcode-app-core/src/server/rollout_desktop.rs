@@ -272,23 +272,76 @@ fn retire_foreign_bridges(
 }
 
 #[cfg(any(test, target_os = "macos"))]
-fn timeout_fallback(
-    timed_out: bool,
-    mut no_clients: impl FnMut() -> Result<bool>,
-    wait: impl FnOnce(),
-    signal: impl FnOnce() -> Result<()>,
-) -> Result<()> {
-    if !timed_out {
-        bail!("retirement did not time out; no signal sent");
-    }
-    if !no_clients()? {
-        bail!("bridge has clients or its sockets are inconclusive; no signal sent");
-    }
-    wait();
-    if !no_clients()? {
-        bail!("bridge gained clients or its sockets are inconclusive; no signal sent");
-    }
-    signal()
+trait BridgeRetirement {
+    fn request(&mut self) -> jcode_sdk::Result<()>;
+    fn alive(&mut self) -> Result<bool>;
+    fn no_clients(&mut self) -> Result<bool>;
+    fn signal(&mut self, signal: i32) -> Result<()>;
+    fn wait(&mut self, duration: Duration);
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn retire_with_fallback(process: &BridgeProcess, ops: &mut impl BridgeRetirement) -> Result<()> {
+    let result = (|| -> Result<()> {
+        match ops.request() {
+            Ok(())
+            | Err(jcode_sdk::Error {
+                kind: jcode_sdk::ErrorKind::Timeout,
+                ..
+            }) => {
+                for _ in 0..50 {
+                    if !ops.alive()? {
+                        return Ok(());
+                    }
+                    ops.wait(Duration::from_millis(100));
+                }
+            }
+            Err(error) if error.kind == jcode_sdk::ErrorKind::UnsupportedCapability => {}
+            Err(error) => return Err(error.into()),
+        }
+        if !ops.alive()? {
+            return Ok(());
+        }
+        if !ops.no_clients()? {
+            bail!("bridge has clients or socket inspection is inconclusive");
+        }
+        ops.wait(Duration::from_secs(1));
+        if !ops.alive()? {
+            return Ok(());
+        }
+        if !ops.no_clients()? {
+            bail!("bridge gained clients or socket inspection is inconclusive");
+        }
+        ops.signal(libc::SIGTERM)?;
+        for _ in 0..50 {
+            if !ops.alive()? {
+                return Ok(());
+            }
+            ops.wait(Duration::from_millis(100));
+        }
+        if !ops.alive()? {
+            return Ok(());
+        }
+        if !ops.no_clients()? {
+            bail!("bridge has clients or socket inspection is inconclusive after SIGTERM");
+        }
+        ops.signal(libc::SIGKILL)?;
+        for _ in 0..50 {
+            if !ops.alive()? {
+                return Ok(());
+            }
+            ops.wait(Duration::from_millis(100));
+        }
+        bail!("bridge did not exit after SIGKILL")
+    })();
+    result.with_context(|| {
+        format!(
+            "foreign bridge {} ({}); inspect clients with `lsof -nP -a -p {} -U`",
+            process.pid,
+            process.executable.display(),
+            process.pid
+        )
+    })
 }
 
 fn process_start(pid: u32) -> Result<String> {
@@ -296,38 +349,62 @@ fn process_start(pid: u32) -> Result<String> {
 }
 
 #[cfg(target_os = "macos")]
-fn timeout_retire_fallback(process: &BridgeProcess, socket: &Path, start: &str) -> Result<()> {
-    timeout_fallback(
-        true,
-        || {
-            if process_start(process.pid)? != start
-                || !executable_of(process.pid)
-                    .is_some_and(|exe| same_path(&exe, &process.executable))
-            {
-                bail!("bridge process identity changed");
-            }
-            let peer = std::os::unix::net::UnixStream::connect(socket)?;
-            if jcode_build_support::runtime_generation::socket_peer_pid(&peer) != Some(process.pid)
-            {
-                bail!("bridge listener peer changed");
-            }
-            drop(peer);
-            let sockets = unix_sockets(process.pid)?;
-            Ok(only_listener(&sockets, socket))
-        },
-        || std::thread::sleep(Duration::from_secs(1)),
-        || {
-            if unsafe { libc::kill(process.pid as i32, libc::SIGTERM) } != 0 {
-                return Err(std::io::Error::last_os_error().into());
-            }
-            Ok(())
-        },
-    )
+struct SystemBridgeRetirement<'a> {
+    process: &'a BridgeProcess,
+    socket: &'a Path,
+    start: String,
 }
 
-#[cfg(not(target_os = "macos"))]
-fn timeout_retire_fallback(_process: &BridgeProcess, _socket: &Path, _start: &str) -> Result<()> {
-    bail!("safe client detection is unavailable on this platform")
+#[cfg(target_os = "macos")]
+impl BridgeRetirement for SystemBridgeRetirement<'_> {
+    fn request(&mut self) -> jcode_sdk::Result<()> {
+        jcode_sdk::bundle_bridge::retire_bridge_if_pid(
+            self.socket,
+            self.process.pid,
+            Duration::from_secs(1),
+        )
+    }
+    fn alive(&mut self) -> Result<bool> {
+        let rc = unsafe { libc::kill(self.process.pid as i32, 0) };
+        if rc != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(false);
+            }
+            return Err(error.into());
+        }
+        if process_start(self.process.pid)? != self.start
+            || !executable_of(self.process.pid)
+                .is_some_and(|exe| same_path(&exe, &self.process.executable))
+        {
+            bail!("bridge process identity changed");
+        }
+        Ok(true)
+    }
+    fn no_clients(&mut self) -> Result<bool> {
+        if !self.alive()? {
+            bail!("bridge exited during inspection");
+        }
+        let peer = std::os::unix::net::UnixStream::connect(self.socket)?;
+        if jcode_build_support::runtime_generation::socket_peer_pid(&peer) != Some(self.process.pid)
+        {
+            bail!("bridge listener peer changed");
+        }
+        drop(peer);
+        Ok(only_listener(&unix_sockets(self.process.pid)?, self.socket))
+    }
+    fn signal(&mut self, signal: i32) -> Result<()> {
+        if !self.alive()? {
+            return Ok(());
+        }
+        if unsafe { libc::kill(self.process.pid as i32, signal) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
+    fn wait(&mut self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
 }
 
 fn user_bridge_processes(home: &Path, runtime: &Path) -> Result<Vec<BridgeProcess>> {
@@ -342,8 +419,12 @@ fn user_bridge_processes(home: &Path, runtime: &Path) -> Result<Vec<BridgeProces
         }
         let executable = executable_of(pid)
             .with_context(|| format!("cannot inspect bridge {pid} executable"))?;
-        let observed = unix_sockets(pid)
-            .with_context(|| format!("cannot inspect bridge {pid} Unix sockets"))?;
+        let observed = unix_sockets(pid).with_context(|| {
+            format!(
+                "cannot inspect bridge {pid} ({}); inspect clients with `lsof -nP -a -p {pid} -U`",
+                executable.display()
+            )
+        })?;
         let mut sockets = observed.paths;
         sockets.sort();
         sockets.dedup();
@@ -414,39 +495,41 @@ pub(super) async fn retire_stale_bridges(app: &Path, target_app: &Path) -> Resul
         let (home, runtime) = bridge_context(&app)?;
         let processes = user_bridge_processes(&home, &runtime)?;
         retire_foreign_bridges(&processes, &target, |process| {
-            if process.sockets.is_empty() {
-                crate::logging::info(&format!(
-                    "rollout: bridge {} (parent {}) has no observable Unix endpoint; no signal sent",
-                    process.pid, process.parent_pid
-                ));
-            }
-            let start = process_start(process.pid);
-            for socket in &process.sockets {
-                match jcode_sdk::bundle_bridge::retire_bridge_if_pid(
-                    socket,
+            crate::logging::info(&format!(
+                "rollout: retiring foreign bridge {} (parent {})",
+                process.pid, process.parent_pid
+            ));
+            let context = || {
+                format!(
+                    "foreign bridge {} ({}); inspect clients with `lsof -nP -a -p {} -U`",
                     process.pid,
-                    Duration::from_secs(1),
-                ) {
-                    Ok(()) => break,
-                    Err(error) => {
-                        crate::logging::info(&format!(
-                            "rollout: bridge {} (parent {}) retirement at {} failed: {error}",
-                            process.pid, process.parent_pid, socket.display()
-                        ));
-                        if error.kind == jcode_sdk::ErrorKind::Timeout
-                            && process.sockets.len() == 1
-                            && let Ok(start) = &start
-                        {
-                            if let Err(failure) = timeout_retire_fallback(process, socket, start) {
-                                crate::logging::info(&format!("rollout: bridge {} fallback refused: {failure:#}", process.pid));
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                }
+                    process.executable.display(),
+                    process.pid
+                )
+            };
+            let [socket] = process.sockets.as_slice() else {
+                bail!("{}: cannot identify a single listener", context());
+            };
+            #[cfg(target_os = "macos")]
+            {
+                let start = process_start(process.pid).with_context(context)?;
+                retire_with_fallback(
+                    process,
+                    &mut SystemBridgeRetirement {
+                        process,
+                        socket,
+                        start,
+                    },
+                )
             }
-            Ok(())
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = socket;
+                bail!(
+                    "{}: safe client detection is unavailable on this platform",
+                    context()
+                )
+            }
         })
     })
     .await?
@@ -645,6 +728,121 @@ fn executable_of(pid: u32) -> Option<PathBuf> {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+    struct FakeBridge {
+        snapshots: std::collections::VecDeque<Option<bool>>,
+        signals: Vec<(i32, Duration)>,
+        elapsed: Duration,
+        alive: bool,
+        exit_on_term: bool,
+        request: Option<jcode_sdk::ErrorKind>,
+    }
+
+    impl BridgeRetirement for FakeBridge {
+        fn request(&mut self) -> jcode_sdk::Result<()> {
+            match self.request.clone() {
+                Some(kind) => Err(jcode_sdk::Error::new(kind, "fixture")),
+                None => Ok(()),
+            }
+        }
+        fn alive(&mut self) -> Result<bool> {
+            Ok(self.alive)
+        }
+        fn no_clients(&mut self) -> Result<bool> {
+            self.snapshots
+                .pop_front()
+                .expect("missing lsof snapshot")
+                .context("lsof failed")
+        }
+        fn signal(&mut self, signal: i32) -> Result<()> {
+            self.signals.push((signal, self.elapsed));
+            if signal == libc::SIGKILL || self.exit_on_term {
+                self.alive = false;
+            }
+            Ok(())
+        }
+        fn wait(&mut self, duration: Duration) {
+            self.elapsed += duration;
+        }
+    }
+
+    fn fake_bridge(snapshots: &[Option<bool>], exit_on_term: bool) -> (BridgeProcess, FakeBridge) {
+        (
+            BridgeProcess {
+                pid: 77,
+                parent_pid: 1,
+                executable: "/fixture/old/jcode".into(),
+                sockets: vec!["/fixture/run/jcode-api.sock".into()],
+                devices: vec![],
+            },
+            FakeBridge {
+                snapshots: snapshots.iter().copied().collect(),
+                signals: vec![],
+                elapsed: Duration::ZERO,
+                alive: true,
+                exit_on_term,
+                request: Some(jcode_sdk::ErrorKind::UnsupportedCapability),
+            },
+        )
+    }
+
+    #[test]
+    fn legacy_clientless_exits_and_survivor_is_killed_after_five_seconds() {
+        for exit_on_term in [true, false] {
+            let (process, mut fake) =
+                fake_bridge(&[Some(true), Some(true), Some(true)], exit_on_term);
+            retire_foreign_bridges(&[process], Path::new("/fixture/new/jcode"), |bridge| {
+                retire_with_fallback(bridge, &mut fake)
+            })
+            .unwrap();
+            assert_eq!(fake.signals[0], (libc::SIGTERM, Duration::from_secs(1)));
+            if exit_on_term {
+                assert_eq!(fake.signals.len(), 1);
+            } else {
+                assert_eq!(
+                    fake.signals,
+                    vec![
+                        (libc::SIGTERM, Duration::from_secs(1)),
+                        (libc::SIGKILL, Duration::from_secs(6))
+                    ]
+                );
+            }
+            assert!(!fake.alive);
+        }
+    }
+
+    #[test]
+    fn legacy_clients_or_inconclusive_lsof_block_rollout_and_report_command() {
+        for snapshots in [
+            &[Some(false)][..],
+            &[None][..],
+            &[Some(true), Some(false)][..],
+            &[Some(true), None][..],
+        ] {
+            let (process, mut fake) = fake_bridge(snapshots, false);
+            let error =
+                retire_foreign_bridges(&[process], Path::new("/fixture/new/jcode"), |bridge| {
+                    retire_with_fallback(bridge, &mut fake)
+                })
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("77")
+                    && error.contains("/fixture/old/jcode")
+                    && error.contains("lsof -nP -a -p 77 -U"),
+                "{error}"
+            );
+            assert!(fake.signals.is_empty());
+        }
+    }
+
+    #[test]
+    fn retirement_api_waits_before_fallback_and_rechecks_before_kill() {
+        let (process, mut fake) = fake_bridge(&[Some(true), Some(true), Some(false)], false);
+        fake.request = None;
+        assert!(retire_with_fallback(&process, &mut fake).is_err());
+        assert_eq!(fake.signals, vec![(libc::SIGTERM, Duration::from_secs(6))]);
+        assert_eq!(fake.elapsed, Duration::from_secs(11));
+    }
     #[test]
     fn orphaned_backup_bridge_is_not_overlooked_during_swap() {
         let app = PathBuf::from("/fixture/Applications/Jcode.app");
@@ -705,60 +903,6 @@ mod tests {
         })
         .unwrap();
         server.join().unwrap();
-    }
-
-    #[test]
-    fn timed_out_legacy_bridge_without_clients_is_signalled() {
-        let mut samples = 0;
-        let mut signalled = false;
-        timeout_fallback(
-            true,
-            || {
-                samples += 1;
-                Ok(true)
-            },
-            || {},
-            || {
-                signalled = true;
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert_eq!(samples, 2);
-        assert!(signalled);
-    }
-
-    #[test]
-    fn timed_out_legacy_bridge_with_clients_is_not_signalled() {
-        for snapshots in [[false, false], [true, false]] {
-            let mut samples = snapshots.into_iter();
-            let mut signalled = false;
-            let result = timeout_fallback(
-                true,
-                || Ok(samples.next().unwrap()),
-                || {},
-                || {
-                    signalled = true;
-                    Ok(())
-                },
-            );
-            assert!(result.is_err());
-            assert!(!signalled);
-        }
-        let mut signalled = false;
-        assert!(
-            timeout_fallback(
-                false,
-                || Ok(true),
-                || {},
-                || {
-                    signalled = true;
-                    Ok(())
-                }
-            )
-            .is_err()
-        );
-        assert!(!signalled);
     }
 
     #[test]
