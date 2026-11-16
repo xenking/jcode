@@ -108,13 +108,17 @@ fn send_modes_reload_reconciles_unconfirmed_prompt_by_id() {
         client_id: "persisted-id".into(),
         content: "only once".into(),
         images: vec![],
+        active_skill: None,
         mode: crate::protocol::QueuedPromptMode::AfterYield,
     };
     let mut app = create_test_app();
     app.pending_queue_requests.push((41, Some(prompt.clone())));
     app.save_input_for_reload(&session_id);
     let mut restored = App::new_for_remote(Some(session_id));
-    assert_eq!(restored.uncertain_queue_prompts.as_slice(), std::slice::from_ref(&prompt));
+    assert_eq!(
+        restored.uncertain_queue_prompts.as_slice(),
+        std::slice::from_ref(&prompt)
+    );
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
@@ -142,6 +146,7 @@ fn send_modes_unconfirmed_missing_snapshot_restores_draft_without_resending() {
             client_id: "maybe-consumed".into(),
             content: "check me".into(),
             images: vec![],
+            active_skill: None,
             mode: crate::protocol::QueuedPromptMode::Steer,
         });
     app.queue_snapshot_request_id = Some(5);
@@ -175,6 +180,7 @@ fn send_modes_server_rejection_preserves_active_turn_and_draft() {
             client_id: "rejected".into(),
             content: "recover me".into(),
             images: vec![],
+            active_skill: None,
             mode: crate::protocol::QueuedPromptMode::Steer,
         }),
     ));
@@ -239,6 +245,7 @@ fn send_modes_snapshot_does_not_duplicate_legacy_pending_rows() {
                 client_id: crate::tui::backend::soft_interrupt_client_id(41),
                 content: "legacy".into(),
                 images: vec![],
+                active_skill: None,
                 mode: crate::protocol::QueuedPromptMode::Steer,
             }],
         },

@@ -43,7 +43,7 @@ pub enum QueuedPromptRemovalOutcome {
     NotFound,
 }
 
-/// A daemon-owned queued user prompt.
+/// A daemon-owned queued user prompt, including its optional active skill.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QueuedPrompt {
     pub client_id: String,
@@ -51,6 +51,8 @@ pub struct QueuedPrompt {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<(String, String)>,
     pub mode: QueuedPromptMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_skill: Option<String>,
 }
 
 /// Curated request surface. Internally-tagged on `"req"`.
@@ -197,6 +199,8 @@ pub enum ApiRequest {
         mode: QueuedPromptMode,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_reminder: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_skill: Option<String>,
     },
     SetQueuedPromptMode {
         session_id: String,

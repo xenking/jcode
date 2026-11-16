@@ -1075,6 +1075,29 @@ fn queued_prompt_bridge_forwards_and_correlates_controls_and_snapshots() {
 }
 
 #[test]
+fn queued_skill_requires_capability_and_preserves_typed_rejection() {
+    let mut state = BridgeState {
+        session_id: Some("s1".into()),
+        queued_prompts_supported: true,
+        ..Default::default()
+    };
+    let request = json!({"req":"queue_prompt","id":41,"session_id":"s1","client_id":"p1","content":"hello","mode":"after_yield","active_skill":"missing"});
+    assert!(matches!(
+        &state.api_request_to_legacy(&request)[..],
+        [Outbound::Reply(_)]
+    ));
+    state.queued_prompt_active_skill_supported = true;
+    let out = state.api_request_to_legacy(&request);
+    let legacy = legacy_out(&out);
+    assert_eq!(legacy["active_skill"], "missing");
+    let id = legacy["id"].as_u64().unwrap();
+    let result = state.legacy_event_to_api(&json!({"type":"queued_prompt_rejected","id":id,"reason":"unknown_skill","skill":"missing"}));
+    assert!(
+        matches!(&result[..], [frame] if frame.reply_to == Some(41) && matches!(&frame.event, ApiEvent::Error { code: ErrorCode::UnknownSkill, .. }))
+    );
+}
+
+#[test]
 fn batch_interrupt_requires_capability_and_forwards_ids() {
     let mut state = BridgeState {
         session_id: Some("s1".into()),

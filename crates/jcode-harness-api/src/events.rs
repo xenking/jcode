@@ -627,6 +627,7 @@ pub enum ErrorCode {
     UnsupportedVersion,
     UnknownRequest,
     UnknownSession,
+    UnknownSkill,
     InvalidRequest,
     Internal,
 }

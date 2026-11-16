@@ -1054,6 +1054,26 @@ impl JcodeClient {
         prompt: jcode_harness_api::QueuedPrompt,
         system_reminder: Option<&str>,
     ) -> Result<()> {
+        self.queue_prompt_with_options(session_id, prompt, system_reminder)
+    }
+
+    /// Queue a prompt with a skill resolved and validated by the daemon.
+    pub fn queue_prompt_with_skill(
+        &self,
+        session_id: &str,
+        mut prompt: jcode_harness_api::QueuedPrompt,
+        active_skill: Option<&str>,
+    ) -> Result<()> {
+        prompt.active_skill = active_skill.map(str::to_owned);
+        self.queue_prompt_with_options(session_id, prompt, None)
+    }
+
+    fn queue_prompt_with_options(
+        &self,
+        session_id: &str,
+        prompt: jcode_harness_api::QueuedPrompt,
+        system_reminder: Option<&str>,
+    ) -> Result<()> {
         self.request_ok(ApiRequest::QueuePrompt {
             session_id: session_id.into(),
             client_id: prompt.client_id,
@@ -1061,6 +1081,7 @@ impl JcodeClient {
             images: prompt.images,
             mode: prompt.mode,
             system_reminder: system_reminder.map(str::to_owned),
+            active_skill: prompt.active_skill,
         })
         .map(drop)
     }

@@ -759,7 +759,7 @@ export class JcodeClient extends EventEmitter {
     await this.requestOk({
       req: "queue_prompt", session_id: sessionId, client_id: prompt.client_id,
       content: prompt.content, images: prompt.images?.length ? prompt.images : undefined,
-      mode: prompt.mode, system_reminder: systemReminder,
+      mode: prompt.mode, system_reminder: systemReminder, active_skill: prompt.active_skill,
     });
   }
 

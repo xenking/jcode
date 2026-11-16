@@ -48,6 +48,13 @@ pub enum QueuedPromptRemovalOutcome {
     NotFound,
 }
 
+/// Why the daemon rejected a queued prompt before accepting it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedPromptRejection {
+    UnknownSkill,
+}
+
 /// One user-authored message still owned by the daemon queue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueuedPrompt {
@@ -56,6 +63,8 @@ pub struct QueuedPrompt {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<(String, String)>,
     pub mode: QueuedPromptMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_skill: Option<String>,
 }
 
 /// Client request to server
@@ -117,6 +126,8 @@ pub enum Request {
         mode: QueuedPromptMode,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_reminder: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_skill: Option<String>,
     },
 
     /// Change the delivery phase of a prompt that is still queued.

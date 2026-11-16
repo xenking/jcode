@@ -82,6 +82,7 @@ impl ErrorKind {
                 jcode_harness_api::ErrorCode::UnsupportedVersion => "unsupported_version",
                 jcode_harness_api::ErrorCode::UnknownRequest => "unknown_request",
                 jcode_harness_api::ErrorCode::UnknownSession => "unknown_session",
+                jcode_harness_api::ErrorCode::UnknownSkill => "unknown_skill",
                 jcode_harness_api::ErrorCode::InvalidRequest => "invalid_request",
                 jcode_harness_api::ErrorCode::Internal => "internal",
             },

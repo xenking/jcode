@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 14;
+export const API_VERSION_MINOR = 15;
 
 export type RuntimeCommand = "mode" | "skills" | "context" | "info" | "cache" | "memory" | "swarm" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout";
 
@@ -18,6 +18,7 @@ export type ErrorCode =
   | "unsupported_version"
   | "unknown_request"
   | "unknown_session"
+  | "unknown_skill"
   | "invalid_request"
   | "internal";
 
@@ -189,6 +190,7 @@ export interface QueuedPrompt {
   content: string;
   images?: ImageAttachment[];
   mode: QueuedPromptMode;
+  active_skill?: string;
 }
 
 /** A tool definition exposed to the model. */
@@ -238,7 +240,7 @@ export type ApiRequest =
       /** Opaque id echoed in `soft_interrupt_injected` and accepted by a filtered cancel. */
       client_id?: string;
     }
-  | { req: "queue_prompt"; session_id: string; client_id: string; content: string; images?: ImageAttachment[]; mode: QueuedPromptMode; system_reminder?: string }
+  | { req: "queue_prompt"; session_id: string; client_id: string; content: string; images?: ImageAttachment[]; mode: QueuedPromptMode; system_reminder?: string; active_skill?: string }
   | { req: "set_queued_prompt_mode"; session_id: string; client_id: string; mode: QueuedPromptMode }
   | { req: "interrupt_queued_prompt"; session_id: string; client_id: string }
   | { req: "interrupt_queued_prompts"; session_id: string; ids: string[] }
@@ -355,7 +357,7 @@ export interface SidePanelSnapshot {
 }
 
 export type ApiEvent =
-  | { ev: "hello_ok"; version: number; server: string; capabilities?: string[] }
+  | { ev: "hello_ok"; version: number; server: string; capabilities?: string[]; runtime_identity?: { pid: number; binary_path: string; git_hash: string; version_label?: string; reload_id?: string; generation: number } }
   | { ev: "ok" }
   | { ev: "runtime_command_result"; session_id: string; command: RuntimeCommand; data: unknown; message: string }
   | { ev: "error"; code: ErrorCode; message: string }
@@ -416,6 +418,7 @@ export type ApiEvent =
       message: string;
     }
   | { ev: "turn_stopped"; session_id: string; reason: TurnStopReason; message: string; provider_stop_reason?: string }
+  | { ev: "peer_user_message"; session_id: string; content: string }
   /** `pending_soft_interrupts`: queued messages this turn never saw (only when nonzero). */
   | { ev: "turn_done"; session_id: string; pending_soft_interrupts?: number }
   /**
@@ -613,6 +616,7 @@ export const KNOWN_EVENT_KINDS = [
   "token_usage",
   "context_cap_changed",
   "kv_cache_miss",
+  "peer_user_message",
   "turn_done",
   "soft_interrupt_injected",
   "soft_interrupts_cancelled",

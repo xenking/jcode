@@ -149,6 +149,7 @@ pub struct BridgeState {
     pub queued_prompts_supported: bool,
     pub queued_prompt_batch_interrupt_supported: bool,
     pub queued_prompt_mutations_supported: bool,
+    pub queued_prompt_active_skill_supported: bool,
     pub bounded_history_supported: bool,
     pub soft_interrupt_ids_supported: bool,
     /// Leftover queue size reported just before the current turn's `done`.
@@ -778,6 +779,16 @@ impl BridgeState {
                             message: "daemon does not advertise queued_prompts".into(),
                         },
                     ))];
+                }
+                if req == "queue_prompt"
+                    && request["active_skill"].is_string()
+                    && !self.queued_prompt_active_skill_supported
+                {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "daemon does not advertise queued_prompt_active_skill",
+                    );
                 }
                 if req == "interrupt_queued_prompts"
                     && !self.queued_prompt_batch_interrupt_supported
@@ -3149,6 +3160,25 @@ impl BridgeState {
                     }));
                 }
                 frames
+            }
+            "queued_prompt_rejected" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let Some(api_id) = self.take_simple(id, SimpleKind::QueueControl) else {
+                    return vec![];
+                };
+                let skill = event["skill"].as_str().unwrap_or("");
+                let code = if event["reason"] == "unknown_skill" {
+                    ErrorCode::UnknownSkill
+                } else {
+                    ErrorCode::InvalidRequest
+                };
+                vec![ServerFrame::reply(
+                    api_id,
+                    ApiEvent::Error {
+                        code,
+                        message: format!("Skill '{skill}' is not installed on the server"),
+                    },
+                )]
             }
             "queued_prompts" => {
                 let id = event["id"].as_u64().unwrap_or(0);

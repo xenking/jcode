@@ -415,8 +415,8 @@ pub use wire::{
     AccountUsageSnapshot, AccountUsageWindow, DaemonIdentity, Request, ServerEvent, TurnIdentity,
 };
 pub use wire::{
-    QueuedPrompt, QueuedPromptMode, QueuedPromptRemovalOutcome, SessionToolConfig,
-    SessionToolDefinition,
+    QueuedPrompt, QueuedPromptMode, QueuedPromptRejection, QueuedPromptRemovalOutcome,
+    SessionToolConfig, SessionToolDefinition,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

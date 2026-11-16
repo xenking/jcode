@@ -34,6 +34,7 @@ pub(in crate::tui::app) async fn send_queued_prompt(
         client_id: crate::id::new_id("prompt"),
         content: content.clone(),
         images: images.clone(),
+        active_skill: None,
         mode,
     };
     match remote.queue_prompt(prompt.clone()).await {

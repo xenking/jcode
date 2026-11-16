@@ -595,6 +595,7 @@ try {
 | `protocol` | The peer returned a malformed or discontinuous history or image fragment. | Reconnect and report the client and server versions if it recurs. |
 | `unknown_request` | The bridge does not implement that request tag. | Upgrade jcode, or stop using that newer SDK method with this bridge. |
 | `unknown_session` | The session no longer exists, is not available to this instance, or the connection is not attached where attachment is required. | Refresh `listSessions()`, use the right private/shared instance, and attach when the method requires it. |
+| `unknown_skill` | The queued skill name is not installed for the session. | Install the skill or choose an available name before retrying. |
 | `invalid_request` | Arguments or current state violate the operation's contract (for example an invalid model, retry count, path, or compaction request). | Correct the caller input. The message contains the rejected constraint; do not blindly retry. |
 | `invalid_option` | A client-only option is outside its allowed range. | Correct the named option, such as `discoveryIntervalMs` or `maxBufferedEvents`. |
 | `unsupported` | The runtime does not advertise `session_tools`. | Update both the jcode daemon and API bridge before using tool controls. |

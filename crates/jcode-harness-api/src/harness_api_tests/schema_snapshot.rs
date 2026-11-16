@@ -3,6 +3,19 @@
 use crate::*;
 
 #[test]
+fn queued_skill_wire_is_optional_and_round_trips() {
+    let legacy = serde_json::json!({"req":"queue_prompt", "session_id":"s", "client_id":"p", "content":"hello", "mode":"after_yield"});
+    let parsed: ApiRequest = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), legacy);
+    let mut modern = legacy;
+    modern["active_skill"] = "verification".into();
+    let parsed: ApiRequest = serde_json::from_value(modern.clone()).unwrap();
+    assert_eq!(serde_json::to_value(parsed).unwrap(), modern);
+    let prompt: QueuedPrompt = serde_json::from_value(serde_json::json!({"client_id":"p", "content":"hello", "mode":"after_yield", "active_skill":"verification"})).unwrap();
+    assert_eq!(prompt.active_skill.as_deref(), Some("verification"));
+}
+
+#[test]
 fn queued_prompt_mutations_wire_shape() {
     let remove = ClientFrame::new(
         7,

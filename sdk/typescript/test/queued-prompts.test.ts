@@ -5,7 +5,7 @@ import { startMockHarness } from "./mock-harness.ts";
 
 test("queue methods retain modes, images, reminder and correlated replies", async (t) => {
   const requests: any[] = [];
-  const prompt = { client_id: "q1", content: "look", images: [["image/png", "YWJj"]] as [string, string][], mode: "after_yield" as const };
+  const prompt = { client_id: "q1", content: "look", images: [["image/png", "YWJj"]] as [string, string][], mode: "after_yield" as const, active_skill: "verification" };
   const server = await startMockHarness({
     onRequest(request, send) {
       requests.push(request);
@@ -13,6 +13,8 @@ test("queue methods retain modes, images, reminder and correlated replies", asyn
         send({ v: 1, reply_to: request.id, ev: "queued_prompts", session_id: "s1", prompts: [prompt] });
       } else if (request.req === "remove_queued_prompt") {
         send({ v: 1, reply_to: request.id, ev: "queued_prompt_removed", session_id: "s1", prompt_id: request.prompt_id, outcome: "in_flight" });
+      } else if (request.req === "queue_prompt" && request.active_skill === "missing") {
+        send({ v: 1, reply_to: request.id, ev: "error", code: "unknown_skill", message: "missing skill" });
       } else if (request.req === "interrupt_queued_prompt") {
         send({ v: 1, reply_to: request.id, ev: "error", code: "not_found", message: "missing" });
       } else {
@@ -31,6 +33,7 @@ test("queue methods retain modes, images, reminder and correlated replies", asyn
   await client.reorderQueuedPrompts("s1", "panel", ["q2", "q1"]);
   await client.interruptQueuedPrompts("s1", ["q2", "q1"]);
   await assert.rejects(() => client.interruptQueuedPrompt("s1", "missing"), (error: unknown) => error instanceof HarnessError && error.code === "not_found");
+  await assert.rejects(() => client.queuePrompt("s1", { client_id: "q3", content: "test", mode: "steer", active_skill: "missing" }), (error: unknown) => error instanceof HarnessError && error.code === "unknown_skill");
   const wire = requests.map(({ v, id, ...request }) => request);
   assert.deepEqual(wire, [
     { req: "queue_prompt", session_id: "s1", ...prompt, system_reminder: "hidden" },
@@ -41,6 +44,7 @@ test("queue methods retain modes, images, reminder and correlated replies", asyn
     { req: "reorder_queued_prompts", session_id: "s1", client_id: "panel", order: ["q2", "q1"] },
     { req: "interrupt_queued_prompts", session_id: "s1", ids: ["q2", "q1"] },
     { req: "interrupt_queued_prompt", session_id: "s1", client_id: "missing" },
+    { req: "queue_prompt", session_id: "s1", client_id: "q3", content: "test", mode: "steer", active_skill: "missing" },
   ]);
   assert.ok(isKnownEvent({ ev: "queued_prompts", session_id: "s1", prompts: [prompt] }));
 });

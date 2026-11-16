@@ -1444,6 +1444,7 @@ impl RemoteConnection {
             images: prompt.images,
             mode: prompt.mode,
             system_reminder: None,
+            active_skill: prompt.active_skill,
         })
         .await?;
         Ok(id)

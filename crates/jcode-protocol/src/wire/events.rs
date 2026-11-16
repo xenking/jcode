@@ -438,6 +438,14 @@ pub enum ServerEvent {
         proposal_key: String,
     },
 
+    /// Rejection before a queued prompt is persisted.
+    #[serde(rename = "queued_prompt_rejected")]
+    QueuedPromptRejected {
+        id: u64,
+        reason: QueuedPromptRejection,
+        skill: String,
+    },
+
     /// Snapshot of user-authored prompts still owned by the session queue.
     #[serde(rename = "queued_prompts")]
     QueuedPrompts { id: u64, prompts: Vec<QueuedPrompt> },

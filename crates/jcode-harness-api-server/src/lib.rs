@@ -403,6 +403,9 @@ where
     let queued_prompt_mutations_supported = daemon_caps
         .iter()
         .any(|cap| cap == "queued_prompt_mutations_v1");
+    let queued_prompt_active_skill_supported = daemon_caps
+        .iter()
+        .any(|cap| cap == "queued_prompt_active_skill");
     let bounded_history_supported = daemon_caps.iter().any(|cap| cap == "bounded_history_v1");
     let ask_response_images_supported = daemon_caps.iter().any(|cap| cap == "ask_response_images");
     let hello_ok = ServerFrame::reply(
@@ -443,6 +446,10 @@ where
             .chain(
                 queued_prompt_mutations_supported.then(|| "queued_prompt_mutations_v1".to_string()),
             )
+            .chain(
+                queued_prompt_active_skill_supported
+                    .then(|| "queued_prompt_active_skill".to_string()),
+            )
             .chain(bounded_history_supported.then(|| "bounded_history_v1".to_string()))
             .chain(ask_response_images_supported.then(|| "ask_response_images".to_string()))
             .chain(
@@ -471,6 +478,7 @@ where
     state.queued_prompts_supported = queued_prompts_supported;
     state.queued_prompt_batch_interrupt_supported = queued_prompt_batch_interrupt_supported;
     state.queued_prompt_mutations_supported = queued_prompt_mutations_supported;
+    state.queued_prompt_active_skill_supported = queued_prompt_active_skill_supported;
     state.bounded_history_supported = bounded_history_supported;
 
     // 3. Pump both directions in one select loop so translation state stays
