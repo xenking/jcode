@@ -193,14 +193,6 @@ impl RawClient {
         }
         anyhow::bail!("timed out waiting for {what}; saw events {seen:?}")
     }
-
-    async fn drain(&mut self, window: Duration) -> Result<()> {
-        let deadline = Instant::now() + window;
-        while Instant::now() < deadline {
-            let _ = self.next_event(Duration::from_millis(100)).await?;
-        }
-        Ok(())
-    }
 }
 
 /// A transcript big enough that 95% of the threshold is already crossed, with a
