@@ -20,6 +20,7 @@
 | Test helpers isolate persistent homes and machine hooks together, never in production builds | `python3 scripts/check_test_isolation.py` (Cargo feature graph) |
 | Header, status and info-widget measurements use display cells and shared truncation | `python3 scripts/check_tui_chrome.py` (zero scalar-width budget) |
 | Quota bar glyphs have one owner, distinct from task-progress glyphs | `python3 scripts/check_usage_bar_owner.py` (no copied builders) |
+| Every runtime slot and compatible endpoint participates in cached and forced catalog refresh | `python3 scripts/check_catalog_fanout.py` (derived slot census and shared consumer) |
 
 - **Commit and push as you go** - Make small, scoped commits and push them to
   the current branch's remote as meaningful work is completed, rather than
@@ -52,8 +53,7 @@
 - Implement both cached prefetch and explicit refresh. Explicit refresh must
   bypass fresh caches. Preserve the last good catalog on network, authentication,
   or malformed-response failures, and scope persistent caches to their endpoint.
-- Wire new providers into the shared refresh fanout and model-update publication,
-  including long-lived sessions, not only startup or login.
+- Publish model updates to long-lived sessions, not only startup or login.
 - Regression tests must discover an arbitrary future model absent from all
   fallback arrays, using the provider's actual response schema. Check picker
   routes, forced refresh with a fresh cache, and last-good behavior on failure.

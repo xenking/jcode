@@ -1,6 +1,18 @@
 //! Model catalog refresh fanout across runtime slots and compatible profiles.
 use super::*;
 
+struct CatalogTarget {
+    label: String,
+    provider: Arc<dyn Provider>,
+    required: bool,
+}
+
+fn catalog_slot<P: ?Sized>(slot: &RwLock<Option<Arc<P>>>) -> Option<Arc<P>> {
+    slot.read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
 async fn refresh_child_catalog(provider: &dyn Provider, force: bool) -> Result<()> {
     if force {
         provider.refresh_model_catalog().await.map(|_| ())
@@ -10,140 +22,89 @@ async fn refresh_child_catalog(provider: &dyn Provider, force: bool) -> Result<(
 }
 
 impl MultiProvider {
-    pub(super) async fn refresh_catalogs(&self, force: bool) -> Result<()> {
-        let anthropic = self.anthropic_provider();
-        let openai = self.openai_provider();
-        let openrouter = self.openrouter_provider();
-        let copilot = self
-            .copilot_api
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        let antigravity = self.antigravity_provider();
-        let gemini = self.gemini_provider();
-        let cursor = self.cursor_provider();
-        let bedrock = self.bedrock_provider();
-        // Compatible profiles (including Grok Build) have independent catalogs
-        // and do not occupy the OpenRouter slot.
-        let compatible_profiles: Vec<_> = self
-            .openai_compatible_profiles
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .map(|(id, provider)| (id.clone(), Arc::clone(provider)))
+    fn catalog_targets(&self) -> Vec<CatalogTarget> {
+        let active = self.active_provider();
+        let active_profile = ProviderRegistry::new(self).active_compatible_profile_id();
+        let slots = [
+            (
+                ActiveProvider::Claude,
+                "anthropic",
+                catalog_slot(&self.anthropic),
+            ),
+            (ActiveProvider::OpenAI, "openai", catalog_slot(&self.openai)),
+            (
+                ActiveProvider::OpenRouter,
+                "openrouter",
+                catalog_slot(&self.openrouter),
+            ),
+            (
+                ActiveProvider::Copilot,
+                "copilot",
+                catalog_slot(&self.copilot_api),
+            ),
+            (
+                ActiveProvider::Antigravity,
+                "antigravity",
+                catalog_slot(&self.antigravity),
+            ),
+            (ActiveProvider::Gemini, "gemini", catalog_slot(&self.gemini)),
+            (ActiveProvider::Cursor, "cursor", catalog_slot(&self.cursor)),
+            (
+                ActiveProvider::Bedrock,
+                "bedrock",
+                catalog_slot(&self.bedrock).map(|provider| provider as Arc<dyn Provider>),
+            ),
+        ];
+        let mut targets: Vec<_> = slots
+            .into_iter()
+            .filter_map(|(kind, label, provider)| {
+                provider.map(|provider| CatalogTarget {
+                    label: label.to_owned(),
+                    provider,
+                    required: kind == active
+                        && kind != ActiveProvider::Bedrock
+                        && (kind != ActiveProvider::OpenRouter || active_profile.is_none()),
+                })
+            })
             .collect();
-
-        let (
-            anthropic_result,
-            openai_result,
-            openrouter_result,
-            copilot_result,
-            antigravity_result,
-            gemini_result,
-            cursor_result,
-            bedrock_result,
-            compatible_results,
-        ) = tokio::join!(
-            async {
-                match anthropic {
-                    Some(provider) => refresh_child_catalog(provider.as_ref(), force).await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match openai {
-                    Some(provider) => refresh_child_catalog(provider.as_ref(), force).await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match openrouter {
-                    Some(provider) => refresh_child_catalog(provider.as_ref(), force).await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match copilot {
-                    Some(provider) => refresh_child_catalog(provider.as_ref(), force).await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match antigravity {
-                    Some(provider) => refresh_child_catalog(provider.as_ref(), force).await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match gemini {
-                    Some(provider) => refresh_child_catalog(provider.as_ref(), force).await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match cursor {
-                    Some(provider) => refresh_child_catalog(provider.as_ref(), force).await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match bedrock {
-                    Some(provider) => refresh_child_catalog(provider.as_ref(), force).await,
-                    None => Ok(()),
-                }
-            },
-            futures::future::join_all(compatible_profiles.into_iter().map(
-                |(id, provider)| async move {
-                    (id, refresh_child_catalog(provider.as_ref(), force).await)
-                }
-            )),
+        // Every configured compatible endpoint has an independent catalog,
+        // even when the real OpenRouter slot is empty or a different slot is active.
+        targets.extend(
+            self.openai_compatible_profiles
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .map(|(id, provider)| CatalogTarget {
+                    label: id.clone(),
+                    provider: Arc::clone(provider),
+                    required: active_profile.as_deref() == Some(id.as_str()),
+                }),
         );
+        targets
+    }
 
-        let active_provider = self.active_provider();
+    pub(super) async fn refresh_catalogs(&self, force: bool) -> Result<()> {
+        // One consumption path for both single runtime slots and endpoint maps.
+        // Adding a target cannot silently skip forced refresh or error handling.
+        let results = futures::future::join_all(self.catalog_targets().into_iter().map(
+            |target| async move {
+                let result = refresh_child_catalog(target.provider.as_ref(), force).await;
+                (target, result)
+            },
+        ))
+        .await;
         let mut errors = Vec::new();
         let mut optional_errors = Vec::new();
-        let active_profile = ProviderRegistry::new(self).active_compatible_profile_id();
-        for (id, result) in compatible_results {
+        for (target, result) in results {
             if let Err(err) = result {
-                let message = format!("{id}: {err}");
-                if active_profile.as_deref() == Some(id.as_str()) {
+                let message = format!("{}: {err}", target.label);
+                if target.required {
                     errors.push(message);
                 } else {
                     optional_errors.push(message);
                 }
             }
         }
-        for (provider_name, result) in [
-            ("anthropic", anthropic_result),
-            ("openai", openai_result),
-            ("openrouter", openrouter_result),
-            ("copilot", copilot_result),
-            ("antigravity", antigravity_result),
-            ("gemini", gemini_result),
-            ("cursor", cursor_result),
-            ("bedrock", bedrock_result),
-        ] {
-            if let Err(err) = result {
-                let is_active = (provider_name != "openrouter" || active_profile.is_none())
-                    && matches!(
-                        (active_provider, provider_name),
-                        (ActiveProvider::Claude, "anthropic" | "claude")
-                            | (ActiveProvider::OpenAI, "openai")
-                            | (ActiveProvider::OpenRouter, "openrouter")
-                            | (ActiveProvider::Copilot, "copilot")
-                            | (ActiveProvider::Antigravity, "antigravity")
-                            | (ActiveProvider::Gemini, "gemini")
-                            | (ActiveProvider::Cursor, "cursor")
-                            | (ActiveProvider::Bedrock, "bedrock")
-                    );
-                if !is_active || matches!(provider_name, "bedrock") {
-                    optional_errors.push(format!("{provider_name}: {err}"));
-                } else {
-                    errors.push(format!("{provider_name}: {err}"));
-                }
-            }
-        }
-
         if !optional_errors.is_empty() {
             crate::logging::warn(&format!(
                 "Optional model catalog refresh failed: {}",

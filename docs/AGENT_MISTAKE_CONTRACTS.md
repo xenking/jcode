@@ -124,3 +124,44 @@ The replaced copied-glyph prose is removed from AGENTS.md. Color and
 used/remaining-label prose remains, because glyph ownership alone does not
 prove every future label or color. The gate has no legacy violation allowances.
 
+## Catalog discovery integration dropping runtime slots or forced refresh
+
+The broader integration class has two corrective incidents in the window:
+`9204b3d04` (busy-session publication) and `2ad342b23` (endpoint-scoped cache).
+Five earlier corrective commits establish recurrence: `15ef6f755` (all runtime
+slots and compatible profiles), `ce353038d` (non-Grok discovery gaps),
+`0f757ede2` (forced Anthropic refresh), `812c174c3` (periodic attached refresh),
+and `602b27590` (capability forwarding). Coverage-only commits `f89e22bf7` and
+`9a370b07e` are deliberately not counted. The new enforcement covers the
+shared fanout/force boundary, not every provider's network/cache implementation
+or publication protocol, which retain their existing behavioral suites.
+
+One typed CatalogTarget list now drives the concurrent refresh and error
+handling for every runtime and compatible endpoint. There is no separate
+per-provider join/result list that can silently omit a new target. The source
+gate derives all Arc-held Provider fields from MultiProvider, including arbitrary
+future slots and endpoint maps, without a frozen provider allowlist. It checks
+the actual collection consumption and both cached/forced entry points. Mutation
+tests remove a target, introduce a future provider, bypass the collection and
+drop force at the consumer, all of which must be rejected. The existing runtime
+probe exercises all dynamic slots and independent compatible profiles; existing
+provider catalog tests retain real-response-schema/future-model coverage.
+
+| Gate | Real bad tree | Expected failure | Current tree |
+| --- | --- | --- | --- |
+| `python3 scripts/check_catalog_fanout.py` | `3ed9b4b351509d8da85e3fd9dc59e9b5ea4b1b75` (parent of `15ef6f755`) | exit 1, `MultiProvider.openai_compatible_profiles: missing catalog fanout` | exit 0 |
+
+```bash
+past="$(mktemp -d)"
+git archive 3ed9b4b351509d8da85e3fd9dc59e9b5ea4b1b75 crates/jcode-base/src/provider | tar -x -C "$past"
+python3 scripts/check_catalog_fanout.py --root "$past" # exits 1, names the actual missing map
+python3 scripts/check_catalog_fanout.py                # exits 0
+python3 scripts/test_check_catalog_fanout.py
+justrust test -p jcode-base --lib catalog_refresh_reaches_every_runtime_slot_and_compatible_profile
+```
+
+Only fully enforced fanout prose was removed. Offline-fallback, endpoint cache,
+last-good and publication rules remain: this check does not pretend to prove
+those network/session semantics. Existing ratchets were not reimplemented.
+
+

@@ -148,6 +148,13 @@ jobs:
           python3 scripts/test_check_usage_bar_owner.py
           python3 scripts/check_usage_bar_owner.py
 
+      - name: Enforce complete cached and forced catalog fanout
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          python3 scripts/test_check_catalog_fanout.py
+          python3 scripts/check_catalog_fanout.py
+
   release-automation:
     name: Release Automation
     runs-on: ubuntu-latest

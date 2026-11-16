@@ -95,6 +95,8 @@ run_gate "chrome width gate contracts" python3 scripts/test_check_tui_chrome.py
 run_gate "chrome uses display cells" python3 scripts/check_tui_chrome.py
 run_gate "usage bar owner gate contracts" python3 scripts/test_check_usage_bar_owner.py
 run_gate "usage bars have one owner" python3 scripts/check_usage_bar_owner.py
+run_gate "catalog fanout gate contracts" python3 scripts/test_check_catalog_fanout.py
+run_gate "all runtime catalogs refresh" python3 scripts/check_catalog_fanout.py
 
 # Onboarding state-space invariants. The onboarding flow is a graph, and the
 # properties that keep users unstuck (no dead ends, every failure has a recovery
