@@ -1312,6 +1312,17 @@ async fn sdk_socket_cancel_workflow(
             else {
                 unreachable!()
             };
+            let peer_ask = tokio::time::timeout(
+                Duration::from_secs(2),
+                until(&mut legacy_reader, |event| {
+                    matches!(event, ServerEvent::AskUserRequest { .. })
+                }),
+            )
+            .await
+            .expect("already-attached peer must receive ask");
+            assert!(
+                matches!(peer_ask, ServerEvent::AskUserRequest { request_id: ref peer_id, .. } if peer_id == &request_id)
+            );
             // The question is already on screen when Desktop exits. Its response
             // sender must remain owned by the session, not by this socket.
             drop(new_writer);
@@ -1343,6 +1354,15 @@ async fn sdk_socket_cancel_workflow(
                 matches!(event, ServerEvent::Done { id: 42 })
             })
             .await;
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                until(
+                    &mut legacy_reader,
+                    |event| matches!(event, ServerEvent::ToolDone { name, .. } if name == "ask"),
+                ),
+            )
+            .await
+            .expect("peer must receive completion of answered ask");
             until(&mut reopened_reader, |event| {
                 matches!(event, ServerEvent::Done { id: 2 })
             })

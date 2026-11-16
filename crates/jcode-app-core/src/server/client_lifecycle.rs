@@ -682,10 +682,11 @@ pub(super) async fn handle_client(
         tokio::spawn(async move {
             while let Some(req) = stdin_req_rx.recv().await {
                 let request_id = req.request_id.clone();
-                stdin_responses
-                    .lock()
-                    .await
-                    .insert(request_id.clone(), req.response_tx);
+                {
+                    let mut responses = stdin_responses.lock().await;
+                    responses.retain(|_, sender| !sender.is_closed());
+                    responses.insert(request_id.clone(), req.response_tx);
+                }
                 if let Some(questions) = req.ask_questions {
                     match serde_json::from_value(questions) {
                         Ok(questions) => {
@@ -1371,6 +1372,12 @@ pub(super) async fn handle_client(
                 active_skill,
                 no_reply,
             } => {
+                if !no_reply
+                    && crate::tool::interactive::answer_with_text(&client_session_id, &content, images.clone())
+                {
+                    let _ = client_event_tx.send(ServerEvent::Done { id });
+                    continue;
+                }
                 if no_reply {
                     append_context_message(
                         id,
@@ -1482,6 +1489,16 @@ pub(super) async fn handle_client(
                 urgent,
                 client_id,
             } => {
+                if crate::tool::interactive::answer_with_text(&client_session_id, &content, images.clone()) {
+                    let _ = client_event_tx.send(ServerEvent::SoftInterruptInjected {
+                        content,
+                        display_role: None,
+                        point: "ask_answer".to_string(),
+                        tools_skipped: None,
+                        client_ids: client_id.into_iter().collect(),
+                    });
+                    continue;
+                }
                 // A soft interrupt has somewhere to go only while a turn is
                 // active. When the session is idle, queueing it would strand
                 // the user's prompt until an unrelated future message starts

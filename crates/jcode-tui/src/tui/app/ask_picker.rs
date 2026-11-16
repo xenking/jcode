@@ -8,6 +8,7 @@ use crossterm::event::KeyCode;
 #[derive(Debug, Clone)]
 pub(crate) struct AskPickerState {
     pub request_id: String,
+    pub tool_call_id: String,
     pub questions: Vec<AskQuestion>,
     /// Index of the question currently shown.
     pub current: usize,
@@ -29,6 +30,7 @@ impl AskPickerState {
         let n = questions.len();
         Self {
             request_id,
+            tool_call_id: String::new(),
             questions,
             current: 0,
             cursor: 0,
@@ -277,11 +279,17 @@ mod tests {
 }
 
 impl super::App {
-    pub(super) fn open_ask_picker(&mut self, request_id: String, questions: Vec<AskQuestion>) {
+    pub(super) fn open_ask_picker(
+        &mut self,
+        request_id: String,
+        tool_call_id: String,
+        questions: Vec<AskQuestion>,
+    ) {
         if questions.is_empty() {
             return;
         }
-        let picker = AskPickerState::new(request_id, questions);
+        let mut picker = AskPickerState::new(request_id, questions);
+        picker.tool_call_id = tool_call_id;
         self.inline_interactive_state = None;
         self.set_inline_view(picker.view());
         self.ask_picker = Some(picker);

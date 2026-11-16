@@ -11,11 +11,11 @@ use tokio::sync::{mpsc, oneshot};
 
 struct PendingAsk {
     generation: u64,
-    dispatched_to: Option<u64>,
     request_id: String,
     prompt: String,
     questions: serde_json::Value,
     answer: UnboundedSender<String>,
+    closed: tokio_util::sync::CancellationToken,
 }
 
 static PENDING: LazyLock<Mutex<HashMap<String, HashMap<String, PendingAsk>>>> =
@@ -40,8 +40,13 @@ fn dispatch_ask(
     let session_id = session_id.to_owned();
     let request_id = pending.request_id.clone();
     let generation = pending.generation;
+    let closed = pending.closed.clone();
     tokio::spawn(async move {
-        let Ok(answer) = response_rx.await else {
+        let answer = tokio::select! {
+            answer = response_rx => answer,
+            _ = closed.cancelled() => return,
+        };
+        let Ok(answer) = answer else {
             return;
         };
         let mut all = PENDING.lock().unwrap_or_else(|e| e.into_inner());
@@ -55,6 +60,7 @@ fn dispatch_ask(
             return;
         }
         if let Some(pending) = requests.remove(&request_id) {
+            pending.closed.cancel();
             let _ = pending.answer.send(answer);
         }
         if requests.is_empty() {
@@ -74,35 +80,41 @@ fn register_ask(
     let generation = NEXT.fetch_add(1, Ordering::Relaxed);
     let request_id = request.request_id;
     let (answer, mut answers) = mpsc::unbounded_channel();
-    let mut pending = PendingAsk {
+    let pending = PendingAsk {
         generation,
-        dispatched_to: None,
         request_id: request_id.clone(),
         prompt: request.prompt,
         questions,
         answer,
+        closed: tokio_util::sync::CancellationToken::new(),
     };
     let mut all = PENDING.lock().unwrap_or_else(|e| e.into_inner());
-    let destination = ROUTES
+    let destinations: Vec<_> = ROUTES
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(session_id)
-        .and_then(|routes| {
+        .map(|routes| {
             routes
                 .iter()
-                .rev()
-                .find(|(_, _, target)| !target.is_closed())
-                .map(|(id, _, target)| (*id, target.clone()))
-        });
-    if let Some((id, destination)) = destination {
-        pending.dispatched_to = Some(id);
-        dispatch_ask(session_id, &pending, &destination);
-    } else {
+                .filter(|(_, _, target)| !target.is_closed())
+                .map(|(_, _, target)| target.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    if destinations.is_empty() {
         dispatch_ask(session_id, &pending, target);
+    } else {
+        for destination in destinations {
+            dispatch_ask(session_id, &pending, &destination);
+        }
     }
-    all.entry(session_id.to_owned())
+    if let Some(previous) = all
+        .entry(session_id.to_owned())
         .or_default()
-        .insert(request_id.clone(), pending);
+        .insert(request_id.clone(), pending)
+    {
+        previous.closed.cancel();
+    }
     drop(all);
     let session_id = session_id.to_owned();
     tokio::spawn(async move {
@@ -117,7 +129,9 @@ fn register_ask(
                 .get(&request_id)
                 .is_some_and(|p| p.generation == generation)
             {
-                requests.remove(&request_id);
+                if let Some(pending) = requests.remove(&request_id) {
+                    pending.closed.cancel();
+                }
             }
             if requests.is_empty() {
                 all.remove(&session_id);
@@ -165,6 +179,9 @@ pub(crate) fn attach(session_id: &str, sender: UnboundedSender<StdinInputRequest
             }
         }
     });
+    // Serialize registration with pending-ask insertion: an attachment must
+    // see each question exactly once even when it races its creation.
+    let all = PENDING.lock().unwrap_or_else(|e| e.into_inner());
     ROUTES
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -172,16 +189,9 @@ pub(crate) fn attach(session_id: &str, sender: UnboundedSender<StdinInputRequest
         .or_default()
         .push((id, route_tx, sender.clone()));
     ROUTES_CHANGED.notify_waiters();
-    if let Some(requests) = PENDING
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get_mut(session_id)
-    {
-        for pending in requests.values_mut() {
-            if pending.dispatched_to != Some(id) {
-                pending.dispatched_to = Some(id);
-                dispatch_ask(session_id, pending, &sender);
-            }
+    if let Some(requests) = all.get(session_id) {
+        for pending in requests.values() {
+            dispatch_ask(session_id, pending, &sender);
         }
     }
     Attachment {
@@ -199,6 +209,45 @@ pub(crate) fn sender(session_id: &str) -> Option<UnboundedSender<StdinInputReque
         .rev()
         .find(|(_, sender, target)| !sender.is_closed() && !target.is_closed())
         .map(|(_, sender, _)| sender.clone())
+}
+
+pub(crate) fn answer_with_text(
+    session_id: &str,
+    content: &str,
+    images: Vec<(String, String)>,
+) -> bool {
+    if content.trim().is_empty() && images.is_empty() {
+        return false;
+    }
+    let mut all = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(requests) = all.get_mut(session_id) else {
+        return false;
+    };
+    let Some(request_id) = requests
+        .values()
+        .min_by_key(|pending| pending.generation)
+        .map(|pending| pending.request_id.clone())
+    else {
+        return false;
+    };
+    let Some(pending) = requests.remove(&request_id) else {
+        return false;
+    };
+    pending.closed.cancel();
+    if requests.is_empty() {
+        all.remove(session_id);
+    }
+    let response = crate::protocol::AskResponse {
+        answers: Some(vec![crate::protocol::AskAnswer {
+            other: Some(content.to_owned()),
+            other_images: images,
+            ..Default::default()
+        }]),
+    };
+    pending
+        .answer
+        .send(serde_json::to_string(&response).expect("ask response serializes"))
+        .is_ok()
 }
 
 /// Wait without losing a concurrent attachment notification.
@@ -228,6 +277,73 @@ impl Drop for Attachment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn message_answers_pending_ask_once() {
+        let (client, mut requests) = mpsc::unbounded_channel();
+        let _attachment = attach("free-answer-test", client);
+        let (reply, response) = oneshot::channel();
+        sender("free-answer-test")
+            .unwrap()
+            .send(StdinInputRequest {
+                request_id: "ask-one".into(),
+                prompt: "one".into(),
+                is_password: false,
+                ask_questions: Some(serde_json::json!([{}])),
+                response_tx: reply,
+            })
+            .unwrap();
+        let _request = requests.recv().await.unwrap();
+        assert!(answer_with_text(
+            "free-answer-test",
+            "my decision",
+            vec![("image/png".into(), "abc".into())]
+        ));
+        assert!(!answer_with_text("free-answer-test", "second", vec![]));
+        let answer: crate::protocol::AskResponse =
+            serde_json::from_str(&response.await.unwrap()).unwrap();
+        let answer = &answer.answers.unwrap()[0];
+        assert_eq!(answer.other.as_deref(), Some("my decision"));
+        assert_eq!(answer.other_images, [("image/png".into(), "abc".into())]);
+    }
+
+    #[tokio::test]
+    async fn pending_ask_is_sent_to_every_attached_client() {
+        let (first, mut first_rx) = mpsc::unbounded_channel();
+        let (second, mut second_rx) = mpsc::unbounded_channel();
+        let _first = attach("fanout-test", first);
+        let _second = attach("fanout-test", second);
+        let (reply, response) = oneshot::channel();
+        sender("fanout-test")
+            .unwrap()
+            .send(StdinInputRequest {
+                request_id: "ask-one".into(),
+                prompt: "one".into(),
+                is_password: false,
+                ask_questions: Some(serde_json::json!([])),
+                response_tx: reply,
+            })
+            .unwrap();
+        let first_request =
+            tokio::time::timeout(std::time::Duration::from_secs(1), first_rx.recv())
+                .await
+                .expect("first client must see ask")
+                .unwrap();
+        let mut second_request =
+            tokio::time::timeout(std::time::Duration::from_secs(1), second_rx.recv())
+                .await
+                .expect("second client must see ask")
+                .unwrap();
+        first_request.response_tx.send("answer".into()).unwrap();
+        assert_eq!(response.await.unwrap(), "answer");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            second_request.response_tx.closed(),
+        )
+        .await
+        .expect("peer response must close");
+        assert!(second_request.response_tx.send("late".into()).is_err());
+    }
 
     #[tokio::test]
     async fn latest_live_attachment_wins_and_dropping_one_never_removes_the_other() {

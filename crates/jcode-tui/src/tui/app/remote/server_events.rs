@@ -684,7 +684,16 @@ fn handle_server_event_inner(
             name,
             output,
             error,
-        } => super::server_event_handlers::handle_tool_done(app, remote, id, name, output, error),
+        } => {
+            if name == "ask"
+                && app.ask_picker.as_ref().is_some_and(|picker| picker.tool_call_id == id)
+            {
+                app.ask_picker = None;
+                app.clear_inline_view();
+                app.sync_btw_card();
+            }
+            super::server_event_handlers::handle_tool_done(app, remote, id, name, output, error)
+        }
         ServerEvent::GeneratedImage {
             id,
             path,
@@ -3715,7 +3724,7 @@ fn handle_server_event_inner(
                     }
                 } else {
                     app.streaming_tool_calls.push(ToolCall {
-                        id: tool_call_id,
+                        id: tool_call_id.clone(),
                         name: "ask".into(),
                         input,
                         intent: None,
@@ -3723,7 +3732,7 @@ fn handle_server_event_inner(
                     });
                 }
             }
-            app.open_ask_picker(request_id, questions);
+            app.open_ask_picker(request_id, tool_call_id, questions);
             true
         }
         ServerEvent::StdinRequest { .. } => {

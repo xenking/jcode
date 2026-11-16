@@ -44,6 +44,11 @@ async fn declining_ask_keeps_socket_accepting_messages() {
     socket_reload_ask_workflow("decline").await;
 }
 
+#[tokio::test]
+async fn message_during_ask_answers_over_socket() {
+    socket_reload_ask_workflow("message").await;
+}
+
 async fn socket_reload_ask_workflow(mode: &str) {
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
@@ -191,6 +196,30 @@ async fn socket_reload_ask_workflow(mode: &str) {
         unreachable!()
     };
     assert_eq!(request_id, "ask-reload-call");
+    if mode == "message" {
+        writer
+            .write_all(
+                format!(
+                    "{}\n",
+                    json!({"type":"message","id":43,"content":"my free answer"})
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let answered = std::cell::Cell::new(false);
+        let reply = std::cell::Cell::new(false);
+        tokio::time::timeout(Duration::from_secs(2), until(&mut reader, |event| {
+            if matches!(event, ServerEvent::ToolDone { name, output, .. } if name == "ask" && output.contains("my free answer")) { answered.set(true); }
+            if matches!(event, ServerEvent::Done { id: 43 }) { reply.set(true); }
+            answered.get() && reply.get()
+        })).await.expect("message must resolve ask");
+        drop(writer);
+        drop(reader);
+        sessions.clear_for_test().await;
+        server_task.abort();
+        return;
+    }
     if mode == "cancel" {
         Bus::global().publish(BusEvent::CompactionStarted {
             trigger: "other-session".into(),
@@ -281,21 +310,6 @@ async fn socket_reload_ask_workflow(mode: &str) {
         matches!(event, ServerEvent::Ack { id: 41 })
     })
     .await;
-    assert_eq!(provider.0.load(Ordering::SeqCst), 0);
-    writer
-        .write_all(
-            format!(
-                "{}\n",
-                json!({"type":"message","id":43,"content":"another message"})
-            )
-            .as_bytes(),
-        )
-        .await
-        .unwrap();
-    until(&mut reader, |event| {
-        assert!(!matches!(event, ServerEvent::ToolDone { name, .. } if name == "ask"), "message cancelled the ask");
-        matches!(event, ServerEvent::Error { id: 43, message, .. } if message.contains("Already processing"))
-    }).await;
     assert_eq!(provider.0.load(Ordering::SeqCst), 0);
     writer.write_all(format!("{}\n", json!({"type":"ask_user_response","id":42,"request_id":request_id,"response":{"answers":[{"selected":["B"],"other":"custom [#image 1]","comments":{"B":"reason [#image 1]"},"other_images":[["image/png","b3RoZXI="]],"comment_images":{"B":[["image/jpeg","Y29tbWVudA=="]]}}]}})).as_bytes()).await.unwrap();
     let ack = std::cell::Cell::new(false);

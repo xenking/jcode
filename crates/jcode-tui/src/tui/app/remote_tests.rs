@@ -61,15 +61,40 @@ fn live_ask_result_preserves_questions_without_tool_input_event() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
     let questions = serde_json::from_value(serde_json::json!([
         {"question":"Which?", "options":[{"label":"A"},{"label":"B"}]}
-    ])).unwrap();
-    handle_server_event(&mut app, ServerEvent::AskUserRequest {
-        request_id: "request-not-derived-from-tool".into(), tool_call_id: "call-1".into(), questions,
-    }, &mut remote);
-    handle_server_event(&mut app, ServerEvent::ToolDone {
-        id: "call-1".into(), name: "ask".into(), output: "User answers:\n1. Which? -> B\n".into(), error: None,
-    }, &mut remote);
-    let result = app.display_messages().iter().find(|message| message.is_ask_decision()).unwrap();
-    assert_eq!(result.tool_data.as_ref().unwrap().input["questions"][0]["question"], "Which?");
+    ]))
+    .unwrap();
+    handle_server_event(
+        &mut app,
+        ServerEvent::AskUserRequest {
+            request_id: "request-not-derived-from-tool".into(),
+            tool_call_id: "call-1".into(),
+            questions,
+        },
+        &mut remote,
+    );
+    handle_server_event(
+        &mut app,
+        ServerEvent::ToolDone {
+            id: "call-1".into(),
+            name: "ask".into(),
+            output: "User answers:\n1. Which? -> B\n".into(),
+            error: None,
+        },
+        &mut remote,
+    );
+    assert!(
+        app.ask_picker.is_none(),
+        "peer answer must close the picker"
+    );
+    let result = app
+        .display_messages()
+        .iter()
+        .find(|message| message.is_ask_decision())
+        .unwrap();
+    assert_eq!(
+        result.tool_data.as_ref().unwrap().input["questions"][0]["question"],
+        "Which?"
+    );
     assert!(result.is_answered_ask());
 }
 
