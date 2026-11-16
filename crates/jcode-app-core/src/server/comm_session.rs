@@ -188,6 +188,20 @@ use spawn_model_selection::{
     resolve_swarm_spawn_selection, session_swarm_model,
 };
 
+fn inherit_visible_spawn_agent_models(parent_id: &str, child_id: &str) -> anyhow::Result<()> {
+    let Ok(parent) = Session::load_startup_stub(parent_id) else {
+        return Ok(());
+    };
+    if parent.agent_model_overrides.is_empty() {
+        return Ok(());
+    }
+    // A startup stub deliberately refuses to overwrite the transcript. Load
+    // the just-prepared child in full before updating its initial snapshot.
+    let mut child = Session::load(child_id)?;
+    child.agent_model_overrides = parent.agent_model_overrides;
+    child.save_prepared()
+}
+
 fn persist_headed_startup_message(session_id: &str, message: &str) {
     crate::logging::info(&format!(
         "Headed spawn: persisting startup submission for {session_id} (chars={}) to client-input handoff file",
@@ -514,6 +528,7 @@ pub(super) async fn spawn_swarm_agent(
             startup_message.as_deref(),
             |session_id, cwd, selfdev_requested, provider_key| {
                 crate::session_env::inherit_session_env(req_session_id, session_id);
+                inherit_visible_spawn_agent_models(req_session_id, session_id)?;
                 if let Some(lane_id) = lane_id.as_deref() {
                     let brief = super::swarm_todo_link::seed_spawn_lane(
                         req_session_id,

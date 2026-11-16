@@ -465,6 +465,57 @@ fn prepare_visible_spawn_session_persists_and_launches_provider_key_for_openrout
 }
 
 #[test]
+fn visible_selfdev_spawn_inherits_session_model_overrides_before_launch() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::TempDir::new().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    let mut parent = crate::session::Session::create_with_id("visible-parent".into(), None, None);
+    parent.set_canary("self-dev");
+    parent
+        .set_agent_model_override("review", Some("review-override".into()))
+        .unwrap();
+    parent.save_prepared().unwrap();
+    let (id, launched) = prepare_visible_spawn_session(
+        Some(home.path().to_str().unwrap()),
+        None,
+        None,
+        None,
+        None,
+        true,
+        None,
+        |id, _, selfdev, _| {
+            assert!(selfdev);
+            super::inherit_visible_spawn_agent_models(&parent.id, id)?;
+            let child = crate::session::Session::load_startup_stub(id)?;
+            assert!(child.is_canary);
+            assert_eq!(
+                child
+                    .effective_agent_model("review", Some("global".into()))
+                    .as_deref(),
+                Some("review-override")
+            );
+            Ok(true)
+        },
+    )
+    .unwrap();
+    assert!(launched);
+    assert_eq!(
+        crate::session::Session::load_startup_stub(&id)
+            .unwrap()
+            .agent_model_overrides
+            .get("review")
+            .map(String::as_str),
+        Some("review-override")
+    );
+    if let Some(previous) = previous {
+        crate::env::set_var("JCODE_HOME", previous);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
 fn prepare_visible_spawn_session_persists_requested_effort() {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
@@ -944,6 +995,10 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
     session.model = Some("claude-opus-4-6".into());
     session.provider_key = Some("claude-api".into());
     session.route_api_method = Some("claude-api".into());
+    session.set_canary("self-dev");
+    session
+        .set_agent_model_override("review", Some("review-override".into()))
+        .unwrap();
     session.save_prepared().unwrap();
     let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
         HashMap::from([("routing_busy".to_string(), agent.clone())]),
@@ -1013,6 +1068,18 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
     let child = child.lock().await;
     assert_eq!(child.provider_model(), "gpt-5.5");
     assert_eq!(child.session_provider_key().as_deref(), Some("openai-api"));
+    assert!(
+        child.is_canary(),
+        "selfdev coordinator must spawn a selfdev worker"
+    );
+    assert_eq!(
+        child
+            .session_for_split()
+            .effective_agent_model("review", Some("global-review".into()))
+            .as_deref(),
+        Some("review-override"),
+        "session routing overrides must follow the coordinator into its worker"
+    );
     drop(child);
     crate::server::client_actions::set_session_agent_model(
         &agent,

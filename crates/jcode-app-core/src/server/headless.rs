@@ -184,6 +184,14 @@ pub(super) async fn create_headless_session(
 
     if let Some(parent_id) = report_back_to_session_id.as_deref() {
         crate::session_env::inherit_session_env(parent_id, &client_session_id);
+        // These are session-scoped routing preferences, not process config.
+        // The coordinator usually holds its agent lock while spawning, so read
+        // the persisted sidecar, including changes made during the turn.
+        if let Ok(parent) = crate::session::Session::load_startup_stub(parent_id) {
+            for (target, model) in parent.agent_model_overrides {
+                new_agent.set_agent_model_override(&target, Some(model))?;
+            }
+        }
     }
 
     if selfdev_requested {
