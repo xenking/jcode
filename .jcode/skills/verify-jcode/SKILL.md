@@ -12,14 +12,15 @@ Use the real built CLI, daemon, terminal input and renderer. Only the external m
 Run from the repository root. Requires Python 3.9+, tmux, a Rust toolchain and justrust. macOS and Linux use Unix sockets. No API key, account, browser or paid provider is needed.
 
 ```bash
-justrust build --profile selfdev -p jcode --bin jcode
-BINARY="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/selfdev/jcode"
+BUILD_DIR="$PWD/target/verify-jcode"
+justrust build --target-dir "$BUILD_DIR" --profile selfdev -p jcode --bin jcode
+BINARY="$BUILD_DIR/selfdev/jcode"
 V="$PWD/.jcode/skills/verify-jcode/scripts/verify-jcode"
 E="${JCODE_SCRATCH_DIR:-$HOME/.jcode/scratch}/verify-jcode-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 "$V" launch --binary "$BINARY" --evidence "$E"
 ```
 
-If justrust is unavailable, use `scripts/dev_cargo.sh build --profile selfdev -p jcode --bin jcode`. Resolve the effective target directory as above, rather than assuming `target/selfdev` or taking `jcode` from PATH. Never use `selfdev reload` for this workflow.
+If justrust is unavailable, use `scripts/dev_cargo.sh build --target-dir "$BUILD_DIR" --profile selfdev -p jcode --bin jcode`. Keep this worktree's explicit target directory: an implicit shared build target can reuse another checkout's artifacts. Never take `jcode` from PATH or use `selfdev reload` for this workflow.
 
 Launch copies that binary into a short-lived owner-only runtime directory, records its SHA-256/version and checkout revision, starts the existing `scripts/fake_openai_server.py` on a kernel-selected loopback port, starts `serve --socket <private>/app.sock`, completes a real CLI inference and opens a 160x48 TUI in a private `tmux -S` server. Use `launch --cols 60 --rows 30` for a separate narrow-terminal run. It drives the optional first-run welcome screen with Right, Enter. Ready means a completed inference, usable terminal prompt and daemon attachment, not just a socket file.
 
@@ -40,11 +41,13 @@ Require `status: ready`. This is read-only against the app: verify the runtime o
 "$V" drive --evidence "$E" tui
 "$V" drive --evidence "$E" slash
 "$V" drive --evidence "$E" resume
+"$V" drive --evidence "$E" cancel
+"$V" drive --evidence "$E" restart
 "$V" drive --evidence "$E" side-panel
 "$V" frame --evidence "$E" --label reviewed
 ```
 
-Run only the recipes relevant to the change, plus their listed entry points. `cli` also accepts `--mode plain` and `--mode ndjson`. Each drive runs doctor first, records actual input and before/after frames, uses a fresh token to reject stale responses, and exits nonzero when an observable assertion fails. A failed journey remains failed. Inspect its artifacts, clean up, then launch a fresh run after fixing the cause.
+Run only the recipes relevant to the change, plus their listed entry points. `cli` also accepts `--mode plain` and `--mode ndjson`. Each drive runs doctor first, records actual input and before/after frames, uses a fresh token to reject stale responses, and exits nonzero when an observable assertion fails. `cancel` presses Escape during a file-gated provider request. `restart` stops only the owned private daemon, starts the same copied binary, and resumes the saved session. Neither proves binary reload or real vendor authentication. A failed journey remains failed. Inspect its artifacts, clean up, then launch a fresh run after fixing the cause.
 
 For additional user paths, reuse terminal controls instead of inventing another harness:
 

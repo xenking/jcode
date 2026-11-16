@@ -18,7 +18,7 @@ Preconditions: Launch and doctor passed. The helper creates and persists a first
 
 - **Reopen and continue:** `"$V" drive --evidence "$E" resume`. The helper sends a fresh token, waits for persistence, closes only its own terminal session, then opens the real TUI with --resume and the saved ID on the same private daemon.
 - **Proof:** compare `*-original.state.json` with `*-after.state.json`. Require identical remote_session_id, original token visible after reattachment, and a fresh continued prompt reaching the provider and appearing in the same saved transcript. Retain original and final frames and `*-session.json`.
-- **Other entries:** picker selection, CLI continuation and a full daemon restart each require an additional explicit journey and must be reported separately.
+- **Other entries:** picker selection and CLI continuation require separate journeys. `drive restart` covers a full private daemon restart with the same binary. See [Cancellation and daemon restart](lifecycle.md).
 
 ## Gotchas
 

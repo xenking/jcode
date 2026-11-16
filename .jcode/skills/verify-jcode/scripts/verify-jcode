@@ -319,23 +319,75 @@ class Harness:
                             "CLI saved no completed reply for the fresh prompt")
                     shutil.copy2(path, self.evidence / f"{label}-{path.name}")
                 result["output"] = output
-            elif feature == "resume":
+            elif feature == "cancel":
+                sid = self.observe("state")["remote_session_id"]
+                gate = self.root / "control" / token
+                try:
+                    self.send(token + f" [e2e:hold:{token}]")
+                    self.request_after(token, start)
+                    wait_for(lambda: gate.with_suffix(".held").exists(), "held provider request")
+                    require(self.observe("state")["processing"], "Held turn is not processing")
+                    self.frame(label + "-held")
+                    self.event(action="terminal-keys", keys=["Escape"], purpose="cancel held turn")
+                    self.tmux("send-keys", "-t", "verify", "Escape")
+                    self.idle()
+                    saved = load_persisted(self.root / "data/sessions" / f"{sid}.json")
+                    require(saved and any(token in json.dumps(m.get("content"))
+                                          for m in saved["messages"]), "Cancelled prompt was lost")
+                    require(not completed_turn(saved["messages"], token), "Cancelled turn completed")
+                    dump(self.evidence / f"{label}-cancelled-session.json", saved)
+                    self.frame(label + "-cancelled")
+                finally:
+                    gate.with_suffix(".release").write_text("release cancelled fixture request\n")
+                    self.event(action="fixture-release", token=token)
+                self.send(token + "_continued")
+                self.request_after(token + "_continued", start)
+                self.idle()
+                require(self.observe("state")["remote_session_id"] == sid, "Cancel changed session ID")
+                result["session_id"] = sid
+                dump(self.evidence / f"{label}-session.json", self.persisted(sid, token + "_continued"))
+            elif feature in {"resume", "restart"}:
                 self.send(token)
                 self.request_after(token, start)
                 self.idle()
                 sid = self.observe("state")["remote_session_id"]
-                self.persisted(sid, token)
+                original = self.persisted(sid, token)
                 self.frame(label + "-original")
                 self.tmux("kill-session", "-t", "verify")
                 wait_for(lambda: not alive(self.state["processes"]["tmux"]["pid"]), "old terminal shutdown", 10)
+                if feature == "restart":
+                    old_server_id = self.debug("server:info")["id"]
+                    process = self.state["processes"]["server"]
+                    require(alive(process["pid"]) and identity(process["pid"]) == process["identity"],
+                            "Daemon process ownership changed")
+                    self.event(action="daemon-stop", pid=process["pid"], signal="SIGTERM")
+                    os.killpg(process["pid"], signal.SIGTERM)
+                    wait_for(lambda: not alive(process["pid"]), "old daemon shutdown", 15)
+                    self.spawn("server", [self.binary, "--no-update", "--no-selfdev", "--provider",
+                                          "openai-compatible", "--model", "fake-model", "--debug-socket",
+                                          "--socket", self.root / "app.sock", "serve"])
+
+                    def restarted():
+                        try:
+                            return self.debug("server:info")["id"] != old_server_id
+                        except (OSError, RuntimeError):
+                            return False
+                    wait_for(restarted, "new isolated daemon identity")
+                    result["previous_server_id"] = old_server_id
+                    result["server_id"] = self.debug("server:info")["id"]
                 self.start_tui(resume=sid)
+                self.doctor()
                 require(self.observe("state")["remote_session_id"] == sid, "Resume changed session ID")
                 require(token in self.pane(), "Resumed TUI did not restore original prompt")
                 self.send(token + "_continued")
                 self.request_after(token + "_continued", start)
                 self.idle()
                 result["session_id"] = sid
-                dump(self.evidence / f"{label}-session.json", self.persisted(sid, token + "_continued"))
+                saved = self.persisted(sid, token + "_continued")
+                original_ids = [m["id"] for m in original["messages"]]
+                require([m["id"] for m in saved["messages"][:len(original_ids)]] == original_ids,
+                        "Resume changed the original transcript prefix")
+                dump(self.evidence / f"{label}-session.json", saved)
             else:
                 prompt = token
                 if feature == "tui":
@@ -521,7 +573,8 @@ def main():
         command = sub.add_parser(name)
         command.add_argument("--evidence", required=True)
         if name == "drive":
-            command.add_argument("feature", choices=["cli", "tui", "slash", "resume", "side-panel", "input", "keys"])
+            command.add_argument("feature", choices=["cli", "tui", "slash", "resume", "restart", "cancel",
+                                                     "side-panel", "input", "keys"])
             command.add_argument("--mode", choices=["plain", "json", "ndjson"], default="json")
             command.add_argument("--text", help="Text for exploratory input drive")
             command.add_argument("--keys", nargs="+", help="tmux keys, e.g. Escape or C-u")

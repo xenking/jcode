@@ -123,6 +123,44 @@ class VerificationSafetyTests(unittest.TestCase):
         path.write_bytes(b"abc")
         self.assertEqual(HELPER.digest(path), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
 
+    def test_cancel_releases_provider_gate_after_failed_drive(self):
+        (self.root / "control").mkdir()
+        with patch.object(self.harness, "doctor"), \
+                patch.object(self.harness, "records", return_value=[]), \
+                patch.object(self.harness, "frame"), \
+                patch.object(self.harness, "observe", return_value={"remote_session_id": "session_test"}), \
+                patch.object(self.harness, "send"), \
+                patch.object(self.harness, "request_after", side_effect=RuntimeError("provider wait failed")):
+            with self.assertRaisesRegex(RuntimeError, "provider wait failed"):
+                self.harness.drive("cancel", "json")
+        receipt = json.loads((self.evidence / "drive-001-cancel.json").read_text())
+        self.assertEqual(receipt["status"], "failed")
+        self.assertTrue((self.root / "control" / (receipt["token"] + ".release")).is_file())
+
+    def test_restart_refuses_changed_daemon_identity_before_signal(self):
+        self.harness.state["processes"] = {
+            "tmux": {"pid": 111, "identity": "terminal"},
+            "server": {"pid": 222, "identity": "original-daemon"},
+        }
+        with patch.object(self.harness, "doctor"), \
+                patch.object(self.harness, "records", return_value=[]), \
+                patch.object(self.harness, "frame"), \
+                patch.object(self.harness, "observe", return_value={"remote_session_id": "session_test"}), \
+                patch.object(self.harness, "send"), \
+                patch.object(self.harness, "request_after"), \
+                patch.object(self.harness, "idle"), \
+                patch.object(self.harness, "persisted", return_value={"messages": []}), \
+                patch.object(self.harness, "tmux"), \
+                patch.object(self.harness, "debug", return_value={"id": "old-daemon"}), \
+                patch.object(HELPER, "alive", side_effect=lambda pid: pid == 222), \
+                patch.object(HELPER, "identity", return_value="different-daemon"), \
+                patch.object(HELPER.os, "killpg") as kill:
+            with self.assertRaisesRegex(RuntimeError, "ownership changed"):
+                self.harness.drive("restart", "json")
+            kill.assert_not_called()
+        receipt = json.loads((self.evidence / "drive-001-restart.json").read_text())
+        self.assertEqual(receipt["status"], "failed")
+
 
 if __name__ == "__main__":
     unittest.main()
