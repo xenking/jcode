@@ -10,6 +10,7 @@ pub(super) fn repository() -> (tempfile::TempDir, tempfile::TempDir, RepoManifes
         &["config", "user.email", "cloud@example.invalid"],
     )
     .unwrap();
+    git(root.path(), &["config", "commit.gpgsign", "false"]).unwrap();
     std::fs::write(root.path().join("file.txt"), "original\n").unwrap();
     git(root.path(), &["add", "."]).unwrap();
     git(root.path(), &["commit", "--quiet", "-m", "initial"]).unwrap();
