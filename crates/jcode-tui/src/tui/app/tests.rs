@@ -1314,15 +1314,24 @@ fn skill_invocation_with_prompt_attaches_pending_image_to_user_message() {
         .last()
         .expect("submitted session message");
     assert_eq!(submitted.role, Role::User);
-    assert!(matches!(
-        submitted.content.as_slice(),
-        [
-            ContentBlock::Image { media_type, data },
-            ContentBlock::Text { text, .. },
-        ] if media_type == "image/png"
-            && data == "ZmFrZSBwbmcgYnl0ZXM="
-            && text == "describe this screenshot"
-    ));
+    let images = app.session.session_images();
+    assert_eq!(images.len(), 1);
+    let expected_reference = format!("Attached session images: [#{}]", images[0].image_id);
+    assert!(
+        matches!(
+            submitted.content.as_slice(),
+            [
+                ContentBlock::Image { media_type, data },
+                ContentBlock::Text { text, .. },
+                ContentBlock::Text { text: reference, .. },
+            ] if media_type == "image/png"
+                && data == "ZmFrZSBwbmcgYnl0ZXM="
+                && text == "describe this screenshot"
+                && reference == &expected_reference
+        ),
+        "submitted content: {:?}",
+        submitted.content
+    );
 }
 
 #[test]
