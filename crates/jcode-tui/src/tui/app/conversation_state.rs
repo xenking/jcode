@@ -214,7 +214,13 @@ impl App {
                         crate::compaction::CompactionAction::None => {}
                     }
                 }
-                let messages = manager.messages_for_api_with(&base_messages);
+                let messages = manager.messages_for_api_with_vision(
+                    &base_messages,
+                    crate::compaction::snapcompact_pages_usable(
+                        self.provider.supports_image_input(),
+                        &self.provider.model(),
+                    ),
+                );
                 let event = manager.take_compaction_event();
                 if event.is_some() || discarded_oversized_native {
                     self.sync_session_compaction_state_from_manager(&manager);

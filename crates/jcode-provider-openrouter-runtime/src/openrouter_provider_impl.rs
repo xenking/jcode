@@ -441,8 +441,8 @@ impl Provider for OpenRouterProvider {
         // honour that before falling back to a per-provider guess. Without this
         // a vision-capable model on the native OpenRouter route is clamped to
         // text even though the provider advertised image input for it.
-        if self.catalog_declares_image_input(&model_id) {
-            return true;
+        if let Some(supports_images) = self.catalog_image_input(&model_id) {
+            return supports_images;
         }
 
         // Direct OpenAI-compatible local providers such as Ollama and LM Studio
@@ -1118,26 +1118,32 @@ impl OpenRouterProvider {
     /// `supports_image_input` is a sync trait method, so the in-memory read uses
     /// `try_read` rather than awaiting the tokio lock; a busy lock defers to the
     /// disk copy instead of blocking.
+    #[cfg(test)]
     pub(crate) fn catalog_declares_image_input(&self, model_id: &str) -> bool {
+        self.catalog_image_input(model_id) == Some(true)
+    }
+
+    fn catalog_image_input(&self, model_id: &str) -> Option<bool> {
         if !self.supports_model_catalog {
-            return false;
+            return None;
         }
         if let Ok(cache) = self.models_cache.try_read()
             && let Some(model) = cache
                 .models
                 .iter()
                 .find(|model| model.id.trim().eq_ignore_ascii_case(model_id))
+            && !model.input.is_empty()
         {
-            return declares_image_input(model);
+            return Some(declares_image_input(model));
         }
-        self.load_usable_model_disk_cache_entry()
-            .is_some_and(|entry| {
-                entry
-                    .models
-                    .iter()
-                    .find(|model| model.id.trim().eq_ignore_ascii_case(model_id))
-                    .is_some_and(declares_image_input)
-            })
+        self.load_usable_model_disk_cache_entry().and_then(|entry| {
+            entry
+                .models
+                .iter()
+                .find(|model| model.id.trim().eq_ignore_ascii_case(model_id))
+                .filter(|model| !model.input.is_empty())
+                .map(declares_image_input)
+        })
     }
 }
 

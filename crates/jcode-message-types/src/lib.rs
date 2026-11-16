@@ -123,6 +123,15 @@ pub struct SnapcompactArchive {
     pub source: String,
     /// Base64-encoded PNG images in chronological order.
     pub pages: Vec<String>,
+    /// Verifiable excerpts with original zero-based message and page references.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub index: String,
+    /// Model-extracted decisions and rules, labelled as derived, not verbatim.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub decisions: String,
+    /// Character ranges in `source`, one per page, when available.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub page_ranges: Vec<(usize, usize)>,
 }
 
 /// A message in the conversation
@@ -1051,7 +1060,8 @@ mod tests {
                 ContentBlock::ReasoningTrace {
                     text: "history-only scratch".to_string(),
                 },
-            ].into(),
+            ]
+            .into(),
             timestamp: Some(chrono::Utc::now() + chrono::Duration::seconds(7)),
             tool_duration_ms: Some(42),
         };

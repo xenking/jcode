@@ -15,6 +15,9 @@
 //! - **Semantic**: compact based on embedding-detected topic shifts and
 //!   relevance scoring. Falls back to proactive if embeddings are unavailable.
 
+mod snap_index;
+use snap_index::build_snapcompact_index;
+
 use crate::message::{ContentBlock, Message, Role};
 use crate::provider::Provider;
 use crate::provider::openai_request::{
@@ -43,6 +46,13 @@ pub use jcode_compaction_core::{
     semantic_goal_text, semantic_message_text, strip_large_images_in_contents,
     summary_payload_char_count,
 };
+
+/// Models with measured poor dense-page recall use the text index even if they
+/// support ordinary images. Unknown models follow the provider catalog.
+pub fn snapcompact_pages_usable(supports_image_input: bool, model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    supports_image_input && !model.contains("gpt-6-luna") && !model.contains("claude-haiku-5-5")
+}
 
 const HARD_THRESHOLD_PENDING_WAIT_MS: u64 = 15_000;
 const HARD_THRESHOLD_PENDING_POLL_MS: u64 = 50;
@@ -1497,6 +1507,8 @@ impl CompactionManager {
 
         // Snapshot messages to summarize (must clone for the async task)
         let messages_to_summarize: Vec<Message> = active[..cutoff].to_vec();
+        let archive_history =
+            all_messages[..self.compacted_count.min(all_messages.len()) + cutoff].to_vec();
         let msg_count = messages_to_summarize.len();
         let existing_summary = self.active_summary.clone();
         let snapcompact_enabled = self.compaction_config.snapcompact;
@@ -1528,9 +1540,10 @@ impl CompactionManager {
         // Spawn background task that notifies via Bus when done
         self.pending_task = crate::runtime_activity::spawn(async move {
             let start = std::time::Instant::now();
-            let result = generate_compaction_artifact(
+            let result = generate_compaction_artifact_indexed(
                 provider,
                 messages_to_summarize,
+                archive_history,
                 existing_summary,
                 snapcompact_enabled,
                 snapcompact_shape,
@@ -1755,6 +1768,8 @@ impl CompactionManager {
         }
 
         let messages_to_summarize: Vec<Message> = active[..cutoff].to_vec();
+        let archive_history =
+            all_messages[..self.compacted_count.min(all_messages.len()) + cutoff].to_vec();
         let msg_count = messages_to_summarize.len();
         let existing_summary = self.active_summary.clone();
         let snapcompact_enabled = self.compaction_config.snapcompact;
@@ -1768,9 +1783,10 @@ impl CompactionManager {
 
         self.pending_task = crate::runtime_activity::spawn(async move {
             let start = std::time::Instant::now();
-            let result = generate_compaction_artifact(
+            let result = generate_compaction_artifact_indexed(
                 provider,
                 messages_to_summarize,
+                archive_history,
                 existing_summary,
                 snapcompact_enabled,
                 snapcompact_shape,
@@ -2001,17 +2017,72 @@ impl CompactionManager {
                     });
 
                 let mut content = vec![summary_block];
-                if let Some(archive) = &summary.snapcompact
-                    && supports_image_input
-                {
+                if let Some(archive) = &summary.snapcompact {
+                    let ranges: Vec<_> = if archive.page_ranges.is_empty() {
+                        jcode_compaction_core::snapcompact::legacy_page_ranges(
+                            &archive.source,
+                            &summary.text,
+                            archive.pages.len(),
+                        )
+                    } else {
+                        archive
+                            .page_ranges
+                            .iter()
+                            .enumerate()
+                            .map(|(index, &(source_start, source_end))| {
+                                jcode_compaction_core::snapcompact::FrameRange {
+                                    index: index as u32,
+                                    source_start,
+                                    source_end,
+                                }
+                            })
+                            .collect()
+                    };
+                    let generated;
+                    let index = if archive.index.is_empty() {
+                        generated = build_snapcompact_index(
+                            &all_messages[..self.compacted_count.min(all_messages.len())],
+                            0,
+                            &archive.source,
+                            &ranges,
+                        );
+                        &generated
+                    } else {
+                        &archive.index
+                    };
+                    let mut text = String::from(
+                        "ARCHIVE INDEX (zero-based message indices, one-based pages): Prefer exact values from the index. Cite page and message. Verify exact details with session_search(message_index=N) for the current session. If evidence is missing or uncertain, answer UNKNOWN instead of guessing. Index omissions do not prove absence.\n",
+                    );
+                    text.push_str(index);
+                    if !archive.decisions.is_empty() {
+                        text.push_str("\nLLM-EXTRACTED DECISIONS AND RULES (derived, verify against source):\n");
+                        text.push_str(&archive.decisions);
+                    }
+                    if !supports_image_input && index.is_empty() {
+                        text.push_str("\nLegacy archive excerpt (may be truncated):\n");
+                        text.extend(
+                            archive
+                                .source
+                                .replace('\u{2588}', "\n")
+                                .replace(['\u{e}', '\u{f}'], "")
+                                .chars()
+                                .take(120_000),
+                        );
+                    }
                     content.push(ContentBlock::Text {
-                        text: "The following PNG pages contain earlier conversation history in chronological order.".to_string(),
+                        text,
                         cache_control: None,
                     });
-                    content.extend(archive.pages.iter().map(|data| ContentBlock::Image {
-                        media_type: "image/png".to_string(),
-                        data: data.clone(),
-                    }));
+                    if supports_image_input {
+                        content.push(ContentBlock::Text {
+                            text: "The following PNG pages contain earlier conversation history in chronological order.".to_string(),
+                            cache_control: None,
+                        });
+                        content.extend(archive.pages.iter().map(|data| ContentBlock::Image {
+                            media_type: "image/png".to_string(),
+                            data: data.clone(),
+                        }));
+                    }
                 }
                 let mut result = Vec::with_capacity(active.len() + 1);
 
@@ -2404,10 +2475,81 @@ impl Default for CompactionManager {
     }
 }
 
-/// Generate summary using the provider
+/// Best-effort LLM extraction, never a replacement for the verbatim index.
+async fn extract_snapcompact_decisions(provider: &dyn Provider, index: &str) -> String {
+    if index.is_empty() {
+        return String::new();
+    }
+    let budget = provider
+        .context_window()
+        .saturating_sub(4_000)
+        .saturating_mul(CHARS_PER_TOKEN)
+        .min(120_000);
+    let input: String = index.chars().take(budget).collect();
+    let prompt = format!(
+        "Extract decisions with their reasons, user rules and preferences from the following indexed excerpts. Preserve negations, uncertainty, and who said what. Do not infer missing reasons. Each line must begin with the exact [message N, page P | role] tag from its supporting excerpt. Do not invent facts. Output only supported lines.\n\n{input}"
+    );
+    let result = tokio::time::timeout(
+        Duration::from_secs(60),
+        provider.complete_simple_with_usage(
+            &prompt,
+            "Extract grounded decisions and rules, without guessing.",
+        ),
+    )
+    .await;
+    let Ok(Ok((response, usage))) = result else {
+        return String::new();
+    };
+    crate::telemetry::record_simple_completion_usage(
+        None,
+        provider.name(),
+        &provider.model(),
+        crate::telemetry::UsageSource::Compaction,
+        usage,
+    );
+    let mut output = String::new();
+    for line in response.lines() {
+        let line = line.trim();
+        let Some(end) = line.find(']') else {
+            continue;
+        };
+        let tag = &line[..=end];
+        if tag.starts_with("[message ")
+            && index.lines().any(|source| source.starts_with(tag))
+            && output.len() + line.len() < 24_000
+        {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    output
+}
+
+/// Generate a compaction artifact for a standalone transcript.
 async fn generate_compaction_artifact(
     provider: Arc<dyn Provider>,
+    messages: Vec<Message>,
+    existing_summary: Option<Summary>,
+    snapcompact_enabled: bool,
+    snapcompact_shape: Option<String>,
+    shake_config: Option<ShakeConfig>,
+) -> Result<CompactionResult> {
+    generate_compaction_artifact_indexed(
+        provider,
+        messages.clone(),
+        messages,
+        existing_summary,
+        snapcompact_enabled,
+        snapcompact_shape,
+        shake_config,
+    )
+    .await
+}
+
+async fn generate_compaction_artifact_indexed(
+    provider: Arc<dyn Provider>,
     mut messages: Vec<Message>,
+    archive_history: Vec<Message>,
     mut existing_summary: Option<Summary>,
     snapcompact_enabled: bool,
     snapcompact_shape: Option<String>,
@@ -2482,7 +2624,6 @@ async fn generate_compaction_artifact(
     let mut snapcompact = None;
     let mut snapcompact_summary = None;
     if snapcompact_enabled
-        && provider.supports_image_input()
         && existing_summary
             .as_ref()
             .is_none_or(|s| s.openai_encrypted_content.is_none())
@@ -2521,11 +2662,31 @@ async fn generate_compaction_artifact(
                 }
             });
             let preparation = prepare_messages_with(&input, previous, usize::MAX)?;
-            compact(&preparation, &options)
+            let result = compact(&preparation, &options)?;
+            let ranges = if result.truncated_chars == 0 {
+                result
+                    .frames
+                    .iter()
+                    .map(|f| jcode_compaction_core::snapcompact::FrameRange {
+                        index: f.index,
+                        source_start: f.source_start,
+                        source_end: f.source_end,
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            let index = build_snapcompact_index(&archive_history, 0, &result.source_text, &ranges);
+            Ok::<_, String>((result, ranges, index))
         })
         .await;
         match rendered {
-            Ok(Ok(result)) => {
+            Ok(Ok((result, ranges, index))) => {
+                let page_ranges = ranges
+                    .iter()
+                    .map(|r| (r.source_start, r.source_end))
+                    .collect();
+                let decisions = extract_snapcompact_decisions(&*provider, &index).await;
                 let pages = result
                     .frames
                     .into_iter()
@@ -2535,6 +2696,9 @@ async fn generate_compaction_artifact(
                 snapcompact = Some(jcode_message_types::SnapcompactArchive {
                     source: result.source_text,
                     pages,
+                    index,
+                    decisions,
+                    page_ranges,
                 });
             }
             Ok(Err(error)) => {
@@ -2565,12 +2729,44 @@ async fn generate_compaction_artifact(
         }
     }
 
-    // A snapcompact pass is a complete compaction: omp makes no LLM call for
-    // it, so the reading guide stands in for the summary and the whole
-    // full-context summarizer request disappears on vision models.
-    if let Some(summary) = snapcompact_summary
+    // The image archive replaces the full-context summary for vision models.
+    // Decision extraction is best effort, and text-only models also get a summary.
+    if let Some(mut summary) = snapcompact_summary
         && snapcompact.is_some()
     {
+        if !snapcompact_pages_usable(provider.supports_image_input(), &provider.model()) {
+            let mut prior = existing_summary.clone();
+            if let Some(previous) = prior.as_mut()
+                && let Some(archive) = &previous.snapcompact
+            {
+                previous.text = archive
+                    .source
+                    .replace('\u{2588}', "\n")
+                    .replace(['\u{e}', '\u{f}'], "");
+            }
+            let max_chars = provider.context_window().saturating_sub(4000) * CHARS_PER_TOKEN;
+            let prompt = build_compaction_prompt(&messages, prior.as_ref(), max_chars);
+            if let Ok(Ok((text, usage))) = tokio::time::timeout(
+                Duration::from_secs(60),
+                provider.complete_simple_with_usage(
+                    &prompt,
+                    "You are a helpful assistant that summarizes conversations.",
+                ),
+            )
+            .await
+            {
+                crate::telemetry::record_simple_completion_usage(
+                    None,
+                    provider.name(),
+                    &provider.model(),
+                    crate::telemetry::UsageSource::Compaction,
+                    usage,
+                );
+                if let Ok(text) = validate_compaction_summary(text) {
+                    summary = text;
+                }
+            }
+        }
         return Ok(CompactionResult {
             summary_text: summary,
             openai_encrypted_content: None,

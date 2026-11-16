@@ -387,9 +387,15 @@ pub fn summary_payload_char_count(summary: &Summary) -> usize {
         .unwrap_or_else(|| summary.text.len());
     text.saturating_add(summary.snapcompact.as_ref().map_or(0, |archive| {
         archive
-            .pages
+            .index
             .len()
-            .saturating_mul(IMAGE_TOKEN_COST * CHARS_PER_TOKEN)
+            .saturating_add(archive.decisions.len())
+            .saturating_add(
+                archive
+                    .pages
+                    .len()
+                    .saturating_mul(IMAGE_TOKEN_COST * CHARS_PER_TOKEN),
+            )
     }))
 }
 

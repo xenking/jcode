@@ -312,7 +312,13 @@ impl App {
             return base;
         }
         match self.registry.compaction().try_write() {
-            Ok(mut manager) => manager.messages_for_api_with(&base),
+            Ok(mut manager) => manager.messages_for_api_with_vision(
+                &base,
+                crate::compaction::snapcompact_pages_usable(
+                    self.provider.supports_image_input(),
+                    &self.provider.model(),
+                ),
+            ),
             Err(_) => base,
         }
     }

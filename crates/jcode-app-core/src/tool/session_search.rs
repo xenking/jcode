@@ -59,7 +59,11 @@ const LEGACY_INDEX_FILE_NAME: &str = "session_search_recent_index_v1.json";
 
 #[derive(Debug, Deserialize)]
 struct SearchInput {
+    #[serde(default)]
     query: String,
+    /// Read one zero-based message from the current session, including journal replay.
+    #[serde(default)]
+    message_index: Option<usize>,
     #[serde(default)]
     working_dir: Option<String>,
     #[serde(default)]
@@ -306,6 +310,11 @@ impl Tool for SessionSearchTool {
                     "type": "string",
                     "description": "Distinctive keywords; stop-word-only queries are rejected."
                 },
+                "message_index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Read this zero-based message from the current session, including tool content. Alternative to query."
+                },
                 "working_dir": {
                     "type": "string",
                     "description": "Working directory path prefix, case-insensitive."
@@ -399,12 +408,19 @@ impl Tool for SessionSearchTool {
                     "description": "Search every session, not just the recent indexed subset. Slower."
                 }
             },
-            "required": ["query"]
+            "required": []
         })
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: SearchInput = serde_json::from_value(input)?;
+        if let Some(index) = params.message_index {
+            let session_id = ctx.session_id.clone();
+            let message =
+                tokio::task::spawn_blocking(move || current_message_by_index(&session_id, index))
+                    .await??;
+            return Ok(ToolOutput::new(message).with_title("session_search"));
+        }
         let limit = match validate_bounded_usize(params.limit, DEFAULT_LIMIT, 1, MAX_LIMIT, "limit")
         {
             Ok(limit) => limit,
@@ -530,6 +546,36 @@ impl Tool for SessionSearchTool {
                 .with_title("session_search"),
         )
     }
+}
+
+fn current_message_by_index(session_id: &str, index: usize) -> Result<String> {
+    let session = Session::load(session_id)?;
+    let Some(message) = session.messages.get(index) else {
+        return Ok(format!(
+            "UNKNOWN: message {index} is unavailable in the current session ({} messages).",
+            session.messages.len()
+        ));
+    };
+    let mut value = serde_json::to_value(message)?;
+    if let Some(blocks) = value.get_mut("content").and_then(Value::as_array_mut) {
+        for block in blocks {
+            if block.get("type").and_then(Value::as_str) == Some("image") {
+                if let Some(object) = block.as_object_mut() {
+                    object.insert("data".into(), Value::String("[image data omitted]".into()));
+                }
+            }
+        }
+    }
+    let serialized = serde_json::to_string_pretty(&value)?;
+    if serialized.len() > 1_000_000 {
+        let prefix: String = serialized.chars().take(500_000).collect();
+        return Ok(format!(
+            "Message {index} is too large; truncated, do not treat as complete:\n{prefix}"
+        ));
+    }
+    Ok(format!(
+        "Current session message {index} (zero-based, image data omitted):\n{serialized}"
+    ))
 }
 
 fn validate_bounded_usize(

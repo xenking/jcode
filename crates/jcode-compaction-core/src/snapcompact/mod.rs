@@ -985,6 +985,71 @@ fn finish_frame_text(text: &str, dim_open: &mut bool) -> String {
     output
 }
 
+/// Infer legacy page ranges only when the persisted grid and page count agree.
+/// Legacy archives do not persist geometry, so ambiguous or truncated layouts
+/// intentionally return no ranges rather than guessing page numbers.
+pub fn legacy_page_ranges(text: &str, summary: &str, page_count: usize) -> Vec<FrameRange> {
+    if text.contains("[snapcompact:") {
+        return Vec::new();
+    }
+    // The historical guide does not identify the font. If Silver and bitmap
+    // cell widths disagree we cannot prove the old layout from the guide.
+    if text.chars().any(|ch| {
+        renderer::snapcompact_render::cell_units(ch as u32, true)
+            != renderer::snapcompact_render::cell_units(ch as u32, false)
+    }) {
+        return Vec::new();
+    }
+    let Some(grid) = summary.split("one grid ").nth(1) else {
+        return Vec::new();
+    };
+    let Some((columns, rest)) = grid.split_once(" characters wide, up to ") else {
+        return Vec::new();
+    };
+    let Some(rows) = rest.split_whitespace().next() else {
+        return Vec::new();
+    };
+    let (Ok(columns), Ok(rows)) = (columns.parse::<usize>(), rows.parse::<usize>()) else {
+        return Vec::new();
+    };
+    if columns == 0 || rows == 0 {
+        return Vec::new();
+    }
+    let Some(capacity) = columns.checked_mul(rows) else {
+        return Vec::new();
+    };
+    let mut ranges = Vec::new();
+    let (mut start, mut end, mut cursor) = (0, 0, 0);
+    for ch in text.chars() {
+        let width = renderer::snapcompact_render::cell_units(ch as u32, true);
+        let pad = usize::from(width == 2 && columns >= 2 && cursor % columns == columns - 1);
+        if cursor + pad + width > capacity {
+            ranges.push(FrameRange {
+                index: ranges.len() as u32,
+                source_start: start,
+                source_end: end,
+            });
+            start = end;
+            cursor = 0;
+        }
+        cursor +=
+            usize::from(width == 2 && columns >= 2 && cursor % columns == columns - 1) + width;
+        end += 1;
+    }
+    if end > start {
+        ranges.push(FrameRange {
+            index: ranges.len() as u32,
+            source_start: start,
+            source_end: end,
+        });
+    }
+    if ranges.len() == page_count {
+        ranges
+    } else {
+        Vec::new()
+    }
+}
+
 fn chunk_into_frames(text: &str, shape: &Shape, max_frames: usize) -> Vec<FrameRange> {
     let cols = (shape.frame_size / shape.cell_width.max(1)) as usize;
     let capacity = shape.chars_per_frame() as usize;
@@ -1053,6 +1118,17 @@ mod tests {
             "\u{e}continued\u{f}b"
         );
         assert!(!open);
+    }
+
+    #[test]
+    fn legacy_grid_page_ranges_are_checked_against_count() {
+        let guide = "Frame: one grid 4 characters wide, up to 2 rows tall";
+        let ranges = super::legacy_page_ranges("abcdefghijkl", guide, 2);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!((ranges[0].source_start, ranges[0].source_end), (0, 8));
+        assert_eq!((ranges[1].source_start, ranges[1].source_end), (8, 12));
+        assert!(super::legacy_page_ranges("abcdefghijkl", guide, 3).is_empty());
+        assert!(super::legacy_page_ranges("[snapcompact: 10 chars elided]", guide, 2).is_empty());
     }
 
     #[test]

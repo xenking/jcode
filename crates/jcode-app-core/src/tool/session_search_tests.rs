@@ -57,6 +57,29 @@ fn run_search(home: &Path, query: &str, options: &SearchOptions) -> Vec<SearchRe
 }
 
 #[test]
+fn current_message_index_reads_snapshot_and_journal_without_guessing() {
+    with_temp_home(|_| {
+        let mut session = save_test_session(
+            "indexed-message",
+            vec![(Role::User, vec![text("Never force push")])],
+        );
+        session.add_message(Role::Assistant, vec![text("commit 06a64d9d8")]);
+        session.save().unwrap();
+        let first = current_message_by_index("indexed-message", 0).unwrap();
+        let second = current_message_by_index("indexed-message", 1).unwrap();
+        assert!(first.contains("Never force push"));
+        assert!(second.contains("06a64d9d8"));
+        assert!(
+            current_message_by_index("indexed-message", 2)
+                .unwrap()
+                .contains("UNKNOWN")
+        );
+        let params: SearchInput = serde_json::from_value(json!({"message_index": 1})).unwrap();
+        assert_eq!(params.message_index, Some(1));
+    });
+}
+
+#[test]
 fn token_overlap_matches_when_exact_phrase_is_absent() {
     with_temp_home(|home| {
         save_test_session(

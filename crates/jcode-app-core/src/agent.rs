@@ -1115,7 +1115,10 @@ impl Agent {
                         }
                         manager.messages_for_api_with_vision(
                             all_messages,
-                            self.provider.supports_image_input(),
+                            crate::compaction::snapcompact_pages_usable(
+                                self.provider.supports_image_input(),
+                                &self.provider.model(),
+                            ),
                         )
                     };
                     let event = manager.take_compaction_event();

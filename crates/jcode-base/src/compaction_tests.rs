@@ -1881,10 +1881,9 @@ impl Provider for CountingVisionProvider {
     }
 }
 
-/// omp snapcompact is a complete compaction: no LLM summarizer request at all.
-/// jcode used to render the frames and then still pay the full-context summary.
+/// Snapcompact makes only the bounded decisions-and-rules extraction call.
 #[tokio::test]
-async fn snapcompact_skips_the_llm_summarizer() {
+async fn snapcompact_extracts_decisions_without_full_summarizer() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let provider = Arc::new(CountingVisionProvider {
         calls: calls.clone(),
@@ -1901,8 +1900,8 @@ async fn snapcompact_skips_the_llm_summarizer() {
     .unwrap();
     assert_eq!(
         calls.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "snapcompact must not call the summarizer"
+        1,
+        "snapcompact should call the bounded decisions extractor once"
     );
     assert!(
         result
@@ -1927,7 +1926,12 @@ async fn snapcompact_skips_the_llm_summarizer() {
     .await
     .unwrap();
     assert!(text_only.summary_text.starts_with("summary("));
-    assert!(text_only.snapcompact.is_none());
+    assert!(
+        text_only
+            .snapcompact
+            .as_ref()
+            .is_some_and(|a| a.index.contains("no vision"))
+    );
     drop(calls);
 }
 
@@ -2063,7 +2067,55 @@ async fn snapcompact_generates_summary_and_preserves_previous_archive() {
     )
     .await
     .unwrap();
-    assert!(plain.snapcompact.is_none());
+    assert!(
+        plain
+            .snapcompact
+            .as_ref()
+            .is_some_and(|a| a.index.contains("no vision"))
+    );
+}
+
+#[test]
+fn snapcompact_page_capability_respects_catalog_and_measured_readers() {
+    assert!(!snapcompact_pages_usable(false, "deepseek-v4.1-flash"));
+    assert!(snapcompact_pages_usable(true, "deepseek-v4.1-flash"));
+    assert!(!snapcompact_pages_usable(true, "gpt-6-luna"));
+    assert!(!snapcompact_pages_usable(true, "claude-haiku-5-5"));
+    assert!(snapcompact_pages_usable(true, "gpt-6.1-sol"));
+}
+
+#[test]
+fn snapcompact_index_keeps_exact_values_and_provenance() {
+    let messages = vec![
+        make_text_message(
+            Role::User,
+            "Never force push because it destroys history. Set cache_limit = 42.",
+        ),
+        make_text_message(
+            Role::Assistant,
+            "Worker fox fixed crates/app/src/main.rs in commit 06a64d9d8.",
+        ),
+    ];
+    let source = jcode_compaction_core::snapcompact::normalize(
+        &jcode_compaction_core::snapcompact::serialize::serialize_messages(&messages).unwrap(),
+    );
+    let ranges = vec![jcode_compaction_core::snapcompact::FrameRange {
+        index: 0,
+        source_start: 0,
+        source_end: source.chars().count(),
+    }];
+    let index = build_snapcompact_index(&messages, 0, &source, &ranges);
+    assert!(index.contains("06a64d9d8"), "{index}");
+    assert!(index.contains("crates/app/src/main.rs"), "{index}");
+    assert!(index.contains("cache_limit = 42"), "{index}");
+    assert!(
+        index.contains("Never force push because it destroys history"),
+        "{index}"
+    );
+    assert!(
+        index.contains("message 0") && index.contains("page 1"),
+        "{index}"
+    );
 }
 
 #[test]
@@ -2075,6 +2127,9 @@ fn snapcompact_pages_survive_persistence_and_follow_vision_capability() {
         snapcompact: Some(jcode_message_types::SnapcompactArchive {
             source: "early█detail".into(),
             pages: vec!["cG5n".into()],
+            index: String::new(),
+            decisions: String::new(),
+            page_ranges: Vec::new(),
         }),
         covers_up_to_turn: 0,
         original_turn_count: 0,
@@ -2097,7 +2152,13 @@ fn snapcompact_pages_survive_persistence_and_follow_vision_capability() {
         plain[0]
             .content
             .iter()
-            .any(|b| matches!(b, ContentBlock::Text { text, .. } if text.contains("archive")))
+            .any(|b| matches!(b, ContentBlock::Text { text, .. } if text.contains("early") && text.contains("detail")))
+    );
+    assert!(
+        plain[0]
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { text, .. } if text.contains("UNKNOWN")))
     );
 }
 

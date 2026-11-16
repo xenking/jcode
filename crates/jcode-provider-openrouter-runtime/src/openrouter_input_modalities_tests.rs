@@ -72,6 +72,42 @@ fn catalog_without_image_modality_keeps_legacy_behaviour() {
     );
 }
 
+#[test]
+fn opencode_go_catalog_parses_mime_image_modalities_and_context() {
+    let value = serde_json::json!({
+        "id": "arbitrary-future-model",
+        "modalities": {"input": ["text", "image/png", "image/jpeg"], "output": ["text"]},
+        "limit": {"context": 1_000_000, "output": 384_000}
+    });
+    let model = crate::models_catalog_parse::parse_model_info_value(&value).unwrap();
+    assert_eq!(model.context_length, Some(1_000_000));
+    assert!(model.input.iter().any(|item| item == "image"));
+}
+
+#[test]
+fn direct_catalog_text_only_model_overrides_vision_fallback() {
+    let _lock = ENV_LOCK.lock();
+    let profile = jcode_base::config::NamedProviderConfig {
+        base_url: "http://localhost:1234/v1".into(),
+        auth: jcode_base::config::NamedProviderAuth::None,
+        default_model: Some("deepseek-v4.1-flash".into()),
+        model_catalog: true,
+        ..Default::default()
+    };
+    let provider =
+        OpenRouterProvider::new_named_openai_compatible("opencode-go", &profile).unwrap();
+    {
+        let mut cache = provider.models_cache.blocking_write();
+        cache.models = vec![jcode_provider_openrouter::ModelInfo {
+            id: "deepseek-v4.1-flash".into(),
+            input: vec!["text".into()],
+            ..Default::default()
+        }];
+        cache.fetched = true;
+    }
+    assert!(!provider.supports_image_input());
+}
+
 /// A model absent from the catalog keeps the provider-level fallback.
 #[test]
 fn absent_catalog_entry_keeps_provider_fallback() {
