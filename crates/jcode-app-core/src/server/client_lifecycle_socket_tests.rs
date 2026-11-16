@@ -544,6 +544,7 @@ struct TerminalSocketProvider {
     catalog_revision: Arc<std::sync::atomic::AtomicUsize>,
     ask_after_reattach: Arc<std::sync::atomic::AtomicBool>,
     steer_tool: Arc<std::sync::atomic::AtomicBool>,
+    effort: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 #[async_trait]
@@ -612,6 +613,15 @@ impl Provider for TerminalSocketProvider {
 
     fn name(&self) -> &str {
         "terminal-socket-test"
+    }
+
+    fn reasoning_effort(&self) -> Option<String> {
+        self.effort.lock().unwrap().clone()
+    }
+
+    fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+        *self.effort.lock().unwrap() = Some(effort.to_owned());
+        Ok(())
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
@@ -684,6 +694,11 @@ async fn queued_follow_up_runs_only_after_the_current_turn_over_socket() {
 #[tokio::test]
 async fn queued_steer_is_injected_without_cancelling_over_socket() {
     sdk_socket_cancel_workflow(false, true, true, false, false, false, false, Some("steer")).await;
+}
+
+#[tokio::test]
+async fn busy_session_sets_effort_over_socket_before_turn_finishes() {
+    sdk_socket_cancel_workflow(false, true, true, false, false, false, false, Some("effort")).await;
 }
 
 #[tokio::test]
@@ -1165,7 +1180,16 @@ async fn sdk_socket_cancel_workflow(
             })
             .await;
         }
-        if let Some(mode) = queued_test {
+        if queued_test == Some("effort") {
+            send(&mut client_writer, json!({"type":"set_reasoning_effort","id":49,"effort":"high"})).await;
+            let event = tokio::time::timeout(Duration::from_secs(2), until(&mut client_reader, |event| {
+                matches!(event, ServerEvent::ReasoningEffortChanged { id:49, .. })
+            })).await.expect("effort must be confirmed during the active turn");
+            assert!(matches!(event, ServerEvent::ReasoningEffortChanged { effort: Some(ref effort), error: None, .. } if effort == "high"));
+            assert_eq!(terminal_provider.reasoning_effort().as_deref(), Some("high"));
+            assert_eq!(terminal_provider.calls.load(Ordering::SeqCst), 1);
+        }
+        if let Some(mode) = queued_test.filter(|mode| *mode != "effort") {
             let queue_mode = if mode == "steer" {
                 "steer"
             } else {
@@ -1308,7 +1332,7 @@ async fn sdk_socket_cancel_workflow(
                         assert!(active.replace(identity).is_none());
                     }
                     ServerEvent::TurnEvent { identity, event } => {
-                        if idle_soft_interrupt && active.is_none() {
+                        if (idle_soft_interrupt || queued_test == Some("effort")) && active.is_none() {
                             // The pickup wait may already have consumed the
                             // asynchronous TurnStarted notification.
                             active = Some(identity.clone());

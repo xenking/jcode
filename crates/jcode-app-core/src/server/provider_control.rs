@@ -659,6 +659,8 @@ pub(super) async fn handle_set_reasoning_effort(
     effort: String,
     is_swarm_worker: bool,
     agent: &Arc<Mutex<Agent>>,
+    session_id: &str,
+    provider: Option<Arc<dyn Provider>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     let result = if let Ok(mut agent_guard) = agent.try_lock() {
@@ -669,14 +671,39 @@ pub(super) async fn handle_set_reasoning_effort(
         } else {
             agent_guard.set_reasoning_effort(&effort)
         }
+    } else if let Some(provider) = provider {
+        let requested = if is_swarm_worker {
+            let session_id = session_id.to_owned();
+            let provider = Arc::clone(&provider);
+            let effort = effort.clone();
+            tokio::task::spawn_blocking(move || {
+                let session = crate::session::Session::load_for_remote_startup(&session_id)
+                    .or_else(|_| crate::session::Session::load_startup_stub(&session_id))?;
+                Agent::worker_effort_for_provider(provider.as_ref(), session.provider_key.as_deref(), &effort)
+            }).await.unwrap_or_else(|error| Err(error.into()))
+        } else {
+            Ok(effort)
+        };
+        let result = requested.and_then(|requested| provider.set_reasoning_effort(&requested))
+            .map(|()| provider.reasoning_effort());
+        if let Ok(current) = &result {
+            crate::session_effort::record_session_effort(session_id, current.as_deref());
+            let agent = Arc::clone(agent);
+            crate::runtime_activity::spawn(async move {
+                let mut agent = agent.lock().await;
+                let result = if is_swarm_worker { agent.mark_swarm_worker() } else { Ok(()) }
+                    .and_then(|()| agent.persist_current_reasoning_effort());
+                if let Err(error) = result {
+                    crate::logging::warn(&format!("Could not persist reasoning effort: {error}"));
+                }
+            });
+        }
+        send_reasoning_effort_result(id, result, client_event_tx);
+        return;
     } else {
-        spawn_deferred_reasoning_effort_change(
-            id,
-            effort,
-            is_swarm_worker,
-            Arc::clone(agent),
-            client_event_tx.clone(),
-        );
+        send_reasoning_effort_result(id, Err(anyhow::anyhow!(
+            "Cannot change effort while the session is busy: live provider unavailable"
+        )), client_event_tx);
         return;
     };
 
@@ -704,35 +731,6 @@ fn send_reasoning_effort_result(
             });
         }
     }
-}
-
-fn spawn_deferred_reasoning_effort_change(
-    id: u64,
-    effort: String,
-    is_swarm_worker: bool,
-    agent: Arc<Mutex<Agent>>,
-    client_event_tx: mpsc::UnboundedSender<ServerEvent>,
-) {
-    let queued_at = log_provider_control_deferred("set_reasoning_effort", id);
-    crate::runtime_activity::spawn(async move {
-        let mut agent_guard = agent.lock().await;
-        log_provider_control_lock_acquired("set_reasoning_effort", id, queued_at);
-        let result = if is_swarm_worker {
-            agent_guard
-                .mark_swarm_worker()
-                .and_then(|()| agent_guard.set_reasoning_effort(&effort))
-        } else {
-            agent_guard.set_reasoning_effort(&effort)
-        };
-        crate::logging::info(&format!(
-            "Deferred reasoning effort change completed request_id={} requested={} success={}",
-            id,
-            effort,
-            result.is_ok()
-        ));
-        send_reasoning_effort_result(id, result, &client_event_tx);
-        log_provider_control_completed("set_reasoning_effort", id, queued_at);
-    });
 }
 
 pub(super) async fn handle_set_service_tier(

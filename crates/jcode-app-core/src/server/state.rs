@@ -757,13 +757,17 @@ impl SessionControlHandle {
     }
 
     pub fn provider_handle(&self) -> Option<Arc<dyn Provider>> {
+        Self::provider_for_session(&self.session_id)
+    }
+
+    pub(super) fn provider_for_session(session_id: &str) -> Option<Arc<dyn Provider>> {
         SESSION_PROVIDERS
             .lock()
             .unwrap_or_else(|poisoned| {
                 crate::logging::warn("Recovering poisoned session provider registry");
                 poisoned.into_inner()
             })
-            .get(&self.session_id)?
+            .get(session_id)?
             .upgrade()
     }
 

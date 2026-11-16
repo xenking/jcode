@@ -91,6 +91,25 @@ mod worker_effort_cap_tests {
 }
 
 impl Agent {
+    pub(crate) fn worker_effort_for_provider(
+        provider: &dyn Provider,
+        provider_key: Option<&str>,
+        requested: &str,
+    ) -> Result<String> {
+        let model = provider.model();
+        let model = provider.explicit_provider_pin_for_current_model()
+            .map(|pin| format!("{model}@{pin}"))
+            .unwrap_or(model);
+        capped_worker_effort(
+            &crate::config::config().agents,
+            provider_key,
+            provider.name(),
+            &model,
+            requested,
+            &provider.available_efforts(),
+        )
+    }
+
     pub(crate) fn mark_swarm_worker(&mut self) -> Result<()> {
         if self.session.is_swarm_worker {
             return Ok(());
@@ -553,6 +572,18 @@ impl Agent {
         self.log_env_snapshot("set_reasoning_effort");
         self.session.save()?;
         Ok(current)
+    }
+
+    /// Persist a setting already applied through the live provider handle.
+    /// Read the latest value rather than replaying a stale queued request.
+    pub(crate) fn persist_current_reasoning_effort(&mut self) -> Result<()> {
+        self.session.reasoning_effort = self.provider.reasoning_effort();
+        crate::session_effort::record_session_effort(
+            &self.session.id,
+            self.session.reasoning_effort.as_deref(),
+        );
+        self.session.save_prepared()?;
+        Ok(())
     }
 
     pub fn set_agent_model_override(&mut self, target: &str, model: Option<String>) -> Result<()> {

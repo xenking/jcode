@@ -169,7 +169,7 @@ async fn worker_effort_caps_apply_to_spawn_control_failover_and_resume() {
         agent.set_model("test-model-b").unwrap();
         assert_eq!(provider.reasoning_effort().as_deref(), Some("medium"));
     }
-    handle_set_reasoning_effort(71, "xhigh".into(), true, &worker, &tx).await;
+    handle_set_reasoning_effort(71, "xhigh".into(), true, &worker, "session_worker", None, &tx).await;
     let event = timeout(Duration::from_secs(5), rx.recv())
         .await
         .unwrap()
@@ -177,6 +177,11 @@ async fn worker_effort_caps_apply_to_spawn_control_failover_and_resume() {
     assert!(
         matches!(event, ServerEvent::ReasoningEffortChanged { effort: Some(ref effort), error: None, .. } if effort == "medium")
     );
+    let busy_worker = worker.lock().await;
+    handle_set_reasoning_effort(72, "max".into(), true, &worker, "session_effort_cap_worker", Some(provider.clone()), &tx).await;
+    let event = timeout(Duration::from_secs(1), rx.recv()).await.expect("busy worker must respond").unwrap();
+    assert!(matches!(event, ServerEvent::ReasoningEffortChanged { effort: Some(ref effort), error: None, .. } if effort == "medium"));
+    drop(busy_worker);
     let mut saved = crate::session::Session::load("session_effort_cap_worker").unwrap();
     assert!(saved.is_swarm_worker);
     saved.model = Some("test-model-b".into());
@@ -317,6 +322,9 @@ async fn set_context_cap_is_deferred_isolated_and_persisted() {
 #[tokio::test]
 async fn set_reasoning_effort_does_not_wait_for_busy_agent_lock() {
     let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
     let _runtime = IsolatedRuntimeDir::new();
 
     let (provider, agent, client_event_tx, mut client_event_rx) =
@@ -325,18 +333,14 @@ async fn set_reasoning_effort_does_not_wait_for_busy_agent_lock() {
 
     timeout(
         Duration::from_millis(100),
-        handle_set_reasoning_effort(7, "low".to_string(), false, &agent, &client_event_tx),
+        handle_set_reasoning_effort(7, "low".to_string(), false, &agent, "session_busy_reasoning_effort", Some(provider.clone()), &client_event_tx),
     )
     .await
     .expect("reasoning effort changes must not wait for a busy agent mutex");
 
-    assert!(client_event_rx.try_recv().is_err());
-
-    drop(busy_agent_lock);
-
     let event = timeout(Duration::from_secs(1), client_event_rx.recv())
         .await
-        .expect("deferred reasoning effort change should finish after agent is idle");
+        .expect("reasoning effort change must be confirmed while the turn is active");
     assert_eq!(provider.reasoning_effort().as_deref(), Some("low"));
     assert!(matches!(
         event,
@@ -346,6 +350,21 @@ async fn set_reasoning_effort_does_not_wait_for_busy_agent_lock() {
             error: None,
         }) if effort == "low"
     ));
+    drop(busy_agent_lock);
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if crate::session::Session::load("session_busy_reasoning_effort")
+                .ok().and_then(|session| session.reasoning_effort).as_deref() == Some("low") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("applied effort must be saved after the agent unlocks");
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
 }
 
 #[tokio::test]

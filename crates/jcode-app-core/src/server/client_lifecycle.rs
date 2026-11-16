@@ -2368,7 +2368,7 @@ pub(super) async fn handle_client(
                 if let Some(target_session_id) = target_session_id {
                     let target_agent = { sessions.read().await.get(&target_session_id).cloned() };
                     if let Some(target_agent) = target_agent {
-                        handle_set_reasoning_effort(id, effort, is_swarm_worker, &target_agent, &client_event_tx)
+                        handle_set_reasoning_effort(id, effort, is_swarm_worker, &target_agent, &target_session_id, SessionControlHandle::provider_for_session(&target_session_id), &client_event_tx)
                             .await;
                     } else {
                         let _ = client_event_tx.send(ServerEvent::ReasoningEffortChanged {
@@ -2378,7 +2378,7 @@ pub(super) async fn handle_client(
                         });
                     }
                 } else {
-                    handle_set_reasoning_effort(id, effort, is_swarm_worker, &agent, &client_event_tx).await;
+                    handle_set_reasoning_effort(id, effort, is_swarm_worker, &agent, &client_session_id, session_control.provider_handle(), &client_event_tx).await;
                 }
             }
 
