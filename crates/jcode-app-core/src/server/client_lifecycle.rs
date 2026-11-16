@@ -231,6 +231,38 @@ async fn poll_agent_compaction_completion(agent: Arc<Mutex<Agent>>) -> Option<Se
     }
 }
 
+fn publish_compaction_completion(bus: &Bus, session_id: &str, event: ServerEvent) {
+    bus.publish(BusEvent::CompactionApplied {
+        session_id: session_id.to_owned(),
+        event,
+    });
+}
+
+fn forward_compaction_completion(
+    event: &BusEvent,
+    session_id: &str,
+    tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let BusEvent::CompactionApplied {
+        session_id: owner,
+        event,
+    } = event
+    else {
+        return;
+    };
+    if owner != session_id {
+        return;
+    }
+    let post_tokens = match event {
+        ServerEvent::Compaction { post_tokens, .. } => *post_tokens,
+        _ => None,
+    };
+    let _ = tx.send(event.clone());
+    if let Some(usage) = crate::agent::compaction_context_usage_event(post_tokens, None) {
+        let _ = tx.send(usage);
+    }
+}
+
 async fn refresh_session_control_handle(
     session_id: &str,
     agent: &Arc<Mutex<Agent>>,
@@ -884,26 +916,15 @@ pub(super) async fn handle_client(
                     }
                     Ok(BusEvent::CompactionFinished) => {
                         let agent = Arc::clone(&agent);
-                        let tx = client_event_tx.clone();
+                        let session_id = client_session_id.clone();
                         tokio::spawn(async move {
                             if let Some(event) = poll_agent_compaction_completion(agent).await {
-                                let post_tokens = match &event {
-                                    ServerEvent::Compaction { post_tokens, .. } => *post_tokens,
-                                    _ => None,
-                                };
-                                let _ = tx.send(event);
-                                // Clients derive the context percentage from the last
-                                // usage report, so publish the post-compaction size at
-                                // completion. Without it the composer keeps showing the
-                                // pre-compaction figure until the next turn, which in a
-                                // waiting session can be many minutes.
-                                if let Some(usage) =
-                                    crate::agent::compaction_context_usage_event(post_tokens, None)
-                                {
-                                    let _ = tx.send(usage);
-                                }
+                                publish_compaction_completion(Bus::global(), &session_id, event);
                             }
                         });
+                    }
+                    Ok(event @ BusEvent::CompactionApplied { .. }) => {
+                        forward_compaction_completion(&event, &client_session_id, &client_event_tx);
                     }
                     Ok(BusEvent::CompactionStarted {
                         trigger,
@@ -3866,7 +3887,8 @@ async fn publish_available_models_for_client(
         let _ = tx.send(event.clone());
     } else {
         crate::logging::warn(&format!(
-            "Skipping oversized catalog for connection {} ({} bytes)", connection_id, catalog.encoded_len
+            "Skipping oversized catalog for connection {} ({} bytes)",
+            connection_id, catalog.encoded_len
         ));
     }
     *last = Some(Arc::clone(&catalog.dedup_key));
