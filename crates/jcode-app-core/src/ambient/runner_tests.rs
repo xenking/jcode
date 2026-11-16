@@ -12,6 +12,52 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
+#[test]
+fn empty_completed_cycles_are_quiet_but_work_and_failures_notify() {
+    use crate::ambient::{AmbientCycleResult, CycleStatus};
+    let mut result = AmbientCycleResult {
+        summary: "Nothing needed".into(),
+        memories_modified: 0,
+        compactions: 0,
+        proactive_work: None,
+        next_schedule: None,
+        started_at: chrono::Utc::now(),
+        ended_at: chrono::Utc::now(),
+        status: CycleStatus::Complete,
+        conversation: None,
+    };
+    assert!(!super::cycle_should_notify(&result, 0));
+    assert!(super::cycle_should_notify(&result, 1));
+    result.proactive_work = Some("Fixed bug".into());
+    assert!(super::cycle_should_notify(&result, 0));
+    result.proactive_work = None;
+    result.memories_modified = 1;
+    assert!(super::cycle_should_notify(&result, 0));
+    result.memories_modified = 0;
+    result.status = CycleStatus::Incomplete;
+    assert!(super::cycle_should_notify(&result, 0));
+}
+
+#[test]
+fn cycle_errors_are_short_and_do_not_expose_provider_details() {
+    assert_eq!(
+        super::cycle_error_reason(&anyhow::anyhow!("HTTP 401 secret token")),
+        "Provider authentication failed"
+    );
+    assert_eq!(
+        super::cycle_error_reason(&anyhow::anyhow!("Unsupported OpenAI model 'x'")),
+        "Configured model is unavailable"
+    );
+    assert_eq!(
+        super::cycle_error_reason(&anyhow::anyhow!("HTTP 429")),
+        "Provider rate limit reached"
+    );
+    assert_eq!(
+        super::cycle_error_reason(&anyhow::anyhow!("private request body")),
+        "Ambient agent failed; check logs for details"
+    );
+}
+
 #[path = "runner_live_delivery_tests.rs"]
 mod live_delivery;
 
@@ -146,6 +192,8 @@ async fn running_loop_observes_enable_edit_without_cache_invalidation() {
 #[derive(Clone, Default)]
 struct StreamingTestProvider {
     responses: Arc<StdMutex<VecDeque<Vec<StreamEvent>>>>,
+    requested_models: Arc<StdMutex<Vec<String>>>,
+    supplied_tools: Arc<StdMutex<Vec<Vec<ToolDefinition>>>>,
 }
 
 impl StreamingTestProvider {
@@ -182,10 +230,11 @@ impl Provider for StreamingTestProvider {
     async fn complete(
         &self,
         _messages: &[Message],
-        _tools: &[ToolDefinition],
+        tools: &[ToolDefinition],
         _system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        self.supplied_tools.lock().unwrap().push(tools.to_vec());
         let events = self
             .responses
             .lock()
@@ -204,8 +253,88 @@ impl Provider for StreamingTestProvider {
         "test"
     }
 
+    fn set_model(&self, model: &str) -> Result<()> {
+        self.requested_models
+            .lock()
+            .unwrap()
+            .push(model.to_string());
+        Ok(())
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(self.clone())
+    }
+}
+
+#[tokio::test]
+async fn configured_route_receives_and_executes_ambient_end_tool() {
+    let _guard = crate::storage::lock_test_env();
+    let _cache = ResetConfigCache;
+    let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _provider_env = EnvVarGuard::unset("JCODE_AMBIENT_PROVIDER");
+    let _model_env = EnvVarGuard::unset("JCODE_AMBIENT_MODEL");
+    std::fs::write(
+        Config::path().unwrap(),
+        "[ambient]\nprovider = 'openai'\nmodel = 'gpt-6.1-terra'\n",
+    )
+    .unwrap();
+    Config::invalidate_cache();
+    let mock = StreamingTestProvider::default();
+    mock.queue_response(vec![
+        StreamEvent::ToolUseStart {
+            id: "call_end".into(),
+            name: "end_ambient_cycle".into(),
+        },
+        StreamEvent::ToolInputDelta(
+            r#"{"summary":"Nothing to do","memories_modified":0,"compactions":0}"#.into(),
+        ),
+        StreamEvent::ToolUseEnd,
+        StreamEvent::MessageEnd {
+            stop_reason: Some("tool_use".into()),
+        },
+    ]);
+    mock.queue_response(vec![
+        StreamEvent::TextDelta("Done".into()),
+        StreamEvent::MessageEnd {
+            stop_reason: Some("end_turn".into()),
+        },
+    ]);
+    let original: Arc<dyn Provider> = Arc::new(mock.clone());
+    let routed = super::configured_cycle_provider(&original).await.unwrap();
+    assert_eq!(
+        mock.requested_models.lock().unwrap().as_slice(),
+        ["openai-oauth:gpt-6.1-terra"]
+    );
+    let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
+    let result = runner
+        .run_cycle_with_visible_launcher(&routed, false, || unreachable!())
+        .await
+        .unwrap();
+    assert!(matches!(
+        result.status,
+        crate::ambient::CycleStatus::Complete
+    ));
+    assert!(!super::cycle_should_notify(&result, 0));
+    let requests = mock.supplied_tools.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        1,
+        "a completed cycle must not make another model request"
+    );
+    let tool = requests[0]
+        .iter()
+        .find(|tool| tool.name == "end_ambient_cycle")
+        .expect("tool must reach provider");
+    assert!(!tool.defer_loading);
+    for field in ["summary", "memories_modified", "compactions", "intent"] {
+        assert!(
+            tool.input_schema["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item == field)
+        );
     }
 }
 
@@ -253,7 +382,7 @@ async fn assert_visible_launch_error_falls_back(error_kind: std::io::ErrorKind) 
         "headless fallback should capture an agent conversation"
     );
     assert!(
-        result.summary.contains("forced end after 2 attempts"),
+        result.summary.contains("two attempts"),
         "headless fallback should return the headless agent result"
     );
 }

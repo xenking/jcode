@@ -28,6 +28,78 @@ use tokio::sync::{Notify, RwLock};
 
 const MAX_IDLE_POLL_SECS: u64 = 30;
 
+fn cycle_should_notify(result: &AmbientCycleResult, pending_permissions: usize) -> bool {
+    !matches!(result.status, CycleStatus::Complete)
+        || result.memories_modified > 0
+        || result.compactions > 0
+        || pending_permissions > 0
+        || result
+            .proactive_work
+            .as_deref()
+            .is_some_and(|work| !work.trim().is_empty())
+}
+
+fn cycle_error_reason(error: &anyhow::Error) -> &'static str {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    if text.contains("429") || text.contains("rate limit") {
+        "Provider rate limit reached"
+    } else if text.contains("401") || text.contains("403") || text.contains("authenticat") {
+        "Provider authentication failed"
+    } else if text.contains("model")
+        && (text.contains("not found")
+            || text.contains("unavailable")
+            || text.contains("unsupported"))
+    {
+        "Configured model is unavailable"
+    } else if text.contains("timeout") || text.contains("timed out") {
+        "Provider request timed out"
+    } else {
+        "Ambient agent failed; check logs for details"
+    }
+}
+
+/// Apply the configured route to an isolated provider fork, never to the daemon's provider.
+pub async fn configured_cycle_provider(
+    provider: &Arc<dyn Provider>,
+) -> anyhow::Result<Arc<dyn Provider>> {
+    let cycle_provider = provider.fork();
+    let cfg = &config().ambient;
+    if let Some(model) = cfg
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty() && *m != "inherit")
+    {
+        let mut route = match cfg
+            .provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty() && *p != "auto" && *p != "inherit")
+        {
+            Some(prefix) if !model.contains(':') => format!("{prefix}:{model}"),
+            _ => model.to_string(),
+        };
+        if !cfg.allow_api_keys {
+            if route.starts_with("openai-api:") || route.starts_with("claude-api:") {
+                anyhow::bail!("Ambient API-key route requires ambient.allow_api_keys = true");
+            }
+            if let Some(model) = route.strip_prefix("openai:") {
+                route = format!("openai-oauth:{model}");
+            } else if let Some(model) = route.strip_prefix("claude:") {
+                route = format!("claude-oauth:{model}");
+            }
+        }
+        if crate::provider::set_model_with_auth_refresh(cycle_provider.as_ref(), &route).is_err() {
+            // New models may only be present in the live catalog, not the offline fallback.
+            // Other providers in the refresh fanout can fail independently, so still
+            // retry selection against any catalog that was successfully updated.
+            let _ = cycle_provider.prefetch_models().await;
+            crate::provider::set_model_with_auth_refresh(cycle_provider.as_ref(), &route)?;
+        }
+    }
+    Ok(cycle_provider)
+}
+
 /// Re-read enabled on each loop iteration, without overriding an explicit stop.
 /// Config edits take effect on the next wake, not on the config cache's cadence.
 fn ambient_allowed(status: &AmbientStatus) -> bool {
@@ -732,7 +804,11 @@ impl AmbientRunnerHandle {
             logging::info("Ambient runner: starting ambient cycle");
             self.set_running_detail("starting cycle").await;
 
-            let cycle_result = self.run_cycle(&provider).await;
+            let cycle_provider = configured_cycle_provider(&provider).await;
+            let cycle_result = match &cycle_provider {
+                Ok(cycle_provider) => self.run_cycle(cycle_provider).await,
+                Err(error) => Err(anyhow::anyhow!("Ambient route selection failed: {error:#}")),
+            };
 
             // Clear the soft interrupt queue — cycle is done
             {
@@ -769,8 +845,13 @@ impl AmbientRunnerHandle {
                             }
                             CycleStatus::Incomplete => crate::safety::TranscriptStatus::Incomplete,
                         },
-                        provider: provider.name().to_string(),
-                        model: provider.model(),
+                        provider: cycle_provider
+                            .as_ref()
+                            .map_or_else(|_| provider.name(), |p| p.name())
+                            .to_string(),
+                        model: cycle_provider
+                            .as_ref()
+                            .map_or_else(|_| provider.model(), |p| p.model()),
                         actions: Vec::new(),
                         pending_permissions: self.inner.safety.pending_requests().len(),
                         summary: Some(result.summary.clone()),
@@ -781,13 +862,20 @@ impl AmbientRunnerHandle {
                     let _ = self.inner.safety.save_transcript(&transcript);
 
                     // Send notifications (fire-and-forget)
-                    self.inner.notifier.dispatch_cycle_summary(&transcript);
+                    if cycle_should_notify(&result, transcript.pending_permissions) {
+                        self.inner.notifier.dispatch_cycle_summary(&transcript);
+                    } else {
+                        logging::info("Ambient cycle: empty result, skipping notification");
+                    }
 
                     // Stored memories are recalled directly by Jev, so ambient
                     // cycles must not initialize or backfill an embedding model.
                 }
                 Err(e) => {
                     logging::error(&format!("Ambient cycle failed: {}", e));
+                    self.inner
+                        .notifier
+                        .dispatch_cycle_failure(cycle_error_reason(&e));
                     scheduler.on_rate_limit_hit();
 
                     let mut s = self.inner.state.write().await;
@@ -970,8 +1058,10 @@ impl AmbientRunnerHandle {
         }
 
         // Agent didn't call end_ambient_cycle - try continuation
-        if run_result.is_err() {
-            logging::warn("Ambient cycle: agent error without calling end_ambient_cycle");
+        if let Err(ref error) = run_result {
+            logging::warn(&format!(
+                "Ambient cycle: agent error without calling end_ambient_cycle: {error:#}"
+            ));
         }
 
         self.set_running_detail("continuation turn").await;
@@ -981,7 +1071,7 @@ impl AmbientRunnerHandle {
             what you accomplished and schedule your next wake. \
             If you are not done, continue what you were doing.";
 
-        let _ = agent.run_once_capture(continuation).await;
+        let continuation_result = agent.run_once_capture(continuation).await;
 
         // Check again
         if let Some(result) = ambient_tools::take_cycle_result() {
@@ -999,9 +1089,14 @@ impl AmbientRunnerHandle {
         // Forced end
         ambient_tools::unregister_ambient_session(&ambient_session_id);
         logging::warn("Ambient cycle: forced end after 2 attempts without end_ambient_cycle");
+        let reason = continuation_result
+            .as_ref()
+            .err()
+            .or_else(|| run_result.as_ref().err())
+            .map(cycle_error_reason)
+            .unwrap_or("Model did not end the cycle after two attempts");
         let forced = AmbientCycleResult {
-            summary: "Cycle ended without calling end_ambient_cycle (forced end after 2 attempts)"
-                .to_string(),
+            summary: reason.to_string(),
             memories_modified: 0,
             compactions: 0,
             proactive_work: None,

@@ -167,6 +167,28 @@ fn test_format_cycle_body_safe() {
 }
 
 #[test]
+fn incomplete_cycle_notification_is_short_and_does_not_include_transcript() {
+    let transcript = AmbientTranscript {
+        session_id: "test".into(),
+        started_at: chrono::Utc::now(),
+        ended_at: None,
+        status: crate::safety::TranscriptStatus::Incomplete,
+        provider: "openai".into(),
+        model: "gpt-test".into(),
+        actions: vec![],
+        pending_permissions: 0,
+        summary: Some("Provider request failed".into()),
+        compactions: 0,
+        memories_modified: 0,
+        conversation: Some("SECRET FULL TRANSCRIPT".into()),
+    };
+    let (title, body) = cycle_failure_notification(&transcript);
+    assert_eq!(title, "Ambient cycle failed");
+    assert_eq!(body, "Provider request failed");
+    assert!(!body.contains("# Summary"));
+}
+
+#[test]
 fn test_format_cycle_body_detailed() {
     let transcript = AmbientTranscript {
         session_id: "test_001".to_string(),

@@ -1101,6 +1101,7 @@ impl Agent {
             let mut malformed_calls: Vec<MalformedToolCallInfo> = Vec::new();
             let mut executed_valid_call = false;
             let mut tool_results_dirty = false;
+            let mut ambient_cycle_ended = false;
             for tc in tool_calls {
                 let message_id = assistant_message_id
                     .clone()
@@ -1256,6 +1257,11 @@ impl Agent {
 
                 match result {
                     Ok(output) => {
+                        if tc.name == "end_ambient_cycle"
+                            && crate::tool::ambient::is_ambient_session_registered(&self.session.id)
+                        {
+                            ambient_cycle_ended = true;
+                        }
                         let output = cap_tool_output_for_history(&tc.name, output);
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
                             session_id: self.session.id.clone(),
@@ -1328,6 +1334,10 @@ impl Agent {
 
             if tool_results_dirty {
                 self.session.save()?;
+            }
+
+            if ambient_cycle_ended {
+                break;
             }
 
             if !generated_image_contexts.is_empty() {

@@ -159,6 +159,10 @@ The ambient agent has access to a subset of jcode tools plus ambient-specific to
 
 Every ambient cycle **must** end with this tool call. The system uses the summary for the notification email and the info widget.
 
+Completed cycles with zero memory changes, zero compactions, no proactive work,
+and no pending permissions are recorded silently. An incomplete cycle sends one
+short failure notification; the full transcript remains in local history.
+
 ```rust
 // Tool: end_ambient_cycle
 {
