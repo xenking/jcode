@@ -187,14 +187,17 @@ fn spill_path(session_id: &str, call_id: &str) -> Option<PathBuf> {
 
 pub(crate) fn render_report(out: &jcode_codemode::RunOutput) -> String {
     let mut report = String::new();
-    if !out.logs.is_empty() {
+    if !out.logs.is_empty() || out.logs_truncated {
         report.push_str("console:\n");
         for line in &out.logs {
             report.push_str(line);
             report.push('\n');
         }
         if out.logs_truncated {
-            report.push_str("...(console output truncated)\n");
+            report.push_str(&format!(
+                "...(console output exceeded the {} byte per-run limit; log less or return/store smaller results in a new run)\n",
+                Limits::default().max_log_bytes
+            ));
         }
         report.push('\n');
     }

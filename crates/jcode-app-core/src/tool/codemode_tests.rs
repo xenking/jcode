@@ -296,6 +296,19 @@ async fn uncaught_errors_without_side_effects_are_tool_errors() {
 }
 
 #[test]
+fn report_explains_console_limit_even_if_first_line_was_dropped() {
+    let out = jcode_codemode::RunOutput {
+        logs_truncated: true,
+        ..Default::default()
+    };
+    let report = render_report(&out);
+    assert!(
+        report.contains("65536") && report.contains("console") && report.contains("smaller"),
+        "{report}"
+    );
+}
+
+#[test]
 fn report_renders_strings_raw_and_lists_store_keys() {
     let mut store = Map::new();
     store.insert("k".into(), json!(1));
