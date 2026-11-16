@@ -231,6 +231,28 @@ pub(in crate::tui::app) fn handle_server_event(
             return false;
         }
         ServerEvent::TurnStarted { identity } => {
+            // A queued server turn can start before the prior turn's paced
+            // output has drained. Settle that accepted terminal first, while
+            // its identity is still current, instead of orphaning its local
+            // request ID and letting it reject the new turn's Done.
+            if let (Some(id), Some(previous)) = (
+                app.deferred_stream_done_id,
+                app.deferred_stream_done_identity.clone(),
+            ) && app.remote_turn_fence.is_latest(&previous)
+                && previous.runtime_generation == identity.runtime_generation
+                && previous.turn_id < identity.turn_id
+            {
+                let ops = app.stream_buffer.flush();
+                app.apply_stream_ops(ops);
+                handle_server_event(
+                    app,
+                    ServerEvent::TurnEvent {
+                        identity: previous,
+                        event: Box::new(ServerEvent::Done { id }),
+                    },
+                    remote,
+                );
+            }
             let same_turn = app.remote_turn_fence.accepts(&identity);
             if !app.remote_turn_fence.start(&identity) {
                 return false;

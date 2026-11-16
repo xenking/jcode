@@ -25,6 +25,99 @@ fn scoped(generation: &str, turn_id: u64, event: ServerEvent) -> ServerEvent {
 }
 
 #[test]
+fn newer_queued_turn_settles_when_previous_done_was_paced() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.auto_poke_incomplete_todos = false;
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _guard = runtime.enter();
+    let mut remote = RemoteConnection::dummy();
+    app.current_message_id = Some(42);
+    start(&mut app, &mut remote, "runtime", 1);
+    handle_server_event(
+        &mut app,
+        scoped(
+            "runtime",
+            1,
+            ServerEvent::TextDelta {
+                text: "old response".into(),
+            },
+        ),
+        &mut remote,
+    );
+    handle_server_event(
+        &mut app,
+        scoped("runtime", 1, ServerEvent::Done { id: 42 }),
+        &mut remote,
+    );
+    assert!(app.deferred_stream_done_id.is_some());
+    start(&mut app, &mut remote, "runtime", 2);
+    assert!(app.is_processing);
+    assert!(app.current_message_id.is_none());
+    assert!(
+        app.display_messages
+            .iter()
+            .any(|message| message.content == "old response")
+    );
+    handle_server_event(
+        &mut app,
+        scoped(
+            "runtime",
+            2,
+            ServerEvent::TextDelta {
+                text: "queued response".into(),
+            },
+        ),
+        &mut remote,
+    );
+    handle_server_event(
+        &mut app,
+        scoped("runtime", 2, ServerEvent::Done { id: 0 }),
+        &mut remote,
+    );
+    let ops = app.stream_buffer.flush();
+    app.apply_stream_ops(ops);
+    if let Some(id) = app.deferred_stream_done_id.take() {
+        handle_server_event(
+            &mut app,
+            scoped("runtime", 2, ServerEvent::Done { id }),
+            &mut remote,
+        );
+    }
+    assert!(
+        app.display_messages
+            .iter()
+            .any(|message| message.content == "queued response")
+    );
+    handle_server_event(
+        &mut app,
+        ServerEvent::Compaction {
+            trigger: "manual".into(),
+            method: None,
+            pre_tokens: Some(100),
+            post_tokens: Some(20),
+            tokens_saved: Some(80),
+            duration_ms: None,
+            messages_dropped: None,
+            messages_compacted: None,
+            summary_chars: None,
+            active_messages: None,
+            divider: None,
+        },
+        &mut remote,
+    );
+    assert!(
+        app.display_messages
+            .iter()
+            .any(|message| message.role == "compaction")
+    );
+    assert!(
+        !app.is_processing,
+        "the newer queued turn must settle even if the previous Done was deferred"
+    );
+}
+
+#[test]
 fn completed_turn_busy_continuation_retries_from_idle_without_another_terminal() {
     for auto_retry in [false, true] {
         let mut app = create_test_app();
