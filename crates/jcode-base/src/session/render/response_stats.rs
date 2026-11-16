@@ -68,8 +68,18 @@ fn attach_turn(
             total.checked_add(field(messages[i].token_usage.as_ref()?)?)
         })
     };
+    let calls: std::collections::HashSet<_> = assistants
+        .iter()
+        .flat_map(|&i| {
+            messages[i].content.iter().filter_map(|block| match block {
+                ContentBlock::ToolUse { id, .. } => Some(id),
+                _ => None,
+            })
+        })
+        .collect();
     let stats = ResponseStats {
         duration_secs: None,
+        tool_calls: (!calls.is_empty()).then_some(calls.len() as u64),
         input_tokens: sum(|usage| Some(usage.input_tokens)),
         output_tokens: sum(|usage| Some(usage.output_tokens)),
         cache_read_tokens: sum(|usage| usage.cache_read_input_tokens),
@@ -79,6 +89,7 @@ fn attach_turn(
         || stats.output_tokens.is_some()
         || stats.cache_read_tokens.is_some()
         || stats.cache_creation_tokens.is_some()
+        || stats.tool_calls.is_some()
     {
         row.response_stats = Some(stats);
     }
@@ -161,6 +172,7 @@ mod tests {
         assert_eq!(first.cache_read_tokens, Some(6));
         assert_eq!(first.cache_creation_tokens, Some(8));
         assert_eq!(first.duration_secs, None);
+        assert_eq!(serde_json::to_value(first).unwrap()["tool_calls"], 1);
         assert_eq!(
             rows[1].response_stats.as_ref().unwrap().input_tokens,
             Some(40)
