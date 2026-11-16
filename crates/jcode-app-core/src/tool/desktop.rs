@@ -18,7 +18,7 @@ impl Tool for DesktopTool {
         "desktop"
     }
     fn description(&self) -> &str {
-        "Control local Jcode Desktop by explicit window and session ID: list, background open, state, click, set_composer, send, Enter, search, expand_tool, render, wait_for. Focused composers and existing drafts are protected unless explicitly allowed. Click supports composer.send and tool:<call_id>; render and visibility waits also support visible row:<revision>:<index>."
+        "Control local Jcode Desktop by explicit window and session ID: list, background open, state, click, set_composer, send, Enter/Escape, search, expand_tool, render, wait_for. Focused composers and existing drafts are protected unless explicitly allowed. Click supports composer.send and tool:<call_id>; render and visibility waits also support visible row:<revision>:<index>."
     }
     fn parameters_schema(&self) -> Value {
         json!({"type":"object", "required":["action"], "properties":{
@@ -27,7 +27,7 @@ impl Tool for DesktopTool {
             "target":{"type":"object","required":["window_id","session_id"],"properties":{"window_id":{"type":"string"},"session_id":{"type":"string"}},"additionalProperties":false},
             "session_id":{"type":"string","description":"Session to open."},
             "destination":{"oneOf":[{"type":"string","enum":["new_window"]},{"type":"object","required":["background_panel"],"properties":{"background_panel":{"type":"object","required":["window_id"],"properties":{"window_id":{"type":"string"}},"additionalProperties":false}},"additionalProperties":false}]},
-            "selector":{"type":"string", "description":"Supported: tool:<call_id>, row:<revision>:<index> (render/wait), composer.send (click only)."}, "text":{"type":"string"}, "key":{"type":"string", "description":"Enter or Return only."}, "query":{"type":"string"}, "path":{"type":"string"},
+            "selector":{"type":"string", "description":"Supported: tool:<call_id>, row:<revision>:<index> (render/wait), composer.send (click only)."}, "text":{"type":"string"}, "key":{"type":"string", "description":"Enter/Return to send, Escape/Esc to close search."}, "query":{"type":"string"}, "path":{"type":"string"},
             "allow_user_window":{"type":"boolean","description":"Explicitly allow acting on the user's focused composer or existing draft."},
             "condition":{"type":"object", "required":["kind"], "properties":{"kind":{"type":"string", "enum":["selector_visible","text_contains","session_idle"]}, "selector":{"type":"string"}, "text":{"type":"string"}}, "additionalProperties":false},"timeout_ms":{"type":"integer","minimum":1,"maximum":120000}
         }})
