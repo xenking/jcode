@@ -58,6 +58,14 @@ mod fixture { fn old_bar() { "█".repeat(4); } }
 fn real() { shared(); }
 """}), [])
 
+    def test_checkout_name_cannot_hide_production_files(self):
+        with tempfile.TemporaryDirectory(prefix="tests_context_") as directory:
+            root = Path(directory)
+            source = root / "crates/jcode-tui/src/tui/future.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text('fn quota() { "█".repeat(3); }')
+            self.assertEqual(len(violations(root)), 1)
+
     def test_shared_progress_is_allowed_outside_quota_surfaces(self):
         self.assertEqual(self.check({"ui_messages.rs": "fn progress() { progress_bar::spans(); }"}), [])
 

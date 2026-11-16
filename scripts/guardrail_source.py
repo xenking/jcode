@@ -16,7 +16,7 @@ def rust_sources(directory: Path) -> list[Path]:
         raise FileNotFoundError(f"{directory}: restore the source directory or update its architecture gate")
     files = [
         p for p in sorted(directory.rglob("*.rs"))
-        if not any(re.search(r"(?:^tests?$|_tests?$|^tests_)", part) for part in p.with_suffix("").parts)
+        if not any(re.search(r"(?:^tests?$|_tests?$|^tests_)", part) for part in p.relative_to(directory).with_suffix("").parts)
     ]
     test_only = test_module_files(files, production_lines)
     return [p for p in files if p.resolve() not in test_only]
