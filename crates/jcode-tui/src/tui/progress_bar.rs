@@ -30,7 +30,6 @@ pub(super) fn pulse(width: usize, active: Range<usize>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::style::Stylize;
     use unicode_width::UnicodeWidthStr;
 
     #[test]

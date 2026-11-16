@@ -190,8 +190,9 @@ and the four historical-tree rejection proofs passed. Runtime tests also passed
 for downstream machine-hook suppression, Unicode chrome fitting, catalog fanout,
 quota/task progress, compaction delivery and image-ID mapping.
 
-Strict `justrust clippy` passed on the regular/default targets of all 13 Rust
-packages touched by these changes or the prerequisite formatting cleanup:
+Strict `justrust clippy --all-targets` passed on all 13 Rust packages touched by
+these changes or the prerequisite formatting cleanup. This stronger receipt was
+obtained after rebasing onto `origin/master` at `0012e21aa` on 2026-11-16:
 
 ```bash
 justrust clippy -p jcode-base -p jcode-app-core \
@@ -199,7 +200,7 @@ justrust clippy -p jcode-base -p jcode-app-core \
   -p jcode-harness-api-server -p jcode-tui -p jcode-companion \
   -p jcode-harness-api -p jcode-protocol \
   -p jcode-provider-anthropic-runtime -p jcode-provider-openrouter-runtime \
-  -p jcode-tui-messages -p jcode-voice -- -D warnings
+  -p jcode-tui-messages -p jcode-voice --all-targets -- -D warnings
 ```
 
 The required complete command was attempted, not replaced with the four new
@@ -224,9 +225,14 @@ against an independent archive of the pre-change `origin/master` tree
 These are inherited failures, not a green full acceptance. No ratchet baseline
 was increased, no failure was suppressed, and no unrelated mass refactor was
 undertaken to relabel the branch green. Integration must retain this blocker
-until those existing violations are repaired separately. The all-targets strict
-clippy variant also exposes pre-existing test-only lock/module-order diagnostics;
-the regular-target pass above must not be described as an all-targets pass.
+until those existing violations are repaired separately. The initial all-targets
+attempt exposed existing test-only lock/module-order diagnostics. Those were
+subsequently repaired on master by separate commits; the rebased all-targets
+command above now passes without suppressions. A final runtime test also passed
+for the fixed-cell task-progress primitive after removing its unused test import.
+The complete guardrail command was repeated after this rebase and still exited 1
+on the same five inherited ratchets, while every new gate, its regression suite,
+formatting and onboarding invariants passed.
 
 To reproduce the prior-tree checks without changing this checkout:
 
