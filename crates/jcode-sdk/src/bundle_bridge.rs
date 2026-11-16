@@ -13,9 +13,7 @@ pub const BUNDLE_BRIDGE_CAPABILITIES: &[&str] = &["bridge_lifecycle_v1", "peer_u
 /// Including the file identity also separates two builds installed at one path.
 pub fn bundle_bridge_socket(base: &Path, target: &ImmutableTarget) -> PathBuf {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
-    serde_json::to_vec(target)
-        .expect("immutable target is serializable")
-        .hash(&mut hash);
+    target.hash(&mut hash);
     base.with_file_name(format!("jcode-api-{:016x}.sock", hash.finish()))
 }
 
@@ -203,6 +201,26 @@ mod tests {
             retire_bridge_if_pid(&api, std::process::id() + 1, Duration::from_secs(1)).unwrap_err();
         assert_eq!(error.kind, ErrorKind::HandshakeFailed);
         server.join().unwrap();
+    }
+
+    #[test]
+    fn non_utf8_bundle_paths_get_stable_distinct_endpoints() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let mut target = generation::pin_path(&std::env::current_exe().unwrap()).unwrap();
+        target.binary_path = root
+            .path()
+            .join(std::ffi::OsString::from_vec(b"jcode-\xff".to_vec()));
+        let base = root.path().join("api.sock");
+        let socket = bundle_bridge_socket(&base, &target);
+        assert_eq!(socket, bundle_bridge_socket(&base, &target));
+        let other = root.path().join("jcode-other");
+        std::fs::write(&other, b"binary").unwrap();
+        assert_ne!(
+            socket,
+            bundle_bridge_socket(&base, &generation::pin_path(&other).unwrap())
+        );
     }
 
     #[test]

@@ -1,6 +1,9 @@
 //! Client for the local Desktop control socket. The caller chooses an explicit
 //! endpoint so test instances and the user's running Desktop are never confused.
-pub use jcode_harness_api::desktop_control::*;
+pub use jcode_harness_api::desktop_control::{
+    DESKTOP_CONTROL_VERSION, DesktopAction, DesktopRequest, DesktopResponse, DesktopTarget,
+    OpenDestination, WaitCondition,
+};
 #[cfg(unix)]
 use std::{
     io::{self, BufRead, BufReader, Read, Write},

@@ -550,8 +550,8 @@ impl CloudClient {
         if let Some(index) = agents
             .iter()
             .position(|(name, timeout, _)| name == &self.client_name && *timeout == self.timeout)
+            && let Some(entry) = agents.remove(index)
         {
-            let entry = agents.remove(index).unwrap();
             let agent = entry.2.clone();
             agents.push_back(entry);
             return agent;

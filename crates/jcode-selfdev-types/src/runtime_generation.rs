@@ -9,7 +9,7 @@ pub enum DesiredSelection {
     SharedServer,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FileIdentity {
     pub device: u64,
     pub inode: u64,
@@ -18,7 +18,7 @@ pub struct FileIdentity {
 }
 
 /// A resolved selection. Never resolve its original channel again at exec time.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ImmutableTarget {
     pub binary_path: PathBuf,
     pub git_hash: Option<String>,
