@@ -28,7 +28,10 @@ impl DisplayMessage {
     /// An ask result records a human decision, even though it is stored as a tool result.
     pub fn is_ask_decision(&self) -> bool {
         self.role == "tool"
-            && self.tool_data.as_ref().is_some_and(|tool| tool.name == "ask")
+            && self
+                .tool_data
+                .as_ref()
+                .is_some_and(|tool| tool.name == "ask")
     }
 
     pub fn is_answered_ask(&self) -> bool {
@@ -150,8 +153,7 @@ impl DisplayMessage {
 
     /// Whether the divider is expanded to show its detail.
     pub fn compaction_is_expanded(&self) -> bool {
-        self.is_compaction()
-            && self.title.as_deref() == Some(COMPACTION_EXPANDED_TITLE)
+        self.is_compaction() && self.title.as_deref() == Some(COMPACTION_EXPANDED_TITLE)
     }
 
     /// Whether this divider represents a compaction still in progress.
@@ -311,8 +313,7 @@ impl DisplayMessage {
             .flatten();
         // Stored compaction rows carry no title; the collapse state lives in the
         // title, so rehydrated dividers start collapsed like live ones.
-        let title = (item.role == "compaction")
-            .then(|| COMPACTION_COLLAPSED_TITLE.to_string());
+        let title = (item.role == "compaction").then(|| COMPACTION_COLLAPSED_TITLE.to_string());
         Self {
             role: item.role,
             content: item.content,
@@ -601,7 +602,8 @@ mod tests {
     #[test]
     fn tool_duration_restored_metadata_wins_and_missing_stays_unknown() {
         let mut row = RenderedMessage {
-            response_stats: None, timestamp_ms: None,
+            response_stats: None,
+            timestamp_ms: None,
             tool_duration_ms: Some(1234),
             role: "tool".into(),
             content: "[tool timing: duration=2s] body".into(),
@@ -634,7 +636,8 @@ mod tests {
     #[test]
     fn rendered_messages_convert_to_display_messages() {
         let rendered = RenderedMessage {
-            response_stats: None, timestamp_ms: None,
+            response_stats: None,
+            timestamp_ms: None,
             tool_duration_ms: None,
             role: "assistant".to_string(),
             content: "done".to_string(),

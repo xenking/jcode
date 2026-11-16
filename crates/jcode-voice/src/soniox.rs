@@ -242,10 +242,7 @@ impl SonioxSession {
 }
 
 fn session_config() -> Value {
-    session_config_with(
-        SONIOX_LANGUAGE_HINTS,
-        &super::nari::recognition_terms(),
-    )
+    session_config_with(SONIOX_LANGUAGE_HINTS, &super::nari::recognition_terms())
 }
 
 /// The start message for a realtime session. `language_hints` steers mixed
@@ -671,7 +668,10 @@ mod tests {
         assert_eq!(config["num_channels"], 1);
         assert_eq!(config["language_hints"], json!(["ru", "en"]));
         assert_eq!(config["context"]["terms"], json!(["Jcode", "Kubernetes"]));
-        assert!(config.get("api_key").is_none(), "the key stays in the header");
+        assert!(
+            config.get("api_key").is_none(),
+            "the key stays in the header"
+        );
         assert!(
             config.get("language_hints_strict").is_none(),
             "hints must not reject a language outside the list"

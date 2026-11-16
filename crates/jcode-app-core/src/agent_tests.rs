@@ -911,22 +911,39 @@ async fn queued_image_prompts_keep_independent_session_markers() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
-    for (text, image, id) in [("first [#image 1]", "first-image", "one"), ("second [#image 1]", "second-image", "two")] {
-        agent.queue_soft_interrupt_with_id(text.into(), vec![("image/png".into(), image.into())], false, SoftInterruptSource::User, Some(id.into()));
+    for (text, image, id) in [
+        ("first [#image 1]", "first-image", "one"),
+        ("second [#image 1]", "second-image", "two"),
+    ] {
+        agent.queue_soft_interrupt_with_id(
+            text.into(),
+            vec![("image/png".into(), image.into())],
+            false,
+            SoftInterruptSource::User,
+            Some(id.into()),
+        );
     }
     let injected = agent.inject_soft_interrupts();
     let images = agent.session.session_images();
     assert_eq!(images.len(), 2);
     assert_eq!(injected.len(), 2);
     let events = Agent::build_soft_interrupt_events(injected, "D", None);
-    let mapped: Vec<_> = events.iter().filter_map(|event| match event {
-        ServerEvent::UserImageIds { content, image_ids, .. } => Some((content, image_ids)),
-        _ => None,
-    }).collect();
+    let mapped: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            ServerEvent::UserImageIds {
+                content, image_ids, ..
+            } => Some((content, image_ids)),
+            _ => None,
+        })
+        .collect();
     assert_eq!(mapped.len(), 2);
     for ((content, ids), image) in mapped.iter().zip(&images) {
         assert_eq!(ids.as_slice(), &[image.image_id.clone()]);
-        assert!(content.contains(&format!("[#{}]", image.image_id)), "{content}");
+        assert!(
+            content.contains(&format!("[#{}]", image.image_id)),
+            "{content}"
+        );
         assert!(!content.contains("[#image 1]"));
     }
 }

@@ -5,17 +5,32 @@ use super::*;
 fn answered_ask_is_rendered_as_a_compact_user_decision() {
     let msg = DisplayMessage::tool(
         "User answers:\n1. Which database? -> Postgres (comment: reliable)\n2. When? -> Now\n",
-        crate::message::ToolCall { id: "ask-1".into(), name: "ask".into(),
+        crate::message::ToolCall {
+            id: "ask-1".into(),
+            name: "ask".into(),
             input: serde_json::json!({"questions": [
                 {"header":"Database", "question":"Which database?", "options":[{"label":"Postgres"},{"label":"SQLite"}]},
                 {"question":"When?", "options":[{"label":"Now"},{"label":"Later"}]}
-            ]}), intent: None, thought_signature: None },
+            ]}),
+            intent: None,
+            thought_signature: None,
+        },
     );
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off);
-    let text = lines.iter().map(extract_line_text).collect::<Vec<_>>().join("\n");
-    assert!(text.contains("Decision") && text.contains("2 questions answered"), "{text}");
+    let text = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("Decision") && text.contains("2 questions answered"),
+        "{text}"
+    );
     assert!(text.contains("✓ Postgres"), "{text}");
-    assert!(!text.contains("questions\":") && !text.contains("When?"), "{text}");
+    assert!(
+        !text.contains("questions\":") && !text.contains("When?"),
+        "{text}"
+    );
 }
 
 #[test]

@@ -355,7 +355,9 @@ async fn build_model_catalog(
                         ),
                         crate::session_effort::session_effort(&session_id)
                             .or_else(|| {
-                                persisted.as_ref().and_then(|session| session.reasoning_effort.clone())
+                                persisted
+                                    .as_ref()
+                                    .and_then(|session| session.reasoning_effort.clone())
                             })
                             .or_else(|| provider.reasoning_effort()),
                         "fallback",

@@ -233,11 +233,13 @@ fn finish(mut capture: Capture) {
                             Some(capture.session.clone()),
                             SEND_TIMEOUT,
                         ) {
-                            Ok(()) => if sent {
-                                "Sent to Jcode".to_string()
-                            } else {
-                                "Inserted into Jcode".to_string()
-                            },
+                            Ok(()) => {
+                                if sent {
+                                    "Sent to Jcode".to_string()
+                                } else {
+                                    "Inserted into Jcode".to_string()
+                                }
+                            }
                             Err(error) => {
                                 eprintln!("jcode companion: voice delivery failed: {error:#}");
                                 "Couldn't reach Jcode".to_string()

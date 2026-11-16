@@ -292,6 +292,7 @@ fn client_focus_report_roundtrip() {
 fn swarm_runtime_round_trips_stall_age() {
     let runtime: super::SwarmMemberRuntime = serde_json::from_value(serde_json::json!({
         "stalled_secs": 720
-    })).unwrap();
+    }))
+    .unwrap();
     assert_eq!(serde_json::to_value(runtime).unwrap()["stalled_secs"], 720);
 }

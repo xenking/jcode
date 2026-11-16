@@ -1548,8 +1548,8 @@ fn render_message_into(
                 acc.prompt_num += 1;
                 acc.user_prompt_texts.push(msg.content.clone());
                 acc.user_line_indices.push(tool_start_line);
-                let distance = (ctx.total_prompts + ctx.pending_count + 1)
-                    .saturating_sub(acc.prompt_num);
+                let distance =
+                    (ctx.total_prompts + ctx.pending_count + 1).saturating_sub(acc.prompt_num);
                 if let Some(line) = cached.first_mut() {
                     line.spans.insert(
                         0,
@@ -1611,7 +1611,8 @@ fn render_message_into(
                     ));
                 }
                 if (!msg.is_ask_decision() || msg.title.as_deref() == Some("decision:expanded"))
-                    && let (Some(app), Some(items)) = (ctx.app, ctx.anchored_images.by_tool.get(&tc.id))
+                    && let (Some(app), Some(items)) =
+                        (ctx.app, ctx.anchored_images.by_tool.get(&tc.id))
                 {
                     for line in super::inline_image_ui::anchored_image_lines(
                         items,

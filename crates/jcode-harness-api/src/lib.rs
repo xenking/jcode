@@ -15,9 +15,9 @@
 
 use serde::{Deserialize, Serialize};
 
-pub mod desktop_control;
-mod client;
 mod await_state;
+mod client;
+pub mod desktop_control;
 mod edit_stats;
 mod events;
 pub use edit_stats::{
@@ -35,10 +35,8 @@ mod sockets;
 mod swarm_metadata;
 mod worker_meta;
 
+pub use await_state::{PendingAwait, pending_awaits_for_session, pending_awaits_in};
 pub use client::{FrameError, HarnessClient, read_frame, write_frame};
-pub use await_state::{
-    PendingAwait, pending_awaits_for_session, pending_awaits_in,
-};
 pub use events::*;
 pub use jcode_applet_types;
 pub use jcode_session_types::TurnStopReason;
@@ -52,9 +50,7 @@ pub use sockets::{api_socket_path, legacy_socket_path, runtime_dir};
 pub use swarm_metadata::{
     enrich_sessions_from_local_swarm_state, enrich_sessions_from_swarm_state,
 };
-pub use worker_meta::{
-    local_worker_meta, worker_ids, worker_meta, worker_meta_for,
-};
+pub use worker_meta::{local_worker_meta, worker_ids, worker_meta, worker_meta_for};
 
 #[cfg(test)]
 #[path = "harness_api_tests/schema_snapshot.rs"]

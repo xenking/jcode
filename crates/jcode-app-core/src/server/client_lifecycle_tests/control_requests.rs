@@ -139,13 +139,30 @@ async fn busy_missing_queue_fails_closed_without_waiting() {
     let _busy = agent.lock().await;
     let queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
     let signals = Arc::new(RwLock::new(HashMap::new()));
-    let control = tokio::time::timeout(Duration::from_millis(100),
-        refresh_session_control_handle("missing-queue-session", &agent, &signals, &queues)
-    ).await.expect("busy agent must not block attachment");
+    let control = tokio::time::timeout(
+        Duration::from_millis(100),
+        refresh_session_control_handle("missing-queue-session", &agent, &signals, &queues),
+    )
+    .await
+    .expect("busy agent must not block attachment");
     assert!(control.needs_queue_refresh());
-    assert!(!control.queue_soft_interrupt("hello".into(), Vec::new(), false, SoftInterruptSource::User));
-    assert!(control.enqueue_user_prompt("id".into(), "hello".into(), Vec::new(),
-        jcode_agent_runtime::QueuedMessageMode::Steer, None).is_err());
+    assert!(!control.queue_soft_interrupt(
+        "hello".into(),
+        Vec::new(),
+        false,
+        SoftInterruptSource::User
+    ));
+    assert!(
+        control
+            .enqueue_user_prompt(
+                "id".into(),
+                "hello".into(),
+                Vec::new(),
+                jcode_agent_runtime::QueuedMessageMode::Steer,
+                None
+            )
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -382,9 +399,15 @@ async fn cancel_without_local_task_still_signals_session_control() {
     assert_eq!(session_id.as_deref(), Some("session_detached_cancel"));
     assert!(client_event_rx.try_recv().is_err());
     tokio::time::sleep(Duration::from_millis(650)).await;
-    assert!(stop_signal.is_set(), "a running turn must retain cancellation until it observes it");
+    assert!(
+        stop_signal.is_set(),
+        "a running turn must retain cancellation until it observes it"
+    );
     drop(active_turn);
-    assert!(!stop_signal.is_set(), "turn completion resets the signal for the next turn");
+    assert!(
+        !stop_signal.is_set(),
+        "turn completion resets the signal for the next turn"
+    );
 }
 
 /// Regression for issue #428: the detached-turn cancel path schedules a

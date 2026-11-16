@@ -679,20 +679,31 @@ pub(super) async fn handle_set_reasoning_effort(
             tokio::task::spawn_blocking(move || {
                 let session = crate::session::Session::load_for_remote_startup(&session_id)
                     .or_else(|_| crate::session::Session::load_startup_stub(&session_id))?;
-                Agent::worker_effort_for_provider(provider.as_ref(), session.provider_key.as_deref(), &effort)
-            }).await.unwrap_or_else(|error| Err(error.into()))
+                Agent::worker_effort_for_provider(
+                    provider.as_ref(),
+                    session.provider_key.as_deref(),
+                    &effort,
+                )
+            })
+            .await
+            .unwrap_or_else(|error| Err(error.into()))
         } else {
             Ok(effort)
         };
-        let result = requested.and_then(|requested| provider.set_reasoning_effort(&requested))
+        let result = requested
+            .and_then(|requested| provider.set_reasoning_effort(&requested))
             .map(|()| provider.reasoning_effort());
         if let Ok(current) = &result {
             crate::session_effort::record_session_effort(session_id, current.as_deref());
             let agent = Arc::clone(agent);
             crate::runtime_activity::spawn(async move {
                 let mut agent = agent.lock().await;
-                let result = if is_swarm_worker { agent.mark_swarm_worker() } else { Ok(()) }
-                    .and_then(|()| agent.persist_current_reasoning_effort());
+                let result = if is_swarm_worker {
+                    agent.mark_swarm_worker()
+                } else {
+                    Ok(())
+                }
+                .and_then(|()| agent.persist_current_reasoning_effort());
                 if let Err(error) = result {
                     crate::logging::warn(&format!("Could not persist reasoning effort: {error}"));
                 }
@@ -701,9 +712,13 @@ pub(super) async fn handle_set_reasoning_effort(
         send_reasoning_effort_result(id, result, client_event_tx);
         return;
     } else {
-        send_reasoning_effort_result(id, Err(anyhow::anyhow!(
-            "Cannot change effort while the session is busy: live provider unavailable"
-        )), client_event_tx);
+        send_reasoning_effort_result(
+            id,
+            Err(anyhow::anyhow!(
+                "Cannot change effort while the session is busy: live provider unavailable"
+            )),
+            client_event_tx,
+        );
         return;
     };
 

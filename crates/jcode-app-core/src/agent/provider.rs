@@ -97,7 +97,8 @@ impl Agent {
         requested: &str,
     ) -> Result<String> {
         let model = provider.model();
-        let model = provider.explicit_provider_pin_for_current_model()
+        let model = provider
+            .explicit_provider_pin_for_current_model()
             .map(|pin| format!("{model}@{pin}"))
             .unwrap_or(model);
         capped_worker_effort(

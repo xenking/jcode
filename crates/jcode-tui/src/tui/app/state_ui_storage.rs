@@ -16,7 +16,10 @@ fn compact_tool_input_for_display(name: &str, input: &serde_json::Value) -> serd
         // Dropping them here breaks both live and restored transcript rows.
         "ask" => obj(vec![(
             "questions",
-            input.get("questions").cloned().unwrap_or(serde_json::Value::Null),
+            input
+                .get("questions")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
         )]),
         // Unlike an optional technical summary, the source is the codemode
         // card's body. Keep it on insertion and subsequent snapshot compaction

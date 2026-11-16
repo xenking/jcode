@@ -182,12 +182,25 @@ async fn system_prompt_socket_creation_attach_resume_fork_and_no_leaking() {
             let (observer_task, observer_stream) = connect();
             let (observer_reader, mut observer_writer) = observer_stream.into_split();
             let mut observer_reader = BufReader::new(observer_reader);
-            send(&mut observer_writer, json!({"type":"subscribe","id":201,
-                "working_dir":home._home.path(),"target_session_id":parent_id})).await;
-            send(&mut observer_writer, serde_json::to_value(Request::GetState { id: 202 }).unwrap()).await;
+            send(
+                &mut observer_writer,
+                json!({"type":"subscribe","id":201,
+                "working_dir":home._home.path(),"target_session_id":parent_id}),
+            )
+            .await;
+            send(
+                &mut observer_writer,
+                serde_json::to_value(Request::GetState { id: 202 }).unwrap(),
+            )
+            .await;
             tokio::time::timeout(Duration::from_secs(1), async {
-                until(&mut observer_reader, |event| matches!(event, ServerEvent::State { id: 202, .. })).await;
-            }).await.expect("busy target must not block attach state reply");
+                until(&mut observer_reader, |event| {
+                    matches!(event, ServerEvent::State { id: 202, .. })
+                })
+                .await;
+            })
+            .await
+            .expect("busy target must not block attach state reply");
             observer_task.abort();
         }
         let saved = crate::session::Session::load(&parent_id).unwrap();

@@ -260,7 +260,10 @@ impl App {
     }
 
     pub(super) fn toggle_decision_message_expand(&mut self, msg_idx: usize) -> bool {
-        let Some(message) = self.display_messages.get(msg_idx).filter(|m| m.is_ask_decision())
+        let Some(message) = self
+            .display_messages
+            .get(msg_idx)
+            .filter(|m| m.is_ask_decision())
         else {
             return false;
         };

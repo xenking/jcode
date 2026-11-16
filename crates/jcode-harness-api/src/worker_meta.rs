@@ -355,14 +355,17 @@ fn clean(value: Option<String>) -> Option<String> {
 
 fn stamp_millis(home: &Path, session_id: &str) -> Option<i64> {
     let dir = home.join("sessions");
-    let newest = [format!("{session_id}.journal.jsonl"), format!("{session_id}.json")]
-        .into_iter()
-        .filter_map(|name| {
-            std::fs::metadata(dir.join(name))
-                .ok()
-                .and_then(|meta| meta.modified().ok())
-        })
-        .max()?;
+    let newest = [
+        format!("{session_id}.journal.jsonl"),
+        format!("{session_id}.json"),
+    ]
+    .into_iter()
+    .filter_map(|name| {
+        std::fs::metadata(dir.join(name))
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+    })
+    .max()?;
     newest
         .duration_since(SystemTime::UNIX_EPOCH)
         .ok()

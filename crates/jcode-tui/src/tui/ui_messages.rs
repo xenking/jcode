@@ -13,10 +13,10 @@ pub(crate) use todo_stages::animate_lane_spinners;
 use todo_stages::{agent_roster_spans, push_stage_lines, push_stage_pips, render_todo_item_line};
 
 use super::*;
-#[path = "ui_messages/decision.rs"]
-mod decision;
 #[path = "ui_messages_cache.rs"]
 mod cache_support;
+#[path = "ui_messages/decision.rs"]
+mod decision;
 use crate::message::{
     ParsedBackgroundTaskNotification, ParsedBackgroundTaskProgressNotification,
     parse_background_task_notification_markdown,

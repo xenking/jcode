@@ -686,7 +686,10 @@ fn handle_server_event_inner(
             error,
         } => {
             if name == "ask"
-                && app.ask_picker.as_ref().is_some_and(|picker| picker.tool_call_id == id)
+                && app
+                    .ask_picker
+                    .as_ref()
+                    .is_some_and(|picker| picker.tool_call_id == id)
             {
                 app.ask_picker = None;
                 app.clear_inline_view();

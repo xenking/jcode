@@ -1016,8 +1016,16 @@ mod tests {
             1,
             "user duplicates of built-in terms are dropped: {terms:?}"
         );
-        assert!(!terms.iter().any(|term| term.contains('\n') || term.is_empty()));
-        assert!(!terms.iter().any(|term| term.starts_with(',') || term.ends_with(',')));
+        assert!(
+            !terms
+                .iter()
+                .any(|term| term.contains('\n') || term.is_empty())
+        );
+        assert!(
+            !terms
+                .iter()
+                .any(|term| term.starts_with(',') || term.ends_with(','))
+        );
         let long = collect_terms(&(0..500).map(|i| format!("term{i}")).collect::<Vec<_>>());
         assert!(long.len() <= 200, "{} terms", long.len());
         let size: usize = long.iter().map(|term| term.chars().count() + 2).sum();
