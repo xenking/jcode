@@ -19,6 +19,7 @@ enum Turn {
     Worker,
     Poke,
     WorkerReport,
+    Await,
     Other,
 }
 
@@ -47,7 +48,12 @@ impl GatedProvider {
     }
 
     fn count(&self, kind: Turn) -> usize {
-        self.turns.lock().unwrap().iter().filter(|t| **t == kind).count()
+        self.turns
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|t| **t == kind)
+            .count()
     }
 }
 
@@ -69,9 +75,17 @@ impl Provider for GatedProvider {
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         let texts = user_texts(messages);
-        let last = texts.last().cloned().unwrap_or_default();
+        let last = texts
+            .iter()
+            .rev()
+            .find(|text| !text.starts_with("<system-reminder>"))
+            .cloned()
+            .unwrap_or_default();
         // User messages carry a "[timestamp] " prefix; strip it for matching.
-        let bare = match last.strip_prefix('[').and_then(|rest| rest.split_once("] ")) {
+        let bare = match last
+            .strip_prefix('[')
+            .and_then(|rest| rest.split_once("] "))
+        {
             Some((_, rest)) => rest.to_string(),
             None => last.clone(),
         };
@@ -79,15 +93,18 @@ impl Provider for GatedProvider {
             Turn::Worker
         } else if jcode::todo::is_auto_poke_message(&bare) {
             Turn::Poke
+        } else if last.contains("Swarm await finished") {
+            Turn::Await
         } else if last.contains("A worker has reported back")
             || last.contains("finished their work")
-            || last.contains("completed their work") {
+            || last.contains("completed their work")
+        {
             Turn::WorkerReport
         } else {
             Turn::Other
         };
         self.turns.lock().unwrap().push(turn);
-        self.lasts.lock().unwrap().push(last.chars().take(160).collect());
+        self.lasts.lock().unwrap().push(last.clone());
         if turn == Turn::Worker {
             // The worker "works" until the test lets it finish.
             while !self.released.load(std::sync::atomic::Ordering::SeqCst) {
@@ -176,7 +193,7 @@ impl RawClient {
     }
 }
 
-async fn run_scenario(assign_todo_to_worker: bool) -> Result<()> {
+async fn run_scenario(assign_todo_to_worker: bool, await_worker: bool) -> Result<()> {
     let _env = setup_test_env()?;
     // An empty override clears any `agents.swarm_model` pin from the host's
     // config, so the worker inherits the scripted provider.
@@ -221,9 +238,12 @@ async fn run_scenario(assign_todo_to_worker: bool) -> Result<()> {
             .await?;
         let coordinator = client
             .wait_for("subscribe session id", Duration::from_secs(20), |e| {
-                matches!(e["type"].as_str(), Some("history" | "session_id" | "session"))
-                    .then(|| e["session_id"].as_str().map(str::to_owned))
-                    .flatten()
+                matches!(
+                    e["type"].as_str(),
+                    Some("history" | "session_id" | "session")
+                )
+                .then(|| e["session_id"].as_str().map(str::to_owned))
+                .flatten()
             })
             .await?;
 
@@ -255,11 +275,18 @@ async fn run_scenario(assign_todo_to_worker: bool) -> Result<()> {
         // The worker's turn is now blocked inside the provider.
         let started = Instant::now();
         while provider.count(Turn::Worker) == 0 {
-            anyhow::ensure!(started.elapsed() < Duration::from_secs(20), "worker never started");
+            anyhow::ensure!(
+                started.elapsed() < Duration::from_secs(20),
+                "worker never started"
+            );
             client.drain(Duration::from_millis(100)).await?;
         }
 
-        let owner = if assign_todo_to_worker { Some(worker.clone()) } else { None };
+        let owner = if assign_todo_to_worker {
+            Some(worker.clone())
+        } else {
+            None
+        };
         jcode::todo::save_todos(
             &coordinator,
             &[jcode::todo::TodoItem {
@@ -271,6 +298,35 @@ async fn run_scenario(assign_todo_to_worker: bool) -> Result<()> {
                 ..Default::default()
             }],
         )?;
+
+        if await_worker {
+            client
+                .send(serde_json::to_value(Request::CommAwaitMembers {
+                    id: 4,
+                    session_id: coordinator.clone(),
+                    target_status: vec![
+                        "ready".into(),
+                        "completed".into(),
+                        "stopped".into(),
+                        "failed".into(),
+                    ],
+                    session_ids: vec![worker.clone()],
+                    mode: None,
+                    timeout_secs: Some(60),
+                    background: true,
+                    notify: true,
+                    wake: true,
+                })?)
+                .await?;
+            client
+                .wait_for("await handoff", Duration::from_secs(10), |e| {
+                    (e["type"] == "comm_await_members_response"
+                        && e["id"] == 4
+                        && e["background_started"] == true)
+                        .then_some(())
+                })
+                .await?;
+        }
 
         // One ordinary coordinator turn. Its end is the poke decision point.
         client
@@ -297,11 +353,20 @@ async fn run_scenario(assign_todo_to_worker: bool) -> Result<()> {
             "no poke may fire while the worker is running: {:?}",
             provider.turns.lock().unwrap()
         );
-        assert_eq!(provider.count(Turn::WorkerReport), 0, "worker not finished yet");
+        assert_eq!(
+            provider.count(Turn::WorkerReport),
+            0,
+            "worker not finished yet"
+        );
+        assert_eq!(provider.count(Turn::Await), 0, "await must remain pending");
 
         provider.release_worker();
         let started = Instant::now();
-        while provider.count(Turn::WorkerReport) == 0 {
+        while if await_worker {
+            provider.count(Turn::Await) == 0
+        } else {
+            provider.count(Turn::WorkerReport) == 0
+        } {
             anyhow::ensure!(
                 started.elapsed() < Duration::from_secs(30),
                 "worker completion never woke the coordinator: {:?} {:?}",
@@ -312,10 +377,23 @@ async fn run_scenario(assign_todo_to_worker: bool) -> Result<()> {
         }
         // Exactly one wake long after it.
         client.drain(Duration::from_secs(3)).await?;
-        let label = if assign_todo_to_worker { "todo assigned to worker" } else { "own todo" };
+        if await_worker {
+            assert_eq!(
+                provider.count(Turn::Await),
+                1,
+                "one await result must produce exactly one wake: {:?}; pending={:?}",
+                provider.lasts.lock().unwrap(),
+                jcode::server::pending_await_members_for_session(&coordinator)
+            );
+        }
+        let label = if assign_todo_to_worker {
+            "todo assigned to worker"
+        } else {
+            "own todo"
+        };
         assert_eq!(
             provider.count(Turn::WorkerReport),
-            1,
+            if await_worker { 0 } else { 1 },
             "{label}: {:?}",
             provider.turns.lock().unwrap()
         );
@@ -351,7 +429,12 @@ async fn run_scenario(assign_todo_to_worker: bool) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn coordinator_is_not_poked_while_its_worker_runs_and_wakes_once() -> Result<()> {
     // The only open todo is assigned to the running worker.
-    run_scenario(true).await?;
+    run_scenario(true, false).await?;
     // Coordinator-owned open todo, but a spawned worker is still running.
-    run_scenario(false).await
+    run_scenario(false, false).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pending_await_suppresses_poke_and_wakes_once() -> Result<()> {
+    run_scenario(true, true).await
 }

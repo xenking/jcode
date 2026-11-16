@@ -1764,6 +1764,38 @@ pub(super) async fn update_member_status_with_report_tldr(
     swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
 ) {
     let completion_report = normalize_completion_report(completion_report);
+    // Snapshot before publishing the status transition. Once published, an
+    // await watcher can finalize concurrently and disappear from the pending
+    // registry. Its result already carries the worker report, so starting a
+    // second owner turn races that wake and can strand the queued result.
+    let covered_by_await = if matches!(
+        status,
+        "ready" | "completed" | "failed" | "stopped" | "crashed"
+    ) {
+        let owner_and_swarm = {
+            let members = swarm_members.read().await;
+            members.get(session_id).and_then(|member| {
+                Some((
+                    member.report_back_to_session_id.clone()?,
+                    member.swarm_id.clone()?,
+                ))
+            })
+        };
+        owner_and_swarm.is_some_and(|(owner, swarm_id)| {
+            super::pending_await_members_for_session(&owner)
+                .iter()
+                .any(|wait| {
+                    wait.background
+                        && wait.wake
+                        && wait.swarm_id == swarm_id
+                        && wait.target_status.iter().any(|target| target == status)
+                        && (wait.requested_ids.is_empty()
+                            || wait.requested_ids.iter().any(|id| id == session_id))
+                })
+        })
+    } else {
+        false
+    };
     let detail_present = detail.is_some();
     let (
         swarm_id,
@@ -1941,7 +1973,7 @@ pub(super) async fn update_member_status_with_report_tldr(
                 // context. Deliver reports through the reliable runtime bus,
                 // which wakes idle owners and queues reports for busy ones.
                 // Explicit stops are cancellation, not permission to restart.
-                if report_back_to_session_id.is_some() && status != "stopped" {
+                if report_back_to_session_id.is_some() && status != "stopped" && !covered_by_await {
                     crate::bus::Bus::global().publish(crate::bus::BusEvent::SwarmWorkerReported(
                         crate::bus::SwarmWorkerReported {
                             session_id: recipient_session_id.clone(),
