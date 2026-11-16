@@ -190,9 +190,8 @@ mod tests {
         let listener = std::os::unix::net::UnixListener::bind(&api).unwrap();
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(1)))
-                .unwrap();
+            // macOS may reject SO_RCVTIMEO after the expected peer has already
+            // closed. The client always closes after its bounded PID check.
             let mut line = String::new();
             assert_eq!(
                 BufReader::new(stream).read_line(&mut line).unwrap(),

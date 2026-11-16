@@ -569,12 +569,26 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
     // Bundle clients must not mistake a previous bundle's surviving listener
     // for their packaged bridge. Remote/custom SDK clients without an explicit
     // local executable retain their existing endpoint semantics.
+    let standalone_bridge = sibling_exe("jcode-harness-api-bridge");
+    let (bridge, bridge_args) = shared_bridge_launch(
+        &jcode,
+        &standalone_bridge,
+        options.binary.is_some(),
+        CLI_SERVES_API_BRIDGE,
+    );
     let bridge_target =
         if options.api_socket.is_some() && options.binary.is_some() && jcode.is_file() {
-            Some(
-                jcode_build_support::runtime_generation::pin_path(&jcode)
-                    .map_err(|error| Error::new(ErrorKind::LaunchFailed, error.to_string()))?,
+            let mut target = jcode_build_support::runtime_generation::resolve(
+                jcode_build_support::runtime_generation::DesiredSelection::Path(jcode.clone()),
             )
+            .map_err(|error| Error::new(ErrorKind::LaunchFailed, error.to_string()))?;
+            if bridge != jcode {
+                let git_hash = target.git_hash;
+                target = jcode_build_support::runtime_generation::pin_path(bridge)
+                    .map_err(|error| Error::new(ErrorKind::LaunchFailed, error.to_string()))?;
+                target.git_hash = git_hash;
+            }
+            Some(target)
         } else {
             None
         };
@@ -624,13 +638,6 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
         wait_for_socket(&legacy, "jcode runtime", options.start_timeout)?;
     }
     progress("starting harness API bridge...");
-    let standalone_bridge = sibling_exe("jcode-harness-api-bridge");
-    let (bridge, bridge_args) = shared_bridge_launch(
-        &jcode,
-        &standalone_bridge,
-        options.binary.is_some(),
-        CLI_SERVES_API_BRIDGE,
-    );
     let target = jcode_build_support::runtime_generation::pin_path(bridge).ok();
     spawn_detached_at(bridge, bridge_args, target.as_ref(), Some((&api, &legacy))).map_err(
         |error| {
@@ -969,8 +976,15 @@ mod executable_tests {
     #[cfg(unix)]
     #[test]
     fn existing_unidentified_bundle_bridge_is_not_reused() {
-        use std::os::unix::net::UnixListener;
+        use std::os::unix::{fs::PermissionsExt, net::UnixListener};
         let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("jcode");
+        fs::write(
+            &binary,
+            "#!/bin/sh\nprintf '%s' '{\"version\":\"test\",\"git_hash\":\"abcdef123\"}'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
         let api = root.path().join("old.sock");
         let listener = UnixListener::bind(&api).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -987,7 +1001,7 @@ mod executable_tests {
         });
         let result = ensure_runtime(
             &LaunchOptions {
-                binary: Some(std::env::current_exe().unwrap()),
+                binary: Some(binary),
                 api_socket: Some(api),
                 start_timeout: Duration::from_millis(100),
                 ..Default::default()
@@ -999,6 +1013,64 @@ mod executable_tests {
             result.is_err(),
             "an accepting socket is not bundle identity evidence"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_bridge_with_previous_build_hash_is_retired_before_reuse() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("jcode");
+        fs::write(
+            &binary,
+            "#!/bin/sh\nprintf '%s' '{\"version\":\"test\",\"git_hash\":\"abcdef123\"}'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let api = root.path().join("api.sock");
+        let listener = UnixListener::bind(&api).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let identity_path = binary.clone();
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < deadline {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let mut line = String::new();
+                    BufReader::new(stream.try_clone().unwrap())
+                        .read_line(&mut line)
+                        .unwrap();
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    requests.push(request["req"].as_str().unwrap().to_owned());
+                    let reply = if request["req"] == "retire_bridge" {
+                        serde_json::json!({"v":1,"reply_to":1,"ev":"bridge_retiring"})
+                    } else {
+                        serde_json::json!({"v":1,"reply_to":1,"ev":"hello_ok","version":1,
+                            "runtime_identity":{"pid":std::process::id(),"binary_path":identity_path,
+                                "git_hash":"987654321","generation":1},
+                            "capabilities":crate::bundle_bridge::BUNDLE_BRIDGE_CAPABILITIES})
+                    };
+                    writeln!(stream, "{reply}").unwrap();
+                    if requests.last().unwrap() == "retire_bridge" {
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            requests
+        });
+        let result = ensure_runtime(
+            &LaunchOptions {
+                binary: Some(binary),
+                api_socket: Some(api),
+                start_timeout: Duration::from_millis(100),
+                ..Default::default()
+            },
+            &|_| {},
+        );
+        assert!(result.is_err(), "same path is not the expected build");
+        assert_eq!(server.join().unwrap(), ["hello", "retire_bridge"]);
     }
 
     #[test]
