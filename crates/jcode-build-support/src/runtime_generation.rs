@@ -250,6 +250,32 @@ pub fn prepare_launch(cmd: &mut Command, target: &ImmutableTarget) -> Result<()>
     Ok(())
 }
 
+/// Validate one self-report regardless of whether it arrived in Pong or HelloOk.
+pub fn validate_serving_identity(identity: &ServingIdentity) -> Result<()> {
+    if identity.pid == 0 || !identity.binary_path.is_absolute() {
+        bail!("listener reports malformed serving identity (PID or executable path)");
+    }
+    if identity.git_hash.is_empty()
+        || !identity
+            .git_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        bail!("listener reports unknown or malformed serving git hash");
+    }
+    if identity.generation == 0 {
+        bail!("listener does not report a positive serving generation");
+    }
+    if identity
+        .reload_id
+        .as_ref()
+        .is_some_and(|id| id.trim().is_empty())
+    {
+        bail!("listener reports an empty reload id");
+    }
+    Ok(())
+}
+
 /// Compare self-reported serving identity. Missing information remains Unknown.
 pub fn assess_handoff(
     reload_id: &str,
@@ -261,17 +287,17 @@ pub fn assess_handoff(
             reason: "listener did not report a serving identity".into(),
         };
     };
+    if let Err(error) = validate_serving_identity(serving) {
+        return GenerationVerdict::Unknown {
+            reason: error.to_string(),
+        };
+    }
     if serving.reload_id.as_deref() != Some(reload_id) {
         return GenerationVerdict::Pending {
             reason: format!(
                 "listener confirms reload {:?}, waiting for {reload_id}",
                 serving.reload_id
             ),
-        };
-    }
-    if serving.generation == 0 {
-        return GenerationVerdict::Unknown {
-            reason: "listener did not report its exec generation".into(),
         };
     }
     if let Some(target) = target {
@@ -318,9 +344,9 @@ pub fn assess_serving_target(
             reason: "bridge did not report serving identity".into(),
         };
     };
-    if serving.generation == 0 {
+    if let Err(error) = validate_serving_identity(serving) {
         return GenerationVerdict::Unknown {
-            reason: "bridge did not report its runtime generation".into(),
+            reason: error.to_string(),
         };
     }
     if serving.binary_path != target.binary_path {
@@ -361,9 +387,9 @@ fn assess_reconnect_in(
     max_age: std::time::Duration,
     marker_path: &Path,
 ) -> GenerationVerdict {
-    if serving.generation == 0 {
+    if let Err(error) = validate_serving_identity(serving) {
         return GenerationVerdict::Unknown {
-            reason: "listener does not report runtime generations".into(),
+            reason: error.to_string(),
         };
     }
     let metadata = match std::fs::metadata(marker_path) {

@@ -1,5 +1,5 @@
 //! Socket adapter. A live connection or a legacy Pong is not identity evidence.
-use super::ServingIdentity;
+use super::{ServingIdentity, validate_serving_identity};
 use anyhow::{Context, Result, bail};
 use jcode_transport::SyncStream;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -47,7 +47,7 @@ pub(super) fn probe_stream_identity(
             .filter(|value| !value.is_null())
             .context("listener does not report serving identity (legacy daemon)")?;
         let identity: ServingIdentity = serde_json::from_value(raw.clone())?;
-        validate_reported_identity(&identity)?;
+        validate_serving_identity(&identity)?;
         if peer.is_some_and(|pid| pid != identity.pid) {
             bail!(
                 "serving identity PID {} differs from socket peer {:?}",
@@ -58,31 +58,6 @@ pub(super) fn probe_stream_identity(
         return Ok(identity);
     }
     bail!("listener did not report serving generation within the bounded Ping response")
-}
-
-fn validate_reported_identity(identity: &ServingIdentity) -> Result<()> {
-    if identity.pid == 0 || !identity.binary_path.is_absolute() {
-        bail!("listener reports malformed serving identity (PID or executable path)");
-    }
-    if identity.git_hash.is_empty()
-        || !identity
-            .git_hash
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
-        bail!("listener reports unknown or malformed serving git hash");
-    }
-    if identity.generation == 0 {
-        bail!("listener does not report a positive serving generation");
-    }
-    if identity
-        .reload_id
-        .as_ref()
-        .is_some_and(|id| id.trim().is_empty())
-    {
-        bail!("listener reports an empty reload id");
-    }
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -147,23 +122,23 @@ mod tests {
             reload_id: Some("reload-id".into()),
             generation: 2,
         };
-        assert!(validate_reported_identity(&valid).is_ok());
+        assert!(validate_serving_identity(&valid).is_ok());
         let mut bad = valid.clone();
         bad.binary_path = "relative/jcode".into();
-        assert!(validate_reported_identity(&bad).is_err());
+        assert!(validate_serving_identity(&bad).is_err());
         bad = valid.clone();
         bad.git_hash = "unknown".into();
-        assert!(validate_reported_identity(&bad).is_err());
+        assert!(validate_serving_identity(&bad).is_err());
         bad.git_hash = "not-a-git-hash".into();
-        assert!(validate_reported_identity(&bad).is_err());
+        assert!(validate_serving_identity(&bad).is_err());
         bad = valid.clone();
         bad.generation = 0;
-        assert!(validate_reported_identity(&bad).is_err());
+        assert!(validate_serving_identity(&bad).is_err());
         bad = valid.clone();
         bad.pid = 0;
-        assert!(validate_reported_identity(&bad).is_err());
+        assert!(validate_serving_identity(&bad).is_err());
         bad = valid;
         bad.reload_id = Some(" ".into());
-        assert!(validate_reported_identity(&bad).is_err());
+        assert!(validate_serving_identity(&bad).is_err());
     }
 }

@@ -4,7 +4,7 @@ fn serving() -> ServingIdentity {
     ServingIdentity {
         pid: 42,
         binary_path: PathBuf::from("/versions/new/jcode"),
-        git_hash: "newhash".into(),
+        git_hash: "abcdef123".into(),
         version_label: Some("new".into()),
         reload_id: Some("reload-new".into()),
         generation: 2,
@@ -40,6 +40,35 @@ fn invalid_generation_is_explicit_not_an_invented_fresh_launch() {
 }
 
 #[test]
+fn every_readiness_assessor_rejects_malformed_self_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut identity = serving();
+    identity.git_hash = "abcdef123".into();
+    let target = ImmutableTarget {
+        binary_path: identity.binary_path.clone(),
+        git_hash: Some(identity.git_hash.clone()),
+        version_label: identity.version_label.clone(),
+        file_identity: None,
+        payload_identity: None,
+    };
+    identity.pid = 0;
+    for verdict in [
+        assess_handoff("reload-new", Some(&target), Some(&identity)),
+        assess_serving_target(&target, Some(&identity)),
+        assess_reconnect_in(
+            &identity,
+            std::time::Duration::from_secs(30),
+            &dir.path().join("absent"),
+        ),
+    ] {
+        assert!(
+            matches!(verdict, GenerationVerdict::Unknown { .. }),
+            "{verdict:?}"
+        );
+    }
+}
+
+#[test]
 fn same_pid_after_exec_is_a_new_generation() {
     let mut old = serving();
     old.generation = 1;
@@ -61,7 +90,7 @@ fn same_pid_after_exec_is_a_new_generation() {
 fn bridge_left_from_previous_bundle_is_a_mismatch() {
     let target = ImmutableTarget {
         binary_path: PathBuf::from("/bundle/new/jcode"),
-        git_hash: Some("newhash".into()),
+        git_hash: Some("abcdef123".into()),
         version_label: None,
         file_identity: None,
         payload_identity: None,
@@ -123,7 +152,7 @@ fn channel_moves_after_selection_but_exec_uses_original_target() {
     let old = dir.path().join("versions/old/jcode");
     let new = dir.path().join("versions/new/jcode");
     executable(&old, "oldhash");
-    executable(&new, "newhash");
+    executable(&new, "abcdef123");
     let channel = dir.path().join("shared-server");
     symlink(&old, &channel).unwrap();
     let target = resolve(DesiredSelection::Path(channel.clone())).unwrap();
