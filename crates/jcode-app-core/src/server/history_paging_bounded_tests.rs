@@ -43,17 +43,84 @@ fn cursor_survives_append_but_rejects_changed_boundary() {
 }
 
 #[test]
+fn bounded_history_images_use_stable_session_ids_even_for_duplicate_payloads() {
+    use crate::message::{ContentBlock, Role};
+    let mut session = crate::session::Session::create_with_id("image-page-test".into(), None, None);
+    for _ in 0..2 {
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "same".into(),
+            }],
+        );
+    }
+    let ids = session.session_images();
+    let records = super::bounded::records(&session).unwrap();
+    let image_keys: Vec<String> = records
+        .iter()
+        .flat_map(|record| {
+            let value: serde_json::Value = serde_json::from_str(record).unwrap();
+            value["images"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|image| image["data"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(
+        image_keys,
+        ids.iter()
+            .map(|image| format!("jcode-lazy:{}", image.image_id))
+            .collect::<Vec<_>>()
+    );
+    assert_ne!(image_keys[0], image_keys[1]);
+    assert_eq!(
+        super::image_chunk(&session, &ids[0].image_id, 0).unwrap(),
+        (4, "same".into())
+    );
+    assert_eq!(
+        super::image_chunk(&session, &ids[1].image_id, 0).unwrap(),
+        (4, "same".into())
+    );
+}
+
+#[test]
 fn prompt_offsets_count_answered_ask_results() {
     use crate::message::{ContentBlock, Role};
     let mut session = crate::session::Session::create_with_id("offset-test".into(), None, None);
-    session.add_message(Role::User, vec![ContentBlock::Text { text: "first".into(), cache_control: None }]);
-    session.add_message(Role::Assistant, vec![ContentBlock::ToolUse {
-        id: "ask-1".into(), name: "ask".into(), input: serde_json::json!({"questions": []}), thought_signature: None,
-    }]);
-    session.add_message(Role::User, vec![ContentBlock::ToolResult {
-        tool_use_id: "ask-1".into(), content: "User answers:\n1. Which? -> B\n".into(), is_error: None,
-    }]);
-    session.add_message(Role::User, vec![ContentBlock::Text { text: "last".into(), cache_control: None }]);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "first".into(),
+            cache_control: None,
+        }],
+    );
+    session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "ask-1".into(),
+            name: "ask".into(),
+            input: serde_json::json!({"questions": []}),
+            thought_signature: None,
+        }],
+    );
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::ToolResult {
+            tool_use_id: "ask-1".into(),
+            content: "User answers:\n1. Which? -> B\n".into(),
+            is_error: None,
+        }],
+    );
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "last".into(),
+            cache_control: None,
+        }],
+    );
     let records = super::bounded::records(&session).unwrap();
     let last: serde_json::Value = serde_json::from_str(records.last().unwrap()).unwrap();
     assert_eq!(last["message"]["content"], "last");

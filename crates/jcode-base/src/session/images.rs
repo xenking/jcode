@@ -91,10 +91,9 @@ fn read_archived_image(id: &str) -> Option<String> {
     std::fs::read_to_string(archive_path(id).ok()?).ok()
 }
 
-/// Prepare model-visible IDs without changing the persisted transcript.
-/// Keep image blocks next to their tool result so provider adapters can fold
-/// them into the native tool-result payload.
-pub(super) fn provider_message(session_id: &str, stored: &super::StoredMessage) -> super::Message {
+/// Ensure model-visible IDs are persisted alongside the image blocks. Mutating
+/// a uniquely owned content buffer does not clone the image payload.
+pub(super) fn annotate_message(session_id: &str, stored: &mut super::StoredMessage) -> bool {
     let mut ordinal = 0usize;
     let mut ids = Vec::new();
     for block in &stored.content {
@@ -107,28 +106,25 @@ pub(super) fn provider_message(session_id: &str, stored: &super::StoredMessage) 
             _ => {}
         }
     }
-    let mut message = stored.to_message();
     if ids.is_empty() {
-        return message;
+        return false;
     }
-    // New messages persist their markers. Reuse their shared image buffers in
-    // the provider cache instead of cloning potentially huge base64 payloads.
     if ids.iter().all(|id| {
         let marker = format!("[#{id}]");
-        message.content.iter().any(|block| match block {
+        stored.content.iter().any(|block| match block {
             ContentBlock::Text { text, .. } => text.contains(&marker),
             ContentBlock::ToolResult { content, .. } => content.contains(&marker),
             _ => false,
         })
     }) {
-        return message;
+        return false;
     }
-    let has_tool_result = message
+    let has_tool_result = stored
         .content
         .iter()
         .any(|block| matches!(block, ContentBlock::ToolResult { .. }));
     let mut mapped = vec![false; ids.len()];
-    for block in &mut message.content {
+    for block in &mut stored.content {
         if !has_tool_result {
             if let ContentBlock::Text { text, .. } = block {
                 for (index, id) in ids.iter().enumerate() {
@@ -160,12 +156,19 @@ pub(super) fn provider_message(session_id: &str, stored: &super::StoredMessage) 
         .filter_map(|(id, mapped)| (!mapped).then(|| format!("[#{id}]")))
         .collect::<Vec<_>>();
     if !remaining.is_empty() {
-        message.content.push(ContentBlock::Text {
+        stored.content.push(ContentBlock::Text {
             text: format!("Attached session images: {}", remaining.join(", ")),
             cache_control: None,
         });
     }
-    message
+    true
+}
+
+/// Legacy messages not yet migrated can still produce a marked provider view.
+pub(super) fn provider_message(session_id: &str, stored: &super::StoredMessage) -> super::Message {
+    let mut message = stored.clone();
+    annotate_message(session_id, &mut message);
+    message.to_message()
 }
 
 impl Session {

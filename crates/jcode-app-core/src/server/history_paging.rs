@@ -116,20 +116,28 @@ fn image_chunk(
     key: &str,
     offset: usize,
 ) -> std::result::Result<(usize, String), String> {
-    let (_, images, _) =
-        crate::session::render_messages_and_images_with_compacted_history(session, usize::MAX);
-    let image = images
-        .into_iter()
-        .find(|image| bounded::image_key(&image.data) == key)
-        .ok_or("history image no longer exists")?;
-    if offset > image.data.len() || !image.data.is_char_boundary(offset) {
+    let data = if key.starts_with("img_") {
+        session
+            .session_image(key)
+            .ok_or("history image no longer exists")?
+            .data
+    } else {
+        let (_, images, _) =
+            crate::session::render_messages_and_images_with_compacted_history(session, usize::MAX);
+        images
+            .into_iter()
+            .find(|image| bounded::image_key(&image.data) == key)
+            .ok_or("history image no longer exists")?
+            .data
+    };
+    if offset > data.len() || !data.is_char_boundary(offset) {
         return Err("invalid image offset".into());
     }
-    let mut end = offset.saturating_add(512 * 1024).min(image.data.len());
-    while !image.data.is_char_boundary(end) {
+    let mut end = offset.saturating_add(512 * 1024).min(data.len());
+    while !data.is_char_boundary(end) {
         end -= 1;
     }
-    Ok((image.data.len(), image.data[offset..end].to_owned()))
+    Ok((data.len(), data[offset..end].to_owned()))
 }
 
 pub(in crate::server) async fn handle_history_image_chunk(

@@ -13,15 +13,15 @@ pub(super) fn image_key(data: &str) -> String {
 /// Every record contains one rendered row and only metadata for its images.
 /// Image bytes never enter a history response, even for the initial tail.
 pub(super) fn records(session: &crate::session::Session) -> Result<Vec<String>, String> {
-    let (messages, images, _) =
-        crate::session::render_messages_and_images_with_compacted_history(session, usize::MAX);
+    let (messages, images, _, image_ids) =
+        crate::session::render_messages_and_images_with_ids(session, usize::MAX);
     let mut image_rows = vec![Vec::new(); messages.len().max(1)];
     let user_indices: Vec<_> = messages
         .iter()
         .enumerate()
         .filter_map(|(i, m)| (m.role == "user").then_some(i))
         .collect();
-    for mut image in images {
+    for (mut image, image_id) in images.into_iter().zip(image_ids) {
         let index = if let Some(boundary) = image.history_message_index {
             let index = boundary.min(image_rows.len() - 1);
             image.history_message_index = Some(boundary.saturating_sub(index));
@@ -47,7 +47,7 @@ pub(super) fn records(session: &crate::session::Session) -> Result<Vec<String>, 
             *ordinal = ordinal
                 .saturating_sub(user_indices.partition_point(|user_index| *user_index < index));
         }
-        image.data = format!("{LAZY_IMAGE_PREFIX}{}", image_key(&image.data));
+        image.data = format!("{LAZY_IMAGE_PREFIX}{image_id}");
         image_rows[index].push(image);
     }
     let mut records = Vec::with_capacity(image_rows.len());
@@ -56,19 +56,22 @@ pub(super) fn records(session: &crate::session::Session) -> Result<Vec<String>, 
         let text = message.content.trim();
         // Match Desktop's numbered user turns, including completed ask decisions.
         let is_prompt = (message.role == "tool"
-            && message.tool_data.as_ref().is_some_and(|tool| tool.name == "ask")
+            && message
+                .tool_data
+                .as_ref()
+                .is_some_and(|tool| tool.name == "ask")
             && jcode_session_types::stored_ask_answer_text(text).is_some())
             || (message.role == "user"
-            && !text.is_empty()
-            && !crate::todo::is_auto_poke_message(text)
-            && ![
-                "**Background task** `",
-                "**Background task started** `",
-                "**Background task progress** `",
-                "**Background task stalled** `",
-            ]
-            .iter()
-            .any(|prefix| text.starts_with(prefix)));
+                && !text.is_empty()
+                && !crate::todo::is_auto_poke_message(text)
+                && ![
+                    "**Background task** `",
+                    "**Background task started** `",
+                    "**Background task progress** `",
+                    "**Background task stalled** `",
+                ]
+                .iter()
+                .any(|prefix| text.starts_with(prefix)));
         let tool = if message.role == "tool" {
             message.tool_data
         } else {

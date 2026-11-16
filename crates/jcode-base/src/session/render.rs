@@ -407,7 +407,23 @@ pub fn render_messages_and_images_with_compacted_history(
     Vec<RenderedImage>,
     Option<RenderedCompactedHistoryInfo>,
 ) {
+    let (messages, images, info, _) =
+        render_messages_and_images_with_ids(session, compacted_history_visible);
+    (messages, images, info)
+}
+
+/// Render history together with the stable identity of each rendered image.
+pub fn render_messages_and_images_with_ids(
+    session: &Session,
+    compacted_history_visible: usize,
+) -> (
+    Vec<RenderedMessage>,
+    Vec<RenderedImage>,
+    Option<RenderedCompactedHistoryInfo>,
+    Vec<String>,
+) {
     let mut rendered: Vec<RenderedMessage> = Vec::new();
+    let mut image_ids = Vec::new();
     let mut images: Vec<RenderedImage> = Vec::new();
     let mut tool_map: HashMap<String, ToolCall> = HashMap::new();
     // 0-based ordinal of the next rendered user prompt, used to anchor pasted
@@ -569,10 +585,14 @@ pub fn render_messages_and_images_with_compacted_history(
         // screenshot). Their user-prompt ordinal is only known once we know the
         // message actually renders a user prompt, so patch them afterwards.
         let mut pending_prompt_image_indices: Vec<usize> = Vec::new();
+        let mut image_ordinal = 0usize;
 
         for block in &msg.content {
             match block {
                 ContentBlock::Text { text: t, .. } => {
+                    if super::images::is_archive_marker(t) {
+                        image_ordinal += 1;
+                    }
                     // The `[Attached image associated with the preceding tool
                     // result: ...]` block is synthetic metadata jcode injects so
                     // the model can associate a label with the image. It lives in
@@ -658,6 +678,8 @@ pub fn render_messages_and_images_with_compacted_history(
                 }
                 ContentBlock::AnthropicThinking { .. } | ContentBlock::OpenAIReasoning { .. } => {}
                 ContentBlock::Image { media_type, data } => {
+                    image_ids.push(super::images::image_id(&session.id, &msg.id, image_ordinal));
+                    image_ordinal += 1;
                     let anchor =
                         image_anchor_for_message(role, current_tool.as_ref(), user_prompt_count);
                     let is_pending_prompt_anchor = current_tool.is_none() && role == "user";
@@ -770,7 +792,7 @@ pub fn render_messages_and_images_with_compacted_history(
     rendered.extend(errors.map(|(_, content)| render_error(content)));
     insert_compaction_rows(session, &mut rendered, render_start_idx);
     response_stats::attach(&session.messages, &mut rendered);
-    (rendered, images, compacted_info)
+    (rendered, images, compacted_info, image_ids)
 }
 
 /// The transcript divider body for a compaction: `label` + blank line + detail.

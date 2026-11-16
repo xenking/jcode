@@ -117,6 +117,28 @@ fn provider_context_names_image_by_its_session_id() {
 }
 
 #[test]
+fn attaching_an_image_reuses_the_original_payload_allocation() {
+    let mut session = Session::create(None, None);
+    let data = "a".repeat(1024 * 1024);
+    let original = data.as_ptr();
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Image {
+            media_type: "image/png".into(),
+            data,
+        }],
+    );
+    let ContentBlock::Image { data, .. } = &session.messages[0].content[0] else {
+        panic!("image missing")
+    };
+    assert_eq!(
+        data.as_ptr(),
+        original,
+        "attaching an image must not duplicate its payload"
+    );
+}
+
+#[test]
 fn queued_message_rename_updates_its_persisted_marker() {
     let mut session = Session::create(None, None);
     session.add_message(

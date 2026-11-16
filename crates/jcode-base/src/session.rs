@@ -49,7 +49,8 @@ pub use render::{
     RenderedCompactedHistoryInfo, RenderedImage, RenderedImageAnchor, RenderedImageSource,
     RenderedMessage, compaction_divider_content, has_rendered_images, is_attached_image_label_text,
     render_images, render_messages, render_messages_and_images,
-    render_messages_and_images_with_compacted_history, summarize_tool_calls,
+    render_messages_and_images_with_compacted_history, render_messages_and_images_with_ids,
+    summarize_tool_calls,
 };
 pub use storage_paths::session_journal_path_from_snapshot;
 pub(crate) mod resume_cache;
@@ -1480,7 +1481,7 @@ request in this new forked session, using the inherited conversation only as con
     pub fn append_stored_message(&mut self, mut message: StoredMessage) {
         // Persist the model-visible identity once, so all later provider views
         // can share the same image buffers with the transcript.
-        message.content = images::provider_message(&self.id, &message).content;
+        images::annotate_message(&self.id, &mut message);
         self.memory_profile_cache.messages_count += 1;
         self.memory_profile_cache.messages_json_bytes += estimate_json_bytes(&message);
         self.memory_profile_cache
@@ -1494,11 +1495,7 @@ request in this new forked session, using the inherited conversation only as con
     pub(super) fn migrate_image_markers(&mut self) {
         let mut changed = false;
         for message in &mut self.messages {
-            let annotated = images::provider_message(&self.id, message);
-            if !annotated.content.shares_storage_with(&message.content) {
-                message.content = annotated.content;
-                changed = true;
-            }
+            changed |= images::annotate_message(&self.id, message);
         }
         if changed {
             self.mark_memory_profile_dirty();
@@ -1506,7 +1503,7 @@ request in this new forked session, using the inherited conversation only as con
         }
     }
 
-    /// Assign the queued delivery identity without leaving stale image markers.
+    /// Assign the queued delivery identity while keeping image markers consistent.
     pub fn rename_last_message(&mut self, id: String) {
         let Some(message) = self.messages.last_mut() else {
             return;
