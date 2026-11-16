@@ -2039,20 +2039,6 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
     }
 }
 
-#[cfg(test)]
-mod peer_message_tests {
-    use super::*;
-
-    #[test]
-    fn peer_message_is_scoped_to_its_session() {
-        let event = ApiEvent::PeerUserMessage {
-            session_id: "session-a".into(),
-            content: "hello".into(),
-        };
-        assert_eq!(event_session(&event), Some("session-a"));
-    }
-}
-
 fn closed_error() -> Error {
     Error::new(ErrorKind::Disconnected, "harness connection closed")
 }
@@ -2078,4 +2064,18 @@ fn request_name(request: &ApiRequest) -> String {
                 .and_then(|r| r.as_str().map(str::to_string))
         })
         .unwrap_or_else(|| "request".to_string())
+}
+
+#[cfg(test)]
+mod peer_message_tests {
+    use super::*;
+
+    #[test]
+    fn peer_message_is_scoped_to_its_session() {
+        let event = ApiEvent::PeerUserMessage {
+            session_id: "session-a".into(),
+            content: "hello".into(),
+        };
+        assert_eq!(event_session(&event), Some("session-a"));
+    }
 }
