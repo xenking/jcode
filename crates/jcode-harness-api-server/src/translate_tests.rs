@@ -1998,7 +1998,7 @@ fn a_scheduled_compaction_reports_its_status() {
 }
 
 #[test]
-fn compaction_completion_is_forwarded_as_progress() {
+fn compaction_completion_is_forwarded_as_divider() {
     let mut state = state_with_session();
     let frames = state.legacy_event_to_api(&json!({
         "type": "compaction", "trigger": "manual", "pre_tokens": 10000,
@@ -2006,8 +2006,8 @@ fn compaction_completion_is_forwarded_as_progress() {
         "messages_compacted": 8
     }));
     assert!(frames.iter().any(|frame| matches!(&frame.event,
-        ApiEvent::BackgroundProgress { summary, done: true, .. }
-            if summary.contains("10000") && summary.contains("4000"))));
+        ApiEvent::CompactionDivider { content, running: false, pre_tokens: Some(10000), post_tokens: Some(4000), .. }
+            if content.contains("10000") && content.contains("4000"))));
 }
 
 #[test]
@@ -3606,8 +3606,8 @@ fn history_response_stats_old_and_malformed_fields_are_optional() {
 fn history_response_stats_cross_real_render_protocol_and_sdk_boundary() {
     let mut session = jcode_base::session::Session::create(None, None);
     session.messages = serde_json::from_value(json!([
-        {"id":"u","role":"user","content":[{"type":"text","text":"question"}]},
-        {"id":"a","role":"assistant","content":[{"type":"text","text":"answer"}],
+        {"id":"u","role":"user","timestamp":"2026-11-15T05:21:00Z","content":[{"type":"text","text":"question"}]},
+        {"id":"a","role":"assistant","timestamp":"2026-11-15T05:21:14Z","content":[{"type":"text","text":"answer"}],
             "token_usage":{"input_tokens":123,"output_tokens":45,"cache_read_input_tokens":7,"cache_creation_input_tokens":8}}
     ])).unwrap();
     let legacy: Vec<_> = jcode_base::session::render_messages(&session)
