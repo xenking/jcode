@@ -617,6 +617,19 @@ impl JcodeClient {
                 "This server cannot receive images in ask answers. Update the jcode runtime and API bridge before sending; your answer has not been sent.",
             ));
         }
+        if matches!(
+            &request,
+            ApiRequest::QueuePrompt {
+                active_skill: Some(_),
+                ..
+            }
+        ) && !self.supports("queued_prompt_active_skill")
+        {
+            return Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                "This server cannot preserve queued skills. Update the jcode runtime and API bridge before sending; your prompt has not been sent.",
+            ));
+        }
         let (tx, rx) = channel();
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         self.inner.pending.lock().map_err(poisoned)?.insert(id, tx);

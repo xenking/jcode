@@ -7,6 +7,7 @@ test("queue methods retain modes, images, reminder and correlated replies", asyn
   const requests: any[] = [];
   const prompt = { client_id: "q1", content: "look", images: [["image/png", "YWJj"]] as [string, string][], mode: "after_yield" as const, active_skill: "verification" };
   const server = await startMockHarness({
+    capabilities: ["sessions", "streaming", "queued_prompt_active_skill"],
     onRequest(request, send) {
       requests.push(request);
       if (request.req === "get_queued_prompts") {
@@ -47,4 +48,23 @@ test("queue methods retain modes, images, reminder and correlated replies", asyn
     { req: "queue_prompt", session_id: "s1", client_id: "q3", content: "test", mode: "steer", active_skill: "missing" },
   ]);
   assert.ok(isKnownEvent({ ev: "queued_prompts", session_id: "s1", prompts: [prompt] }));
+});
+
+test("queued skills are never sent without the capability", async (t) => {
+  const requests: any[] = [];
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      requests.push(request);
+      send({ v: 1, reply_to: request.id, ev: "ok" });
+    },
+  });
+  t.after(() => server.close());
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  t.after(() => client.close());
+  const prompt = { client_id: "q", content: "hello", mode: "steer" as const, active_skill: "verification" };
+  await assert.rejects(() => client.queuePrompt("s", prompt), (error: unknown) => error instanceof HarnessError && error.code === "unsupported");
+  await assert.rejects(() => client.request({ req: "queue_prompt", session_id: "s", ...prompt }), (error: unknown) => error instanceof HarnessError && error.code === "unsupported");
+  await client.queuePrompt("s", { ...prompt, active_skill: undefined });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].active_skill, undefined);
 });

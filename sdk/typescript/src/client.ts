@@ -421,6 +421,12 @@ export class JcodeClient extends EventEmitter {
         "This server cannot receive images in ask answers. Update the jcode runtime and API bridge before sending; your answer has not been sent.",
       ));
     }
+    if (request.req === "queue_prompt" && request.active_skill != null && !this.supports("queued_prompt_active_skill")) {
+      return Promise.reject(new HarnessError(
+        "unsupported",
+        "This server cannot preserve queued skills. Update the jcode runtime and API bridge before sending; your prompt has not been sent.",
+      ));
+    }
     const id = this.nextId++;
     return new Promise<ServerFrame>((resolve, reject) => {
       const entry: Pending = { resolve, reject, onReply };
