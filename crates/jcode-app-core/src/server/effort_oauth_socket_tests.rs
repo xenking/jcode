@@ -142,7 +142,7 @@ fn claude_oauth_socket_effort_changes_the_next_http_request() {
     // No runtime exists yet, so constructing the real provider cannot prewarm usage.
     let provider = AnthropicProvider::new();
     provider.set_oauth_account(Some(&account)).unwrap();
-    let provider = provider.with_oauth_test_endpoint(&endpoint);
+    let provider = provider.with_oauth_test_endpoint(&endpoint).unwrap();
     provider.set_model("claude-opus-5-5").unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

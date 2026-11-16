@@ -649,21 +649,25 @@ impl AnthropicProvider {
     /// Route OAuth inference to a loopback fixture, without preflight or proxies.
     /// Construct outside a Tokio runtime to avoid background usage prewarming.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn with_oauth_test_endpoint(mut self, endpoint: &str) -> Self {
-        let url = reqwest::Url::parse(endpoint).expect("OAuth fixture URL");
-        assert_eq!(url.scheme(), "http");
-        assert!(matches!(url.host_str(), Some("127.0.0.1" | "[::1]")));
+    pub fn with_oauth_test_endpoint(mut self, endpoint: &str) -> Result<Self> {
+        let url = reqwest::Url::parse(endpoint).context("invalid OAuth fixture URL")?;
+        anyhow::ensure!(url.scheme() == "http", "OAuth fixture must use HTTP");
+        anyhow::ensure!(
+            matches!(url.host_str(), Some("127.0.0.1" | "[::1]")),
+            "OAuth fixture must use loopback"
+        );
         self.client = Client::builder()
             .no_proxy()
             .build()
-            .expect("fixture client");
+            .context("build OAuth fixture client")?;
         self.direct_transport.oauth_api_url = Some(endpoint.to_owned());
         self.oauth_preflight_done.store(true, Ordering::Relaxed);
         *self
             .credential_mode
             .try_write()
-            .expect("fixture credential mode") = AnthropicCredentialMode::OAuth;
-        self
+            .map_err(|error| anyhow::anyhow!("OAuth fixture credential mode: {error}"))? =
+            AnthropicCredentialMode::OAuth;
+        Ok(self)
     }
 
     fn direct_api_key(&self) -> Result<String> {
@@ -1256,7 +1260,15 @@ fn log_anthropic_canonical_input(
     is_oauth: bool,
     split_prompt: bool,
 ) {
-    let payload = anthropic_canonical_payload(request);
+    let payload = match anthropic_canonical_payload(request) {
+        Ok(payload) => payload,
+        Err(error) => {
+            jcode_base::logging::warn(&format!(
+                "Anthropic canonical diagnostic serialization failed: {error}"
+            ));
+            return;
+        }
+    };
     let message_items = payload["messages"]
         .as_array()
         .map(Vec::as_slice)
@@ -1280,31 +1292,20 @@ fn log_anthropic_canonical_input(
     );
 }
 
-fn anthropic_canonical_payload(request: &ApiRequest) -> Value {
-    let messages_value = serde_json::to_value(&request.messages).unwrap_or(Value::Null);
-    let system_value = request
-        .system
-        .as_ref()
-        .and_then(|system| serde_json::to_value(system).ok());
-    let tools_value = request
-        .tools
-        .as_ref()
-        .and_then(|tools| serde_json::to_value(tools).ok());
-    let mut payload = json!({
-        "model": &request.model,
-        "max_tokens": request.max_tokens,
-        "thinking": &request.thinking,
-        "output_config": &request.output_config,
-        "temperature": request.temperature,
-    });
-
-    let object = payload
-        .as_object_mut()
-        .expect("canonical payload is an object");
-    object.insert("messages".into(), messages_value);
-    object.insert("system".into(), system_value.unwrap_or(Value::Null));
-    object.insert("tools".into(), tools_value.unwrap_or(Value::Null));
-    payload
+fn anthropic_canonical_payload(request: &ApiRequest) -> serde_json::Result<Value> {
+    let messages_value = serde_json::to_value(&request.messages)?;
+    let system_value = serde_json::to_value(&request.system)?;
+    let tools_value = serde_json::to_value(&request.tools)?;
+    Ok(Value::Object(serde_json::Map::from_iter([
+        ("model".into(), json!(&request.model)),
+        ("max_tokens".into(), json!(request.max_tokens)),
+        ("thinking".into(), json!(&request.thinking)),
+        ("output_config".into(), json!(&request.output_config)),
+        ("temperature".into(), json!(request.temperature)),
+        ("messages".into(), messages_value),
+        ("system".into(), system_value),
+        ("tools".into(), tools_value),
+    ])))
 }
 
 #[cfg(test)]
@@ -1346,7 +1347,7 @@ mod canonical_input_tests {
                 "system": system, "messages": messages, "tools": tools,
                 "thinking": request.thinking, "output_config": request.output_config,
                 "temperature": request.temperature});
-            let payload = anthropic_canonical_payload(&request);
+            let payload = anthropic_canonical_payload(&request).unwrap();
             assert_eq!(payload, legacy);
             assert_eq!(
                 serde_json::to_vec(&payload).unwrap(),
