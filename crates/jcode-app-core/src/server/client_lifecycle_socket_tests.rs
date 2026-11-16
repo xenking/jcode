@@ -495,23 +495,29 @@ async fn daemon_delivers_switched_steer_before_ordered_followups() {
     })
     .await;
     provider.finish_first.notify_one();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while provider.calls.load(Ordering::SeqCst) < 4 {
-            tokio::task::yield_now().await;
-        }
+    until(&mut reader, |event| {
+        matches!(event, ServerEvent::Done { id: 0 })
     })
-    .await
-    .expect("ordered prompts not delivered");
+    .await;
     let messages = provider.messages.lock().unwrap().clone();
-    let count =
-        |turn: usize, text: &str| messages[turn].iter().filter(|s| s.ends_with(text)).count();
+    let count = |turn: usize, text: &str| {
+        messages[turn]
+            .iter()
+            .flat_map(|message| message.split("\n\n"))
+            .filter(|part| part.ends_with(text))
+            .count()
+    };
     assert!(
         messages[2]
             .iter()
             .any(|message| message.contains("collection instructions")),
         "queued follow-up lost its system reminder: {messages:?}"
     );
-    assert_eq!(messages.len(), 4, "{messages:?}");
+    assert_eq!(
+        messages.len(),
+        3,
+        "follow-ups must share one queued turn: {messages:?}"
+    );
     assert_eq!(
         (
             count(0, "switch-to-steer"),
@@ -534,15 +540,12 @@ async fn daemon_delivers_switched_steer_before_ordered_followups() {
             count(2, "later-one"),
             count(2, "later-two")
         ),
-        (1, 1, 0)
-    );
-    assert_eq!(
-        (
-            count(3, "switch-to-steer"),
-            count(3, "later-one"),
-            count(3, "later-two")
-        ),
         (1, 1, 1)
+    );
+    let followups = messages[2].join("\n");
+    assert!(
+        followups.contains("later-one\n\nlater-two"),
+        "queue order changed: {followups:?}"
     );
     send(&mut writer, json!({"type":"remove_queued_prompt","id":7,"client_id":"test","prompt_id":"switch-to-steer"})).await;
     until(&mut reader, |event| {
