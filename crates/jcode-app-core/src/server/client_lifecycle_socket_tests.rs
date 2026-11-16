@@ -642,6 +642,13 @@ impl Provider for TerminalSocketProvider {
         }).collect()
     }
 
+    async fn refresh_model_catalog(&self) -> Result<crate::provider::ModelCatalogRefreshSummary> {
+        // This fixture starts with a fresh, cached fallback. Only explicit
+        // refresh discovers the future model, as a live provider would.
+        self.catalog_revision.fetch_add(1, Ordering::SeqCst);
+        Ok(crate::provider::ModelCatalogRefreshSummary::default())
+    }
+
     fn catalog_sharing_identity(&self) -> Option<String> {
         if self.churn_catalog.load(Ordering::SeqCst) {
             self.catalog_revision.fetch_add(1, Ordering::SeqCst);
@@ -1029,8 +1036,15 @@ async fn sdk_socket_cancel_workflow(
         .await
         .unwrap();
         if queued_test == Some("catalog") {
-            terminal_provider.catalog_revision.fetch_add(1, Ordering::SeqCst);
-            crate::bus::Bus::global().publish_models_updated();
+            // A second client explicitly refreshes the already-fresh catalog while
+            // the long-lived session owns its agent lock. No daemon restart.
+            send(&mut legacy_writer, json!({"type":"refresh_models", "id": 88})).await;
+            until(&mut legacy_reader, |event| matches!(event, ServerEvent::Done { id: 88 })).await;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while terminal_provider.catalog_revision.load(Ordering::SeqCst) == 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("explicit refresh must bypass the fixture's fresh cache");
             tokio::time::sleep(Duration::from_millis(1200)).await;
             terminal_provider.finish_first.notify_one();
             let event = until(&mut client_reader, |event| matches!(event,
