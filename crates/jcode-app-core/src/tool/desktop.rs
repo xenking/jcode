@@ -18,7 +18,7 @@ impl Tool for DesktopTool {
         "desktop"
     }
     fn description(&self) -> &str {
-        "Control local Jcode Desktop by explicit window and session ID. List, state, background open and set_composer are supported. Focused composers and existing drafts are protected unless explicitly allowed. Other actions may be unsupported."
+        "Control local Jcode Desktop by explicit window and session ID: list, background open, state, click, set_composer, send, Enter, search, expand_tool, render, wait_for. Focused composers and existing drafts are protected unless explicitly allowed. Click supports composer.send and tool:<call_id>; render and visibility waits also support visible row:<revision>:<index>."
     }
     fn parameters_schema(&self) -> Value {
         json!({"type":"object", "required":["action"], "properties":{
