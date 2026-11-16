@@ -748,6 +748,9 @@ pub struct SwarmMemberRuntime {
     /// tell a working agent from one that has gone quiet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_age_secs: Option<u64>,
+    /// Silence duration when the server watchdog considers this worker stalled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled_secs: Option<u64>,
     /// Tokens in the worker's context window as of its latest response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_tokens: Option<u64>,
@@ -772,6 +775,7 @@ impl SwarmMemberRuntime {
             && self.effort.is_none()
             && self.elapsed_secs.is_none()
             && self.activity_age_secs.is_none()
+            && self.stalled_secs.is_none()
             && self.context_tokens.is_none()
             && self.context_limit.is_none()
             && self.output_tokens.is_none()

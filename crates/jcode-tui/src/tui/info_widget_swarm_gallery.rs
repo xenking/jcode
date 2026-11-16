@@ -79,6 +79,9 @@ pub(super) fn member_wait_note(member: &SwarmMemberStatus) -> Option<String> {
 
 /// Show scoped waits before stale output, otherwise prefer streamed text.
 fn member_body(member: &SwarmMemberStatus) -> Vec<String> {
+    if let Some(age) = member.runtime.stalled_secs {
+        return vec![format!("stalled {}m", age / 60)];
+    }
     if let Some(note) = member_wait_note(member) {
         return vec![note];
     }
@@ -673,6 +676,14 @@ mod tests {
             todo_items: Vec::new(),
             runtime: crate::protocol::SwarmMemberRuntime::default(),
         }
+    }
+
+    #[test]
+    fn stalled_worker_is_visible_in_gallery() {
+        let mut worker = member("fox", "running", None, None);
+        worker.output_tail = Some("old text".into());
+        worker.runtime.stalled_secs = Some(720);
+        assert_eq!(members_to_gallery(&[worker])[0].body, ["stalled 12m"]);
     }
 
     #[test]

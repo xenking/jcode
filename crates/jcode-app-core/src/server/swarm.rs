@@ -871,6 +871,7 @@ async fn broadcast_swarm_status_now(
                             activity_age_secs: crate::session_metrics::last_activity_age_secs(
                                 &m.session_id,
                             ),
+                            stalled_secs: super::swarm_watchdog::stalled_for_secs(&m.session_id),
                             context_tokens: tokens.map(|(context, _)| context).filter(|t| *t > 0),
                             context_limit,
                             output_tokens: tokens.map(|(_, output)| output).filter(|t| *t > 0),
