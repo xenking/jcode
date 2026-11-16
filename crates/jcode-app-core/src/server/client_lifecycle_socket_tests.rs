@@ -623,7 +623,23 @@ impl Provider for TerminalSocketProvider {
             !self.fail_catalog.load(Ordering::SeqCst),
             "injected catalog worker failure"
         );
-        vec![self.model()]
+        let mut models = vec![self.model()];
+        if self.catalog_revision.load(Ordering::SeqCst) > 0 {
+            models.push("fixture-future-model".into());
+        }
+        models
+    }
+
+    fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
+        self.available_models_display().into_iter().map(|model| crate::provider::ModelRoute {
+            model,
+            provider: "fixture".into(),
+            api_method: "fixture".into(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        }).collect()
     }
 
     fn catalog_sharing_identity(&self) -> Option<String> {
@@ -636,6 +652,11 @@ impl Provider for TerminalSocketProvider {
             self.catalog_revision.load(Ordering::SeqCst)
         ))
     }
+}
+
+#[tokio::test]
+async fn busy_long_lived_session_receives_catalog_update_after_turn() {
+    sdk_socket_cancel_workflow(false, true, true, false, false, false, false, Some("catalog")).await;
 }
 
 #[tokio::test]
@@ -1007,6 +1028,25 @@ async fn sdk_socket_cancel_workflow(
         )
         .await
         .unwrap();
+        if queued_test == Some("catalog") {
+            terminal_provider.catalog_revision.fetch_add(1, Ordering::SeqCst);
+            crate::bus::Bus::global().publish_models_updated();
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            terminal_provider.finish_first.notify_one();
+            let event = until(&mut client_reader, |event| matches!(event,
+                ServerEvent::AvailableModelsUpdated { available_models, available_model_routes, .. }
+                if available_models.iter().any(|m| m == "fixture-future-model")
+                    && available_model_routes.iter().any(|r| r.model == "fixture-future-model")
+            )).await;
+            assert!(matches!(event, ServerEvent::AvailableModelsUpdated { .. }));
+            drop(client_writer);
+            drop(client_reader);
+            drop(legacy_writer);
+            drop(legacy_reader);
+            server_task.abort();
+            legacy_task.abort();
+            return;
+        }
         if ask_reattach {
             drop(client_writer);
             drop(client_reader);

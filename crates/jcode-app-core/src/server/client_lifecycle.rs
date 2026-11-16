@@ -485,6 +485,11 @@ pub(super) async fn handle_client(
 
     let mut swarm_enabled = crate::config::config().features.swarm;
     let mut last_available_models_snapshot: Option<Arc<str>> = None;
+    // A running turn holds the agent lock. Keep a refresh pending until the
+    // catalog can be captured rather than silently dropping the bus event.
+    let mut catalog_update_pending = false;
+    let mut catalog_retry_tick = tokio::time::interval(std::time::Duration::from_millis(250));
+    catalog_retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Create a new session for this client
     let t0 = std::time::Instant::now();
@@ -812,6 +817,12 @@ pub(super) async fn handle_client(
                 }
                 continue;
             }
+            _ = catalog_retry_tick.tick(), if client_subscribed && catalog_update_pending => {
+                catalog_update_pending = !publish_available_models_for_client(
+                    &agent, &client_event_tx, &mut last_available_models_snapshot, &client_connection_id,
+                ).await;
+                continue;
+            }
             // Forward bus events to this client
             bus_event = bus_rx.recv(), if client_subscribed => {
                 match bus_event {
@@ -821,27 +832,9 @@ pub(super) async fn handle_client(
                         }
                     }
                     Ok(BusEvent::ModelsUpdated) => {
-                        let Some(catalog) = try_available_models_catalog_offloaded(&agent).await else {
-                            continue;
-                        };
-                        // Equivalent clients share the snapshot, normalized key,
-                        // and size/downgrade decision. Pointer equality makes an
-                        // unchanged shared catalog a constant-time fast path.
-                        if last_available_models_snapshot.as_ref().is_some_and(|previous| {
-                            Arc::ptr_eq(previous, &catalog.dedup_key)
-                                || previous.as_ref() == catalog.dedup_key.as_ref()
-                        }) {
-                            continue;
-                        }
-                        if let Some(event) = catalog.live_event() {
-                            let _ = client_event_tx.send(event.clone());
-                        } else {
-                            crate::logging::warn(&format!(
-                                "Skipping oversized catalog for connection {} ({} bytes)",
-                                client_connection_id, catalog.encoded_len
-                            ));
-                        }
-                        last_available_models_snapshot = Some(Arc::clone(&catalog.dedup_key));
+                        catalog_update_pending = !publish_available_models_for_client(
+                            &agent, &client_event_tx, &mut last_available_models_snapshot, &client_connection_id,
+                        ).await;
                     }
                     // Push the todo card to windows showing this session, so
                     // they do not each poll for it. One todo-tool call writes
@@ -3852,6 +3845,32 @@ pub(super) async fn process_reserved_message_streaming_mpsc(
         );
     }
     result
+}
+
+/// Returns false when a busy agent or failed build requires another attempt.
+async fn publish_available_models_for_client(
+    agent: &Arc<Mutex<Agent>>,
+    tx: &mpsc::UnboundedSender<ServerEvent>,
+    last: &mut Option<Arc<str>>,
+    connection_id: &str,
+) -> bool {
+    let Some(catalog) = try_available_models_catalog_offloaded(agent).await else {
+        return false;
+    };
+    if last.as_ref().is_some_and(|previous| {
+        Arc::ptr_eq(previous, &catalog.dedup_key) || previous.as_ref() == catalog.dedup_key.as_ref()
+    }) {
+        return true;
+    }
+    if let Some(event) = catalog.live_event() {
+        let _ = tx.send(event.clone());
+    } else {
+        crate::logging::warn(&format!(
+            "Skipping oversized catalog for connection {} ({} bytes)", connection_id, catalog.encoded_len
+        ));
+    }
+    *last = Some(Arc::clone(&catalog.dedup_key));
+    true
 }
 
 #[cfg(test)]
