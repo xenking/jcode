@@ -43,7 +43,7 @@ def request(path, command):
                 event = json.loads(line)
                 if event.get("type") != "ack":
                     return event
-    raise AssertionError("daemon disconnected without response")
+    raise ConnectionError("daemon disconnected during a generation transition")
 
 
 def version(binary, root):
