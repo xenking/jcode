@@ -867,7 +867,10 @@ impl SessionControlHandle {
         mode: jcode_agent_runtime::QueuedMessageMode,
         system_reminder: Option<String>,
     ) -> anyhow::Result<bool> {
-        anyhow::ensure!(self.queue_available, "session queue unavailable while reconnecting");
+        anyhow::ensure!(
+            self.queue_available,
+            "session queue unavailable while reconnecting"
+        );
         anyhow::ensure!(!client_id.trim().is_empty(), "client_id must not be empty");
         let mut queue = self
             .soft_interrupt_queue
@@ -924,7 +927,10 @@ impl SessionControlHandle {
     }
 
     pub(super) fn queued_user_prompts(&self) -> anyhow::Result<Vec<crate::protocol::QueuedPrompt>> {
-        anyhow::ensure!(self.queue_available, "session queue unavailable while reconnecting");
+        anyhow::ensure!(
+            self.queue_available,
+            "session queue unavailable while reconnecting"
+        );
         let queue = self
             .soft_interrupt_queue
             .lock()
@@ -1053,7 +1059,10 @@ impl SessionControlHandle {
         mode: jcode_agent_runtime::QueuedMessageMode,
         prioritize: bool,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(self.queue_available, "session queue unavailable while reconnecting");
+        anyhow::ensure!(
+            self.queue_available,
+            "session queue unavailable while reconnecting"
+        );
         let mut queue = self
             .soft_interrupt_queue
             .lock()
@@ -1084,11 +1093,88 @@ impl SessionControlHandle {
         Ok(())
     }
 
+    /// Mark the requested snapshot for an interrupt without changing its order.
+    pub(super) fn interrupt_user_prompts(&self, ids: &[String]) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.queue_available,
+            "session queue unavailable while reconnecting"
+        );
+        anyhow::ensure!(!ids.is_empty(), "no queued prompts selected");
+        let requested: std::collections::HashSet<_> = ids.iter().collect();
+        anyhow::ensure!(requested.len() == ids.len(), "duplicate queued prompt id");
+        let mut queue = self
+            .soft_interrupt_queue
+            .lock()
+            .map_err(|_| anyhow::anyhow!("queue lock poisoned"))?;
+        let found = queue
+            .iter()
+            .filter(|item| {
+                item.source == SoftInterruptSource::User
+                    && item.mode != jcode_agent_runtime::QueuedMessageMode::InFlight
+                    && item
+                        .client_id
+                        .as_ref()
+                        .is_some_and(|id| requested.contains(id))
+            })
+            .count();
+        anyhow::ensure!(
+            found == ids.len(),
+            "one or more queued prompts are no longer available"
+        );
+        let previous = queue.clone();
+        for item in queue.iter_mut().filter(|item| {
+            item.client_id
+                .as_ref()
+                .is_some_and(|id| requested.contains(id))
+                && item.source == SoftInterruptSource::User
+        }) {
+            item.mode = jcode_agent_runtime::QueuedMessageMode::AfterYield;
+            item.urgent = true;
+        }
+        if let Err(error) = crate::soft_interrupt_store::overwrite(&self.session_id, &queue) {
+            *queue = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub(super) fn take_user_prompt_batch(
+        &self,
+        interrupted_only: bool,
+    ) -> anyhow::Result<Vec<SoftInterruptMessage>> {
+        anyhow::ensure!(
+            self.queue_available,
+            "session queue unavailable while reconnecting"
+        );
+        let mut queue = self
+            .soft_interrupt_queue
+            .lock()
+            .map_err(|_| anyhow::anyhow!("queue lock poisoned"))?;
+        let mut batch = Vec::new();
+        for item in queue.iter_mut() {
+            if item.source == SoftInterruptSource::User
+                && item.client_id.is_some()
+                && item.mode != jcode_agent_runtime::QueuedMessageMode::InFlight
+                && (!interrupted_only
+                    || (item.mode == jcode_agent_runtime::QueuedMessageMode::AfterYield
+                        && item.urgent))
+            {
+                batch.push(item.clone());
+                item.mode = jcode_agent_runtime::QueuedMessageMode::InFlight;
+            }
+        }
+        Ok(batch)
+    }
+
+    #[cfg(test)]
     pub(super) fn take_next_user_prompt(
         &self,
         interrupted_only: bool,
     ) -> anyhow::Result<Option<SoftInterruptMessage>> {
-        anyhow::ensure!(self.queue_available, "session queue unavailable while reconnecting");
+        anyhow::ensure!(
+            self.queue_available,
+            "session queue unavailable while reconnecting"
+        );
         let mut queue = self
             .soft_interrupt_queue
             .lock()
@@ -1109,7 +1195,10 @@ impl SessionControlHandle {
     }
 
     pub(super) fn restore_user_prompt(&self, prompt: SoftInterruptMessage) -> anyhow::Result<()> {
-        anyhow::ensure!(self.queue_available, "session queue unavailable while reconnecting");
+        anyhow::ensure!(
+            self.queue_available,
+            "session queue unavailable while reconnecting"
+        );
         let mut queue = self
             .soft_interrupt_queue
             .lock()

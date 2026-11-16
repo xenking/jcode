@@ -872,6 +872,7 @@ impl Request {
             Request::QueuePrompt { id, .. }
             | Request::SetQueuedPromptMode { id, .. }
             | Request::InterruptQueuedPrompt { id, .. }
+            | Request::InterruptQueuedPrompts { id, .. }
             | Request::RemoveQueuedPrompt { id, .. }
             | Request::ReorderQueuedPrompts { id, .. }
             | Request::GetQueuedPrompts { id } => *id,

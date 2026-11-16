@@ -29,6 +29,7 @@ test("queue methods retain modes, images, reminder and correlated replies", asyn
   assert.deepEqual(await client.getQueuedPrompts("s1"), [prompt]);
   assert.equal(await client.removeQueuedPrompt("s1", "panel", "q1"), "in_flight");
   await client.reorderQueuedPrompts("s1", "panel", ["q2", "q1"]);
+  await client.interruptQueuedPrompts("s1", ["q2", "q1"]);
   await assert.rejects(() => client.interruptQueuedPrompt("s1", "missing"), (error: unknown) => error instanceof HarnessError && error.code === "not_found");
   const wire = requests.map(({ v, id, ...request }) => request);
   assert.deepEqual(wire, [
@@ -38,6 +39,7 @@ test("queue methods retain modes, images, reminder and correlated replies", asyn
     { req: "get_queued_prompts", session_id: "s1" },
     { req: "remove_queued_prompt", session_id: "s1", client_id: "panel", prompt_id: "q1" },
     { req: "reorder_queued_prompts", session_id: "s1", client_id: "panel", order: ["q2", "q1"] },
+    { req: "interrupt_queued_prompts", session_id: "s1", ids: ["q2", "q1"] },
     { req: "interrupt_queued_prompt", session_id: "s1", client_id: "missing" },
   ]);
   assert.ok(isKnownEvent({ ev: "queued_prompts", session_id: "s1", prompts: [prompt] }));

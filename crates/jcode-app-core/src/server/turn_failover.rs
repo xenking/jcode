@@ -249,7 +249,7 @@ pub(super) async fn process_reserved_message_with_server_failover(
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
     enabled: bool,
-    queued_client_id: Option<String>,
+    queued_client_id: Option<Vec<String>>,
 ) -> anyhow::Result<()> {
     let reminder = system_reminder.clone();
     let mut guard = agent.lock().await;

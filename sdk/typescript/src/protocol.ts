@@ -240,6 +240,7 @@ export type ApiRequest =
   | { req: "queue_prompt"; session_id: string; client_id: string; content: string; images?: ImageAttachment[]; mode: QueuedPromptMode; system_reminder?: string }
   | { req: "set_queued_prompt_mode"; session_id: string; client_id: string; mode: QueuedPromptMode }
   | { req: "interrupt_queued_prompt"; session_id: string; client_id: string }
+  | { req: "interrupt_queued_prompts"; session_id: string; ids: string[] }
   | { req: "get_queued_prompts"; session_id: string }
   | { req: "remove_queued_prompt"; session_id: string; client_id: string; prompt_id: string }
   | { req: "reorder_queued_prompts"; session_id: string; client_id: string; order: string[] }
@@ -662,6 +663,7 @@ export const KNOWN_REQUEST_KINDS = [
   "queue_prompt",
   "set_queued_prompt_mode",
   "interrupt_queued_prompt",
+  "interrupt_queued_prompts",
   "get_queued_prompts",
   "remove_queued_prompt",
   "reorder_queued_prompts",

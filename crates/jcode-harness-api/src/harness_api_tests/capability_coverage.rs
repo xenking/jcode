@@ -66,6 +66,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("GetTodos", Covered),
     ("InputShell", ClientInternal),
     ("InterruptQueuedPrompt", Covered),
+    ("InterruptQueuedPrompts", Covered),
     ("InvalidateAnthropicUsage", Covered),
     ("InvalidateOpenAiUsage", Covered),
     ("Message", Covered),

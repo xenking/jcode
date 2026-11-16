@@ -52,6 +52,7 @@ const REQUIRES_ATTACH: &[&str] = &[
     "queue_prompt",
     "set_queued_prompt_mode",
     "interrupt_queued_prompt",
+    "interrupt_queued_prompts",
     "get_queued_prompts",
     "remove_queued_prompt",
     "reorder_queued_prompts",
@@ -144,6 +145,7 @@ pub struct BridgeState {
     /// The daemon accepts soft interrupt ids and per-id cancellation, and
     /// replies to `background_tool` with a result.
     pub queued_prompts_supported: bool,
+    pub queued_prompt_batch_interrupt_supported: bool,
     pub queued_prompt_mutations_supported: bool,
     pub bounded_history_supported: bool,
     pub soft_interrupt_ids_supported: bool,
@@ -748,6 +750,7 @@ impl BridgeState {
             "queue_prompt"
             | "set_queued_prompt_mode"
             | "interrupt_queued_prompt"
+            | "interrupt_queued_prompts"
             | "get_queued_prompts"
             | "remove_queued_prompt"
             | "reorder_queued_prompts" => {
@@ -757,6 +760,18 @@ impl BridgeState {
                         ApiEvent::Error {
                             code: ErrorCode::Internal,
                             message: "daemon does not advertise queued_prompts".into(),
+                        },
+                    ))];
+                }
+                if req == "interrupt_queued_prompts"
+                    && !self.queued_prompt_batch_interrupt_supported
+                {
+                    return vec![Outbound::Reply(ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: "daemon does not advertise queued_prompt_batch_interrupt_v1"
+                                .into(),
                         },
                     ))];
                 }

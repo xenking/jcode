@@ -202,6 +202,11 @@ pub enum ApiRequest {
         session_id: String,
         client_id: String,
     },
+    /// Requires queued_prompt_batch_interrupt_v1.
+    InterruptQueuedPrompts {
+        session_id: String,
+        ids: Vec<String>,
+    },
     GetQueuedPrompts {
         session_id: String,
     },

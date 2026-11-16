@@ -763,6 +763,10 @@ export class JcodeClient extends EventEmitter {
     await this.requestOk({ req: "interrupt_queued_prompt", session_id: sessionId, client_id: clientId });
   }
 
+  async interruptQueuedPrompts(sessionId: string, ids: string[]): Promise<void> {
+    await this.requestOk({ req: "interrupt_queued_prompts", session_id: sessionId, ids });
+  }
+
   async getQueuedPrompts(sessionId: string): Promise<QueuedPrompt[]> {
     const frame = await this.expectReply({ req: "get_queued_prompts", session_id: sessionId }, "queued_prompts");
     return frame.prompts;

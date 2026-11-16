@@ -1053,6 +1053,30 @@ fn queued_prompt_bridge_forwards_and_correlates_controls_and_snapshots() {
 }
 
 #[test]
+fn batch_interrupt_requires_capability_and_forwards_ids() {
+    let mut state = BridgeState {
+        session_id: Some("s1".into()),
+        queued_prompts_supported: true,
+        ..Default::default()
+    };
+    let request =
+        json!({"req":"interrupt_queued_prompts","id":22,"session_id":"s1","ids":["a","b"]});
+    assert!(matches!(
+        &state.api_request_to_legacy(&request)[..],
+        [Outbound::Reply(_)]
+    ));
+    state.queued_prompt_batch_interrupt_supported = true;
+    let out = state.api_request_to_legacy(&request);
+    let legacy = legacy_out(&out);
+    assert_eq!(legacy["ids"], json!(["a", "b"]));
+    let id = legacy["id"].as_u64().unwrap();
+    let result = state.legacy_event_to_api(&json!({"type":"ack","id":id}));
+    assert!(
+        matches!(&result[..], [frame] if frame.reply_to == Some(22) && matches!(frame.event, ApiEvent::Ok))
+    );
+}
+
+#[test]
 fn queued_prompt_mutation_bridge_requires_capability_and_correlates_outcome() {
     let mut state = BridgeState {
         session_id: Some("s1".into()),

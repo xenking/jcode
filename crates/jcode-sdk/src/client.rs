@@ -1074,6 +1074,14 @@ impl JcodeClient {
         .map(drop)
     }
 
+    pub fn interrupt_queued_prompts(&self, session_id: &str, ids: Vec<String>) -> Result<()> {
+        self.request_ok(ApiRequest::InterruptQueuedPrompts {
+            session_id: session_id.into(),
+            ids,
+        })
+        .map(drop)
+    }
+
     pub fn get_queued_prompts(
         &self,
         session_id: &str,

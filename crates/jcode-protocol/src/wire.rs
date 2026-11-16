@@ -127,6 +127,10 @@ pub enum Request {
     #[serde(rename = "interrupt_queued_prompt")]
     InterruptQueuedPrompt { id: u64, client_id: String },
 
+    /// Interrupt and deliver these queued prompts together, in queue order.
+    #[serde(rename = "interrupt_queued_prompts")]
+    InterruptQueuedPrompts { id: u64, ids: Vec<String> },
+
     /// Obtain a fresh queue snapshot after reconnecting.
     #[serde(rename = "get_queued_prompts")]
     GetQueuedPrompts { id: u64 },

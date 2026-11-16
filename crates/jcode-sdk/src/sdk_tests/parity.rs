@@ -49,6 +49,7 @@ const CAPABILITIES: &[Capability] = &[
     cap("queue_prompt_with_reminder", "queuePromptWithReminder"),
     cap("set_queued_prompt_mode", "setQueuedPromptMode"),
     cap("interrupt_queued_prompt", "interruptQueuedPrompt"),
+    cap("interrupt_queued_prompts", "interruptQueuedPrompts"),
     cap("get_queued_prompts", "getQueuedPrompts"),
     cap("remove_queued_prompt", "removeQueuedPrompt"),
     cap("reorder_queued_prompts", "reorderQueuedPrompts"),

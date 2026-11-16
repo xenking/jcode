@@ -127,21 +127,20 @@ pub(super) async fn record_processing_completion(
 /// Restore a reservation if its task is cancelled before recording the input.
 struct QueuedPromptClaimGuard {
     queue: jcode_agent_runtime::SoftInterruptQueue,
-    client_id: Option<String>,
+    client_ids: Vec<String>,
 }
 
 impl Drop for QueuedPromptClaimGuard {
     fn drop(&mut self) {
-        let Some(client_id) = self.client_id.as_deref() else {
-            return;
-        };
-        if let Ok(mut queue) = self.queue.lock()
-            && let Some(item) = queue.iter_mut().find(|item| {
-                item.client_id.as_deref() == Some(client_id)
+        if let Ok(mut queue) = self.queue.lock() {
+            for item in queue.iter_mut().filter(|item| {
+                item.client_id
+                    .as_ref()
+                    .is_some_and(|id| self.client_ids.contains(id))
                     && item.mode == jcode_agent_runtime::QueuedMessageMode::InFlight
-            })
-        {
-            item.mode = jcode_agent_runtime::QueuedMessageMode::AfterYield;
+            }) {
+                item.mode = jcode_agent_runtime::QueuedMessageMode::AfterYield;
+            }
         }
     }
 }
@@ -165,9 +164,9 @@ pub(super) async fn start_next_queued_prompt(
     if *state.client_is_processing || crate::turn_cancel_registry::has_active_turn(session_id) {
         return;
     }
-    let prompt = match control.take_next_user_prompt(interrupted_only) {
-        Ok(Some(prompt)) => prompt,
-        Ok(None) => return,
+    let prompts = match control.take_user_prompt_batch(interrupted_only) {
+        Ok(prompts) if !prompts.is_empty() => prompts,
+        Ok(_) => return,
         Err(error) => {
             crate::logging::warn(&format!(
                 "Failed to claim queued prompt for {session_id}: {error}"
@@ -175,6 +174,27 @@ pub(super) async fn start_next_queued_prompt(
             return;
         }
     };
+    let client_ids: Vec<String> = prompts.iter().filter_map(|p| p.client_id.clone()).collect();
+    let mut content_parts = Vec::new();
+    let mut images = Vec::new();
+    let mut reminders = Vec::new();
+    for prompt in &prompts {
+        let mut content = prompt.content.clone();
+        let offset = images.len();
+        if offset != 0 {
+            for n in (1..=prompt.images.len()).rev() {
+                content = content.replace(
+                    &format!("[#image {n}]"),
+                    &format!("[#image {}]", n + offset),
+                );
+                content =
+                    content.replace(&format!("[image {n}]"), &format!("[image {}]", n + offset));
+            }
+        }
+        content_parts.push(content);
+        images.extend(prompt.images.clone());
+        reminders.extend(prompt.system_reminder.clone());
+    }
     {
         let mut connections = connections.write().await;
         if let Some(info) = connections.get_mut(connection_id) {
@@ -188,10 +208,10 @@ pub(super) async fn start_next_queued_prompt(
     start_processing_message(
         ProcessingMessage {
             id: QUEUED_TURN_REQUEST_ID,
-            queued_client_id: prompt.client_id.clone(),
-            content: prompt.content.clone(),
-            images: prompt.images.clone(),
-            system_reminder: prompt.system_reminder.clone(),
+            queued_client_id: Some(client_ids),
+            content: content_parts.join("\n\n"),
+            images,
+            system_reminder: (!reminders.is_empty()).then(|| reminders.join("\n\n")),
             active_skill: None,
             server_failover,
         },
@@ -205,10 +225,12 @@ pub(super) async fn start_next_queued_prompt(
     )
     .await;
     if *state.message_id != Some(QUEUED_TURN_REQUEST_ID) {
-        if let Err(error) = control.restore_user_prompt(prompt) {
-            crate::logging::error(&format!(
-                "Failed to restore queued prompt for {session_id}: {error}"
-            ));
+        for prompt in prompts {
+            if let Err(error) = control.restore_user_prompt(prompt) {
+                crate::logging::error(&format!(
+                    "Failed to restore queued prompt for {session_id}: {error}"
+                ));
+            }
         }
         let mut connections = connections.write().await;
         if let Some(info) = connections.get_mut(connection_id) {
@@ -445,7 +467,7 @@ pub(super) async fn start_processing_message(
     crate::logging::info(&format!("Processing message id={} spawning task", id));
     let queued_claim = QueuedPromptClaimGuard {
         queue: pending_queue.clone(),
-        client_id: queued_client_id.clone(),
+        client_ids: queued_client_id.clone().unwrap_or_default(),
     };
     *state.task = crate::runtime_activity::spawn_session(client_session_id, async move {
         let _queued_claim = queued_claim;
@@ -821,11 +843,10 @@ pub(super) async fn cancel_processing_message(
             // resets that signal when the turn really exits. Detached signals
             // still need the bounded reset to avoid poisoning the next turn.
             let control_signal = reset_control.stop_current_turn_signal();
-            let owned_by_active_turn = crate::turn_cancel_registry::active_turn_signals(
-                &reset_control.session_id,
-            )
-            .iter()
-            .any(|signal| signal.same_instance(&control_signal));
+            let owned_by_active_turn =
+                crate::turn_cancel_registry::active_turn_signals(&reset_control.session_id)
+                    .iter()
+                    .any(|signal| signal.same_instance(&control_signal));
             if !owned_by_active_turn {
                 reset_control.reset_cancel_if_epoch(cancel_epoch);
             }

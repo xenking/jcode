@@ -104,7 +104,7 @@ fn event_for_transport(
 
 struct ProcessingMessage {
     id: u64,
-    queued_client_id: Option<String>,
+    queued_client_id: Option<Vec<String>>,
     content: String,
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
@@ -272,15 +272,24 @@ async fn refresh_session_control_handle(
     let agent_guard = match agent.try_lock() {
         Ok(agent_guard) => agent_guard,
         Err(_) => {
-            let stop_signal = shutdown_signals.read().await.get(session_id).cloned()
+            let stop_signal = shutdown_signals
+                .read()
+                .await
+                .get(session_id)
+                .cloned()
                 .unwrap_or_else(InterruptSignal::new);
-            let queue = soft_interrupt_queues.read().await.get(session_id).cloned()
+            let queue = soft_interrupt_queues
+                .read()
+                .await
+                .get(session_id)
+                .cloned()
                 .or_else(|| crate::incoming_message::bound_queue(session_id));
             return match queue {
                 Some(queue) => SessionControlHandle::cancel_only(session_id, queue, stop_signal),
                 None => {
                     crate::logging::warn(&format!(
-                        "refresh_session_control_handle: queue unavailable for busy session {}; queue commands will be rejected until it becomes available", session_id
+                        "refresh_session_control_handle: queue unavailable for busy session {}; queue commands will be rejected until it becomes available",
+                        session_id
                     ));
                     SessionControlHandle::queue_unavailable(session_id, stop_signal)
                 }
@@ -1202,7 +1211,7 @@ pub(super) async fn handle_client(
 
         // Queue controls are acknowledged after their durable mutation, not
         // by the generic pre-dispatch Ack below.
-        if matches!(&request, Request::QueuePrompt { .. } | Request::SetQueuedPromptMode { .. } | Request::InterruptQueuedPrompt { .. } | Request::GetQueuedPrompts { .. } | Request::RemoveQueuedPrompt { .. } | Request::ReorderQueuedPrompts { .. }) {
+        if matches!(&request, Request::QueuePrompt { .. } | Request::SetQueuedPromptMode { .. } | Request::InterruptQueuedPrompt { .. } | Request::InterruptQueuedPrompts { .. } | Request::GetQueuedPrompts { .. } | Request::RemoveQueuedPrompt { .. } | Request::ReorderQueuedPrompts { .. }) {
             let mut interrupt = false;
             let mut dispatch_if_idle = false;
             let mut already_delivered = None;
@@ -1230,6 +1239,10 @@ pub(super) async fn handle_client(
                 Request::InterruptQueuedPrompt { id, client_id } => {
                     interrupt = true;
                     (id, session_control.set_user_prompt_mode(&client_id, jcode_agent_runtime::QueuedMessageMode::AfterYield, true))
+                }
+                Request::InterruptQueuedPrompts { id, ids } => {
+                    interrupt = true;
+                    (id, session_control.interrupt_user_prompts(&ids))
                 }
                 Request::GetQueuedPrompts { id } => { dispatch_if_idle = true; (id, Ok(())) },
                 Request::RemoveQueuedPrompt { id, client_id: _, prompt_id } => {
@@ -1362,7 +1375,7 @@ pub(super) async fn handle_client(
             connection_client_name = Some(name.clone());
         }
         match request {
-            Request::QueuePrompt { .. } | Request::SetQueuedPromptMode { .. } | Request::InterruptQueuedPrompt { .. } | Request::GetQueuedPrompts { .. } | Request::RemoveQueuedPrompt { .. } | Request::ReorderQueuedPrompts { .. } => unreachable!("queue controls dispatched before acknowledgment"),
+            Request::QueuePrompt { .. } | Request::SetQueuedPromptMode { .. } | Request::InterruptQueuedPrompt { .. } | Request::InterruptQueuedPrompts { .. } | Request::GetQueuedPrompts { .. } | Request::RemoveQueuedPrompt { .. } | Request::ReorderQueuedPrompts { .. } => unreachable!("queue controls dispatched before acknowledgment"),
             Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. } => unreachable!("SDK controls dispatched before acknowledgment"),
             Request::Message {
                 id,
@@ -3851,7 +3864,7 @@ pub(super) async fn process_reserved_message_streaming_mpsc(
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
-    queued_client_id: Option<String>,
+    queued_client_id: Option<Vec<String>>,
 ) -> Result<()> {
     agent.validate_server_turn(lease)?;
     let session_id = agent.session_id().to_string();
