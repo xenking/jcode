@@ -494,9 +494,10 @@ fn test_account_picker_includes_all_configured_credentials_even_excluded_and_man
             "COPILOT_GITHUB_TOKEN",
             "GROQ_API_KEY",
         ]);
-        for key in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"] {
+        for key in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"] {
             crate::env::set_var(key, "picker-test-secret-api-key");
         }
+        crate::env::set_var("OPENROUTER_API_KEY", "sk-or-picker-test-secret-own-key");
         crate::env::set_var("COPILOT_GITHUB_TOKEN", "picker-test-secret-device-token");
         crate::env::set_var("GROQ_API_KEY", "picker-test-secret-compatible-key");
         crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
