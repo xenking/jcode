@@ -507,6 +507,9 @@ async fn daemon_restart_restores_and_delivers_pending_prompt_once() {
     use serde_json::json;
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
+    let skill_dir = home._home.path().join(".jcode/skills/queued-test");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(skill_dir.join("SKILL.md"), "---\nname: queued-test\ndescription: test\n---\n\nQueued skill instructions.\n").unwrap();
     let provider = TerminalSocketProvider::default();
     let socket = home._runtime.path().join("restart-1.sock");
     let server = crate::server::Server::new_with_paths(
@@ -559,7 +562,7 @@ async fn daemon_restart_restores_and_delivers_pending_prompt_once() {
     tokio::time::timeout(Duration::from_secs(5), provider.first_started.notified())
         .await
         .unwrap();
-    send(&mut writer, json!({"type":"queue_prompt","id":3,"client_id":"restart-prompt","content":"survive restart","mode":"after_yield","system_reminder":"persistent collection instructions"})).await;
+    send(&mut writer, json!({"type":"queue_prompt","id":3,"client_id":"restart-prompt","content":"survive restart","mode":"after_yield","system_reminder":"persistent collection instructions","active_skill":"queued-test"})).await;
     until(&mut reader, |e| matches!(e, ServerEvent::Ack { id: 3 })).await;
     drop(writer);
     drop(reader);
@@ -622,6 +625,7 @@ async fn daemon_restart_restores_and_delivers_pending_prompt_once() {
     .await
     .expect("restored prompt not delivered");
     let messages = provider2.messages.lock().unwrap().clone();
+    assert!(messages[0].iter().any(|message| message.contains("# Active Skill") && message.contains("Queued skill instructions")), "lost skill on restart: {messages:?}");
     assert!(
         messages[0]
             .iter()
