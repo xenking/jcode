@@ -1,3 +1,5 @@
+#[path = "state_ui_context_todos.rs"]
+mod context_todos;
 #[path = "state_ui_count_format.rs"]
 mod count_format;
 use super::state_ui_storage::infer_spawned_session_startup_hints;
@@ -2159,7 +2161,6 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             .unwrap_or(app.session.id.as_str())
             .to_string();
         let context = app.context_info();
-        let todos = crate::todo::load_todos(active_session_id.as_str()).unwrap_or_default();
 
         let (provider_name, model_name, reasoning_effort, service_tier, transport, total_tokens) =
             if app.is_remote {
@@ -2245,28 +2246,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
         let side_panel_pages = app.side_panel.pages.len();
         let focused_side_panel = app.side_panel.focused_page_id.as_deref().unwrap_or("none");
 
-        let mut todo_lines = String::new();
-        if todos.is_empty() {
-            todo_lines.push_str("- none\n");
-        } else {
-            for todo in todos.iter().take(8) {
-                let (confidence_label, confidence) = if todo.status == "completed" {
-                    ("done", todo.completion_confidence.or(todo.confidence))
-                } else {
-                    ("confidence", todo.confidence)
-                };
-                let confidence = confidence
-                    .map(|state| state.as_str().to_string())
-                    .unwrap_or_else(|| "?".to_string());
-                todo_lines.push_str(&format!(
-                    "- [{}|{}|{} {}] {}\n",
-                    todo.status, todo.priority, confidence_label, confidence, todo.content
-                ));
-            }
-            if todos.len() > 8 {
-                todo_lines.push_str(&format!("- … {} more\n", todos.len() - 8));
-            }
-        }
+        let todo_lines = context_todos::render(&active_session_id);
 
         let mut context_report = String::new();
         context_report.push_str("Session Context\n\n");

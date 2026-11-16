@@ -366,6 +366,26 @@ fn format_countdown_until_handles_subminute_and_minutes() {
 }
 
 #[test]
+fn gather_ambient_info_does_not_invent_empty_state_after_load_failure() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let ambient = temp.path().join("ambient");
+    std::fs::create_dir(&ambient).unwrap();
+    let state = ambient.join("state.json");
+    std::fs::write(&state, "broken scheduler state").unwrap();
+
+    assert!(
+        gather_ambient_info_inner(true).is_none(),
+        "an unreadable scheduler must not appear idle with an empty queue"
+    );
+    assert_eq!(
+        std::fs::read_to_string(state).unwrap(),
+        "broken scheduler state"
+    );
+}
+
+#[test]
 fn gather_ambient_info_filters_to_session_reminders_when_ambient_disabled() {
     let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
