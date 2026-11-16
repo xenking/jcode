@@ -74,7 +74,13 @@ impl MacHost {
                 builds: crate::build::builds_dir()?,
             },
             jcode_home,
-            own_session: std::env::var("JCODE_SESSION_ID").ok(),
+            own_session: std::env::var_os("JCODE_SESSION_ID")
+                .map(|value| {
+                    value
+                        .into_string()
+                        .map_err(|_| anyhow::anyhow!("JCODE_SESSION_ID is not UTF-8"))
+                })
+                .transpose()?,
             daemon_socket,
         })
     }
@@ -211,7 +217,10 @@ impl Host for MacHost {
     fn arch(&self) -> String {
         output(Command::new("uname").arg("-m"))
             .map(|arch| arch.trim().to_string())
-            .unwrap_or_default()
+            .unwrap_or_else(|error| {
+                crate::logging::warn(&format!("Cannot detect rollout architecture: {error:#}"));
+                "unknown".into()
+            })
     }
 
     fn free_gb(&self) -> Result<u64> {
@@ -220,8 +229,9 @@ impl Host for MacHost {
             .lines()
             .nth(1)
             .and_then(|line| line.split_whitespace().nth(3))
-            .and_then(|kb| kb.parse().ok())
-            .context("could not read free space from df")?;
+            .context("could not read free space from df")?
+            .parse()
+            .context("invalid free space from df")?;
         Ok(free_kb / 1024 / 1024)
     }
 
@@ -237,6 +247,8 @@ impl Host for MacHost {
     }
 
     fn commits_between(&self, repo: Repo, from: &str, to: &str) -> Option<usize> {
+        // Informational only: unknown history is displayed as unknown, never
+        // treated as a zero-commit rollout or as proof of deployment identity.
         output(git(self.repo(repo)).args(["rev-list", "--count", &format!("{from}..{to}")]))
             .ok()?
             .trim()
@@ -245,6 +257,8 @@ impl Host for MacHost {
     }
 
     fn deployed(&self) -> Deployed {
+        // Missing/broken installed artifacts remain unknown in the report.
+        // The durable executor separately preflights every required artifact.
         let daemon = self.daemon();
         let desktop = output(
             Command::new(self.layout.app.join("Contents/MacOS/jcode-desktop")).arg("--version"),
@@ -291,6 +305,8 @@ impl Host for MacHost {
     }
 
     fn built_cli(&self, pair: &Pair) -> Option<PathBuf> {
+        // A missing, unexecutable, or malformed cached binary is a cache miss.
+        // After rebuilding, the same failed probe becomes a build_cli error.
         let binary = self.built_binary();
         let json = output(Command::new(&binary).args(["version", "--json"])).ok()?;
         let hash = serde_json::from_str::<serde_json::Value>(&json).ok()?["git_hash"]
@@ -312,6 +328,8 @@ impl Host for MacHost {
     }
 
     fn packaged_app(&self, pair: &Pair) -> Option<PathBuf> {
+        // Incomplete/malformed package caches require packaging again, never
+        // authorization to deploy an unverified bundle.
         let app = self.layout.dist_dir.join("Jcode.app");
         let desktop =
             output(Command::new(app.join("Contents/MacOS/jcode-desktop")).arg("--version"))
@@ -439,7 +457,16 @@ fn daemon_control(_socket: &Path, _command: &str) -> Result<serde_json::Value> {
 }
 
 fn daemon_identity(socket: &Path) -> Option<crate::protocol::DaemonIdentity> {
-    crate::build::runtime_generation::probe_socket_identity(socket, Duration::from_secs(2)).ok()
+    // Status may be requested without a running daemon. Absence here is not
+    // used for mutation: ensure_rollout_daemon must succeed before submission.
+    crate::build::runtime_generation::probe_socket_identity(socket, Duration::from_secs(2))
+        .inspect_err(|error| {
+            crate::logging::debug(&format!(
+                "Cannot inspect rollout daemon {}: {error:#}",
+                socket.display()
+            ))
+        })
+        .ok()
 }
 
 fn live_workers(socket: &Path, own: Option<&str>) -> Result<Vec<(String, String)>> {
@@ -588,8 +615,13 @@ fn output(command: &mut Command) -> Result<String> {
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
-        .with_context(|| format!("failed to start {command:?}"))?;
+        .with_context(|| format!("failed to start {command:?}"))
+        .inspect_err(|error| crate::logging::debug(&format!("Rollout probe failed: {error:#}")))?;
     if !result.status.success() {
+        crate::logging::debug(&format!(
+            "Rollout probe {command:?} exited with {}",
+            result.status
+        ));
         bail!("{command:?} exited with {}", result.status);
     }
     Ok(String::from_utf8_lossy(&result.stdout).into_owned())
