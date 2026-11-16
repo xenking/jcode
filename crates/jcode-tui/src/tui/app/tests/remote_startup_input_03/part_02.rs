@@ -290,7 +290,7 @@ fn test_reload_progress_coalesces_into_single_message() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     app.handle_server_event(
-        crate::protocol::ServerEvent::Reloading { new_socket: None },
+        crate::protocol::ServerEvent::Reloading { new_socket: None, reload_id: None },
         &mut remote,
     );
     app.handle_server_event(

@@ -618,7 +618,7 @@ fn reload_recovery_dedup_is_session_scoped_and_resets_for_new_reload() {
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
     app.handle_server_event(
-        crate::protocol::ServerEvent::Reloading { new_socket: None },
+        crate::protocol::ServerEvent::Reloading { new_socket: None, reload_id: None },
         &mut remote,
     );
     assert!(remote::queue_reload_continuation_once(

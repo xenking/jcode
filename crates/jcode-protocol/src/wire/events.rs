@@ -2,13 +2,8 @@
 
 use super::*;
 
-/// Process and build that answered a daemon Ping, not an installation symlink.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DaemonIdentity {
-    pub pid: u32,
-    pub binary_path: std::path::PathBuf,
-    pub git_hash: String,
-}
+/// Self-reported process image and exec generation, never a channel selection.
+pub type DaemonIdentity = jcode_selfdev_types::ServingIdentity;
 
 /// A provider-reported account limit beyond the two legacy quota slots.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -900,6 +895,9 @@ pub enum ServerEvent {
         /// New socket path to connect to (if different)
         #[serde(skip_serializing_if = "Option::is_none")]
         new_socket: Option<String>,
+        /// Correlates reconnect to the listener that completed this handoff.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reload_id: Option<String>,
     },
 
     /// Progress update during server reload

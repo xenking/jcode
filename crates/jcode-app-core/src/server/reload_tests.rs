@@ -49,6 +49,7 @@ fn member(session_id: &str, status: &str) -> SwarmMember {
 async fn receive_reload_signal_consumes_already_pending_value() {
     let (tx, mut rx) = watch::channel(None::<ReloadSignal>);
     tx.send(Some(ReloadSignal {
+        target: None,
         hash: "abc1234".to_string(),
         triggering_session: Some("sess-1".to_string()),
         prefer_selfdev_binary: true,
@@ -78,6 +79,7 @@ async fn receive_reload_signal_waits_for_future_value_when_initially_empty() {
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
     tx.send(Some(ReloadSignal {
+        target: None,
         hash: "def5678".to_string(),
         triggering_session: Some("sess-2".to_string()),
         prefer_selfdev_binary: false,

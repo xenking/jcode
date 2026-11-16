@@ -24,6 +24,7 @@ pub(in crate::tui::app) struct RemoteRunState {
     pub server_reload_in_progress: bool,
     pub reload_recovery_attempted: bool,
     pub last_reload_pid: Option<u32>,
+    pub last_reload_id: Option<String>,
     /// When this client last tried to start a replacement for a server that
     /// vanished outside a reload. Throttles respawns (issue #1887).
     pub last_dead_server_respawn: Option<Instant>,
@@ -272,15 +273,9 @@ async fn wait_for_reload_handoff_before_reconnect(
         return Ok(None);
     }
 
-    // The marker stays `SocketReady` for up to RELOAD_MARKER_MAX_AGE after a
-    // reload completes. Any client launched in that window would otherwise
-    // flash "Waiting for reload handoff..." (an extra notice row that shoved
-    // the layout) even though the replacement server is already serving.
-    if !state.server_reload_in_progress
-        && crate::server::recent_reload_state(RELOAD_MARKER_MAX_AGE)
-            .is_some_and(|marker| marker.phase == crate::server::ReloadPhase::SocketReady)
-    {
-        return Ok(None);
+    if state.last_reload_id.is_none() {
+        state.last_reload_id = crate::server::recent_reload_state(RELOAD_MARKER_MAX_AGE)
+            .map(|marker| marker.request_id);
     }
 
     state.disconnect_start.get_or_insert_with(Instant::now);
@@ -294,10 +289,12 @@ async fn wait_for_reload_handoff_before_reconnect(
     terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
 
     let socket_path = crate::server::socket_path();
-    match crate::server::inspect_reload_wait_status(
+    match crate::server::inspect_reload_wait_status_for(
         &socket_path,
         RELOAD_MARKER_MAX_AGE,
         state.last_reload_pid,
+        state.last_reload_id.as_deref(),
+        None,
     )
     .await
     {
@@ -307,6 +304,11 @@ async fn wait_for_reload_handoff_before_reconnect(
                 crate::server::reload_state_summary(RELOAD_MARKER_MAX_AGE)
             ));
             Ok(None)
+        }
+        crate::server::ReloadWaitStatus::Unknown { reason } => {
+            state.last_disconnect_reason = Some(format!("Runtime generation unknown: {reason}"));
+            crate::server::wait_for_reload_handoff_event(state.last_reload_pid, &socket_path).await;
+            Ok(Some(ConnectOutcome::Retry))
         }
         crate::server::ReloadWaitStatus::Failed(detail) => {
             crate::logging::warn(&format!(
@@ -590,10 +592,12 @@ pub(in crate::tui::app) async fn connect_with_retry(
 
             if reload_handoff_active(state) {
                 let socket_path = crate::server::socket_path();
-                match crate::server::inspect_reload_wait_status(
+                match crate::server::inspect_reload_wait_status_for(
                     &socket_path,
                     RELOAD_MARKER_MAX_AGE,
                     state.last_reload_pid,
+                    state.last_reload_id.as_deref(),
+                    None,
                 )
                 .await
                 {
@@ -602,6 +606,16 @@ pub(in crate::tui::app) async fn connect_with_retry(
                             "Reconnect reload handoff: ready immediately (state={})",
                             crate::server::reload_state_summary(RELOAD_MARKER_MAX_AGE)
                         ));
+                        return Ok(ConnectOutcome::Retry);
+                    }
+                    crate::server::ReloadWaitStatus::Unknown { reason } => {
+                        state.last_disconnect_reason =
+                            Some(format!("Runtime generation unknown: {reason}"));
+                        crate::server::wait_for_reload_handoff_event(
+                            state.last_reload_pid,
+                            &socket_path,
+                        )
+                        .await;
                         return Ok(ConnectOutcome::Retry);
                     }
                     crate::server::ReloadWaitStatus::Failed(detail) => {
@@ -840,6 +854,7 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
     state.reconnect_attempts = 0;
     state.initial_server_start = false;
     state.server_reload_in_progress = false;
+    state.last_reload_id = None;
 
     if same_session_reload_fast_path {
         crate::logging::info(

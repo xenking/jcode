@@ -1139,12 +1139,18 @@ pub(super) async fn handle_reload(
         delivered += fanout_live_client_event(
             swarm_members,
             session_id,
-            ServerEvent::Reloading { new_socket: None },
+            ServerEvent::Reloading {
+                new_socket: None,
+                reload_id: None,
+            },
         )
         .await;
     }
     if delivered == 0 {
-        let _ = client_event_tx.send(ServerEvent::Reloading { new_socket: None });
+        let _ = client_event_tx.send(ServerEvent::Reloading {
+            new_socket: None,
+            reload_id: None,
+        });
     }
 
     let hash = jcode_build_meta::git_hash().to_string();

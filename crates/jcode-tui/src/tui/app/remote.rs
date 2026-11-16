@@ -1144,13 +1144,23 @@ pub(super) async fn handle_remote_event<B: Backend>(
             handle_disconnect(app, state, Some(reason));
             Ok((RemoteEventOutcome::Reconnect, true))
         }
-        RemoteRead::Event(ServerEvent::Reloading { new_socket }) => {
+        RemoteRead::Event(ServerEvent::Reloading {
+            new_socket,
+            reload_id,
+        }) => {
+            state.last_reload_id = reload_id;
             let _ = new_socket;
             state.server_reload_in_progress = true;
             state.reload_recovery_attempted = false;
             state.last_disconnect_reason = Some("server reload in progress".to_string());
-            let needs_redraw =
-                handle_server_event(app, ServerEvent::Reloading { new_socket: None }, remote);
+            let needs_redraw = handle_server_event(
+                app,
+                ServerEvent::Reloading {
+                    new_socket: None,
+                    reload_id: state.last_reload_id.clone(),
+                },
+                remote,
+            );
             process_remote_followups(app, remote).await;
             Ok((RemoteEventOutcome::Continue, needs_redraw))
         }

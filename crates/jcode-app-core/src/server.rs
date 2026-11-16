@@ -537,10 +537,11 @@ pub(crate) use self::await_members_state::{
 pub(crate) use self::reload_state::subscribe_reload_signal_for_tests;
 pub use self::reload_state::{
     ReloadAck, ReloadPhase, ReloadSignal, ReloadState, ReloadWaitStatus, acknowledge_reload_signal,
-    await_reload_handoff, clear_reload_marker, inspect_reload_wait_status, recent_reload_state,
-    reload_marker_active, reload_marker_exists, reload_marker_path, reload_process_alive,
-    reload_state_summary, send_reload_signal, wait_for_reload_ack, wait_for_reload_handoff_event,
-    write_reload_marker, write_reload_state,
+    await_reload_handoff, await_reload_handoff_for, clear_reload_marker,
+    inspect_reload_wait_status, inspect_reload_wait_status_for, probe_serving_identity,
+    recent_reload_state, reload_marker_active, reload_marker_exists, reload_marker_path,
+    reload_process_alive, reload_state_summary, send_reload_signal, send_reload_signal_target,
+    wait_for_reload_ack, wait_for_reload_handoff_event, write_reload_marker, write_reload_state,
 };
 use self::reload_state::{clear_reload_marker_if_stale_for_pid, publish_reload_socket_ready};
 

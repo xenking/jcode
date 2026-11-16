@@ -306,7 +306,11 @@ pub(super) async fn start_processing_message(
             "Rejecting new message for session {} because server reload is starting",
             client_session_id
         ));
-        let _ = client_event_tx.send(ServerEvent::Reloading { new_socket: None });
+        let _ = client_event_tx.send(ServerEvent::Reloading {
+            new_socket: None,
+            reload_id: crate::server::recent_reload_state(std::time::Duration::from_secs(30))
+                .map(|state| state.request_id),
+        });
         return;
     }
 

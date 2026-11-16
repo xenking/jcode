@@ -429,7 +429,14 @@ impl SelfDevTool {
                         ack.hash
                     )));
                 }
-                match server::await_reload_handoff(&server::socket_path(), timeout).await {
+                match server::await_reload_handoff_for(
+                    &server::socket_path(),
+                    timeout,
+                    &request_id,
+                    None,
+                )
+                .await
+                {
                     server::ReloadWaitStatus::Ready => {
                         let _ = build::complete_pending_activation_for_session(session_id);
                         Ok(ToolOutput::new(format!(
@@ -447,6 +454,11 @@ impl SelfDevTool {
                             server::reload_state_summary(std::time::Duration::from_secs(60))
                         ))
                     }
+                    server::ReloadWaitStatus::Unknown { reason } => Err(anyhow::anyhow!(
+                        "Reload {} has unknown serving generation: {}",
+                        request_id,
+                        reason
+                    )),
                     server::ReloadWaitStatus::Idle | server::ReloadWaitStatus::Waiting { .. } => {
                         let _ = build::rollback_pending_activation_for_session(session_id);
                         Err(anyhow::anyhow!(

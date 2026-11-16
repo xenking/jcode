@@ -322,6 +322,7 @@ fn canonicalize_or(path: PathBuf) -> PathBuf {
 /// running binary has been unlinked or replaced in place. The marker is part of
 /// the readlink target, not the real filename, so removing it recovers the path
 /// that may now point at the freshly written replacement binary.
+#[cfg(test)]
 fn strip_deleted_suffix(path: PathBuf) -> PathBuf {
     const DELETED_MARKER: &str = " (deleted)";
     if let Some(stripped) = path.to_str().and_then(|s| s.strip_suffix(DELETED_MARKER)) {
@@ -340,19 +341,14 @@ fn strip_deleted_suffix(path: PathBuf) -> PathBuf {
 /// was skipped forever. Resolve the path once, at first use (server startup),
 /// before any later install can move the link.
 pub(crate) fn running_server_binary() -> Option<PathBuf> {
-    static RUNNING: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
-    RUNNING
-        .get_or_init(|| match std::env::current_exe() {
-            Ok(exe) => Some(resolve_launch_path(exe)),
-            Err(error) => {
-                crate::logging::warn(&format!("cannot identify running server binary: {error}"));
-                None
-            }
-        })
-        .clone()
+    jcode_build_support::runtime_generation::serving_identity(jcode_build_meta::git_hash())
+        .map(|identity| identity.binary_path)
+        .map_err(|error| crate::logging::warn(&format!("running generation unknown: {error:#}")))
+        .ok()
 }
 
 /// Follow channel symlinks in a launch path to the file it points at now.
+#[cfg(test)]
 fn resolve_launch_path(exe: PathBuf) -> PathBuf {
     let exe = strip_deleted_suffix(exe);
     std::fs::canonicalize(&exe).unwrap_or(exe)

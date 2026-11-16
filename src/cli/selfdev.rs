@@ -95,6 +95,10 @@ async fn wait_for_reloading_server() -> bool {
             ));
             false
         }
+        crate::server::ReloadWaitStatus::Unknown { reason } => {
+            crate::logging::warn(&format!("Unknown runtime generation: {reason}"));
+            false
+        }
         crate::server::ReloadWaitStatus::Idle => false,
         crate::server::ReloadWaitStatus::Waiting { .. } => false,
     }

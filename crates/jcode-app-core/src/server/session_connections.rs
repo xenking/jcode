@@ -49,13 +49,10 @@ pub(super) async fn connection_presence_pong(
             crate::protocol::CLIENT_FOCUS_CAPABILITY.into(),
         ],
         user_connected_session_ids: Some(user_connected_session_ids),
-        daemon_identity: std::env::current_exe().ok().map(|binary_path| {
-            crate::protocol::DaemonIdentity {
-                pid: std::process::id(),
-                binary_path,
-                git_hash: jcode_build_meta::git_hash().to_string(),
-            }
-        }),
+        daemon_identity: jcode_build_support::runtime_generation::serving_identity(
+            jcode_build_meta::git_hash(),
+        )
+        .ok(),
     }
 }
 

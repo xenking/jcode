@@ -517,6 +517,7 @@ async fn do_reload_returns_after_ack_in_direct_mode() {
 
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     server::acknowledge_reload_signal(&crate::server::ReloadSignal {
+        target: None,
         hash: "direct-hash".to_string(),
         triggering_session: None,
         prefer_selfdev_binary: true,
@@ -525,6 +526,7 @@ async fn do_reload_returns_after_ack_in_direct_mode() {
 
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     server::acknowledge_reload_signal(&crate::server::ReloadSignal {
+        target: None,
         hash: "direct-hash".to_string(),
         triggering_session: None,
         prefer_selfdev_binary: true,

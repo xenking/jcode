@@ -966,7 +966,13 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
             .recv()
             .await
             .expect("reload event should be sent to client");
-        assert!(matches!(event, ServerEvent::Reloading { new_socket: None }));
+        assert!(matches!(
+            event,
+            ServerEvent::Reloading {
+                new_socket: None,
+                ..
+            }
+        ));
         assert!(
             client_event_rx.try_recv().is_err(),
             "reload guard should only emit the reload notification"
@@ -1827,7 +1833,13 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
             .expect("reload guard should emit promptly for every session")
             .expect("reload event should be sent to client");
             assert!(
-                matches!(event, ServerEvent::Reloading { new_socket: None }),
+                matches!(
+                    event,
+                    ServerEvent::Reloading {
+                        new_socket: None,
+                        ..
+                    }
+                ),
                 "expected Reloading event for {session_id}, got {event:?}"
             );
             assert!(
