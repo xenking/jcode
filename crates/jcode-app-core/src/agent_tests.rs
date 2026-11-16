@@ -11,6 +11,12 @@ use tokio_stream::wrappers::ReceiverStream;
 #[path = "agent_tests/cache_session_affinity.rs"]
 mod cache_session_affinity;
 
+#[path = "agent_tests/worker_http_capture.rs"]
+mod worker_http_capture;
+
+#[path = "agent_tests/worker_tool_capture.rs"]
+mod worker_tool_capture;
+
 #[path = "agent_tests/tool_streaming.rs"]
 mod tool_streaming;
 

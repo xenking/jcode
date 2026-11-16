@@ -126,6 +126,8 @@ pdf = ["dep:jcode-pdf"]
 test-support = ["jcode-base/test-support"]
 
 [dev-dependencies]
+jcode-provider-openai-runtime = { path = "../jcode-provider-openai-runtime" }
+jcode-provider-openrouter-runtime = { path = "../jcode-provider-openrouter-runtime" }
 # The application consumes a corpus registered by the executable. Only its
 # own documentation tests need to embed the real corpus directly.
 jcode-docs-data = { path = "../jcode-docs-data" }

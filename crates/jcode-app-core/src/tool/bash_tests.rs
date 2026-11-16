@@ -50,11 +50,97 @@ pub(super) async fn wait_for_session_env_launch_gate(session_id: &str) {
 mod session_environment;
 
 #[cfg(not(windows))]
+#[tokio::test]
+async fn bash_search_hint_is_scoped_and_nonblocking() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/a"), "foo\n").unwrap();
+    let mut ctx = make_ctx(None);
+    ctx.session_id = "search-hint-runtime-test".into();
+    ctx.working_dir = Some(dir.path().into());
+    let tool = BashTool::new();
+    let run = |command: &str| tool.execute(json!({"command": command}), ctx.clone());
+    let result = run("rg foo src").await.unwrap();
+    assert!(result.output.contains("foo"));
+    assert!(result.output.contains("agentgrep"));
+    assert!(
+        !run("rg foo src")
+            .await
+            .unwrap()
+            .output
+            .contains("agentgrep")
+    );
+    for command in [
+        "git log",
+        "justrust test",
+        "rg foo src > output",
+        "rg foo src | tee output",
+    ] {
+        let mut other = ctx.clone();
+        other.session_id = format!("search-hint-{command}");
+        let output = tool
+            .execute(json!({"command": command}), other)
+            .await
+            .unwrap();
+        assert!(!output.output.contains("agentgrep"), "{command}");
+    }
+}
+
+#[test]
+fn read_hint_respects_session_tool_policy() {
+    let session = "search-hint-disabled-test";
+    super::super::set_session_tool_policy(session, None, ["agentgrep".to_string()].into());
+    assert!(super::search_read_hint(session, "rg foo src").is_none());
+    assert!(
+        super::search_read_hint(session, "cat file")
+            .unwrap()
+            .contains("read")
+    );
+    super::super::clear_session_tool_policy(session);
+    super::clear_read_hint_session(session);
+}
+
+#[test]
+fn read_hints_are_rate_limited_and_ignore_mutating_shell() {
+    let session = "search-hint-interval-test";
+    super::clear_read_hint_session(session);
+    assert!(super::search_read_hint(session, "rg foo src").is_some());
+    for _ in 0..9 {
+        assert!(super::search_read_hint(session, "cat file").is_none());
+    }
+    assert!(
+        super::search_read_hint(session, "cat file")
+            .unwrap()
+            .contains("read")
+    );
+    for command in [
+        "sed -n '1,10p' file > out",
+        "find . -delete",
+        "rg foo | tee out",
+        "git log",
+        "justrust test",
+    ] {
+        assert!(super::pure_read_hint(command).is_none(), "{command}");
+    }
+    assert!(
+        super::pure_read_hint("sed -n '1,10p' file")
+            .unwrap()
+            .contains("read")
+    );
+    super::clear_read_hint_session(session);
+}
+
+#[cfg(not(windows))]
 #[test]
 fn bash_definition_prefers_repository_search_tools() {
     let definition = BashTool::new().to_definition();
     assert_eq!(definition.name, "bash");
-    assert!(definition.description.contains("Prefer agentgrep/rg"));
+    assert!(
+        definition
+            .description
+            .contains("Prefer agentgrep for code search")
+    );
+    assert!(definition.description.contains("read for file views"));
     assert!(definition.description.contains("hidden/ignored"));
     assert!(definition.description.contains("--hidden --no-ignore"));
 }

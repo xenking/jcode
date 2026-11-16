@@ -3775,6 +3775,8 @@ dependencies = [
  "jcode-plan",
  "jcode-productivity-core",
  "jcode-provider-core",
+ "jcode-provider-openai-runtime",
+ "jcode-provider-openrouter-runtime",
  "jcode-schema-dialect",
  "jcode-selfdev-types",
  "jcode-session-types",

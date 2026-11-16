@@ -230,7 +230,7 @@ impl Tool for AgentGrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search code and file names. Defaults to grep mode when mode is omitted."
+        "Search code and file names with grep, find, outline, or trace. Grep supports regex, glob filters, and paths_only. Use read for file contents."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -271,6 +271,14 @@ impl Tool for AgentGrepTool {
                 "type": {
                     "type": "string",
                     "description": "ripgrep file type, e.g. rs, py, md."
+                },
+                "hidden": {
+                    "type": "boolean",
+                    "description": "Include hidden files."
+                },
+                "no_ignore": {
+                    "type": "boolean",
+                    "description": "Include files normally excluded by ignore rules."
                 },
                 "max_files": {
                     "type": "integer",

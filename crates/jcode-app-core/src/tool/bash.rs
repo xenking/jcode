@@ -28,8 +28,7 @@ const MAX_OUTPUT_LEN: usize = 30000;
 const DEFAULT_TIMEOUT_MS: u64 = 120000;
 const PROGRESS_MARKER_PREFIX: &str = "JCODE_PROGRESS ";
 const CHECKPOINT_MARKER_PREFIX: &str = "JCODE_CHECKPOINT ";
-const BASH_TOOL_DESCRIPTION: &str =
-    "Run bash. Prefer agentgrep/rg. Include hidden/ignored with --hidden --no-ignore.";
+const BASH_TOOL_DESCRIPTION: &str = "Run bash for shell work. Prefer agentgrep for code search and read for file views. Include hidden/ignored with --hidden --no-ignore when using rg.";
 const WINDOWS_SHELL_TOOL_DESCRIPTION: &str =
     "Run a Windows cmd.exe command (compatibility name `bash`). Use cmd.exe syntax, not Bash.";
 
@@ -854,6 +853,11 @@ impl Tool for BashTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let mut params: BashInput = serde_json::from_value(input)?;
         let run_in_background = params.run_in_background.unwrap_or(false);
+        let read_hint = if cfg!(unix) && !run_in_background {
+            search_read_hint(&ctx.session_id, &params.command)
+        } else {
+            None
+        };
 
         // Destructive-command gate (#604), before background dispatch.
         if let Some(refusal) = destructive_command_refusal(
@@ -898,7 +902,120 @@ impl Tool for BashTool {
             output.output.push_str("\n\n");
             output.output.push_str(hint);
         }
+        if let Some(hint) = read_hint {
+            output.output.push_str("\n\n");
+            output.output.push_str(hint);
+        }
         Ok(output)
+    }
+}
+
+const READ_HINT_INTERVAL: usize = 10;
+static READ_HINT_COUNTS: LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, (usize, Option<usize>)>>,
+> = LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+pub(super) fn clear_read_hint_session(session_id: &str) {
+    READ_HINT_COUNTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(session_id);
+}
+
+fn search_read_hint(session_id: &str, command: &str) -> Option<&'static str> {
+    let hint = pure_read_hint(command);
+    let policy = super::session_tool_policy(session_id);
+    let sdk = super::sdk::config(session_id);
+    let mut counts = READ_HINT_COUNTS.lock().unwrap_or_else(|e| e.into_inner());
+    // Bound memory for direct invocations without Agent lifecycle registration.
+    if counts.len() >= 4096 && !counts.contains_key(session_id) {
+        return None;
+    }
+    let state = counts.entry(session_id.to_owned()).or_default();
+    state.0 = state.0.saturating_add(1);
+    let hint = hint?;
+    let tool = if hint.contains("agentgrep") {
+        "agentgrep"
+    } else {
+        "read"
+    };
+    let sdk_enabled = sdk.as_ref().and_then(|config| config.enabled.as_ref());
+    if sdk_enabled.is_some_and(|enabled| !enabled.iter().any(|name| name == tool))
+        || sdk
+            .as_ref()
+            .is_some_and(|config| config.disabled.iter().any(|name| name == tool))
+        || (sdk_enabled.is_none()
+            && policy.as_ref().is_some_and(|policy| {
+                policy
+                    .allowed_tools
+                    .as_ref()
+                    .is_some_and(|allowed| !super::tool_name_is_allowed(allowed, tool))
+                    || super::tool_name_is_disabled(&policy.disabled_tools, tool)
+            }))
+    {
+        return None;
+    }
+    if state
+        .1
+        .is_some_and(|last| state.0.saturating_sub(last) < READ_HINT_INTERVAL)
+    {
+        return None;
+    }
+    state.1 = Some(state.0);
+    Some(hint)
+}
+
+fn pure_read_hint(command: &str) -> Option<&'static str> {
+    // Be conservative: compound commands, redirection, substitutions, and
+    // shell expansion are not pure reads, even if their first word looks like one.
+    if command
+        .chars()
+        .any(|c| matches!(c, '|' | '&' | ';' | '>' | '<' | '`' | '$' | '\n' | '\r'))
+    {
+        return None;
+    }
+    let words: Vec<_> = command.split_whitespace().collect();
+    let (program, args) = words.split_first()?;
+    if args.is_empty() {
+        return None;
+    }
+    let search = "Tip: use `agentgrep` for code search (regex, glob, paths_only).";
+    let read = "Tip: use `read` with start_line and limit to inspect file contents.";
+    match *program {
+        "rg" | "grep"
+            if !args
+                .iter()
+                .any(|a| a.starts_with("--pre") || *a == "--search-zip") =>
+        {
+            Some(search)
+        }
+        "find"
+            if !args.iter().any(|a| {
+                matches!(
+                    *a,
+                    "-exec"
+                        | "-execdir"
+                        | "-ok"
+                        | "-okdir"
+                        | "-delete"
+                        | "-fprint"
+                        | "-fprintf"
+                        | "-fls"
+                )
+            }) =>
+        {
+            Some(search)
+        }
+        "cat" => Some(read),
+        "sed"
+            if args.iter().any(|a| *a == "-n")
+                && !args.iter().any(|a| {
+                    a.starts_with("-i") || a.starts_with("--in-place") || a.contains('w')
+                }) =>
+        {
+            Some(read)
+        }
+        _ => None,
     }
 }
 

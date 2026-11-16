@@ -44,6 +44,25 @@ fn grep_input(query: &str, max_regions: Option<usize>) -> AgentGrepInput {
     }
 }
 
+#[test]
+fn grep_regex_glob_paths_only_searches_real_files() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("one.rs"), "needle123\n").unwrap();
+    fs::write(dir.path().join("two.txt"), "needle123\n").unwrap();
+    fs::write(dir.path().join("three.rs"), "other\n").unwrap();
+    let mut input = grep_input(r"needle[0-9]+", None);
+    input.regex = Some(true);
+    input.glob = Some("*.rs".into());
+    input.paths_only = Some(true);
+    let output = run_agentgrep_blocking(&input, &test_ctx(dir.path()))
+        .unwrap()
+        .output;
+    assert!(output.contains("one.rs"), "{output}");
+    assert!(!output.contains("two.txt"), "{output}");
+    assert!(!output.contains("three.rs"), "{output}");
+    assert!(!output.contains("needle123"), "{output}");
+}
+
 #[tokio::test]
 async fn foreground_budget_returns_fast_search_result_directly() {
     let handle = spawn_cancellable_search(|| Ok(ToolOutput::new("fast result")));
@@ -656,8 +675,8 @@ fn schema_only_advertises_common_public_fields() {
             json!("trace")
         ]
     );
-    assert!(!props.contains_key("hidden"));
-    assert!(!props.contains_key("no_ignore"));
+    assert!(props.contains_key("hidden"));
+    assert!(props.contains_key("no_ignore"));
     assert!(!props.contains_key("full_region"));
     assert!(!props.contains_key("debug_plan"));
     assert!(!props.contains_key("debug_score"));
