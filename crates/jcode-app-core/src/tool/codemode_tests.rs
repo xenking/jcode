@@ -329,6 +329,10 @@ fn report_renders_strings_raw_and_lists_store_keys() {
 /// authority: a blocked call is a thrown error plus a `failed` receipt.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test must serialize process environment for its entire async lifetime"
+)]
 async fn pre_tool_hook_gates_each_nested_call() {
     use std::os::unix::fs::PermissionsExt;
     let _guard = crate::storage::lock_test_env();

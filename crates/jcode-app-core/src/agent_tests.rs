@@ -939,7 +939,7 @@ async fn queued_image_prompts_keep_independent_session_markers() {
         .collect();
     assert_eq!(mapped.len(), 2);
     for ((content, ids), image) in mapped.iter().zip(&images) {
-        assert_eq!(ids.as_slice(), &[image.image_id.clone()]);
+        assert_eq!(ids.as_slice(), std::slice::from_ref(&image.image_id));
         assert!(
             content.contains(&format!("[#{}]", image.image_id)),
             "{content}"

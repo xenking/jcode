@@ -176,18 +176,24 @@ mod tests {
         }
     }
 
-    struct TestHome(Option<std::ffi::OsString>, tempfile::TempDir);
+    struct TestHome {
+        previous: Option<std::ffi::OsString>,
+        _home: tempfile::TempDir,
+    }
     impl TestHome {
         fn new() -> Self {
             let previous = std::env::var_os("JCODE_HOME");
             let home = tempfile::tempdir().unwrap();
             crate::env::set_var("JCODE_HOME", home.path());
-            Self(previous, home)
+            Self {
+                previous,
+                _home: home,
+            }
         }
     }
     impl Drop for TestHome {
         fn drop(&mut self) {
-            match self.0.take() {
+            match self.previous.take() {
                 Some(value) => crate::env::set_var("JCODE_HOME", value),
                 None => crate::env::remove_var("JCODE_HOME"),
             }

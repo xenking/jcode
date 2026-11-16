@@ -1104,6 +1104,10 @@ fn gate_ctx(working_dir: &str) -> ToolContext {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test must serialize process environment for its entire async lifetime"
+)]
 async fn bash_refuses_to_delete_the_home_directory() {
     // The #604 incident, at the real tool boundary.
     let temp = tempfile::tempdir().expect("temp home");

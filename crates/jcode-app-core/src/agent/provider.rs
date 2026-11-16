@@ -60,36 +60,6 @@ fn capped_worker_effort(
         })
 }
 
-#[cfg(test)]
-mod worker_effort_cap_tests {
-    use super::*;
-
-    #[test]
-    fn model_caps_choose_supported_rung_and_leave_other_routes_unrestricted() {
-        let mut agents = crate::config::AgentsConfig::default();
-        agents
-            .swarm_effort_caps
-            .insert("openai:gpt-6.1-sol".into(), "xhigh".into());
-        let levels = ["low", "medium", "high", "xhigh", "max"];
-        let resolve = |provider, model, request, available: &[&str]| {
-            capped_worker_effort(&agents, Some(provider), provider, model, request, available)
-                .unwrap()
-        };
-        assert_eq!(resolve("openai", "gpt-6.1-sol", "max", &levels), "xhigh");
-        assert_eq!(
-            resolve("openai", "gpt-6.1-sol@account", "max", &levels),
-            "xhigh"
-        );
-        assert_eq!(resolve("openai", "gpt-6.1-sol", "high", &levels), "high");
-        assert_eq!(
-            resolve("openai", "gpt-6.1-sol", "max", &["low", "high", "max"]),
-            "high"
-        );
-        assert_eq!(resolve("openrouter", "gpt-6.1-sol", "max", &levels), "max");
-        assert_eq!(resolve("openai", "other", "max", &levels), "max");
-    }
-}
-
 impl Agent {
     pub(crate) fn worker_effort_for_provider(
         provider: &dyn Provider,
@@ -717,5 +687,35 @@ impl Agent {
     /// Get the stored messages (for transcript export)
     pub fn messages(&self) -> &[StoredMessage] {
         &self.session.messages
+    }
+}
+
+#[cfg(test)]
+mod worker_effort_cap_tests {
+    use super::*;
+
+    #[test]
+    fn model_caps_choose_supported_rung_and_leave_other_routes_unrestricted() {
+        let mut agents = crate::config::AgentsConfig::default();
+        agents
+            .swarm_effort_caps
+            .insert("openai:gpt-6.1-sol".into(), "xhigh".into());
+        let levels = ["low", "medium", "high", "xhigh", "max"];
+        let resolve = |provider, model, request, available: &[&str]| {
+            capped_worker_effort(&agents, Some(provider), provider, model, request, available)
+                .unwrap()
+        };
+        assert_eq!(resolve("openai", "gpt-6.1-sol", "max", &levels), "xhigh");
+        assert_eq!(
+            resolve("openai", "gpt-6.1-sol@account", "max", &levels),
+            "xhigh"
+        );
+        assert_eq!(resolve("openai", "gpt-6.1-sol", "high", &levels), "high");
+        assert_eq!(
+            resolve("openai", "gpt-6.1-sol", "max", &["low", "high", "max"]),
+            "high"
+        );
+        assert_eq!(resolve("openrouter", "gpt-6.1-sol", "max", &levels), "max");
+        assert_eq!(resolve("openai", "other", "max", &levels), "max");
     }
 }

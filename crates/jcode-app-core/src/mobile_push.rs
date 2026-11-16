@@ -1566,7 +1566,7 @@ mod tests {
             "ok",
             Some(8338987288606337570),
         );
-        assert!(p.turn_id.unwrap() <= (1 << 53) - 1);
+        assert!(p.turn_id.unwrap() < (1 << 53));
         assert_eq!(
             build_payload(PushKind::TurnDone, "s", None, "ok", Some(42)).turn_id,
             Some(42)

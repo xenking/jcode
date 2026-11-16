@@ -15,6 +15,10 @@ fn make_ctx(working_dir: std::path::PathBuf) -> ToolContext {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test must serialize process environment for its entire async lifetime"
+)]
 async fn reads_session_image_by_stable_id() {
     let _lock = crate::storage::lock_test_env();
     struct RestoreHome(Option<std::ffi::OsString>);

@@ -18,6 +18,10 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 struct MockProvider(Option<&'static str>);
 
 #[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test must serialize process environment for its entire async lifetime"
+)]
 async fn resume_todos_arrive_before_backpressured_large_history() {
     let _env = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().unwrap();

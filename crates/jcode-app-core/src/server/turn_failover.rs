@@ -1590,13 +1590,7 @@ mod tests {
             let route = self.route.lock().unwrap().clone();
             let model = self.model.lock().unwrap().clone();
             self.calls.lock().unwrap().push((route.clone(), model));
-            if self
-                .failing_routes
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|failing| *failing == route)
-            {
+            if self.failing_routes.lock().unwrap().contains(&route) {
                 anyhow::bail!(
                     "400 Bad Request: this credential route is not entitled for the model"
                 );
