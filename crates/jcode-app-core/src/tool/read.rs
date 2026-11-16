@@ -122,7 +122,7 @@ impl Tool for ReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read a file, image or PDF. Read a session image using session-image:// followed by its image ID."
+        "Read text, images or PDFs, including session-image://<image_id>."
     }
 
     fn parameters_schema(&self) -> Value {

@@ -223,7 +223,9 @@ fn read_tool_description_advertises_supported_file_types() {
     let file_path_description = schema["properties"]["file_path"]["description"]
         .as_str()
         .expect("file_path should have a description");
-    assert_eq!(file_path_description, "Path to a file.");
+    assert!(file_path_description.contains("file"));
+    assert!(file_path_description.contains("session-image://<image_id>"));
+    assert!(description.contains("session-image://<image_id>"));
 }
 
 #[tokio::test]

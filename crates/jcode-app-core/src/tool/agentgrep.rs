@@ -230,7 +230,7 @@ impl Tool for AgentGrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search code and file names with grep, find, outline, or trace. Grep supports regex, glob filters, and paths_only. Use read for file contents."
+        "Search code/files: grep, find, outline, trace. Use read for contents."
     }
 
     fn parameters_schema(&self) -> Value {

@@ -141,8 +141,12 @@ fn bash_definition_prefers_repository_search_tools() {
             .contains("Prefer agentgrep for code search")
     );
     assert!(definition.description.contains("read for file views"));
-    assert!(definition.description.contains("hidden/ignored"));
-    assert!(definition.description.contains("--hidden --no-ignore"));
+    let schema = BashTool::new().parameters_schema();
+    let command = schema["properties"]["command"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(command.contains("hidden/ignored"));
+    assert!(command.contains("--hidden --no-ignore"));
 }
 
 #[test]
