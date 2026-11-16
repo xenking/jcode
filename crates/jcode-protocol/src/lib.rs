@@ -411,7 +411,9 @@ impl AuthChanged {
 pub type ReloadRecoverySnapshot = jcode_selfdev_types::ReloadRecoveryDirective;
 
 mod wire;
-pub use wire::{AccountUsageSnapshot, AccountUsageWindow, Request, ServerEvent, TurnIdentity};
+pub use wire::{
+    AccountUsageSnapshot, AccountUsageWindow, DaemonIdentity, Request, ServerEvent, TurnIdentity,
+};
 pub use wire::{
     QueuedPrompt, QueuedPromptMode, QueuedPromptRemovalOutcome, SessionToolConfig,
     SessionToolDefinition,

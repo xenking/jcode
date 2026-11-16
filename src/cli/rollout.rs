@@ -456,7 +456,20 @@ pub fn run<H: Host, W: Write>(host: &mut H, opts: &RolloutOptions, out: &mut W) 
     run.finish(&mut state, "drain")?;
 
     // ---- 6. reload ----
-    reload(&mut run, &label)?;
+    if let Err(error) = reload(&mut run, &label) {
+        let now = run.host.deployed();
+        if now.daemon_label.as_deref() != Some(label.as_str()) {
+            return Err(error);
+        }
+        run.say(
+            "reload",
+            "warn",
+            format!(
+                "{error:#}; daemon pid {} demonstrably runs {label}, continuing to desktop-swap",
+                now.daemon_pid.unwrap_or(0)
+            ),
+        )?;
+    }
     run.finish(&mut state, "reload")?;
 
     // ---- 7. desktop-swap ----
@@ -672,7 +685,7 @@ fn reload<H: Host, W: Write>(run: &mut Run<'_, H, W>, label: &str) -> Result<()>
         );
     }
     let workers = running_workers(&*run.host)?;
-    run.host.reload(label)?;
+    let reload_error = run.host.reload(label).err();
     let mut now = run.host.deployed();
     for _ in 0..RELOAD_SETTLE_ATTEMPTS {
         if now.daemon_label.as_deref() == Some(label) {
@@ -691,9 +704,19 @@ fn reload<H: Host, W: Write>(run: &mut Run<'_, H, W>, label: &str) -> Result<()>
             ),
         )?;
         bail!(
-            "reload did not take: daemon runs {}",
-            opt(&now.daemon_label)
+            "reload did not take: daemon runs {}{}",
+            opt(&now.daemon_label),
+            reload_error
+                .as_ref()
+                .map_or(String::new(), |error| format!("; {error:#}"))
         );
+    }
+    if let Some(error) = reload_error {
+        run.say(
+            "reload",
+            "warn",
+            format!("{error:#}; daemon demonstrably runs {label}"),
+        )?;
     }
     // Reload recovery restores interrupted workers on its own. Give it a
     // moment, then resume any it left stopped, crashed or missing.

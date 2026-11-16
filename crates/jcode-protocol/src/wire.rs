@@ -1056,7 +1056,9 @@ pub enum Request {
 }
 
 mod events;
-pub use events::{AccountUsageSnapshot, AccountUsageWindow, ServerEvent, TurnIdentity};
+pub use events::{
+    AccountUsageSnapshot, AccountUsageWindow, DaemonIdentity, ServerEvent, TurnIdentity,
+};
 
 impl std::fmt::Debug for Request {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

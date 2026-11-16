@@ -167,24 +167,14 @@ impl MacHost {
         command
     }
 
-    fn daemon(&self) -> Option<(u32, PathBuf)> {
-        let socket = &self.daemon_socket;
-        let listing = output(Command::new("lsof").args(["-U", "-F", "pn"])).ok()?;
-        let socket = socket.to_string_lossy().to_string();
-        let mut pid = None;
-        for line in listing.lines() {
-            if let Some(value) = line.strip_prefix('p') {
-                pid = value.parse::<u32>().ok();
-            } else if let Some(name) = line.strip_prefix('n')
-                && name == socket
-                && let Some(pid) = pid
-                && let Some(exe) = executable_of(pid)
-                && exe.file_name().is_some_and(|name| name == "jcode")
-            {
-                return Some((pid, exe));
-            }
-        }
-        None
+    fn daemon(&self) -> Option<(u32, Option<String>)> {
+        let identity = daemon_identity(&self.daemon_socket)?;
+        let label = if valid_git_hash(&identity.git_hash) {
+            Some(identity.git_hash.chars().take(9).collect())
+        } else {
+            installed_daemon_label(identity.pid, &identity.binary_path, &self.layout.builds)
+        };
+        Some((identity.pid, label))
     }
 
     fn bridge_paths(&self) -> Vec<String> {
@@ -333,12 +323,7 @@ impl Host for MacHost {
         Deployed {
             cli_current: channel_label("current"),
             cli_shared: channel_label("shared-server"),
-            daemon_label: daemon.as_ref().and_then(|(_, exe)| {
-                let exe = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.clone());
-                let builds = std::fs::canonicalize(&self.layout.builds)
-                    .unwrap_or_else(|_| self.layout.builds.clone());
-                version_label_of(&exe, &builds)
-            }),
+            daemon_label: daemon.as_ref().and_then(|(_, label)| label.clone()),
             daemon_pid: daemon.map(|(pid, _)| pid),
             desktop_version: desktop.as_ref().map(|(version, _)| version.clone()),
             desktop_sha: desktop.map(|(_, sha)| sha),
@@ -465,7 +450,13 @@ impl Host for MacHost {
         Ok(())
     }
 
-    fn reload(&mut self, _label: &str) -> Result<()> {
+    fn reload(&mut self, label: &str) -> Result<()> {
+        if self
+            .daemon()
+            .is_some_and(|(_, running)| running.as_deref() == Some(label))
+        {
+            return Ok(());
+        }
         run(self.jcode().args(["server", "reload", "--json"]))
     }
 
@@ -592,6 +583,176 @@ impl Host for MacHost {
         std::fs::rename(tmp, path)?;
         Ok(())
     }
+}
+
+fn valid_git_hash(hash: &str) -> bool {
+    (7..=40).contains(&hash.len()) && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[cfg(unix)]
+fn daemon_identity(socket: &Path) -> Option<crate::protocol::DaemonIdentity> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket).ok()?;
+    // Capture the peer before sending: a legacy one-shot server may exit as
+    // soon as it replies. A client's PID can never be mistaken for the listener.
+    let pid = socket_peer_pid(&stream);
+    let executable = pid.and_then(executable_of);
+    let timeout = Duration::from_secs(2);
+    stream.set_read_timeout(Some(timeout)).ok()?;
+    stream.set_write_timeout(Some(timeout)).ok()?;
+    let reply = (|| -> Result<serde_json::Value> {
+        writeln!(stream, "{{\"type\":\"ping\",\"id\":1}}")?;
+        let mut reader = BufReader::new(stream);
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                bail!("daemon ping timed out");
+            }
+            reader.get_ref().set_read_timeout(Some(remaining))?;
+            let mut line = String::new();
+            if reader.read_line(&mut line)? == 0 {
+                bail!("daemon disconnected before pong");
+            }
+            let event: serde_json::Value = serde_json::from_str(&line)?;
+            if event["id"] == 1 && event["type"] == "pong" {
+                return Ok(event);
+            }
+        }
+    })();
+    if let Ok(reply) = reply
+        && let Some(value) = reply.get("daemon_identity")
+        && !value.is_null()
+    {
+        let identity: crate::protocol::DaemonIdentity =
+            serde_json::from_value(value.clone()).ok()?;
+        if identity.pid == 0
+            || pid.is_some_and(|peer| peer != identity.pid)
+            || !identity.binary_path.is_absolute()
+            || !valid_git_hash(&identity.git_hash)
+        {
+            return None;
+        }
+        return Some(identity);
+    }
+    // Legacy daemons do not report their build. Only inspect the kernel-proven
+    // listening peer, never any process whose lsof socket pathname happens to match.
+    let pid = pid.filter(|pid| *pid != std::process::id())?;
+    Some(crate::protocol::DaemonIdentity {
+        pid,
+        binary_path: executable?,
+        git_hash: String::new(),
+    })
+}
+
+#[cfg(not(unix))]
+fn daemon_identity(_socket: &Path) -> Option<crate::protocol::DaemonIdentity> {
+    None
+}
+
+#[cfg(unix)]
+fn socket_peer_pid(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+    #[cfg(target_os = "macos")]
+    {
+        let mut pid: libc::pid_t = 0;
+        let mut len = std::mem::size_of_val(&pid) as libc::socklen_t;
+        // SAFETY: pid and len are writable buffers of the size supplied to getsockopt.
+        let rc = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERPID,
+                (&mut pid as *mut libc::pid_t).cast(),
+                &mut len,
+            )
+        };
+        (rc == 0 && pid > 0).then_some(pid as u32)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: ucred is a plain C struct whose zero representation is valid.
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of_val(&cred) as libc::socklen_t;
+        // SAFETY: cred and len are writable buffers of the size supplied to getsockopt.
+        let rc = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut cred as *mut libc::ucred).cast(),
+                &mut len,
+            )
+        };
+        (rc == 0 && cred.pid > 0).then_some(cred.pid as u32)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = stream;
+        None
+    }
+}
+
+#[cfg(unix)]
+fn installed_daemon_label(pid: u32, executable: &Path, builds: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let (device, inode) = process_image_file_id(pid, executable)?;
+    let mut matches = Vec::new();
+    for entry in std::fs::read_dir(builds.join("versions")).ok()?.flatten() {
+        let binary = entry.path().join(crate::build::binary_name());
+        if std::fs::metadata(binary).is_ok_and(|file| file.dev() == device && file.ino() == inode) {
+            matches.push(entry.file_name().to_str()?.to_owned());
+        }
+    }
+    // Multiple labels for one image do not establish which label the daemon runs.
+    (matches.len() == 1).then(|| matches.remove(0))
+}
+
+#[cfg(not(unix))]
+fn installed_daemon_label(_pid: u32, _executable: &Path, _builds: &Path) -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn process_image_file_id(pid: u32, executable: &Path) -> Option<(u64, u64)> {
+    // proc_pidpath is a vnode pathname cache, not an immutable launch path.
+    // Executing a hardlink (built_cli's version check) can change it to target/.
+    // lsof reads the running image's vnode inode, even if target/ was replaced.
+    let listing = output(Command::new("lsof").args([
+        "-a",
+        "-p",
+        &pid.to_string(),
+        "-d",
+        "txt",
+        "-F",
+        "fDin",
+    ]))
+    .ok()?;
+    let (mut device, mut inode) = (None, None);
+    for line in listing.lines() {
+        if line.starts_with('f') {
+            device = None;
+            inode = None;
+        } else if let Some(value) = line.strip_prefix('D') {
+            device = u64::from_str_radix(value.trim_start_matches("0x"), 16).ok();
+        } else if let Some(value) = line.strip_prefix('i') {
+            inode = value.parse::<u64>().ok();
+        } else if let Some(name) = line.strip_prefix('n')
+            && Path::new(name).file_name() == executable.file_name()
+        {
+            return device.zip(inode);
+        }
+    }
+    None
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn process_image_file_id(pid: u32, _executable: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let file = std::fs::metadata(format!("/proc/{pid}/exe")).ok()?;
+    Some((file.dev(), file.ino()))
 }
 
 fn live_workers(socket: &Path, own: Option<&str>) -> Result<Vec<(String, String)>> {
@@ -1206,6 +1367,160 @@ int main(int argc, char **argv) {
             .status()
             .unwrap();
         assert!(status.success());
+    }
+
+    #[test]
+    fn legacy_daemon_hardlink_alias_still_identifies_installed_version() {
+        const CHILD: &str = "JCODE_ROLLOUT_HARDLINK_TEST_SOCKET";
+        if let Some(socket) = std::env::var_os(CHILD) {
+            let listener = UnixListener::bind(socket).unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            writeln!(stream, "{{\"type\":\"pong\",\"id\":1}}").unwrap();
+            loop {
+                std::thread::park();
+            }
+        }
+        let (_dir, host, _) = checkout_fixture();
+        let version = host.layout.builds.join("versions/483d7848f/jcode");
+        let alias = host.jcode_home.join("target/release/jcode");
+        std::fs::create_dir_all(version.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(alias.parent().unwrap()).unwrap();
+        std::fs::hard_link(std::env::current_exe().unwrap(), &version).unwrap();
+        std::fs::hard_link(&version, &alias).unwrap();
+        let mut child = Command::new(&alias)
+            .args(["--exact", "cli::rollout_host::tests::legacy_daemon_hardlink_alias_still_identifies_installed_version", "--nocapture"])
+            .env(CHILD, &host.daemon_socket)
+            .stdout(Stdio::null())
+            .spawn().unwrap();
+        let pid = child.id();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !host.daemon_socket.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let observed_exe = executable_of(pid);
+        let replacement = alias.with_extension("replacement");
+        std::fs::write(&replacement, "a different build inode\n").unwrap();
+        std::fs::rename(replacement, &alias).unwrap();
+        let deployed = host.deployed();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(
+            observed_exe.as_deref(),
+            Some(alias.as_path()),
+            "fixture must reproduce the non-versioned proc_pidpath alias"
+        );
+        assert_eq!(deployed.daemon_pid, Some(pid));
+        assert_eq!(
+            deployed.daemon_label.as_deref(),
+            Some("483d7848f"),
+            "hardlinked daemon exe was {observed_exe:?}"
+        );
+    }
+
+    #[test]
+    fn daemon_identity_comes_from_socket_with_same_process_client_open() {
+        use std::os::unix::net::UnixStream;
+        let (_dir, mut host, _) = checkout_fixture();
+        let listener = UnixListener::bind(&host.daemon_socket).unwrap();
+        let _client = UnixStream::connect(&host.daemon_socket).unwrap();
+        let (_accepted_client, _) = listener.accept().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if std::time::Instant::now() >= deadline {
+                                return false;
+                            }
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("accept: {error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["type"], "ping");
+                writeln!(
+                    stream,
+                    "{}",
+                    serde_json::json!({
+                        "type": "pong", "id": request["id"],
+                        "daemon_identity": {
+                            "pid": std::process::id(),
+                            "binary_path": std::env::current_exe().unwrap(),
+                            "git_hash": "483d7848f1234567890"
+                        }
+                    })
+                )
+                .unwrap();
+            }
+            true
+        });
+        let deployed = host.deployed();
+        let reload = host.reload("483d7848f");
+        let answered = server.join().unwrap();
+        assert!(
+            answered,
+            "MacHost must query the socket, not pick a path from lsof"
+        );
+        assert_eq!(deployed.daemon_pid, Some(std::process::id()));
+        assert_eq!(deployed.daemon_label.as_deref(), Some("483d7848f"));
+        assert!(
+            reload.is_ok(),
+            "already-running target must not execute server reload: {reload:?}"
+        );
+    }
+
+    #[test]
+    fn daemon_identity_rejects_mismatched_peer_and_malformed_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let pid = std::process::id();
+        let server = std::thread::spawn(move || {
+            for (reported_pid, binary_path, git_hash) in [
+                (pid + 1, "/target/jcode", "483d7848f"),
+                (pid, "relative/jcode", "483d7848f"),
+                (pid, "/target/jcode", "not-a-hash"),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut request)
+                    .unwrap();
+                writeln!(stream, "{}", serde_json::json!({
+                    "type": "pong", "id": 1,
+                    "daemon_identity": {"pid": reported_pid, "binary_path": binary_path, "git_hash": git_hash}
+                })).unwrap();
+            }
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            writeln!(stream, "{{\"type\":\"pong\",\"id\":1}}").unwrap();
+        });
+        for _ in 0..4 {
+            assert!(
+                daemon_identity(&socket).is_none(),
+                "must not trust a false identity or use self as legacy fallback"
+            );
+        }
+        server.join().unwrap();
     }
 
     #[test]

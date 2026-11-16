@@ -18,6 +18,8 @@ struct Fake {
     built: bool,
     packaged: bool,
     reload_takes: bool,
+    reload_error: bool,
+    resume_error: bool,
     rollback_takes: bool,
     bridge_ok: bool,
     bridge_candidates: Vec<super::super::rollout_host::BridgeCandidate>,
@@ -72,6 +74,8 @@ impl Fake {
             built: false,
             packaged: false,
             reload_takes: true,
+            reload_error: false,
+            resume_error: false,
             rollback_takes: true,
             bridge_ok: true,
             bridge_candidates: vec![],
@@ -171,10 +175,16 @@ impl Host for Fake {
             deployed.daemon_label = Some(label.into());
             deployed.daemon_pid = Some(90001);
         }
+        if self.reload_error {
+            bail!("reload connection closed before acknowledgement");
+        }
         Ok(())
     }
     fn resume_worker(&mut self, session_id: &str) -> Result<()> {
         self.calls.push(format!("resume {session_id}"));
+        if self.resume_error {
+            bail!("worker recovery failed");
+        }
         Ok(())
     }
     fn swap_desktop(&mut self, _app: &Path) -> Result<()> {
@@ -450,6 +460,50 @@ fn a_reload_that_does_not_take_fails_before_the_desktop_swap() {
     let (outcome, output) = rollout(&mut fake, &opts());
     assert!(outcome.is_err());
     assert!(output.contains("reload          FAIL"), "{output}");
+    assert!(!fake.mutations().contains(&"swap"));
+}
+
+#[test]
+fn already_running_target_skips_reload_even_when_reload_would_fail() {
+    let mut fake = Fake::new();
+    fake.deployed.borrow_mut().daemon_label = Some(CLI[..9].into());
+    fake.reload_error = true;
+    let (outcome, output) = rollout(&mut fake, &opts());
+    assert_eq!(outcome.unwrap(), Outcome::Deployed, "{output}");
+    assert!(output.contains("reload          skip"), "{output}");
+    assert!(!fake.calls.iter().any(|call| call.starts_with("reload ")));
+    assert!(fake.mutations().contains(&"swap"), "{output}");
+}
+
+#[test]
+fn reload_rpc_failure_does_not_block_desktop_when_target_is_proven_running() {
+    let mut fake = Fake::new();
+    fake.reload_error = true;
+    let (outcome, output) = rollout(&mut fake, &opts());
+    assert_eq!(outcome.unwrap(), Outcome::Deployed, "{output}");
+    assert!(fake.mutations().contains(&"swap"), "{output}");
+    assert!(output.contains("reload connection closed"), "{output}");
+}
+
+#[test]
+fn worker_recovery_failure_does_not_block_desktop_when_target_is_proven_running() {
+    let mut fake = Fake::new();
+    fake.resume_error = true;
+    fake.workers_after = vec![("session_calf_1_a".into(), "stopped".into())];
+    let (outcome, output) = rollout(&mut fake, &opts());
+    assert_eq!(outcome.unwrap(), Outcome::Deployed, "{output}");
+    assert!(fake.mutations().contains(&"swap"), "{output}");
+    assert!(output.contains("worker recovery failed"), "{output}");
+    assert!(output.contains("continuing to desktop-swap"), "{output}");
+}
+
+#[test]
+fn reload_rpc_failure_with_old_daemon_still_blocks_desktop() {
+    let mut fake = Fake::new();
+    fake.reload_error = true;
+    fake.reload_takes = false;
+    let (outcome, output) = rollout(&mut fake, &opts());
+    assert!(outcome.is_err(), "{output}");
     assert!(!fake.mutations().contains(&"swap"));
 }
 

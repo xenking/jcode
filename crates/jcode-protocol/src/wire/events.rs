@@ -2,6 +2,14 @@
 
 use super::*;
 
+/// Process and build that answered a daemon Ping, not an installation symlink.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonIdentity {
+    pub pid: u32,
+    pub binary_path: std::path::PathBuf,
+    pub git_hash: String,
+}
+
 /// A provider-reported account limit beyond the two legacy quota slots.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccountUsageWindow {
@@ -650,6 +658,9 @@ pub enum ServerEvent {
         /// Authoritative connected non-headless users. None on older daemons.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         user_connected_session_ids: Option<Vec<String>>,
+        /// Absent on older daemons and on streaming keepalives.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        daemon_identity: Option<DaemonIdentity>,
     },
 
     /// Current state (debug)

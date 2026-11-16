@@ -663,6 +663,20 @@ fn test_message_end_carries_provider_stop_reason() -> Result<()> {
 }
 
 #[test]
+fn daemon_identity_pong_is_optional_and_roundtrips() -> Result<()> {
+    let legacy: ServerEvent = serde_json::from_str(r#"{"type":"pong","id":7}"#)?;
+    assert!(matches!(&legacy, ServerEvent::Pong { daemon_identity: None, .. }));
+    assert!(serde_json::to_value(legacy)?.get("daemon_identity").is_none());
+    let modern = serde_json::json!({
+        "type": "pong", "id": 8,
+        "daemon_identity": {"pid": 123, "binary_path": "/target/release/jcode", "git_hash": "483d7848f"}
+    });
+    let decoded: ServerEvent = serde_json::from_value(modern.clone())?;
+    assert_eq!(serde_json::to_value(decoded)?["daemon_identity"], modern["daemon_identity"]);
+    Ok(())
+}
+
+#[test]
 fn test_native_ssh_pong_capability_is_backward_compatible() -> Result<()> {
     let legacy: ServerEvent = serde_json::from_str(r#"{"type":"pong","id":7}"#)?;
     assert!(matches!(
@@ -678,6 +692,7 @@ fn test_native_ssh_pong_capability_is_backward_compatible() -> Result<()> {
         native_ssh_protocol: Some(1),
         capabilities: vec!["session_tools".into()],
         user_connected_session_ids: None,
+        daemon_identity: None,
     };
     let json = serde_json::to_value(&modern)?;
     assert_eq!(json["native_ssh_protocol"], 1);

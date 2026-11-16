@@ -111,6 +111,43 @@ fn server_initializes_schedule_runner_even_when_ambient_disabled() {
 }
 
 #[tokio::test]
+async fn daemon_ping_reports_own_process_and_build_without_creating_session() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("jcode.sock");
+    let provider: Arc<dyn Provider> = Arc::new(TestProvider);
+    let server = Server::new_with_paths(provider, socket.clone(), temp.path().join("debug.sock"));
+    let runtime = ServerRuntime::from_server(&server);
+    let accept = runtime.spawn_main_accept_loop(Listener::bind(&socket).unwrap());
+    let response = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut stream = crate::transport::Stream::connect(&socket).await.unwrap();
+        stream
+            .write_all(b"{\"type\":\"ping\",\"id\":42}\n")
+            .await
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).await.unwrap();
+        serde_json::from_str::<crate::protocol::ServerEvent>(&line).unwrap()
+    })
+    .await;
+    runtime.shutdown().await;
+    accept.await.unwrap();
+    let crate::protocol::ServerEvent::Pong {
+        id: 42,
+        daemon_identity: Some(identity),
+        ..
+    } = response.unwrap()
+    else {
+        panic!("Ping must report the answering daemon's identity");
+    };
+    assert_eq!(identity.pid, std::process::id());
+    assert_eq!(identity.binary_path, std::env::current_exe().unwrap());
+    assert_eq!(identity.git_hash, jcode_build_meta::git_hash());
+    assert!(server.sessions.read().await.is_empty());
+}
+
+#[tokio::test]
 async fn readiness_probes_do_not_contend_with_group_transfer_admission() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
