@@ -246,8 +246,11 @@ fn at_position(source: &str, diagnostic: &OxcDiagnostic) -> StripError {
 
 /// 1-based line and column of a byte offset.
 fn line_column(source: &str, offset: u32) -> (u32, u32) {
-    let offset = (offset as usize).min(source.len());
-    let before = source.get(..offset).unwrap_or_default();
+    let mut offset = (offset as usize).min(source.len());
+    while !source.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let before = &source[..offset];
     let line = before.matches('\n').count() as u32 + 1;
     let column = before
         .rfind('\n')
@@ -261,6 +264,12 @@ fn line_column(source: &str, offset: u32) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_offset_inside_utf8_clamps_to_preceding_character() {
+        assert_eq!(line_column("one\nёж", 5), (2, 1));
+        assert_eq!(line_column("one\nёж", 7), (2, 2));
+    }
 
     fn code(source: &str) -> String {
         strip(source).expect("script must strip").code
