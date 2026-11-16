@@ -1188,7 +1188,10 @@ mod canonical_payload_tests {
     #[test]
     fn malformed_diagnostic_inputs_return_errors() {
         for responses in [false, true] {
-            for payload in [json!({}), json!({"messages": null, "input": "not an array"})] {
+            for payload in [
+                json!({}),
+                json!({"messages": null, "input": "not an array"}),
+            ] {
                 let error = canonical_diagnostic_parts(&payload, responses).unwrap_err();
                 assert!(error.to_string().contains("must be an array"));
             }
