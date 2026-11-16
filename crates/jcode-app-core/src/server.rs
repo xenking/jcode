@@ -845,9 +845,7 @@ impl Server {
                             || ((owner_live
                                 || self.running_before_restart.contains(&member.session_id))
                                 && headless_member_should_restore(&member.status, true))
-                            || (owner_live
-                                && worker_revive::open_lane_continuation(&member.session_id)
-                                    .is_some()))
+                            || (owner_live && worker_revive::has_open_lane(&member.session_id)))
                 })
                 .map(|member| member.session_id.clone())
                 .collect::<Vec<_>>()

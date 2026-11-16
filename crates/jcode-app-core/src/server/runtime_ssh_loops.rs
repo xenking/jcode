@@ -395,6 +395,17 @@ fn next_followup(
     decision
 }
 
+fn next_followup_after_turn(
+    state: &mut LoopState,
+    snapshot: &todo::followup::TodoSnapshot,
+    reload_continuation: bool,
+) -> todo::followup::Decision {
+    if reload_continuation {
+        return Default::default();
+    }
+    next_followup(state, snapshot)
+}
+
 /// Run inside the server turn task before releasing its processing guard. Never
 /// recursively invokes turn_failover, and rereads durable state each turn so
 /// stop/status work from another connection while a model/tool is busy.
@@ -404,13 +415,14 @@ pub(super) async fn run_followups(
     event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<()> {
     let lease = agent.claim_server_turn()?;
-    run_reserved_followups(agent, &lease, event_tx).await
+    run_reserved_followups(agent, &lease, event_tx, false).await
 }
 
 pub(super) async fn run_reserved_followups(
     agent: &mut Agent,
     lease: &crate::agent::TurnLease,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
+    reload_continuation: bool,
 ) -> Result<()> {
     agent.validate_server_turn(lease)?;
     let session_id = agent.session_id().to_string();
@@ -444,7 +456,13 @@ pub(super) async fn run_reserved_followups(
             ));
             return Ok(());
         }
-        let decision = update_state(&session_id, |state| Ok(next_followup(state, &snapshot)))?;
+        let decision = update_state(&session_id, |state| {
+            Ok(next_followup_after_turn(
+                state,
+                &snapshot,
+                reload_continuation,
+            ))
+        })?;
         apply_effects(&session_id, &decision.effects)?;
         let Some(followup) = decision.follow_up else {
             if let Some(notice) = decision.notice {

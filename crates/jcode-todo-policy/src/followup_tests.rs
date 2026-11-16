@@ -193,14 +193,11 @@ fn running_dependencies_pause_without_consuming_budget_or_reviews() {
         waiting_on: vec!["build".into()],
         ..todo("validate", "in_progress")
     }]);
-    // First exhaust the actionable budget, then explicitly wait. Resolution
-    // must get a fresh budget even though the todo payload did not change.
-    for _ in 0..INCOMPLETE_TODO_MAX_ATTEMPTS {
-        assert_eq!(
-            kind(&policy.decide(&state)),
-            Some(FollowUpKind::IncompleteTodos)
-        );
-    }
+    // Waiting and resolution must not reset the unchanged todo fingerprint.
+    assert_eq!(
+        kind(&policy.decide(&state)),
+        Some(FollowUpKind::IncompleteTodos)
+    );
     assert_eq!(policy.decide(&state), Decision::default());
     state.running_background_tasks = vec!["build".into()];
     state.long_session_review_due = true;
@@ -209,12 +206,7 @@ fn running_dependencies_pause_without_consuming_budget_or_reviews() {
     }
     state.running_background_tasks.clear();
     state.long_session_review_due = false;
-    for _ in 0..INCOMPLETE_TODO_MAX_ATTEMPTS {
-        assert_eq!(
-            kind(&policy.decide(&state)),
-            Some(FollowUpKind::IncompleteTodos)
-        );
-    }
+    assert_eq!(policy.decide(&state), Decision::default());
 }
 
 #[test]
@@ -239,6 +231,27 @@ fn mixed_dependencies_poke_only_actionable_todos() {
     assert!(follow_up.message.contains("write-tests"));
     assert!(!follow_up.message.contains("blocked-validation"));
     assert!(is_auto_poke_message(&follow_up.message));
+}
+
+#[test]
+fn unchanged_todo_set_is_not_poked_again_when_a_dependency_finishes() {
+    let mut state = snapshot(vec![
+        todo("independent", "pending"),
+        TodoItem {
+            waiting_on: vec!["await-1".into()],
+            ..todo("waiting", "pending")
+        },
+    ]);
+    state.running_background_tasks = vec!["await-1".into()];
+    let mut policy = FollowUpPolicy::new(true);
+    let message = policy.decide(&state).follow_up.unwrap().message;
+    assert!(message.contains("independent"));
+    assert!(!message.contains("waiting"));
+    state.running_background_tasks.clear();
+    state.todos.reverse();
+    assert_eq!(policy.decide(&state), Decision::default());
+    state.todos[0].content.push_str(" updated");
+    assert!(policy.decide(&state).follow_up.is_some());
 }
 
 #[test]
@@ -274,7 +287,7 @@ fn disabled_policy_never_follows_up() {
 }
 
 #[test]
-fn pokes_open_work_three_times_per_distinct_state() {
+fn pokes_open_work_once_per_distinct_state() {
     let mut policy = FollowUpPolicy::new(true);
     let open = snapshot(vec![todo("a", "pending"), todo("b", "in_progress")]);
     let first = policy.decide(&open);
@@ -282,13 +295,7 @@ fn pokes_open_work_three_times_per_distinct_state() {
     assert_eq!(follow_up.kind, FollowUpKind::IncompleteTodos);
     assert!(is_auto_poke_message(&follow_up.message));
     assert!(follow_up.notice.contains("2 incomplete todos"));
-    for _ in 1..INCOMPLETE_TODO_MAX_ATTEMPTS {
-        assert_eq!(
-            kind(&policy.decide(&open)),
-            Some(FollowUpKind::IncompleteTodos)
-        );
-    }
-    // Three attempts without progress exhaust the budget, without disabling it.
+    // One attempt exhausts the budget without disabling it.
     assert_eq!(policy.decide(&open), Decision::default());
     assert_eq!(policy.decide(&open), Decision::default());
     assert!(policy.is_enabled());

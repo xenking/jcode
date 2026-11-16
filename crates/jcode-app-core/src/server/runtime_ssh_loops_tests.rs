@@ -29,6 +29,31 @@ fn enabled_state() -> LoopState {
 }
 
 #[test]
+fn unchanged_open_todos_are_poked_only_once_even_after_restart() {
+    let snapshot = open_snapshot();
+    let mut state = enabled_state();
+    assert!(next_followup(&mut state, &snapshot).follow_up.is_some());
+    state = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+    assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
+}
+
+#[test]
+fn reload_continuation_does_not_trigger_an_immediate_auto_poke() {
+    let mut state = enabled_state();
+    let snapshot = open_snapshot();
+    assert!(
+        next_followup_after_turn(&mut state, &snapshot, true)
+            .follow_up
+            .is_none()
+    );
+    assert!(
+        next_followup_after_turn(&mut state, &snapshot, false)
+            .follow_up
+            .is_some()
+    );
+}
+
+#[test]
 fn persisted_policy_keeps_unchanged_todo_retry_budget_across_reload() {
     let mut state = enabled_state();
     let snapshot = open_snapshot();
@@ -80,14 +105,14 @@ fn blockers_and_running_tasks_pause_without_consuming_retry_budget() {
     });
     assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
     snapshot.todos[0].requires_user_auth = None;
-    assert!(next_followup(&mut state, &snapshot).follow_up.is_some());
+    assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
     snapshot.goals = vec![todo::TodoGoal {
         cannot_complete: Some("Target host was decommissioned".into()),
         ..Default::default()
     }];
     assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
     snapshot.goals.clear();
-    assert!(next_followup(&mut state, &snapshot).follow_up.is_some());
+    assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
 }
 
 #[test]
@@ -191,6 +216,16 @@ impl Provider for RecordingProvider {
 }
 
 struct RestoreHome(Option<std::ffi::OsString>);
+struct RestoreRuntime(Option<std::ffi::OsString>);
+impl Drop for RestoreRuntime {
+    fn drop(&mut self) {
+        if let Some(value) = &self.0 {
+            crate::env::set_var("JCODE_RUNTIME_DIR", value);
+        } else {
+            crate::env::remove_var("JCODE_RUNTIME_DIR");
+        }
+    }
+}
 impl Drop for RestoreHome {
     fn drop(&mut self) {
         if let Some(home) = &self.0 {
@@ -200,6 +235,88 @@ impl Drop for RestoreHome {
         }
         crate::config::Config::invalidate_cache();
     }
+}
+
+#[tokio::test]
+async fn delivered_reload_turn_does_not_launch_followup() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+    let provider = RecordingProvider::default();
+    let mut agent = Agent::new_with_initial_working_dir(
+        Arc::new(provider.clone()),
+        crate::tool::Registry::empty(),
+        home.path().to_str(),
+    );
+    let id = agent.session_id().to_string();
+    todo::save_todos(&id, &open_snapshot().todos).unwrap();
+    initialize_remote_session(&id, true).unwrap();
+    let notice = "Your session was interrupted by a server reload. Continue where you left off.";
+    super::super::reload_recovery::persist_intent(
+        "reload-test",
+        &id,
+        super::super::reload_recovery::ReloadRecoveryRole::Headless,
+        crate::tool::selfdev::ReloadRecoveryDirective {
+            reconnect_notice: None,
+            continuation_message: notice.into(),
+        },
+        "test",
+    )
+    .unwrap();
+    assert!(
+        super::super::reload_recovery::mark_delivered_if_matching_continuation(&id, notice, "test")
+            .unwrap()
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    super::super::turn_failover::process_locked_message_with_server_failover(
+        &mut agent,
+        "",
+        vec![],
+        Some(notice.into()),
+        tx.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    run_followups(&mut agent, tx).await.unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn headless_startup_does_not_resume_a_lane_waiting_on_a_pending_await() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    let _restore_runtime = RestoreRuntime(std::env::var_os("JCODE_RUNTIME_DIR"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::set_var("JCODE_RUNTIME_DIR", runtime.path());
+    let session = "headless-pending-await-test";
+    let now = super::super::durable_state::now_unix_ms();
+    let state = super::super::await_members_state::PersistedAwaitMembersState {
+        key: format!("{session}-{now}"),
+        session_id: session.into(),
+        swarm_id: "swarm".into(),
+        requested_ids: vec!["worker".into()],
+        target_status: vec!["completed".into()],
+        mode: None,
+        created_at_unix_ms: now,
+        deadline_unix_ms: now + 60_000,
+        background: true,
+        notify: true,
+        wake: true,
+        final_response: None,
+    };
+    super::super::await_members_state::save_state(&state);
+    let mut task = open_snapshot().todos.remove(0);
+    task.waiting_on = vec![state.dependency_id()];
+    todo::save_todos(session, &[task]).unwrap();
+    assert!(super::super::worker_revive::has_open_lane(session));
+    assert!(super::super::worker_revive::open_lane_continuation(session).is_none());
+    super::super::await_members_state::persist_final_response(&state, true, vec![], "done".into());
+    assert!(super::super::worker_revive::open_lane_continuation(session).is_some());
 }
 
 #[tokio::test]

@@ -235,9 +235,17 @@ pub(super) async fn process_reserved_message_with_server_failover(
     if !enabled && result.is_err() {
         return result;
     }
-    retry_turn_with_server_failover(&mut guard, lease, result, reminder, event_tx.clone(), &[])
-        .await?;
-    super::runtime_ssh_loops::run_reserved_followups(&mut guard, lease, event_tx).await
+    retry_turn_with_server_failover(
+        &mut guard,
+        lease,
+        result,
+        reminder.clone(),
+        event_tx.clone(),
+        &[],
+    )
+    .await?;
+    let reload = is_reload_continuation(guard.session_id(), content, reminder.as_deref());
+    super::runtime_ssh_loops::run_reserved_followups(&mut guard, lease, event_tx, reload).await
 }
 
 /// Server-initiated turn (swarm spawn/assign, wake, headless reload recovery)
@@ -329,13 +337,14 @@ pub(super) async fn process_reserved_locked_message_with_swarm_fallbacks(
         agent,
         lease,
         result,
-        reminder,
+        reminder.clone(),
         event_tx.clone(),
         fallbacks,
         allowed_models,
     )
     .await?;
-    super::runtime_ssh_loops::run_reserved_followups(agent, lease, event_tx).await
+    let reload = is_reload_continuation(agent.session_id(), content, reminder.as_deref());
+    super::runtime_ssh_loops::run_reserved_followups(agent, lease, event_tx, reload).await
 }
 
 /// Route identity of a fallback selection.
@@ -540,12 +549,26 @@ pub(super) async fn process_reserved_locked_context_with_server_failover(
         agent,
         lease,
         result,
-        reminder,
+        reminder.clone(),
         event_tx.clone(),
         &effective_worker_allowed_models(agent),
     )
     .await?;
-    super::runtime_ssh_loops::run_reserved_followups(agent, lease, event_tx).await
+    let reload = is_reload_continuation(agent.session_id(), content, reminder.as_deref());
+    super::runtime_ssh_loops::run_reserved_followups(agent, lease, event_tx, reload).await
+}
+
+fn is_reload_continuation(session_id: &str, content: &str, reminder: Option<&str>) -> bool {
+    if reminder.is_some_and(|text| {
+        text == crate::tool::selfdev::ReloadContext::interrupted_session_continuation_message()
+            || text.starts_with("Reload complete. Resuming your task.\n\n")
+    }) {
+        return true;
+    }
+    [reminder, Some(content)].into_iter().flatten().any(|text| {
+        !text.is_empty()
+            && super::reload_recovery::is_delivered_continuation(session_id, text).unwrap_or(false)
+    })
 }
 
 /// [`process_locked_message_with_server_failover`] for callers holding an

@@ -38,8 +38,8 @@ async fn resume_background_awaits_finalizes_states_expired_while_down() {
         .unwrap()
         .dependency_id();
     assert!(
-        !crate::todo::await_dependency::running(_runtime_dir.path(), &dependency_id, requester,),
-        "an expired wait releases todos even before recovery finalizes it"
+        crate::todo::await_dependency::running(_runtime_dir.path(), &dependency_id, requester,),
+        "a pending wait blocks todos until recovery actually finalizes it"
     );
     let swarm_members = Arc::new(RwLock::new(HashMap::from([
         (requester.to_string(), member(requester, swarm_id, "ready")),
@@ -104,4 +104,53 @@ async fn resume_background_awaits_finalizes_states_expired_while_down() {
         .expect("expired await should have a persisted final response");
     assert!(!final_response.completed);
     assert!(final_response.summary.contains("Timed out"));
+}
+
+#[tokio::test]
+async fn restart_does_not_resurrect_consumed_await_from_backup() {
+    let (_env, runtime_dir) = RuntimeEnvGuard::new();
+    let now = crate::server::durable_state::now_unix_ms();
+    let state = crate::server::await_members_state::PersistedAwaitMembersState {
+        key: "restart-backup".into(),
+        session_id: "restart-owner".into(),
+        swarm_id: "restart-swarm".into(),
+        target_status: vec!["completed".into()],
+        requested_ids: vec!["old-worker".into()],
+        mode: None,
+        created_at_unix_ms: now - 8 * 60 * 60 * 1000,
+        deadline_unix_ms: now - 7 * 60 * 60 * 1000,
+        background: true,
+        notify: true,
+        wake: true,
+        final_response: None,
+    };
+    crate::server::await_members_state::save_state(&state);
+    let (mut done, fresh) = crate::server::await_members_state::persist_final_response(
+        &state,
+        true,
+        vec![],
+        "already delivered".into(),
+    );
+    assert!(fresh);
+    done.final_response.as_mut().unwrap().resolved_at_unix_ms = now - 7 * 60 * 60 * 1000;
+    let path = runtime_dir
+        .path()
+        .join("jcode-await-members/restart-backup.json");
+    std::fs::write(path, serde_json::to_vec(&done).unwrap()).unwrap();
+    let mut bus = crate::bus::Bus::global().subscribe();
+    let members = Arc::new(RwLock::new(HashMap::new()));
+    let swarms = Arc::new(RwLock::new(HashMap::new()));
+    let (events, _) = broadcast::channel(8);
+    crate::server::comm_await::resume_background_awaits(
+        &members,
+        &swarms,
+        &events,
+        &AwaitMembersRuntime::default(),
+    )
+    .await;
+    assert!(!matches!(
+        bus.try_recv(),
+        Ok(crate::bus::BusEvent::SwarmAwaitCompleted(_))
+    ));
+    assert!(crate::server::await_members_state::load_state(&state.key).is_none());
 }

@@ -49,6 +49,45 @@ fn default_auto_poke_does_not_recheck_completed_confidence_or_ownership() {
 }
 
 #[test]
+fn reload_interrupt_never_triggers_an_auto_poke() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "resume".into(),
+                content: "Finish work".into(),
+                status: "pending".into(),
+                priority: "high".into(),
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        app.session.messages.push(crate::session::StoredMessage {
+            id: "interrupted".into(),
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "[generation interrupted - server reloading]".into(),
+                cache_control: None,
+            }]
+            .into(),
+            display_role: None,
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        });
+        assert!(app.was_interrupted_by_reload());
+        app.reload_recovery_dispatch_pending = true;
+        assert!(!app.schedule_turn_end_followups());
+        assert!(app.queued_messages.is_empty());
+        app.reload_recovery_dispatch_pending = false;
+        app.session.messages.pop();
+        assert!(app.schedule_turn_end_followups());
+    });
+}
+
+#[test]
 fn auto_poke_stays_armed_when_a_turn_has_no_todos() {
     with_temp_jcode_home(|| {
         assert!(!crate::config::config().features.todo_gate_digest);
@@ -87,7 +126,7 @@ fn auto_poke_stays_armed_when_a_turn_has_no_todos() {
 }
 
 #[test]
-fn auto_poke_retries_three_times_until_incomplete_todos_change() {
+fn auto_poke_once_until_incomplete_todos_change() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
@@ -108,16 +147,9 @@ fn auto_poke_retries_three_times_until_incomplete_todos_change() {
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
         app.turn_tool_call_seen = true;
-        for expected in 2..=3 {
-            assert!(app.schedule_auto_poke_followup_if_needed());
-            assert_eq!(app.auto_poke_attempts, expected);
-            app.queued_messages.clear();
-            app.pending_queued_dispatch = false;
-            app.turn_tool_call_seen = true;
-        }
         assert!(
             !app.schedule_auto_poke_followup_if_needed(),
-            "an unchanged list must stop after three attempts"
+            "an unchanged list must stop after one attempt"
         );
 
         app.save_input_for_reload(&app.session.id);
@@ -127,7 +159,7 @@ fn auto_poke_retries_three_times_until_incomplete_todos_change() {
         reloaded.auto_poke_incomplete_todos = true;
         reloaded.auto_poke_default_on = true;
         reloaded.apply_restored_reload_input(restored);
-        assert_eq!(reloaded.auto_poke_attempts, 3);
+        assert_eq!(reloaded.auto_poke_attempts, 1);
         assert!(!reloaded.schedule_auto_poke_followup_if_needed());
         app = reloaded;
 

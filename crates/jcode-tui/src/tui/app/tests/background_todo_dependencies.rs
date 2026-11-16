@@ -179,7 +179,7 @@ fn live_dependency_fixture(app: &App, task: &str) -> DependencyTaskFixture {
 }
 
 #[test]
-fn background_dependency_waiting_only_suppresses_review_and_resets_budget() {
+fn background_dependency_waiting_preserves_poke_fingerprint_and_suppresses_review() {
     with_temp_jcode_home(|| {
         let mut app = waiting_dependency_test_app();
         let task = format!("tui-wait-{}", app.session.id);
@@ -205,8 +205,11 @@ fn background_dependency_waiting_only_suppresses_review_and_resets_budget() {
         assert!(!app.schedule_turn_end_followups());
         assert!(app.queued_messages.is_empty());
         assert!(!app.pending_queued_dispatch);
-        assert_eq!(app.auto_poke_attempts, 0);
-        assert!(app.last_auto_poke_fingerprint.is_none());
+        assert_eq!(
+            app.auto_poke_attempts,
+            crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS
+        );
+        assert_eq!(app.last_auto_poke_fingerprint.as_deref(), Some("old state"));
         assert_eq!(app.todo_completion_gate_attempts, 2);
         // The due timed review is still available after the dependency resolves.
         assert!(crate::todo::take_long_session_review_if_due(&app.session.id).unwrap());
@@ -379,7 +382,11 @@ fn background_dependency_reload_reads_session_scoped_task_state() {
     });
 }
 
-fn swarm_member(id: &str, status: &str, parent: Option<&str>) -> crate::protocol::SwarmMemberStatus {
+fn swarm_member(
+    id: &str,
+    status: &str,
+    parent: Option<&str>,
+) -> crate::protocol::SwarmMemberStatus {
     crate::protocol::SwarmMemberStatus {
         session_id: id.to_string(),
         friendly_name: Some(id.to_string()),

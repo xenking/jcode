@@ -225,6 +225,7 @@ pub fn set_dependency_delivery(
 /// tens of ms each. Writes in this process invalidate it directly, since the
 /// directory mtime alone can miss same-tick updates.
 struct PendingScan {
+    dir: std::path::PathBuf,
     dir_mtime: Option<std::time::SystemTime>,
     built_at: std::time::Instant,
     states: Vec<PersistedAwaitMembersState>,
@@ -303,10 +304,19 @@ pub(super) fn persist_final_response(
         summary,
         resolved_at_unix_ms: now_unix_ms(),
     });
-    if !superseded {
-        save_state_unlocked(&next);
+    if superseded {
+        return (next, false);
     }
-    (next, !superseded)
+    // The terminal result is the durable delivery marker. Never publish the
+    // completion if that marker could not be committed, otherwise a restart
+    // can publish the same result again from the still-pending primary.
+    let path = super::durable_state::state_path(AWAIT_MEMBERS_DIR, &next.key);
+    if let Err(error) = crate::storage::write_json(&path, &next) {
+        crate::logging::warn(&format!("Failed to persist await completion: {error}"));
+        return (next, false);
+    }
+    invalidate_pending_scan();
+    (next, true)
 }
 
 pub fn pending_await_members_for_session(session_id: &str) -> Vec<PersistedAwaitMembersState> {
@@ -335,7 +345,8 @@ pub(super) fn all_pending_await_members() -> Vec<PersistedAwaitMembersState> {
 /// be finalized with a timeout instead of silently dropping the promised
 /// notify/wake.
 pub(super) fn all_pending_await_members_including_expired() -> Vec<PersistedAwaitMembersState> {
-    let dir_mtime = std::fs::metadata(state_dir(AWAIT_MEMBERS_DIR))
+    let dir = state_dir(AWAIT_MEMBERS_DIR);
+    let dir_mtime = std::fs::metadata(&dir)
         .and_then(|meta| meta.modified())
         .ok();
     {
@@ -344,6 +355,7 @@ pub(super) fn all_pending_await_members_including_expired() -> Vec<PersistedAwai
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(scan) = guard.as_ref()
             && scan.dir_mtime.is_some()
+            && scan.dir == dir
             && scan.dir_mtime == dir_mtime
             && scan.built_at.elapsed() < PENDING_SCAN_TTL
         {
@@ -354,6 +366,7 @@ pub(super) fn all_pending_await_members_including_expired() -> Vec<PersistedAwai
     *PENDING_SCAN
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(PendingScan {
+        dir,
         dir_mtime,
         built_at: std::time::Instant::now(),
         states: states.clone(),
@@ -370,13 +383,19 @@ fn scan_pending_await_members_including_expired() -> Vec<PersistedAwaitMembersSt
     let mut pending = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_file() {
+        // Atomic writes retain the previous generation as `.bak`. It is not
+        // a second await: scanning it resurrects a pending wait after its
+        // completed primary has expired, replaying old notifications forever.
+        if !path.is_file() || path.extension().is_none_or(|ext| ext != "json") {
             continue;
         }
 
         let Ok(state) = crate::storage::read_json::<PersistedAwaitMembersState>(&path) else {
             continue;
         };
+        if path.file_stem().and_then(|stem| stem.to_str()) != Some(state.key.as_str()) {
+            continue;
+        }
         if is_stale(&state) {
             let _ = std::fs::remove_file(path);
             continue;

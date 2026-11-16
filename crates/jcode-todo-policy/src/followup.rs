@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 pub const MAX_GATE_ATTEMPTS: u8 = 5;
 
 /// Automatic incomplete-todo follow-ups allowed for one unchanged open state.
-pub const INCOMPLETE_TODO_MAX_ATTEMPTS: u8 = 3;
+pub const INCOMPLETE_TODO_MAX_ATTEMPTS: u8 = 1;
 
 /// Shared retry budget for clients that handle their own turn-end loop.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,7 +51,8 @@ impl IncompleteTodoBudget {
             return true;
         }
         // Compare the actual policy inputs instead of fallible JSON serialization.
-        let fingerprint: Vec<TodoItem> = incomplete.into_iter().cloned().collect();
+        let mut fingerprint: Vec<TodoItem> = incomplete.into_iter().cloned().collect();
+        fingerprint.sort_by(|a, b| a.id.cmp(&b.id));
         if self.fingerprint.as_ref() != Some(&fingerprint) {
             self.fingerprint = Some(fingerprint);
             self.attempts = 0;
@@ -363,9 +364,8 @@ impl FollowUpPolicy {
         if !incomplete.is_empty()
             && (actionable.is_empty() || !snapshot.running_swarm_members.is_empty())
         {
-            // Waiting is not resistance or completion. A completion wake will
-            // re-enter the policy with fresh runtime facts and a fresh budget.
-            self.incomplete_budget = IncompleteTodoBudget::default();
+            // Waiting is not a new todo set. The completion wake is enough,
+            // and must not reset the fingerprint of an earlier poke.
             return Decision::default();
         }
 
@@ -382,7 +382,7 @@ impl FollowUpPolicy {
         }
 
         if !incomplete.is_empty() {
-            return self.poke_incomplete(&actionable);
+            return self.poke_incomplete(&actionable, todos);
         }
 
         // Completing or removing the list ends the prior poke cycle.
@@ -499,7 +499,7 @@ impl FollowUpPolicy {
         Decision::default().with_effects(effects)
     }
 
-    fn poke_incomplete(&mut self, incomplete: &[&TodoItem]) -> Decision {
+    fn poke_incomplete(&mut self, incomplete: &[&TodoItem], all_todos: &[TodoItem]) -> Decision {
         self.final_response_requested = false;
         // Open work begins a new completion cycle.
         self.gate_digest_delivered = false;
@@ -507,8 +507,8 @@ impl FollowUpPolicy {
         self.last_ownership_fingerprint = None;
         let todos: Vec<_> = incomplete.iter().map(|todo| (*todo).clone()).collect();
         let message = build_actionable_poke_message(&todos);
-        if !self.incomplete_budget.allow_follow_up(&todos) {
-            // Stop after three automatic retries without progress. Keep the
+        if !self.incomplete_budget.allow_follow_up(all_todos) {
+            // Stop after one automatic reminder. Keep the
             // configured enablement so changed work can start a fresh budget.
             return Decision::default();
         }

@@ -1446,6 +1446,11 @@ impl App {
         if crate::tui::is_ssh_remote() {
             return false;
         }
+        // Reload recovery already owns this boundary. A synthetic todo poke
+        // must not compete with its interrupted-turn continuation.
+        if self.reload_recovery_dispatch_pending || self.pending_reload_reconnect_status.is_some() {
+            return false;
+        }
         if self.guardrail_stops_exhausted_at_turn_end() {
             self.stop_auto_continuation_after_guardrail();
             return false;
@@ -1462,8 +1467,9 @@ impl App {
             return false;
         }
         if self.all_open_todos_are_paused() {
-            self.last_auto_poke_fingerprint = None;
-            self.auto_poke_attempts = 0;
+            if self.last_auto_poke_fingerprint.is_none() {
+                self.auto_poke_attempts = 0;
+            }
             self.auto_poke_outcome_pending = false;
             return false;
         }
@@ -1539,8 +1545,9 @@ impl App {
         if incomplete.is_empty() && todos.iter().any(super::commands::is_incomplete_poke_todo) {
             // User-only blockers and live waits are neither resistance nor
             // completion. Do not spend work or assessment review budgets.
-            self.last_auto_poke_fingerprint = None;
-            self.auto_poke_attempts = 0;
+            if self.last_auto_poke_fingerprint.is_none() {
+                self.auto_poke_attempts = 0;
+            }
             self.auto_poke_outcome_pending = false;
             return false;
         }
@@ -1737,8 +1744,9 @@ impl App {
         self.todo_gate_digest_delivered = false;
         self.todo_confidence_spike_challenged = false;
         self.last_todo_ownership_fingerprint = None;
-        let fingerprint =
-            serde_json::to_string(&incomplete).unwrap_or_else(|_| poke_message.clone());
+        let fingerprint = self
+            .current_incomplete_poke_fingerprint()
+            .unwrap_or_else(|| poke_message.clone());
         if self.last_auto_poke_fingerprint.as_ref() != Some(&fingerprint) {
             self.auto_poke_attempts = 0;
         }
@@ -1781,14 +1789,14 @@ impl App {
     /// Fingerprint of the current open todos, matching the one auto-poke
     /// records when it nudges, so a poke sent elsewhere can be credited here.
     fn current_incomplete_poke_fingerprint(&self) -> Option<String> {
-        let incomplete: Vec<_> = super::commands::poke_todos(self)
+        let mut incomplete: Vec<_> = super::commands::poke_todos(self)
             .into_iter()
             .filter(super::commands::is_incomplete_poke_todo)
-            .filter(|todo| !self.todo_is_paused_for_auto_followup(todo))
             .collect();
         if incomplete.is_empty() {
             return None;
         }
+        incomplete.sort_by(|a, b| a.id.cmp(&b.id));
         serde_json::to_string(&incomplete).ok()
     }
 

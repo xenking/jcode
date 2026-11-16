@@ -142,21 +142,39 @@ pub(super) async fn live_or_revived_agent(
     Some(agent)
 }
 
-/// The continuation for a headless worker that still owns open todos.
-///
-/// A worker's turn can end just before a restart (its snapshot says `ready`)
-/// while its lane is still open: it was waiting on a build, or between steps.
-/// That is work in flight, so startup recovery resumes it with the same
-/// actionable-todo prompt auto-poke uses. `None` when every todo is closed,
-/// handed to another worker, or waiting on the user.
+/// Whether this worker owns unfinished work, including a live dependency wait.
+pub(super) fn has_open_lane(session_id: &str) -> bool {
+    let Ok(home) = crate::storage::jcode_dir() else {
+        return false;
+    };
+    let snapshot = crate::todo::store::load_snapshot(&home, session_id);
+    snapshot.todos.iter().any(|todo| {
+        crate::todo::is_incomplete_todo(todo)
+            && !crate::todo::todo_assigned_elsewhere(todo, session_id)
+            && !crate::todo::todo_requires_user_auth(todo)
+            && !crate::todo::todo_goal_cannot_complete(todo, &snapshot.goals)
+    })
+}
+
+/// Build a continuation only when the worker has actionable unfinished work.
+/// A blocked worker is restored idle and woken by its dependency's completion.
 pub(super) fn open_lane_continuation(session_id: &str) -> Option<String> {
-    let todos = crate::todo::load_todos(session_id).ok()?;
-    let actionable: Vec<crate::todo::TodoItem> = todos
+    let home = crate::storage::jcode_dir().ok()?;
+    let snapshot = crate::todo::store::load_snapshot(&home, session_id);
+    let actionable: Vec<crate::todo::TodoItem> = snapshot
+        .todos
         .into_iter()
         .filter(|todo| {
             crate::todo::is_incomplete_todo(todo)
                 && !crate::todo::todo_assigned_elsewhere(todo, session_id)
                 && !crate::todo::todo_requires_user_auth(todo)
+                && !crate::todo::todo_goal_cannot_complete(todo, &snapshot.goals)
+                && !crate::todo::todo_waits_on_running_task(todo, |id| {
+                    snapshot
+                        .running_background_tasks
+                        .iter()
+                        .any(|running| running == id)
+                })
         })
         .collect();
     if actionable.is_empty() {
