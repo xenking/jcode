@@ -55,7 +55,16 @@ class H(BaseHTTPRequestHandler):
         prompt = text_of(msgs[last_user]) if last_user >= 0 else ""
         has_tool_result = any(m.get("role") == "tool" for m in msgs[last_user + 1:])
         tool_calls = None
-        if CONTROL and "[e2e:verify-write]" in prompt and not has_tool_result:
+        if CONTROL and "[e2e:verify-env]" in prompt:
+            if has_tool_result:
+                text = text_of(next(m for m in reversed(msgs) if m.get("role") == "tool"))
+            else:
+                tool_calls = [{"id": "call_verification_env", "type": "function", "function": {
+                    "name": "bash", "arguments": json.dumps({
+                        "intent": "Read the isolated seat environment through real Bash",
+                        "command": "echo \"$FOO_SEAT\"",
+                    })}}]
+        elif CONTROL and "[e2e:verify-write]" in prompt and not has_tool_result:
             tool_calls = [{"id": "call_verification_write", "type": "function", "function": {
                 "name": "write", "arguments": json.dumps({
                     "intent": "Prove a real tool side effect in the isolated workspace",
