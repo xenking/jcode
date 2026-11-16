@@ -637,10 +637,8 @@ async fn consume_native_stream(
                 }
                 // Opaque reasoning signals: the model reasoned but the runtime
                 // surfaces only a signature/encrypted item, not readable text.
-                StreamEvent::ThinkingSignatureDelta(signature) => {
-                    if !signature.is_empty() {
-                        outcome.saw_reasoning_signal = true;
-                    }
+                StreamEvent::ThinkingSignatureDelta(signature) if !signature.is_empty() => {
+                    outcome.saw_reasoning_signal = true;
                 }
                 StreamEvent::OpenAIReasoning { .. } => {
                     outcome.saw_reasoning_signal = true;
@@ -670,15 +668,13 @@ async fn consume_native_stream(
                         outcome.tool_calls.push(tool);
                     }
                 }
-                StreamEvent::ToolUseSignatureFor { id, signature } => {
-                    if !signature.is_empty() {
-                        if let Some(tool) = pending_tools.get_mut(&id) {
-                            tool.thought_signature = Some(signature);
-                        } else if let Some(tool) =
-                            outcome.tool_calls.iter_mut().find(|tool| tool.id == id)
-                        {
-                            tool.thought_signature = Some(signature);
-                        }
+                StreamEvent::ToolUseSignatureFor { id, signature } if !signature.is_empty() => {
+                    if let Some(tool) = pending_tools.get_mut(&id) {
+                        tool.thought_signature = Some(signature);
+                    } else if let Some(tool) =
+                        outcome.tool_calls.iter_mut().find(|tool| tool.id == id)
+                    {
+                        tool.thought_signature = Some(signature);
                     }
                 }
                 // Emitted after the matching `ToolUseEnd`; attach it to the most
