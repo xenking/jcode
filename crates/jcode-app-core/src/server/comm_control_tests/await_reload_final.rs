@@ -1,4 +1,83 @@
 #[tokio::test]
+async fn await_all_does_not_replay_final_for_a_different_member_set() {
+    let (_env, _runtime_dir) = RuntimeEnvGuard::new();
+    let swarm = "swarm-new-generation";
+    let requester = "req";
+    let targets = vec!["completed".to_string()];
+    let key =
+        crate::server::await_members_state::request_key(requester, swarm, &[], &targets, None);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    crate::server::await_members_state::save_state(
+        &crate::server::await_members_state::PersistedAwaitMembersState {
+            key,
+            session_id: requester.into(),
+            swarm_id: swarm.into(),
+            target_status: targets.clone(),
+            requested_ids: vec![],
+            mode: None,
+            created_at_unix_ms: now,
+            deadline_unix_ms: now + 60_000,
+            background: false,
+            notify: false,
+            wake: false,
+            final_response: Some(
+                crate::server::await_members_state::PersistedAwaitMembersResult {
+                    completed: true,
+                    members: vec![crate::protocol::AwaitedMemberStatus {
+                        session_id: "old".into(),
+                        friendly_name: None,
+                        status: "completed".into(),
+                        done: true,
+                        completion_report: None,
+                    }],
+                    summary: "old result".into(),
+                    resolved_at_unix_ms: now,
+                },
+            ),
+        },
+    );
+    let runtime = AwaitMembersRuntime::default();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let members = Arc::new(RwLock::new(HashMap::from([
+        (requester.to_string(), member(requester, swarm, "ready")),
+        ("new".to_string(), member("new", swarm, "completed")),
+    ])));
+    let swarms = Arc::new(RwLock::new(HashMap::from([(
+        swarm.into(),
+        HashSet::from([requester.into(), "new".into()]),
+    )])));
+    let (events, _) = broadcast::channel(32);
+    handle_comm_await_members(
+        1,
+        requester.into(),
+        targets,
+        vec![],
+        None,
+        Some(60),
+        false,
+        false,
+        false,
+        CommAwaitMembersContext {
+            client_event_tx: &tx,
+            swarm_members: &members,
+            swarms_by_id: &swarms,
+            swarm_event_tx: &events,
+            await_members_runtime: &runtime,
+        },
+    )
+    .await;
+    match rx.recv().await.unwrap() {
+        ServerEvent::CommAwaitMembersResponse { members, .. } => {
+            assert_eq!(members[0].session_id, "new")
+        }
+        event => panic!("unexpected response: {event:?}"),
+    }
+}
+
+#[tokio::test]
 async fn await_members_returns_persisted_final_response_after_reload_retry() {
     let (_env, _runtime_dir) = RuntimeEnvGuard::new();
     let swarm_id = "swarm-d";

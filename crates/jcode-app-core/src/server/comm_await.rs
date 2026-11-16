@@ -386,8 +386,15 @@ pub(super) async fn handle_comm_await_members(
             .as_ref()
             .and_then(|state| state.final_response.clone())
         {
-            let current_still_satisfies =
-                initial_statuses.is_empty() || mode_satisfied(&initial_statuses, mode.as_deref());
+            let same_members = initial_statuses.len() == final_response.members.len()
+                && initial_statuses.iter().all(|current| {
+                    final_response
+                        .members
+                        .iter()
+                        .any(|previous| previous.session_id == current.session_id)
+                });
+            let current_still_satisfies = initial_statuses.is_empty()
+                || (same_members && mode_satisfied(&initial_statuses, mode.as_deref()));
             if current_still_satisfies {
                 let _ = ctx
                     .client_event_tx
