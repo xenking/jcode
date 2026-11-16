@@ -191,7 +191,9 @@ fn isolated_bridge_reports_its_pinned_bundle_not_a_previous_bridge() {
     )
     .unwrap();
     let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line).unwrap();
+    BufReader::new(stream.try_clone().unwrap())
+        .read_line(&mut line)
+        .unwrap();
     let hello: ServerFrame = serde_json::from_str(&line).unwrap();
     let ApiEvent::HelloOk {
         runtime_identity: Some(identity),
@@ -217,6 +219,72 @@ fn isolated_bridge_reports_its_pinned_bundle_not_a_previous_bridge() {
         generation::assess_serving_target(&previous_bundle, Some(&identity)),
         GenerationVerdict::Mismatch { .. }
     ));
+    let mut retire = UnixStream::connect(&api).unwrap();
+    retire
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    writeln!(retire, "{{\"v\":1,\"id\":2,\"req\":\"retire_bridge\"}}").unwrap();
+    let mut reply = String::new();
+    BufReader::new(retire).read_line(&mut reply).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&reply).unwrap()["ev"],
+        "bridge_retiring"
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while api.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "retiring bridge did not withdraw listener"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut replacement_command = Command::new(env!("CARGO_BIN_EXE_jcode-harness-api-bridge"));
+    replacement_command
+        .args([api.as_os_str(), legacy.as_os_str()])
+        .env("HOME", sandbox.path())
+        .env("JCODE_HOME", sandbox.path())
+        .env("JCODE_RUNTIME_DIR", sandbox.path())
+        .env_remove(generation::TARGET_ENV)
+        .env_remove(generation::RELOAD_ID_ENV)
+        .env_remove(generation::GENERATION_ENV)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut replacement = Bridge(replacement_command.spawn().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !api.exists() {
+        assert!(
+            replacement.0.try_wait().unwrap().is_none(),
+            "replacement could not acquire retired bridge lock"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "replacement did not publish listener while old client drained"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        bridge.0.try_wait().unwrap().is_none(),
+        "retirement interrupted an existing client"
+    );
+    writeln!(stream, "{{\"v\":1,\"id\":3,\"req\":\"ping\"}}").unwrap();
+    reply.clear();
+    BufReader::new(stream.try_clone().unwrap())
+        .read_line(&mut reply)
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&reply).unwrap()["ev"],
+        "pong"
+    );
+    drop(stream);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while bridge.0.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "drained bridge did not exit");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        api.exists(),
+        "drained predecessor removed its successor's socket"
+    );
     stop.store(true, Ordering::Relaxed);
     daemon.join().unwrap();
 }

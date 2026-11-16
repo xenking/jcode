@@ -136,6 +136,54 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn bundle_handshake_requires_path_build_capabilities_and_socket_peer() {
+        for mismatch in ["none", "path", "hash", "capabilities", "pid", "protocol"] {
+            let root = tempfile::tempdir().unwrap();
+            let api = root.path().join("api.sock");
+            let mut target = generation::pin_path(&std::env::current_exe().unwrap()).unwrap();
+            target.git_hash = Some("abcdef123".into());
+            let mut identity = generation::ServingIdentity {
+                pid: std::process::id(),
+                binary_path: target.binary_path.clone(),
+                git_hash: "abcdef123".into(),
+                version_label: None,
+                reload_id: None,
+                generation: 1,
+            };
+            match mismatch {
+                "path" => identity.binary_path = root.path().join("old-bundle/jcode"),
+                "hash" => identity.git_hash = "987654321".into(),
+                "pid" => identity.pid += 1,
+                _ => {}
+            }
+            let caps = if mismatch == "capabilities" {
+                &[][..]
+            } else {
+                BUNDLE_BRIDGE_CAPABILITIES
+            };
+            let response = serde_json::json!({"v":1,"reply_to":1,"ev":"hello_ok",
+                "version": if mismatch == "protocol" { 2 } else { 1 }, "server":"fixture",
+                "runtime_identity":identity,"capabilities":caps});
+            let listener = std::os::unix::net::UnixListener::bind(&api).unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut request = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut request)
+                    .unwrap();
+                writeln!(stream, "{response}").unwrap();
+            });
+            let result = verify_bundle_bridge(&api, &target, Duration::from_secs(1));
+            assert_eq!(result.is_ok(), mismatch == "none", "{mismatch}: {result:?}");
+            server.join().unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn changed_peer_is_not_sent_a_retirement_request() {
         let root = tempfile::tempdir().unwrap();
         let api = root.path().join("api.sock");
