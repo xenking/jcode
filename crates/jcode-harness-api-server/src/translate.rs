@@ -2775,6 +2775,7 @@ impl BridgeState {
                             .as_str()
                             .unwrap_or("Compaction failed")
                             .to_string(),
+                        detail: None,
                         done: true,
                     })];
                 }

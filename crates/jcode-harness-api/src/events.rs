@@ -370,6 +370,9 @@ pub enum ApiEvent {
         percent: Option<f32>,
         /// One-line status, e.g. `42% · Running tests`.
         summary: String,
+        /// The completion notification, including its bounded output preview.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
         /// The task ended: clients should retire its bar.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         done: bool,
