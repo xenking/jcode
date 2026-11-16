@@ -3,6 +3,7 @@
 //! Uses newline-delimited JSON over Unix socket.
 //! Server streams events back to clients during message processing.
 //! Session images can be listed and fetched by stable identity.
+//! Queued skill delivery is negotiated by the queued_prompt_active_skill capability.
 //!
 //! Socket types:
 //! - Main socket: TUI/client communication with agent
