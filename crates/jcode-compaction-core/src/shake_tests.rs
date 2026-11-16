@@ -217,7 +217,7 @@ fn defaults_match_omp_auto_shake() {
     assert_eq!(config.protect_window_tokens, 16_000);
     assert_eq!(config.min_savings_tokens, 4_000);
     assert_eq!(config.min_elidable_tokens, 400);
-    assert_eq!(config.code_blocks, true);
+    assert!(config.code_blocks);
     assert_eq!(config.protected_tools, PROTECTED_TOOLS_DEFAULT);
 }
 
