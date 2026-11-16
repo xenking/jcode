@@ -37,6 +37,8 @@ impl AutoResetDecision {
 const FULL: f32 = 0.995;
 
 /// Latest reset among fully used windows: the account is blocked until then.
+/// Malformed optional dates are unknown, not a zero-length wait. `decide`
+/// explicitly handles a blocked account without a known reset time.
 pub fn blocked_until(windows: &[(f32, Option<String>)]) -> Option<DateTime<Utc>> {
     windows
         .iter()

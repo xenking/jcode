@@ -871,6 +871,8 @@ pub fn compaction_divider_content(
     summary: Option<&str>,
     idle: bool,
 ) -> String {
+    // String writes cannot fail, and these format arguments are only built-in
+    // strings and integers, whose Display implementations cannot return Err.
     use std::fmt::Write as _;
     let method = method.unwrap_or("summary");
     let mut parts: Vec<String> = Vec::new();

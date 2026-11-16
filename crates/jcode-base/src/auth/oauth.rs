@@ -601,7 +601,10 @@ pub async fn start_openai_device_login_at(base: &str) -> Result<OpenAiDeviceCode
         .await?;
     let status = resp.status();
     if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
+        let text = resp
+            .text()
+            .await
+            .unwrap_or_else(|error| format!("<response body unavailable: {error}>"));
         if status.as_u16() == 404 {
             anyhow::bail!(
                 "OpenAI device-code login is not enabled for this account. Turn on device code authorization in ChatGPT security settings, then try again."
@@ -610,6 +613,8 @@ pub async fn start_openai_device_login_at(base: &str) -> Result<OpenAiDeviceCode
         anyhow::bail!("OpenAI device-code request failed ({status}): {text}");
     }
     let body: UserCodeResponse = resp.json().await?;
+    // Timing hints are optional. Missing or malformed hints use bounded
+    // defaults, without discarding the required device authorization identity.
     // The server sends `interval` as a string ("5"); accept a number too.
     let interval = match body.interval {
         Some(serde_json::Value::Number(n)) => n.as_u64(),
@@ -659,7 +664,10 @@ pub async fn poll_openai_device_login_at(
         return Ok(None);
     }
     if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
+        let text = resp
+            .text()
+            .await
+            .unwrap_or_else(|error| format!("<response body unavailable: {error}>"));
         anyhow::bail!("OpenAI device-code login failed ({status}): {text}");
     }
     let body: TokenResponse = resp.json().await?;

@@ -971,11 +971,22 @@ impl MemoryManager {
 
         let sidecar = crate::session::Session::load_startup_stub(session_id)
             .map(|session| Sidecar::for_session(&session))
-            .unwrap_or_else(|_| Sidecar::new());
+            .unwrap_or_else(|error| {
+                crate::logging::warn(&format!(
+                    "Memory extraction session metadata unavailable: {error:#}"
+                ));
+                Sidecar::new()
+            });
         let extracted = sidecar.extract_memories(transcript).await?;
 
         let client = if crate::config::config().agents.memory_auto_recall {
-            crate::jev::JevClient::new().ok()
+            crate::jev::JevClient::new()
+                .inspect_err(|error| {
+                    crate::logging::warn(&format!(
+                        "Memory decision client unavailable, using local deduplication: {error:#}"
+                    ));
+                })
+                .ok()
         } else {
             None
         };

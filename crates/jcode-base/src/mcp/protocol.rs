@@ -145,6 +145,8 @@ pub struct DiscoverResult {
 
 impl DiscoverResult {
     pub fn server_info(&self) -> Option<ServerInfo> {
+        // Optional display metadata is not a capability or protocol identity.
+        // A malformed advisory name must not reject otherwise valid discovery.
         self.meta
             .as_ref()
             .and_then(|meta| meta.get("io.modelcontextprotocol/serverInfo"))

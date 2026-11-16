@@ -81,6 +81,11 @@ pub fn cached_account_banked_resets(
                 })
                 .or_else(|| {
                     let account = crate::auth::claude::list_accounts()
+                        .inspect_err(|error| {
+                            crate::logging::debug(&format!(
+                                "Cached banked-reset account unavailable: {error:#}"
+                            ));
+                        })
                         .ok()?
                         .into_iter()
                         .find(|a| a.label == label)?;

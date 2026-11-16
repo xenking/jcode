@@ -71,6 +71,7 @@ pub fn cached_account_usage_snapshot(
 /// Read fresh account-scoped usage, including failed probes for status indicators.
 /// A failed probe must not be interpreted as zero usage or an exhausted quota.
 /// Like the quota-only accessor, this never probes or blocks the render thread.
+/// A contended or poisoned cache yields unknown, never zero or usable quota.
 pub fn cached_account_usage_status_snapshot(
     provider: super::MultiAccountProviderKind,
     label: &str,

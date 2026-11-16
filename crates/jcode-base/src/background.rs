@@ -866,19 +866,33 @@ impl BackgroundTaskManager {
     /// extension, so an unparseable status file is included.
     pub async fn sweep(&self) -> usize {
         let dir = self.output_dir.clone();
-        let paths = tokio::task::spawn_blocking(move || {
-            std::fs::read_dir(dir)
-                .map(|entries| {
-                    entries
-                        .flatten()
-                        .map(|entry| entry.path())
-                        .filter(|path| path.extension().is_some_and(|e| e == "json"))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
+        let scan = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<PathBuf>> {
+            let entries = match std::fs::read_dir(dir) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+                Err(error) => return Err(error),
+            };
+            let mut paths = Vec::new();
+            for entry in entries {
+                let path = entry?.path();
+                if path.extension().is_some_and(|e| e == "json") {
+                    paths.push(path);
+                }
+            }
+            Ok(paths)
         })
-        .await
-        .unwrap_or_default();
+        .await;
+        let paths = match scan {
+            Ok(Ok(paths)) => paths,
+            Ok(Err(error)) => {
+                crate::logging::warn(&format!("Cannot scan background tasks: {error}"));
+                return 0;
+            }
+            Err(error) => {
+                crate::logging::warn(&format!("Background task scan failed: {error}"));
+                return 0;
+            }
+        };
 
         let pending: Vec<PathBuf> = {
             let mut settled = self.settled.lock().await;

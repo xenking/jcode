@@ -64,19 +64,37 @@ fn read_report(
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
+    .inspect_err(|error| crate::logging::debug(&format!("OMP usage cache unavailable: {error}")))
     .ok()?;
     db.busy_timeout(std::time::Duration::from_millis(100))
+        .inspect_err(|error| {
+            crate::logging::debug(&format!("OMP cache timeout unavailable: {error}"))
+        })
         .ok()?;
-    let mut stmt = db.prepare("SELECT value, expires_at FROM cache WHERE key LIKE 'usage_cache:report:%:anthropic:%' AND expires_at > ?1 ORDER BY expires_at DESC LIMIT 100").ok()?;
+    let mut stmt = db.prepare("SELECT value, expires_at FROM cache WHERE key LIKE 'usage_cache:report:%:anthropic:%' AND expires_at > ?1 ORDER BY expires_at DESC LIMIT 100")
+        .inspect_err(|error| crate::logging::debug(&format!("OMP usage query unavailable: {error}")))
+        .ok()?;
     let rows = stmt
         .query_map([now / 1000], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })
+        .inspect_err(|error| crate::logging::debug(&format!("OMP usage read failed: {error}")))
         .ok()?;
     let mut best: Option<(serde_json::Value, i64)> = None;
-    for (raw, _) in rows.flatten() {
-        let Ok(report) = serde_json::from_str::<serde_json::Value>(&raw) else {
-            continue;
+    for row in rows {
+        let (raw, _) = match row {
+            Ok(row) => row,
+            Err(error) => {
+                crate::logging::debug(&format!("OMP usage row unavailable: {error}"));
+                continue;
+            }
+        };
+        let report = match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(report) => report,
+            Err(error) => {
+                crate::logging::debug(&format!("OMP usage report invalid: {error}"));
+                continue;
+            }
         };
         let Some(fetched) = report.pointer("/value/fetchedAt").and_then(|v| v.as_i64()) else {
             continue;
@@ -127,12 +145,22 @@ pub(super) async fn import_for_account(token: &str, key: &str) {
         .timeout(std::time::Duration::from_secs(5))
         .send()
         .await;
-    let Ok(response) = response else { return };
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            crate::logging::debug(&format!("OMP profile verification unavailable: {error}"));
+            return;
+        }
+    };
     if !response.status().is_success() {
         return;
     }
-    let Ok(profile) = response.json::<serde_json::Value>().await else {
-        return;
+    let profile = match response.json::<serde_json::Value>().await {
+        Ok(profile) => profile,
+        Err(error) => {
+            crate::logging::debug(&format!("OMP profile verification invalid: {error}"));
+            return;
+        }
     };
     let Some(account) = profile
         .pointer("/account/uuid")
@@ -151,8 +179,12 @@ pub(super) async fn import_for_account(token: &str, key: &str) {
     let (account, org) = (account.to_owned(), org.to_owned());
     let now = chrono::Utc::now().timestamp_millis();
     let result = tokio::task::spawn_blocking(move || read_report(&path, &account, &org, now)).await;
-    if let Ok(Some((status, fetched))) = result {
-        super::disk_cache::store_imported_reset_status(key, token, status, fetched);
+    match result {
+        Ok(Some((status, fetched))) => {
+            super::disk_cache::store_imported_reset_status(key, token, status, fetched);
+        }
+        Ok(None) => {} // No verified advisory balance, never a zero balance.
+        Err(error) => crate::logging::warn(&format!("OMP usage import task failed: {error}")),
     }
 }
 

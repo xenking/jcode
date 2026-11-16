@@ -509,7 +509,9 @@ fn bounded_tool_input(input: &serde_json::Value) -> serde_json::Value {
     }
     let mut preview = Preview(Vec::new());
     if serde_json::to_writer(&mut preview, input).is_ok() {
-        serde_json::from_slice(&preview.0).unwrap_or_default()
+        // Serialization proved this value fits the wire budget. Keep the
+        // original value instead of parsing our own JSON back through a fallback.
+        input.clone()
     } else {
         serde_json::Value::String(format!(
             "{}\n… (truncated)",
@@ -590,7 +592,13 @@ fn structured_tools(
     // Backend limits are UTF-16 code units for prose and 256 KiB serialized
     // metadata. Reserve room for the JSON property names/envelope.
     if prose.text.encode_utf16().count() > 200_000
-        || serde_json::to_vec(&(&calls, &results)).ok()?.len() > MAX_STRUCTURED_BYTES
+        || serde_json::to_vec(&(&calls, &results))
+            .inspect_err(|error| {
+                crate::logging::warn(&format!("Mobile tool metadata unavailable: {error}"));
+            })
+            .ok()?
+            .len()
+            > MAX_STRUCTURED_BYTES
     {
         return None;
     }
