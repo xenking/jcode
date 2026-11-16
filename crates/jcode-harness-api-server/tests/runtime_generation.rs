@@ -20,6 +20,57 @@ impl Drop for Bridge {
 }
 
 #[test]
+fn missing_inherited_target_never_publishes_a_bridge_listener() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let missing = sandbox.path().join("removed-target");
+    std::fs::write(&missing, b"original target").unwrap();
+    let target = generation::pin_path(&missing).unwrap();
+    std::fs::remove_file(&missing).unwrap();
+    let api = sandbox.path().join("api.sock");
+    let legacy = sandbox.path().join("daemon.sock");
+    let mut bridge = Bridge(
+        Command::new(env!("CARGO_BIN_EXE_jcode-harness-api-bridge"))
+            .args([api.as_os_str(), legacy.as_os_str()])
+            .env("HOME", sandbox.path())
+            .env("JCODE_HOME", sandbox.path())
+            .env("JCODE_RUNTIME_DIR", sandbox.path())
+            .env(
+                generation::TARGET_ENV,
+                serde_json::to_string(&target).unwrap(),
+            )
+            .env_remove(generation::RELOAD_ID_ENV)
+            .env_remove(generation::GENERATION_ENV)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        assert!(
+            !api.exists(),
+            "bridge published a listener with an invalid immutable target"
+        );
+        if let Some(status) = bridge.0.try_wait().unwrap() {
+            assert!(
+                !status.success(),
+                "missing requested target must be an explicit startup error"
+            );
+            let mut stderr = String::new();
+            std::io::Read::read_to_string(&mut bridge.0.stderr.take().unwrap(), &mut stderr)
+                .unwrap();
+            assert!(stderr.contains("target is missing"), "{stderr}");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "bridge did not reject its missing target"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
 fn isolated_bridge_reports_its_pinned_bundle_not_a_previous_bridge() {
     let sandbox = tempfile::tempdir().unwrap();
     let api = sandbox.path().join("api.sock");

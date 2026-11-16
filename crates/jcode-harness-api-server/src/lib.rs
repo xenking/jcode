@@ -218,6 +218,8 @@ pub(crate) fn single_instance_lock(api_socket: &std::path::Path) -> Result<Optio
 }
 
 pub async fn run_bridge(api_socket: PathBuf, legacy_socket: PathBuf) -> Result<()> {
+    jcode_build_support::runtime_generation::serving_identity(jcode_build_meta::git_hash())
+        .context("capture API bridge generation before publishing its listener")?;
     // Only one bridge may own the socket.
     //
     // This is the fix for clients seeing "disconnected: harness API stream
@@ -305,6 +307,8 @@ async fn handle_api_client(stream: Stream, legacy_socket: PathBuf) -> Result<()>
 /// while SSH still holds stdin open. This entrypoint is for a CLI process only.
 #[cfg(unix)]
 pub async fn run_bridge_stdio(legacy_socket: PathBuf) -> Result<()> {
+    jcode_build_support::runtime_generation::serving_identity(jcode_build_meta::git_hash())
+        .context("capture stdio bridge generation before accepting input")?;
     drop(search_index::warm_on_start());
     let (input, mut writer) = std::os::unix::net::UnixStream::pair()?;
     input.set_nonblocking(true)?;
@@ -329,6 +333,9 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
+    let runtime_identity =
+        jcode_build_support::runtime_generation::serving_identity(jcode_build_meta::git_hash())
+            .context("capture API bridge serving generation")?;
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
     let mut pending = timing::Pending::default();
@@ -401,10 +408,7 @@ where
     let hello_ok = ServerFrame::reply(
         reply_to,
         ApiEvent::HelloOk {
-            runtime_identity: jcode_build_support::runtime_generation::serving_identity(
-                jcode_build_meta::git_hash(),
-            )
-            .ok(),
+            runtime_identity: Some(runtime_identity),
             version: API_VERSION_MAJOR,
             server: format!("jcode-harness-api-bridge/{}", env!("CARGO_PKG_VERSION")),
             capabilities: [
