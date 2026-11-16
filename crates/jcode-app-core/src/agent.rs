@@ -954,6 +954,18 @@ impl Agent {
         }
     }
 
+    fn set_queued_active_skill(&mut self, active_skill: Option<String>) -> bool {
+        let Some(name) = active_skill else {
+            return true;
+        };
+        if self.current_skills_snapshot().get(&name).is_none() {
+            return false;
+        }
+        self.session.pinned_skill = Some(name.clone());
+        self.active_skill = Some(name);
+        self.announce_active_skill_inner()
+    }
+
     fn active_skill_announcement(&self) -> Option<String> {
         let name = self.active_skill.as_deref()?;
         let skills = self.current_skills_snapshot();
@@ -979,8 +991,14 @@ impl Agent {
     /// Record the newly active skill's instructions as a hidden transcript
     /// message. The system prompt stays byte-identical across skill changes.
     pub(crate) fn announce_active_skill(&mut self) {
+        if self.announce_active_skill_inner() {
+            self.persist_session_best_effort("active skill announcement");
+        }
+    }
+
+    fn announce_active_skill_inner(&mut self) -> bool {
         let Some(text) = self.active_skill_announcement() else {
-            return;
+            return false;
         };
         self.add_message_with_display_role(
             Role::User,
@@ -990,7 +1008,7 @@ impl Agent {
             }],
             Some(StoredDisplayRole::System),
         );
-        self.persist_session_best_effort("active skill announcement");
+        true
     }
 
     fn sync_session_compaction_state_from_manager(

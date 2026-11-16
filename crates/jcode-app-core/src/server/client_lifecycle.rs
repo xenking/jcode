@@ -1249,13 +1249,31 @@ pub(super) async fn handle_client(
             let mut already_delivered = None;
             let mut removal = None;
             let (id, result) = match request {
-                Request::QueuePrompt { id, client_id, content, images, mode, system_reminder } => {
+                Request::QueuePrompt { id, client_id, content, images, mode, system_reminder, active_skill } => {
+                    if let Some(name) = active_skill.as_deref() {
+                        let working_dir = crate::session::Session::load(&client_session_id)
+                            .ok().and_then(|session| session.working_dir.clone())
+                            .unwrap_or_else(|| initial_working_dir.clone());
+                        let skills = registry.skills();
+                        let global = skills.read().await;
+                        let effective = crate::skill::SkillRegistry::effective_for_working_dir(
+                            &global, Some(std::path::Path::new(&working_dir)),
+                        );
+                        if effective.get(name).is_none() {
+                            let _ = client_event_tx.send(ServerEvent::QueuedPromptRejected {
+                                id,
+                                reason: crate::protocol::QueuedPromptRejection::UnknownSkill,
+                                skill: name.to_owned(),
+                            });
+                            continue;
+                        }
+                    }
                     let mode = match mode {
                         crate::protocol::QueuedPromptMode::Steer => jcode_agent_runtime::QueuedMessageMode::Steer,
                         crate::protocol::QueuedPromptMode::AfterYield => jcode_agent_runtime::QueuedMessageMode::AfterYield,
                     };
                     dispatch_if_idle = true;
-                    let result = session_control.enqueue_user_prompt(client_id.clone(), content.clone(), images, mode, system_reminder).map(|delivered| {
+                    let result = session_control.enqueue_user_prompt_with_skill(client_id.clone(), content.clone(), images, mode, system_reminder, active_skill).map(|delivered| {
                         if delivered { already_delivered = Some((client_id, content)); }
                     });
                     (id, result)

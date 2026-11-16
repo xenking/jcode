@@ -8,6 +8,18 @@ async fn interrupt_queued_batch_delivers_one_turn_promptly() {
     use serde_json::json;
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
+    for (name, body) in [
+        ("batch-one", "First skill instructions"),
+        ("batch-two", "Second skill instructions"),
+    ] {
+        let dir = home._home.path().join(".jcode/skills").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: test\n---\n\n{body}\n"),
+        )
+        .unwrap();
+    }
     let provider = TerminalSocketProvider::default();
     provider.long_tool.store(true, Ordering::SeqCst);
     let socket = home._runtime.path().join("batch-interrupt.sock");
@@ -66,8 +78,11 @@ async fn interrupt_queued_batch_delivers_one_turn_promptly() {
         |e| matches!(e, ServerEvent::ToolStart { name, .. } if name == "bash"),
     )
     .await;
-    for (id, client_id, content) in [(3, "a", "first queued"), (4, "b", "second queued")] {
-        send(&mut writer, json!({"type":"queue_prompt","id":id,"client_id":client_id,"content":content,"mode":"after_yield"})).await;
+    for (id, client_id, content, skill) in [
+        (3, "a", "first queued", "batch-one"),
+        (4, "b", "second queued", "batch-two"),
+    ] {
+        send(&mut writer, json!({"type":"queue_prompt","id":id,"client_id":client_id,"content":content,"mode":"after_yield","active_skill":skill})).await;
         until(
             &mut reader,
             |e| matches!(e, ServerEvent::Ack { id: n } if *n == id),
@@ -104,10 +119,36 @@ async fn interrupt_queued_batch_delivers_one_turn_promptly() {
     .expect("batch turn was not started promptly");
     let messages = provider.messages.lock().unwrap().clone();
     assert_eq!(messages.len(), 2, "{messages:?}");
-    let joined = messages[1].join("\n");
+    let journal = crate::session::Session::load(&session_id).unwrap();
+    let contents: Vec<_> = journal
+        .messages
+        .iter()
+        .map(|message| {
+            (
+                message.display_role.clone(),
+                format!("{:?}", message.content),
+            )
+        })
+        .collect();
+    let first = contents
+        .iter()
+        .position(|(role, text)| {
+            *role == Some(crate::session::StoredDisplayRole::System)
+                && text.contains("First skill instructions")
+        })
+        .unwrap();
     assert!(
-        joined.contains("first queued\n\nsecond queued"),
-        "{joined:?}"
+        contents[first + 1].1.contains("first queued"),
+        "{contents:?}"
+    );
+    assert!(
+        contents[first + 2].0 == Some(crate::session::StoredDisplayRole::System)
+            && contents[first + 2].1.contains("Second skill instructions"),
+        "{contents:?}"
+    );
+    assert!(
+        contents[first + 3].1.contains("second queued"),
+        "{contents:?}"
     );
     drop(writer);
     drop(reader);
@@ -124,6 +165,15 @@ async fn queue_mutations_survive_daemon_restart_over_socket() {
     use serde_json::json;
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
+    for name in ["mutation-b", "mutation-c"] {
+        let dir = home._home.path().join(".jcode/skills").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: test\n---\n\nInstructions.\n"),
+        )
+        .unwrap();
+    }
     async fn send(writer: &mut crate::transport::WriteHalf, value: serde_json::Value) {
         writer
             .write_all(format!("{value}\n").as_bytes())
@@ -186,8 +236,12 @@ async fn queue_mutations_survive_daemon_restart_over_socket() {
         matches!(e, ServerEvent::Done { id: 20 })
     })
     .await;
-    for (id, prompt) in [(3, "a"), (4, "b"), (5, "c")] {
-        send(&mut writer, json!({"type":"queue_prompt","id":id,"client_id":prompt,"content":prompt,"mode":"after_yield"})).await;
+    for (id, prompt, skill) in [
+        (3, "a", None),
+        (4, "b", Some("mutation-b")),
+        (5, "c", Some("mutation-c")),
+    ] {
+        send(&mut writer, json!({"type":"queue_prompt","id":id,"client_id":prompt,"content":prompt,"mode":"after_yield","active_skill":skill})).await;
         until(
             &mut reader,
             |e| matches!(e, ServerEvent::Ack { id: n } if *n == id),
@@ -272,6 +326,13 @@ async fn queue_mutations_survive_daemon_restart_over_socket() {
             .map(|p| p.client_id.as_str())
             .collect::<Vec<_>>(),
         vec!["c", "b"]
+    );
+    assert_eq!(
+        prompts
+            .iter()
+            .map(|p| p.active_skill.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("mutation-c"), Some("mutation-b")]
     );
     drop(writer);
     drop(reader);
@@ -509,7 +570,11 @@ async fn daemon_restart_restores_and_delivers_pending_prompt_once() {
     let home = IsolatedReloadRecoveryEnv::new();
     let skill_dir = home._home.path().join(".jcode/skills/queued-test");
     std::fs::create_dir_all(&skill_dir).unwrap();
-    std::fs::write(skill_dir.join("SKILL.md"), "---\nname: queued-test\ndescription: test\n---\n\nQueued skill instructions.\n").unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: queued-test\ndescription: test\n---\n\nQueued skill instructions.\n",
+    )
+    .unwrap();
     let provider = TerminalSocketProvider::default();
     let socket = home._runtime.path().join("restart-1.sock");
     let server = crate::server::Server::new_with_paths(
@@ -562,6 +627,18 @@ async fn daemon_restart_restores_and_delivers_pending_prompt_once() {
     tokio::time::timeout(Duration::from_secs(5), provider.first_started.notified())
         .await
         .unwrap();
+    send(&mut writer, json!({"type":"queue_prompt","id":30,"client_id":"unknown","content":"must not send","mode":"after_yield","active_skill":"no-such-queued-skill"})).await;
+    until(&mut reader, |e| {
+        matches!(
+            e,
+            ServerEvent::QueuedPromptRejected {
+                id: 30,
+                reason: crate::protocol::QueuedPromptRejection::UnknownSkill,
+                ..
+            }
+        )
+    })
+    .await;
     send(&mut writer, json!({"type":"queue_prompt","id":3,"client_id":"restart-prompt","content":"survive restart","mode":"after_yield","system_reminder":"persistent collection instructions","active_skill":"queued-test"})).await;
     until(&mut reader, |e| matches!(e, ServerEvent::Ack { id: 3 })).await;
     drop(writer);
@@ -625,7 +702,26 @@ async fn daemon_restart_restores_and_delivers_pending_prompt_once() {
     .await
     .expect("restored prompt not delivered");
     let messages = provider2.messages.lock().unwrap().clone();
-    assert!(messages[0].iter().any(|message| message.contains("# Active Skill") && message.contains("Queued skill instructions")), "lost skill on restart: {messages:?}");
+    let journal = crate::session::Session::load(&session_id).unwrap();
+    let skill_index = journal
+        .messages
+        .iter()
+        .position(|message| {
+            message.display_role == Some(crate::session::StoredDisplayRole::System)
+                && format!("{:?}", message.content).contains("Queued skill instructions")
+        })
+        .expect("missing skill system entry");
+    assert!(
+        format!("{:?}", journal.messages[skill_index + 1].content).contains("survive restart"),
+        "skill should precede queued user text"
+    );
+    assert!(
+        messages[0]
+            .iter()
+            .any(|message| message.contains("# Active Skill")
+                && message.contains("Queued skill instructions")),
+        "lost skill on restart: {messages:?}"
+    );
     assert!(
         messages[0]
             .iter()
@@ -656,6 +752,13 @@ async fn daemon_listener_delivers_all_queue_modes_once() {
     use serde_json::json;
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
+    let skill_dir = home._home.path().join(".jcode/skills/modes-test");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: modes-test\ndescription: test\n---\n\nModes skill instructions.\n",
+    )
+    .unwrap();
     for mode in ["after_yield", "steer", "interrupt"] {
         let provider = TerminalSocketProvider::default();
         provider.steer_tool.store(mode == "steer", Ordering::SeqCst);
@@ -713,7 +816,7 @@ async fn daemon_listener_delivers_all_queue_modes_once() {
         } else {
             "after_yield"
         };
-        let request = json!({"type":"queue_prompt","id":3,"client_id":format!("{mode}-one"),"content":"follow-up","mode":queue_mode});
+        let request = json!({"type":"queue_prompt","id":3,"client_id":format!("{mode}-one"),"content":"follow-up","mode":queue_mode,"active_skill":"modes-test"});
         send(&mut writer, request.clone()).await;
         until(&mut reader, |e| matches!(e, ServerEvent::Ack { id: 3 })).await;
         send(&mut writer, request).await;
@@ -770,6 +873,26 @@ async fn daemon_listener_delivers_all_queue_modes_once() {
                 .count(),
             1,
             "{mode}: {messages:?}"
+        );
+        assert!(
+            messages[1]
+                .iter()
+                .any(|s| s.contains("Modes skill instructions")),
+            "{mode}: {messages:?}"
+        );
+        let session_id = server.sessions.read().await.keys().next().unwrap().clone();
+        let journal = crate::session::Session::load(&session_id).unwrap();
+        let skill = journal
+            .messages
+            .iter()
+            .position(|m| {
+                m.display_role == Some(crate::session::StoredDisplayRole::System)
+                    && format!("{:?}", m.content).contains("Modes skill instructions")
+            })
+            .expect("skill entry");
+        assert!(
+            format!("{:?}", journal.messages[skill + 1].content).contains("follow-up"),
+            "{mode}"
         );
         drop(writer);
         drop(reader);

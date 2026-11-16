@@ -840,6 +840,7 @@ async fn steering_recovery_filters_committed_ids_after_crash_window() {
     ]
     .into_iter()
     .map(|(id, mode)| SoftInterruptMessage {
+        active_skill: None,
         system_reminder: None,
         content: id.into(),
         images: vec![],
@@ -885,6 +886,7 @@ async fn steering_injection_preserves_after_yield_messages_in_order() {
         ("later two", QueuedMessageMode::AfterYield),
     ] {
         queue.lock().unwrap().push(SoftInterruptMessage {
+            active_skill: None,
             system_reminder: None,
             content: content.into(),
             images: vec![],

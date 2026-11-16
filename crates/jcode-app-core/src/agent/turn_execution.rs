@@ -216,19 +216,70 @@ impl Agent {
         self.emit_context_messages_since(announcement_start, &event_tx);
         let input_start = self.session.messages.len();
         if !resuming_ask {
+            let queued_items = queued_client_id
+                .as_ref()
+                .map(|ids| {
+                    let queue = self
+                        .soft_interrupt_queue
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    ids.iter()
+                        .filter_map(|id| {
+                            queue
+                                .iter()
+                                .find(|item| item.client_id.as_ref() == Some(id))
+                                .cloned()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let has_queued_skills = queued_items.iter().any(|item| item.active_skill.is_some());
             let session_id = self.session.id.clone();
             if !crate::server::reload_recovery::admit_input(
                 &session_id,
                 lease.identity(),
                 queued_client_id.as_deref(),
                 || {
-                    self.append_user_context_message_with_display_role(
-                        &user_message,
-                        images,
-                        display_role,
-                        continues_turn,
-                        queued_client_id.as_deref(),
-                    )
+                    if has_queued_skills {
+                        let previous_count = self.session.messages.len();
+                        let previous_skill = self.active_skill.clone();
+                        let previous_pinned_skill = self.session.pinned_skill.clone();
+                        let result = (|| {
+                            for item in queued_items {
+                                if let Some(skill) = item.active_skill {
+                                    anyhow::ensure!(
+                                        self.set_queued_active_skill(Some(skill)),
+                                        "Queued skill no longer installed"
+                                    );
+                                } else {
+                                    self.set_queued_active_skill(None);
+                                }
+                                let ids: Vec<String> = item.client_id.into_iter().collect();
+                                self.append_user_context_message_unpersisted(
+                                    &item.content,
+                                    item.images,
+                                    display_role,
+                                    continues_turn,
+                                    Some(&ids),
+                                )?;
+                            }
+                            self.session.save()
+                        })();
+                        if result.is_err() {
+                            self.session.truncate_messages(previous_count);
+                            self.active_skill = previous_skill;
+                            self.session.pinned_skill = previous_pinned_skill;
+                        }
+                        result
+                    } else {
+                        self.append_user_context_message_with_display_role(
+                            &user_message,
+                            images,
+                            display_role,
+                            continues_turn,
+                            queued_client_id.as_deref(),
+                        )
+                    }
                 },
             )? {
                 return Ok(());
@@ -447,6 +498,24 @@ impl Agent {
         continues_turn: bool,
         queued_client_id: Option<&[String]>,
     ) -> Result<()> {
+        self.append_user_context_message_unpersisted(
+            user_message,
+            images,
+            display_role,
+            continues_turn,
+            queued_client_id,
+        )?;
+        self.session.save()
+    }
+
+    fn append_user_context_message_unpersisted(
+        &mut self,
+        user_message: &str,
+        images: Vec<(String, String)>,
+        display_role: Option<crate::session::StoredDisplayRole>,
+        continues_turn: bool,
+        queued_client_id: Option<&[String]>,
+    ) -> Result<()> {
         let mut blocks: Vec<ContentBlock> = images
             .into_iter()
             .map(|(media_type, data)| ContentBlock::Image { media_type, data })
@@ -480,7 +549,7 @@ impl Agent {
         if starts_turn {
             self.begin_model_usage_turn(&input_id);
         }
-        self.session.save()
+        Ok(())
     }
 
     /// Fire the `turn_start` observer hook when a turn begins, before the model

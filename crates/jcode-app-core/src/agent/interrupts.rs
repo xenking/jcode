@@ -195,6 +195,7 @@ impl Agent {
         if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
             let pending_before = queue.len();
             queue.push(SoftInterruptMessage {
+                active_skill: None,
                 system_reminder: None,
                 content,
                 images,
@@ -436,6 +437,8 @@ impl Agent {
         };
         let previous_queue = queue.clone();
         let initial_message_count = self.session.messages.len();
+        let initial_active_skill = self.active_skill.clone();
+        let initial_pinned_skill = self.session.pinned_skill.clone();
         let messages: Vec<SoftInterruptMessage> = {
             if queue.is_empty() {
                 return Vec::new();
@@ -450,9 +453,13 @@ impl Agent {
                     .map(|message| message.content.len())
                     .sum::<usize>()
             ));
-            let (steering, waiting): (Vec<_>, Vec<_>) = queue
-                .drain(..)
-                .partition(|message| message.mode == jcode_agent_runtime::QueuedMessageMode::Steer);
+            let (steering, waiting): (Vec<_>, Vec<_>) = queue.drain(..).partition(|message| {
+                message.mode == jcode_agent_runtime::QueuedMessageMode::Steer
+                    && message
+                        .active_skill
+                        .as_ref()
+                        .is_none_or(|name| self.current_skills_snapshot().get(name).is_some())
+            });
             *queue = waiting;
             steering
         };
@@ -507,6 +514,25 @@ impl Agent {
         };
 
         for message in messages {
+            let has_skill = message.active_skill.is_some();
+            if let Some(skill) = message.active_skill.clone() {
+                if let Some(source) = current_source.take() {
+                    flush_group(
+                        self,
+                        &mut injected,
+                        source,
+                        &mut current_parts,
+                        &mut current_images,
+                        &mut current_ids,
+                    );
+                }
+                let previous_skill = self.active_skill.clone();
+                if !self.set_queued_active_skill(Some(skill)) {
+                    self.active_skill = previous_skill;
+                    queue.push(message);
+                    continue;
+                }
+            }
             // User follow-ups may share a model message. Notifications must
             // retain their own delivery events and transcript entries.
             match current_source {
@@ -532,6 +558,17 @@ impl Agent {
             current_parts.push(message.content);
             current_images.extend(message.images);
             current_ids.extend(message.client_id);
+            if has_skill {
+                flush_group(
+                    self,
+                    &mut injected,
+                    message.source,
+                    &mut current_parts,
+                    &mut current_images,
+                    &mut current_ids,
+                );
+                current_source = None;
+            }
         }
 
         if let Some(source) = current_source {
@@ -547,6 +584,8 @@ impl Agent {
 
         if let Err(err) = self.session.save() {
             self.session.truncate_messages(initial_message_count);
+            self.active_skill = initial_active_skill;
+            self.session.pinned_skill = initial_pinned_skill;
             *queue = previous_queue;
             logging::warn(&format!(
                 "Failed to persist soft interrupt injection for {}: {}",

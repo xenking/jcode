@@ -704,6 +704,7 @@ pub(super) fn enqueue_soft_interrupt_with_id(
     if let Ok(mut pending) = queue.lock() {
         let pending_before = pending.len();
         pending.push(SoftInterruptMessage {
+            active_skill: None,
             system_reminder: None,
             content,
             images,
@@ -859,6 +860,7 @@ impl SessionControlHandle {
 
     /// Accept a prompt under the same lock as steering injection. Persist
     /// before acknowledging it, and make retries with the same id idempotent.
+    #[cfg(test)]
     pub(super) fn enqueue_user_prompt(
         &self,
         client_id: String,
@@ -866,6 +868,18 @@ impl SessionControlHandle {
         images: Vec<(String, String)>,
         mode: jcode_agent_runtime::QueuedMessageMode,
         system_reminder: Option<String>,
+    ) -> anyhow::Result<bool> {
+        self.enqueue_user_prompt_with_skill(client_id, content, images, mode, system_reminder, None)
+    }
+
+    pub(super) fn enqueue_user_prompt_with_skill(
+        &self,
+        client_id: String,
+        content: String,
+        images: Vec<(String, String)>,
+        mode: jcode_agent_runtime::QueuedMessageMode,
+        system_reminder: Option<String>,
+        active_skill: Option<String>,
     ) -> anyhow::Result<bool> {
         anyhow::ensure!(
             self.queue_available,
@@ -895,6 +909,8 @@ impl SessionControlHandle {
             anyhow::ensure!(
                 existing.content == content
                     && existing.images == images
+                    && existing.active_skill == active_skill
+                    && existing.system_reminder == system_reminder
                     && (existing.mode == mode
                         || existing.mode == jcode_agent_runtime::QueuedMessageMode::InFlight),
                 "client_id already belongs to another prompt"
@@ -919,6 +935,7 @@ impl SessionControlHandle {
             return Ok(true);
         }
         queue.push(SoftInterruptMessage {
+            active_skill,
             system_reminder,
             content,
             images,
@@ -960,6 +977,7 @@ impl SessionControlHandle {
                     client_id: message.client_id.clone()?,
                     content: message.content.clone(),
                     images: message.images.clone(),
+                    active_skill: message.active_skill.clone(),
                     mode: match message.mode {
                         jcode_agent_runtime::QueuedMessageMode::Steer => {
                             crate::protocol::QueuedPromptMode::Steer
@@ -1536,6 +1554,7 @@ pub(super) async fn queue_soft_interrupt_with_images_for_session(
         crate::soft_interrupt_store::append(
             session_id,
             SoftInterruptMessage {
+                active_skill: None,
                 system_reminder: None,
                 content,
                 images,

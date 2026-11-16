@@ -16,6 +16,8 @@ struct PersistedSoftInterrupt {
     client_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     system_reminder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_skill: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -56,6 +58,7 @@ impl From<SoftInterruptMessage> for PersistedSoftInterrupt {
             after_yield: value.mode != jcode_agent_runtime::QueuedMessageMode::Steer,
             client_id: value.client_id,
             system_reminder: value.system_reminder,
+            active_skill: value.active_skill,
         }
     }
 }
@@ -74,6 +77,7 @@ impl From<PersistedSoftInterrupt> for SoftInterruptMessage {
             },
             client_id: value.client_id,
             system_reminder: value.system_reminder,
+            active_skill: value.active_skill,
         }
     }
 }
