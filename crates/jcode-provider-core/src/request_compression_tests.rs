@@ -10,6 +10,10 @@ fn jsonish(len: usize) -> Vec<u8> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test must serialize the process-wide uplink estimate throughout async requests"
+)]
 async fn json_uploads_match_original_wire_bytes_and_headers() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let _guard = UPLINK_TEST_LOCK
