@@ -144,7 +144,6 @@ impl App {
             // Clone data needed for the API call to avoid borrow issues
             // The future would hold references across the select! which conflicts with handle_key
             let provider = self.provider.clone();
-            let mut provider_messages = provider_messages;
             let cache_signature_len = provider_messages.len();
             if let Some(pending) = &memory_pending {
                 provider_messages.push(Message::user(&format!(
