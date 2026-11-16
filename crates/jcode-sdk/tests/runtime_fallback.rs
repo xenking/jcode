@@ -18,7 +18,12 @@ fn sdk_fallback_child() {
         ..LaunchOptions::default()
     };
     // The fixture executable records its invocation but deliberately never binds.
-    assert!(ensure_runtime(&options, &|_| {}).is_err());
+    let result = ensure_runtime(&options, &|_| {});
+    if std::env::var_os("SDK_FALLBACK_WARM").is_some() {
+        assert!(result.is_ok(), "{result:?}");
+    } else {
+        assert!(result.is_err());
+    }
 }
 
 #[test]
@@ -75,6 +80,27 @@ fn direct_sdk_spawn_selects_previous_unserved_generation_without_mutating_journa
         assert_eq!(std::fs::read(&journal_path).unwrap(), journal);
         std::fs::remove_file(&capture).unwrap();
     }
+    // A restarted Desktop must not offer the failed bundle to the recovered
+    // live daemon again just because that bundle is still its companion.
+    let legacy_listener =
+        std::os::unix::net::UnixListener::bind(runtime.join("jcode.sock")).unwrap();
+    let api_listener =
+        std::os::unix::net::UnixListener::bind(runtime.join("jcode-api.sock")).unwrap();
+    child.env("SDK_FALLBACK_WARM", "1");
+    let output = child.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !capture.exists(),
+        "warm rollback re-executed the failed bundle's version probe"
+    );
+    child.env_remove("SDK_FALLBACK_WARM");
+    drop((legacy_listener, api_listener));
+    std::fs::remove_file(runtime.join("jcode.sock")).unwrap();
+    std::fs::remove_file(runtime.join("jcode-api.sock")).unwrap();
     std::fs::remove_file(root.join("previous")).unwrap();
     assert!(child.status().unwrap().success());
     assert!(
