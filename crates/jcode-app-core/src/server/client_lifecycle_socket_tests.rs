@@ -124,12 +124,7 @@ async fn interrupt_queued_batch_delivers_one_turn_promptly() {
     let contents: Vec<_> = journal
         .messages
         .iter()
-        .map(|message| {
-            (
-                message.display_role.clone(),
-                format!("{:?}", message.content),
-            )
-        })
+        .map(|message| (message.display_role, format!("{:?}", message.content)))
         .collect();
     let first = contents
         .iter()
