@@ -2,7 +2,7 @@
 use super::{Tool, ToolContext, ToolOutput};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
-use jcode_sdk::desktop_control::{DesktopAction, DesktopResponse, OpenDestination};
+use jcode_sdk::desktop_control::{DesktopAction, DesktopResponse, OpenDestination, WaitCondition};
 use serde_json::{Value, json};
 
 pub struct DesktopTool;
@@ -94,9 +94,71 @@ fn execute_with_paths(action: DesktopAction, paths: Vec<std::path::PathBuf>) -> 
     if matches.next().is_some() {
         bail!("ambiguous window ID");
     }
-    match request(path, action, Duration::from_secs(125)).context("Desktop request failed")? {
+    if let DesktopAction::WaitFor {
+        target,
+        condition,
+        timeout_ms,
+    } = action
+    {
+        if !(1..=120_000).contains(&timeout_ms) {
+            bail!("timeout_ms must be between 1 and 120000");
+        }
+        if matches!(condition, WaitCondition::SelectorVisible { .. }) {
+            bail!("selector visibility is not implemented");
+        }
+        let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                bail!("wait_for timed out");
+            }
+            match request(
+                path,
+                DesktopAction::State {
+                    target: target.clone(),
+                },
+                remaining.min(Duration::from_secs(5)),
+            )
+            .context("Desktop wait_for state request failed")?
+            {
+                DesktopResponse::Ok { result } => {
+                    if condition_met(&condition, &result) {
+                        return Ok(result);
+                    }
+                }
+                DesktopResponse::Error { code, message } => bail!("{code}: {message}"),
+            }
+            std::thread::sleep(
+                deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .min(Duration::from_millis(100)),
+            );
+        }
+    }
+    match request(path, action, Duration::from_secs(5)).context("Desktop request failed")? {
         DesktopResponse::Ok { result } => Ok(result),
         DesktopResponse::Error { code, message } => bail!("{code}: {message}"),
+    }
+}
+
+#[cfg(unix)]
+fn condition_met(condition: &WaitCondition, state: &Value) -> bool {
+    fn contains(value: &Value, text: &str) -> bool {
+        match value {
+            Value::String(value) => value.contains(text),
+            Value::Array(values) => values.iter().any(|value| contains(value, text)),
+            Value::Object(values) => values.values().any(|value| contains(value, text)),
+            _ => false,
+        }
+    }
+    let panel = &state["panel"];
+    match condition {
+        WaitCondition::SessionIdle {} => panel["status"].as_str() == Some("idle"),
+        WaitCondition::TextContains { text } => {
+            contains(&panel["loaded_transcript_items"], text)
+                || contains(&panel["streaming_text"], text)
+        }
+        WaitCondition::SelectorVisible { .. } => false,
     }
 }
 #[cfg(not(unix))]
@@ -110,6 +172,30 @@ mod tests {
     use jcode_sdk::desktop_control::{DesktopRequest, DesktopTarget};
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn wait_conditions_match_transcript_not_metadata() {
+        let state = json!({"panel":{"status":"idle", "title":"not transcript", "loaded_transcript_items":[{"Assistant":"hello world"}], "streaming_text":"streaming now"}});
+        assert!(condition_met(&WaitCondition::SessionIdle {}, &state));
+        assert!(condition_met(
+            &WaitCondition::TextContains {
+                text: "hello".into()
+            },
+            &state
+        ));
+        assert!(condition_met(
+            &WaitCondition::TextContains {
+                text: "streaming".into()
+            },
+            &state
+        ));
+        assert!(!condition_met(
+            &WaitCondition::TextContains {
+                text: "not transcript".into()
+            },
+            &state
+        ));
+    }
 
     #[test]
     fn routes_only_to_matching_window() {
