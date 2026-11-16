@@ -204,7 +204,7 @@ fn unix_sockets(pid: u32) -> Result<UnixSockets> {
     Ok(parse_unix_sockets(&listing))
 }
 
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn only_listener(sockets: &UnixSockets, socket: &Path) -> bool {
     sockets.descriptors == 1
         && sockets.peers.is_empty()
@@ -289,7 +289,7 @@ fn retire_foreign_bridges(
     Ok(())
 }
 
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 trait BridgeRetirement {
     fn request(&mut self) -> jcode_sdk::Result<()>;
     fn alive(&mut self) -> Result<bool>;
@@ -298,7 +298,7 @@ trait BridgeRetirement {
     fn wait(&mut self, duration: Duration);
 }
 
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn retire_with_fallback(process: &BridgeProcess, ops: &mut impl BridgeRetirement) -> Result<()> {
     let result = (|| -> Result<()> {
         match ops.request() {

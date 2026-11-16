@@ -190,6 +190,7 @@ fn crash_after_exchange_can_be_recognized_without_swapping_back() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn pre_exec_probe_rejects_exit_and_wrong_hash() {
     use std::os::unix::fs::PermissionsExt;
@@ -208,6 +209,7 @@ async fn pre_exec_probe_rejects_exit_and_wrong_hash() {
     assert!(preflight(&binary, "abcdef123").await.is_ok());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn staged_generation_is_a_snapshot_and_never_overwrites_an_existing_image() {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
