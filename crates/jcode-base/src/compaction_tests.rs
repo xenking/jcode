@@ -1881,6 +1881,45 @@ impl Provider for CountingVisionProvider {
     }
 }
 
+struct GroundedDecisionProvider;
+
+#[async_trait::async_trait]
+impl Provider for GroundedDecisionProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        Ok(Box::pin(futures::stream::empty()))
+    }
+
+    fn name(&self) -> &str {
+        "mock-grounded-decisions"
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+    async fn complete_simple_with_usage(
+        &self,
+        prompt: &str,
+        _system: &str,
+    ) -> Result<(String, jcode_provider_core::SimpleCompletionUsage)> {
+        assert!(prompt.contains("Preserve negations, uncertainty"));
+        Ok(("[message 0, page UNKNOWN | user] Do not force push because history might be lost.\n[message 99, page 1 | user] invented rule\n".into(), Default::default()))
+    }
+}
+
+#[tokio::test]
+async fn snapcompact_decisions_preserve_supported_negation_and_reject_unknown_tags() {
+    let index =
+        "[message 0, page UNKNOWN | user] Do not force push because history might be lost.\n";
+    let decisions = extract_snapcompact_decisions(&GroundedDecisionProvider, index).await;
+    assert!(decisions.contains("Do not force push because history might be lost"));
+    assert!(!decisions.contains("invented rule"));
+}
+
 /// Snapcompact makes only the bounded decisions-and-rules extraction call.
 #[tokio::test]
 async fn snapcompact_extracts_decisions_without_full_summarizer() {
