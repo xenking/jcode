@@ -16,4 +16,7 @@ jcode-side-panel-types = { path = "../jcode-side-panel-types" }
 jcode-applet-types = { path = "../jcode-applet-types" }
 jcode-todo-policy = { path = "../jcode-todo-policy" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]

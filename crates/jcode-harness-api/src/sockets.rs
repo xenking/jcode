@@ -21,10 +21,30 @@ pub fn runtime_dir() -> PathBuf {
         return PathBuf::from(dir);
     }
     #[cfg(target_os = "macos")]
+    if let Some(dir) = darwin_user_temp_dir() {
+        return dir;
+    }
+    #[cfg(target_os = "macos")]
     if let Ok(dir) = std::env::var("TMPDIR") {
         return PathBuf::from(dir);
     }
     fallback_runtime_dir()
+}
+
+/// The per-user Darwin temp dir, independent of `$TMPDIR` (which jcode tools
+/// and launchd agents override). Must match `jcode-storage::runtime_dir`.
+#[cfg(target_os = "macos")]
+fn darwin_user_temp_dir() -> Option<PathBuf> {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStrExt;
+    let mut buf = vec![0 as libc::c_char; libc::PATH_MAX as usize];
+    let len = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buf.as_mut_ptr(), buf.len()) };
+    if len == 0 || len > buf.len() {
+        return None;
+    }
+    let path = unsafe { CStr::from_ptr(buf.as_ptr()) };
+    let path = PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes()));
+    path.is_dir().then_some(path)
 }
 
 fn fallback_runtime_dir() -> PathBuf {

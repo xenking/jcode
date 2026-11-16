@@ -4076,6 +4076,7 @@ dependencies = [
  "jcode-side-panel-types",
  "jcode-todo-policy",
  "jcode-usage-types",
+ "libc",
  "serde",
  "serde_json",
 ]
@@ -4673,6 +4674,7 @@ dependencies = [
  "anyhow",
  "dirs",
  "jcode-core",
+ "jcode-harness-api",
  "libc",
  "rand 0.9.3",
  "serde",
