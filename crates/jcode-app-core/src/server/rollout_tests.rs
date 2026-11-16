@@ -83,6 +83,22 @@ fn mutation_intent_and_result_are_atomic_durable_and_lock_is_exclusive() {
 }
 
 #[test]
+fn interrupted_rollback_spawns_previous_before_startup_reconciles() {
+    let (_dir, store, mut journal) = fixture();
+    journal.phase = Phase::RollingBack;
+    journal.serving = false;
+    journal.owner_pid = i32::MAX as u32;
+    store.save(&journal).unwrap();
+    let path = store.path.clone();
+    drop(store);
+    assert_eq!(
+        reconcile_before_spawn_at(&journal.socket, path.clone()).unwrap(),
+        Some(journal.previous_binary),
+    );
+    assert_eq!(load_at(&path).unwrap().unwrap().phase, Phase::RollingBack);
+}
+
+#[test]
 fn failed_copy_keeps_installed_bundle_and_backup() {
     let (_dir, _store, journal) = fixture();
     let missing = journal.intent.app.with_file_name("missing.app");

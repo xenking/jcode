@@ -853,7 +853,8 @@ mod tests {
                         "daemon_identity": {
                             "pid": std::process::id(),
                             "binary_path": std::env::current_exe().unwrap(),
-                            "git_hash": "483d7848f1234567890"
+                            "git_hash": "483d7848f1234567890",
+                            "generation": 1
                         }
                     })
                 )
@@ -895,7 +896,7 @@ mod tests {
                     .unwrap();
                 writeln!(stream, "{}", serde_json::json!({
                     "type": "pong", "id": 1,
-                    "daemon_identity": {"pid": reported_pid, "binary_path": binary_path, "git_hash": git_hash}
+                    "daemon_identity": {"pid": reported_pid, "binary_path": binary_path, "git_hash": git_hash, "generation": 1}
                 })).unwrap();
             }
             let (mut stream, _) = listener.accept().unwrap();

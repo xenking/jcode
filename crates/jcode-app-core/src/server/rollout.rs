@@ -645,7 +645,10 @@ fn restore_links(store: &Store, journal: &mut Journal) -> Result<()> {
 /// dead generation without a serving marker is never selected a second time.
 /// Returns an immutable previous binary to bypass automatic channel upgrades.
 pub fn reconcile_before_spawn(socket: &Path) -> Result<Option<PathBuf>> {
-    let path = journal_path()?;
+    reconcile_before_spawn_at(socket, journal_path()?)
+}
+
+fn reconcile_before_spawn_at(socket: &Path, path: PathBuf) -> Result<Option<PathBuf>> {
     let Some(store) = Store::acquire(path.clone())? else {
         return Ok(None);
     };
@@ -656,6 +659,14 @@ pub fn reconcile_before_spawn(socket: &Path) -> Result<Option<PathBuf>> {
         return Ok(None);
     }
     if journal.phase == Phase::RolledBack {
+        return Ok(Some(journal.previous_binary));
+    }
+    if journal.phase == Phase::RollingBack {
+        if super::reload_process_alive(journal.owner_pid) {
+            bail!("rollout {} rollback executor is still active", journal.id);
+        }
+        // A crash may precede restoring channel links. Start the previous image
+        // directly and let its daemon-owned startup replay finish compensation.
         return Ok(Some(journal.previous_binary));
     }
     if journal.phase != Phase::ExecPending || journal.serving {
