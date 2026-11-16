@@ -87,6 +87,7 @@ fn claude_oauth_socket_effort_changes_the_next_http_request() {
                     Err(error) => panic!("local HTTP accept: {error}"),
                 }
             };
+            socket.set_nonblocking(false).unwrap();
             socket
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
