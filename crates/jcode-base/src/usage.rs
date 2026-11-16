@@ -30,6 +30,8 @@ mod openai_reset;
 pub(crate) use openai_reset::auto_reset_weekly_usage;
 mod provider_fetch;
 mod remote_accounts;
+#[cfg(test)]
+pub(crate) use remote_accounts::run_remote_account_test_in_subprocess;
 mod startup_snapshot;
 pub use accessors::*;
 pub use anthropic_banked::AnthropicBankedResets;

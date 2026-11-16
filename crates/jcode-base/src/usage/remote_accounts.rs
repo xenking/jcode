@@ -13,6 +13,37 @@ struct RemoteAccounts {
 
 static REMOTE: OnceLock<Mutex<RemoteAccounts>> = OnceLock::new();
 
+#[cfg(test)]
+pub(crate) fn run_remote_account_test_in_subprocess(test_name: &str) -> bool {
+    const CHILD: &str = "JCODE_REMOTE_ACCOUNT_TEST";
+    if std::env::var(CHILD).as_deref() == Ok(test_name) {
+        return false;
+    }
+    // Enabling the mirror is irreversible: even clearing it must keep local
+    // credentials inaccessible. A child process isolates that production mode.
+    let home = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_name, "--nocapture"])
+        .env(CHILD, test_name)
+        .env("HOME", home.path())
+        .env("JCODE_HOME", home.path())
+        .env("JCODE_RUNTIME_DIR", home.path())
+        .env("JCODE_TEST_SESSION", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "isolated {test_name} failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "isolated test must execute, not match zero tests: {test_name}",
+    );
+    true
+}
+
 fn try_remote_lock(
     mutex: &Mutex<RemoteAccounts>,
 ) -> Option<std::sync::MutexGuard<'_, RemoteAccounts>> {
@@ -229,6 +260,11 @@ mod tests {
 
     #[test]
     fn connection_reset_is_not_an_empty_authoritative_response() {
+        if run_remote_account_test_in_subprocess(
+            "usage::remote_accounts::tests::connection_reset_is_not_an_empty_authoritative_response",
+        ) {
+            return;
+        }
         clear_remote_account_usage();
         assert!(!remote_account_usage_received());
         assert!(matches!(
