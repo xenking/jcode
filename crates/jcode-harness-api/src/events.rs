@@ -57,6 +57,19 @@ pub enum ApiEvent {
         images: Vec<RenderedImage>,
     },
 
+    /// Expanded archived transcript window and its remaining history.
+    CompactedHistory {
+        session_id: String,
+        messages: Vec<HistoryMessage>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<RenderedImage>,
+        compacted_total: usize,
+        compacted_visible: usize,
+        compacted_remaining: usize,
+        #[serde(default)]
+        compacted_hidden_prompts: usize,
+    },
+
     /// Current daemon-owned prompt queue, sent as a reply or as a live update.
     QueuedPrompts {
         session_id: String,
@@ -238,6 +251,10 @@ pub enum ApiEvent {
     /// before the first output of the response that sees the messages.
     SoftInterruptInjected {
         session_id: String,
+        /// The user or daemon message actually delivered to the model.
+        /// Older bridges omit it, so consumers must tolerate its absence.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<String>,
         /// Ids from `soft_interrupt.client_id`, in queue order. Several queued
         /// messages are delivered as one user message. Empty when none of the
         /// delivered messages carried an id.

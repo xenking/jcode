@@ -598,7 +598,10 @@ impl JcodeClient {
             && response.answers.as_ref().is_some_and(|answers| {
                 answers.iter().any(|answer| {
                     !answer.other_images.is_empty()
-                        || answer.comment_images.values().any(|images| !images.is_empty())
+                        || answer
+                            .comment_images
+                            .values()
+                            .any(|images| !images.is_empty())
                 })
             })
             && !self.supports("ask_response_images")
@@ -1105,6 +1108,25 @@ impl JcodeClient {
                 messages, images, ..
             } => Ok((messages, images)),
             other => Err(unexpected("history", &other)),
+        }
+    }
+
+    /// Fetch an expanded compacted-history window from the attached session.
+    pub fn get_compacted_history(
+        &self,
+        session_id: &str,
+        visible_messages: usize,
+    ) -> Result<ApiEvent> {
+        let event = self
+            .request_ok(ApiRequest::GetCompactedHistory {
+                session_id: session_id.to_string(),
+                visible_messages,
+            })?
+            .event;
+        if matches!(event, ApiEvent::CompactedHistory { .. }) {
+            Ok(event)
+        } else {
+            Err(unexpected("compacted_history", &event))
         }
     }
 

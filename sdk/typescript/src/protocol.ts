@@ -239,6 +239,7 @@ export type ApiRequest =
   | { req: "interrupt_queued_prompt"; session_id: string; client_id: string }
   | { req: "get_queued_prompts"; session_id: string }
   | { req: "get_history"; session_id: string }
+  | { req: "get_compacted_history"; session_id: string; visible_messages: number }
   | { req: "peek_session"; session_id: string; limit?: number }
   | { req: "clear"; session_id: string }
   | { req: "rewind"; session_id: string; message_index: number }
@@ -351,6 +352,7 @@ export type ApiEvent =
   | { ev: "attached"; session: SessionInfo }
   | { ev: "session_forked"; session: SessionInfo }
   | { ev: "history"; session_id: string; messages: HistoryMessage[]; images?: RenderedImage[] }
+  | { ev: "compacted_history"; session_id: string; messages: HistoryMessage[]; images?: RenderedImage[]; compacted_total: number; compacted_visible: number; compacted_remaining: number; compacted_hidden_prompts?: number }
   | { ev: "pong" }
   | { ev: "text_delta"; session_id: string; text: string; message_id?: string }
   | { ev: "text_done"; session_id: string; message_id?: string }
@@ -407,6 +409,7 @@ export type ApiEvent =
   | {
       ev: "soft_interrupt_injected";
       session_id: string;
+      content?: string;
       client_ids: string[];
       point: string;
       tools_skipped?: number;
@@ -564,6 +567,7 @@ export const KNOWN_EVENT_KINDS = [
   "attached",
   "session_forked",
   "history",
+  "compacted_history",
   "queued_prompts",
   "side_pane_images",
   "side_panel_state",
@@ -636,6 +640,7 @@ export const KNOWN_REQUEST_KINDS = [
   "interrupt_queued_prompt",
   "get_queued_prompts",
   "get_history",
+  "get_compacted_history",
   "peek_session",
   "clear",
   "rewind",

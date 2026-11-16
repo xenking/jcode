@@ -772,6 +772,13 @@ export class JcodeClient extends EventEmitter {
     return messages;
   }
 
+  async getCompactedHistory(sessionId: string, visibleMessages: number) {
+    return this.expectReply(
+      { req: "get_compacted_history", session_id: sessionId, visible_messages: visibleMessages },
+      "compacted_history",
+    );
+  }
+
   async getHistoryWithImages(
     sessionId: string,
   ): Promise<{ messages: HistoryMessage[]; images: RenderedImage[] }> {

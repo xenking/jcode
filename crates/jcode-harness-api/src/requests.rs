@@ -202,6 +202,12 @@ pub enum ApiRequest {
         session_id: String,
     },
 
+    /// Expand the archived portion of an attached session's transcript.
+    GetCompactedHistory {
+        session_id: String,
+        visible_messages: usize,
+    },
+
     /// Fetch the tail of *any* session's conversation, attached or not.
     ///
     /// `GetHistory` can only answer for the session this connection is

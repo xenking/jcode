@@ -59,6 +59,7 @@ const REQUIRES_ATTACH: &[&str] = &[
     "rewind",
     "rewind_undo",
     "get_history",
+    "get_compacted_history",
     "list_models",
     "set_model",
     "set_context_cap",
@@ -775,6 +776,16 @@ impl BridgeState {
                 let id = self.legacy_id();
                 self.pending_simple.push((id, api_id, SimpleKind::History));
                 vec![Outbound::Legacy(json!({"type": "get_history", "id": id}))]
+            }
+            "get_compacted_history" => {
+                let id = self.legacy_id();
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::CompactedHistory));
+                vec![Outbound::Legacy(json!({
+                    "type": "get_compacted_history", "id": id,
+                    "visible_messages": request["visible_messages"].as_u64().unwrap_or(64),
+                    "recent_history": false,
+                }))]
             }
             // Answered from the stored record rather than the daemon: the
             // legacy protocol can only speak about the attached session, and
@@ -2355,6 +2366,48 @@ impl BridgeState {
                 .take_simple(event["id"].as_u64().unwrap_or(0), SimpleKind::Ping)
                 .map(|api_id| vec![ServerFrame::reply(api_id, ApiEvent::Pong)])
                 .unwrap_or_default(),
+            "compacted_history" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let Some(api_id) = self.take_simple(id, SimpleKind::CompactedHistory) else {
+                    return vec![];
+                };
+                let messages = event["messages"]
+                    .as_array()
+                    .map(|messages| {
+                        messages
+                            .iter()
+                            .map(|m| HistoryMessage {
+                                response_stats: serde_json::from_value(m["response_stats"].clone())
+                                    .unwrap_or(None),
+                                timestamp_ms: m["timestamp_ms"].as_i64(),
+                                role: m["role"].as_str().unwrap_or("").to_string(),
+                                content: m["content"].as_str().unwrap_or("").to_string(),
+                                tool: Self::history_tool(m),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                vec![ServerFrame::reply(
+                    api_id,
+                    ApiEvent::CompactedHistory {
+                        session_id: event["session_id"]
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| session(self)),
+                        messages,
+                        images: serde_json::from_value(event["images"].clone()).unwrap_or_default(),
+                        compacted_total: event["compacted_total"].as_u64().unwrap_or(0) as usize,
+                        compacted_visible: event["compacted_visible"].as_u64().unwrap_or(0)
+                            as usize,
+                        compacted_remaining: event["compacted_remaining"].as_u64().unwrap_or(0)
+                            as usize,
+                        compacted_hidden_prompts: event["compacted_hidden_prompts"]
+                            .as_u64()
+                            .unwrap_or(0)
+                            as usize,
+                    },
+                )]
+            }
             "history" => {
                 let id = event["id"].as_u64().unwrap_or(0);
                 // The daemon volunteers the full session set on `history`,
@@ -2902,6 +2955,7 @@ impl BridgeState {
                 self.activity_version += 1;
                 frames.push(ServerFrame::event(ApiEvent::SoftInterruptInjected {
                     session_id: session(self),
+                    content: event["content"].as_str().map(str::to_string),
                     client_ids,
                     point: event["point"].as_str().unwrap_or("").to_string(),
                     tools_skipped: event["tools_skipped"].as_u64().map(|n| n as u32),

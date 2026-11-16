@@ -51,6 +51,7 @@ const CAPABILITIES: &[Capability] = &[
     cap("interrupt_queued_prompt", "interruptQueuedPrompt"),
     cap("get_queued_prompts", "getQueuedPrompts"),
     cap("get_history", "getHistory"),
+    cap("get_compacted_history", "getCompactedHistory"),
     cap("get_history_with_images", "getHistoryWithImages"),
     cap("peek_session", "peekSession"),
     cap("clear", "clear"),

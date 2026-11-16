@@ -1031,6 +1031,7 @@ fn soft_interrupt_injected_closes_open_text_and_carries_ids() {
         frames[1].event,
         ApiEvent::SoftInterruptInjected {
             session_id: "s1".into(),
+            content: Some("first\n\nsecond".into()),
             client_ids: vec!["f1".into(), "f2".into()],
             point: "D".into(),
             tools_skipped: None,
@@ -3483,6 +3484,28 @@ fn list_and_attach_expose_swarm_ownership_without_nesting_forks() {
             .iter()
             .all(|s| s.parent_session_id.is_none() && s.swarm_status.is_none())
     );
+}
+
+#[test]
+fn compacted_history_page_preserves_swarm_and_window() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(
+        &json!({"req":"get_compacted_history", "id":77, "session_id":"s1", "visible_messages":128}),
+    );
+    let [Outbound::Legacy(request)] = out.as_slice() else {
+        panic!("expected page request: {out:?}")
+    };
+    assert_eq!(request["type"], "get_compacted_history");
+    assert_eq!(request["visible_messages"], 128);
+    let frames = state.legacy_event_to_api(&json!({
+        "type":"compacted_history", "id":request["id"], "session_id":"s1",
+        "compacted_total":300, "compacted_visible":128, "compacted_remaining":172, "compacted_hidden_prompts":12,
+        "messages":[{"role":"tool","content":"sent","tool_data":{"id":"x","name":"swarm","input":{"action":"message"}}}]
+    }));
+    let value = serde_json::to_value(&frames[0]).unwrap();
+    assert_eq!(value["reply_to"], 77);
+    assert_eq!(value["compacted_remaining"], 172);
+    assert_eq!(value["messages"][0]["tool"]["name"], "swarm");
 }
 
 #[test]

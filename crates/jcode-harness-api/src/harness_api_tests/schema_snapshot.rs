@@ -171,6 +171,7 @@ fn soft_interrupt_ids_requests_and_events_wire_shape() {
 
     let injected = ServerFrame::event(ApiEvent::SoftInterruptInjected {
         session_id: "s1".into(),
+        content: None,
         client_ids: vec!["f1".into(), "f2".into()],
         point: "D".into(),
         tools_skipped: None,
