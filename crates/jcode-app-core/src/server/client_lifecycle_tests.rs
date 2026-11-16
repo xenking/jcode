@@ -269,7 +269,7 @@ struct IsolatedReloadRecoveryEnv {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn desktop_skill_message_crosses_real_bridge_and_daemon_into_journal() {
+async fn desktop_queued_skill_crosses_real_bridge_and_daemon_into_journal() {
     use crate::server::runtime::ServerRuntime;
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
@@ -313,6 +313,7 @@ async fn desktop_skill_message_crosses_real_bridge_and_daemon_into_journal() {
         })
         .unwrap();
         assert!(client.supports("skill_message_v1"));
+        assert!(client.supports("queued_prompt_active_skill"));
         let session = client.create_session(Some(project_path)).unwrap();
         let catalog = client
             .runtime_command(
@@ -330,12 +331,15 @@ async fn desktop_skill_message_crosses_real_bridge_and_daemon_into_journal() {
         );
         let events = client.events(Some(&session.session_id));
         client
-            .send_skill_message(
+            .queue_prompt(
                 &session.session_id,
-                "fix this please",
-                "poteto-mode",
-                vec![],
-                None,
+                jcode_sdk::api::QueuedPrompt {
+                    client_id: "desktop-skill-1".into(),
+                    content: "fix this please".into(),
+                    images: vec![],
+                    mode: jcode_sdk::api::QueuedPromptMode::AfterYield,
+                    active_skill: Some("poteto-mode".into()),
+                },
             )
             .unwrap();
         loop {
