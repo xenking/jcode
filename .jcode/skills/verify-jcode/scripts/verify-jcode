@@ -230,7 +230,7 @@ class Harness:
             raise
 
     def start_tui(self, resume=None):
-        argv = [str(self.binary), "--no-update", "--no-selfdev", "--provider", "openai-compatible",
+        argv = [str(self.binary), "--fresh-spawn", "--no-update", "--no-selfdev", "--provider", "openai-compatible",
                 "--model", "fake-model", "--debug-socket", "--socket", str(self.root / "app.sock")]
         if resume:
             argv += ["--resume", resume]
@@ -510,7 +510,7 @@ def launch(args):
            "LANG": "en_US.UTF-8", "TERM": "xterm-256color", "TMPDIR": str(root),
            "JCODE_HOME": str(root / "data"), "JCODE_RUNTIME_DIR": str(root),
            "XDG_CONFIG_HOME": str(root / "home/.config"), "XDG_CACHE_HOME": str(root / "home/.cache"),
-           "JCODE_TEST_SESSION": "1", "JCODE_DEBUG_CONTROL": "1",
+           "JCODE_TEST_SESSION": "1", "JCODE_DEBUG_CONTROL": "1", "JCODE_NO_MENUBAR": "1",
            "JCODE_NO_TELEMETRY": "1", "JCODE_TELEMETRY": "off",
            "JCODE_NO_AUTO_UPDATE": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
            "GIT_TERMINAL_PROMPT": "0", "OPENAI_COMPAT_API_KEY": "synthetic-verification-key",
