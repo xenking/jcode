@@ -1605,6 +1605,30 @@ impl BridgeState {
         }
     }
 
+    fn daemon_list<T: serde::de::DeserializeOwned>(
+        event: &Value,
+        field: &str,
+    ) -> Result<Vec<T>, String> {
+        // Older daemons may omit optional image lists. Present malformed data
+        // is different: reporting an empty list would silently lose attachments.
+        if event[field].is_null() {
+            return Ok(Vec::new());
+        }
+        serde_json::from_value(event[field].clone())
+            .map_err(|error| format!("invalid daemon {field}: {error}"))
+    }
+
+    fn invalid_daemon_event(reply_to: Option<u64>, message: String) -> Vec<ServerFrame> {
+        let event = ApiEvent::Error {
+            code: ErrorCode::Internal,
+            message,
+        };
+        vec![match reply_to {
+            Some(id) => ServerFrame::reply(id, event),
+            None => ServerFrame::event(event),
+        }]
+    }
+
     /// Tool identity of a daemon `tool` history row, if it carries one.
     fn history_tool(message: &Value) -> Option<jcode_harness_api::HistoryTool> {
         let data = &message["tool_data"];
@@ -2006,15 +2030,21 @@ impl BridgeState {
                 })
                 .into_iter()
                 .collect(),
-            "user_image_ids" => vec![ServerFrame::event(ApiEvent::UserImageIds {
-                session_id: self.session_id.clone().unwrap_or_default(),
-                original_content: event["original_content"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned(),
-                content: event["content"].as_str().unwrap_or_default().to_owned(),
-                image_ids: serde_json::from_value(event["image_ids"].clone()).unwrap_or_default(),
-            })],
+            "user_image_ids" => {
+                let image_ids = match Self::daemon_list(event, "image_ids") {
+                    Ok(ids) => ids,
+                    Err(error) => return Self::invalid_daemon_event(None, error),
+                };
+                vec![ServerFrame::event(ApiEvent::UserImageIds {
+                    session_id: self.session_id.clone().unwrap_or_default(),
+                    original_content: event["original_content"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                    content: event["content"].as_str().unwrap_or_default().to_owned(),
+                    image_ids,
+                })]
+            }
             "tools" => {
                 let id = event["id"].as_u64().unwrap_or(0);
                 let Some(api_id) = self.take_simple(id, SimpleKind::Tools) else {
@@ -2283,7 +2313,10 @@ impl BridgeState {
                     tool_call_id: event["tool_call_id"].as_str().unwrap_or("").to_string(),
                     questions,
                 })],
-                Err(_) => vec![],
+                Err(error) => Self::invalid_daemon_event(
+                    None,
+                    format!("invalid daemon ask questions: {error}"),
+                ),
             },
             "tool_start" => vec![ServerFrame::event(ApiEvent::ToolStart {
                 session_id: session(self),
@@ -2333,13 +2366,19 @@ impl BridgeState {
                     _ => vec![],
                 }
             }
-            "side_pane_images" => vec![ServerFrame::event(ApiEvent::SidePaneImages {
-                session_id: event["session_id"]
-                    .as_str()
-                    .map(str::to_string)
-                    .unwrap_or_else(|| session(self)),
-                images: serde_json::from_value(event["images"].clone()).unwrap_or_default(),
-            })],
+            "side_pane_images" => {
+                let images = match Self::daemon_list(event, "images") {
+                    Ok(images) => images,
+                    Err(error) => return Self::invalid_daemon_event(None, error),
+                };
+                vec![ServerFrame::event(ApiEvent::SidePaneImages {
+                    session_id: event["session_id"]
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| session(self)),
+                    images,
+                })]
+            }
             "tokens" => vec![ServerFrame::event(ApiEvent::TokenUsage {
                 session_id: session(self),
                 input: event["input"].as_u64().unwrap_or(0),
@@ -2543,22 +2582,30 @@ impl BridgeState {
                 let Some(api_id) = self.take_simple(id, SimpleKind::CompactedHistory) else {
                     return vec![];
                 };
-                let messages = event["messages"]
-                    .as_array()
-                    .map(|messages| {
-                        messages
-                            .iter()
-                            .map(|m| HistoryMessage {
-                                response_stats: serde_json::from_value(m["response_stats"].clone())
-                                    .unwrap_or(None),
-                                timestamp_ms: m["timestamp_ms"].as_i64(),
-                                role: m["role"].as_str().unwrap_or("").to_string(),
-                                content: m["content"].as_str().unwrap_or("").to_string(),
-                                tool: Self::history_tool(m),
+                let raw_messages: Vec<Value> = match Self::daemon_list(event, "messages") {
+                    Ok(messages) => messages,
+                    Err(error) => return Self::invalid_daemon_event(Some(api_id), error),
+                };
+                let messages = raw_messages
+                    .iter()
+                    .map(|m| HistoryMessage {
+                        // Statistics were optional in older daemon history. Malformed
+                        // optional display metadata must not discard the transcript.
+                        response_stats: serde_json::from_value(m["response_stats"].clone())
+                            .inspect_err(|error| {
+                                eprintln!("harness optional response statistics invalid: {error}")
                             })
-                            .collect()
+                            .unwrap_or(None),
+                        timestamp_ms: m["timestamp_ms"].as_i64(),
+                        role: m["role"].as_str().unwrap_or("").to_string(),
+                        content: m["content"].as_str().unwrap_or("").to_string(),
+                        tool: Self::history_tool(m),
                     })
-                    .unwrap_or_default();
+                    .collect();
+                let images = match Self::daemon_list(event, "images") {
+                    Ok(images) => images,
+                    Err(error) => return Self::invalid_daemon_event(Some(api_id), error),
+                };
                 vec![ServerFrame::reply(
                     api_id,
                     ApiEvent::CompactedHistory {
@@ -2567,7 +2614,7 @@ impl BridgeState {
                             .map(str::to_string)
                             .unwrap_or_else(|| session(self)),
                         messages,
-                        images: serde_json::from_value(event["images"].clone()).unwrap_or_default(),
+                        images,
                         compacted_total: event["compacted_total"].as_u64().unwrap_or(0) as usize,
                         compacted_visible: event["compacted_visible"].as_u64().unwrap_or(0)
                             as usize,
@@ -2586,6 +2633,10 @@ impl BridgeState {
                 else {
                     return vec![];
                 };
+                let fragments = match Self::daemon_list(event, "fragments") {
+                    Ok(fragments) => fragments,
+                    Err(error) => return Self::invalid_daemon_event(Some(api_id), error),
+                };
                 vec![ServerFrame::reply(
                     api_id,
                     ApiEvent::HistoryPage {
@@ -2593,7 +2644,7 @@ impl BridgeState {
                             .as_str()
                             .map(str::to_string)
                             .unwrap_or_else(|| session(self)),
-                        fragments: event["fragments"].as_array().cloned().unwrap_or_default(),
+                        fragments,
                         before: event["before"].as_str().map(str::to_string),
                     },
                 )]
@@ -2625,11 +2676,15 @@ impl BridgeState {
                 else {
                     return vec![];
                 };
+                let images = match Self::daemon_list(event, "images") {
+                    Ok(images) => images,
+                    Err(error) => return Self::invalid_daemon_event(Some(api_id), error),
+                };
                 vec![ServerFrame::reply(
                     api_id,
                     ApiEvent::SessionImages {
                         session_id: event["session_id"].as_str().unwrap_or("").to_owned(),
-                        images: event["images"].as_array().cloned().unwrap_or_default(),
+                        images,
                     },
                 )]
             }
@@ -2740,7 +2795,10 @@ impl BridgeState {
                         message.response_stats = None;
                     }
                 }
-                let images = serde_json::from_value(event["images"].clone()).unwrap_or_default();
+                let images = match Self::daemon_list(event, "images") {
+                    Ok(images) => images,
+                    Err(error) => return Self::invalid_daemon_event(Some(api_id), error),
+                };
                 let mut frames = vec![ServerFrame::reply(
                     api_id,
                     ApiEvent::History {

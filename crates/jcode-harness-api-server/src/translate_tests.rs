@@ -1,6 +1,60 @@
 use super::*;
 
 #[test]
+fn malformed_image_metadata_is_not_a_successful_empty_history() {
+    for field in ["images", "messages"] {
+        let mut state = state_with_session();
+        let request =
+            state.api_request_to_legacy(&json!({"req":"get_compacted_history", "id":912}));
+        let id = legacy_out(&request)["id"].as_u64().unwrap();
+        let mut event = json!({"type":"compacted_history", "id":id, "session_id":"s1", "messages":[], "images":[]});
+        event[field] = json!({"not":"a list"});
+        let frames = state.legacy_event_to_api(&event);
+        assert!(
+            matches!(&frames[..], [frame] if frame.reply_to == Some(912) && matches!(&frame.event, ApiEvent::Error { .. })),
+            "{frames:?}"
+        );
+    }
+    let mut state = state_with_session();
+    let frames = state.legacy_event_to_api(&json!({
+        "type":"user_image_ids", "image_ids":{"not":"an id list"},
+        "original_content":"photo", "content":"photo",
+    }));
+    assert!(
+        matches!(&frames[..], [frame] if matches!(&frame.event, ApiEvent::Error { .. })),
+        "{frames:?}"
+    );
+}
+
+#[test]
+fn daemon_optional_lists_accept_absence_but_reject_present_wrong_types() {
+    for event in [json!({}), json!({"images":null}), json!({"images":[]})] {
+        assert!(
+            BridgeState::daemon_list::<Value>(&event, "images")
+                .unwrap()
+                .is_empty()
+        );
+    }
+    for value in [json!({}), json!("image"), json!(false)] {
+        assert!(BridgeState::daemon_list::<Value>(&json!({"images":value}), "images").is_err());
+    }
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({"req":"get_history_page", "id":913}));
+    let frames = state.legacy_event_to_api(
+        &json!({"type":"history_page", "id":legacy_out(&out)["id"], "fragments":{}}),
+    );
+    assert!(
+        matches!(&frames[..], [frame] if frame.reply_to == Some(913) && matches!(&frame.event, ApiEvent::Error { .. })),
+        "{frames:?}"
+    );
+    let frames = state.legacy_event_to_api(&json!({"type":"ask_user_request", "questions":{}}));
+    assert!(
+        matches!(&frames[..], [frame] if matches!(&frame.event, ApiEvent::Error { .. })),
+        "{frames:?}"
+    );
+}
+
+#[test]
 fn force_stop_is_capability_gated_and_ack_correlated() {
     let mut state = state_with_session();
     let request = json!({"req":"force_stop_turn", "id":73, "session_id":"s1"});
