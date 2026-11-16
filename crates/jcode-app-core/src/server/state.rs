@@ -498,6 +498,9 @@ pub(super) async fn fanout_session_event(
         .unwrap_or(0)
 }
 
+/// Returns the undelivered event by value (like `send_event_to_targets_recover`)
+/// so callers can fall back without cloning on the hot path.
+#[allow(clippy::result_large_err)]
 async fn fanout_session_event_recover(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     session_id: &str,
