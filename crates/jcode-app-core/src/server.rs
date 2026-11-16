@@ -794,7 +794,7 @@ impl Server {
         });
     }
 
-    async fn recover_headless_sessions_on_startup(&self) {
+    async fn recover_headless_sessions_on_startup(&self) -> Vec<tokio::task::JoinHandle<()>> {
         // Migrate legacy snapshots into the same durable owner. An existing
         // record, including Stop/superseded tombstones, is authoritative.
         let current_reload_id = recent_reload_state(Duration::from_secs(600))
@@ -909,7 +909,7 @@ impl Server {
         // is absent from the swarm snapshot, enter this one admission path.
         reload_recovery::RecoveryOwner::new(self)
             .reconcile_once()
-            .await;
+            .await
     }
 
     async fn finish_startup_after_bind(
@@ -981,8 +981,9 @@ impl Server {
 
         // Startup recovery can be expensive in multi-session reloads. Run it
         // only after the replacement daemon is already accepting reconnects.
-        self.recover_headless_sessions_on_startup().await;
-        reload_recovery::RecoveryOwner::new(self).spawn(runtime.cancellation_token());
+        let recovery_tasks = self.recover_headless_sessions_on_startup().await;
+        reload_recovery::RecoveryOwner::new(self)
+            .spawn(runtime.cancellation_token(), recovery_tasks);
 
         // Restored running workers initially appear stopped in durable swarm
         // snapshots. Resume their turns before evaluating persisted awaits,

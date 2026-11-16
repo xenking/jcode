@@ -364,6 +364,11 @@ pub(super) async fn start_processing_message(
         });
         return;
     }
+    if super::super::reload_recovery::wait_for_retired_attempt(client_session_id).await
+        && state.task.is_none()
+    {
+        *state.client_is_processing = false;
+    }
     if *state.client_is_processing {
         let _ = client_event_tx.send(ServerEvent::Error {
             id,

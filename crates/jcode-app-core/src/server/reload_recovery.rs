@@ -427,12 +427,51 @@ pub(super) fn supersede(session_id: &str) -> Result<()> {
     )
 }
 
+struct ActiveAttempt {
+    identity: crate::protocol::TurnIdentity,
+    stop: tokio_util::sync::CancellationToken,
+    retired: tokio::sync::watch::Receiver<bool>,
+}
+
+static ACTIVE_ATTEMPTS: LazyLock<StdMutex<std::collections::HashMap<String, ActiveAttempt>>> =
+    LazyLock::new(|| StdMutex::new(std::collections::HashMap::new()));
+
+/// A new prompt waits for its superseded reservation, never behind an ask.
+pub(super) async fn wait_for_retired_attempt(session_id: &str) -> bool {
+    let mut retired = {
+        let attempts = ACTIVE_ATTEMPTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        attempts
+            .get(session_id)
+            .filter(|attempt| attempt.stop.is_cancelled())
+            .map(|attempt| attempt.retired.clone())
+    };
+    if let Some(retired) = &mut retired {
+        while !*retired.borrow_and_update() {
+            if retired.changed().await.is_err() {
+                break;
+            }
+        }
+        return true;
+    }
+    false
+}
+
 fn finish_pending(session_id: &str, status: ReloadRecoveryStatus, reason: &str) -> Result<()> {
     let _guard = lock_store();
     if let Some(mut record) = peek_for_session(session_id)?
         && record.status.needs_admission()
     {
         write_outcome(&mut record, status, reason)?;
+        if let Some(attempt) = ACTIVE_ATTEMPTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            && record.attempt.as_ref() == Some(&attempt.identity)
+        {
+            attempt.stop.cancel();
+        }
     }
     Ok(())
 }
@@ -618,9 +657,12 @@ impl RecoveryOwner {
         }
     }
 
-    pub(super) fn spawn(self, cancellation: tokio_util::sync::CancellationToken) {
+    pub(super) fn spawn(
+        self,
+        cancellation: tokio_util::sync::CancellationToken,
+        mut tasks: Vec<tokio::task::JoinHandle<()>>,
+    ) {
         tokio::spawn(async move {
-            let mut tasks = Vec::new();
             loop {
                 tokio::select! {
                     biased;
@@ -652,8 +694,41 @@ impl RecoveryOwner {
             match self.prepare(&record).await {
                 Ok(Some((agent, lease, claimed))) => {
                     let owner = self.clone();
+                    let stop = tokio_util::sync::CancellationToken::new();
+                    let (retired_tx, retired) = tokio::sync::watch::channel(false);
+                    let session_id = claimed.session_id.clone();
+                    let identity = lease.identity().clone();
+                    ACTIVE_ATTEMPTS
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(
+                            session_id.clone(),
+                            ActiveAttempt {
+                                identity: identity.clone(),
+                                stop: stop.clone(),
+                                retired,
+                            },
+                        );
+                    if !peek_for_session(&session_id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|record| record.status.needs_admission())
+                    {
+                        stop.cancel();
+                    }
                     tasks.push(tokio::spawn(async move {
-                        owner.run(agent, lease, claimed).await
+                        owner.run(agent, lease, claimed, stop).await;
+                        // run has released its lease and drained publication.
+                        retired_tx.send_replace(true);
+                        let mut attempts = ACTIVE_ATTEMPTS
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if attempts
+                            .get(&session_id)
+                            .is_some_and(|attempt| attempt.identity == identity)
+                        {
+                            attempts.remove(&session_id);
+                        }
                     }));
                 }
                 Ok(None) => {}
@@ -685,6 +760,16 @@ impl RecoveryOwner {
             return Ok(None);
         }
         let session_id = &record.session_id;
+        if crate::tool::interactive::sender(session_id).is_none()
+            && crate::session::Session::load(session_id)
+                .ok()
+                .and_then(|session| crate::agent::Agent::interrupted_ask_tool_id(&session))
+                .is_some()
+        {
+            // Keep the durable obligation, but do not start a model turn or
+            // repeatedly execute an unanswered ask without an interactive owner.
+            return Ok(None);
+        }
         let agent = self
             .sessions
             .get_or_start(session_id, || async {
@@ -746,11 +831,16 @@ impl RecoveryOwner {
         agent: Arc<tokio::sync::Mutex<crate::agent::Agent>>,
         lease: crate::agent::TurnLease,
         record: ReloadRecoveryRecord,
+        stop: tokio_util::sync::CancellationToken,
     ) {
         let session_id = &record.session_id;
         // A deterministic crash/Stop window for isolated real-daemon tests.
         if let Some(delay) = super::startup_headless_recovery_test_delay() {
-            tokio::time::sleep(delay).await;
+            tokio::select! {
+                biased;
+                _ = stop.cancelled() => return,
+                _ = tokio::time::sleep(delay) => {}
+            }
         }
         if !peek_for_session(session_id)
             .ok()
@@ -781,7 +871,7 @@ impl RecoveryOwner {
             Some(&self.events),
         )
         .await;
-        let result = super::turn_failover::process_reserved_message_with_server_failover(
+        let processing = super::turn_failover::process_reserved_message_with_server_failover(
             agent,
             &lease,
             "",
@@ -790,14 +880,24 @@ impl RecoveryOwner {
             events.sender(),
             true,
             Some(vec![record.input_id()]),
-        )
-        .await;
+        );
+        let result = tokio::select! {
+            biased;
+            _ = stop.cancelled() => Err(anyhow::anyhow!("Recovery cancelled or superseded")),
+            result = processing => result,
+        };
         if let Err(error) = &result {
             // Only admission is retried. Once its receipt exists, a model error
             // is the turn's result, not permission to submit another turn.
             crate::logging::warn(&format!("Recovery turn failed for {session_id}: {error}"));
         }
-        let status = if result.is_ok() { "ready" } else { "failed" };
+        let status = if stop.is_cancelled() {
+            "stopped"
+        } else if result.is_ok() {
+            "ready"
+        } else {
+            "failed"
+        };
         super::update_member_status(
             session_id,
             status,
