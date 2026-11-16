@@ -6,6 +6,25 @@ that merely expands coverage. Older originating fixes are marked separately.
 Local jcode-repository sessions were also read, excluding scratch projects and
 Desktop/cloud repositories. Session contents and credentials are not copied here.
 
+## Selection and enforcement level
+
+The selected unratcheted classes are ranked by documented corrective incidents.
+The recent window and older corroborating fixes are separated rather than
+pretending all evidence came from the last 600 commits. Existing size, panic,
+swallowed-error and dependency ratchets are not duplicated.
+
+| Mistake class | Recent incidents | Older corroborating fixes | Level chosen | Why not only types or tests? |
+| --- | ---: | ---: | --- | --- |
+| Test home/hooks isolation | 8 | 0 | One Cargo feature owner + graph gate | Cross-crate dev-feature selection is outside Rust's type system |
+| Catalog integration | 2 | 5 | One typed target list + derived-field/consumption gate | New runtime fields do not automatically implement a Rust visitor; network/publication behavior keeps its existing tests |
+| Copied quota gauges | 2 | 1 | Two semantic primitives + ownership gate | Strings/ratatui spans remain open-ended, so new copied glyph builders still compile without the gate |
+| Scalar-width chrome | 1 | 2 | Shared truncators + zero-budget boundary lint + Unicode behavior tests | Text-editing indices legitimately use scalars; globally banning chars or wrapping every String would reject prose/input code |
+
+Each class is established by at least two corrective incidents. Shared commits
+can repair more than one distinct class, but overlapping fixes within a class
+are not double-counted. Sections below state each new check's exact boundary.
+
+
 ## Test targets inheriting the operator's home and hooks
 
 Eight incidents (nine corrective commits) in the window:
@@ -164,4 +183,62 @@ Only fully enforced fanout prose was removed. Offline-fallback, endpoint cache,
 last-good and publication rules remain: this check does not pretend to prove
 those network/session semantics. Existing ratchets were not reimplemented.
 
+## Acceptance and inherited guardrail failures
 
+On 2026-11-16, all four current-tree gates, their 41 Python regression tests,
+and the four historical-tree rejection proofs passed. Runtime tests also passed
+for downstream machine-hook suppression, Unicode chrome fitting, catalog fanout,
+quota/task progress, compaction delivery and image-ID mapping.
+
+Strict `justrust clippy` passed on the regular/default targets of all 13 Rust
+packages touched by these changes or the prerequisite formatting cleanup:
+
+```bash
+justrust clippy -p jcode-base -p jcode-app-core \
+  -p jcode-provider-grok-build-runtime -p jcode-tui-permissions \
+  -p jcode-harness-api-server -p jcode-tui -p jcode-companion \
+  -p jcode-harness-api -p jcode-protocol \
+  -p jcode-provider-anthropic-runtime -p jcode-provider-openrouter-runtime \
+  -p jcode-tui-messages -p jcode-voice -- -D warnings
+```
+
+The required complete command was attempted, not replaced with the four new
+checks:
+
+```bash
+CARGO=justrust scripts/check_guardrails.sh --skip-slow
+```
+
+It exited 1 on five existing ratchets. The same unchanged checkers were run
+against an independent archive of the pre-change `origin/master` tree
+`91dd697c5` and reproduced all five failures:
+
+| Existing ratchet | Pre-change result | Representative diagnostic |
+| --- | --- | --- |
+| Production file size | exit 1, 100 diagnostics | `agent.rs` 1375 -> 1603 LOC |
+| Test file size | exit 1, 43 diagnostics | `agent_tests.rs` 3195 -> 3475 LOC |
+| Production panic budget | exit 1, 20 diagnostics | total 147 -> 170 |
+| Swallowed-error budget | exit 1, 80 diagnostics | total 3877 -> 4120 |
+| Cross-crate wildcard exports | exit 1, 2 diagnostics | `jcode-sdk/src/desktop_control.rs`, total 18 -> 19 |
+
+These are inherited failures, not a green full acceptance. No ratchet baseline
+was increased, no failure was suppressed, and no unrelated mass refactor was
+undertaken to relabel the branch green. Integration must retain this blocker
+until those existing violations are repaired separately. The all-targets strict
+clippy variant also exposes pre-existing test-only lock/module-order diagnostics;
+the regular-target pass above must not be described as an all-targets pass.
+
+To reproduce the prior-tree checks without changing this checkout:
+
+```bash
+past="$(mktemp -d)"
+git archive 91dd697c5 | tar -x -C "$past"
+(
+  cd "$past"
+  python3 scripts/check_code_size_budget.py
+  python3 scripts/check_test_size_budget.py
+  python3 scripts/check_panic_budget.py
+  python3 scripts/check_swallowed_error_budget.py
+  python3 scripts/check_wildcard_reexport_budget.py
+)
+```
