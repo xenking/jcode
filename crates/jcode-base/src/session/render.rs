@@ -408,7 +408,7 @@ pub fn render_messages_and_images_with_compacted_history(
     Option<RenderedCompactedHistoryInfo>,
 ) {
     let (messages, images, info, _) =
-        render_messages_and_images_with_ids(session, compacted_history_visible);
+        render_messages_and_images_internal(session, compacted_history_visible, false);
     (messages, images, info)
 }
 
@@ -416,6 +416,19 @@ pub fn render_messages_and_images_with_compacted_history(
 pub fn render_messages_and_images_with_ids(
     session: &Session,
     compacted_history_visible: usize,
+) -> (
+    Vec<RenderedMessage>,
+    Vec<RenderedImage>,
+    Option<RenderedCompactedHistoryInfo>,
+    Vec<String>,
+) {
+    render_messages_and_images_internal(session, compacted_history_visible, true)
+}
+
+fn render_messages_and_images_internal(
+    session: &Session,
+    compacted_history_visible: usize,
+    include_archived: bool,
 ) -> (
     Vec<RenderedMessage>,
     Vec<RenderedImage>,
@@ -591,7 +604,40 @@ pub fn render_messages_and_images_with_ids(
             match block {
                 ContentBlock::Text { text: t, .. } => {
                     if super::images::is_archive_marker(t) {
+                        let id = super::images::image_id(&session.id, &msg.id, image_ordinal);
                         image_ordinal += 1;
+                        if include_archived
+                            && let Some(media_type) =
+                                super::images::archived_image_media_type(t, &id)
+                        {
+                            image_ids.push(id.clone());
+                            let anchor = image_anchor_for_message(
+                                role,
+                                current_tool.as_ref(),
+                                user_prompt_count,
+                            );
+                            let is_pending_prompt_anchor = current_tool.is_none() && role == "user";
+                            images.push(RenderedImage {
+                                history_message_index: current_tool
+                                    .as_ref()
+                                    .map(|_| rendered.len()),
+                                media_type,
+                                data: format!("jcode-lazy:{id}"),
+                                label: current_tool
+                                    .as_ref()
+                                    .and_then(fallback_image_label_for_tool),
+                                source: image_source_for_message(
+                                    message_role.clone(),
+                                    current_tool.as_ref(),
+                                ),
+                                anchor,
+                            });
+                            last_image_idx = Some(images.len() - 1);
+                            if is_pending_prompt_anchor {
+                                pending_prompt_image_indices.push(images.len() - 1);
+                            }
+                            continue;
+                        }
                     }
                     // The `[Attached image associated with the preceding tool
                     // result: ...]` block is synthetic metadata jcode injects so

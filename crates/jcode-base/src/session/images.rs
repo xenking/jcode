@@ -69,6 +69,11 @@ pub(super) fn is_archive_marker(text: &str) -> bool {
     parse_archive_marker(text).is_some()
 }
 
+pub(super) fn archived_image_media_type(text: &str, id: &str) -> Option<String> {
+    let reference = parse_archive_marker(text)?;
+    (reference.image_id == id).then_some(reference.media_type)
+}
+
 fn archive_path(id: &str) -> anyhow::Result<std::path::PathBuf> {
     anyhow::ensure!(
         id.len() == 36 && id.starts_with("img_") && id[4..].bytes().all(|b| b.is_ascii_hexdigit()),

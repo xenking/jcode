@@ -179,6 +179,35 @@ fn ask_migration_remaps_old_markers_even_when_ids_were_already_appended() {
 }
 
 #[test]
+fn paged_render_retains_archived_tool_image_identity() {
+    let mut session = Session::create(None, None);
+    session.add_message(
+        Role::User,
+        vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "screenshot".into(),
+                content: "screenshot captured".into(),
+                is_error: None,
+            },
+            ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "payload".into(),
+            },
+        ],
+    );
+    let id = session.session_images()[0].image_id.clone();
+    session.messages[0].content[1] = ContentBlock::Text {
+        text: super::images::archive_marker(&id, "image/png"),
+        cache_control: None,
+    };
+    let (_, images, _, ids) =
+        super::render::render_messages_and_images_with_ids(&session, usize::MAX);
+    assert_eq!(ids, vec![id.clone()]);
+    assert_eq!(images[0].media_type, "image/png");
+    assert_eq!(images[0].data, format!("jcode-lazy:{id}"));
+}
+
+#[test]
 fn attaching_an_image_reuses_the_original_payload_allocation() {
     let mut session = Session::create(None, None);
     let data = "a".repeat(1024 * 1024);
