@@ -10,7 +10,6 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 struct Status {
     eligible: bool,
-    #[serde(default)]
     grants: Vec<Grant>,
     #[serde(default)]
     next_grant_id: Option<String>,
@@ -35,6 +34,11 @@ pub(super) fn banked_from_status(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<AnthropicBankedResets> {
     let block = value.get("cedar_ember").filter(|block| block.is_object())?;
+    // Surface-gated responses do not evaluate this program and commonly
+    // contain an empty placeholder list, not a confirmed zero balance.
+    if block.get("ineligible_reason").and_then(|v| v.as_str()) == Some("surface") {
+        return None;
+    }
     let status: Status = match serde_json::from_value(block.clone()) {
         Ok(status) => status,
         Err(error) => {
@@ -77,6 +81,10 @@ pub(super) fn banked_from_status(
         available_count,
         usable_count,
         expires_at: expires_at.map(|(_, raw)| raw),
+        cached_source: value
+            .get("_jcode_cached_source")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
     })
 }
 
@@ -86,8 +94,13 @@ pub(super) fn cached_banked_resets(
     account_label: Option<&str>,
 ) -> Option<AnthropicBankedResets> {
     let key = super::anthropic_usage_cache_key(access_token, account_label);
-    let value = super::disk_cache::reset_status(&key)?;
-    banked_from_status(&value, account_label, chrono::Utc::now())
+    let now = chrono::Utc::now();
+    super::disk_cache::reset_status(&key)
+        .and_then(|value| banked_from_status(&value, account_label, now))
+        .or_else(|| {
+            super::disk_cache::imported_reset_status(&key, access_token)
+                .and_then(|value| banked_from_status(&value, account_label, now))
+        })
 }
 
 #[cfg(test)]
@@ -117,6 +130,8 @@ mod tests {
         for value in [
             serde_json::json!({}),
             serde_json::json!({"cedar_ember": null}),
+            serde_json::json!({"cedar_ember": {"eligible": false, "ineligible_reason": "surface", "grants": []}}),
+            serde_json::json!({"cedar_ember": {"eligible": true}}),
             serde_json::json!({"cedar_ember": {"grants": []}}),
             serde_json::json!({"cedar_ember": {"eligible": true, "grants": [{"id": "x"}]}}),
         ] {

@@ -127,8 +127,9 @@ pub(super) fn cached_input(
                 .map(|snapshot| snapshot.window_ratios())
         })
         .unwrap_or_default();
-    input.available_resets =
-        crate::usage::cached_account_banked_resets(kind, label).map(|b| b.available);
+    input.available_resets = crate::usage::cached_account_banked_resets(kind, label)
+        .filter(|b| b.cached_source.is_none())
+        .map(|b| b.usable.unwrap_or(b.available));
     input
 }
 
@@ -158,6 +159,7 @@ pub fn input_from_report(report: &crate::usage::ProviderUsage) -> AutoResetInput
             report
                 .anthropic_banked_resets
                 .as_ref()
+                .filter(|b| b.cached_source.is_none())
                 .map(|b| b.usable_count)
         });
     AutoResetInput {
@@ -186,6 +188,27 @@ mod tests {
             windows,
             available_resets: n,
         }
+    }
+
+    #[test]
+    fn imported_banked_grants_are_not_automatic_reset_authority() {
+        let mut report = crate::usage::ProviderUsage {
+            anthropic_banked_resets: Some(crate::usage::AnthropicBankedResets {
+                account_label: Some("fixture".into()),
+                available_count: 2,
+                usable_count: 1,
+                expires_at: None,
+                cached_source: Some("OMP".into()),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(input_from_report(&report).available_resets, None);
+        report
+            .anthropic_banked_resets
+            .as_mut()
+            .unwrap()
+            .cached_source = None;
+        assert_eq!(input_from_report(&report).available_resets, Some(1));
     }
 
     #[test]

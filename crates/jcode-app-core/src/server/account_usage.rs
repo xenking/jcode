@@ -135,6 +135,8 @@ fn with_banked(
 ) -> AccountUsageSnapshot {
     if let Some(banked) = crate::usage::cached_account_banked_resets(provider, &snapshot.label) {
         snapshot.banked_resets = Some(banked.available);
+        snapshot.banked_usable = banked.usable;
+        snapshot.banked_cached_source = banked.cached_source;
         snapshot.banked_expires_at = banked.expires_at;
         snapshot.banked_next_at = banked.next_available_at;
     }
@@ -185,6 +187,8 @@ fn wire_snapshot(
         // Raw endpoint failures can contain request diagnostics. Only send a safe status.
         error,
         banked_resets: None,
+        banked_usable: None,
+        banked_cached_source: None,
         banked_expires_at: None,
         banked_next_at: None,
     }

@@ -342,6 +342,8 @@ mod tests {
             resets_at: None,
             error: None,
             banked_resets: None,
+            banked_usable: None,
+            banked_cached_source: None,
             banked_expires_at: None,
             banked_next_at: None,
         };
@@ -417,6 +419,8 @@ mod tests {
             resets_at: Some("2026-01-01T00:00:00Z".into()),
             error: Some("Usage unavailable".into()),
             banked_resets: None,
+            banked_usable: None,
+            banked_cached_source: None,
             banked_expires_at: None,
             banked_next_at: None,
         }];

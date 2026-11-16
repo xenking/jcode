@@ -77,6 +77,8 @@ pub fn save_context(
                         resets_at: usage.resets_at,
                         error: usage.error,
                         banked_resets: None,
+                        banked_usable: None,
+                        banked_cached_source: None,
                         banked_expires_at: None,
                         banked_next_at: None,
                     })

@@ -19,6 +19,18 @@ pub(super) fn usage_percent_from_remaining_limit(remaining: f64, limit: f64) -> 
     usage_percent_from_used_limit((limit - remaining).max(0.0), limit)
 }
 
+pub(super) fn set_anthropic_banked_status(
+    report: &mut ProviderUsage,
+    banked: Option<AnthropicBankedResets>,
+) {
+    if banked.is_none() {
+        report
+            .extra_info
+            .push(("Banked resets".into(), "Unknown".into()));
+    }
+    report.anthropic_banked_resets = banked;
+}
+
 pub(super) async fn fetch_anthropic_usage_for_token(
     display_name: String,
     access_token: String,
@@ -73,17 +85,16 @@ pub(super) async fn fetch_anthropic_usage_for_token(
                     &access_token,
                     stored.then_some(account_label.as_str()),
                 );
-                let banked = super::anthropic_banked::cached_banked_resets(
-                    &access_token,
-                    stored.then_some(account_label.as_str()),
-                );
-                super::banked::record_anthropic_offer(
-                    &account_label,
-                    offer.as_ref(),
-                    banked.as_ref(),
-                );
+                let label = stored.then_some(account_label.as_str());
+                let mut banked =
+                    super::anthropic_banked::cached_banked_resets(&access_token, label);
+                if banked.is_none() {
+                    let key = anthropic_usage_cache_key(&access_token, label);
+                    super::omp_banked::import_for_account(&access_token, &key).await;
+                    banked = super::anthropic_banked::cached_banked_resets(&access_token, label);
+                }
                 report.anthropic_limit_reset = offer;
-                report.anthropic_banked_resets = banked;
+                set_anthropic_banked_status(&mut report, banked);
                 if ineligible {
                     report
                         .extra_info

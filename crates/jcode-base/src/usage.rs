@@ -9,6 +9,7 @@ pub use account_fetch::fetch_oauth_account_usage;
 mod anthropic_banked;
 mod anthropic_fable_reset;
 mod anthropic_reset;
+mod omp_banked;
 pub(crate) use anthropic_fable_reset::auto_reset_fable_usage;
 mod anthropic_response;
 pub(crate) use anthropic_response::invalidate_auth_failure as invalidate_anthropic_usage_auth_failure;
