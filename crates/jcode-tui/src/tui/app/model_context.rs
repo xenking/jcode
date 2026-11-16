@@ -2176,9 +2176,19 @@ impl App {
         }
         if let Some(banked) = &provider.anthropic_banked_resets {
             let marker = if banked.available_count > 0 { '+' } else { ':' };
+            let expiry = banked
+                .expires_at
+                .as_deref()
+                .map(|at| format!(" · expires in {}", crate::usage::format_reset_time(at)))
+                .unwrap_or_default();
+            let source = banked
+                .cached_source
+                .as_deref()
+                .map(|s| format!(" · cached {s}"))
+                .unwrap_or_default();
             details.push(format!(
-                "{marker} Banked resets\t{} available",
-                banked.available_count
+                "{marker} Banked resets\t{} usable / {}{expiry}{source}",
+                banked.usable_count, banked.available_count
             ));
         }
         if let Some(offer) = &provider.anthropic_limit_reset {

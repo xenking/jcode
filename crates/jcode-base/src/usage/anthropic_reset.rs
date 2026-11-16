@@ -35,7 +35,7 @@ struct StatusBlock {
 
 /// Parse the status block from an at-wall usage response. `None` means the
 /// account is not offered resets at all, so no reset control should appear.
-fn offer_from_status(
+pub(super) fn offer_from_status(
     value: &serde_json::Value,
     account_label: Option<&str>,
 ) -> Option<AnthropicLimitResetOffer> {
@@ -142,9 +142,13 @@ pub(super) fn cached_limit_reset_offer(
 // remain unknown and must not be displayed as a confirmed empty balance.
 fn explicitly_ineligible(value: &serde_json::Value) -> bool {
     value
-        .pointer("/juniper_tide/eligible")
-        .and_then(|v| v.as_bool())
-        == Some(false)
+        .pointer("/juniper_tide/ineligible_reason")
+        .and_then(|v| v.as_str())
+        != Some("surface")
+        && value
+            .pointer("/juniper_tide/eligible")
+            .and_then(|v| v.as_bool())
+            == Some(false)
 }
 
 /// A confirmation pins the login, organization and token, so switching the
@@ -416,9 +420,6 @@ async fn consume_with_client(
 /// reset. Only local state changes, so this is safe to repeat.
 pub fn invalidate_anthropic_usage_reset_state(account_label: Option<&str>) {
     super::cache::invalidate_anthropic_usage_after_reset(account_label);
-    if let Some(label) = account_label {
-        super::banked::record_anthropic_offer(label, None, None);
-    }
     crate::provider::clear_claude_provider_unavailability_for_account_label(account_label);
 }
 

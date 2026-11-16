@@ -132,6 +132,9 @@ fn only_explicit_denial_is_reported_as_ineligible() {
     assert!(!explicitly_ineligible(
         &json!({"juniper_tide": {"eligible": null}})
     ));
+    assert!(!explicitly_ineligible(
+        &json!({"juniper_tide": {"eligible": false, "ineligible_reason": "surface"}})
+    ));
     assert!(explicitly_ineligible(
         &json!({"juniper_tide": {"eligible": false}})
     ));

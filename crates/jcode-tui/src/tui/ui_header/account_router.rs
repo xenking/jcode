@@ -622,8 +622,17 @@ fn banked_resets_span(banked: &crate::usage::AccountBankedResets) -> Option<Span
             .as_deref()
             .map(|at| format!(" · exp {}", crate::usage::format_reset_time(at)))
             .unwrap_or_default();
+        let usable = banked
+            .usable
+            .map(|count| format!(" · {count} usable"))
+            .unwrap_or_default();
+        let source = banked
+            .cached_source
+            .as_deref()
+            .map(|s| format!(" · cached {s}"))
+            .unwrap_or_default();
         return Some(Span::styled(
-            format!("↻ {} {noun}{expiry}", banked.available),
+            format!("↻ {} {noun}{usable}{expiry}{source}", banked.available),
             Style::default().fg(banked_expiry_color(
                 banked.expires_at.as_deref(),
                 chrono::Utc::now(),
@@ -1500,12 +1509,24 @@ mod tests {
     fn banked_resets_suffix_shows_count_or_next_unlock() {
         let ready = crate::usage::AccountBankedResets {
             available: 2,
+            usable: None,
+            cached_source: None,
             next_available_at: None,
             expires_at: None,
         };
         assert_eq!(banked_resets_span(&ready).unwrap().content, "↻ 2 resets");
+        let partial = crate::usage::AccountBankedResets {
+            usable: Some(1),
+            ..ready.clone()
+        };
+        assert_eq!(
+            banked_resets_span(&partial).unwrap().content,
+            "↻ 2 resets · 1 usable"
+        );
         let expiring = crate::usage::AccountBankedResets {
             available: 1,
+            usable: None,
+            cached_source: None,
             next_available_at: None,
             expires_at: Some("2099-01-01T00:00:00Z".into()),
         };
@@ -1517,6 +1538,8 @@ mod tests {
         );
         let spent = crate::usage::AccountBankedResets {
             available: 0,
+            usable: None,
+            cached_source: None,
             next_available_at: Some("2099-01-01T00:00:00Z".into()),
             expires_at: None,
         };
@@ -1528,6 +1551,8 @@ mod tests {
         );
         let none = crate::usage::AccountBankedResets {
             available: 0,
+            usable: None,
+            cached_source: None,
             next_available_at: None,
             expires_at: None,
         };

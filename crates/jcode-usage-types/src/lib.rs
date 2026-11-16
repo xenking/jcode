@@ -33,6 +33,9 @@ pub struct AnthropicBankedResets {
     pub usable_count: u64,
     /// RFC3339 expiry of the soonest-expiring unexpired grant.
     pub expires_at: Option<String>,
+    /// Stale imported observation, never authority to spend a reset. The
+    /// source is displayed to distinguish it from a live provider response.
+    pub cached_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]

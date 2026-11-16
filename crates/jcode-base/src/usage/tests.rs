@@ -473,6 +473,17 @@ fn test_provider_usage_percent_helpers_clamp_invalid_low_values() {
 }
 
 #[test]
+fn anthropic_banked_status_is_explicitly_unknown_when_unavailable() {
+    let mut report = ProviderUsage::default();
+    provider_fetch::set_anthropic_banked_status(&mut report, None);
+    assert_eq!(
+        report.extra_info,
+        vec![("Banked resets".into(), "Unknown".into())]
+    );
+    assert!(report.anthropic_banked_resets.is_none());
+}
+
+#[test]
 fn test_active_anthropic_usage_report_prefers_marked_account() {
     let results = vec![
         ProviderUsage {

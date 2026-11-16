@@ -196,6 +196,8 @@ pub fn remote_account_banked_resets(
     }
     Some(super::AccountBankedResets {
         available: data.banked_resets.unwrap_or(0),
+        usable: data.banked_usable,
+        cached_source: data.banked_cached_source.clone(),
         next_available_at: data.banked_next_at.clone(),
         expires_at: data.banked_expires_at.clone(),
     })
@@ -267,6 +269,8 @@ mod tests {
             resets_at: None,
             error: None,
             banked_resets: None,
+            banked_usable: None,
+            banked_cached_source: None,
             banked_expires_at: None,
             banked_next_at: None,
         });

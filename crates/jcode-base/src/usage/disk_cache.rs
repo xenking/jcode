@@ -45,6 +45,12 @@ struct Entry {
     reset_status: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reset_observed_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    imported_reset: Option<ImportedReset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    omp_probe: Option<OmpProbe>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    omp_suppress_until_ms: Option<i64>,
     last_good: Option<Snapshot>,
     /// Latest failure and when it happened, for cross-process backoff.
     error: Option<String>,
@@ -54,6 +60,88 @@ struct Entry {
     adaptive_interval_secs: u64,
     #[serde(default)]
     retry_not_before_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct ImportedReset {
+    status: serde_json::Value,
+    token_hash: String,
+    report_fetched_ms: i64,
+    verified_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct OmpProbe {
+    token_hash: String,
+    attempted_ms: i64,
+}
+
+/// Rate-limit identity probes across CLI and desktop processes.
+pub(super) fn begin_omp_probe(key: &str, token: &str) -> bool {
+    let token_hash = token_hash(token);
+    let mut allowed = false;
+    update(key, |entry| {
+        if entry
+            .omp_suppress_until_ms
+            .is_some_and(|until| until > now_ms())
+        {
+            return;
+        }
+        if entry.omp_probe.as_ref().is_some_and(|p| {
+            p.token_hash == token_hash
+                && p.attempted_ms <= now_ms()
+                && age(p.attempted_ms) < Duration::from_secs(5 * 60)
+        }) {
+            return;
+        }
+        entry.omp_probe = Some(OmpProbe {
+            token_hash,
+            attempted_ms: now_ms(),
+        });
+        allowed = true;
+    });
+    allowed
+}
+
+fn token_hash(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+pub(super) fn store_imported_reset_status(
+    key: &str,
+    token: &str,
+    status: serde_json::Value,
+    report_fetched_ms: i64,
+) {
+    update(key, |entry| {
+        if entry
+            .omp_suppress_until_ms
+            .is_some_and(|until| until > now_ms())
+        {
+            return;
+        }
+        entry.imported_reset = Some(ImportedReset {
+            status,
+            token_hash: token_hash(token),
+            report_fetched_ms,
+            verified_ms: now_ms(),
+        })
+    });
+}
+
+pub(super) fn imported_reset_status(key: &str, token: &str) -> Option<serde_json::Value> {
+    let entry = load().remove(key)?;
+    let imported = entry.imported_reset?;
+    let now = now_ms();
+    if imported.token_hash != token_hash(token)
+        || imported.verified_ms > now
+        || imported.report_fetched_ms > now
+        || age(imported.verified_ms) >= Duration::from_secs(5 * 60)
+        || age(imported.report_fetched_ms) >= LAST_GOOD_MAX_AGE
+    {
+        return None;
+    }
+    Some(imported.status)
 }
 
 fn path() -> Option<PathBuf> {
@@ -145,6 +233,7 @@ fn update(key: &str, change: impl FnOnce(&mut Entry)) -> Entry {
     // Drop logins whose only data is long expired.
     map.retain(|_, entry| {
         entry.adaptive_interval_secs > 0
+            || entry.omp_suppress_until_ms.is_some_and(|at| at > now_ms())
             || entry.retry_not_before_ms.is_some_and(|at| at > now_ms())
             || entry
                 .last_good
@@ -415,8 +504,24 @@ pub(super) fn store_success_with_reset_status(
             entry.adaptive_interval_secs = RATE_LIMIT_BACKOFF.as_secs() * 2;
         }
         entry.last_good = Some(snapshot);
-        entry.reset_observed_ms = reset_status.as_ref().map(|_| now_ms());
-        entry.reset_status = reset_status;
+        // A surface-gated placeholder carries no grant or session facts. It
+        // must not erase a still-fresh evaluation or extend that evaluation's
+        // lifetime. Never resurrect an expired result.
+        let surface_only = reset_status.as_ref().is_some_and(|status| {
+            ["cedar_ember", "juniper_tide"].iter().all(|name| {
+                let block = &status[*name];
+                block.is_null()
+                    || block.get("ineligible_reason").and_then(|v| v.as_str()) == Some("surface")
+            })
+        });
+        let prior_fresh = entry.reset_status.is_some()
+            && entry
+                .reset_observed_ms
+                .is_some_and(|at| age(at) < interval(entry));
+        if !surface_only || !prior_fresh {
+            entry.reset_observed_ms = reset_status.as_ref().map(|_| now_ms());
+            entry.reset_status = reset_status;
+        }
         entry.error = None;
         entry.error_unix_ms = None;
         // Do not clear learned slowdown or a provider's outstanding deadline.
@@ -528,6 +633,13 @@ pub(super) fn invalidate(matches: impl Fn(&str) -> bool) {
             // A quota reset invalidates ratios, not provider polling policy.
             entry.retry_not_before_ms = deadline(entry);
             entry.last_good = None;
+            entry.reset_status = None;
+            entry.reset_observed_ms = None;
+            entry.imported_reset = None;
+            // OMP may preserve a pre-redemption grant list while refreshing its
+            // usage timestamp. Do not resurrect it after a local redemption.
+            entry.omp_suppress_until_ms =
+                Some(now_ms().saturating_add(LAST_GOOD_MAX_AGE.as_millis() as i64));
             if entry.adaptive_interval_secs == 0
                 && entry.error.as_deref().is_some_and(is_rate_limit)
             {
@@ -541,6 +653,78 @@ pub(super) fn invalidate(matches: impl Fn(&str) -> bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imported_resets_are_account_bound_throttled_and_invalidated_after_spend() {
+        with_home(|| {
+            let key = "label:import-fixture";
+            store_success(key, &sample());
+            assert!(begin_omp_probe(key, "token-a"));
+            assert!(!begin_omp_probe(key, "token-a"));
+            let status = serde_json::json!({"cedar_ember": {"eligible": true, "grants": []}});
+            store_imported_reset_status(key, "token-a", status.clone(), now_ms());
+            assert_eq!(imported_reset_status(key, "token-a"), Some(status.clone()));
+            assert_eq!(imported_reset_status(key, "token-b"), None);
+            invalidate(|candidate| candidate == key);
+            assert_eq!(imported_reset_status(key, "token-a"), None);
+            assert!(!begin_omp_probe(key, "token-a"));
+            // A profile request already in flight must not restore old grants.
+            store_imported_reset_status(key, "token-a", status, now_ms());
+            assert_eq!(imported_reset_status(key, "token-a"), None);
+        });
+    }
+
+    #[test]
+    fn claude_grants_share_one_snapshot_across_reports_and_account_rows() {
+        with_home(|| {
+            let label = "fixture-grants";
+            let key = format!("label:{label}");
+            let mut status: serde_json::Value =
+                serde_json::from_str(include_str!("fixtures/claude_usage_cedar_ember.json"))
+                    .unwrap();
+            status["cedar_ember"]["grants"][0]["ends_at"] = "2099-01-01T00:00:00Z".into();
+            status["cedar_ember"]["grants"][1]["ends_at"] = "2099-02-01T00:00:00Z".into();
+            store_success_with_reset_status(&key, &sample(), Some(status));
+            store_response_limits(&key, Some((0.2, "2099-01-01T00:00:00Z".into())), None);
+            let report =
+                super::super::anthropic_banked::cached_banked_resets("fixture-token", Some(label))
+                    .unwrap();
+            let row = super::super::cached_account_banked_resets(
+                super::super::MultiAccountProviderKind::Anthropic,
+                label,
+            )
+            .unwrap();
+            assert_eq!((report.usable_count, report.available_count), (1, 2));
+            assert_eq!((row.usable, row.available), (Some(1), 2));
+            assert_eq!(report.expires_at, row.expires_at);
+            assert!(
+                super::super::cached_account_banked_resets(
+                    super::super::MultiAccountProviderKind::Anthropic,
+                    "other-account"
+                )
+                .is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn surface_placeholder_does_not_erase_or_extend_fresh_grants() {
+        with_home(|| {
+            let key = "label:surface-fixture";
+            let status = serde_json::json!({"cedar_ember": {"eligible": true, "grants": []}});
+            let surface = serde_json::json!({"cedar_ember": {"eligible": false, "ineligible_reason": "surface", "grants": []}, "juniper_tide": {"eligible": false, "ineligible_reason": "surface"}});
+            store_success_with_reset_status(key, &sample(), Some(status.clone()));
+            let observed = load()[key].reset_observed_ms;
+            store_success_with_reset_status(key, &sample(), Some(surface.clone()));
+            assert_eq!(reset_status(key), Some(status));
+            assert_eq!(load()[key].reset_observed_ms, observed);
+            update(key, |entry| {
+                entry.reset_observed_ms = Some(now_ms() - 3_600_000)
+            });
+            store_success_with_reset_status(key, &sample(), Some(surface.clone()));
+            assert_eq!(reset_status(key), Some(surface));
+        });
+    }
 
     #[test]
     fn response_headers_preserve_recent_reset_status_without_extending_its_age() {

@@ -1,6 +1,26 @@
 use super::*;
 
 #[test]
+fn claude_banked_card_shows_usable_total_and_expiry() {
+    let mut app = create_test_app();
+    app.handle_usage_report(vec![crate::usage::ProviderUsage {
+        provider_name: "Anthropic (Claude)".into(),
+        anthropic_banked_resets: Some(crate::usage::AnthropicBankedResets {
+            account_label: Some("fixture".into()),
+            available_count: 2,
+            usable_count: 1,
+            cached_source: Some("OMP".into()),
+            expires_at: Some("2099-01-01T00:00:00Z".into()),
+        }),
+        ..Default::default()
+    }]);
+    let content = &app.display_messages().last().unwrap().content;
+    assert!(content.contains("1 usable / 2"), "{content}");
+    assert!(content.contains("expires"), "{content}");
+    assert!(content.contains("cached OMP"), "{content}");
+}
+
+#[test]
 fn test_usage_card_shows_every_opencode_go_quota_window() {
     let mut app = create_test_app();
     app.handle_usage_report(vec![crate::usage::ProviderUsage {
