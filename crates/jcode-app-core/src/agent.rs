@@ -545,6 +545,7 @@ impl Agent {
         };
         let t = Instant::now();
         agent.refresh_prompt_skills_snapshot();
+        agent.restore_pinned_skill();
         logging::info(&format!(
             "[TIMING] agent build_base: skills={skills_ms}ms, agents_md={agents_md_ms}ms, prompt_skills={}ms",
             t.elapsed().as_millis()
@@ -844,7 +845,7 @@ impl Agent {
     }
 
     fn reset_runtime_state_for_session_change(&mut self) {
-        self.active_skill = None;
+        self.restore_pinned_skill();
         self.last_upstream_provider = None;
         self.last_connection_type = None;
         self.last_status_detail = None;
@@ -866,32 +867,121 @@ impl Agent {
     /// Synchronize the remote client's selected skill, accepting only names
     /// present in the daemon's own registry snapshot.
     pub(super) fn set_remote_active_skill(&mut self, active_skill: Option<String>) -> bool {
-        let skills = self.current_skills_snapshot();
-        let recognized = active_skill
+        match active_skill {
+            Some(name) => self.set_pinned_skill(Some(&name)).is_ok(),
+            None => true,
+        }
+    }
+
+    pub(crate) fn set_pinned_skill(&mut self, name: Option<&str>) -> Result<()> {
+        if let Some(name) = name
+            && self.current_skills_snapshot().get(name).is_none()
+        {
+            anyhow::bail!(crate::skill::unknown_skill_message(name));
+        }
+        let next = name.map(str::to_owned);
+        if self.session.pinned_skill == next && self.active_skill == next {
+            return Ok(());
+        }
+        self.session.pinned_skill = next.clone();
+        self.active_skill = next;
+        if name.is_some() {
+            self.announce_active_skill();
+        } else {
+            self.add_message_with_display_role(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: format!(
+                        "<system-reminder>\n{}\n</system-reminder>",
+                        crate::skill::MODE_OFF_REMINDER
+                    ),
+                    cache_control: None,
+                }],
+                Some(StoredDisplayRole::System),
+            );
+        }
+        self.session.save()?;
+        Ok(())
+    }
+
+    pub(crate) fn inherit_pinned_skill(&mut self, parent: &Session) -> Result<()> {
+        self.session.inherit_pinned_skill(parent);
+        self.restore_pinned_skill();
+        self.session.save()?;
+        Ok(())
+    }
+
+    pub(crate) fn mode_command(&mut self, argument: &str) -> Result<String> {
+        match argument.trim() {
+            "" => {}
+            "off" => self.set_pinned_skill(None)?,
+            name => self.set_pinned_skill(Some(name))?,
+        }
+        Ok(format!(
+            "Session mode: {}",
+            self.session.pinned_skill.as_deref().unwrap_or("off")
+        ))
+    }
+
+    fn restore_pinned_skill(&mut self) {
+        self.active_skill = self.session.pinned_skill.clone();
+        let Some(announcement) = self.active_skill_announcement() else {
+            return;
+        };
+        let start = self
+            .session
+            .compaction
             .as_ref()
-            .is_none_or(|name| skills.get(name).is_some());
-        let next = active_skill.filter(|name| skills.get(name).is_some());
-        if next != self.active_skill {
-            self.active_skill = next;
+            .map_or(0, |state| state.compacted_count);
+        let announced = self
+            .session
+            .messages
+            .iter()
+            .skip(start)
+            .rev()
+            .flat_map(|m| &m.content)
+            .find_map(|block| match block {
+                ContentBlock::Text { text, .. }
+                    if text.starts_with("<system-reminder>\n# Active Skill\n") =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .is_some_and(|text| text == &announcement);
+        if !announced {
             self.announce_active_skill();
         }
-        recognized
+    }
+
+    fn active_skill_announcement(&self) -> Option<String> {
+        let name = self.active_skill.as_deref()?;
+        let skills = self.current_skills_snapshot();
+        skills
+            .get(name)
+            .map(|skill| {
+                format!(
+                    "<system-reminder>\n# Active Skill\n\n{}\n</system-reminder>",
+                    skill.get_prompt().trim()
+                )
+            })
+            .or_else(|| {
+                (self.session.pinned_skill == self.active_skill)
+                    .then(|| {
+                        self.session
+                            .stored_pinned_skill_announcement()
+                            .map(str::to_owned)
+                    })
+                    .flatten()
+            })
     }
 
     /// Record the newly active skill's instructions as a hidden transcript
     /// message. The system prompt stays byte-identical across skill changes.
     pub(crate) fn announce_active_skill(&mut self) {
-        let Some(name) = self.active_skill.clone() else {
+        let Some(text) = self.active_skill_announcement() else {
             return;
         };
-        let skills = self.current_skills_snapshot();
-        let Some(skill) = skills.get(&name) else {
-            return;
-        };
-        let text = format!(
-            "<system-reminder>\n# Active Skill\n\n{}\n</system-reminder>",
-            skill.get_prompt().trim()
-        );
         self.add_message_with_display_role(
             Role::User,
             vec![ContentBlock::Text {
@@ -990,6 +1080,10 @@ impl Agent {
         self.mcp_late_register_resolved = false;
         self.provider_session_id = None;
         self.session.provider_session_id = None;
+        if self.session.pinned_skill.is_some() {
+            self.active_skill = self.session.pinned_skill.clone();
+            self.announce_active_skill();
+        }
         self.session.save()?;
         crate::runtime_memory_log::emit_event(
             crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
@@ -1090,7 +1184,7 @@ impl Agent {
                         self.maybe_shake_before_request(&mut manager);
                         self.maybe_cache_expiry_compaction(&mut manager);
                     }
-                    let messages = {
+                    let mut messages = {
                         let all_messages = self.session.provider_messages();
                         if self.provider.uses_jcode_compaction() {
                             let action =
@@ -1129,6 +1223,15 @@ impl Agent {
                         self.note_compaction_applied();
                         self.record_compaction_divider(event);
                         self.persist_session_best_effort("compaction completion");
+                        if self.session.pinned_skill.is_some() {
+                            messages = manager.messages_for_api_with_vision(
+                                self.session.provider_messages(),
+                                crate::compaction::snapcompact_pages_usable(
+                                    self.provider.supports_image_input(),
+                                    &self.provider.model(),
+                                ),
+                            );
+                        }
                     }
                     let user_count = messages
                         .iter()

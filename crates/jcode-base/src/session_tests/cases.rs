@@ -2974,6 +2974,35 @@ fn system_prompt_missing_in_legacy_session_defaults_to_none() -> Result<()> {
 }
 
 #[test]
+fn pinned_mode_survives_session_storage_and_startup_stubs() -> Result<()> {
+    let _lock = lock_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path());
+    let legacy = serde_json::to_value(Session::create(None, None))?;
+    assert!(legacy.get("pinned_skill").is_none());
+    let mut value = legacy;
+    value["pinned_skill"] = serde_json::json!("future-mode-probe");
+    let mut session: Session = serde_json::from_value(value)?;
+    session.save()?;
+    for loaded in [
+        Session::load(&session.id)?,
+        Session::load_startup_stub(&session.id)?,
+    ] {
+        assert_eq!(
+            serde_json::to_value(loaded)?["pinned_skill"],
+            "future-mode-probe"
+        );
+    }
+    session.model = Some("changed-model".into());
+    session.save()?;
+    assert_eq!(
+        serde_json::to_value(Session::load(&session.id)?)?["pinned_skill"],
+        "future-mode-probe"
+    );
+    Ok(())
+}
+
+#[test]
 fn first_visible_user_prompt_becomes_the_generated_title() {
     let mut session = Session::create_with_id("session_prompt_title_1".to_string(), None, None);
     session.add_message(

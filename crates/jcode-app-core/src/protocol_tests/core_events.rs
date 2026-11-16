@@ -247,6 +247,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         reasoning_effort: None,
         service_tier: None,
         subagent_model: None,
+        pinned_skill: None,
         autoreview_enabled: None,
         autojudge_enabled: None,
         compaction_mode: crate::config::CompactionMode::Reactive,

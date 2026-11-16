@@ -175,6 +175,7 @@ impl App {
         }
 
         self.invalidate_kv_cache_after_compaction();
+        self.reannounce_pinned_skill();
         self.session.save()?;
         Ok(())
     }
@@ -261,6 +262,7 @@ impl App {
     ) {
         self.commit_pending_streaming_assistant_message();
         self.invalidate_kv_cache_after_compaction();
+        self.reannounce_pinned_skill();
         // Remote clients hold a transcript-stripped stub; the server owns the
         // session file and already persisted the compaction.
         if !self.is_remote

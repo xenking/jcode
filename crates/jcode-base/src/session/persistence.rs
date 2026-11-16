@@ -729,6 +729,7 @@ impl Session {
             && self.title.is_none()
             && self.parent_id.is_none()
             && self.system_prompt.is_none()
+            && self.pinned_skill.is_none()
             && !self.is_canary
             && !self.is_debug
         {

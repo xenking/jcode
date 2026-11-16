@@ -40,6 +40,13 @@ pub(super) async fn execute(
 ) -> Result<(Value, String)> {
     let config = crate::config::Config::load();
     let data = match command {
+        RuntimeCommand::Mode => {
+            let message = agent.mode_command(&args.join(" "))?;
+            return Ok((
+                json!({"pinned_skill": agent.session_for_split().pinned_skill}),
+                message,
+            ));
+        }
         RuntimeCommand::Review | RuntimeCommand::Judge | RuntimeCommand::Subagent => {
             let role = match command {
                 RuntimeCommand::Review => "review",
@@ -636,6 +643,83 @@ mod tests {
         assert_eq!(boolean_action(&[], false, false).unwrap(), None);
         assert!(boolean_action(&["typo".into()], false, false).is_err());
         assert!(boolean_action(&["on".into(), "off".into()], false, false).is_err());
+    }
+
+    #[tokio::test]
+    async fn pinned_mode_runtime_command_persists_without_inference() {
+        let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let dir = project.path().join(".jcode/skills/mode-probe");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: mode-probe\ndescription: Runtime mode\n---\nMODE_PROBE_BODY\n",
+        )
+        .unwrap();
+        let mut agent = Agent::new_with_initial_working_dir(
+            Arc::new(NoInferenceProvider::default()),
+            crate::tool::Registry::empty(),
+            project.path().to_str(),
+        );
+        for args in [vec!["mode-probe".into()], Vec::new()] {
+            let (data, message) =
+                execute(&mut agent, RuntimeCommand::Mode, &args, false, Value::Null)
+                    .await
+                    .unwrap();
+            assert_eq!(data["pinned_skill"], "mode-probe");
+            assert!(message.contains("mode-probe"));
+            assert_eq!(
+                crate::session::Session::load(agent.session_id())
+                    .unwrap()
+                    .pinned_skill
+                    .as_deref(),
+                Some("mode-probe")
+            );
+        }
+        let count = agent.message_count();
+        execute(
+            &mut agent,
+            RuntimeCommand::Mode,
+            &["mode-probe".into()],
+            false,
+            Value::Null,
+        )
+        .await
+        .unwrap();
+        assert_eq!(agent.message_count(), count);
+        assert!(
+            execute(
+                &mut agent,
+                RuntimeCommand::Mode,
+                &["missing-mode-probe".into()],
+                false,
+                Value::Null
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown skill: /missing-mode-probe")
+        );
+        assert_eq!(
+            agent.runtime_skills_snapshot()["active_skill"],
+            "mode-probe"
+        );
+        let (data, _) = execute(
+            &mut agent,
+            RuntimeCommand::Mode,
+            &["off".into()],
+            false,
+            Value::Null,
+        )
+        .await
+        .unwrap();
+        assert!(data["pinned_skill"].is_null());
+        assert!(
+            crate::session::Session::load(agent.session_id())
+                .unwrap()
+                .pinned_skill
+                .is_none()
+        );
     }
     #[test]
     fn role_arguments_preserve_model_and_task_and_reject_unsupported_resume() {

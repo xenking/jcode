@@ -447,6 +447,10 @@ fn handle_server_event_inner(
     } = event
     {
         remote.finish_runtime_command(id);
+        if command == "mode" {
+            app.session.pinned_skill = data["pinned_skill"].as_str().map(str::to_owned);
+            app.active_skill = app.session.pinned_skill.clone();
+        }
         if command == "poke"
             && let Some(enabled) = data["poke_enabled"].as_bool()
         {
@@ -1880,6 +1884,7 @@ fn handle_server_event_inner(
             provider_name,
             provider_model,
             subagent_model,
+            pinned_skill,
             agent_model_overrides,
             autoreview_enabled,
             autojudge_enabled,
@@ -2262,6 +2267,8 @@ fn handle_server_event_inner(
                 app.invalidate_command_candidates_cache();
             }
             if authoritative {
+                app.session.pinned_skill = pinned_skill;
+                app.active_skill = app.session.pinned_skill.clone();
                 app.remote_sessions = all_sessions;
                 app.remote_client_count = client_count;
                 app.remote_is_canary = is_canary;

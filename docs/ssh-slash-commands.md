@@ -66,6 +66,7 @@ A blocked command must not silently execute against the laptop.
 | Registered commands | SSH capability | Details and limitations |
 | --- | --- | --- |
 | `/help`, `/?`, `/commands` | UI | Help overlay and command topics describe the build, not proof of VM capability. |
+| `/mode` | Runtime | Show the daemon's pinned session skill, pin `/mode <skill>`, or clear it with `/mode off`. The host resolves skills and persists the choice. |
 | `/model`, `/models` | Wire + UI | Server catalog picker and explicit model selection. `/model refresh` requests a fresh server catalog. |
 | `/refresh-model-list` | Wire | Refresh provider catalogs on the server. |
 | `/provider-test-coverage`, `/model-status` | Runtime | Read persisted verification evidence from the VM, not the laptop. |

@@ -1285,6 +1285,65 @@ fn skill_invocation_with_prompt_activates_and_submits_in_one_turn() {
 }
 
 #[test]
+fn pinned_mode_commands_activate_report_and_clear_without_a_turn() {
+    let mut app = create_test_app();
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join(".jcode/skills/pinned-probe");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        "---\nname: pinned-probe\ndescription: Mode test\n---\nPINNED_MODE_BODY\n",
+    )
+    .unwrap();
+    app.session.working_dir = Some(temp.path().to_string_lossy().into_owned());
+    for command in ["/mode pinned-probe", "/mode"] {
+        app.input = command.into();
+        app.submit_input();
+        assert!(
+            !app.is_processing,
+            "{command} must not submit an agent turn"
+        );
+        assert_eq!(app.active_skill.as_deref(), Some("pinned-probe"));
+        assert_eq!(
+            serde_json::to_value(&app.session).unwrap()["pinned_skill"],
+            "pinned-probe"
+        );
+        assert!(
+            app.display_messages()
+                .last()
+                .unwrap()
+                .content
+                .contains("pinned-probe")
+        );
+    }
+    let announcements = app.session.messages.len();
+    app.input = "/mode pinned-probe".into();
+    app.submit_input();
+    assert_eq!(
+        app.session.messages.len(),
+        announcements,
+        "re-pinning is idempotent"
+    );
+    app.input = "/mode absent-mode-probe".into();
+    app.submit_input();
+    assert_eq!(app.active_skill.as_deref(), Some("pinned-probe"));
+    assert_eq!(
+        app.display_messages().last().unwrap().content,
+        "Unknown skill: /absent-mode-probe"
+    );
+    app.input = "/mode off".into();
+    app.submit_input();
+    assert!(app.active_skill.is_none());
+    assert!(
+        serde_json::to_value(&app.session)
+            .unwrap()
+            .get("pinned_skill")
+            .is_none()
+    );
+    assert!(!app.is_processing);
+}
+
+#[test]
 fn skill_invocation_with_prompt_attaches_pending_image_to_user_message() {
     let mut app = create_test_app();
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1478,6 +1537,7 @@ fn stale_server_history_is_deferred_before_remote_state_is_applied() {
                 provider_name: Some("stale-provider".to_string()),
                 provider_model: Some("stale-model".to_string()),
                 subagent_model: Some("stale-subagent".to_string()),
+                pinned_skill: None,
                 agent_model_overrides: Default::default(),
                 autoreview_enabled: Some(true),
                 autojudge_enabled: Some(true),
@@ -1578,6 +1638,7 @@ fn deferred_stale_server_history_captures_session_id_for_reload_handoff() {
             provider_name: Some("stale-provider".to_string()),
             provider_model: Some("stale-model".to_string()),
             subagent_model: None,
+            pinned_skill: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -1669,6 +1730,7 @@ fn ancient_server_history_is_deferred_via_client_side_release_check() {
             provider_name: Some("ancient-provider".to_string()),
             provider_model: Some("ancient-model".to_string()),
             subagent_model: Some("ancient-subagent".to_string()),
+            pinned_skill: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: Some(true),
             autojudge_enabled: Some(true),
@@ -1758,6 +1820,7 @@ fn older_server_reporting_no_update_is_still_deferred_via_client_check() {
             provider_name: Some("p".to_string()),
             provider_model: Some("m".to_string()),
             subagent_model: None,
+            pinned_skill: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -1869,6 +1932,7 @@ fn older_server_history_repairs_stale_shared_server_channel_end_to_end() {
             provider_name: Some("p".to_string()),
             provider_model: Some("m".to_string()),
             subagent_model: None,
+            pinned_skill: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -1952,6 +2016,7 @@ fn current_release_server_history_is_not_deferred_by_client_check() {
             provider_name: Some("p".to_string()),
             provider_model: Some("m".to_string()),
             subagent_model: None,
+            pinned_skill: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,

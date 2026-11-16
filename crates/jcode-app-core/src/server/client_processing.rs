@@ -393,7 +393,7 @@ pub(super) async fn start_processing_message(
         let skill_name = active_skill.as_deref().unwrap_or_default();
         let _ = client_event_tx.send(ServerEvent::Error {
             id,
-            message: format!("Skill '{skill_name}' is not installed on the server"),
+            message: crate::skill::unknown_skill_message(skill_name),
             retry_after_secs: None,
         });
         return;

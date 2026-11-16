@@ -257,7 +257,8 @@ fn dispatch_single_local_command(app: &mut App, trimmed: &str) -> bool {
         }
         return false;
     }
-    super::commands::handle_cancel_command(app, trimmed)
+    app.handle_mode_command(trimmed)
+        || super::commands::handle_cancel_command(app, trimmed)
         || super::commands::handle_help_command(app, trimmed)
         || super::commands::handle_keys_command(app, trimmed)
         || super::commands::handle_ssh_command(app, trimmed)

@@ -60,7 +60,7 @@ pub(in crate::tui::app) async fn begin_remote_send(
             content.clone(),
             images.clone(),
             system_reminder.clone(),
-            app.active_skill.clone(),
+            None,
         )
         .await;
     let msg_id = match msg_id {
@@ -293,6 +293,13 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
 ) -> Result<()> {
     let raw_input = prepared.raw_input.clone();
 
+    if prepared.expanded.split_whitespace().next() == Some("/mode") {
+        return Box::pin(super::key_handling::submit_prepared_remote_enter_input(
+            app, remote, prepared,
+        ))
+        .await;
+    }
+
     if crate::tui::is_ssh_remote() {
         // Box the shared dispatcher because its non-SSH fallback can call
         // this entry point. The SSH branch terminates in a wire send instead.
@@ -328,6 +335,12 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
         app.submit_input();
         return Ok(());
     };
+
+    if snapshot.get(invocation.name).is_some() {
+        remote
+            .runtime_command("mode", vec![invocation.name.to_string()])
+            .await?;
+    }
 
     let Some(trailing_prompt) = invocation.prompt else {
         app.input = raw_input;
@@ -816,6 +829,9 @@ mod ssh_slash_tests {
                 ("/model refresh", "refresh_models"),
                 ("/git status", "input_shell"),
                 ("/auth", "runtime_command"),
+                ("/mode server-only-skill", "runtime_command"),
+                ("/mode", "runtime_command"),
+                ("/mode off", "runtime_command"),
                 ("/refresh-model-list", "runtime_command"),
                 ("/logout openai", "runtime_command"),
                 ("/context", "runtime_command"),
@@ -845,6 +861,13 @@ mod ssh_slash_tests {
                 if command == "/logout openai" {
                     assert_eq!(request["command"], "logout");
                     assert_eq!(request["args"], serde_json::json!(["openai"]));
+                }
+                if command.starts_with("/mode") {
+                    assert_eq!(request["command"], "mode");
+                    assert!(
+                        app.active_skill.is_none(),
+                        "only server acknowledgement activates a mode"
+                    );
                 }
                 assert!(!app.pending_turn);
             }

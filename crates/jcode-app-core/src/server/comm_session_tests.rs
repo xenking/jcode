@@ -486,7 +486,7 @@ fn visible_selfdev_spawn_inherits_session_model_overrides_before_launch() {
         None,
         |id, _, selfdev, _| {
             assert!(selfdev);
-            super::inherit_visible_spawn_agent_models(&parent.id, id)?;
+            super::inherit_visible_spawn_preferences(&parent.id, id)?;
             let child = crate::session::Session::load_startup_stub(id)?;
             assert!(child.is_canary);
             assert_eq!(
@@ -999,6 +999,16 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
     session
         .set_agent_model_override("review", Some("review-override".into()))
         .unwrap();
+    let mut value = serde_json::to_value(&session).unwrap();
+    value["pinned_skill"] = serde_json::json!("pinned-probe");
+    session = serde_json::from_value(value).unwrap();
+    let skill_dir = temp.path().join(".jcode/skills/pinned-probe");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: pinned-probe\ndescription: Inherited mode\n---\nINHERITED_MODE_BODY\n",
+    )
+    .unwrap();
     session.save_prepared().unwrap();
     let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
         HashMap::from([("routing_busy".to_string(), agent.clone())]),
@@ -1066,6 +1076,18 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
     .unwrap();
     let child = sessions.read().await.get(&child_id).cloned().unwrap();
     let child = child.lock().await;
+    assert_eq!(
+        child.runtime_skills_snapshot()["active_skill"],
+        "pinned-probe"
+    );
+    let stored_child = crate::session::Session::load(&child_id).unwrap();
+    assert_eq!(
+        serde_json::to_value(&stored_child).unwrap()["pinned_skill"],
+        "pinned-probe"
+    );
+    assert_eq!(stored_child.messages.iter().flat_map(|m| &m.content).filter(|b| matches!(b,
+        crate::message::ContentBlock::Text { text, .. } if text.contains("INHERITED_MODE_BODY")
+    )).count(), 1, "worker receives the announcement before any turn");
     assert_eq!(child.provider_model(), "gpt-5.5");
     assert_eq!(child.session_provider_key().as_deref(), Some("openai-api"));
     assert!(

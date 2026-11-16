@@ -377,6 +377,7 @@ impl App {
             skills,
             mcp_manager,
             messages: Vec::new(),
+            active_skill: session.pinned_skill.clone(),
             session,
             agent_models_global_scope: false,
             pending_agent_model_request_id: None,
@@ -398,7 +399,6 @@ impl App {
             cursor_pos: 0,
             scroll_offset: 0,
             auto_scroll_paused: false,
-            active_skill: None,
             is_processing: false,
             streaming: StreamingProgress::default(),
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
@@ -907,6 +907,7 @@ impl App {
             skills,
             mcp_manager,
             messages: Vec::new(),
+            active_skill: session.pinned_skill.clone(),
             session,
             agent_models_global_scope: false,
             pending_agent_model_request_id: None,
@@ -928,7 +929,6 @@ impl App {
             cursor_pos: 0,
             scroll_offset: 0,
             auto_scroll_paused: false,
-            active_skill: None,
             is_processing: false,
             streaming: StreamingProgress::default(),
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
@@ -1538,6 +1538,7 @@ impl App {
         session.env_snapshots.shrink_to_fit();
         session.memory_injections.shrink_to_fit();
         session.replay_events.shrink_to_fit();
+        self.active_skill = session.pinned_skill.clone();
         self.session = session;
         // The full deserialized transcript (raw file + Session structs) was a
         // large transient; return the freed arena pages to the OS now instead

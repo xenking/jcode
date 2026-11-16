@@ -1148,12 +1148,25 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
         }
     };
 
-    let line = status_with_background_tasks(
+    let mut line = status_with_background_tasks(
         line,
         app.background_task_rows(),
         area.width as usize,
         app.is_processing(),
     );
+
+    if let Some(mode) = app.active_skill() {
+        let separator = if line.width() == 0 { "" } else { " · " };
+        let label = format!("{separator}mode: {}", mode.replace(['\r', '\n', '\t'], " "));
+        if line
+            .width()
+            .saturating_add(unicode_width::UnicodeWidthStr::width(label.as_str()))
+            <= usize::from(area.width)
+        {
+            line.spans
+                .push(Span::styled(label, Style::default().fg(accent_color())));
+        }
+    }
 
     crate::memory::check_staleness();
 

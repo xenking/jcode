@@ -48,6 +48,24 @@ fn first_prompt_preserves_welcome_header_spacing() {
 }
 
 #[test]
+fn pinned_mode_chrome_is_visible_when_it_fits_and_omitted_when_it_does_not() {
+    let _lock = viewport_snapshot_test_lock();
+    let mode = "工作😀".repeat(8);
+    let state = TestState {
+        active_skill: Some(mode.clone()),
+        suppress_info_widgets: true,
+        ..Default::default()
+    };
+    let wide = buffer_to_text(&render_full(&state, 240, 48));
+    let mode_rows: Vec<_> = wide.lines().filter(|line| line.contains("mode:")).collect();
+    assert_eq!(mode_rows.len(), 1, "{wide}");
+    let cells: String = mode_rows[0].chars().filter(|ch| !ch.is_whitespace()).collect();
+    assert!(cells.ends_with(&format!("mode:{mode}")), "{wide}");
+    let narrow = buffer_to_text(&render_full(&state, 30, 48));
+    assert!(!narrow.contains("mode:"), "mode label must be omitted, not clipped or wrapped: {narrow}");
+}
+
+#[test]
 fn first_prompt_stays_visible_with_widgets_during_processing_at_47x51() {
     let _lock = viewport_snapshot_test_lock();
     pin_full_tier();

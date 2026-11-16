@@ -407,6 +407,7 @@ async fn build_model_catalog(
         // authoritative. Omitting it falsely turns off /fast status and its badge.
         service_tier,
         subagent_model: None,
+        pinned_skill: None,
         agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,
@@ -863,6 +864,7 @@ async fn send_history_from_persisted_session(
     let provider_name = history_provider_name(&session, provider.as_ref());
     let provider_model = session.model.clone().or_else(|| Some(provider.model()));
     let subagent_model = session.subagent_model.clone();
+    let pinned_skill = session.pinned_skill.clone();
     let autoreview_enabled = session.autoreview_enabled;
     let autojudge_enabled = session.autojudge_enabled;
     let is_canary = session.is_canary;
@@ -910,6 +912,7 @@ async fn send_history_from_persisted_session(
         provider_name,
         provider_model,
         subagent_model,
+        pinned_skill,
         agent_model_overrides,
         autoreview_enabled,
         autojudge_enabled,
@@ -1125,6 +1128,7 @@ async fn send_history_with_guard(
             .map(str::to_string)
             .collect(),
     );
+    let pinned_skill = agent_guard.session_for_history().pinned_skill.clone();
     let provider_oauth_email = provider_oauth_email(agent_guard.provider_handle().as_ref());
     let provider_oauth_account_label = agent_guard.provider_handle().serving_oauth_account_label();
     let inferred_interrupted = was_interrupted
@@ -1241,6 +1245,7 @@ async fn send_history_with_guard(
         provider_name: Some(provider_name),
         provider_model: Some(provider_model),
         subagent_model,
+        pinned_skill,
         agent_model_overrides,
         autoreview_enabled,
         autojudge_enabled,

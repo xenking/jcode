@@ -11,6 +11,24 @@ use tokio::sync::RwLock;
 mod invocation;
 pub use invocation::SkillInvocation;
 
+pub const MODE_OFF_REMINDER: &str = "# Active Skill\n\nSession mode is off. Previously activated skill instructions are no longer session-wide instructions. Follow them only when explicitly requested again.";
+
+pub fn unknown_skill_message(name: &str) -> String {
+    endorsed_skills()
+        .iter()
+        .find(|skill| skill.name == name)
+        .map(|skill| match skill.install {
+            Some(install) => format!(
+                "Skill /{name} is endorsed but not installed. Install it with `{install}`, then run /skills or skill_manage reload_all."
+            ),
+            None => format!(
+                "Skill /{name} is endorsed but not installed (source: {}). Install it into ~/.jcode/skills/{name}/SKILL.md.",
+                skill.source
+            ),
+        })
+        .unwrap_or_else(|| format!("Unknown skill: /{name}"))
+}
+
 /// A skill definition from SKILL.md
 #[derive(Debug, Clone)]
 pub struct Skill {

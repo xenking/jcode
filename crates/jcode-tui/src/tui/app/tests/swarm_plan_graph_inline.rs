@@ -539,6 +539,7 @@ fn history_event_for_session(session_id: &str) -> crate::protocol::ServerEvent {
         provider_name: Some("claude".to_string()),
         provider_model: Some("claude-sonnet-4-20250514".to_string()),
         subagent_model: None,
+        pinned_skill: None,
         agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,

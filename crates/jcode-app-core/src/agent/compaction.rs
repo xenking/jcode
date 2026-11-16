@@ -28,6 +28,10 @@ impl Agent {
         self.locked_tools = None;
         self.provider_session_id = None;
         self.session.provider_session_id = None;
+        if self.session.pinned_skill.is_some() {
+            self.active_skill = self.session.pinned_skill.clone();
+            self.announce_active_skill();
+        }
     }
 
     pub fn poll_compaction_completion_event(&mut self) -> Option<CompactionEvent> {

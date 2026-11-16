@@ -188,6 +188,7 @@ pub(super) async fn create_headless_session(
         // The coordinator usually holds its agent lock while spawning, so read
         // the persisted sidecar, including changes made during the turn.
         if let Ok(parent) = crate::session::Session::load_startup_stub(parent_id) {
+            new_agent.inherit_pinned_skill(&parent)?;
             for (target, model) in parent.agent_model_overrides {
                 new_agent.set_agent_model_override(&target, Some(model))?;
             }

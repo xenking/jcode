@@ -3967,6 +3967,71 @@ impl App {
         *call_output_tokens_seen = output_tokens;
     }
 
+    pub(super) fn handle_mode_command(&mut self, input: &str) -> bool {
+        if input.split_whitespace().next() != Some("/mode") {
+            return false;
+        }
+        let argument = input.strip_prefix("/mode").unwrap_or_default().trim();
+        if argument == "off" {
+            let changed =
+                self.session.pinned_skill.take().is_some() | self.active_skill.take().is_some();
+            if changed {
+                if !self.is_remote {
+                    self.append_turn_system_reminder(Some(crate::skill::MODE_OFF_REMINDER.into()));
+                }
+                self.session_save_pending = true;
+            }
+        } else if !argument.is_empty() {
+            let snapshot = self.current_skills_snapshot();
+            let Some(skill) = snapshot.get(argument) else {
+                self.push_display_message(DisplayMessage::error(
+                    crate::skill::unknown_skill_message(argument),
+                ));
+                return true;
+            };
+            self.activate_pinned_skill(argument, skill.get_prompt());
+        }
+        self.push_display_message(DisplayMessage::system(format!(
+            "Session mode: {}",
+            self.session.pinned_skill.as_deref().unwrap_or("off")
+        )));
+        true
+    }
+
+    fn activate_pinned_skill(&mut self, name: &str, prompt: String) {
+        let changed = self.session.pinned_skill.as_deref() != Some(name);
+        self.session.pinned_skill = Some(name.into());
+        self.active_skill = Some(name.into());
+        if changed && !self.is_remote {
+            self.append_turn_system_reminder(Some(format!("# Active Skill\n\n{}", prompt.trim())));
+        }
+        self.session_save_pending = true;
+    }
+
+    pub(super) fn reannounce_pinned_skill(&mut self) {
+        if self.is_remote {
+            return;
+        }
+        self.active_skill = self.session.pinned_skill.clone();
+        let reminder = self
+            .session
+            .pinned_skill
+            .as_deref()
+            .and_then(|name| {
+                self.current_skills_snapshot()
+                    .get(name)
+                    .map(|skill| format!("# Active Skill\n\n{}", skill.get_prompt().trim()))
+            })
+            .or_else(|| {
+                self.session
+                    .stored_pinned_skill_announcement()
+                    .and_then(|text| text.strip_prefix("<system-reminder>\n"))
+                    .and_then(|text| text.strip_suffix("\n</system-reminder>"))
+                    .map(str::to_owned)
+            });
+        self.append_turn_system_reminder(reminder);
+    }
+
     /// Submit input - just sets up message and flags, processing happens in next loop iteration
     pub(super) fn submit_input(&mut self) {
         let command = expand_paste_placeholders(self, &self.input)
@@ -4107,13 +4172,7 @@ impl App {
             }
 
             if let Some(skill) = skill {
-                self.active_skill = Some(skill_name.clone());
-                if !self.is_remote {
-                    self.append_turn_system_reminder(Some(format!(
-                        "# Active Skill\n\n{}",
-                        skill.get_prompt().trim()
-                    )));
-                }
+                self.activate_pinned_skill(&skill_name, skill.get_prompt());
                 self.push_display_message(DisplayMessage {
                     role: "system".to_string(),
                     content: format!("Activated skill: {} - {}", skill.name, skill.description),
@@ -4131,23 +4190,9 @@ impl App {
                 // Distinguish an endorsed-but-not-installed skill from a
                 // typo: the skill list advertises endorsed skills, so a bare
                 // "Unknown skill" for them reads like a bug (issue #445).
-                let endorsed_hint = crate::skill::endorsed_skills()
-                    .iter()
-                    .find(|endorsed| endorsed.name == skill_name)
-                    .map(|endorsed| match endorsed.install {
-                        Some(install) => format!(
-                            "Skill /{} is endorsed but not installed. Install it with `{}`, then run /skills or skill_manage reload_all.",
-                            skill_name, install
-                        ),
-                        None => format!(
-                            "Skill /{} is endorsed but not installed (source: {}). Install it into ~/.jcode/skills/{}/SKILL.md.",
-                            skill_name, endorsed.source, skill_name
-                        ),
-                    });
                 self.push_display_message(DisplayMessage {
                     role: "error".to_string(),
-                    content: endorsed_hint
-                        .unwrap_or_else(|| format!("Unknown skill: /{}", skill_name)),
+                    content: crate::skill::unknown_skill_message(&skill_name),
                     tool_calls: vec![],
                     duration_secs: None,
                     title: None,

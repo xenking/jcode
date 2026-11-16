@@ -26,6 +26,7 @@ mod memory_profile;
 mod model;
 mod parallel_messages;
 mod persistence;
+mod pinned_skill;
 pub mod prewarm;
 mod render;
 mod storage_paths;
@@ -101,6 +102,8 @@ pub struct Session {
     /// Full assembled system prompt replacement, including an intentionally empty prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_skill: Option<String>,
     /// Durable logical input turn identity for per-route usage deduplication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_usage_turn_id: Option<String>,
@@ -233,6 +236,8 @@ struct SessionStartupStub {
     custom_title: Option<String>,
     #[serde(default)]
     system_prompt: Option<String>,
+    #[serde(default)]
+    pinned_skill: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     #[serde(default)]
@@ -364,6 +369,7 @@ impl Session {
         let mut session = Self::create_with_id(stub.id, stub.parent_id, stub.title);
         session.custom_title = stub.custom_title;
         session.system_prompt = stub.system_prompt;
+        session.pinned_skill = stub.pinned_skill;
         session.created_at = stub.created_at;
         session.updated_at = stub.updated_at;
         session.compaction = stub.compaction;
@@ -406,6 +412,7 @@ impl Session {
         let mut session = Self::create_with_id(snapshot.id, snapshot.parent_id, snapshot.title);
         session.custom_title = snapshot.custom_title;
         session.system_prompt = snapshot.system_prompt;
+        session.pinned_skill = snapshot.pinned_skill;
         session.created_at = snapshot.created_at;
         session.updated_at = snapshot.updated_at;
         session.messages = snapshot.messages;
@@ -649,6 +656,7 @@ impl Session {
             title: self.title.clone(),
             custom_title: self.custom_title.clone(),
             system_prompt: self.system_prompt.clone(),
+            pinned_skill: self.pinned_skill.clone(),
             updated_at: self.updated_at,
             compaction: self.compaction.clone(),
             compaction_unchanged: false,
@@ -857,6 +865,7 @@ impl Session {
         self.title = meta.title;
         self.custom_title = meta.custom_title;
         self.system_prompt = meta.system_prompt;
+        self.pinned_skill = meta.pinned_skill;
         self.updated_at = meta.updated_at;
         if !meta.compaction_unchanged {
             self.compaction = meta.compaction;
@@ -910,6 +919,7 @@ impl Session {
             updated_at: now,
             messages: Vec::new(),
             system_prompt: None,
+            pinned_skill: None,
             model_usage_turn_id: None,
             compaction: None,
             provider_session_id: None,
@@ -972,6 +982,7 @@ impl Session {
             updated_at: now,
             messages: Vec::new(),
             system_prompt: None,
+            pinned_skill: None,
             model_usage_turn_id: None,
             compaction: None,
             provider_session_id: None,
@@ -1955,6 +1966,8 @@ struct RemoteStartupSessionSnapshot {
     custom_title: Option<String>,
     #[serde(default)]
     system_prompt: Option<String>,
+    #[serde(default)]
+    pinned_skill: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     #[serde(default, deserialize_with = "parallel_messages::deserialize")]

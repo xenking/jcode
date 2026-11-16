@@ -109,9 +109,10 @@ impl App {
                 return Ok(());
             }
 
-            let (provider_messages, compaction_event) = self.messages_for_provider();
+            let (mut provider_messages, compaction_event) = self.messages_for_provider();
             if let Some(event) = compaction_event {
                 self.handle_compaction_event(event, None);
+                provider_messages = self.messages_for_provider().0;
             }
 
             let tools = self.registry.definitions(None).await;

@@ -1644,6 +1644,14 @@ impl Agent {
                 continue;
             }
 
+            if input.split_whitespace().next() == Some("/mode") {
+                match self.mode_command(input.strip_prefix("/mode").unwrap_or_default()) {
+                    Ok(message) => println!("{message}"),
+                    Err(error) => eprintln!("{error}"),
+                }
+                continue;
+            }
+
             // Check for skill invocation. Resolve against the registry (not
             // the bare tokenizer) so a `SKILL.md` `name:` field containing
             // spaces, e.g. "My Custom Skill", can still be matched: the
@@ -1652,8 +1660,7 @@ impl Agent {
                 if let Some(skill) = skills.get(invocation.name) {
                     println!("Activating skill: {}", skill.name);
                     println!("{}\n", skill.description);
-                    self.active_skill = Some(invocation.name.to_string());
-                    self.announce_active_skill();
+                    self.set_pinned_skill(Some(invocation.name))?;
                     if let Some(prompt) = invocation.prompt {
                         if let Err(e) = self.run_once(prompt).await {
                             eprintln!("\nError: {}\n", e);

@@ -320,6 +320,17 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
         }
         let trimmed = prepared.expanded.trim();
 
+        if trimmed.split_whitespace().next() == Some("/mode") {
+            let argument = trimmed.strip_prefix("/mode").unwrap_or_default().trim();
+            let args = if argument.is_empty() {
+                Vec::new()
+            } else {
+                vec![argument.to_string()]
+            };
+            remote.runtime_command("mode", args).await?;
+            return Ok(());
+        }
+
         // Before the SSH gate: `/local` must work from a client attached
         // to the cloud copy, because the return is coordinated locally.
         if app_mod::commands_cloud::parse_cloud_command(trimmed).is_some() {
