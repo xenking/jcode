@@ -8,6 +8,43 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[test]
+fn durable_steer_wakes_blocking_wait_but_follow_up_does_not() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let sid = "session_durable_steer_wakeup";
+    let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let control = SessionControlHandle::cancel_only(sid, queue, InterruptSignal::new());
+    let watch = crate::incoming_message::watch(sid);
+    control
+        .enqueue_user_prompt(
+            "follow".into(),
+            "later".into(),
+            vec![],
+            jcode_agent_runtime::QueuedMessageMode::AfterYield,
+            None,
+        )
+        .unwrap();
+    assert!(
+        !watch.is_pending(),
+        "follow-up must not interrupt a blocking wait"
+    );
+    control
+        .enqueue_user_prompt(
+            "steer".into(),
+            "now".into(),
+            vec![],
+            jcode_agent_runtime::QueuedMessageMode::Steer,
+            None,
+        )
+        .unwrap();
+    assert!(
+        watch.is_pending(),
+        "durable steer must wake a blocking wait"
+    );
+    crate::incoming_message::forget(sid);
+}
+
+#[test]
 fn identity_transport_negotiation_preserves_legacy_payload_shape() {
     let identity = crate::protocol::TurnIdentity {
         runtime_generation: "runtime".into(),

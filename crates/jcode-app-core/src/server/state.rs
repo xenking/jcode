@@ -892,6 +892,9 @@ impl SessionControlHandle {
             return Err(error);
         }
         drop(queue);
+        if mode == jcode_agent_runtime::QueuedMessageMode::Steer {
+            self.wake_blocking_waits(true, SoftInterruptSource::User);
+        }
         Ok(false)
     }
 
@@ -957,6 +960,9 @@ impl SessionControlHandle {
             return Err(error);
         }
         drop(queue);
+        if mode == jcode_agent_runtime::QueuedMessageMode::Steer {
+            self.wake_blocking_waits(true, SoftInterruptSource::User);
+        }
         Ok(())
     }
 
