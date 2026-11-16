@@ -79,23 +79,54 @@ pub fn enrich_sessions_from_swarm_state(sessions: &mut [SessionInfo], dir: impl 
     if sessions.is_empty() {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+    let dir = dir.as_ref();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            eprintln!(
+                "harness swarm metadata scan failed at {}: {error}",
+                dir.display()
+            );
+            return;
+        }
     };
-    let mut paths: Vec<_> = entries.flatten().map(|entry| entry.path()).collect();
+    let mut paths: Vec<_> = entries
+        .filter_map(|entry| match entry {
+            Ok(entry) => Some(entry.path()),
+            Err(error) => {
+                eprintln!("harness swarm metadata entry unavailable: {error}");
+                None
+            }
+        })
+        .collect();
     paths.sort();
     let mut members: BTreeMap<String, (u64, Member)> = BTreeMap::new();
     for path in paths {
         if path.extension().is_none_or(|ext| ext != "json") {
             continue;
         }
-        let snapshot = std::fs::File::open(path).ok().and_then(|file| {
-            serde_json::from_reader::<_, Snapshot>(std::io::BufReader::new(file)).ok()
+        let snapshot = std::fs::File::open(&path).and_then(|file| {
+            serde_json::from_reader::<_, Snapshot>(std::io::BufReader::new(file))
+                .map_err(std::io::Error::other)
         });
-        let Some(snapshot) = snapshot else { continue };
-        for value in snapshot.members {
-            let Ok(member) = serde_json::from_value::<Member>(value) else {
+        let snapshot = match snapshot {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                eprintln!(
+                    "harness swarm snapshot unavailable at {}: {error}",
+                    path.display()
+                );
                 continue;
+            }
+        };
+        for value in snapshot.members {
+            let member = match serde_json::from_value::<Member>(value) {
+                Ok(member) => member,
+                Err(error) => {
+                    eprintln!("harness swarm member metadata invalid: {error}");
+                    continue;
+                }
             };
             // A member may appear in old snapshots after changing swarms.
             // Choose the newest record as a whole, not a mix of old fields.
@@ -110,10 +141,15 @@ pub fn enrich_sessions_from_swarm_state(sessions: &mut [SessionInfo], dir: impl 
             }
         }
     }
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
+    // Clock failure cannot establish freshness. Ordinary persisted labels/status
+    // remain best-effort display metadata, never a live ownership decision.
+    let now_ms = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(elapsed) => Some(elapsed.as_millis() as u64),
+        Err(error) => {
+            eprintln!("harness swarm clock unavailable: {error}");
+            None
+        }
+    };
     for session in sessions {
         let Some((updated_at, member)) = members.get(&session.session_id) else {
             continue;
@@ -133,8 +169,7 @@ pub fn enrich_sessions_from_swarm_state(sessions: &mut [SessionInfo], dir: impl 
         if session.swarm_status.is_none() {
             let fresh_stall = member.status.as_deref() == Some("running")
                 && member.stalled_secs.is_some()
-                && *updated_at <= now_ms
-                && now_ms - *updated_at <= 120_000;
+                && now_ms.is_some_and(|now| *updated_at <= now && now - *updated_at <= 120_000);
             session.swarm_status = if fresh_stall {
                 Some("stalled".into())
             } else {

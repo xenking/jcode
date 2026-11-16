@@ -91,13 +91,14 @@ pub fn worker_meta(home: &Path, session_id: &str) -> Option<WorkerMeta> {
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let cache = cache.get_or_insert_with(HashMap::new);
     let key = home.join(session_id);
-    if let Some((seen, meta)) = cache.get(&key)
+    if let Some(stamp) = stamp
+        && let Some((seen, meta)) = cache.get(&key)
         && *seen == stamp
     {
         return Some(meta.clone());
     }
     let meta = read(home, session_id);
-    if let Some(meta) = &meta {
+    if let (Some(stamp), Some(meta)) = (stamp, &meta) {
         cache.insert(key, (stamp, meta.clone()));
     }
     meta
@@ -107,15 +108,19 @@ type Stamp = (u64, Option<SystemTime>, u64, Option<SystemTime>);
 
 static CACHE: Mutex<Option<HashMap<PathBuf, (Stamp, WorkerMeta)>>> = Mutex::new(None);
 
-fn stamp(home: &Path, session_id: &str) -> Stamp {
-    let meta = |name: String| {
-        std::fs::metadata(home.join("sessions").join(name))
-            .map(|m| (m.len(), m.modified().ok()))
-            .unwrap_or((0, None))
+fn stamp(home: &Path, session_id: &str) -> Option<Stamp> {
+    let meta = |name: String| match std::fs::metadata(home.join("sessions").join(name)) {
+        Ok(metadata) => metadata.modified().map(|time| (metadata.len(), Some(time))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((0, None)),
+        Err(error) => Err(error),
     };
-    let (a, am) = meta(format!("{session_id}.json"));
-    let (b, bm) = meta(format!("{session_id}.journal.jsonl"));
-    (a, am, b, bm)
+    match (
+        meta(format!("{session_id}.json")),
+        meta(format!("{session_id}.journal.jsonl")),
+    ) {
+        (Ok((a, am)), Ok((b, bm))) => Some((a, am, b, bm)),
+        _ => None, // An unreadable stamp never validates a cached record.
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -277,20 +282,46 @@ fn message_phase(message: &Message) -> Option<Phase> {
 }
 
 fn read(home: &Path, session_id: &str) -> Option<WorkerMeta> {
-    let dir = home.join("sessions");
-    let snapshot: Option<Snapshot> = std::fs::read(dir.join(format!("{session_id}.json")))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
-    let journal = std::fs::read_to_string(dir.join(format!("{session_id}.journal.jsonl")))
-        .ok()
-        .unwrap_or_default();
-    let journal: Vec<JournalLine> = journal
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect();
-    if snapshot.is_none() && journal.is_empty() {
-        return None;
+    match read_checked(home, session_id) {
+        Ok(meta) => meta,
+        Err(error) => {
+            eprintln!("harness worker metadata unavailable for {session_id}: {error}");
+            None
+        }
     }
+}
+
+fn read_checked(home: &Path, session_id: &str) -> std::io::Result<Option<WorkerMeta>> {
+    let dir = home.join("sessions");
+    let snapshot: Option<Snapshot> = match std::fs::read(dir.join(format!("{session_id}.json"))) {
+        Ok(bytes) => Some(serde_json::from_slice(&bytes).map_err(std::io::Error::other)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let journal = match std::fs::read_to_string(dir.join(format!("{session_id}.journal.jsonl"))) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    let mut entries = Vec::new();
+    for (index, line) in journal.split_inclusive('\n').enumerate() {
+        match serde_json::from_str::<JournalLine>(line) {
+            Ok(entry) => entries.push(entry),
+            // A writer may be appending the final line. Do not cache or publish
+            // partial usage totals until the record is complete.
+            Err(error) => {
+                return Err(std::io::Error::other(format!(
+                    "journal line {}: {error}",
+                    index + 1
+                )));
+            }
+        }
+    }
+    let journal = entries;
+    if snapshot.is_none() && journal.is_empty() {
+        return Ok(None);
+    }
+    // Journal-only records are supported; a missing snapshot is not a read error.
     let snapshot = snapshot.unwrap_or_default();
     let mut meta = WorkerMeta {
         model: clean(snapshot.meta.model),
@@ -344,7 +375,7 @@ fn read(home: &Path, session_id: &str) -> Option<WorkerMeta> {
     // The record's own write time is the newest activity: the journal is
     // appended as messages arrive, so its mtime moves with the turn.
     meta.last_activity_ms = stamp_millis(home, session_id);
-    Some(meta)
+    Ok(Some(meta))
 }
 
 fn clean(value: Option<String>) -> Option<String> {
@@ -354,6 +385,8 @@ fn clean(value: Option<String>) -> Option<String> {
 }
 
 fn stamp_millis(home: &Path, session_id: &str) -> Option<i64> {
+    // Advisory activity time only. Unknown filesystem time stays absent, never
+    // a fresh heartbeat or authority to recover/cancel a worker.
     let dir = home.join("sessions");
     let newest = [
         format!("{session_id}.journal.jsonl"),

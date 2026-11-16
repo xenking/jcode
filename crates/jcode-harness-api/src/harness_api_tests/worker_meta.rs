@@ -112,6 +112,30 @@ fn unknown_spend_stays_absent_and_closed_sessions_are_idle() {
 }
 
 #[test]
+fn partial_unreadable_worker_records_do_not_claim_complete_usage() {
+    let home = home("partial-unreadable");
+    write(
+        &home,
+        "bad_snapshot",
+        "not json",
+        "{\"meta\":{\"model\":\"future-model\"}}\n",
+    );
+    let corrupt_snapshot = worker_meta(&home, "bad_snapshot");
+    write(&home, "bad_journal", SILENT, "");
+    std::fs::create_dir(home.join("sessions/bad_journal.journal.jsonl")).unwrap();
+    let unreadable_journal = worker_meta(&home, "bad_journal");
+    std::fs::remove_dir_all(home).unwrap();
+    assert!(
+        corrupt_snapshot.is_none(),
+        "a corrupt snapshot is not an empty transcript"
+    );
+    assert!(
+        unreadable_journal.is_none(),
+        "an unreadable journal is not an idle session"
+    );
+}
+
+#[test]
 fn missing_or_unreadable_records_are_absent() {
     let home = home("missing");
     assert!(worker_meta(&home, "session_nobody_5_e").is_none());
