@@ -12,6 +12,7 @@ mod burst_spawn;
 mod disconnect;
 mod idle_precompact;
 mod poke_swarm;
+mod peer_prompt;
 mod provider_behavior;
 mod reload_multiclient;
 mod safety;
