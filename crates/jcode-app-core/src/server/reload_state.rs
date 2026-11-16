@@ -1,4 +1,3 @@
-use super::has_live_listener;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -227,6 +226,43 @@ pub async fn probe_serving_identity(
     .map_err(|error| anyhow::anyhow!("serving identity observer failed: {error}"))?
 }
 
+pub async fn observe_serving_socket(
+    socket_path: &std::path::Path,
+) -> jcode_build_support::runtime_generation::SocketObservation {
+    use jcode_build_support::runtime_generation::{SocketObservation, observe_socket};
+    let socket = socket_path.to_path_buf();
+    tokio::task::spawn_blocking(move || observe_socket(&socket, Duration::from_millis(200)))
+        .await
+        .unwrap_or_else(|error| SocketObservation::Unknown {
+            reason: format!("serving observer task failed: {error}"),
+        })
+}
+
+pub async fn replacement_spawn_permission(
+    socket_path: &std::path::Path,
+    handoff_owner: Option<u32>,
+) -> Result<(), String> {
+    let observation = observe_serving_socket(socket_path).await;
+    jcode_build_support::runtime_generation::replacement_spawn_permission(
+        &observation,
+        handoff_owner.is_some_and(reload_process_alive),
+    )
+}
+
+pub async fn confirm_replacement_generation(
+    socket_path: &std::path::Path,
+    max_age: Duration,
+) -> anyhow::Result<crate::protocol::DaemonIdentity> {
+    use jcode_build_support::runtime_generation::{GenerationVerdict, assess_reconnect};
+    let serving = probe_serving_identity(socket_path).await?;
+    match assess_reconnect(&serving, max_age) {
+        GenerationVerdict::Ready(identity) => Ok(identity),
+        GenerationVerdict::Unknown { reason }
+        | GenerationVerdict::Pending { reason }
+        | GenerationVerdict::Mismatch { reason } => anyhow::bail!(reason),
+    }
+}
+
 pub async fn inspect_reload_wait_status_for(
     socket_path: &std::path::Path,
     max_age: Duration,
@@ -234,7 +270,9 @@ pub async fn inspect_reload_wait_status_for(
     reload_id: Option<&str>,
     target: Option<&jcode_selfdev_types::ImmutableTarget>,
 ) -> ReloadWaitStatus {
-    use jcode_build_support::runtime_generation::{GenerationVerdict, assess_handoff};
+    use jcode_build_support::runtime_generation::{
+        GenerationVerdict, SocketObservation, assess_handoff,
+    };
     let state = recent_reload_state(max_age)
         .filter(|state| reload_id.is_none_or(|id| state.request_id == id));
     if let Some(state) = &state
@@ -243,33 +281,24 @@ pub async fn inspect_reload_wait_status_for(
         return ReloadWaitStatus::Failed(state.detail.clone());
     }
     let pid = state.as_ref().map(|state| state.pid).or(last_known_pid);
-    if let Some(id) = reload_id {
-        match probe_serving_identity(socket_path).await {
-            Ok(serving) => match assess_handoff(id, target, Some(&serving)) {
-                GenerationVerdict::Ready(_) => return ReloadWaitStatus::Ready,
-                GenerationVerdict::Mismatch { reason } => {
-                    return ReloadWaitStatus::Failed(Some(reason));
-                }
-                GenerationVerdict::Unknown { reason } => {
-                    return ReloadWaitStatus::Unknown { reason };
-                }
-                GenerationVerdict::Pending { .. } => {
-                    return ReloadWaitStatus::Waiting {
-                        pid: pid.or(Some(serving.pid)),
-                    };
-                }
-            },
-            Err(error) if has_live_listener(socket_path).await => {
+    match observe_serving_socket(socket_path).await {
+        SocketObservation::Serving(serving) => {
+            let Some(id) = reload_id else {
                 return ReloadWaitStatus::Unknown {
-                    reason: format!("{error:#}"),
+                    reason: "live listener has no correlated reload request".into(),
                 };
-            }
-            Err(_) => {}
+            };
+            return match assess_handoff(id, target, Some(&serving)) {
+                GenerationVerdict::Ready(_) => ReloadWaitStatus::Ready,
+                GenerationVerdict::Mismatch { reason } => ReloadWaitStatus::Failed(Some(reason)),
+                GenerationVerdict::Unknown { reason } => ReloadWaitStatus::Unknown { reason },
+                GenerationVerdict::Pending { .. } => ReloadWaitStatus::Waiting {
+                    pid: pid.or(Some(serving.pid)),
+                },
+            };
         }
-    } else if has_live_listener(socket_path).await {
-        return ReloadWaitStatus::Unknown {
-            reason: "live listener has no correlated reload request".into(),
-        };
+        SocketObservation::Unknown { reason } => return ReloadWaitStatus::Unknown { reason },
+        SocketObservation::Absent { .. } => {}
     }
     if let Some(pid) = pid {
         if reload_process_alive(pid) {
@@ -597,11 +626,10 @@ pub fn send_reload_signal(
     ));
     let target = super::reload_exec_target(prefer_selfdev_binary)
         .ok_or_else(|| anyhow::anyhow!("no selected reload target"))
-        .and_then(|(path, _)| {
-            jcode_build_support::runtime_generation::resolve(
-                jcode_selfdev_types::DesiredSelection::Path(path),
-            )
-        });
+        // Admission pins file/payload identity without running a subprocess on
+        // the daemon's control loop. Explicit version selections are resolved
+        // and hash-checked by their caller before send_reload_signal_target.
+        .and_then(|(path, _)| jcode_build_support::runtime_generation::pin_path(&path));
     let target = match target {
         Ok(target) => target,
         Err(error) => {

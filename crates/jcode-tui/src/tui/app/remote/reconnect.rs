@@ -243,7 +243,9 @@ fn disconnected_redraw_interval(
 
 pub(in crate::tui::app) fn reload_handoff_active(state: &RemoteRunState) -> bool {
     !crate::tui::is_ssh_remote()
-        && (state.server_reload_in_progress || super::session_persistence::reload_marker_active())
+        && (state.server_reload_in_progress
+            || (!state.reload_recovery_attempted
+                && super::session_persistence::reload_marker_active()))
 }
 
 pub(in crate::tui::app) fn should_use_same_session_fast_path(
@@ -322,7 +324,10 @@ async fn wait_for_reload_handoff_before_reconnect(
             if recover_reloading_server(app, terminal, state, &detail).await? {
                 Ok(Some(ConnectOutcome::Retry))
             } else {
-                Ok(None)
+                // Failure is not permission to attach to an unconfirmed old listener.
+                crate::server::wait_for_reload_handoff_event(state.last_reload_pid, &socket_path)
+                    .await;
+                Ok(Some(ConnectOutcome::Retry))
             }
         }
         crate::server::ReloadWaitStatus::Idle => {
@@ -340,7 +345,9 @@ async fn wait_for_reload_handoff_before_reconnect(
             {
                 Ok(Some(ConnectOutcome::Retry))
             } else {
-                Ok(None)
+                crate::server::wait_for_reload_handoff_event(state.last_reload_pid, &socket_path)
+                    .await;
+                Ok(Some(ConnectOutcome::Retry))
             }
         }
         crate::server::ReloadWaitStatus::Waiting { pid } => {
@@ -377,10 +384,15 @@ async fn recover_reloading_server(
     state: &mut RemoteRunState,
     detail: &str,
 ) -> Result<bool> {
-    if crate::tui::is_ssh_remote()
-        || state.reload_recovery_attempted
-        || crate::server_spawn::is_running().await
-    {
+    if crate::tui::is_ssh_remote() || state.reload_recovery_attempted {
+        return Ok(false);
+    }
+    let socket_path = crate::server::socket_path();
+    let owner = state.last_reload_pid.or_else(|| {
+        crate::server::recent_reload_state(RELOAD_MARKER_MAX_AGE).map(|marker| marker.pid)
+    });
+    if let Err(reason) = crate::server::replacement_spawn_permission(&socket_path, owner).await {
+        state.last_disconnect_reason = Some(format!("replacement deferred: {reason}"));
         return Ok(false);
     }
 
@@ -401,12 +413,23 @@ async fn recover_reloading_server(
         detail
     ));
 
-    match crate::server_spawn::spawn_default_server().await {
+    let replacement = async {
+        crate::server_spawn::spawn_default_server().await?;
+        crate::server::confirm_replacement_generation(&socket_path, RELOAD_MARKER_MAX_AGE).await?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    match replacement {
         Ok(()) => {
             state.initial_server_start = true;
+            state.server_reload_in_progress = false;
+            state.last_reload_id = None;
+            state.last_reload_pid = None;
             state.last_disconnect_reason =
-                Some("replacement server started; reconnecting".to_string());
-            crate::logging::info("Replacement shared server started after stalled reload");
+                Some("replacement generation confirmed; reconnecting".to_string());
+            crate::logging::info(
+                "Replacement shared server generation confirmed after stalled reload",
+            );
             Ok(true)
         }
         Err(error) => {
@@ -436,8 +459,12 @@ async fn respawn_dead_server(
 ) -> Result<bool> {
     if !should_respawn_dead_server(state, crate::tui::is_ssh_remote(), Instant::now())
         || reload_handoff_active(state)
-        || crate::server_spawn::is_running().await
     {
+        return Ok(false);
+    }
+    let socket_path = crate::server::socket_path();
+    if let Err(reason) = crate::server::replacement_spawn_permission(&socket_path, None).await {
+        state.last_disconnect_reason = Some(format!("replacement deferred: {reason}"));
         return Ok(false);
     }
     state.last_dead_server_respawn = Some(Instant::now());
@@ -450,17 +477,24 @@ async fn respawn_dead_server(
         state.reconnect_attempts
     ));
 
-    let socket_path = crate::server::socket_path();
     if crate::server::reap_stale_socket_if_dead(&socket_path).await {
         crate::logging::info("Reconnect: reaped stale socket before respawn");
     }
 
-    match crate::server_spawn::spawn_default_server().await {
+    let replacement = async {
+        crate::server_spawn::spawn_default_server().await?;
+        crate::server::confirm_replacement_generation(&socket_path, RELOAD_MARKER_MAX_AGE).await?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    match replacement {
         Ok(()) => {
             state.initial_server_start = true;
             state.last_disconnect_reason =
-                Some("replacement server started; reconnecting".to_string());
-            crate::logging::info("Replacement shared server started after server loss");
+                Some("replacement generation confirmed; reconnecting".to_string());
+            crate::logging::info(
+                "Replacement shared server generation confirmed after server loss",
+            );
             Ok(true)
         }
         Err(error) => {
