@@ -4112,7 +4112,7 @@ fn render_swarm_tool(msg: &DisplayMessage, width: u16) -> Option<Vec<Line<'stati
         "spawn" | "resume" => "+",
         "stop" => "■",
         "await_members" => "⌛",
-        "list" => "☷",
+        "list" => "≡",
         "focus" => "◎",
         _ => "·",
     };
