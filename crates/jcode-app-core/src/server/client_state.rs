@@ -507,8 +507,20 @@ pub(super) fn recent_history_window(
     let is_prompt = |message: &&HistoryMessage| {
         message.role == "user" && !crate::session::is_attached_image_label_text(&message.content)
     };
+    // Image anchors use ordinals of actual user rows, not decision cards.
     let excluded_prompts = messages[..start].iter().filter(is_prompt).count();
-    let hidden_user_prompts = archived_prompts + excluded_prompts;
+    let excluded_ask_answers = messages[..start]
+        .iter()
+        .filter(|message| {
+            message.role == "tool"
+                && message
+                    .tool_data
+                    .as_ref()
+                    .is_some_and(|tool| tool.name == "ask")
+                && jcode_session_types::stored_ask_answer_text(&message.content).is_some()
+        })
+        .count();
+    let hidden_user_prompts = archived_prompts + excluded_prompts + excluded_ask_answers;
     let info = crate::session::RenderedCompactedHistoryInfo {
         total_messages: total,
         visible_messages: total - start,

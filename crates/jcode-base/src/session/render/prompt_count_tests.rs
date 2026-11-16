@@ -65,6 +65,43 @@ fn compacted_tool_results_are_not_hidden_user_prompts_or_turn_boundaries() {
 }
 
 #[test]
+fn answered_ask_is_a_user_turn_in_rendered_history() {
+    let mut session = compacted_tool_session(10);
+    session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "ask-1".into(),
+            name: "ask".into(),
+            input: serde_json::json!({"questions": []}),
+            thought_signature: None,
+        }],
+    );
+    let call = session.messages.pop().unwrap();
+    session.messages.insert(1, call);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::ToolResult {
+            tool_use_id: "ask-1".into(),
+            content: "User answers:\n1. Which? -> Mango\n".into(),
+            is_error: None,
+        }],
+    );
+    let result = session.messages.pop().unwrap();
+    session.messages.insert(2, result);
+    std::sync::Arc::make_mut(session.compaction.as_mut().unwrap()).compacted_count += 2;
+    let (messages, _, info) = render_messages_and_images_with_compacted_history(&session, 1);
+    assert_eq!(info.unwrap().hidden_user_prompts, 10);
+    let (full, _, _) = render_messages_and_images_with_compacted_history(&session, usize::MAX);
+    let answer = full
+        .iter()
+        .find(|m| m.tool_data.as_ref().is_some_and(|t| t.id == "ask-1"))
+        .unwrap();
+    assert_eq!(answer.role, "tool");
+    assert!(answer.content.contains("Mango"));
+    assert!(!messages.iter().any(|m| m.content.contains("Mango")));
+}
+
+#[test]
 fn compacted_single_tool_heavy_turn_is_never_truncated() {
     let mut session = compacted_tool_session(1);
     let tool_result = session.messages[1].clone();

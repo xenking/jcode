@@ -30,6 +30,42 @@ fn delta_test_base(
 }
 
 #[test]
+fn recent_history_counts_ask_answers_but_preserves_image_ordinals() {
+    let mut messages = delta_test_messages();
+    messages.insert(
+        1,
+        crate::protocol::HistoryMessage {
+            response_stats: None,
+            timestamp_ms: None,
+            role: "tool".into(),
+            content: "User answers:\n1. Which? -> Mango\n".into(),
+            tool_calls: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "a".into(),
+                name: "ask".into(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
+            }),
+        },
+    );
+    let image = crate::session::RenderedImage {
+        media_type: "image/png".into(),
+        data: "data".into(),
+        label: None,
+        source: crate::session::RenderedImageSource::UserInput,
+        anchor: Some(crate::session::RenderedImageAnchor::UserPrompt { ordinal: 1 }),
+        history_message_index: None,
+    };
+    let (_, images, info) = super::super::recent_history_window(messages, vec![image], 2);
+    assert_eq!(info.hidden_user_prompts, 2);
+    assert_eq!(
+        images[0].anchor,
+        Some(crate::session::RenderedImageAnchor::UserPrompt { ordinal: 0 })
+    );
+}
+
+#[test]
 fn history_base_match_sends_only_the_tail() {
     let messages = delta_test_messages();
     let base = delta_test_base(&messages, 3);

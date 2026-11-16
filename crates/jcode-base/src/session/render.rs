@@ -144,6 +144,33 @@ fn stored_message_is_user_turn(msg: &super::StoredMessage) -> bool {
     !text.is_empty() && !crate::message::is_background_task_notification_content(&text)
 }
 
+fn stored_user_turn_count(
+    msg: &super::StoredMessage,
+    ask_ids: &std::collections::HashSet<&str>,
+) -> usize {
+    let prompt = usize::from(stored_message_is_user_turn(msg));
+    if !matches!(msg.role, Role::User) || msg.display_role.is_some() {
+        return prompt;
+    }
+    prompt
+        + msg
+            .content
+            .iter()
+            .filter(|block| match block {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => {
+                    *is_error != Some(true)
+                        && ask_ids.contains(tool_use_id.as_str())
+                        && jcode_session_types::stored_ask_answer_text(content).is_some()
+                }
+                _ => false,
+            })
+            .count()
+}
+
 fn compacted_history_render_window(
     messages: &[super::StoredMessage],
     compacted_count: usize,
@@ -151,14 +178,24 @@ fn compacted_history_render_window(
 ) -> (usize, RenderedCompactedHistoryInfo) {
     let compacted_count = compacted_count.min(messages.len());
     let compacted_prefix = &messages[..compacted_count];
+    let ask_ids: std::collections::HashSet<&str> = messages
+        .iter()
+        .flat_map(|msg| msg.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { id, name, .. } if name == "ask" && !id.is_empty() => {
+                Some(id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
     let total_renderable = compacted_prefix
         .iter()
         .filter(|msg| stored_message_renders_visible_message(msg))
         .count();
     let total_turns = compacted_prefix
         .iter()
-        .filter(|msg| stored_message_is_user_turn(msg))
-        .count();
+        .map(|msg| stored_user_turn_count(msg, &ask_ids))
+        .sum::<usize>();
 
     // Guardrails: only truncate when the prefix is BOTH very long AND has more
     // than a handful of turns. Otherwise show everything. This avoids cutting a
@@ -214,8 +251,8 @@ fn compacted_history_render_window(
     let remaining_renderable = total_renderable.saturating_sub(visible_renderable);
     let hidden_user_prompts = compacted_prefix[..render_start_idx]
         .iter()
-        .filter(|msg| stored_message_is_user_turn(msg))
-        .count();
+        .map(|msg| stored_user_turn_count(msg, &ask_ids))
+        .sum();
 
     (
         render_start_idx,

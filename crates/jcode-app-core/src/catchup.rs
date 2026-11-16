@@ -69,11 +69,20 @@ pub fn mark_seen(session_id: &str, updated_at: DateTime<Utc>) -> Result<()> {
 
 pub fn build_brief(session: &Session) -> CatchupBrief {
     let rendered = crate::session::render_messages(session);
-    let last_user_prompt = rendered
-        .iter()
-        .rev()
-        .find(|msg| msg.role == "user" && !msg.content.trim().is_empty())
-        .map(|msg| msg.content.trim().to_string());
+    let last_user_prompt = rendered.iter().rev().find_map(|msg| {
+        if msg.role == "user" && !msg.content.trim().is_empty() {
+            Some(msg.content.trim().to_string())
+        } else if msg.role == "tool"
+            && msg
+                .tool_data
+                .as_ref()
+                .is_some_and(|tool| tool.name == "ask")
+        {
+            jcode_session_types::stored_ask_answer_text(&msg.content)
+        } else {
+            None
+        }
+    });
     let latest_agent_response = rendered
         .iter()
         .rev()
@@ -594,6 +603,39 @@ mod tests {
     use super::{build_brief, needs_catchup_with_seen, render_markdown};
     use crate::message::{ContentBlock, Role};
     use crate::session::{Session, SessionStatus};
+
+    #[test]
+    fn catchup_last_user_prompt_includes_ask_answer() {
+        let mut session = Session::create(None, None);
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "older".into(),
+                cache_control: None,
+            }],
+        );
+        session.add_message(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "a".into(),
+                name: "ask".into(),
+                input: serde_json::json!({}),
+                thought_signature: None,
+            }],
+        );
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "a".into(),
+                content: "User answers:\n1. Which? -> papaya\n".into(),
+                is_error: None,
+            }],
+        );
+        assert_eq!(
+            build_brief(&session).last_user_prompt.as_deref(),
+            Some("Q: Which? → papaya")
+        );
+    }
 
     #[test]
     fn needs_catchup_requires_attention_status_and_newer_than_seen() {
