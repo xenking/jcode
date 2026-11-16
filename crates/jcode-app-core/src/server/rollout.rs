@@ -531,6 +531,8 @@ async fn desktop_swap(store: &Store, journal: &mut Journal) -> Result<()> {
     {
         journal.desktop_swapped = true;
         store.save(journal)?;
+        super::rollout_desktop::retire_stale_bridges(&journal.intent.app, &journal.intent.app)
+            .await?;
         return launch_desktop(store, journal).await;
     }
     if journal.incoming_inode.is_none() {
@@ -550,6 +552,8 @@ async fn desktop_swap(store: &Store, journal: &mut Journal) -> Result<()> {
     }
     store.before(journal, "quit_desktop")?;
     super::rollout_desktop::quit(&journal.intent.app).await?;
+    super::rollout_desktop::retire_stale_bridges(&journal.intent.app, &journal.incoming_app)
+        .await?;
     store.after(journal, "old desktop stopped")?;
     store.before(journal, "swap_bundle")?;
     if journal.intent.app.exists() {
