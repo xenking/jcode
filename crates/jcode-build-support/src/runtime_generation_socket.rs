@@ -64,8 +64,13 @@ fn validate_reported_identity(identity: &ServingIdentity) -> Result<()> {
     if identity.pid == 0 || !identity.binary_path.is_absolute() {
         bail!("listener reports malformed serving identity (PID or executable path)");
     }
-    if identity.git_hash.trim().is_empty() || identity.git_hash.eq_ignore_ascii_case("unknown") {
-        bail!("listener reports unknown serving git hash");
+    if identity.git_hash.is_empty()
+        || !identity
+            .git_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        bail!("listener reports unknown or malformed serving git hash");
     }
     if identity.generation == 0 {
         bail!("listener does not report a positive serving generation");
@@ -148,6 +153,8 @@ mod tests {
         assert!(validate_reported_identity(&bad).is_err());
         bad = valid.clone();
         bad.git_hash = "unknown".into();
+        assert!(validate_reported_identity(&bad).is_err());
+        bad.git_hash = "not-a-git-hash".into();
         assert!(validate_reported_identity(&bad).is_err());
         bad = valid.clone();
         bad.generation = 0;

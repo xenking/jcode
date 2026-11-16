@@ -816,7 +816,7 @@ fn identity_listener(
                 let identity = crate::protocol::DaemonIdentity {
                     pid: std::process::id(),
                     binary_path: "/fixture/versions/new/jcode".into(),
-                    git_hash: "new-hash".into(),
+                    git_hash: "abcdef123".into(),
                     version_label: Some("new".into()),
                     reload_id: reload_id.borrow_and_update().clone(),
                     generation: 2,
