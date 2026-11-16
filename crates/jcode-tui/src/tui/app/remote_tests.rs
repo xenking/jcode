@@ -53,6 +53,26 @@ fn create_test_app() -> crate::tui::app::App {
     app
 }
 
+#[test]
+fn live_ask_result_preserves_questions_without_tool_input_event() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let questions = serde_json::from_value(serde_json::json!([
+        {"question":"Which?", "options":[{"label":"A"},{"label":"B"}]}
+    ])).unwrap();
+    handle_server_event(&mut app, ServerEvent::AskUserRequest {
+        request_id: "request-not-derived-from-tool".into(), tool_call_id: "call-1".into(), questions,
+    }, &mut remote);
+    handle_server_event(&mut app, ServerEvent::ToolDone {
+        id: "call-1".into(), name: "ask".into(), output: "User answers:\n1. Which? -> B\n".into(), error: None,
+    }, &mut remote);
+    let result = app.display_messages().iter().find(|message| message.is_ask_decision()).unwrap();
+    assert_eq!(result.tool_data.as_ref().unwrap().input["questions"][0]["question"], "Which?");
+    assert!(result.is_answered_ask());
+}
+
 /// Point JCODE_HOME at a per-process temp dir when the environment does not
 /// already pin one, so tests never read the developer's real `~/.jcode`
 /// state (e.g. a populated ambient queue turns `has_notification()` on and

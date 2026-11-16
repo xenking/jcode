@@ -123,3 +123,48 @@ fn short_swarm_dm_is_expandable() {
     assert_eq!(state.body, "hello");
     assert!(app.toggle_swarm_message_expand(index));
 }
+#[test]
+fn decision_card_is_a_numbered_user_turn_and_click_expands_it() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.push_display_message(DisplayMessage::tool(
+        "User answers:\n1. Which? -> B (comment: because)\n2. When? -> Later\n",
+        crate::message::ToolCall { id: "decision".into(), name: "ask".into(),
+            input: serde_json::json!({"questions":[
+                {"header":"Choice", "question":"Which?", "options":[{"label":"A"},{"label":"B"}]},
+                {"question":"When?", "options":[{"label":"Now"},{"label":"Later"}]}
+            ]}), intent: None, thought_signature: None },
+    ));
+    assert_eq!(app.display_user_message_count, 1);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 36)).unwrap();
+    let collapsed = render_and_snap(&app, &mut terminal);
+    assert!(collapsed.contains("Decision") && collapsed.contains("✓ B"), "{collapsed}");
+    assert!(!collapsed.contains("When?"), "{collapsed}");
+    let buffer = terminal.backend().buffer();
+    let (column, row) = (0..buffer.area().height).find_map(|row| {
+        let line = (0..buffer.area().width).map(|col| buffer[(col, row)].symbol()).collect::<String>();
+        line.find("Decision").map(|byte| (unicode_width::UnicodeWidthStr::width(&line[..byte]) as u16, row))
+    }).expect("decision header");
+    assert!(app.try_toggle_decision_expand_at(column, row));
+    let expanded = render_and_snap(&app, &mut terminal);
+    assert!(expanded.contains("Choice") && expanded.contains("because") && expanded.contains("✓ Later"), "{expanded}");
+}
+
+#[test]
+fn reloaded_decision_keeps_questions_and_user_turn_count() {
+    let mut app = create_test_app();
+    let rendered = crate::session::RenderedMessage {
+        role: "tool".into(), content: "User answers:\n1. Which? -> B\n".into(),
+        tool_data: Some(crate::message::ToolCall { id: "history-ask".into(), name: "ask".into(),
+            input: serde_json::json!({"questions":[{"question":"Which?","options":[{"label":"A"},{"label":"B"}]}]}),
+            intent: None, thought_signature: None }),
+        tool_calls: vec![], timestamp_ms: None, tool_duration_ms: None, response_stats: None, stored_index: Some(1),
+    };
+    app.replace_display_messages(vec![DisplayMessage::from_rendered_message(rendered)]);
+    assert_eq!(app.display_user_message_count, 1);
+    let decision = app.display_messages.last().unwrap();
+    assert_eq!(decision.tool_data.as_ref().unwrap().input["questions"][0]["question"], "Which?");
+    let lines = crate::tui::ui::render_tool_message(decision, 90, crate::config::DiffDisplayMode::Off);
+    let plain = lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+    assert!(plain.contains("Decision") && plain.contains("✓ B"), "{plain}");
+}

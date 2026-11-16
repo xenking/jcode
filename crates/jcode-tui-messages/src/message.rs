@@ -25,6 +25,19 @@ pub struct DisplayMessage {
 }
 
 impl DisplayMessage {
+    /// An ask result records a human decision, even though it is stored as a tool result.
+    pub fn is_ask_decision(&self) -> bool {
+        self.role == "tool"
+            && self.tool_data.as_ref().is_some_and(|tool| tool.name == "ask")
+    }
+
+    pub fn is_answered_ask(&self) -> bool {
+        self.is_ask_decision()
+            && (self.content.starts_with("User answers:")
+                || self.content.contains(" -> ")
+                || self.content.contains("declined"))
+    }
+
     /// Create an error message.
     pub fn error(content: impl Into<String>) -> Self {
         Self {

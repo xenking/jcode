@@ -187,7 +187,7 @@ impl crate::tui::TuiState for TestState {
     fn display_user_message_count(&self) -> usize {
         self.display_messages
             .iter()
-            .filter(|message| message.role == "user")
+            .filter(|message| message.role == "user" || message.is_answered_ask())
             .count()
     }
     fn compacted_hidden_user_prompts(&self) -> usize {

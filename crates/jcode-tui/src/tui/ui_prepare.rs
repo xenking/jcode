@@ -1299,7 +1299,7 @@ fn prepare_history_preview_bounded(
             prompt_number_offset: hidden_prompts,
             total_prompts: messages
                 .iter()
-                .filter(|msg| msg.effective_role() == "user")
+                .filter(|msg| msg.effective_role() == "user" || msg.is_answered_ask())
                 .count(),
             pending_count: 0,
             anchored_images: Arc::new(Default::default()),
@@ -1543,7 +1543,23 @@ fn render_message_into(
         }
         "tool" => {
             let tool_start_line = acc.lines.len();
-            let cached = get_cached_message_lines(msg, width, diff_mode, render_tool_message);
+            let mut cached = get_cached_message_lines(msg, width, diff_mode, render_tool_message);
+            if msg.is_answered_ask() {
+                acc.prompt_num += 1;
+                acc.user_prompt_texts.push(msg.content.clone());
+                acc.user_line_indices.push(tool_start_line);
+                let distance = (ctx.total_prompts + ctx.pending_count + 1)
+                    .saturating_sub(acc.prompt_num);
+                if let Some(line) = cached.first_mut() {
+                    line.spans.insert(
+                        0,
+                        Span::styled(
+                            format!("{}› ", acc.prompt_num + ctx.prompt_number_offset),
+                            user_prompt_number_style(rainbow_prompt_color(distance)),
+                        ),
+                    );
+                }
+            }
             if let Some(target) = tool_message_copy_target(msg, cached.len()) {
                 acc.copy_targets
                     .push(offset_copy_target(target, tool_start_line));
@@ -1594,7 +1610,8 @@ fn render_message_into(
                         expandable,
                     ));
                 }
-                if let (Some(app), Some(items)) = (ctx.app, ctx.anchored_images.by_tool.get(&tc.id))
+                if (!msg.is_ask_decision() || msg.title.as_deref() == Some("decision:expanded"))
+                    && let (Some(app), Some(items)) = (ctx.app, ctx.anchored_images.by_tool.get(&tc.id))
                 {
                     for line in super::inline_image_ui::anchored_image_lines(
                         items,
@@ -1814,9 +1831,12 @@ pub(super) fn prepare_body_incremental(
     let anchor_prompt_ordinal = if anchored_images.by_prompt.is_empty() {
         0
     } else {
-        prev.user_prompt_texts
+        messages[..prev_msg_count]
             .iter()
-            .filter(|text| !crate::session::is_attached_image_label_text(text))
+            .filter(|msg| {
+                msg.effective_role() == "user"
+                    && !crate::session::is_attached_image_label_text(&msg.content)
+            })
             .count()
     };
 
@@ -2091,7 +2111,7 @@ pub(super) fn suffix_reuse_compatible(
     let dropped_prompts = base.message_boundaries[drop_msgs - 1].user_prompt_len;
     let head_prompts = messages[..head_count.min(messages.len())]
         .iter()
-        .filter(|msg| msg.effective_role() == "user")
+        .filter(|msg| msg.effective_role() == "user" || msg.is_answered_ask())
         .count();
     dropped_prompts + base_prompt_offset == head_prompts + app.compacted_hidden_user_prompts()
 }

@@ -96,7 +96,7 @@ impl App {
         self.display_user_message_count = self
             .display_messages
             .iter()
-            .filter(|message| message.effective_role() == "user")
+            .filter(|message| message.effective_role() == "user" || message.is_answered_ask())
             .count();
         self.display_edit_tool_message_count = self
             .display_messages
@@ -134,7 +134,7 @@ impl App {
             update(self.display_edit_line_counts.1, counts.1),
         );
         let delta: isize = if added { 1 } else { -1 };
-        if message.effective_role() == "user" {
+        if message.effective_role() == "user" || message.is_answered_ask() {
             self.display_user_message_count =
                 (self.display_user_message_count as isize + delta).max(0) as usize;
         }

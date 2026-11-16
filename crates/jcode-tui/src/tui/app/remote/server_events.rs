@@ -3664,8 +3664,24 @@ fn handle_server_event_inner(
         ServerEvent::AskUserRequest {
             request_id,
             questions,
-            ..
+            tool_call_id,
         } => {
+            if !tool_call_id.is_empty() {
+                let input = serde_json::json!({"questions": questions});
+                if let Some(tool) = app.streaming_tool_calls.iter_mut().find(|tool| tool.id == tool_call_id) {
+                    if tool.input.get("questions").is_none() {
+                        tool.input = input;
+                    }
+                } else {
+                    app.streaming_tool_calls.push(ToolCall {
+                        id: tool_call_id,
+                        name: "ask".into(),
+                        input,
+                        intent: None,
+                        thought_signature: None,
+                    });
+                }
+            }
             app.open_ask_picker(request_id, questions);
             true
         }

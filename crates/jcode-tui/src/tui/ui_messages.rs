@@ -13,6 +13,8 @@ pub(crate) use todo_stages::animate_lane_spinners;
 use todo_stages::{agent_roster_spans, push_stage_lines, push_stage_pips, render_todo_item_line};
 
 use super::*;
+#[path = "ui_messages/decision.rs"]
+mod decision;
 #[path = "ui_messages_cache.rs"]
 mod cache_support;
 use crate::message::{
@@ -4230,6 +4232,9 @@ pub(crate) fn render_tool_message(
     width: u16,
     diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
+    if msg.is_ask_decision() {
+        return decision::render(msg);
+    }
     if let Some(lines) = render_swarm_tool(msg, width) {
         return lines;
     }

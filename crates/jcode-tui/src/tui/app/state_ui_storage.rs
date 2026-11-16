@@ -12,6 +12,12 @@ fn compact_tool_input_for_display(name: &str, input: &serde_json::Value) -> serd
     };
 
     match crate::tui::ui::tools_ui::canonical_tool_name(name) {
+        // The question labels and options are the decision card's source.
+        // Dropping them here breaks both live and restored transcript rows.
+        "ask" => obj(vec![(
+            "questions",
+            input.get("questions").cloned().unwrap_or(serde_json::Value::Null),
+        )]),
         // Unlike an optional technical summary, the source is the codemode
         // card's body. Keep it on insertion and subsequent snapshot compaction
         // so completed calls and restored history render the same preview.
