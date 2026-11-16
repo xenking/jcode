@@ -267,6 +267,93 @@ struct IsolatedReloadRecoveryEnv {
     _runtime: tempfile::TempDir,
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_skill_message_crosses_real_bridge_and_daemon_into_journal() {
+    use crate::server::runtime::ServerRuntime;
+    let _lock = crate::storage::lock_test_env();
+    let home = IsolatedReloadRecoveryEnv::new();
+    let project = tempfile::tempdir().unwrap();
+    let skill = project.path().join(".jcode/skills/poteto-mode");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: poteto-mode\ndescription: Test skill\n---\n\nBe concise.\n",
+    )
+    .unwrap();
+    let daemon_socket = home._runtime.path().join("skill-daemon.sock");
+    let api_socket = home._runtime.path().join("skill-api.sock");
+    let server = crate::server::Server::new_with_paths(
+        Arc::new(CompleteImmediatelyProvider),
+        daemon_socket.clone(),
+        home._runtime.path().join("skill-debug.sock"),
+    );
+    let runtime = ServerRuntime::from_server(&server);
+    let daemon =
+        runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&daemon_socket).unwrap());
+    let bridge = tokio::spawn(jcode_harness_api_server::run_bridge(
+        api_socket.clone(),
+        daemon_socket,
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !api_socket.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let project_path = project.path().to_string_lossy().into_owned();
+    let session_id = tokio::task::spawn_blocking(move || {
+        let client = jcode_sdk::JcodeClient::connect(jcode_sdk::ConnectOptions {
+            socket_path: Some(api_socket),
+            client_name: "jcode-desktop-test".into(),
+            request_timeout: Some(Duration::from_secs(5)),
+            ensure_runtime: false,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(client.supports("skill_message_v1"));
+        let session = client.create_session(Some(project_path)).unwrap();
+        let events = client.events(Some(&session.session_id));
+        client
+            .send_skill_message(
+                &session.session_id,
+                "fix this please",
+                "poteto-mode",
+                vec![],
+                None,
+            )
+            .unwrap();
+        loop {
+            match events
+                .next_timeout(Duration::from_secs(5))
+                .expect("turn event timeout")
+            {
+                jcode_sdk::ApiEvent::TurnDone { .. } => break,
+                jcode_sdk::ApiEvent::Error { message, .. } => {
+                    panic!("skill turn failed: {message}")
+                }
+                _ => {}
+            }
+        }
+        session.session_id
+    })
+    .await
+    .unwrap();
+    let persisted = crate::session::Session::load(&session_id).unwrap();
+    let reminder = persisted.messages.iter().position(|message| {
+        message.display_role == Some(crate::session::StoredDisplayRole::System)
+            && message.content.iter().any(|block| matches!(block, ContentBlock::Text { text, .. } if text.contains("# Active Skill") && text.contains("Be concise.")))
+    }).expect("skill reminder in journal");
+    assert!(persisted.messages.iter().skip(reminder + 1).any(|message| {
+        matches!(message.role, crate::message::Role::User) && message.display_role.is_none()
+            && message.content.iter().any(|block| matches!(block, ContentBlock::Text { text, .. } if text == "fix this please"))
+    }));
+    bridge.abort();
+    runtime.shutdown().await;
+    daemon.await.unwrap();
+}
+
 #[path = "client_lifecycle_tests/control_requests.rs"]
 mod control_requests;
 

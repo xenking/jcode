@@ -3767,6 +3767,7 @@ dependencies = [
  "jcode-desktop-open",
  "jcode-docs-data",
  "jcode-harness-api",
+ "jcode-harness-api-server",
  "jcode-import-core",
  "jcode-message-types",
  "jcode-notify-email",

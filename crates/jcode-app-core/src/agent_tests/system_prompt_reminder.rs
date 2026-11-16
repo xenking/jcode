@@ -2,6 +2,46 @@ use super::*;
 
 type CapturedSystemPromptRequests = Arc<std::sync::Mutex<Vec<(String, Vec<Message>)>>>;
 
+#[tokio::test]
+async fn remote_skill_activation_persists_system_entry_before_user_prompt() {
+    let _guard = crate::storage::lock_test_env();
+    let project = tempfile::tempdir().unwrap();
+    let skill = project.path().join(".jcode/skills/poteto-mode");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: poteto-mode\ndescription: Test skill\n---\n\nBe concise.\n",
+    )
+    .unwrap();
+    let provider: Arc<dyn Provider> = Arc::new(SystemPromptCaptureProvider::default());
+    let mut agent = Agent::new_with_initial_working_dir(
+        provider,
+        Registry::empty(),
+        Some(project.path().to_str().unwrap()),
+    );
+    assert!(agent.set_remote_active_skill(Some("poteto-mode".into())));
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    agent
+        .run_once_streaming_mpsc("fix this please", vec![], None, tx)
+        .await
+        .unwrap();
+    let persisted = crate::session::Session::load(&agent.session.id).unwrap();
+    let reminder = persisted
+        .messages
+        .iter()
+        .position(|message| {
+            message.display_role == Some(crate::session::StoredDisplayRole::System)
+                && content_text(&message.content).contains("# Active Skill")
+                && content_text(&message.content).contains("Be concise.")
+        })
+        .expect("skill reminder persisted");
+    assert!(persisted.messages.iter().skip(reminder + 1).any(|message| {
+        matches!(message.role, Role::User)
+            && message.display_role.is_none()
+            && content_text(&message.content) == "fix this please"
+    }));
+}
+
 #[derive(Clone, Default)]
 struct SystemPromptCaptureProvider {
     requests: CapturedSystemPromptRequests,
