@@ -143,6 +143,17 @@ pub enum ApiRequest {
         no_reply: bool,
     },
 
+    /// Send a user message with a daemon-resolved skill, like the TUI.
+    SendSkillMessage {
+        session_id: String,
+        content: String,
+        active_skill: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_reminder: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<(String, String)>,
+    },
+
     /// Replace the attached session's tool configuration.
     ConfigureTools {
         session_id: String,

@@ -436,6 +436,7 @@ where
             .map(str::to_string)
             .chain(user_connections_supported.then(|| "session_connections".to_string()))
             .chain(runtime_commands_supported.then(|| "runtime_commands".to_string()))
+            .chain(runtime_commands_supported.then(|| "skill_message_v1".to_string()))
             .chain(session_tools_supported.then(|| "session_tools".to_string()))
             .chain(force_stop_turn_supported.then(|| "force_stop_turn_v1".to_string()))
             .chain(queued_prompts_supported.then(|| "queued_prompts".to_string()))
@@ -806,7 +807,11 @@ mod public_acceptance_tests {
                         .unwrap();
                     }
                     Some("message") => {
-                        assert_eq!(request["content"], "public boundary prompt");
+                        if request["content"] == "public boundary prompt" {
+                            continue;
+                        }
+                        assert_eq!(request["content"], "hello");
+                        assert_eq!(request["active_skill"], "poteto-mode");
                         return;
                     }
                     _ => {}
@@ -847,6 +852,13 @@ mod public_acceptance_tests {
         write_json_line(
             &mut write,
             &json!({"id":3, "req":"send_message", "session_id":"session_alpha", "content":"public boundary prompt"}),
+        )
+        .await
+        .unwrap();
+
+        write_json_line(
+            &mut write,
+            &json!({"id":4, "req":"send_skill_message", "session_id":"session_alpha", "content":"hello", "active_skill":"poteto-mode"}),
         )
         .await
         .unwrap();

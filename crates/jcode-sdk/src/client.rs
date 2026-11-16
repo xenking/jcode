@@ -958,6 +958,24 @@ impl JcodeClient {
         self.send_message_with_reminder(session_id, content, images, None, wait_for_accept)
     }
 
+    /// Send a prompt with a skill resolved and activated by the daemon.
+    pub fn send_skill_message(
+        &self,
+        session_id: &str,
+        content: &str,
+        active_skill: &str,
+        images: Vec<(String, String)>,
+        system_reminder: Option<&str>,
+    ) -> Result<()> {
+        self.notify(ApiRequest::SendSkillMessage {
+            session_id: session_id.to_string(),
+            content: content.to_string(),
+            active_skill: active_skill.to_string(),
+            system_reminder: system_reminder.map(str::to_owned),
+            images,
+        })
+    }
+
     /// [`send_message`](Self::send_message) with a hidden system reminder
     /// for this turn only, such as a collection's instructions. The reminder
     /// guides the model without appearing in the visible transcript.

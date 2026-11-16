@@ -4000,6 +4000,18 @@ fn attachment_recovery_is_cleared_on_attach_failure() {
 }
 
 #[test]
+fn message_forwards_active_skill_to_daemon() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({"req":"send_skill_message", "id":90,
+        "session_id":"s1", "content":"hello", "active_skill":"poteto-mode"}));
+    let Outbound::Legacy(message) = &out[0] else {
+        panic!("message")
+    };
+    assert_eq!(message["content"], "hello");
+    assert_eq!(message["active_skill"], "poteto-mode");
+}
+
+#[test]
 fn hidden_system_reminder_is_forwarded_without_visible_content_or_no_reply() {
     let mut state = state_with_session();
     let out = state.api_request_to_legacy(&json!({"req":"send_message", "id":91,

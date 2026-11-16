@@ -47,6 +47,7 @@ const REQUIRES_ATTACH: &[&str] = &[
     "list_tools",
     "tool_result",
     "send_message",
+    "send_skill_message",
     "cancel",
     "force_stop_turn",
     "soft_interrupt",
@@ -688,7 +689,7 @@ impl BridgeState {
                     ),
                 ]
             }
-            "send_message" => {
+            "send_message" | "send_skill_message" => {
                 let id = self.legacy_id();
                 let no_reply = request["no_reply"].as_bool().unwrap_or(false);
                 if no_reply {
@@ -706,6 +707,9 @@ impl BridgeState {
                 }
                 if let Some(reminder) = request["system_reminder"].as_str() {
                     message["system_reminder"] = json!(reminder);
+                }
+                if let Some(skill) = request["active_skill"].as_str() {
+                    message["active_skill"] = json!(skill);
                 }
                 if let Some(images) = request["images"].as_array()
                     && !images.is_empty()
