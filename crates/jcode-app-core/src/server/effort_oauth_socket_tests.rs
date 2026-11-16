@@ -14,19 +14,31 @@ async fn until(
     reader: &mut BufReader<crate::transport::ReadHalf>,
     predicate: impl Fn(&ServerEvent) -> bool,
 ) {
+    let mut observed = Vec::new();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let mut line = String::new();
             assert!(reader.read_line(&mut line).await.unwrap() > 0);
-            let event: ServerEvent = serde_json::from_str(&line).unwrap();
+            let event = turn_payload(serde_json::from_str(&line).unwrap());
+            let summary: String = format!("{event:?}").chars().take(600).collect();
+            if !matches!(event, ServerEvent::Pong { .. }) && observed.len() < 32 {
+                observed.push(summary);
+            }
             assert!(!matches!(event, ServerEvent::Error { .. }), "{event:?}");
+            assert!(
+                !matches!(
+                    event,
+                    ServerEvent::ReasoningEffortChanged { error: Some(_), .. }
+                ),
+                "{event:?}"
+            );
             if predicate(&event) {
                 break;
             }
         }
     })
     .await
-    .expect("daemon event timeout");
+    .unwrap_or_else(|_| panic!("daemon event timeout: {observed:?}"));
 }
 
 #[test]
@@ -51,11 +63,18 @@ fn claude_oauth_socket_effort_changes_the_next_http_request() {
         "http://{}/v1/messages?beta=true",
         listener.local_addr().unwrap()
     );
+    let stop_http = Arc::new(AtomicBool::new(false));
+    let stop = Arc::clone(&stop_http);
+    let request_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = Arc::clone(&request_count);
     let http = std::thread::spawn(move || {
         let mut requests = Vec::new();
-        for _ in 0..2 {
+        loop {
             let deadline = std::time::Instant::now() + Duration::from_secs(15);
             let (mut socket, _) = loop {
+                if stop.load(Ordering::SeqCst) {
+                    return requests;
+                }
                 match listener.accept() {
                     Ok(connection) => break connection,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -103,6 +122,11 @@ fn claude_oauth_socket_effort_changes_the_next_http_request() {
                     }
                 }
             }
+            assert!(
+                requests.len() <= 8,
+                "unexpected repeated inference: {requests:?}"
+            );
+            count.store(requests.len(), Ordering::SeqCst);
             let body = concat!(
                 "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"effort-fixture\",\"model\":\"claude-opus-5-5\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
                 "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
@@ -113,7 +137,6 @@ fn claude_oauth_socket_effort_changes_the_next_http_request() {
             );
             write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
         }
-        requests
     });
     // No runtime exists yet, so constructing the real provider cannot prewarm usage.
     let provider = AnthropicProvider::new();
@@ -124,6 +147,7 @@ fn claude_oauth_socket_effort_changes_the_next_http_request() {
         .enable_all()
         .build()
         .unwrap();
+    let mut medium_request = 0;
     runtime.block_on(async {
         let socket = home._runtime.path().join("oauth-effort.sock");
         let server = crate::server::Server::new_with_paths(
@@ -135,7 +159,14 @@ fn claude_oauth_socket_effort_changes_the_next_http_request() {
         let mut reader = BufReader::new(reader);
         send(&mut writer, json!({"type":"subscribe","id":1,"working_dir":home._home.path()})).await;
         until(&mut reader, |event| matches!(event, ServerEvent::Done { id: 1 })).await;
+        // A user title prevents unrelated cheap-model title generation calls.
+        send(&mut writer, json!({"type":"rename_session","id":6,"title":"OAuth effort fixture"})).await;
+        until(&mut reader, |event| matches!(event, ServerEvent::Done { id: 6 })).await;
         for (effort_id, message_id, effort) in [(2, 3, "high"), (4, 5, "medium")] {
+            if effort == "medium" {
+                medium_request = request_count.load(Ordering::SeqCst);
+                assert!(medium_request > 0, "first inference reached the OAuth fixture");
+            }
             send(&mut writer, json!({"type":"set_reasoning_effort","id":effort_id,"effort":effort})).await;
             until(&mut reader, |event| matches!(event, ServerEvent::ReasoningEffortChanged { id, effort: Some(value), error: None } if *id == effort_id && value == effort)).await;
             send(&mut writer, json!({"type":"message","id":message_id,"content":"Reply done without tools."})).await;
@@ -146,12 +177,16 @@ fn claude_oauth_socket_effort_changes_the_next_http_request() {
         runtime.shutdown().await;
         handle.await.unwrap();
     });
+    stop_http.store(true, Ordering::SeqCst);
     let requests = http.join().unwrap();
-    assert_eq!(requests.len(), 2);
+    assert!(requests.len() > medium_request);
     for request in &requests {
         assert_eq!(request["model"], "claude-opus-5-5");
         assert_eq!(request["thinking"]["type"], "adaptive");
     }
     assert_eq!(requests[0]["output_config"]["effort"], "high");
-    assert_eq!(requests[1]["output_config"]["effort"], "medium");
+    assert_eq!(
+        requests[medium_request]["output_config"]["effort"],
+        "medium"
+    );
 }
