@@ -61,6 +61,26 @@ pub(super) struct BtwRequest {
     pub system_dynamic: String,
 }
 
+fn btw_socket(value: Option<std::ffi::OsString>) -> anyhow::Result<Option<String>> {
+    value
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("JCODE_SOCKET is not valid Unicode"))
+        })
+        .transpose()
+}
+
+#[cfg(all(test, unix))]
+mod socket_tests {
+    #[test]
+    fn explicit_non_unicode_socket_is_not_default_daemon() {
+        use std::os::unix::ffi::OsStringExt;
+        assert!(super::btw_socket(Some(std::ffi::OsString::from_vec(vec![0xff]))).is_err());
+        assert!(super::btw_socket(None).unwrap().is_none());
+    }
+}
+
 impl App {
     #[cfg(test)]
     pub(super) fn btw_card(&self) -> Option<&BtwCard> {
@@ -138,8 +158,8 @@ impl App {
         else {
             return;
         };
-        self.close_btw();
         let Some(child) = child else {
+            self.close_btw();
             super::commands::fork_session_with_prompt_local(self, Some(&question));
             self.set_status_notice("Side question → fork");
             return;
@@ -147,12 +167,16 @@ impl App {
         // The hidden fork already holds the question (and the answer, once it
         // finished): unhide it and open a window on that same session instead
         // of asking again.
-        if let Ok(mut session) = Session::load(&child) {
+        match Session::load(&child).and_then(|mut session| {
             session.hidden = false;
-            if let Err(error) = session.save() {
-                crate::logging::warn(&format!(
-                    "btw: failed to unhide side-question session {child}: {error}"
-                ));
+            session.save()
+        }) {
+            Ok(()) => {}
+            Err(error) => {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Cannot open side-question session {child}: {error}"
+                )));
+                return;
             }
         }
         let exe = super::launch_client_executable();
@@ -160,7 +184,16 @@ impl App {
             .filter(|path| path.is_dir())
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let socket = std::env::var("JCODE_SOCKET").ok();
+        let socket = match btw_socket(std::env::var_os("JCODE_SOCKET")) {
+            Ok(socket) => socket,
+            Err(error) => {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Cannot open side question: {error}"
+                )));
+                return;
+            }
+        };
+        self.close_btw();
         match super::spawn_in_new_terminal(&exe, &child, &cwd, socket.as_deref()) {
             Ok(true) => {
                 self.push_display_message(DisplayMessage::system(format!(
