@@ -907,10 +907,10 @@ pub(super) async fn handle_client(
                         // when it belongs to this connection's agent: otherwise
                         // one compacting session would paint a running divider
                         // in every other session's transcript.
-                        let ours = {
-                            let agent = agent.lock().await;
-                            agent.is_compacting_now()
-                        };
+                        // This process-wide event can belong to a different
+                        // session. Never wait for the turn's Agent lock here:
+                        // it may be held by a tool awaiting this very socket.
+                        let ours = agent.try_lock().is_ok_and(|agent| agent.is_compacting_now());
                         if ours {
                             let _ = client_event_tx
                                 .send(ServerEvent::CompactionStarted { trigger, pre_tokens });

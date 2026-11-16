@@ -31,6 +31,20 @@ impl Provider for RecoveryProvider {
 
 #[tokio::test]
 async fn socket_resume_replays_reload_interrupted_ask_before_provider() {
+    socket_reload_ask_workflow("normal").await;
+}
+
+#[tokio::test]
+async fn compaction_event_during_pending_ask_does_not_block_cancel() {
+    socket_reload_ask_workflow("cancel").await;
+}
+
+#[tokio::test]
+async fn declining_ask_keeps_socket_accepting_messages() {
+    socket_reload_ask_workflow("decline").await;
+}
+
+async fn socket_reload_ask_workflow(mode: &str) {
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
     let session_id = "ask-socket-reload";
@@ -177,6 +191,81 @@ async fn socket_resume_replays_reload_interrupted_ask_before_provider() {
         unreachable!()
     };
     assert_eq!(request_id, "ask-reload-call");
+    if mode == "cancel" {
+        Bus::global().publish(BusEvent::CompactionStarted {
+            trigger: "other-session".into(),
+            pre_tokens: 1,
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        writer
+            .write_all(format!("{}\n", json!({"type":"cancel","id":56})).as_bytes())
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            until(&mut reader, |event| {
+                matches!(event, ServerEvent::Ack { id: 56 })
+            }),
+        )
+        .await
+        .expect("cancel must be acknowledged during ask");
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            until(&mut reader, |event| {
+                matches!(event, ServerEvent::Done { id: 2 })
+            }),
+        )
+        .await
+        .expect("turn must stop during ask");
+        drop(writer);
+        drop(reader);
+        sessions.clear_for_test().await;
+        server_task.abort();
+        return;
+    }
+    if mode == "decline" {
+        Bus::global().publish(BusEvent::CompactionStarted {
+            trigger: "other-session".into(),
+            pre_tokens: 1,
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        writer.write_all(format!("{}\n", json!({"type":"ask_user_response","id":42,"request_id":request_id,"response":{}})).as_bytes()).await.unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            until(&mut reader, |event| {
+                matches!(event, ServerEvent::Done { id: 42 })
+            }),
+        )
+        .await
+        .expect("decline must be accepted");
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            until(&mut reader, |event| {
+                matches!(event, ServerEvent::Done { id: 2 })
+            }),
+        )
+        .await
+        .expect("ask must resolve");
+        writer
+            .write_all(
+                format!("{}\n", json!({"type":"message","id":57,"content":"next"})).as_bytes(),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            until(&mut reader, |event| {
+                matches!(event, ServerEvent::Done { id: 57 })
+            }),
+        )
+        .await
+        .expect("next message must complete");
+        drop(writer);
+        drop(reader);
+        sessions.clear_for_test().await;
+        server_task.abort();
+        return;
+    }
     // A follow-up arriving while the question is open must not silently
     // cancel the pending ask or allow the provider to continue.
     writer.write_all(format!("{}\n", json!({"type":"queue_prompt","id":41,"client_id":"followup","content":"follow up","mode":"steer"})).as_bytes()).await.unwrap();
@@ -286,13 +375,26 @@ async fn socket_resume_replays_reload_interrupted_ask_before_provider() {
         "{journal}"
     );
     writer.write_all(format!("{}\n", json!({"type":"message","id":50,"content":"look [#image 1]","images":[["image/png","bmV3LWltYWdl"]]})).as_bytes()).await.unwrap();
-    let event = until(&mut reader, |event| matches!(event, ServerEvent::UserImageIds { .. })).await;
-    let ServerEvent::UserImageIds { original_content, content, image_ids } = event else { unreachable!() };
+    let event = until(&mut reader, |event| {
+        matches!(event, ServerEvent::UserImageIds { .. })
+    })
+    .await;
+    let ServerEvent::UserImageIds {
+        original_content,
+        content,
+        image_ids,
+    } = event
+    else {
+        unreachable!()
+    };
     assert_eq!(original_content, "look [#image 1]");
     assert_eq!(image_ids.len(), 1);
     assert_eq!(content, format!("look [#{}]", image_ids[0]));
     writer.write_all(format!("{}\n", json!({"type":"get_session_image","id":92,"session_id":session_id,"image_id":image_ids[0]})).as_bytes()).await.unwrap();
-    let image = until(&mut reader, |event| matches!(event, ServerEvent::SessionImage { id: 92, .. })).await;
+    let image = until(&mut reader, |event| {
+        matches!(event, ServerEvent::SessionImage { id: 92, .. })
+    })
+    .await;
     assert!(matches!(image, ServerEvent::SessionImage { data, .. } if data == "bmV3LWltYWdl"));
     drop(writer);
     drop(reader);
