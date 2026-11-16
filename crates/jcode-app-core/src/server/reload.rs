@@ -423,7 +423,7 @@ async fn persist_reload_recovery_intents(
         let Some(directive) = ReloadContext::recovery_directive_for_session(
             &session_id,
             reload_ctx.as_ref(),
-            is_headless || !is_triggering,
+            true,
             None,
         ) else {
             super::reload_trace::record_value(
