@@ -139,8 +139,8 @@ fn persist_reload_recovery_intents_records_running_peer_recovery() -> anyhow::Re
     assert!(
         crate::server::reload_recovery::pending_directive_for_session("initiator")
             .expect("claim initiator recovery")
-            .is_none(),
-        "initiator without selfdev reload context should not get a generic interrupted-peer intent"
+            .is_some(),
+        "an interrupted initiator must recover even without a selfdev reload context"
     );
 
     if let Some(prev_home) = prev_home {

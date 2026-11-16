@@ -280,6 +280,10 @@ impl Agent {
         self.fire_turn_start_hook("chat");
         let title_event_tx = event_tx.clone();
         let result = self.run_turn_streaming_mpsc(event_tx).await;
+        if self.is_graceful_shutdown() {
+            self.persist_session_now()?;
+            crate::turn_activity::global().checkpointed(&self.session.id);
+        }
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
         if result.is_ok() {
             self.refresh_session_title(Some(&title_event_tx)).await;
@@ -349,6 +353,10 @@ impl Agent {
         self.fire_turn_start_hook("failover");
         let title_event_tx = event_tx.clone();
         let result = self.run_turn_streaming_mpsc(event_tx).await;
+        if self.is_graceful_shutdown() {
+            self.persist_session_now()?;
+            crate::turn_activity::global().checkpointed(&self.session.id);
+        }
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
         if result.is_ok() {
             self.refresh_session_title(Some(&title_event_tx)).await;

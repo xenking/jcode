@@ -130,16 +130,6 @@ fn remove_record_files(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn pending_record_is_expired(record: &ReloadRecoveryRecord, now: SystemTime) -> Option<bool> {
-    let created_at = chrono::DateTime::parse_from_rfc3339(&record.created_at).ok()?;
-    let created_at = SystemTime::from(created_at.with_timezone(&chrono::Utc));
-    Some(
-        now.duration_since(created_at)
-            .map(|age| age >= PENDING_RECORD_MAX_AGE)
-            .unwrap_or(false),
-    )
-}
-
 fn file_is_expired(path: &std::path::Path, now: SystemTime) -> bool {
     std::fs::metadata(path)
         .and_then(|metadata| metadata.modified())
@@ -149,7 +139,8 @@ fn file_is_expired(path: &std::path::Path, now: SystemTime) -> bool {
         .unwrap_or(false)
 }
 
-/// Collect old terminal tombstones, never abandon an unfinished intent.
+/// Collect malformed orphan records, never expire authoritative recovery outcomes.
+/// Expiring a cancellation would let legacy reload markers resurrect it.
 ///
 /// This is run synchronously before the server starts accepting clients, so it
 /// cannot race in-process recovery writes. A record path is unique per session,
@@ -197,11 +188,7 @@ fn collect_garbage_at(now: SystemTime) -> Result<GarbageCollectionStats> {
         }
 
         let should_remove = match crate::storage::read_json::<ReloadRecoveryRecord>(&path) {
-            Ok(record) => {
-                !record.status.needs_admission()
-                    && pending_record_is_expired(&record, now)
-                        .unwrap_or_else(|| file_is_expired(&path, now))
-            }
+            Ok(_) => false,
             Err(_) => file_is_expired(&path, now),
         };
         if !should_remove {
@@ -1111,7 +1098,7 @@ mod tests {
     }
 
     #[test]
-    fn gc_preserves_old_pending_and_recent_replay_tombstones() -> Result<()> {
+    fn gc_never_resurrects_explicit_cancellation_or_abandons_pending() -> Result<()> {
         let _lock = crate::storage::lock_test_env();
         let _home = IsolatedHome::new();
         let mut pending = intent("pending", "reload")?;
@@ -1126,8 +1113,12 @@ mod tests {
         let stats = collect_garbage_at(
             SystemTime::now() + PENDING_RECORD_MAX_AGE + Duration::from_secs(1),
         )?;
-        assert_eq!(stats.removed, 1);
+        assert_eq!(stats.removed, 0);
         assert!(has_pending_for_session("pending"));
+        assert_eq!(
+            peek_for_session("terminal")?.unwrap().status,
+            ReloadRecoveryStatus::Cancelled
+        );
         Ok(())
     }
 
