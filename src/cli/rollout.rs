@@ -835,6 +835,8 @@ pub fn parse_desktop_version(output: &str) -> Option<(String, String)> {
     let rest = line.trim().strip_prefix("Jcode Desktop ")?;
     let (version, sha) = rest.split_once(" (")?;
     let sha = sha.strip_suffix(')')?;
+    // Local packaging can append build flags, e.g. `(c949d89, dirty)`.
+    let sha = sha.split(',').next().unwrap_or(sha);
     Some((version.trim().to_string(), sha.trim().to_string()))
 }
 

@@ -22,7 +22,8 @@ use tokio::sync::Notify;
 const WORKER_MARKER: &str = "WORKER-HOLD-MARKER";
 /// The summary the scripted provider returns for a compaction prompt. Gives the
 /// divider something real to expand into.
-const SUMMARY_TEXT: &str = "## Summary\n\nA coordinator waited on a worker while a large transcript was folded.";
+const SUMMARY_TEXT: &str =
+    "## Summary\n\nA coordinator waited on a worker while a large transcript was folded.";
 
 #[derive(Clone)]
 struct HeldWorkerProvider {
@@ -77,7 +78,10 @@ impl Provider for HeldWorkerProvider {
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         let last = last_user_text(messages);
-        let bare = match last.strip_prefix('[').and_then(|rest| rest.split_once("] ")) {
+        let bare = match last
+            .strip_prefix('[')
+            .and_then(|rest| rest.split_once("] "))
+        {
             Some((_, rest)) => rest.to_string(),
             None => last.clone(),
         };
@@ -266,7 +270,9 @@ async fn idle_waiting_session_precompacts_and_persists_a_divider() -> Result<()>
     let session_id = "session_idle_precompact_e2e".to_string();
     seed_large_session(&session_id)?;
 
-    let runtime = tempfile::Builder::new().prefix("jc-idle-precompact-").tempdir()?;
+    let runtime = tempfile::Builder::new()
+        .prefix("jc-idle-precompact-")
+        .tempdir()?;
     let socket = runtime.path().join("d.sock");
     let debug_socket = runtime.path().join("g.sock");
     let provider = HeldWorkerProvider::new();
@@ -302,9 +308,11 @@ async fn idle_waiting_session_precompacts_and_persists_a_divider() -> Result<()>
             })?)
             .await?;
         client
-            .wait_for("history for the seeded session", Duration::from_secs(30), |e| {
-                (e["type"] == "history").then_some(())
-            })
+            .wait_for(
+                "history for the seeded session",
+                Duration::from_secs(30),
+                |e| (e["type"] == "history").then_some(()),
+            )
             .await?;
 
         // A worker that never finishes: the coordinator is idle but waiting.

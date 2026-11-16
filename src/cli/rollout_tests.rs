@@ -507,6 +507,12 @@ fn parses_versions_and_labels() {
         ),
         Some(("v0.7.0".into(), "e97162a".into()))
     );
+    // Packaging rewrites Cargo.lock, so the bundle reports `dirty`; the
+    // commit is still the one before the comma.
+    assert_eq!(
+        parse_desktop_version("Jcode Desktop v0.7.0 (c949d89, dirty)\n"),
+        Some(("v0.7.0".into(), "c949d89".into()))
+    );
     assert_eq!(parse_desktop_version("garbage"), None);
     assert_eq!(
         version_label_of(
