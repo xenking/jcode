@@ -559,10 +559,10 @@ fn current_message_by_index(session_id: &str, index: usize) -> Result<String> {
     let mut value = serde_json::to_value(message)?;
     if let Some(blocks) = value.get_mut("content").and_then(Value::as_array_mut) {
         for block in blocks {
-            if block.get("type").and_then(Value::as_str) == Some("image") {
-                if let Some(object) = block.as_object_mut() {
-                    object.insert("data".into(), Value::String("[image data omitted]".into()));
-                }
+            if block.get("type").and_then(Value::as_str) == Some("image")
+                && let Some(object) = block.as_object_mut()
+            {
+                object.insert("data".into(), Value::String("[image data omitted]".into()));
             }
         }
     }

@@ -28,13 +28,10 @@ pub(super) fn records(session: &crate::session::Session) -> Result<Vec<String>, 
             index
         } else {
             match &mut image.anchor {
-                Some(crate::session::RenderedImageAnchor::UserPrompt { ordinal }) => {
-                    let index = user_indices
-                        .get(*ordinal)
-                        .copied()
-                        .unwrap_or(image_rows.len() - 1);
-                    index
-                }
+                Some(crate::session::RenderedImageAnchor::UserPrompt { ordinal }) => user_indices
+                    .get(*ordinal)
+                    .copied()
+                    .unwrap_or(image_rows.len() - 1),
                 Some(crate::session::RenderedImageAnchor::ToolCall { id }) => messages
                     .iter()
                     .position(|m| m.tool_data.as_ref().is_some_and(|tool| &tool.id == id))

@@ -245,10 +245,11 @@ impl Agent {
                 client_ids,
             });
         }
-        if !continues_turn && display_role.is_none() {
-            if let Some(event) = self.user_image_ids_event(input_start, &user_message) {
-                let _ = event_tx.send(event);
-            }
+        if !continues_turn
+            && display_role.is_none()
+            && let Some(event) = self.user_image_ids_event(input_start, &user_message)
+        {
+            let _ = event_tx.send(event);
         }
         if continues_turn || display_role.is_some() {
             self.emit_context_messages_since(input_start, &event_tx);

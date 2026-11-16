@@ -128,10 +128,9 @@ fn register_ask(
             if requests
                 .get(&request_id)
                 .is_some_and(|p| p.generation == generation)
+                && let Some(pending) = requests.remove(&request_id)
             {
-                if let Some(pending) = requests.remove(&request_id) {
-                    pending.closed.cancel();
-                }
+                pending.closed.cancel();
             }
             if requests.is_empty() {
                 all.remove(&session_id);
