@@ -48,6 +48,7 @@ fn soft_interrupt_protocol_display_role(source: SoftInterruptSource) -> Option<S
 pub(super) struct InjectedSoftInterrupt {
     pub(super) content: String,
     pub(super) source: SoftInterruptSource,
+    image_ids_event: Option<ServerEvent>,
     /// Caller ids of the queued messages combined into this injection, in
     /// queue order. Messages queued without an id contribute nothing.
     pub(super) client_ids: Vec<String>,
@@ -495,9 +496,12 @@ impl Agent {
                     serde_json::to_string(ids).expect("string ids serialize")
                 ));
             }
+            let image_ids_event =
+                agent.user_image_ids_event(agent.session.messages.len() - 1, &content);
             injected.push(InjectedSoftInterrupt {
                 content,
                 source,
+                image_ids_event,
                 client_ids: std::mem::take(ids),
             });
         };
@@ -506,7 +510,12 @@ impl Agent {
             // User follow-ups may share a model message. Notifications must
             // retain their own delivery events and transcript entries.
             match current_source {
-                Some(source) if source != message.source || source != SoftInterruptSource::User => {
+                Some(source)
+                    if source != message.source
+                        || source != SoftInterruptSource::User
+                        || !current_images.is_empty()
+                        || (!message.images.is_empty() && !current_parts.is_empty()) =>
+                {
                     flush_group(
                         self,
                         &mut injected,
@@ -618,12 +627,15 @@ impl Agent {
         injected
             .into_iter()
             .enumerate()
-            .map(|(idx, interrupt)| ServerEvent::SoftInterruptInjected {
-                content: interrupt.content,
-                display_role: soft_interrupt_protocol_display_role(interrupt.source),
-                point: point.to_string(),
-                tools_skipped: if idx == 0 { tools_skipped } else { None },
-                client_ids: interrupt.client_ids,
+            .flat_map(|(idx, interrupt)| {
+                let delivery = ServerEvent::SoftInterruptInjected {
+                    content: interrupt.content,
+                    display_role: soft_interrupt_protocol_display_role(interrupt.source),
+                    point: point.to_string(),
+                    tools_skipped: if idx == 0 { tools_skipped } else { None },
+                    client_ids: interrupt.client_ids,
+                };
+                std::iter::once(delivery).chain(interrupt.image_ids_event)
             })
             .collect()
     }
