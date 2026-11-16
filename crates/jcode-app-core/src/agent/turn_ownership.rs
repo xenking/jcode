@@ -65,6 +65,7 @@ impl Default for TurnOwnership {
 }
 
 struct Reservation {
+    _activity: crate::turn_activity::AdmissionGuard,
     _guard: OwnedMutexGuard<()>,
     observer: TurnObserver,
     identity: TurnIdentity,
@@ -131,7 +132,7 @@ impl TurnOwnership {
         })
     }
 
-    pub(super) fn claim(&self) -> anyhow::Result<TurnLease> {
+    pub(super) fn claim(&self, session_id: &str) -> anyhow::Result<TurnLease> {
         let guard = Arc::clone(&self.gate)
             .try_lock_owned()
             .map_err(|_| anyhow::anyhow!("Already processing a message"))?;
@@ -140,10 +141,12 @@ impl TurnOwnership {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.latest = state
+        let next = state
             .latest
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("Turn identity exhausted"))?;
+        let activity = crate::turn_activity::global().admit(session_id)?;
+        state.latest = next;
         let identity = TurnIdentity {
             runtime_generation: self.observer.runtime_generation().to_owned(),
             turn_id: state.latest,
@@ -151,6 +154,7 @@ impl TurnOwnership {
         state.active = Some(identity.clone());
         Ok(TurnLease {
             reservation: Arc::new(Reservation {
+                _activity: activity,
                 _guard: guard,
                 observer: self.observer.clone(),
                 identity,
@@ -179,23 +183,23 @@ mod tests {
         let runtime = TurnOwnership::default();
         let other = TurnOwnership::default();
         let observer = runtime.observer();
-        let lease = runtime.claim().unwrap();
+        let lease = runtime.claim("turn-ownership-tests").unwrap();
         let first = lease.identity().clone();
         assert_eq!(observer.active(), Some(first.clone()));
-        assert!(runtime.claim().is_err());
+        assert!(runtime.claim("turn-ownership-tests").is_err());
         assert!(runtime.validate(&lease).is_ok());
         assert!(other.validate(&lease).is_err());
-        let independent = other.claim().unwrap();
+        let independent = other.claim("turn-ownership-tests").unwrap();
         assert_ne!(
             first.runtime_generation,
             independent.identity().runtime_generation
         );
         drop(lease);
         assert!(observer.active().is_none());
-        let next = runtime.claim().unwrap();
+        let next = runtime.claim("turn-ownership-tests").unwrap();
         assert!(next.identity().turn_id > first.turn_id);
         assert_eq!(observer.latest_turn_id(), next.identity().turn_id);
-        assert!(other.claim().is_err());
+        assert!(other.claim("turn-ownership-tests").is_err());
         drop(independent);
     }
 
@@ -204,24 +208,31 @@ mod tests {
         let runtime = TurnOwnership::default();
         let observer = runtime.observer();
         let mutation = runtime.claim_mutation().unwrap();
-        assert!(runtime.claim().is_err());
+        assert!(runtime.claim("turn-ownership-tests").is_err());
         assert!(runtime.claim_mutation().is_err());
         assert_eq!(observer.snapshot(), (0, None));
         drop(mutation);
-        let turn = runtime.claim().unwrap();
+        let turn = runtime.claim("turn-ownership-tests").unwrap();
         assert_eq!(turn.identity().turn_id, 1);
         assert!(runtime.claim_mutation().is_err());
         drop(turn);
         let mutation = runtime.claim_mutation().unwrap();
         assert_eq!(observer.snapshot(), (1, None));
         drop(mutation);
-        assert_eq!(runtime.claim().unwrap().identity().turn_id, 2);
+        assert_eq!(
+            runtime
+                .claim("turn-ownership-tests")
+                .unwrap()
+                .identity()
+                .turn_id,
+            2
+        );
     }
 
     #[tokio::test]
     async fn task_abort_releases_reservation() {
         let runtime = TurnOwnership::default();
-        let lease = runtime.claim().unwrap();
+        let lease = runtime.claim("turn-ownership-tests").unwrap();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
             let _lease = lease;
@@ -229,9 +240,9 @@ mod tests {
             std::future::pending::<()>().await;
         });
         ready_rx.await.unwrap();
-        assert!(runtime.claim().is_err());
+        assert!(runtime.claim("turn-ownership-tests").is_err());
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
-        assert!(runtime.claim().is_ok());
+        assert!(runtime.claim("turn-ownership-tests").is_ok());
     }
 }

@@ -1,5 +1,48 @@
 use super::*;
 
+struct NeverProvider;
+#[async_trait::async_trait]
+impl crate::provider::Provider for NeverProvider {
+    async fn complete(
+        &self,
+        _: &[crate::message::Message],
+        _: &[crate::message::ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> anyhow::Result<crate::provider::EventStream> {
+        anyhow::bail!("admission must not execute a provider")
+    }
+    fn name(&self) -> &str {
+        "turn-activity-test"
+    }
+    fn fork(&self) -> Arc<dyn crate::provider::Provider> {
+        Arc::new(Self)
+    }
+}
+
+#[test]
+fn production_admission_is_visible_before_execution_and_until_publication_drains() {
+    let _env = crate::storage::lock_test_env();
+    let agent = crate::agent::Agent::new(Arc::new(NeverProvider), crate::tool::Registry::empty());
+    let id = agent.session_id().to_owned();
+    let turn = agent.claim_server_turn().unwrap();
+    let publication = turn.publication_pin();
+    assert!(
+        global()
+            .snapshot()
+            .session(&id)
+            .is_some_and(|session| session.is_busy()),
+        "accepted lease without execution must be busy"
+    );
+    drop(turn);
+    assert!(
+        global().snapshot().session(&id).unwrap().is_busy(),
+        "queued publication retains ownership"
+    );
+    drop(publication);
+    assert!(!global().snapshot().session(&id).unwrap().is_busy());
+}
+
 #[test]
 fn production_tool_wait_is_busy_even_without_stream_or_roster() {
     let id = "activity_production_tool_lag";
