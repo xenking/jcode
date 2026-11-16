@@ -41,10 +41,18 @@ daemon rejection, or disconnect fails session setup instead of proceeding withou
 the requested environment. An explicit `--session-env` flag takes precedence over
 the environment variable.
 
-ACP does not reconnect existing session connections after a daemon restart or
-reload. A read from the disconnected daemon fails with `Jcode daemon disconnected`.
-Restart the seat's ACP process and load or resume the session to reapply its
-environment before submitting more work.
+ACP automatically reconnects session connections after a daemon restart or
+reload, starting a stopped daemon through the normal daemon-start path. It
+re-attaches the same session ID and, with `--session-env inherit`, re-applies the
+original environment snapshot before sending more work. It also restores a model
+selected with `--model`, `session/set_config_option`, or `/model`. Loading or
+resuming another session still keeps that session's saved model.
+
+Reconnect attempts use exponential backoff from 100 ms up to 5 seconds, with a
+120-second total deadline that includes attachment and environment/model setup.
+A turn interrupted by a disconnect or reload returns an ACP error and is not
+replayed. If reconnecting times out, waiting requests fail with a reconnect error.
+The ACP process stays alive and the next request starts a new reconnect attempt.
 
 For `session/new`, an explicit ACP `--model` selects the session's model even
 when the daemon is already running. A bare model uses `--provider-profile` or an

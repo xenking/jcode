@@ -8,8 +8,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::sync::Mutex;
+
+mod reconnect;
+use reconnect::DaemonTransport;
 
 const ACP_PROTOCOL_VERSION: u64 = 1;
 
@@ -135,14 +138,15 @@ impl JsonRpcMessage {
 
 struct DaemonSession {
     session_id: String,
-    reader: Mutex<BufReader<ReadHalf>>,
-    writer: Mutex<WriteHalf>,
+    transport: DaemonTransport,
     next_request_id: AtomicU64,
     active_prompt_id: Mutex<Option<u64>>,
     prompt_running: AtomicBool,
     /// Set by `session/cancel` while a prompt is running; scoped to that prompt.
     cancel_requested: AtomicBool,
-    ui_state: Mutex<SessionUiState>,
+    ui_state: Arc<Mutex<SessionUiState>>,
+    session_env: Option<HashMap<String, String>>,
+    selected_model: Arc<Mutex<Option<String>>>,
     /// Workspace root reported by the ACP client, used to compose the
     /// project-local skill overlay for slash-skill resolution.
     working_dir: Option<PathBuf>,
@@ -370,13 +374,17 @@ impl DaemonSession {
     fn new(session_id: String, reader: ReadHalf, writer: WriteHalf, next_request_id: u64) -> Self {
         Self {
             session_id,
-            reader: Mutex::new(BufReader::new(reader)),
-            writer: Mutex::new(writer),
+            transport: DaemonTransport::Direct {
+                reader: Mutex::new(BufReader::new(reader).lines()),
+                writer: Mutex::new(writer),
+            },
             next_request_id: AtomicU64::new(next_request_id),
             active_prompt_id: Mutex::new(None),
             prompt_running: AtomicBool::new(false),
             cancel_requested: AtomicBool::new(false),
-            ui_state: Mutex::new(SessionUiState::default()),
+            ui_state: Arc::new(Mutex::new(SessionUiState::default())),
+            session_env: None,
+            selected_model: Arc::new(Mutex::new(None)),
             working_dir: None,
             active_skill: Mutex::new(None),
         }
@@ -398,7 +406,7 @@ impl DaemonSession {
 
     fn with_ui_state(self, state: SessionUiState) -> Self {
         Self {
-            ui_state: Mutex::new(state),
+            ui_state: Arc::new(Mutex::new(state)),
             ..self
         }
     }
@@ -408,36 +416,62 @@ impl DaemonSession {
     }
 
     async fn send(&self, request: &Request) -> Result<()> {
-        let mut json = serde_json::to_string(request)?;
-        json.push('\n');
-        let mut writer = self.writer.lock().await;
-        writer.write_all(json.as_bytes()).await?;
-        writer.flush().await?;
-        Ok(())
+        match &self.transport {
+            DaemonTransport::Managed(connection) => connection.send(request).await,
+            DaemonTransport::Direct { writer, .. } => {
+                let mut json = serde_json::to_string(request)?;
+                json.push('\n');
+                let mut writer = writer.lock().await;
+                writer.write_all(json.as_bytes()).await?;
+                writer.flush().await?;
+                Ok(())
+            }
+        }
     }
 
     async fn read_event(&self) -> Result<ServerEvent> {
-        let mut line = String::new();
-        let mut reader = self.reader.lock().await;
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 {
-            anyhow::bail!("Jcode daemon disconnected");
-        }
+        let reader = match &self.transport {
+            DaemonTransport::Managed(connection) => return connection.read_event().await,
+            DaemonTransport::Direct { reader, .. } => reader,
+        };
+        let line = reader
+            .lock()
+            .await
+            .next_line()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Jcode daemon disconnected"))?;
         let event = serde_json::from_str(&line)
             .with_context(|| format!("failed to decode Jcode daemon event: {}", line.trim_end()))?;
         Ok(super::commands::unwrap_turn_event(event))
+    }
+
+    async fn apply_session_env(&self) -> Result<()> {
+        let Some(env) = &self.session_env else {
+            return Ok(());
+        };
+        let id = self.next_id();
+        self.send(&Request::SetSessionEnv {
+            id,
+            env: env.clone(),
+        })
+        .await?;
+        wait_for_done(self, id)
+            .await
+            .context("failed to apply ACP session environment (--session-env inherit)")
     }
 }
 
 #[derive(Clone)]
 struct AcpRuntime {
-    stdout: Arc<Mutex<tokio::io::Stdout>>,
+    stdout: Arc<Mutex<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>>,
     sessions: Arc<Mutex<HashMap<String, Arc<DaemonSession>>>>,
     profile: AcpProfile,
     provider_choice: ProviderChoice,
     model: Option<String>,
     provider_profile: Option<String>,
     session_env: SessionEnvMode,
+    socket_path: PathBuf,
+    reconnect_timeout: std::time::Duration,
 }
 
 impl AcpRuntime {
@@ -449,13 +483,15 @@ impl AcpRuntime {
         session_env: SessionEnvMode,
     ) -> Self {
         Self {
-            stdout: Arc::new(Mutex::new(tokio::io::stdout())),
+            stdout: Arc::new(Mutex::new(Box::new(tokio::io::stdout()))),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             profile,
             provider_choice,
             model,
             provider_profile,
             session_env,
+            socket_path: crate::server::socket_path(),
+            reconnect_timeout: reconnect::RECONNECT_TIMEOUT,
         }
     }
 
@@ -837,28 +873,33 @@ impl AcpRuntime {
         }
 
         let request_id = session.next_id();
-        let apply_result = match config_id.as_str() {
-            CONFIG_ID_MODEL => {
-                session
-                    .send(&Request::SetModel {
-                        id: request_id,
-                        model: value.clone(),
-                    })
-                    .await?;
-                wait_for_model_changed(&session, request_id).await
+        let apply_result = async {
+            match config_id.as_str() {
+                CONFIG_ID_MODEL => {
+                    session
+                        .send(&Request::SetModel {
+                            id: request_id,
+                            model: value.clone(),
+                        })
+                        .await?;
+                    wait_for_model_changed(&session, request_id).await?;
+                    *session.selected_model.lock().await = Some(value.clone());
+                    Ok(())
+                }
+                CONFIG_ID_EFFORT => {
+                    session
+                        .send(&Request::SetReasoningEffort {
+                            id: request_id,
+                            effort: value.clone(),
+                            target_session_id: None,
+                        })
+                        .await?;
+                    wait_for_effort_changed(&session, request_id).await
+                }
+                other => Err(anyhow::anyhow!("Unknown config option id: {other}")),
             }
-            CONFIG_ID_EFFORT => {
-                session
-                    .send(&Request::SetReasoningEffort {
-                        id: request_id,
-                        effort: value.clone(),
-                        target_session_id: None,
-                    })
-                    .await?;
-                wait_for_effort_changed(&session, request_id).await
-            }
-            other => Err(anyhow::anyhow!("Unknown config option id: {other}")),
-        };
+        }
+        .await;
 
         match apply_result {
             Ok(()) => {
@@ -960,23 +1001,21 @@ impl AcpRuntime {
     }
 
     async fn connect_daemon(&self) -> Result<(ReadHalf, WriteHalf)> {
-        self.ensure_daemon().await?;
-        let stream = crate::server::connect_socket(&crate::server::socket_path()).await?;
+        let stream = match crate::server::connect_socket(&self.socket_path).await {
+            Ok(stream) => stream,
+            Err(_) => {
+                self.ensure_daemon().await?;
+                crate::server::connect_socket(&self.socket_path).await?
+            }
+        };
         Ok(stream.into_split())
     }
 
-    async fn apply_session_env(&self, session: &DaemonSession) -> Result<()> {
-        if self.session_env == SessionEnvMode::None {
-            return Ok(());
+    fn session_environment(&self) -> Result<Option<HashMap<String, String>>> {
+        match self.session_env {
+            SessionEnvMode::None => Ok(None),
+            SessionEnvMode::Inherit => inherited_session_env(std::env::vars_os()).map(Some),
         }
-        async {
-            let env = inherited_session_env(std::env::vars_os())?;
-            let id = session.next_id();
-            session.send(&Request::SetSessionEnv { id, env }).await?;
-            wait_for_done(session, id).await
-        }
-        .await
-        .context("failed to apply ACP session environment (--session-env inherit)")
     }
 
     fn new_session_model(&self) -> Option<String> {
@@ -1006,7 +1045,10 @@ impl AcpRuntime {
 
     async fn create_new_session(&self, cwd: PathBuf) -> Result<DaemonSession> {
         let (reader, writer) = self.connect_daemon().await?;
-        self.create_new_session_connected(cwd, reader, writer).await
+        let session = self
+            .create_new_session_connected(cwd, reader, writer)
+            .await?;
+        Ok(session.maintain_connection(self.clone()))
     }
 
     async fn create_new_session_connected(
@@ -1015,7 +1057,8 @@ impl AcpRuntime {
         reader: ReadHalf,
         writer: WriteHalf,
     ) -> Result<DaemonSession> {
-        let session = DaemonSession::new(String::new(), reader, writer, 2);
+        let mut session = DaemonSession::new(String::new(), reader, writer, 2);
+        session.session_env = self.session_environment()?;
         let subscribe_id = 1;
         session
             .send(&Request::Subscribe {
@@ -1039,12 +1082,19 @@ impl AcpRuntime {
             })
             .await?;
         wait_for_done(&session, subscribe_id).await?;
-        self.apply_session_env(&session).await?;
+        session.apply_session_env().await?;
         if let Some(model) = self.new_session_model() {
             async {
                 let id = session.next_id();
-                session.send(&Request::SetModel { id, model }).await?;
-                wait_for_model_changed(&session, id).await
+                session
+                    .send(&Request::SetModel {
+                        id,
+                        model: model.clone(),
+                    })
+                    .await?;
+                wait_for_model_changed(&session, id).await?;
+                *session.selected_model.lock().await = Some(model);
+                Ok::<_, anyhow::Error>(())
             }
             .await
             .context("failed to select ACP session model (--model)")?;
@@ -1069,14 +1119,8 @@ impl AcpRuntime {
             ),
             other => anyhow::bail!("expected history after session creation, got {other:?}"),
         };
-        Ok(DaemonSession::new(
-            session_id,
-            session.reader.into_inner().into_inner(),
-            session.writer.into_inner(),
-            session.next_request_id.load(Ordering::Relaxed),
-        )
-        .with_ui_state(ui_state)
-        .with_working_dir(cwd))
+        session.session_id = session_id;
+        Ok(session.with_ui_state(ui_state).with_working_dir(cwd))
     }
 
     async fn attach_existing_session(
@@ -1086,14 +1130,16 @@ impl AcpRuntime {
         replay_history: bool,
     ) -> Result<DaemonSession> {
         let (reader, writer) = self.connect_daemon().await?;
-        self.attach_existing_session_connected(
-            target_session_id,
-            cwd,
-            replay_history,
-            reader,
-            writer,
-        )
-        .await
+        let session = self
+            .attach_existing_session_connected(
+                target_session_id,
+                cwd,
+                replay_history,
+                reader,
+                writer,
+            )
+            .await?;
+        Ok(session.maintain_connection(self.clone()))
     }
 
     async fn attach_existing_session_connected(
@@ -1104,7 +1150,8 @@ impl AcpRuntime {
         reader: ReadHalf,
         writer: WriteHalf,
     ) -> Result<DaemonSession> {
-        let session = DaemonSession::new(String::new(), reader, writer, 2);
+        let mut session = DaemonSession::new(String::new(), reader, writer, 2);
+        session.session_env = self.session_environment()?;
         let resume_id = 1;
         session
             .send(&Request::Subscribe {
@@ -1167,15 +1214,9 @@ impl AcpRuntime {
             }
         }
 
-        self.apply_session_env(&session).await?;
-        Ok(DaemonSession::new(
-            attached_id,
-            session.reader.into_inner().into_inner(),
-            session.writer.into_inner(),
-            session.next_request_id.load(Ordering::Relaxed),
-        )
-        .with_ui_state(ui_state)
-        .with_working_dir(cwd))
+        session.apply_session_env().await?;
+        session.session_id = attached_id;
+        Ok(session.with_ui_state(ui_state).with_working_dir(cwd))
     }
 
     async fn replay_history(
@@ -1322,6 +1363,12 @@ impl AcpRuntime {
             outcome.observe(&event, prompt_id);
             match event {
                 ServerEvent::Ack { .. } => {}
+                ServerEvent::Reloading { .. } => {
+                    cleanup_prompt_state(&session).await;
+                    anyhow::bail!(
+                        "Jcode daemon reload interrupted the prompt; retry after reconnecting"
+                    );
+                }
                 ServerEvent::Done { id } if id == prompt_id => break,
                 ServerEvent::Interrupted
                 | ServerEvent::TurnStopped { .. }
@@ -1457,6 +1504,7 @@ impl AcpRuntime {
                     })
                     .await?;
                 wait_for_model_changed(session, id).await?;
+                *session.selected_model.lock().await = Some(model.clone());
                 self.write_config_option_update(session).await?;
                 let selected = session.ui_state.lock().await.model.clone().unwrap_or(model);
                 Ok(format!("Switched model to `{selected}`."))

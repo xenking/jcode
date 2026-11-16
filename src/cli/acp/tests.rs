@@ -941,3 +941,342 @@ fn acp_turn_outcome_ignores_stale_interrupt_before_ack() {
     o.observe(&ServerEvent::Interrupted, 9);
     assert_eq!(o.stop_reason(false), "cancelled");
 }
+
+struct AcpReconnectFixture {
+    runtime: AcpRuntime,
+    session_id: String,
+    listener: crate::transport::Listener,
+    daemon: Option<(BufReader<ReadHalf>, WriteHalf)>,
+    client: BufReader<tokio::io::DuplexStream>,
+    env: Option<HashMap<String, String>>,
+    _home: tempfile::TempDir,
+}
+
+impl AcpReconnectFixture {
+    async fn new(mode: SessionEnvMode, model: Option<&str>) -> Self {
+        Self::with_timeout(mode, model, reconnect::RECONNECT_TIMEOUT).await
+    }
+
+    async fn with_timeout(
+        mode: SessionEnvMode,
+        model: Option<&str>,
+        timeout: std::time::Duration,
+    ) -> Self {
+        let home = tempfile::tempdir().unwrap();
+        let socket_path = home.path().join("acp.sock");
+        let mut listener = crate::transport::Listener::bind(&socket_path).unwrap();
+        let (output, client) = tokio::io::duplex(64 * 1024);
+        let mut runtime = AcpRuntime::new(
+            AcpProfile::Standard,
+            ProviderChoice::Auto,
+            model.map(str::to_string),
+            None,
+            mode,
+        );
+        runtime.socket_path = socket_path;
+        runtime.reconnect_timeout = timeout;
+        runtime.stdout = Arc::new(Mutex::new(Box::new(output)));
+        let creating = {
+            let runtime = runtime.clone();
+            let cwd = home.path().to_path_buf();
+            tokio::spawn(async move { runtime.create_new_session(cwd).await })
+        };
+        let (stream, _) = listener.accept().await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let Request::Subscribe {
+            id,
+            target_session_id,
+            ..
+        } = acp_daemon_request(&mut reader).await
+        else {
+            panic!("expected initial subscription")
+        };
+        assert!(target_session_id.is_none());
+        acp_daemon_event(&mut writer, json!({"type":"done", "id":id})).await;
+        let env = if mode == SessionEnvMode::Inherit {
+            let Request::SetSessionEnv { id, env } = acp_daemon_request(&mut reader).await else {
+                panic!("expected initial environment")
+            };
+            acp_daemon_event(&mut writer, json!({"type":"done", "id":id})).await;
+            Some(env)
+        } else {
+            None
+        };
+        if let Some(expected_model) = model {
+            let Request::SetModel { id, model } = acp_daemon_request(&mut reader).await else {
+                panic!("expected launch model")
+            };
+            assert_eq!(model, expected_model);
+            acp_daemon_event(
+                &mut writer,
+                json!({"type":"model_changed", "id":id, "model":model, "provider_name":"openai"}),
+            )
+            .await;
+        }
+        let Request::GetHistory { id } = acp_daemon_request(&mut reader).await else {
+            panic!("expected initial history")
+        };
+        acp_daemon_event(&mut writer, json!({"type":"history", "id":id, "session_id":"persistent-acp", "messages":[], "provider_model":"saved-model"})).await;
+        let session = Arc::new(creating.await.unwrap().unwrap());
+        let session_id = session.session_id.clone();
+        runtime
+            .sessions
+            .lock()
+            .await
+            .insert(session_id.clone(), session);
+        Self {
+            runtime,
+            session_id,
+            listener,
+            daemon: Some((reader, writer)),
+            client: BufReader::new(client),
+            env,
+            _home: home,
+        }
+    }
+
+    async fn prompt(&self, id: u64) {
+        self.runtime.handle_message(JsonRpcMessage {
+            id: Some(json!(id)), method: Some("session/prompt".into()),
+            params: json!({"sessionId":self.session_id, "prompt":[{"type":"text", "text":"continue"}]}),
+        }).await.unwrap();
+    }
+
+    async fn response(&mut self, id: u64) -> Value {
+        loop {
+            let mut line = String::new();
+            assert_ne!(self.client.read_line(&mut line).await.unwrap(), 0);
+            let response: Value = serde_json::from_str(&line).unwrap();
+            if response.get("id") == Some(&json!(id)) {
+                return response;
+            }
+        }
+    }
+
+    async fn reattach(&mut self, expected_model: Option<&str>) -> (BufReader<ReadHalf>, WriteHalf) {
+        let (stream, _) = self.listener.accept().await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let Request::Subscribe {
+            id,
+            target_session_id,
+            working_dir,
+            ..
+        } = acp_daemon_request(&mut reader).await
+        else {
+            panic!("reconnect must attach")
+        };
+        assert_eq!(target_session_id.as_deref(), Some(self.session_id.as_str()));
+        assert_eq!(working_dir.as_deref(), self._home.path().to_str());
+        acp_daemon_event(&mut writer, json!({"type":"history", "id":id, "session_id":self.session_id, "messages":[], "provider_model":"saved-model"})).await;
+        acp_daemon_event(&mut writer, json!({"type":"done", "id":id})).await;
+        if let Some(expected_env) = &self.env {
+            let Request::SetSessionEnv { id, env } = acp_daemon_request(&mut reader).await else {
+                panic!("reconnect must reapply environment")
+            };
+            assert!(
+                env == *expected_env,
+                "reconnect must reuse the exact environment snapshot"
+            );
+            assert!(
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(20),
+                    acp_daemon_request(&mut reader)
+                )
+                .await
+                .is_err(),
+                "no prompt before environment acknowledgement"
+            );
+            acp_daemon_event(&mut writer, json!({"type":"done", "id":id})).await;
+        }
+        if let Some(expected_model) = expected_model {
+            let Request::SetModel { id, model } = acp_daemon_request(&mut reader).await else {
+                panic!("reconnect must reapply selected model")
+            };
+            assert_eq!(model, expected_model);
+            acp_daemon_event(&mut writer, json!({"type":"model_changed", "id":id, "model":"selected-model", "provider_name":"openai"})).await;
+        }
+        (reader, writer)
+    }
+}
+
+#[tokio::test]
+async fn acp_idle_disconnect_reattaches_and_restores_env_and_model_before_following_prompt() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        for mode in [SessionEnvMode::None, SessionEnvMode::Inherit] {
+            for model in [None, Some("openai:launch-model")] {
+                let mut fixture = AcpReconnectFixture::new(mode, model).await;
+                drop(fixture.daemon.take());
+                let (mut reader, mut writer) = fixture.reattach(model).await;
+                fixture.prompt(42).await;
+                let Request::Message { id, content, .. } = acp_daemon_request(&mut reader).await
+                else {
+                    panic!("expected following prompt")
+                };
+                assert_eq!(content, "continue");
+                acp_daemon_event(&mut writer, json!({"type":"ack", "id":id})).await;
+                acp_daemon_event(&mut writer, json!({"type":"done", "id":id})).await;
+                assert_eq!(
+                    fixture.response(42).await["result"]["stopReason"],
+                    "end_turn"
+                );
+            }
+        }
+    })
+    .await
+    .expect("idle ACP recovery timed out");
+}
+
+#[tokio::test]
+async fn acp_disconnect_during_turn_returns_rpc_error_and_next_prompt_recovers() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut fixture = AcpReconnectFixture::new(SessionEnvMode::Inherit, None).await;
+        fixture.prompt(41).await;
+        let (mut reader, mut writer) = fixture.daemon.take().unwrap();
+        let Request::Message { id, .. } = acp_daemon_request(&mut reader).await else {
+            panic!("expected prompt")
+        };
+        acp_daemon_event(&mut writer, json!({"type":"ack", "id":id})).await;
+        drop((reader, writer));
+        let failed = fixture.response(41).await;
+        assert!(
+            failed["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("daemon disconnected")
+        );
+        assert!(failed.get("result").is_none());
+        fixture.prompt(42).await;
+        let (mut reader, mut writer) = fixture.reattach(None).await;
+        let Request::Message { id, content, .. } = acp_daemon_request(&mut reader).await else {
+            panic!("expected new prompt, not replay")
+        };
+        assert_eq!(content, "continue");
+        acp_daemon_event(&mut writer, json!({"type":"done", "id":id})).await;
+        assert_eq!(
+            fixture.response(42).await["result"]["stopReason"],
+            "end_turn"
+        );
+    })
+    .await
+    .expect("interrupted ACP turn did not complete");
+}
+
+#[tokio::test]
+async fn acp_configured_model_route_survives_reconnect() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut fixture = AcpReconnectFixture::new(SessionEnvMode::Inherit, Some("openai:launch-model")).await;
+        let runtime = fixture.runtime.clone();
+        let session_id = fixture.session_id.clone();
+        let setting = tokio::spawn(async move {
+            runtime.handle_message(JsonRpcMessage { id: Some(json!(20)), method: Some("session/set_config_option".into()), params: json!({"sessionId":session_id,"configId":CONFIG_ID_MODEL,"value":"openai:chosen-model"}) }).await.unwrap();
+        });
+        let (mut reader, mut writer) = fixture.daemon.take().unwrap();
+        let Request::SetModel { id, .. } = acp_daemon_request(&mut reader).await else { panic!("expected configured model") };
+        acp_daemon_event(&mut writer, json!({"type":"model_changed","id":id,"model":"chosen-model","provider_name":"openai"})).await;
+        setting.await.unwrap();
+        assert!(fixture.response(20).await.get("error").is_none());
+        drop((reader, writer));
+        let (_reader, _writer) = fixture.reattach(Some("openai:chosen-model")).await;
+    }).await.expect("configured ACP model recovery timed out");
+}
+
+#[tokio::test]
+async fn acp_failed_reconnect_errors_waiting_request_and_retries_next_request() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut fixture = AcpReconnectFixture::with_timeout(
+            SessionEnvMode::Inherit,
+            None,
+            std::time::Duration::from_millis(500),
+        )
+        .await;
+        drop(fixture.daemon.take());
+        for attempt in 0..2 {
+            let (stream, _) = fixture.listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let Request::Subscribe { id, .. } = acp_daemon_request(&mut reader).await else {
+                panic!("expected reconnect subscription")
+            };
+            if attempt == 0 {
+                fixture.prompt(41).await;
+            }
+            acp_daemon_event(
+                &mut writer,
+                json!({"type":"error", "id":id, "message":"daemon is still restarting"}),
+            )
+            .await;
+        }
+        let failed = fixture.response(41).await;
+        assert!(
+            failed["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Failed to reconnect")
+        );
+        fixture.prompt(42).await;
+        let (mut reader, mut writer) = fixture.reattach(None).await;
+        let Request::Message { id, .. } = acp_daemon_request(&mut reader).await else {
+            panic!("expected prompt after failed reconnect")
+        };
+        acp_daemon_event(&mut writer, json!({"type":"done", "id":id})).await;
+        assert_eq!(
+            fixture.response(42).await["result"]["stopReason"],
+            "end_turn"
+        );
+    })
+    .await
+    .expect("ACP did not retry after a reconnect deadline");
+}
+
+#[tokio::test]
+async fn acp_reload_notice_interrupts_turn_without_waiting_for_eof() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut fixture = AcpReconnectFixture::new(SessionEnvMode::Inherit, None).await;
+        fixture.prompt(41).await;
+        let (mut reader, mut writer) = fixture.daemon.take().unwrap();
+        let Request::Message { id, .. } = acp_daemon_request(&mut reader).await else {
+            panic!("expected prompt")
+        };
+        acp_daemon_event(&mut writer, json!({"type":"ack", "id":id})).await;
+        acp_daemon_event(
+            &mut writer,
+            json!({"type":"reloading", "new_socket":null, "reload_id":null}),
+        )
+        .await;
+        let failed = fixture.response(41).await;
+        assert!(
+            failed["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("reload interrupted")
+        );
+        assert!(
+            !fixture.runtime.sessions.lock().await[&fixture.session_id]
+                .prompt_running
+                .load(Ordering::SeqCst)
+        );
+        drop((reader, writer));
+    })
+    .await
+    .expect("ACP reload notice did not finish the interrupted turn");
+}
+
+#[tokio::test]
+async fn acp_reconnect_backoff_is_bounded_even_when_connect_hangs() {
+    let attempts = AtomicU64::new(0);
+    let error = reconnect::reconnect_with_backoff(std::time::Duration::from_millis(350), || {
+        attempts.fetch_add(1, Ordering::SeqCst);
+        async { Err::<(), _>(anyhow::anyhow!("connection refused")) }
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert!(error.to_string().contains("connection refused"));
+    reconnect::reconnect_with_backoff(std::time::Duration::from_millis(150), || async {
+        std::future::pending::<Result<()>>().await
+    })
+    .await
+    .expect_err("hung connect must respect the total deadline");
+}
