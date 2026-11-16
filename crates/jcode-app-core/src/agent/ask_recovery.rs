@@ -11,6 +11,14 @@ fn interrupted_ask(messages: &[StoredMessage]) -> Option<InterruptedAsk> {
     let assistant_index = messages
         .iter()
         .rposition(|message| message.role == Role::Assistant)?;
+    if messages[assistant_index + 1..].iter().any(|message| {
+        message.role == Role::User
+            && message.display_role.is_none()
+            && message.content.iter().any(|block| matches!(block, ContentBlock::Text { text, .. }
+                if !text.trim().is_empty() && !text.starts_with("[auto] ") && !text.starts_with("<system-reminder>")))
+    }) {
+        return None;
+    }
     for block in &messages[assistant_index].content {
         let ContentBlock::ToolUse {
             id, name, input, ..
@@ -304,6 +312,43 @@ mod tests {
     }
 
     #[test]
+    fn a_new_user_prompt_supersedes_both_dangling_and_interrupted_asks() {
+        for with_interrupted_result in [false, true] {
+            let mut session = Session::create_with_id("ask-new-input".into(), None, None);
+            session.add_message(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "original-ask".into(),
+                    name: "ask".into(),
+                    input: json!({}),
+                    thought_signature: None,
+                }],
+            );
+            if with_interrupted_result {
+                session.add_message(
+                    Role::User,
+                    vec![ContentBlock::ToolResult {
+                        tool_use_id: "original-ask".into(),
+                        content: "[Tool 'ask' interrupted by server reload after 0.2s]".into(),
+                        is_error: Some(true),
+                    }],
+                );
+            }
+            session.add_message(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "New authoritative user prompt".into(),
+                    cache_control: None,
+                }],
+            );
+            assert!(
+                interrupted_ask(&session.messages).is_none(),
+                "new user input supersedes the old unanswered ask"
+            );
+        }
+    }
+
+    #[test]
     fn a_later_answer_supersedes_an_interrupted_marker() {
         let mut session = Session::create_with_id("ask-superseded".into(), None, None);
         session.add_message(
@@ -449,6 +494,65 @@ mod tests {
             "test provider intentionally fails after the answer"
         );
         assert!(interrupted_ask(&Session::load(session_id).unwrap().messages).is_none());
+    }
+
+    #[tokio::test]
+    async fn reload_checkpoint_is_acknowledged_after_turn_cancel_signal_resets() {
+        let _lock = crate::storage::lock_test_env();
+        let _home = TestHome::new();
+        let session_id = "ask-checkpoint-after-reset";
+        let mut session = Session::create_with_id(session_id.into(), None, None);
+        session.add_message(Role::Assistant, vec![ContentBlock::ToolUse {
+            id: "original-ask".into(), name: "ask".into(),
+            input: json!({"questions":[{"question":"Continue?","options":[{"label":"A"},{"label":"B"}]}]}),
+            thought_signature: None,
+        }]);
+        session.save().unwrap();
+        let provider: Arc<dyn Provider> = Arc::new(TestProvider);
+        let registry = Registry::new(provider.clone()).await;
+        let mut agent = Agent::new_with_session(provider, registry, session, None);
+        let lease = agent.claim_server_turn().unwrap();
+        let signal = agent.graceful_shutdown.clone();
+        let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+        let _attachment = crate::tool::interactive::attach(session_id, input_tx.clone());
+        agent.set_stdin_request_tx(input_tx);
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let reload = async {
+            let _request = tokio::time::timeout(Duration::from_secs(3), input_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            crate::turn_activity::global().checkpoint_requested(session_id);
+            crate::turn_cancel_registry::mark_interruption(
+                session_id,
+                crate::turn_cancel_registry::TurnInterruptionReason::Reload,
+            );
+            signal.fire();
+        };
+        let (result, ()) = tokio::join!(
+            agent.run_reserved_streaming_mpsc(
+                &lease,
+                "",
+                vec![],
+                Some("continue after reload".into()),
+                event_tx,
+                None,
+                None
+            ),
+            reload,
+        );
+        result.unwrap();
+        assert!(
+            !agent.is_graceful_shutdown(),
+            "turn guard resets its cancellation signal before returning"
+        );
+        let snapshot = crate::turn_activity::global().snapshot();
+        let activity = snapshot.session(session_id).unwrap();
+        assert!(
+            !activity.checkpoint_pending,
+            "a successfully saved interrupted turn must acknowledge its checkpoint after signal reset"
+        );
+        assert!(Agent::interrupted_ask_tool_id(&Session::load(session_id).unwrap()).is_some());
     }
 
     #[tokio::test]

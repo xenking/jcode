@@ -280,7 +280,12 @@ impl Agent {
         self.fire_turn_start_hook("chat");
         let title_event_tx = event_tx.clone();
         let result = self.run_turn_streaming_mpsc(event_tx).await;
-        if self.is_graceful_shutdown() {
+        if self.session.migration_lease_block().is_none()
+            && crate::turn_activity::global()
+                .snapshot()
+                .session(&self.session.id)
+                .is_some_and(|activity| activity.checkpoint_pending)
+        {
             self.persist_session_now()?;
             crate::turn_activity::global().checkpointed(&self.session.id);
         }
@@ -353,7 +358,12 @@ impl Agent {
         self.fire_turn_start_hook("failover");
         let title_event_tx = event_tx.clone();
         let result = self.run_turn_streaming_mpsc(event_tx).await;
-        if self.is_graceful_shutdown() {
+        if self.session.migration_lease_block().is_none()
+            && crate::turn_activity::global()
+                .snapshot()
+                .session(&self.session.id)
+                .is_some_and(|activity| activity.checkpoint_pending)
+        {
             self.persist_session_now()?;
             crate::turn_activity::global().checkpointed(&self.session.id);
         }
