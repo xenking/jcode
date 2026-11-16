@@ -914,11 +914,9 @@ async fn continue_persistent_ws_locked(
         object.remove("background");
     }
 
-    let continuation_tools = continuation_request
-        .get("tools")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!([]));
-    let continuation_instructions = continuation_request.get("instructions").cloned();
+    let empty_tools = serde_json::json!([]);
+    let continuation_tools = continuation_request.get("tools").unwrap_or(&empty_tools);
+    let continuation_instructions = continuation_request.get("instructions");
     let continuation_tool_count = continuation_tools
         .as_array()
         .map(|tools| tools.len())
@@ -956,8 +954,8 @@ async fn continue_persistent_ws_locked(
         },
         &continuation_payload,
         &incremental_items,
-        continuation_instructions.as_ref(),
-        Some(&continuation_tools),
+        continuation_instructions,
+        Some(continuation_tools),
         Some(continuation_tool_count),
         &[
             (
@@ -1019,6 +1017,11 @@ async fn continue_persistent_ws_locked(
             ),
         ],
     );
+
+    // These duplicate JSON trees exist only for synchronous fingerprinting.
+    // The actual continuation request owns the input needed for serialization.
+    drop(continuation_payload);
+    drop(incremental_items);
 
     let request_text = match serde_json::to_string(&continuation_request) {
         Ok(t) => t,
@@ -1089,8 +1092,6 @@ async fn continue_persistent_ws_locked(
     // owner's original request, not these transformed wire-only copies, while
     // waiting for a potentially long response.
     drop(continuation_request);
-    drop(continuation_tools);
-    drop(continuation_instructions);
 
     loop {
         // Only inactivity ends the stream. A wall-clock cap here used to kill
