@@ -284,6 +284,16 @@ struct IsolatedRuntimeDir {
     _temp: tempfile::TempDir,
 }
 
+#[test]
+fn queued_skill_validation_does_not_fallback_after_session_read_error() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = IsolatedReloadRecoveryEnv::new();
+    let session = crate::session::Session::create(None, None);
+    let path = crate::session::session_path(&session.id).unwrap();
+    std::fs::create_dir_all(path).unwrap();
+    assert!(queued_skill_working_dir(&session.id, "/wrong-project").is_err());
+}
+
 struct IsolatedReloadRecoveryEnv {
     prev_home: Option<std::ffi::OsString>,
     prev_runtime: Option<std::ffi::OsString>,

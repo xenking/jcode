@@ -305,6 +305,24 @@ async fn refresh_session_control_handle(
     .with_provider(agent_guard.provider_handle())
 }
 
+fn queued_skill_working_dir(session_id: &str, initial_working_dir: &str) -> anyhow::Result<String> {
+    match crate::session::Session::load(session_id) {
+        Ok(session) => Ok(session
+            .working_dir
+            .unwrap_or_else(|| initial_working_dir.to_owned())),
+        // An untouched, newly attached session has no snapshot yet. Its validated
+        // connection working directory remains authoritative until first save.
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Ok(initial_working_dir.to_owned())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "client lifecycle wiring spans sessions, swarm state, file state, channels, debug, and runtime coordination"
@@ -1251,9 +1269,15 @@ pub(super) async fn handle_client(
             let (id, result) = match request {
                 Request::QueuePrompt { id, client_id, content, images, mode, system_reminder, active_skill } => {
                     if let Some(name) = active_skill.as_deref() {
-                        let working_dir = crate::session::Session::load(&client_session_id)
-                            .ok().and_then(|session| session.working_dir.clone())
-                            .unwrap_or_else(|| initial_working_dir.clone());
+                        let working_dir = match queued_skill_working_dir(&client_session_id, &initial_working_dir) {
+                            Ok(working_dir) => working_dir,
+                            Err(error) => {
+                                if let Err(delivery_error) = client_event_tx.send(ServerEvent::Error { id, message: format!("Cannot validate queued skill: {error}"), retry_after_secs: None }) {
+                                    crate::logging::debug(&format!("Queue validation error receiver closed: {delivery_error}"));
+                                }
+                                continue;
+                            }
+                        };
                         let skills = registry.skills();
                         let global = skills.read().await;
                         let effective = crate::skill::SkillRegistry::effective_for_working_dir(
@@ -2674,7 +2698,17 @@ pub(super) async fn handle_client(
                 request_id,
                 response,
             } => {
-                let input = serde_json::to_string(&response).unwrap_or_default();
+                let input = match serde_json::to_string(&response) {
+                    Ok(input) => input,
+                    Err(error) => {
+                        if let Err(delivery_error) = client_event_tx.send(ServerEvent::Error {
+                            id, message: format!("Cannot encode ask response: {error}"), retry_after_secs: None,
+                        }) {
+                            crate::logging::debug(&format!("Ask response error receiver closed: {delivery_error}"));
+                        }
+                        continue;
+                    }
+                };
                 handle_stdin_response(id, request_id, input, &stdin_responses, &client_event_tx)
                     .await;
             }
