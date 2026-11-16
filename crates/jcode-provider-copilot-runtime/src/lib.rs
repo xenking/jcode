@@ -7,7 +7,7 @@
 
 mod catalog;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use jcode_base::auth::copilot as copilot_auth;
@@ -67,10 +67,10 @@ pub struct CopilotApiProvider {
 fn canonical_diagnostic_parts(
     payload: &Value,
     responses: bool,
-) -> (&[Value], Option<&Value>, Option<&Value>) {
+) -> Result<(&[Value], Option<&Value>, Option<&Value>)> {
     let items = payload[if responses { "input" } else { "messages" }]
         .as_array()
-        .expect("canonical Copilot input is an array");
+        .context("canonical Copilot input must be an array")?;
     let system = if responses {
         payload.get("instructions")
     } else {
@@ -78,7 +78,7 @@ fn canonical_diagnostic_parts(
             .first()
             .filter(|message| message.get("role").and_then(Value::as_str) == Some("system"))
     };
-    (items, system, payload.get("tools"))
+    Ok((items, system, payload.get("tools")))
 }
 
 impl CopilotApiProvider {
@@ -965,7 +965,7 @@ impl Provider for CopilotApiProvider {
             system,
         );
         let (fingerprint_input, system_value, tools_value) =
-            canonical_diagnostic_parts(&canonical_payload, uses_responses_api);
+            canonical_diagnostic_parts(&canonical_payload, uses_responses_api)?;
         jcode_provider_core::fingerprint::log_provider_canonical_input(
             "copilot",
             &model_for_fingerprint,
@@ -1185,6 +1185,16 @@ mod canonical_payload_tests {
     use super::*;
     use jcode_provider_core::fingerprint::stable_hash_json;
 
+    #[test]
+    fn malformed_diagnostic_inputs_return_errors() {
+        for responses in [false, true] {
+            for payload in [json!({}), json!({"messages": null, "input": "not an array"})] {
+                let error = canonical_diagnostic_parts(&payload, responses).unwrap_err();
+                assert!(error.to_string().contains("must be an array"));
+            }
+        }
+    }
+
     fn provider() -> CopilotApiProvider {
         CopilotApiProvider {
             client: jcode_provider_core::shared_http_client(),
@@ -1287,7 +1297,7 @@ mod canonical_payload_tests {
                     let payload =
                         provider.canonical_payload(model, responses, &messages, tools, system);
                     let (input, diagnostic_system, diagnostic_tools) =
-                        canonical_diagnostic_parts(&payload, responses);
+                        canonical_diagnostic_parts(&payload, responses).unwrap();
                     assert_eq!(payload, expected_payload);
                     assert_eq!(
                         serde_json::to_vec(&payload).unwrap(),
