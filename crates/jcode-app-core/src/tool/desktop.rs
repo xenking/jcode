@@ -2,7 +2,7 @@
 use super::{Tool, ToolContext, ToolOutput};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
-use jcode_sdk::desktop_control::{DesktopAction, DesktopResponse, OpenDestination, WaitCondition};
+use jcode_sdk::desktop_control::{DesktopAction, DesktopResponse, OpenDestination};
 use serde_json::{Value, json};
 
 pub struct DesktopTool;
@@ -100,43 +100,15 @@ fn execute_with_paths(action: DesktopAction, paths: Vec<std::path::PathBuf>) -> 
         timeout_ms,
     } = action
     {
-        if !(1..=120_000).contains(&timeout_ms) {
-            bail!("timeout_ms must be between 1 and 120000");
-        }
-        if let WaitCondition::SelectorVisible { selector } = &condition
-            && !selector.starts_with("tool:")
-            && !selector.starts_with("row:")
-        {
-            bail!("only transcript tool: and row: selector visibility is supported");
-        }
-        let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
-        loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                bail!("wait_for timed out");
-            }
-            match request(
-                path,
-                DesktopAction::State {
-                    target: target.clone(),
-                },
-                remaining.min(Duration::from_secs(5)),
-            )
-            .context("Desktop wait_for state request failed")?
-            {
-                DesktopResponse::Ok { result } => {
-                    if condition_met(&condition, &result) {
-                        return Ok(result);
-                    }
-                }
-                DesktopResponse::Error { code, message } => bail!("{code}: {message}"),
-            }
-            std::thread::sleep(
-                deadline
-                    .saturating_duration_since(std::time::Instant::now())
-                    .min(Duration::from_millis(100)),
-            );
-        }
+        return match jcode_sdk::desktop_control::wait_for(
+            path,
+            target,
+            condition,
+            Duration::from_millis(timeout_ms),
+        )? {
+            DesktopResponse::Ok { result } => Ok(result),
+            DesktopResponse::Error { code, message } => bail!("{code}: {message}"),
+        };
     }
     match request(path, action, Duration::from_secs(5)).context("Desktop request failed")? {
         DesktopResponse::Ok { result } => Ok(result),
@@ -144,31 +116,6 @@ fn execute_with_paths(action: DesktopAction, paths: Vec<std::path::PathBuf>) -> 
     }
 }
 
-#[cfg(unix)]
-fn condition_met(condition: &WaitCondition, state: &Value) -> bool {
-    fn contains(value: &Value, text: &str) -> bool {
-        match value {
-            Value::String(value) => value.contains(text),
-            Value::Array(values) => values.iter().any(|value| contains(value, text)),
-            Value::Object(values) => values.values().any(|value| contains(value, text)),
-            _ => false,
-        }
-    }
-    let panel = &state["panel"];
-    match condition {
-        WaitCondition::SessionIdle {} => panel["status"].as_str() == Some("idle"),
-        WaitCondition::TextContains { text } => {
-            contains(&panel["loaded_transcript_items"], text)
-                || contains(&panel["streaming_text"], text)
-        }
-        WaitCondition::SelectorVisible { selector } => panel["visible_transcript_items"]
-            .as_array()
-            .is_some_and(|rows| {
-                rows.iter()
-                    .any(|row| row["selector"].as_str() == Some(selector))
-            }),
-    }
-}
 #[cfg(not(unix))]
 fn execute_local(_action: DesktopAction) -> Result<Value> {
     bail!("Desktop control is not supported on this platform")
@@ -177,7 +124,7 @@ fn execute_local(_action: DesktopAction) -> Result<Value> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use jcode_sdk::desktop_control::{DesktopRequest, DesktopTarget};
+    use jcode_sdk::desktop_control::{DesktopRequest, DesktopTarget, WaitCondition, condition_met};
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
 

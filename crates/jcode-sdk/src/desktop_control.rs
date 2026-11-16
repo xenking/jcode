@@ -39,6 +39,83 @@ pub fn request(
     serde_json::from_str(&line).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
+/// Poll semantic state without blocking the Desktop event loop. Timeouts are bounded.
+#[cfg(unix)]
+pub fn wait_for(
+    path: &Path,
+    target: DesktopTarget,
+    condition: WaitCondition,
+    timeout: Duration,
+) -> io::Result<DesktopResponse> {
+    if timeout.is_zero() || timeout > Duration::from_secs(120) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "timeout must be between 1ms and 120s",
+        ));
+    }
+    if let WaitCondition::SelectorVisible { selector } = &condition
+        && !selector.starts_with("tool:")
+        && !selector.starts_with("row:")
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "only transcript selector visibility is supported",
+        ));
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "wait_for timed out",
+            ));
+        }
+        let response = request(
+            path,
+            DesktopAction::State {
+                target: target.clone(),
+            },
+            remaining.min(Duration::from_secs(5)),
+        )?;
+        match &response {
+            DesktopResponse::Ok { result } if !condition_met(&condition, result) => {}
+            _ => return Ok(response),
+        }
+        std::thread::sleep(
+            deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .min(Duration::from_millis(100)),
+        );
+    }
+}
+
+/// Interpret a condition against semantic Desktop state.
+pub fn condition_met(condition: &WaitCondition, state: &serde_json::Value) -> bool {
+    fn contains(value: &serde_json::Value, text: &str) -> bool {
+        match value {
+            serde_json::Value::String(value) => value.contains(text),
+            serde_json::Value::Array(values) => values.iter().any(|value| contains(value, text)),
+            serde_json::Value::Object(values) => values.values().any(|value| contains(value, text)),
+            _ => false,
+        }
+    }
+    let panel = &state["panel"];
+    match condition {
+        WaitCondition::SessionIdle {} => panel["status"].as_str() == Some("idle"),
+        WaitCondition::TextContains { text } => {
+            contains(&panel["loaded_transcript_items"], text)
+                || contains(&panel["streaming_text"], text)
+        }
+        WaitCondition::SelectorVisible { selector } => panel["visible_transcript_items"]
+            .as_array()
+            .is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row["selector"].as_str() == Some(selector))
+            }),
+    }
+}
+
 #[cfg(unix)]
 pub fn socket_dir() -> std::path::PathBuf {
     std::env::var_os("JCODE_DESKTOP_CONTROL_DIR")
@@ -84,6 +161,42 @@ pub fn endpoints() -> io::Result<Vec<std::path::PathBuf>> {
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn wait_polls_state_until_selector_is_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("desktop.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            for visible in [false, true] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(&mut stream).read_line(&mut line).unwrap();
+                let request: DesktopRequest = serde_json::from_str(&line).unwrap();
+                assert!(matches!(request.action, DesktopAction::State { .. }));
+                let rows = if visible {
+                    serde_json::json!([{"selector":"tool:c1"}])
+                } else {
+                    serde_json::json!([])
+                };
+                writeln!(stream, "{}", serde_json::json!({"status":"ok", "result":{"panel":{"visible_transcript_items":rows}}})).unwrap();
+            }
+        });
+        let result = wait_for(
+            &path,
+            DesktopTarget {
+                window_id: "w".into(),
+                session_id: "s".into(),
+            },
+            WaitCondition::SelectorVisible {
+                selector: "tool:c1".into(),
+            },
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert!(matches!(result, DesktopResponse::Ok { .. }));
+        server.join().unwrap();
+    }
 
     #[test]
     fn request_round_trips_through_socket() {
