@@ -1084,16 +1084,39 @@ impl Server {
                 .filter(|_| has_stored_recovery_intent)
                 .map(|record| record.reload_id);
 
+            let lease = match agent.lock().await.claim_server_turn() {
+                Ok(lease) => lease,
+                Err(error) => {
+                    crate::logging::info(&format!(
+                        "Skipping duplicate startup recovery for {session_id}: {error}"
+                    ));
+                    continue;
+                }
+            };
+            // Publish the recovered status before returning from startup
+            // recovery, so resumed await watchers never see the temporary
+            // stopped status left by snapshot restoration.
+            update_member_status(
+                &session_id,
+                "running",
+                Some("resuming after reload".to_string()),
+                &recover_swarm_members,
+                &recover_swarms_by_id,
+                Some(&recover_event_history),
+                Some(&recover_event_counter),
+                Some(&recover_swarm_event_tx),
+            )
+            .await;
+            if let Some(swarm_id) = {
+                let members = recover_swarm_members.read().await;
+                members
+                    .get(&session_id)
+                    .and_then(|member| member.swarm_id.clone())
+            } {
+                persist_swarm_state_for(&swarm_id, &recover_swarm_state).await;
+            }
+
             tokio::spawn(async move {
-                let lease = match agent.lock().await.claim_server_turn() {
-                    Ok(lease) => lease,
-                    Err(error) => {
-                        crate::logging::info(&format!(
-                            "Skipping duplicate startup recovery for {session_id}: {error}"
-                        ));
-                        return;
-                    }
-                };
                 if let Some(reload_id) = recovery_reload_id.as_deref() {
                     reload_trace::record_value(
                         reload_id,
@@ -1104,26 +1127,6 @@ impl Server {
                         }),
                     );
                 }
-                update_member_status(
-                    &session_id,
-                    "running",
-                    Some("resuming after reload".to_string()),
-                    &recover_swarm_members,
-                    &recover_swarms_by_id,
-                    Some(&recover_event_history),
-                    Some(&recover_event_counter),
-                    Some(&recover_swarm_event_tx),
-                )
-                .await;
-                if let Some(swarm_id) = {
-                    let members = recover_swarm_members.read().await;
-                    members
-                        .get(&session_id)
-                        .and_then(|member| member.swarm_id.clone())
-                } {
-                    persist_swarm_state_for(&swarm_id, &recover_swarm_state).await;
-                }
-
                 match reload_recovery::mark_delivered_if_matching_continuation(
                     &session_id,
                     &reminder,
@@ -1316,6 +1319,17 @@ impl Server {
         // only after the replacement daemon is already accepting reconnects.
         self.recover_headless_sessions_on_startup().await;
 
+        // Restored running workers initially appear stopped in durable swarm
+        // snapshots. Resume their turns before evaluating persisted awaits,
+        // otherwise an await can falsely resolve during the startup window.
+        comm_await::resume_background_awaits(
+            &self.swarm_state.members,
+            &self.swarm_state.swarms_by_id,
+            &self.swarm_event_tx,
+            &self.await_members_runtime,
+        )
+        .await;
+
         (runtime, main_handle, debug_handle)
     }
 
@@ -1412,25 +1426,6 @@ impl Server {
             )
             .await;
         });
-
-        // Resume any background `swarm await_members` watchers that were active
-        // before this (re)start. Their results are delivered via notify/wake, so
-        // they can pick up transparently without the agent rerunning the wait.
-        {
-            let resume_swarm_members = Arc::clone(&self.swarm_state.members);
-            let resume_swarms_by_id = Arc::clone(&self.swarm_state.swarms_by_id);
-            let resume_swarm_event_tx = self.swarm_event_tx.clone();
-            let resume_await_runtime = self.await_members_runtime.clone();
-            tokio::spawn(async move {
-                comm_await::resume_background_awaits(
-                    &resume_swarm_members,
-                    &resume_swarms_by_id,
-                    &resume_swarm_event_tx,
-                    &resume_await_runtime,
-                )
-                .await;
-            });
-        }
 
         let stale_swarm_members = Arc::clone(&self.swarm_state.members);
         let stale_swarms_by_id = Arc::clone(&self.swarm_state.swarms_by_id);
