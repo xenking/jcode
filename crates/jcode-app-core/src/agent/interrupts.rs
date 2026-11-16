@@ -489,13 +489,11 @@ impl Agent {
                 blocks,
                 soft_interrupt_session_display_role(source),
             );
-            if !ids.is_empty()
-                && let Some(message) = agent.session.messages.last_mut()
-            {
-                message.id = format!(
+            if !ids.is_empty() {
+                agent.session.rename_last_message(format!(
                     "queued:{}",
                     serde_json::to_string(ids).expect("string ids serialize")
-                );
+                ));
             }
             injected.push(InjectedSoftInterrupt {
                 content,

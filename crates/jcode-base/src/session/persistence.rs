@@ -412,6 +412,7 @@ impl Session {
         // hold hundreds of MB of old inline images. Decay them now so the next
         // save rewrites a compact snapshot.
         let decayed_tool_images = session.decay_old_tool_images();
+        session.migrate_image_markers();
         if decayed_tool_images > 0 {
             crate::logging::event_info(
                 "SESSION_PERSISTENCE",
@@ -563,6 +564,7 @@ impl Session {
         session.reset_persist_state(path.exists());
         session.reset_provider_messages_cache();
         session.mark_memory_profile_dirty();
+        session.migrate_image_markers();
         let finalize_ms = finalize_start.elapsed().as_millis();
         crate::logging::info(&format!(
             "[TIMING] remote_startup_load: session={}, snapshot={}ms, journal={}ms, finalize={}ms, snapshot_bytes={}, journal_bytes={}, journal_entries={}, messages={}, total={}ms",

@@ -1477,7 +1477,10 @@ request in this new forked session, using the inherited conversation only as con
         id
     }
 
-    pub fn append_stored_message(&mut self, message: StoredMessage) {
+    pub fn append_stored_message(&mut self, mut message: StoredMessage) {
+        // Persist the model-visible identity once, so all later provider views
+        // can share the same image buffers with the transcript.
+        message.content = images::provider_message(&self.id, &message).content;
         self.memory_profile_cache.messages_count += 1;
         self.memory_profile_cache.messages_json_bytes += estimate_json_bytes(&message);
         self.memory_profile_cache
@@ -1486,6 +1489,56 @@ request in this new forked session, using the inherited conversation only as con
         self.adopt_prompt_title(&message);
         self.messages.push(message);
         self.mark_messages_append_dirty();
+    }
+
+    pub(super) fn migrate_image_markers(&mut self) {
+        let mut changed = false;
+        for message in &mut self.messages {
+            let annotated = images::provider_message(&self.id, message);
+            if !annotated.content.shares_storage_with(&message.content) {
+                message.content = annotated.content;
+                changed = true;
+            }
+        }
+        if changed {
+            self.mark_memory_profile_dirty();
+            self.mark_messages_full_dirty();
+        }
+    }
+
+    /// Assign the queued delivery identity without leaving stale image markers.
+    pub fn rename_last_message(&mut self, id: String) {
+        let Some(message) = self.messages.last_mut() else {
+            return;
+        };
+        let image_count = message
+            .content
+            .iter()
+            .filter(|block| matches!(block, ContentBlock::Image { .. }))
+            .count();
+        let replacements: Vec<_> = (0..image_count)
+            .map(|ordinal| {
+                (
+                    format!("[#{}]", images::image_id(&self.id, &message.id, ordinal)),
+                    format!("[#{}]", images::image_id(&self.id, &id, ordinal)),
+                )
+            })
+            .collect();
+        for block in &mut message.content {
+            let text = match block {
+                ContentBlock::Text { text, .. } => text,
+                ContentBlock::ToolResult { content, .. } => content,
+                _ => continue,
+            };
+            for (old, new) in &replacements {
+                if text.contains(old) {
+                    *text = text.replace(old, new);
+                }
+            }
+        }
+        message.id = id;
+        self.mark_memory_profile_dirty();
+        self.mark_messages_full_dirty();
     }
 
     /// Replace inline screenshots from older tool results with short text
@@ -1564,11 +1617,7 @@ request in this new forked session, using the inherited conversation only as con
     /// cache so the next API call reflects the reduced payload. Returns the
     /// number of images that were stripped.
     pub fn strip_oversized_images(&mut self, target_total_chars: usize) -> usize {
-        let mut contents: Vec<_> = self.messages.iter_mut().map(|m| &mut m.content).collect();
-        let stripped = jcode_compaction_core::strip_large_images_in_contents(
-            &mut contents,
-            target_total_chars,
-        );
+        let stripped = image_archive::archive_to_budget(self, target_total_chars);
         if stripped > 0 {
             self.mark_memory_profile_dirty();
             self.mark_messages_full_dirty();

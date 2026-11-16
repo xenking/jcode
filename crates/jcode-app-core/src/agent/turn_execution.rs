@@ -388,9 +388,7 @@ impl Agent {
         let mut input_id = self.add_message_with_display_role(Role::User, blocks, display_role);
         if let Some(client_id) = queued_client_id {
             input_id = format!("queued:{}", serde_json::to_string(&[client_id])?);
-            if let Some(message) = self.session.messages.last_mut() {
-                message.id.clone_from(&input_id);
-            }
+            self.session.rename_last_message(input_id.clone());
         }
         if starts_turn {
             self.begin_model_usage_turn(&input_id);

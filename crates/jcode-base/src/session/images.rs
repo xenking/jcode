@@ -111,6 +111,18 @@ pub(super) fn provider_message(session_id: &str, stored: &super::StoredMessage) 
     if ids.is_empty() {
         return message;
     }
+    // New messages persist their markers. Reuse their shared image buffers in
+    // the provider cache instead of cloning potentially huge base64 payloads.
+    if ids.iter().all(|id| {
+        let marker = format!("[#{id}]");
+        message.content.iter().any(|block| match block {
+            ContentBlock::Text { text, .. } => text.contains(&marker),
+            ContentBlock::ToolResult { content, .. } => content.contains(&marker),
+            _ => false,
+        })
+    }) {
+        return message;
+    }
     let has_tool_result = message
         .content
         .iter()
