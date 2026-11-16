@@ -682,6 +682,7 @@ fn daemon_identity_pong_is_optional_and_roundtrips() -> Result<()> {
         "daemon_identity": {"pid": 123, "binary_path": "/target/release/jcode", "git_hash": "483d7848f"}
     });
     let decoded: ServerEvent = serde_json::from_value(modern.clone())?;
+    // Legacy identities deserialize with generation zero.
     let mut expected = modern["daemon_identity"].clone();
     expected["generation"] = 0.into();
     assert_eq!(serde_json::to_value(decoded)?["daemon_identity"], expected);

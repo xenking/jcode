@@ -63,6 +63,7 @@ pub struct QueuedPrompt {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<(String, String)>,
     pub mode: QueuedPromptMode,
+    /// Skill name resolved by the daemon when this item is delivered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_skill: Option<String>,
 }
@@ -126,6 +127,7 @@ pub enum Request {
         mode: QueuedPromptMode,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_reminder: Option<String>,
+        /// Requires the `queued_prompt_active_skill` capability. Unknown names are rejected.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         active_skill: Option<String>,
     },

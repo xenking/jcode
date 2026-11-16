@@ -13,6 +13,10 @@ fn queued_skill_wire_is_optional_and_round_trips() {
     assert_eq!(serde_json::to_value(parsed).unwrap(), modern);
     let prompt: QueuedPrompt = serde_json::from_value(serde_json::json!({"client_id":"p", "content":"hello", "mode":"after_yield", "active_skill":"verification"})).unwrap();
     assert_eq!(prompt.active_skill.as_deref(), Some("verification"));
+    assert_eq!(
+        serde_json::to_value(prompt).unwrap()["active_skill"],
+        "verification"
+    );
 }
 
 #[test]
@@ -438,7 +442,8 @@ fn client_handshake_over_in_memory_pipe() {
 /// leaves every JS client unable to name the new frame. Checking from the
 /// Rust side means the guard runs in the normal `cargo test` suite, where
 /// the change is actually being made, rather than only in the SDK's own
-/// Node tests which a Rust-only contributor never runs.
+/// Node tests which a Rust-only contributor never runs. This reads the current
+/// workspace's SDK rather than a published package.
 #[test]
 fn typescript_sdk_lists_every_variant() {
     let Some(sdk) = sdk_protocol_source() else {
