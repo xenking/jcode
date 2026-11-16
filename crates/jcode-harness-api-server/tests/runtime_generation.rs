@@ -20,6 +20,54 @@ impl Drop for Bridge {
 }
 
 #[test]
+fn retirement_without_daemon_releases_listener_and_exits_when_drained() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let api = sandbox.path().join("api.sock");
+    let mut bridge = Bridge(
+        Command::new(env!("CARGO_BIN_EXE_jcode-harness-api-bridge"))
+            .args([
+                api.as_os_str(),
+                sandbox.path().join("absent.sock").as_os_str(),
+            ])
+            .env("HOME", sandbox.path())
+            .env("JCODE_HOME", sandbox.path())
+            .env("JCODE_RUNTIME_DIR", sandbox.path())
+            .env_remove(generation::TARGET_ENV)
+            .env_remove(generation::RELOAD_ID_ENV)
+            .env_remove(generation::GENERATION_ENV)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut stream = loop {
+        if let Ok(stream) = UnixStream::connect(&api) {
+            break stream;
+        }
+        assert!(Instant::now() < deadline, "bridge did not bind");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    writeln!(stream, "{{\"v\":1,\"id\":1,\"req\":\"retire_bridge\"}}").unwrap();
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).unwrap();
+    let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(reply["ev"], "bridge_retiring");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while bridge.0.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "retired bridge did not exit after last client"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!api.exists(), "retired listener was left behind");
+}
+
+#[test]
 fn missing_inherited_target_never_publishes_a_bridge_listener() {
     let sandbox = tempfile::tempdir().unwrap();
     let missing = sandbox.path().join("removed-target");

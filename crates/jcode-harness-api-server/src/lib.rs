@@ -35,6 +35,8 @@ use anyhow::{Context, Result};
 use jcode_harness_api::{API_VERSION_MAJOR, ApiEvent, ErrorCode, ServerFrame};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 // Unix sockets on Unix, named pipes on Windows, one API. Without this the
 // bridge simply did not compile for Windows, so the SDK could not run there at
@@ -184,16 +186,6 @@ where
 #[cfg(unix)]
 pub(crate) struct InstanceLock {
     _file: std::fs::File,
-    path: PathBuf,
-}
-
-#[cfg(unix)]
-impl Drop for InstanceLock {
-    fn drop(&mut self) {
-        // Best effort: the flock is released by the fd close regardless, and a
-        // leftover empty lock file is harmless (the next bridge re-locks it).
-        let _ = std::fs::remove_file(&self.path);
-    }
 }
 
 /// Take the exclusive bridge lock beside the API socket, or report that a live
@@ -214,7 +206,8 @@ pub(crate) fn single_instance_lock(api_socket: &std::path::Path) -> Result<Optio
         .open(&path)
         .with_context(|| format!("open bridge lock {}", path.display()))?;
     let taken = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
-    Ok(taken.then_some(InstanceLock { _file: file, path }))
+    // Never unlink a lock inode: a successor may already be waiting on it.
+    Ok(taken.then_some(InstanceLock { _file: file }))
 }
 
 pub async fn run_bridge(api_socket: PathBuf, legacy_socket: PathBuf) -> Result<()> {
@@ -282,22 +275,60 @@ pub async fn run_bridge(api_socket: PathBuf, legacy_socket: PathBuf) -> Result<(
         legacy_socket.display()
     );
     drop(search_index::warm_on_start());
+    let retiring = Arc::new(AtomicBool::new(false));
+    let mut clients = tokio::task::JoinSet::new();
+    let idle_timeout = std::time::Duration::from_secs(30);
+    let mut idle_since = tokio::time::Instant::now();
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
+    #[cfg(unix)]
+    let parent = unsafe { libc::getppid() };
     loop {
-        let (stream, _) = listener.accept().await?;
-        let legacy = legacy_socket.clone();
-        tokio::spawn(async move {
-            if let Err(error) = handle_api_client(stream, legacy).await {
-                eprintln!("harness API bridge: client ended: {error:#}");
+        tokio::select! {
+            biased;
+            _ = tick.tick() => {
+                #[cfg(unix)]
+                if unsafe { libc::getppid() } != parent {
+                    retiring.store(true, Ordering::Relaxed);
+                }
+                if retiring.load(Ordering::Relaxed)
+                    || (clients.is_empty() && idle_since.elapsed() >= idle_timeout) {
+                    break;
+                }
             }
-            // A closed client drops its translation state and buffers.
-            allocator::trim();
-        });
+            Some(_) = clients.join_next(), if !clients.is_empty() => {
+                if clients.is_empty() { idle_since = tokio::time::Instant::now(); }
+            }
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let legacy = legacy_socket.clone();
+                let retiring = Arc::clone(&retiring);
+                clients.spawn(async move {
+                    if let Err(error) = handle_api_client(stream, legacy, retiring).await {
+                        eprintln!("harness API bridge: client ended: {error:#}");
+                    }
+                    allocator::trim();
+                });
+            }
+        }
     }
+    // Withdraw discovery before draining, without interrupting existing streams.
+    drop(listener);
+    #[cfg(unix)]
+    {
+        let _ = std::fs::remove_file(&api_socket);
+        drop(_lock);
+    }
+    while clients.join_next().await.is_some() {}
+    Ok(())
 }
 
-async fn handle_api_client(stream: Stream, legacy_socket: PathBuf) -> Result<()> {
+async fn handle_api_client(
+    stream: Stream,
+    legacy_socket: PathBuf,
+    retiring: Arc<AtomicBool>,
+) -> Result<()> {
     let (read_half, write_half) = stream.into_split();
-    run_bridge_stream(read_half, write_half, legacy_socket).await
+    run_bridge_stream_inner(read_half, write_half, legacy_socket, Some(retiring)).await
 }
 
 /// Serve the process's stdin/stdout as one API connection.
@@ -326,8 +357,21 @@ pub async fn run_bridge_stdio(legacy_socket: PathBuf) -> Result<()> {
 /// stdio. No API listener or filesystem socket is created for this connection.
 pub async fn run_bridge_stream<R, W>(
     read_half: R,
+    write_half: W,
+    legacy_socket: PathBuf,
+) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    run_bridge_stream_inner(read_half, write_half, legacy_socket, None).await
+}
+
+async fn run_bridge_stream_inner<R, W>(
+    read_half: R,
     mut write_half: W,
     legacy_socket: PathBuf,
+    retiring: Option<Arc<AtomicBool>>,
 ) -> Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -341,7 +385,12 @@ where
     let mut pending = timing::Pending::default();
 
     // 1. Handshake: first frame must be hello with a compatible version.
-    read_frame(&mut reader, &mut line).await?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        read_frame(&mut reader, &mut line),
+    )
+    .await
+    .context("API client hello timed out")??;
     // A malformed first frame used to abort the task, closing the connection
     // with no reply at all: the client saw only an EOF and could not tell a
     // protocol mistake from a crashed bridge. Say what was wrong, then close.
@@ -357,6 +406,19 @@ where
         }
     };
     let reply_to = hello["id"].as_u64().unwrap_or(0);
+    if hello["req"] == "retire_bridge"
+        && let Some(retiring) = retiring
+    {
+        retiring.store(true, Ordering::Relaxed);
+        write_json_line(
+            &mut write_half,
+            &serde_json::json!({
+                "v": API_VERSION_MAJOR, "reply_to": reply_to, "ev": "bridge_retiring"
+            }),
+        )
+        .await?;
+        return Ok(());
+    }
     let client_name = hello["client"].as_str().unwrap_or_default();
     let compatible = hello["req"] == "hello"
         && hello["min_version"].as_u64().unwrap_or(0) <= u64::from(API_VERSION_MAJOR)
@@ -416,6 +478,8 @@ where
             server: format!("jcode-harness-api-bridge/{}", env!("CARGO_PKG_VERSION")),
             capabilities: [
                 "sessions",
+                "bridge_lifecycle_v1",
+                "peer_user_message_v1",
                 "streaming",
                 "text_framing",
                 "turn_stop_reasons",
