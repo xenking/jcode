@@ -2,11 +2,22 @@
 
 use super::{ContentBlock, StoredMessage};
 
-pub(super) fn searchable_message_text(msg: &StoredMessage, include_tools: bool) -> String {
+pub(super) fn searchable_message_text(
+    msg: &StoredMessage,
+    include_tools: bool,
+    ask_ids: &std::collections::HashSet<&str>,
+) -> String {
     msg.content
         .iter()
         .filter_map(|block| match block {
             ContentBlock::Text { text, .. } => Some(text.clone()),
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } if ask_ids.contains(tool_use_id.as_str()) => (*is_error != Some(true))
+                .then(|| jcode_session_types::stored_ask_answer_text(content))
+                .flatten(),
             ContentBlock::ToolResult { content, .. } if include_tools => Some(content.clone()),
             ContentBlock::ToolUse { name, input, .. } if include_tools => {
                 let input = input.to_string();

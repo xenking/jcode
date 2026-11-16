@@ -80,6 +80,40 @@ fn token_overlap_matches_when_exact_phrase_is_absent() {
 }
 
 #[test]
+fn ask_answer_is_recalled_as_user_without_tool_results() {
+    with_temp_home(|home| {
+        save_test_session(
+            "ask-recall",
+            vec![
+                (
+                    Role::Assistant,
+                    vec![ContentBlock::ToolUse {
+                        id: "ask-1".into(),
+                        name: "ask".into(),
+                        input: json!({"questions":[]}),
+                        thought_signature: None,
+                    }],
+                ),
+                (
+                    Role::User,
+                    vec![ContentBlock::ToolResult {
+                        tool_use_id: "ask-1".into(),
+                        content: "User answers:\n1. Which? -> papaya (comment: ripe)\n".into(),
+                        is_error: None,
+                    }],
+                ),
+            ],
+        );
+        let mut options = SearchOptions::for_test("current-session");
+        options.role_filter = Some(RoleFilter::User);
+        let results = run_search(home, "papaya", &options);
+        assert_eq!(results.len(), 1, "{results:?}");
+        assert_eq!(results[0].role, "user");
+        assert!(results[0].snippet.contains("papaya"));
+    });
+}
+
+#[test]
 fn tool_use_input_is_hidden_by_default_and_searchable_when_requested() {
     with_temp_home(|home| {
         save_test_session(

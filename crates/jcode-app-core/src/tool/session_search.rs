@@ -1546,6 +1546,7 @@ fn append_session_results(
         });
     }
 
+    let ask_ids = ask_tool_ids(&session.messages);
     for (message_index, msg) in session.messages.iter().enumerate() {
         if !options.include_system && is_system_like_message(msg) {
             continue;
@@ -1561,7 +1562,7 @@ fn append_session_results(
             continue;
         }
 
-        let text = searchable_message_text(msg, options.include_tools);
+        let text = searchable_message_text(msg, options.include_tools, &ask_ids);
         if text.is_empty() {
             continue;
         }
@@ -1571,7 +1572,7 @@ fn append_session_results(
         };
 
         let mut score = match_score.score;
-        if is_tool_only_message(msg) {
+        if is_tool_only_message(msg) && !has_ask_answer(msg, &ask_ids) {
             score *= 0.4;
         }
 
@@ -1738,6 +1739,7 @@ fn build_jcode_context(
     if options.context_before == 0 && options.context_after == 0 {
         return Vec::new();
     }
+    let ask_ids = ask_tool_ids(messages);
     let start = hit_index.saturating_sub(options.context_before);
     let end = (hit_index + options.context_after + 1).min(messages.len());
     (start..end)
@@ -1747,7 +1749,7 @@ fn build_jcode_context(
             if !options.include_system && is_system_like_message(msg) {
                 return None;
             }
-            let text = searchable_message_text(msg, options.include_tools);
+            let text = searchable_message_text(msg, options.include_tools, &ask_ids);
             if text.trim().is_empty() {
                 return None;
             }
@@ -1772,6 +1774,30 @@ fn truncate_context_text(text: &str) -> String {
 
 mod searchable_text;
 use searchable_text::searchable_message_text;
+
+fn ask_tool_ids(messages: &[StoredMessage]) -> std::collections::HashSet<&str> {
+    messages
+        .iter()
+        .flat_map(|msg| msg.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { id, name, .. } if name == "ask" => Some(id.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn has_ask_answer(msg: &StoredMessage, ask_ids: &std::collections::HashSet<&str>) -> bool {
+    msg.content.iter().any(|block| match block {
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } if *is_error != Some(true) && ask_ids.contains(tool_use_id.as_str()) => {
+            jcode_session_types::stored_ask_answer_text(content).is_some()
+        }
+        _ => false,
+    })
+}
 
 fn is_system_like_message(msg: &StoredMessage) -> bool {
     msg.display_role.is_some()
