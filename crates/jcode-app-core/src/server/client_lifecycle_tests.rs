@@ -443,11 +443,13 @@ fn detached_cancel_and_reload_during_ask_have_distinct_labels() -> anyhow::Resul
                     result = Some(output);
                 }
             }
-            let result = result.expect("ask result");
             if is_reload {
-                assert!(result.contains("interrupted by server reload"), "{result}");
-                assert!(!result.contains("cancelled by the user"), "{result}");
+                assert!(
+                    result.is_none(),
+                    "a recoverable ask must not appear completed: {result:?}"
+                );
             } else {
+                let result = result.expect("cancelled ask result");
                 assert!(result.contains("cancelled by the user"), "{result}");
                 assert!(!result.contains("server reload"), "{result}");
             }

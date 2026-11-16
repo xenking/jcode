@@ -676,7 +676,7 @@ fn render_messages_and_images_internal(
                 ContentBlock::ToolResult {
                     tool_use_id,
                     content,
-                    ..
+                    is_error,
                 } => {
                     let combined = format!("{}{}", reasoning, text);
                     if !combined.is_empty() {
@@ -707,6 +707,16 @@ fn render_messages_and_images_internal(
                         })
                     });
                     current_tool = tool_data.clone();
+
+                    // This is a durable recovery marker, not an answer. The
+                    // original ask is re-presented after reconnect and its
+                    // result replaces the marker in the stored conversation.
+                    if is_error.unwrap_or(false)
+                        && tool_data.as_ref().is_some_and(|tool| tool.name == "ask")
+                        && content.starts_with("[Tool 'ask' interrupted by server reload after ")
+                    {
+                        continue;
+                    }
 
                     rendered.push(RenderedMessage {
                         response_stats: None,

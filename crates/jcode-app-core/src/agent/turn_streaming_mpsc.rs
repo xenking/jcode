@@ -1809,23 +1809,28 @@ impl Agent {
                         )
                     };
 
-                    let _ = event_tx.send(ServerEvent::ToolDone {
-                        id: tc.id.clone(),
-                        name: tc.name.clone(),
-                        output: interrupted_msg.clone(),
-                        error: if is_error {
-                            Some(
-                                if is_reload {
-                                    "interrupted by reload"
-                                } else {
-                                    "cancelled by the user"
-                                }
-                                .to_string(),
-                            )
-                        } else {
-                            None
-                        },
-                    });
+                    // An ask interrupted by reload is still pending, not a
+                    // completed decision. Keep its durable marker for recovery
+                    // but do not publish a false ToolDone to live clients.
+                    if !(is_reload && tc.name == "ask") {
+                        let _ = event_tx.send(ServerEvent::ToolDone {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            output: interrupted_msg.clone(),
+                            error: if is_error {
+                                Some(
+                                    if is_reload {
+                                        "interrupted by reload"
+                                    } else {
+                                        "cancelled by the user"
+                                    }
+                                    .to_string(),
+                                )
+                            } else {
+                                None
+                            },
+                        });
+                    }
 
                     self.add_message_with_duration(
                         Role::User,

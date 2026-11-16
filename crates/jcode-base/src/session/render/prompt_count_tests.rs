@@ -65,6 +65,49 @@ fn compacted_tool_results_are_not_hidden_user_prompts_or_turn_boundaries() {
 }
 
 #[test]
+fn reload_interrupted_ask_marker_is_not_rendered_as_an_answer() {
+    let mut session = Session::create_with_id("ask-reload-render".into(), None, None);
+    session.add_message(Role::User, vec![text("question")]);
+    session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "ask-1".into(),
+            name: "ask".into(),
+            input: serde_json::json!({"questions": []}),
+            thought_signature: None,
+        }],
+    );
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::ToolResult {
+            tool_use_id: "ask-1".into(),
+            content: "[Tool 'ask' interrupted by server reload after 0.2s]".into(),
+            is_error: Some(true),
+        }],
+    );
+    let rendered = render_messages(&session);
+    assert!(
+        !rendered.iter().any(|row| row
+            .tool_data
+            .as_ref()
+            .is_some_and(|tool| tool.id == "ask-1")),
+        "{rendered:?}"
+    );
+    if let ContentBlock::ToolResult {
+        content, is_error, ..
+    } = &mut session.messages.last_mut().unwrap().content[0]
+    {
+        *content = "User answers:\n1. Choose? -> Beta\n".into();
+        *is_error = None;
+    }
+    assert!(
+        render_messages(&session)
+            .iter()
+            .any(|row| row.content.contains("Beta"))
+    );
+}
+
+#[test]
 fn answered_ask_is_a_user_turn_in_rendered_history() {
     let mut session = compacted_tool_session(10);
     session.add_message(
