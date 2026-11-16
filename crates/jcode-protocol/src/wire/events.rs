@@ -613,6 +613,14 @@ pub enum ServerEvent {
     #[serde(rename = "peer_user_message")]
     PeerUserMessage { content: String },
 
+    /// Replace provisional attachment markers once the message is durable.
+    #[serde(rename = "user_image_ids")]
+    UserImageIds {
+        original_content: String,
+        content: String,
+        image_ids: Vec<String>,
+    },
+
     /// Error occurred
     #[serde(rename = "error")]
     Error {

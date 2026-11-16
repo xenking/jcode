@@ -232,6 +232,11 @@ impl Agent {
                 client_ids: vec![client_id],
             });
         }
+        if !continues_turn && display_role.is_none() {
+            if let Some(event) = self.user_image_ids_event(input_start, &user_message) {
+                let _ = event_tx.send(event);
+            }
+        }
         if continues_turn || display_role.is_some() {
             self.emit_context_messages_since(input_start, &event_tx);
         }
@@ -256,6 +261,46 @@ impl Agent {
             self.refresh_session_title(Some(&title_event_tx)).await;
         }
         result
+    }
+
+    pub(super) fn user_image_ids_event(&self, index: usize, original: &str) -> Option<ServerEvent> {
+        if let Some(message) = self.session.messages.get(index) {
+            let image_ids: Vec<_> = message
+                .content
+                .iter()
+                .filter(|block| matches!(block, ContentBlock::Image { .. }))
+                .enumerate()
+                .map(|(ordinal, _)| {
+                    crate::session::image_id(&self.session.id, &message.id, ordinal)
+                })
+                .collect();
+            if !image_ids.is_empty() {
+                let mut content = original.to_string();
+                let mut missing = Vec::new();
+                for (index, id) in image_ids.iter().enumerate() {
+                    let hash = format!("[#image {}]", index + 1);
+                    let plain = format!("[image {}]", index + 1);
+                    let marker = format!("[#{id}]");
+                    if content.contains(&hash) || content.contains(&plain) {
+                        content = content.replace(&hash, &marker).replace(&plain, &marker);
+                    } else {
+                        missing.push(marker);
+                    }
+                }
+                if !missing.is_empty() {
+                    if !content.is_empty() {
+                        content.push(' ');
+                    }
+                    content.push_str(&missing.join(" "));
+                }
+                return Some(ServerEvent::UserImageIds {
+                    original_content: original.to_string(),
+                    content,
+                    image_ids,
+                });
+            }
+        }
+        None
     }
 
     /// Re-run the model loop for the turn already in history, without

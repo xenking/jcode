@@ -212,9 +212,13 @@ async fn socket_resume_replays_reload_interrupted_ask_before_provider() {
     let ack = std::cell::Cell::new(false);
     let tool_done = std::cell::Cell::new(false);
     let live_images = std::cell::Cell::new(false);
+    let resumed_done = std::cell::Cell::new(false);
     until(&mut reader, |event| {
         if matches!(event, ServerEvent::Done { id: 42 }) {
             ack.set(true);
+        }
+        if matches!(event, ServerEvent::Done { id: 2 }) {
+            resumed_done.set(true);
         }
         if let ServerEvent::ToolDone { name, output, .. } = event
             && name == "ask"
@@ -249,7 +253,7 @@ async fn socket_resume_replays_reload_interrupted_ask_before_provider() {
             }));
             live_images.set(true);
         }
-        ack.get() && tool_done.get() && live_images.get()
+        ack.get() && tool_done.get() && live_images.get() && resumed_done.get()
     })
     .await;
     let restored = crate::session::Session::load(session_id).unwrap();
@@ -281,6 +285,15 @@ async fn socket_resume_replays_reload_interrupted_ask_before_provider() {
         !journal.contains("interrupted by server reload"),
         "{journal}"
     );
+    writer.write_all(format!("{}\n", json!({"type":"message","id":50,"content":"look [#image 1]","images":[["image/png","bmV3LWltYWdl"]]})).as_bytes()).await.unwrap();
+    let event = until(&mut reader, |event| matches!(event, ServerEvent::UserImageIds { .. })).await;
+    let ServerEvent::UserImageIds { original_content, content, image_ids } = event else { unreachable!() };
+    assert_eq!(original_content, "look [#image 1]");
+    assert_eq!(image_ids.len(), 1);
+    assert_eq!(content, format!("look [#{}]", image_ids[0]));
+    writer.write_all(format!("{}\n", json!({"type":"get_session_image","id":92,"session_id":session_id,"image_id":image_ids[0]})).as_bytes()).await.unwrap();
+    let image = until(&mut reader, |event| matches!(event, ServerEvent::SessionImage { id: 92, .. })).await;
+    assert!(matches!(image, ServerEvent::SessionImage { data, .. } if data == "bmV3LWltYWdl"));
     drop(writer);
     drop(reader);
     sessions.clear_for_test().await;

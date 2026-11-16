@@ -401,6 +401,14 @@ pub enum ApiEvent {
     /// minutes away.
     MessageAccepted { session_id: String },
 
+    /// Durable IDs for the image attachments in a submitted user message.
+    UserImageIds {
+        session_id: String,
+        original_content: String,
+        content: String,
+        image_ids: Vec<String>,
+    },
+
     /// The `ask` tool is blocked on the user answering these questions.
     /// Reply with `AskResponse`; an empty response (no answers) declines.
     AskRequest {

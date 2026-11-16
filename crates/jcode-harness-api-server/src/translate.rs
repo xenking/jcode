@@ -1910,6 +1910,15 @@ impl BridgeState {
             self.activity_version += 1;
         }
         let mut frames = match kind {
+            "user_image_ids" => vec![ServerFrame::event(ApiEvent::UserImageIds {
+                session_id: self.session_id.clone().unwrap_or_default(),
+                original_content: event["original_content"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                content: event["content"].as_str().unwrap_or_default().to_owned(),
+                image_ids: serde_json::from_value(event["image_ids"].clone()).unwrap_or_default(),
+            })],
             "tools" => {
                 let id = event["id"].as_u64().unwrap_or(0);
                 let Some(api_id) = self.take_simple(id, SimpleKind::Tools) else {

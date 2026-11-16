@@ -1,6 +1,59 @@
 use super::*;
 
 #[test]
+fn image_identity_survives_shake_and_snapcompact_persistence() -> anyhow::Result<()> {
+    let _env_lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir()?;
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => crate::env::set_var("JCODE_HOME", value),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let _home = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    let mut session = Session::create_with_id("image_snapcompact_test".into(), None, None);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: "cGljdHVyZQ==".into(),
+        }],
+    );
+    let expected = session.session_images();
+    session.shake_stored_messages(0, &jcode_compaction_core::shake::ShakeConfig::aggressive());
+    session.compaction = Some(
+        StoredCompactionState {
+            summary_text: "summary".into(),
+            openai_encrypted_content: None,
+            snapcompact: Some(jcode_message_types::SnapcompactArchive {
+                source: "archive".into(),
+                pages: vec!["cG5n".into()],
+                index: String::new(),
+                decisions: String::new(),
+                page_ranges: Vec::new(),
+            }),
+            covers_up_to_turn: 1,
+            original_turn_count: 1,
+            compacted_count: 1,
+        }
+        .into(),
+    );
+    session.save()?;
+    let restored = Session::load(&session.id)?;
+    assert!(restored.compaction.as_ref().unwrap().snapcompact.is_some());
+    assert_eq!(restored.session_images(), expected);
+    assert_eq!(
+        restored.session_image(&expected[0].image_id).unwrap().data,
+        "cGljdHVyZQ=="
+    );
+    Ok(())
+}
+
+#[test]
 fn replacing_a_recovered_ask_assigns_its_image_id_immediately() {
     let mut session = Session::create(None, None);
     session.add_message(

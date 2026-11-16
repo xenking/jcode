@@ -3730,6 +3730,20 @@ fn handle_server_event_inner(
             app.set_status_notice("⌨ Interactive terminal detected (command will timeout)");
             false
         }
+        ServerEvent::UserImageIds {
+            original_content,
+            content,
+            ..
+        } => {
+            if let Some(index) = app
+                .display_messages
+                .iter()
+                .position(|message| message.role == "user" && message.content == original_content)
+            {
+                app.replace_display_message_content(index, content);
+            }
+            true
+        }
         ServerEvent::PeerUserMessage { content } => {
             app.handle_peer_user_message(&content);
             true
