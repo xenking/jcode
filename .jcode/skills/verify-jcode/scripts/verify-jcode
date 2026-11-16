@@ -220,7 +220,8 @@ class Harness:
                 require(events[0].get("session_id") == events[-1].get("session_id"),
                         "NDJSON completion changed session")
             else:
-                require(result.stdout.strip() == ACK, f"CLI reply mismatch, see {label}.stdout")
+                expected = ACK + "\n[Tokens] upload: 1 download: 1"
+                require(result.stdout.strip() == expected, f"CLI reply mismatch, see {label}.stdout")
             return result.stdout
         except subprocess.TimeoutExpired as error:
             dump(self.evidence / f"{label}.command.json", {"argv": argv, "timeout": True})

@@ -105,6 +105,19 @@ class VerificationSafetyTests(unittest.TestCase):
         self.assertTrue(HELPER.completed_turn(loaded["messages"], "fresh-token"))
         self.assertEqual(json.loads(path.read_text())["messages"], [user])
 
+    def test_plain_cli_accepts_real_token_usage_footer(self):
+        output = HELPER.ACK + "\n[Tokens] upload: 1 download: 1\n\n"
+        process = HELPER.subprocess.CompletedProcess([], 0, output, "")
+        with patch.object(HELPER.subprocess, "run", return_value=process):
+            self.assertEqual(self.harness.cli("plain", "prompt", "plain"), output)
+
+    def test_plain_cli_rejects_unexpected_output(self):
+        output = HELPER.ACK + "\nunexpected\n[Tokens] upload: 1 download: 1\n"
+        process = HELPER.subprocess.CompletedProcess([], 0, output, "")
+        with patch.object(HELPER.subprocess, "run", return_value=process):
+            with self.assertRaisesRegex(RuntimeError, "CLI reply mismatch"):
+                self.harness.cli("plain", "prompt", "plain")
+
     def test_digest_works_on_system_python(self):
         path = self.root / "bytes"
         path.write_bytes(b"abc")
