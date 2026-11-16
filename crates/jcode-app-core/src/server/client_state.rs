@@ -470,6 +470,7 @@ pub(super) async fn handle_get_model_catalog(
 mod history_paging;
 pub(super) use history_paging::{
     handle_get_compacted_history, handle_history_image_chunk, handle_history_page,
+    handle_session_images,
 };
 
 /// Window canonical rendered entries, not raw provider messages. Images follow

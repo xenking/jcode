@@ -59,10 +59,6 @@ use storage_paths::{estimate_json_bytes, persist_vector_mode_label};
 pub use storage_paths::{session_exists, session_journal_path, session_path};
 pub use {jcode_session_types::prompt_title, persistence::drain_saves_for_shutdown};
 
-fn stored_messages_to_messages(messages: &[StoredMessage]) -> Vec<Message> {
-    messages.iter().map(StoredMessage::to_message).collect()
-}
-
 fn is_internal_system_reminder_message(message: &StoredMessage) -> bool {
     message
         .content
@@ -1498,8 +1494,7 @@ request in this new forked session, using the inherited conversation only as con
     /// newest screenshots keep their data and are still sent to the provider.
     /// Returns the number of images replaced.
     pub fn decay_old_tool_images(&mut self) -> usize {
-        let mut contents: Vec<_> = self.messages.iter_mut().map(|m| &mut m.content).collect();
-        let stripped = jcode_compaction_core::decay_old_tool_images_in_contents(&mut contents);
+        let stripped = image_archive::archive_and_decay(self);
         if stripped > 0 {
             self.mark_memory_profile_dirty();
             self.mark_messages_full_dirty();
@@ -1816,7 +1811,7 @@ request in this new forked session, using the inherited conversation only as con
             self.provider_message_prefix_hashes_cache
                 .reserve(self.messages.len());
             for index in 0..self.messages.len() {
-                let message = self.messages[index].to_message();
+                let message = images::provider_message(&self.id, &self.messages[index]);
                 self.push_provider_message_cache_entry(message);
             }
             self.provider_messages_cache_len = self.messages.len();
@@ -1832,7 +1827,7 @@ request in this new forked session, using the inherited conversation only as con
             self.provider_message_prefix_hashes_cache
                 .reserve(appended_len);
             for index in self.provider_messages_cache_len..self.messages.len() {
-                let message = self.messages[index].to_message();
+                let message = images::provider_message(&self.id, &self.messages[index]);
                 self.push_provider_message_cache_entry(message);
             }
             self.provider_messages_cache_len = self.messages.len();
@@ -1848,7 +1843,10 @@ request in this new forked session, using the inherited conversation only as con
     }
 
     pub fn messages_for_provider_uncached(&self) -> Vec<Message> {
-        stored_messages_to_messages(&self.messages)
+        self.messages
+            .iter()
+            .map(|message| images::provider_message(&self.id, message))
+            .collect()
     }
 
     pub fn messages_for_provider(&mut self) -> Vec<Message> {
@@ -1958,6 +1956,8 @@ struct RemoteStartupSessionSnapshot {
     save_label: Option<String>,
 }
 
+#[path = "session/image_archive.rs"]
+mod image_archive;
 #[path = "session/images.rs"]
 mod images;
 pub use images::{SessionImage, SessionImageInfo, image_id};

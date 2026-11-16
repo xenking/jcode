@@ -122,7 +122,7 @@ impl Tool for ReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read a file. Supports text files, image files, and PDFs."
+        "Read a file, image or PDF. Read a session image using session-image:// followed by its image ID."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -133,7 +133,7 @@ impl Tool for ReadTool {
                 "intent": super::intent_schema_property(),
                 "file_path": {
                     "type": "string",
-                    "description": "Path to a file."
+                    "description": "Path to a file, or session-image://<image_id> for an image in this session."
                 },
                 "start_line": {
                     "type": "integer",
@@ -149,6 +149,19 @@ impl Tool for ReadTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: ReadInput = serde_json::from_value(input)?;
+        if let Some(id) = params.file_path.strip_prefix("session-image://") {
+            let session = crate::session::Session::load_for_remote_startup(&ctx.session_id)?;
+            let image = session
+                .session_image(id)
+                .ok_or_else(|| anyhow::anyhow!("Session image not found: {id}"))?;
+            return Ok(
+                ToolOutput::new(format!("Session image [#{id}]")).with_labeled_image(
+                    image.info.media_type,
+                    image.data,
+                    format!("[#{id}]"),
+                ),
+            );
+        }
         let range = normalize_read_range(&params)?;
 
         let path = ctx.resolve_path(Path::new(&params.file_path));

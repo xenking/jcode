@@ -35,6 +35,14 @@ async fn socket_resume_replays_reload_interrupted_ask_before_provider() {
     let home = IsolatedReloadRecoveryEnv::new();
     let session_id = "ask-socket-reload";
     let mut persisted = crate::session::Session::create_with_id(session_id.into(), None, None);
+    persisted.add_message(
+        crate::message::Role::User,
+        vec![ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: "aW1hZ2U=".into(),
+        }],
+    );
+    let image_id = persisted.session_images()[0].image_id.clone();
     persisted.add_message(crate::message::Role::Assistant, vec![ContentBlock::ToolUse {
         id: "reload-call".into(), name: "ask".into(),
         input: json!({"questions":[{"question":"Which?","options":[{"label":"A"},{"label":"B"}]}]}),
@@ -112,9 +120,42 @@ async fn socket_resume_replays_reload_interrupted_ask_before_provider() {
         matches!(event, ServerEvent::Done { id: 1 })
     })
     .await;
-    writer.write_all(format!("{}\n", json!({"type":"ping","id":55})).as_bytes()).await.unwrap();
-    let pong = until(&mut reader, |event| matches!(event, ServerEvent::Pong { id: 55, .. })).await;
-    assert!(matches!(pong, ServerEvent::Pong { capabilities, .. } if capabilities.iter().any(|cap| cap == "ask_response_images")));
+    writer
+        .write_all(
+            format!(
+                "{}\n",
+                json!({"type":"list_session_images","id":90,"session_id":session_id})
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let list = until(&mut reader, |event| {
+        matches!(event, ServerEvent::SessionImages { id: 90, .. })
+    })
+    .await;
+    assert!(
+        matches!(list, ServerEvent::SessionImages { images, .. } if images[0]["image_id"] == image_id)
+    );
+    writer.write_all(format!("{}\n", json!({"type":"get_session_image","id":91,"session_id":session_id,"image_id":image_id})).as_bytes()).await.unwrap();
+    let image = until(&mut reader, |event| {
+        matches!(event, ServerEvent::SessionImage { id: 91, .. })
+    })
+    .await;
+    assert!(
+        matches!(image, ServerEvent::SessionImage { data, offset: 0, total: 8, .. } if data == "aW1hZ2U=")
+    );
+    writer
+        .write_all(format!("{}\n", json!({"type":"ping","id":55})).as_bytes())
+        .await
+        .unwrap();
+    let pong = until(&mut reader, |event| {
+        matches!(event, ServerEvent::Pong { id: 55, .. })
+    })
+    .await;
+    assert!(
+        matches!(pong, ServerEvent::Pong { capabilities, .. } if capabilities.iter().any(|cap| cap == "ask_response_images"))
+    );
     writer.write_all(format!("{}\n", json!({"type":"message","id":2,"content":"","system_reminder":"Continue interrupted work."})).as_bytes()).await.unwrap();
     let event = until(&mut reader, |event| {
         assert!(
@@ -185,12 +226,24 @@ async fn socket_resume_replays_reload_interrupted_ask_before_provider() {
     })
     .await;
     let restored = crate::session::Session::load(session_id).unwrap();
-    let blocks: Vec<_> = restored.messages.iter().flat_map(|message| &message.content).collect();
+    let blocks: Vec<_> = restored
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .collect();
     assert!(blocks.iter().any(|block| matches!(block, ContentBlock::Image { media_type, data } if media_type == "image/png" && data == "b3RoZXI=")), "missing free-answer image: {blocks:?}");
     assert!(blocks.iter().any(|block| matches!(block, ContentBlock::Image { media_type, data } if media_type == "image/jpeg" && data == "Y29tbWVudA==")), "missing comment image: {blocks:?}");
     let rendered = crate::session::render_images(&restored);
-    assert_eq!(rendered.len(), 2, "images must survive reload and appear in session images");
-    assert!(rendered.iter().any(|image| image.label.as_deref() == Some("Question 1 free answer, image 1")));
+    assert_eq!(
+        rendered.len(),
+        3,
+        "images must survive reload and appear in session images"
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|image| image.label.as_deref() == Some("Question 1 free answer, image 1"))
+    );
     assert!(rendered.iter().any(|image| image.label.as_deref() == Some("Question 1 option \"B\" comment, image 1")));
     let journal = serde_json::to_string(&restored.messages).unwrap();
     assert!(

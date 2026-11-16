@@ -14,6 +14,40 @@ fn make_ctx(working_dir: std::path::PathBuf) -> ToolContext {
     }
 }
 
+#[tokio::test]
+async fn reads_session_image_by_stable_id() {
+    let _lock = crate::storage::lock_test_env();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => crate::env::set_var("JCODE_HOME", value),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    let mut session = crate::session::Session::create(None, None);
+    session.add_message(
+        crate::message::Role::User,
+        vec![crate::message::ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: "aW1hZ2U=".into(),
+        }],
+    );
+    let id = session.session_images()[0].image_id.clone();
+    session.save().unwrap();
+    let mut ctx = make_ctx(std::env::temp_dir());
+    ctx.session_id = session.id.clone();
+    let output = ReadTool::new()
+        .execute(json!({"file_path": format!("session-image://{id}")}), ctx)
+        .await
+        .unwrap();
+    assert_eq!(output.images[0].data, "aW1hZ2U=");
+}
+
 #[test]
 fn normalize_read_range_supports_start_and_end_lines() {
     let params: ReadInput = serde_json::from_value(json!({

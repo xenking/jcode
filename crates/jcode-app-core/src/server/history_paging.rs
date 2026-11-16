@@ -44,6 +44,73 @@ pub(in crate::server) async fn handle_history_page(
     super::super::client_writer::write_direct_event(writer, &event).await
 }
 
+pub(in crate::server) async fn handle_session_images(
+    id: u64,
+    requested_session_id: &str,
+    session_id: &str,
+    agent: &Arc<Mutex<Agent>>,
+    writer: &Arc<Mutex<WriteHalf>>,
+    image_request: Option<(String, usize)>,
+) -> Result<()> {
+    let event = if requested_session_id != session_id {
+        ServerEvent::Error {
+            id,
+            message: "session is not attached".into(),
+            retry_after_secs: None,
+        }
+    } else {
+        let build =
+            |session: &crate::session::Session| -> std::result::Result<ServerEvent, String> {
+                if let Some((image_id, offset)) = image_request.as_ref() {
+                    let image = session
+                        .session_image(image_id)
+                        .ok_or("session image not found")?;
+                    if *offset > image.data.len() || !image.data.is_char_boundary(*offset) {
+                        return Err("invalid image offset".into());
+                    }
+                    let mut end = offset.saturating_add(512 * 1024).min(image.data.len());
+                    while !image.data.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    Ok(ServerEvent::SessionImage {
+                        id,
+                        session_id: session_id.into(),
+                        image_id: image_id.clone(),
+                        media_type: image.info.media_type,
+                        offset: *offset,
+                        total: image.data.len(),
+                        data: image.data[*offset..end].to_owned(),
+                    })
+                } else {
+                    Ok(ServerEvent::SessionImages {
+                        id,
+                        session_id: session_id.into(),
+                        images: session
+                            .session_images()
+                            .into_iter()
+                            .map(|image| {
+                                serde_json::to_value(image).expect("image metadata serializes")
+                            })
+                            .collect(),
+                    })
+                }
+            };
+        let result = if let Ok(guard) = agent.try_lock() {
+            build(guard.session_for_history())
+        } else {
+            crate::session::Session::load_for_remote_startup(session_id)
+                .map_err(|e| e.to_string())
+                .and_then(|session| build(&session))
+        };
+        result.unwrap_or_else(|message| ServerEvent::Error {
+            id,
+            message,
+            retry_after_secs: None,
+        })
+    };
+    super::super::client_writer::write_direct_event(writer, &event).await
+}
+
 fn image_chunk(
     session: &crate::session::Session,
     key: &str,

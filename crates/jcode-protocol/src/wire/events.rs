@@ -811,6 +811,24 @@ pub enum ServerEvent {
         data: String,
     },
 
+    #[serde(rename = "session_images")]
+    SessionImages {
+        id: u64,
+        session_id: String,
+        images: Vec<serde_json::Value>,
+    },
+
+    #[serde(rename = "session_image")]
+    SessionImage {
+        id: u64,
+        session_id: String,
+        image_id: String,
+        media_type: String,
+        offset: usize,
+        total: usize,
+        data: String,
+    },
+
     /// Expanded compacted-history window (response to GetCompactedHistory).
     #[serde(rename = "compacted_history")]
     CompactedHistory {

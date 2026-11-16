@@ -2,12 +2,16 @@
 //!
 //! Uses newline-delimited JSON over Unix socket.
 //! Server streams events back to clients during message processing.
+//! Session images can be listed and fetched by stable identity.
 //!
 //! Socket types:
 //! - Main socket: TUI/client communication with agent
 //! - Agent socket: Inter-agent communication (AI-to-AI)
 
 use serde::{Deserialize, Serialize};
+
+#[cfg(test)]
+mod image_requests_tests;
 
 /// Selected model-provider OAuth identity for the telemetry notice handshake.
 /// Debug formatting must never disclose this personal information.
@@ -884,6 +888,7 @@ impl Request {
             Request::GetCompactedHistory { id, .. } => *id,
             Request::GetHistoryPage { id, .. } => *id,
             Request::GetHistoryImageChunk { id, .. } => *id,
+            Request::ListSessionImages { id, .. } | Request::GetSessionImage { id, .. } => *id,
             Request::Reload { id, .. } => *id,
             Request::UpgradeRuntime { id, .. } => *id,
             Request::ResumeSession { id, .. } => *id,

@@ -41,45 +41,184 @@ pub fn image_id(session_id: &str, message_id: &str, image_ordinal: usize) -> Str
     )
 }
 
+const ARCHIVE_PREFIX: &str = "[Older tool screenshot omitted from history; jcode-archive:";
+
+#[derive(Serialize, Deserialize)]
+struct ArchiveRef {
+    image_id: String,
+    media_type: String,
+}
+
+pub(super) fn archive_marker(id: &str, media_type: &str) -> String {
+    let reference = ArchiveRef {
+        image_id: id.into(),
+        media_type: media_type.into(),
+    };
+    format!(
+        "{ARCHIVE_PREFIX}{}]",
+        serde_json::to_string(&reference).expect("archive reference serializes")
+    )
+}
+
+fn parse_archive_marker(text: &str) -> Option<ArchiveRef> {
+    let json = text.strip_prefix(ARCHIVE_PREFIX)?.strip_suffix(']')?;
+    serde_json::from_str(json).ok()
+}
+
+pub(super) fn is_archive_marker(text: &str) -> bool {
+    parse_archive_marker(text).is_some()
+}
+
+fn archive_path(id: &str) -> anyhow::Result<std::path::PathBuf> {
+    anyhow::ensure!(
+        id.len() == 36 && id.starts_with("img_") && id[4..].bytes().all(|b| b.is_ascii_hexdigit()),
+        "invalid image ID"
+    );
+    Ok(crate::storage::jcode_dir()?
+        .join("session-image-blobs")
+        .join(id))
+}
+
+pub(super) fn write_archived_image(id: &str, data: &str) -> anyhow::Result<()> {
+    let path = archive_path(id)?;
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(data) {
+        crate::storage::write_text_secret(&path, data)?;
+    }
+    Ok(())
+}
+
+fn read_archived_image(id: &str) -> Option<String> {
+    std::fs::read_to_string(archive_path(id).ok()?).ok()
+}
+
+/// Prepare model-visible IDs without changing the persisted transcript.
+/// Keep image blocks next to their tool result so provider adapters can fold
+/// them into the native tool-result payload.
+pub(super) fn provider_message(session_id: &str, stored: &super::StoredMessage) -> super::Message {
+    let mut ordinal = 0usize;
+    let mut ids = Vec::new();
+    for block in &stored.content {
+        match block {
+            ContentBlock::Image { .. } => {
+                ids.push(image_id(session_id, &stored.id, ordinal));
+                ordinal += 1;
+            }
+            ContentBlock::Text { text, .. } if is_archive_marker(text) => ordinal += 1,
+            _ => {}
+        }
+    }
+    let mut message = stored.to_message();
+    if ids.is_empty() {
+        return message;
+    }
+    let has_tool_result = message
+        .content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::ToolResult { .. }));
+    let mut mapped = vec![false; ids.len()];
+    for block in &mut message.content {
+        if !has_tool_result {
+            if let ContentBlock::Text { text, .. } = block {
+                for (index, id) in ids.iter().enumerate() {
+                    for old in [
+                        format!("[#image {}]", index + 1),
+                        format!("[image {}]", index + 1),
+                    ] {
+                        if text.contains(&old) {
+                            *text = text.replace(&old, &format!("[#{id}]"));
+                            mapped[index] = true;
+                        }
+                    }
+                }
+            }
+        } else if let ContentBlock::ToolResult { content, .. } = block {
+            content.push_str("\n\nAttached session images: ");
+            content.push_str(
+                &ids.iter()
+                    .map(|id| format!("[#{id}]"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            mapped.fill(true);
+        }
+    }
+    let remaining = ids
+        .iter()
+        .zip(mapped)
+        .filter_map(|(id, mapped)| (!mapped).then(|| format!("[#{id}]")))
+        .collect::<Vec<_>>();
+    if !remaining.is_empty() {
+        message.content.push(ContentBlock::Text {
+            text: format!("Attached session images: {}", remaining.join(", ")),
+            cache_control: None,
+        });
+    }
+    message
+}
+
 impl Session {
     pub fn session_images(&self) -> Vec<SessionImageInfo> {
-        self.messages
-            .iter()
-            .enumerate()
-            .flat_map(|(message_index, message)| {
-                message
-                    .content
-                    .iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::Image { media_type, .. } => Some(media_type),
-                        _ => None,
-                    })
-                    .enumerate()
-                    .map(move |(ordinal, media_type)| SessionImageInfo {
+        let mut result = Vec::new();
+        for (message_index, message) in self.messages.iter().enumerate() {
+            let mut ordinal = 0;
+            for block in &message.content {
+                let media_type = match block {
+                    ContentBlock::Image { media_type, .. } => Some(media_type.clone()),
+                    ContentBlock::Text { text, .. } => {
+                        parse_archive_marker(text).and_then(|reference| {
+                            (reference.image_id == image_id(&self.id, &message.id, ordinal))
+                                .then_some(reference.media_type)
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some(media_type) = media_type {
+                    result.push(SessionImageInfo {
                         image_id: image_id(&self.id, &message.id, ordinal),
                         message_index,
                         timestamp: message.timestamp,
-                        media_type: media_type.clone(),
-                    })
-            })
-            .collect()
+                        media_type,
+                    });
+                    ordinal += 1;
+                }
+            }
+        }
+        result
     }
 
     pub fn session_image(&self, id: &str) -> Option<SessionImage> {
         for (message_index, message) in self.messages.iter().enumerate() {
             let mut ordinal = 0;
             for block in &message.content {
-                if let ContentBlock::Image { media_type, data } = block {
-                    let candidate = image_id(&self.id, &message.id, ordinal);
+                let candidate = image_id(&self.id, &message.id, ordinal);
+                let found = match block {
+                    ContentBlock::Image { media_type, data } => {
+                        Some((media_type.clone(), (candidate == id).then(|| data.clone())))
+                    }
+                    ContentBlock::Text { text, .. } => {
+                        parse_archive_marker(text).and_then(|reference| {
+                            (reference.image_id == candidate).then(|| {
+                                (
+                                    reference.media_type,
+                                    (candidate == id)
+                                        .then(|| read_archived_image(&candidate))
+                                        .flatten(),
+                                )
+                            })
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some((media_type, data)) = found {
                     if candidate == id {
                         return Some(SessionImage {
                             info: SessionImageInfo {
                                 image_id: candidate,
                                 message_index,
                                 timestamp: message.timestamp,
-                                media_type: media_type.clone(),
+                                media_type,
                             },
-                            data: data.clone(),
+                            data: data?,
                         });
                     }
                     ordinal += 1;

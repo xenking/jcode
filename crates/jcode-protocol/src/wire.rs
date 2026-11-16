@@ -289,6 +289,20 @@ pub enum Request {
     #[serde(rename = "get_history_image_chunk")]
     GetHistoryImageChunk { id: u64, key: String, offset: usize },
 
+    /// List durable image references in the attached session.
+    #[serde(rename = "list_session_images")]
+    ListSessionImages { id: u64, session_id: String },
+
+    /// Retrieve a bounded chunk of one session image by its stable ID.
+    #[serde(rename = "get_session_image")]
+    GetSessionImage {
+        id: u64,
+        session_id: String,
+        image_id: String,
+        #[serde(default)]
+        offset: usize,
+    },
+
     /// Get only provider/model metadata and available models.
     #[serde(rename = "get_model_catalog")]
     GetModelCatalog {

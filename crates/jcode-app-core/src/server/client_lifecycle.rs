@@ -26,7 +26,7 @@ use super::client_session::{
 };
 use super::client_state::{
     handle_get_compacted_history, handle_get_history, handle_get_model_catalog, handle_get_state,
-    handle_history_image_chunk, handle_history_page,
+    handle_history_image_chunk, handle_history_page, handle_session_images,
 };
 use super::client_writer::write_direct_event;
 use super::comm_await::{CommAwaitMembersContext, handle_comm_await_members};
@@ -2100,6 +2100,13 @@ pub(super) async fn handle_client(
             }
             Request::GetHistoryImageChunk { id, key, offset } => {
                 if handle_history_image_chunk(id, &client_session_id, &agent, &writer, key, offset).await.is_err() { break; }
+            }
+
+            Request::ListSessionImages { id, session_id } => {
+                if handle_session_images(id, &session_id, &client_session_id, &agent, &writer, None).await.is_err() { break; }
+            }
+            Request::GetSessionImage { id, session_id, image_id, offset } => {
+                if handle_session_images(id, &session_id, &client_session_id, &agent, &writer, Some((image_id, offset))).await.is_err() { break; }
             }
 
             Request::GetCompactedHistory {
