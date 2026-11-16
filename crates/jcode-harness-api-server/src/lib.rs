@@ -387,6 +387,7 @@ where
     let session_tools_supported = daemon_caps.iter().any(|cap| cap == "session_tools");
     let soft_interrupt_ids_supported = daemon_caps.iter().any(|cap| cap == "soft_interrupt_ids");
     let queued_prompts_supported = daemon_caps.iter().any(|cap| cap == "queued_prompts");
+    let ask_response_images_supported = daemon_caps.iter().any(|cap| cap == "ask_response_images");
     let hello_ok = ServerFrame::reply(
         reply_to,
         ApiEvent::HelloOk {
@@ -416,6 +417,7 @@ where
             .chain(runtime_commands_supported.then(|| "runtime_commands".to_string()))
             .chain(session_tools_supported.then(|| "session_tools".to_string()))
             .chain(queued_prompts_supported.then(|| "queued_prompts".to_string()))
+            .chain(ask_response_images_supported.then(|| "ask_response_images".to_string()))
             .chain(
                 ["soft_interrupt_ids", "background_tool_result"]
                     .into_iter()

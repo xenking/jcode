@@ -66,7 +66,7 @@ impl Agent {
                     if turn.interruption_reason() == Some(crate::turn_cancel_registry::TurnInterruptionReason::Reload) {
                         return Ok(false);
                     }
-                    ("[Tool 'ask' cancelled by the user]".to_string(), true)
+                    (crate::tool::ToolOutput::new("[Tool 'ask' cancelled by the user]"), true)
                 }
                 result = async {
                     let mut ctx = ctx;
@@ -76,37 +76,42 @@ impl Agent {
                     // No attached user or another transient failure is not an answer.
                     // Leave the durable marker intact for the next recovery attempt.
                     let output = result?;
-                    (output.output, false)
+                    (output, false)
                 }
             };
-            let mut messages = self.session.messages.clone();
-            let result = messages[ask.result_index]
-                .content
-                .iter_mut()
-                .rev()
-                .find(|block| {
-                    matches!(block,
-                        ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == &ask.id
-                    )
-                })
-                .expect("interrupted ask has a matching result");
-            if let ContentBlock::ToolResult {
-                content,
-                is_error: error,
-                ..
-            } = result
+            let side_pane_images =
+                tool_output_side_pane_images(&ask.id, "ask", &ask.input, &output);
+            let output_text = output.output.clone();
+            let mut blocks = tool_output_to_content_blocks(ask.id.clone(), output);
+            if let Some(ContentBlock::ToolResult {
+                is_error: error, ..
+            }) = blocks.first_mut()
             {
-                *content = output.clone();
                 *error = is_error.then_some(true);
             }
+            let mut messages = self.session.messages.clone();
+            let content = &mut messages[ask.result_index].content;
+            let index = content
+                .iter()
+                .rposition(|block| {
+                    matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == &ask.id)
+                })
+                .expect("interrupted ask has a matching result");
+            content.splice(index..=index, blocks);
             self.session.replace_messages(messages);
             self.persist_session_now()?;
             let _ = event_tx.send(ServerEvent::ToolDone {
                 id: ask.id,
                 name: "ask".into(),
-                output: output.clone(),
-                error: is_error.then_some(output),
+                output: output_text.clone(),
+                error: is_error.then_some(output_text),
             });
+            if !side_pane_images.is_empty() {
+                let _ = event_tx.send(ServerEvent::SidePaneImages {
+                    session_id: self.session.id.clone(),
+                    images: side_pane_images,
+                });
+            }
             if is_error {
                 return Ok(false);
             }

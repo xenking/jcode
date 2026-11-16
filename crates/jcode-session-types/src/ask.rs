@@ -126,7 +126,8 @@ pub fn format_ask_answers(questions: &[AskQuestion], response: &AskResponse) -> 
     };
     let mut out = String::from("User answers:\n");
     for (i, q) in questions.iter().enumerate() {
-        let answer = answers.get(i).cloned().unwrap_or_default();
+        let empty_answer = AskAnswer::default();
+        let answer = answers.get(i).unwrap_or(&empty_answer);
         let mut parts: Vec<String> = answer
             .selected
             .iter()

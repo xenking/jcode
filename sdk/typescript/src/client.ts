@@ -409,6 +409,15 @@ export class JcodeClient extends EventEmitter {
 
   private requestFrame(request: ApiRequest, onReply?: (frame: ServerFrame) => void): Promise<ServerFrame> {
     if (this.closed) return Promise.reject(this.closeError ?? new Error("client closed"));
+    if (request.req === "ask_response" && !this.supports("ask_response_images")
+      && request.response.answers?.some((answer) =>
+        (answer.other_images?.length ?? 0) > 0
+        || Object.values(answer.comment_images ?? {}).some((images) => images.length > 0))) {
+      return Promise.reject(new HarnessError(
+        "unsupported",
+        "This server cannot receive images in ask answers. Update the jcode runtime and API bridge before sending; your answer has not been sent.",
+      ));
+    }
     const id = this.nextId++;
     return new Promise<ServerFrame>((resolve, reject) => {
       const entry: Pending = { resolve, reject, onReply };

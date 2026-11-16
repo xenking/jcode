@@ -688,6 +688,14 @@ fn test_ask_user_request_and_response_roundtrip() -> Result<()> {
         format_ask_answers(&questions, &r),
         "User answers:\n1. Which DB? -> SQLite; Other: libsql\n"
     );
+    let legacy: Request = parse_request_json(r#"{"type":"ask_user_response","id":9,"request_id":"ask-1","response":{"answers":[{"selected":["SQLite"]}]}}"#)?;
+    let Request::AskUserResponse { response: legacy_response, .. } = &legacy else {
+        return Err(anyhow!("expected legacy AskUserResponse"));
+    };
+    let answer = &legacy_response.answers.as_ref().unwrap()[0];
+    assert!(answer.other_images.is_empty() && answer.comment_images.is_empty());
+    let encoded_legacy = serde_json::to_string(&legacy)?;
+    assert!(!encoded_legacy.contains("other_images") && !encoded_legacy.contains("comment_images"));
     let declined: Request = parse_request_json(r#"{"type":"ask_user_response","id":8,"request_id":"ask-1","response":{}}"#)?;
     let Request::AskUserResponse { response, .. } = declined else {
         return Err(anyhow!("expected AskUserResponse"));

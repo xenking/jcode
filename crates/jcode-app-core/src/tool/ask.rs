@@ -90,6 +90,35 @@ impl Tool for AskTool {
         let response: AskResponse = serde_json::from_str(&raw).unwrap_or_default();
         let declined = response.answers.is_none();
         let mut output = ToolOutput::new(format_ask_answers(&input.questions, &response));
+        if let Some(answers) = response.answers {
+            for (question_index, answer) in answers.into_iter().enumerate() {
+                for (index, (media_type, data)) in answer.other_images.into_iter().enumerate() {
+                    output = output.with_labeled_image(
+                        media_type,
+                        data,
+                        format!(
+                            "Question {} free answer, image {}",
+                            question_index + 1,
+                            index + 1
+                        ),
+                    );
+                }
+                for (option, images) in answer.comment_images {
+                    for (index, (media_type, data)) in images.into_iter().enumerate() {
+                        output = output.with_labeled_image(
+                            media_type,
+                            data,
+                            format!(
+                                "Question {} option {:?} comment, image {}",
+                                question_index + 1,
+                                option,
+                                index + 1
+                            ),
+                        );
+                    }
+                }
+            }
+        }
         output.title = Some(if declined {
             "User declined".into()
         } else {

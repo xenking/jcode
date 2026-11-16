@@ -118,7 +118,7 @@ async fn session_tools_negotiation_and_stream_translation() {
         );
         let mut pong = json!({"type":"pong","id":0});
         if supported {
-            pong["capabilities"] = json!(["session_tools"]);
+            pong["capabilities"] = json!(["session_tools", "ask_response_images"]);
         }
         write_json_line(probe.get_mut(), &pong).await.unwrap();
         drop(probe);
@@ -129,6 +129,14 @@ async fn session_tools_negotiation_and_stream_translation() {
                 .as_array()
                 .unwrap()
                 .contains(&json!("session_tools")),
+            supported
+        );
+
+        assert_eq!(
+            hello["capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("ask_response_images")),
             supported
         );
 

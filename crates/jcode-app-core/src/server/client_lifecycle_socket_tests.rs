@@ -530,10 +530,13 @@ impl Provider for SdkCallbackProvider {
     }
 }
 
+type CapturedImages = Arc<std::sync::Mutex<Vec<Vec<(String, String)>>>>;
+
 #[derive(Clone, Default)]
 struct TerminalSocketProvider {
     calls: Arc<std::sync::atomic::AtomicUsize>,
     messages: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    images: CapturedImages,
     first_started: Arc<tokio::sync::Notify>,
     finish_first: Arc<tokio::sync::Notify>,
     fail_catalog: Arc<std::sync::atomic::AtomicBool>,
@@ -552,6 +555,14 @@ impl Provider for TerminalSocketProvider {
         _: &str,
         _: Option<&str>,
     ) -> Result<EventStream> {
+        self.images.lock().unwrap().push(
+            messages.iter().flat_map(|message| message.content.iter()).filter_map(|block| {
+                match block {
+                    ContentBlock::Image { media_type, data } => Some((media_type.clone(), data.clone())),
+                    _ => None,
+                }
+            }).collect(),
+        );
         self.messages.lock().unwrap().push(
             messages
                 .iter()
@@ -1046,7 +1057,7 @@ async fn sdk_socket_cancel_workflow(
             );
             send(
                 &mut reopened_writer,
-                json!({"type":"ask_user_response","id":42,"request_id":request_id,"response":{"answers":[{"selected":["B"],"other":"custom","comments":{"B":"reason"}}]}}),
+                json!({"type":"ask_user_response","id":42,"request_id":request_id,"response":{"answers":[{"selected":["B"],"other":"custom [#image 1]","comments":{"B":"reason [#image 1]"},"other_images":[["image/png","b3RoZXI="]],"comment_images":{"B":[["image/jpeg","Y29tbWVudA=="]]}}]}}),
             )
             .await;
             until(&mut reopened_reader, |event| {
@@ -1067,6 +1078,17 @@ async fn sdk_socket_cancel_workflow(
                 history.contains("comment: reason") && history.contains("Other: custom"),
                 "{history}"
             );
+            assert!(history.contains("b3RoZXI=") && history.contains("Y29tbWVudA=="), "{history}");
+            let reloaded = crate::session::Session::load(&session_id).unwrap();
+            let blocks: Vec<_> = reloaded.messages.iter().flat_map(|message| &message.content).collect();
+            assert!(blocks.iter().any(|block| matches!(block, ContentBlock::Image { media_type, data } if media_type == "image/png" && data == "b3RoZXI=")));
+            assert!(blocks.iter().any(|block| matches!(block, ContentBlock::Image { media_type, data } if media_type == "image/jpeg" && data == "Y29tbWVudA==")));
+            assert_eq!(crate::session::render_images(&reloaded).len(), 2);
+            let model_images = terminal_provider.images.lock().unwrap();
+            let last = model_images.last().expect("provider resumed after ask");
+            assert!(last.contains(&("image/png".into(), "b3RoZXI=".into())));
+            assert!(last.contains(&("image/jpeg".into(), "Y29tbWVudA==".into())));
+            drop(model_images);
             assert_eq!(terminal_provider.calls.load(Ordering::SeqCst), 2);
             sessions.clear_for_test().await;
             drop(reopened_writer);

@@ -39,6 +39,7 @@ pub(super) async fn connection_presence_pong(
             "session_tools".into(),
             "soft_interrupt_ids".into(),
             "queued_prompts".into(),
+            "ask_response_images".into(),
             "runtime_commands".into(),
             "session_connections".into(),
             crate::protocol::CLIENT_FOCUS_CAPABILITY.into(),

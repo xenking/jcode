@@ -594,6 +594,20 @@ impl JcodeClient {
         request: ApiRequest,
         timeout: Option<Duration>,
     ) -> Result<ServerFrame> {
+        if let ApiRequest::AskResponse { response, .. } = &request
+            && response.answers.as_ref().is_some_and(|answers| {
+                answers.iter().any(|answer| {
+                    !answer.other_images.is_empty()
+                        || answer.comment_images.values().any(|images| !images.is_empty())
+                })
+            })
+            && !self.supports("ask_response_images")
+        {
+            return Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                "This server cannot receive images in ask answers. Update the jcode runtime and API bridge before sending; your answer has not been sent.",
+            ));
+        }
         let (tx, rx) = channel();
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         self.inner.pending.lock().map_err(poisoned)?.insert(id, tx);

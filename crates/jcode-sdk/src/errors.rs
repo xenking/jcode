@@ -37,6 +37,8 @@ pub enum ErrorKind {
     InvalidInstanceHome,
     /// An option was outside its documented range.
     InvalidOption,
+    /// The connected runtime does not advertise a required capability.
+    UnsupportedCapability,
     /// An operation requires a reconnectable native socket or SSH transport.
     UnsupportedTransport,
     /// A global event consumer fell behind its bounded queue.
@@ -69,6 +71,7 @@ impl ErrorKind {
             Self::StartupTimeout => "startup_timeout",
             Self::InvalidInstanceHome => "invalid_instance_home",
             Self::InvalidOption => "invalid_option",
+            Self::UnsupportedCapability => "unsupported",
             Self::UnsupportedTransport => "unsupported_transport",
             Self::EventBufferOverflow => "event_buffer_overflow",
             Self::Cancelled => "cancelled",
