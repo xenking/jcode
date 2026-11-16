@@ -22,6 +22,8 @@ struct Member {
     task_label: Option<String>,
     #[serde(default)]
     status: Option<String>,
+    #[serde(default)]
+    stalled_secs: Option<u64>,
 }
 
 /// Fill missing session ownership, task labels and lifecycle statuses from
@@ -108,8 +110,12 @@ pub fn enrich_sessions_from_swarm_state(sessions: &mut [SessionInfo], dir: impl 
             }
         }
     }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
     for session in sessions {
-        let Some((_, member)) = members.get(&session.session_id) else {
+        let Some((updated_at, member)) = members.get(&session.session_id) else {
             continue;
         };
         if session.parent_session_id.is_none() {
@@ -125,10 +131,18 @@ pub fn enrich_sessions_from_swarm_state(sessions: &mut [SessionInfo], dir: impl 
                 .filter(|label| !label.trim().is_empty());
         }
         if session.swarm_status.is_none() {
-            session.swarm_status = member
-                .status
-                .clone()
-                .filter(|status| !status.trim().is_empty());
+            let fresh_stall = member.status.as_deref() == Some("running")
+                && member.stalled_secs.is_some()
+                && *updated_at <= now_ms
+                && now_ms - *updated_at <= 120_000;
+            session.swarm_status = if fresh_stall {
+                Some("stalled".into())
+            } else {
+                member
+                    .status
+                    .clone()
+                    .filter(|status| !status.trim().is_empty())
+            };
         }
     }
 }

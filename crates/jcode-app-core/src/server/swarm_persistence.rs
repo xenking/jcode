@@ -137,6 +137,10 @@ pub struct PersistedSwarmMember {
     /// conservative migration fallback so reports are not discarded eagerly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_since_unix_ms: Option<u64>,
+    /// Ephemeral watchdog observation for clients reading the live snapshot.
+    /// Readers must reject old snapshots, as stalls do not survive a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled_secs: Option<u64>,
 }
 
 fn now_unix_ms() -> u64 {
@@ -326,6 +330,9 @@ fn to_persisted_member(member: &SwarmMember, snapshot_unix_ms: u64) -> Persisted
     PersistedSwarmMember {
         record: member.durable_record(),
         terminal_since_unix_ms,
+        stalled_secs: (member.status == "running")
+            .then(|| super::swarm_watchdog::stalled_for_secs(&member.session_id))
+            .flatten(),
     }
 }
 

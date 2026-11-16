@@ -1460,8 +1460,7 @@ impl Server {
         // Stalled-worker watchdog (#1703): flag running workers that went
         // silent with no tool in flight and notify their owner once.
         if let Some(stall_after) = swarm_watchdog::stall_after() {
-            let wd_swarm_members = Arc::clone(&self.swarm_state.members);
-            let wd_swarm_coordinators = Arc::clone(&self.swarm_state.coordinators);
+            let wd_swarm_state = self.swarm_state.clone();
             let wd_sessions = Arc::clone(&self.sessions);
             let wd_soft_interrupt_queues = Arc::clone(&self.soft_interrupt_queues);
             tokio::spawn(async move {
@@ -1471,8 +1470,7 @@ impl Server {
                 loop {
                     interval.tick().await;
                     swarm_watchdog::sweep_stalled_workers(
-                        &wd_swarm_members,
-                        &wd_swarm_coordinators,
+                        &wd_swarm_state,
                         &wd_sessions,
                         &wd_soft_interrupt_queues,
                     )

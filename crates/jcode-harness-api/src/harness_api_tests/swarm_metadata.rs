@@ -82,6 +82,46 @@ fn enrichment_maps_only_swarm_ownership_and_preserves_title() {
 }
 
 #[test]
+fn recent_watchdog_stall_is_visible_but_stale_or_finished_is_not() {
+    let dir = TempDir::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    dir.write(
+        "current.json",
+        json!({"updated_at_unix_ms": now, "members": [
+            {"session_id":"stalled", "status":"running", "stalled_secs": 601},
+            {"session_id":"finished", "status":"ready", "stalled_secs": 601},
+            {"session_id":"healthy", "status":"running"}
+        ]}),
+    );
+    dir.write(
+        "old.json",
+        json!({"updated_at_unix_ms": now - 180_000, "members": [
+            {"session_id":"stale", "status":"running", "stalled_secs": 601}
+        ]}),
+    );
+    let mut sessions = vec![
+        session("stalled"),
+        session("finished"),
+        session("healthy"),
+        session("stale"),
+    ];
+    enrich_sessions_from_swarm_state(&mut sessions, &dir.0);
+    let statuses: Vec<_> = sessions.iter().map(|s| s.swarm_status.as_deref()).collect();
+    assert_eq!(
+        statuses,
+        vec![
+            Some("stalled"),
+            Some("ready"),
+            Some("running"),
+            Some("running")
+        ]
+    );
+}
+
+#[test]
 fn enrichment_prefers_latest_snapshot_and_existing_api_values() {
     let dir = TempDir::new();
     dir.write("a-new.json", json!({"updated_at_unix_ms": 20, "members": [
