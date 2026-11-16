@@ -15,6 +15,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod desktop_control;
 mod client;
 mod await_state;
 mod edit_stats;

@@ -144,6 +144,7 @@ mod client;
 #[cfg(feature = "cloud")]
 pub mod cloud;
 pub mod collections;
+pub mod desktop_control;
 mod diagnostics;
 mod errors;
 mod launch;
