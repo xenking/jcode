@@ -4661,6 +4661,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-slash-command"
+version = "0.1.0"
+
+[[package]]
 name = "jcode-storage"
 version = "0.1.0"
 dependencies = [
@@ -4808,6 +4812,7 @@ dependencies = [
  "jcode-provider-core",
  "jcode-selfdev-types",
  "jcode-session-types",
+ "jcode-slash-command",
  "jcode-terminal-image",
  "jcode-terminal-prompt",
  "jcode-tui-account-picker",

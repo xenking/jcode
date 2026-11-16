@@ -4,18 +4,22 @@
 //! beginning of input or after whitespace. This deliberately avoids treating
 //! URLs, filesystem paths, prose, quoted text, and code as commands.
 
+/// Byte offsets of a known command token in the original input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct SlashCommandMatch {
+pub struct Match {
+    /// Inclusive start of the slash token.
     pub start: usize,
+    /// Exclusive end of the command name.
     pub name_end: usize,
 }
 
-pub(super) fn find_known_commands(input: &str, names: &[&str]) -> Vec<SlashCommandMatch> {
+/// Find known slash tokens, using names that include their leading slash.
+pub fn find_known_commands(input: &str, names: &[&str]) -> Vec<Match> {
     let mut matches = Vec::new();
     scan_slash_tokens(input, |start, end| {
         let token = &input[start..end];
         if names.contains(&token) {
-            matches.push(SlashCommandMatch {
+            matches.push(Match {
                 start,
                 name_end: end,
             });
@@ -24,8 +28,47 @@ pub(super) fn find_known_commands(input: &str, names: &[&str]) -> Vec<SlashComma
     matches
 }
 
-/// Return the slash-token span currently being edited, if any.
-pub(super) fn active_token_before_cursor(input: &str, cursor: usize) -> Option<(usize, usize)> {
+/// Build the dispatch text for each match returned by `find_known_commands`.
+/// Text preceding the first command becomes its first argument.
+///
+/// # Panics
+///
+/// May panic if matches are not ordered valid byte spans in this input.
+pub fn split_command_sequence(input: &str, matches: &[Match]) -> Vec<String> {
+    let Some(first) = matches.first() else {
+        return Vec::new();
+    };
+    let prefix = input[..first.start].trim();
+    matches
+        .iter()
+        .enumerate()
+        .map(|(index, command)| {
+            let end = matches
+                .get(index + 1)
+                .map_or(input.len(), |next| next.start);
+            let args = input[command.name_end..end].trim();
+            if index == 0 && !prefix.is_empty() {
+                if args.is_empty() {
+                    format!("{} {}", &input[command.start..command.name_end], prefix)
+                } else {
+                    format!(
+                        "{} {} {}",
+                        &input[command.start..command.name_end],
+                        prefix,
+                        args
+                    )
+                }
+            } else {
+                input[command.start..end].trim().to_string()
+            }
+        })
+        .collect()
+}
+
+/// Return the byte span of the slash token ending at the byte cursor, if any.
+/// A cursor beyond the input is clamped to its end. A cursor inside a UTF-8
+/// code point returns `None`.
+pub fn active_token_before_cursor(input: &str, cursor: usize) -> Option<(usize, usize)> {
     let cursor = cursor.min(input.len());
     if !input.is_char_boundary(cursor) {
         return None;
@@ -133,11 +176,11 @@ mod tests {
         assert_eq!(
             find_known_commands("test /plan now /review", COMMANDS),
             vec![
-                SlashCommandMatch {
+                Match {
                     start: 5,
                     name_end: 10
                 },
-                SlashCommandMatch {
+                Match {
                     start: 15,
                     name_end: 22
                 },
@@ -155,5 +198,50 @@ mod tests {
     fn finds_active_partial_token_for_completion() {
         assert_eq!(active_token_before_cursor("text /pla", 9), Some((5, 9)));
         assert_eq!(active_token_before_cursor("https://pla", 11), None);
+    }
+
+    #[test]
+    fn splits_prefix_and_multiple_commands_in_order() {
+        let names = &["/poteto-mode", "/review"];
+        let input = "fix this /poteto-mode please";
+        assert_eq!(
+            split_command_sequence(input, &find_known_commands(input, names)),
+            ["/poteto-mode fix this please"]
+        );
+        let input = "fix this /poteto-mode please /review now";
+        assert_eq!(
+            split_command_sequence(input, &find_known_commands(input, names)),
+            ["/poteto-mode fix this please", "/review now"]
+        );
+        let input = "fix this /poteto-mode /review";
+        assert_eq!(
+            split_command_sequence(input, &find_known_commands(input, names)),
+            ["/poteto-mode fix this", "/review"]
+        );
+        assert!(split_command_sequence(input, &[]).is_empty());
+    }
+
+    #[test]
+    fn ignores_non_commands_even_when_their_parts_are_known() {
+        let names = &["/x", "/usr", "/b"];
+        for input in [
+            "https://a/b",
+            "/usr/bin/env",
+            "`code /x`",
+            "quoted \"/x\"",
+            "quoted '/x'",
+            "```\n/x\n```",
+            "/foo",
+        ] {
+            assert!(find_known_commands(input, names).is_empty(), "{input}");
+        }
+    }
+
+    #[test]
+    fn active_token_uses_cursor_position_in_mid_text() {
+        let input = "fix /poteto-mode please";
+        assert_eq!(active_token_before_cursor(input, 8), Some((4, 8)));
+        assert_eq!(active_token_before_cursor(input, input.len()), None);
+        assert_eq!(active_token_before_cursor("é /x", 1), None);
     }
 }
