@@ -385,6 +385,10 @@ async fn socket_reload_ask_workflow(mode: &str) {
         "{journal}"
     );
     assert!(
+        !journal.contains("[auto]"),
+        "synthetic recovery prompt persisted: {journal}"
+    );
+    assert!(
         !journal.contains("interrupted by server reload"),
         "{journal}"
     );

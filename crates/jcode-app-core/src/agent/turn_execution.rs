@@ -187,6 +187,12 @@ impl Agent {
         self.emit_context_messages_since(alert_start, &event_tx);
 
         let system_reminder = system_reminder.filter(|value| !value.trim().is_empty());
+        // A reload continuation for an interrupted ask resumes the existing turn.
+        // It is only a control signal, not another prompt for the model.
+        let resuming_ask = system_reminder.is_some()
+            && user_message.trim().is_empty()
+            && images.is_empty()
+            && self.has_interrupted_ask();
         // A reminder-only turn (e.g. reload recovery) used to persist an empty
         // user message, so the model saw a blank prompt and asked about it.
         // Carry the reminder as the turn's message instead.
@@ -209,13 +215,15 @@ impl Agent {
         self.announce_late_skills();
         self.emit_context_messages_since(announcement_start, &event_tx);
         let input_start = self.session.messages.len();
-        self.append_user_context_message_with_display_role(
-            &user_message,
-            images,
-            display_role,
-            continues_turn,
-            queued_client_id.as_deref(),
-        )?;
+        if !resuming_ask {
+            self.append_user_context_message_with_display_role(
+                &user_message,
+                images,
+                display_role,
+                continues_turn,
+                queued_client_id.as_deref(),
+            )?;
+        }
         if let Some(client_ids) = queued_client_id {
             let mut queue = self
                 .soft_interrupt_queue

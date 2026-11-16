@@ -42,6 +42,10 @@ fn interrupted_ask(messages: &[StoredMessage]) -> Option<InterruptedAsk> {
 }
 
 impl Agent {
+    pub(super) fn has_interrupted_ask(&self) -> bool {
+        interrupted_ask(&self.session.messages).is_some()
+    }
+
     /// Replay an ask interrupted by reload before making another provider call.
     /// Its original tool use and interrupted result are already durable. Keeping
     /// that result until the answer is persisted also makes repeated reloads safe.
