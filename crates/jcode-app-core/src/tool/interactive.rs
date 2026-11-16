@@ -61,7 +61,9 @@ fn dispatch_ask(
         }
         if let Some(pending) = requests.remove(&request_id) {
             pending.closed.cancel();
-            let _ = pending.answer.send(answer);
+            if pending.answer.send(answer).is_err() {
+                crate::logging::debug("Ask answer arrived after its waiting tool was cancelled");
+            }
         }
         if requests.is_empty() {
             all.remove(&session_id);
@@ -100,6 +102,7 @@ fn register_ask(
                 .map(|(_, _, target)| target.clone())
                 .collect()
         })
+        // No attachments is an ordinary state while the originating client reconnects.
         .unwrap_or_default();
     if destinations.is_empty() {
         dispatch_ask(session_id, &pending, target);
@@ -120,7 +123,13 @@ fn register_ask(
     tokio::spawn(async move {
         let mut response_tx = request.response_tx;
         tokio::select! {
-            answer = answers.recv() => { if let Some(answer) = answer { let _ = response_tx.send(answer); } }
+            answer = answers.recv() => {
+                if let Some(answer) = answer
+                    && response_tx.send(answer).is_err()
+                {
+                    crate::logging::debug("Ask requester disconnected before receiving its answer");
+                }
+            }
             _ = response_tx.closed() => {}
         }
         let mut all = PENDING.lock().unwrap_or_else(|e| e.into_inner());
@@ -171,7 +180,11 @@ pub(crate) fn attach(session_id: &str, sender: UnboundedSender<StdinInputRequest
                 biased;
                 request = route_rx.recv() => match request {
                     Some(request) if request.ask_questions.is_some() => register_ask(&session, request, &destination),
-                    Some(request) => { let _ = destination.send(request); }
+                    Some(request) => {
+                        if destination.send(request).is_err() {
+                            break;
+                        }
+                    }
                     None => break,
                 },
                 _ = destination.closed() => break,
@@ -218,6 +231,22 @@ pub(crate) fn answer_with_text(
     if content.trim().is_empty() && images.is_empty() {
         return false;
     }
+    let response = crate::protocol::AskResponse {
+        answers: Some(vec![crate::protocol::AskAnswer {
+            other: Some(content.to_owned()),
+            other_images: images,
+            ..Default::default()
+        }]),
+    };
+    let response = match serde_json::to_string(&response) {
+        Ok(response) => response,
+        Err(error) => {
+            crate::logging::error(&format!(
+                "Failed to serialize text answer for {session_id}: {error}"
+            ));
+            return false;
+        }
+    };
     let mut all = PENDING.lock().unwrap_or_else(|e| e.into_inner());
     let Some(requests) = all.get_mut(session_id) else {
         return false;
@@ -236,17 +265,7 @@ pub(crate) fn answer_with_text(
     if requests.is_empty() {
         all.remove(session_id);
     }
-    let response = crate::protocol::AskResponse {
-        answers: Some(vec![crate::protocol::AskAnswer {
-            other: Some(content.to_owned()),
-            other_images: images,
-            ..Default::default()
-        }]),
-    };
-    pending
-        .answer
-        .send(serde_json::to_string(&response).expect("ask response serializes"))
-        .is_ok()
+    pending.answer.send(response).is_ok()
 }
 
 /// Wait without losing a concurrent attachment notification.

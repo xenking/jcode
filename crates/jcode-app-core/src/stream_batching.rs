@@ -193,8 +193,12 @@ impl BatchingSender {
     }
 
     fn flush_locked(&self, pending: &mut Option<Pending>) {
-        if let Some(pending) = pending.take() {
-            let _ = self.tx.send(pending.kind.event(pending.text));
+        if let Some(pending) = pending.take()
+            && self.tx.send(pending.kind.event(pending.text)).is_err()
+        {
+            crate::logging::debug(
+                "Discarding buffered display text after the event receiver disconnected",
+            );
         }
     }
 

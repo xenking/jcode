@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::Context;
 
 #[derive(Debug, PartialEq)]
 struct InterruptedAsk {
@@ -140,7 +141,7 @@ impl Agent {
                 .rposition(|block| {
                     matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == &ask.id)
                 })
-                .expect("interrupted ask has a matching result");
+                .context("interrupted ask is missing its matching result")?;
             let first_ordinal = content[..index]
                 .iter()
                 .filter(|block| match block {
@@ -182,18 +183,31 @@ impl Agent {
                     } if tool_use_id == &ask.id => Some(content.clone()),
                     _ => None,
                 })
-                .expect("recovered ask has a persisted result");
-            let _ = event_tx.send(ServerEvent::ToolDone {
-                id: ask.id,
-                name: "ask".into(),
-                output: output_text.clone(),
-                error: is_error.then_some(output_text),
-            });
-            if !side_pane_images.is_empty() {
-                let _ = event_tx.send(ServerEvent::SidePaneImages {
-                    session_id: self.session.id.clone(),
-                    images: side_pane_images,
-                });
+                .context("recovered ask is missing its persisted result")?;
+            if event_tx
+                .send(ServerEvent::ToolDone {
+                    id: ask.id,
+                    name: "ask".into(),
+                    output: output_text.clone(),
+                    error: is_error.then_some(output_text),
+                })
+                .is_err()
+            {
+                logging::debug(
+                    "Recovered ask result persisted after its event receiver disconnected",
+                );
+            }
+            if !side_pane_images.is_empty()
+                && event_tx
+                    .send(ServerEvent::SidePaneImages {
+                        session_id: self.session.id.clone(),
+                        images: side_pane_images,
+                    })
+                    .is_err()
+            {
+                logging::debug(
+                    "Recovered ask images persisted after its event receiver disconnected",
+                );
             }
             if is_error {
                 return Ok(false);

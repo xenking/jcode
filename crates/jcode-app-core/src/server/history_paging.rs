@@ -23,17 +23,23 @@ pub(in crate::server) async fn handle_history_page(
             .map_err(|e| e.to_string())
             .and_then(|session| bounded::records(&session))
     };
-    let page = rows.and_then(|rows| bounded::page_records(&rows, before.as_deref(), limit));
-    let event = match page {
-        Ok(page) => ServerEvent::HistoryPage {
-            id,
-            session_id: session_id.to_owned(),
-            fragments: page
+    let page = rows
+        .and_then(|rows| bounded::page_records(&rows, before.as_deref(), limit))
+        .and_then(|page| {
+            let fragments = page
                 .fragments
                 .into_iter()
-                .map(|fragment| serde_json::to_value(fragment).expect("fragment serializes"))
-                .collect(),
-            before: page.before,
+                .map(serde_json::to_value)
+                .collect::<serde_json::Result<Vec<_>>>()
+                .map_err(|error| format!("serialize history page: {error}"))?;
+            Ok((fragments, page.before))
+        });
+    let event = match page {
+        Ok((fragments, before)) => ServerEvent::HistoryPage {
+            id,
+            session_id: session_id.to_owned(),
+            fragments,
+            before,
         },
         Err(message) => ServerEvent::Error {
             id,
@@ -88,10 +94,9 @@ pub(in crate::server) async fn handle_session_images(
                         images: session
                             .session_images()
                             .into_iter()
-                            .map(|image| {
-                                serde_json::to_value(image).expect("image metadata serializes")
-                            })
-                            .collect(),
+                            .map(serde_json::to_value)
+                            .collect::<serde_json::Result<Vec<_>>>()
+                            .map_err(|error| format!("serialize session images: {error}"))?,
                     })
                 }
             };

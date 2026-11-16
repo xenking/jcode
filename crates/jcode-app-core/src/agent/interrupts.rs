@@ -96,14 +96,23 @@ impl Agent {
             return 0;
         }
 
-        let delivered: std::collections::HashSet<String> = self
+        let receipts = self
             .session
             .messages
             .iter()
             .filter_map(|message| message.id.strip_prefix("queued:"))
-            .filter_map(|ids| serde_json::from_str::<Vec<String>>(ids).ok())
-            .flatten()
-            .collect();
+            .map(serde_json::from_str::<Vec<String>>)
+            .collect::<std::result::Result<Vec<_>, _>>();
+        let delivered: std::collections::HashSet<String> = match receipts {
+            Ok(receipts) => receipts.into_iter().flatten().collect(),
+            Err(error) => {
+                logging::warn(&format!(
+                    "Cannot restore queued prompts for {} with invalid delivery receipts: {error}",
+                    self.session_id()
+                ));
+                return 0;
+            }
+        };
         let mut restored_count = 0;
         {
             for item in restored {
@@ -500,7 +509,9 @@ impl Agent {
             if !ids.is_empty() {
                 agent.session.rename_last_message(format!(
                     "queued:{}",
-                    serde_json::to_string(ids).expect("string ids serialize")
+                    serde_json::Value::Array(
+                        ids.iter().cloned().map(serde_json::Value::String).collect()
+                    )
                 ));
             }
             let image_ids_event =

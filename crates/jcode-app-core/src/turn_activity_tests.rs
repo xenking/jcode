@@ -1,5 +1,25 @@
 use super::*;
 
+#[test]
+fn token_wrap_preserves_live_owners_and_fences() {
+    let mut state = State {
+        next_token: u64::MAX,
+        revision: u64::MAX,
+        fence: Some(0),
+        ..Default::default()
+    };
+    state
+        .sessions
+        .entry("live".into())
+        .or_default()
+        .participants
+        .insert(1, Participant::Execution);
+    assert_eq!(state.next(), 2);
+    assert_eq!(state.revision, 0);
+    assert_eq!(state.fence, Some(0));
+    assert!(state.sessions["live"].participants.contains_key(&1));
+}
+
 struct NeverProvider;
 #[async_trait::async_trait]
 impl crate::provider::Provider for NeverProvider {

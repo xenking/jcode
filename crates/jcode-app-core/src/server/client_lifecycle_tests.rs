@@ -165,6 +165,30 @@ fn remove_does_not_hide_corrupt_delivery_history() {
 }
 
 #[test]
+fn enqueue_does_not_hide_corrupt_delivery_history() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let sid = "queue_bad_enqueue_history";
+    let path = crate::session::session_path(sid).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, b"not a session").unwrap();
+    let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let control = SessionControlHandle::cancel_only(sid, queue.clone(), InterruptSignal::new());
+    assert!(
+        control
+            .enqueue_user_prompt(
+                "p".into(),
+                "retry".into(),
+                vec![],
+                jcode_agent_runtime::QueuedMessageMode::AfterYield,
+                None,
+            )
+            .is_err()
+    );
+    assert!(queue.lock().unwrap().is_empty());
+}
+
+#[test]
 fn durable_steer_wakes_blocking_wait_but_follow_up_does_not() {
     let _lock = crate::storage::lock_test_env();
     let _env = IsolatedReloadRecoveryEnv::new();

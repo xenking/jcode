@@ -163,14 +163,20 @@ struct State {
 
 impl State {
     fn next(&mut self) -> u64 {
-        self.next_token = self
-            .next_token
-            .checked_add(1)
-            .expect("activity token exhausted");
-        self.revision = self
-            .revision
-            .checked_add(1)
-            .expect("activity revision exhausted");
+        loop {
+            self.next_token = self.next_token.wrapping_add(1);
+            if self.fence != Some(self.next_token)
+                && !self
+                    .sessions
+                    .values()
+                    .any(|session| session.participants.contains_key(&self.next_token))
+            {
+                break;
+            }
+        }
+        // Revisions are change stamps, not ordered sequence numbers. Wrapping
+        // must not stop guard cleanup, and live ownership tokens are never reused.
+        self.revision = self.revision.wrapping_add(1);
         self.next_token
     }
 

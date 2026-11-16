@@ -2,6 +2,7 @@ use crate::bus::FileOp;
 use crate::plan::VersionedPlan;
 use crate::protocol::ServerEvent;
 use crate::provider::Provider;
+use anyhow::Context;
 use jcode_agent_runtime::{
     InterruptSignal, SoftInterruptMessage, SoftInterruptQueue, SoftInterruptSource,
 };
@@ -49,8 +50,12 @@ pub(super) fn register_background_tool_signal(session_id: &str, signal: Interrup
 pub(super) fn background_tool_signal_for_session(session_id: &str) -> Option<InterruptSignal> {
     BACKGROUND_TOOL_SIGNALS
         .lock()
-        .ok()
-        .and_then(|map| map.get(session_id).cloned())
+        .unwrap_or_else(|poison| {
+            crate::logging::warn("Recovering poisoned background-tool signal registry");
+            poison.into_inner()
+        })
+        .get(session_id)
+        .cloned()
 }
 
 /// Move a session's out-of-band control registrations to a new session id.
@@ -610,8 +615,9 @@ impl TurnEventChannel {
                 identity: identity.clone(),
             };
             if let Err(started) = fanout_session_event_recover(&members, &session_id, started).await
+                && fallback.send(started).is_err()
             {
-                let _ = fallback.send(started);
+                crate::logging::debug("Turn started without connected event receivers");
             }
             loop {
                 let event = tokio::select! {
@@ -635,8 +641,9 @@ impl TurnEventChannel {
                     event: Box::new(event),
                 };
                 if let Err(event) = fanout_session_event_recover(&members, &session_id, event).await
+                    && fallback.send(event).is_err()
                 {
-                    let _ = fallback.send(event);
+                    crate::logging::debug("Turn event has no connected receivers");
                 }
             }
             while let Some(event) = rx.recv().await {
@@ -646,8 +653,9 @@ impl TurnEventChannel {
                     event: Box::new(event),
                 };
                 if let Err(event) = fanout_session_event_recover(&members, &session_id, event).await
+                    && fallback.send(event).is_err()
                 {
-                    let _ = fallback.send(event);
+                    crate::logging::debug("Turn event has no connected receivers");
                 }
             }
             stop_log.finish(&session_id, &identity);
@@ -872,6 +880,25 @@ impl SessionControlHandle {
         self.enqueue_user_prompt_with_skill(client_id, content, images, mode, system_reminder, None)
     }
 
+    /// Missing snapshots are valid for new sessions, but unreadable histories
+    /// and malformed receipts cannot safely establish that a retry is new.
+    fn user_prompt_was_delivered(&self, prompt_id: &str) -> anyhow::Result<bool> {
+        if !crate::session::session_path(&self.session_id)?.try_exists()? {
+            return Ok(false);
+        }
+        let session = crate::session::Session::load(&self.session_id)?;
+        for message in &session.messages {
+            if let Some(receipt) = message.id.strip_prefix("queued:") {
+                let ids: Vec<String> = serde_json::from_str(receipt)
+                    .context("invalid queued prompt delivery receipt")?;
+                if ids.iter().any(|id| id == prompt_id) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     pub(super) fn enqueue_user_prompt_with_skill(
         &self,
         client_id: String,
@@ -888,10 +915,8 @@ impl SessionControlHandle {
         anyhow::ensure!(!client_id.trim().is_empty(), "client_id must not be empty");
         if content.trim().is_empty()
             && images.is_empty()
-            && system_reminder.as_deref().is_some_and(|reminder| {
-                super::reload_recovery::is_delivered_continuation(&self.session_id, reminder)
-                    .unwrap_or(false)
-            })
+            && let Some(reminder) = system_reminder.as_deref()
+            && super::reload_recovery::is_delivered_continuation(&self.session_id, reminder)?
         {
             return Ok(true);
         }
@@ -920,18 +945,7 @@ impl SessionControlHandle {
         // The input can have been committed immediately before a lost ack.
         // Its receipt is part of the durable session history, so a retry must
         // never create a second turn even when the queue no longer contains it.
-        if crate::session::Session::load(&self.session_id)
-            .ok()
-            .is_some_and(|session| {
-                session.messages.iter().any(|message| {
-                    message
-                        .id
-                        .strip_prefix("queued:")
-                        .and_then(|ids| serde_json::from_str::<Vec<String>>(ids).ok())
-                        .is_some_and(|ids| ids.contains(&client_id))
-                })
-            })
-        {
+        if self.user_prompt_was_delivered(&client_id)? {
             return Ok(true);
         }
         queue.push(SoftInterruptMessage {
@@ -1014,23 +1028,7 @@ impl SessionControlHandle {
             }
             return Ok(Outcome::Removed);
         }
-        // A corrupted or unreadable history must not be reported as NotFound:
-        // the receipt could exist but be unavailable. A new session may not
-        // yet have a snapshot, in which case no delivery can have committed.
-        let path = crate::session::session_path(&self.session_id)?;
-        let delivered = if path.try_exists()? {
-            let session = crate::session::Session::load(&self.session_id)?;
-            session.messages.iter().any(|message| {
-                message
-                    .id
-                    .strip_prefix("queued:")
-                    .and_then(|ids| serde_json::from_str::<Vec<String>>(ids).ok())
-                    .is_some_and(|ids| ids.iter().any(|id| id == prompt_id))
-            })
-        } else {
-            false
-        };
-        Ok(if delivered {
+        Ok(if self.user_prompt_was_delivered(prompt_id)? {
             Outcome::AlreadyDelivered
         } else {
             Outcome::NotFound
@@ -1042,27 +1040,28 @@ impl SessionControlHandle {
             .soft_interrupt_queue
             .lock()
             .map_err(|_| anyhow::anyhow!("queue lock poisoned"))?;
-        let indices: Vec<usize> = queue
+        let prompts: Vec<(usize, String)> = queue
             .iter()
             .enumerate()
             .filter_map(|(index, item)| {
-                (item.source == SoftInterruptSource::User
-                    && item.client_id.is_some()
-                    && item.mode != jcode_agent_runtime::QueuedMessageMode::InFlight)
-                    .then_some(index)
+                if item.source == SoftInterruptSource::User
+                    && item.mode != jcode_agent_runtime::QueuedMessageMode::InFlight
+                {
+                    item.client_id.as_ref().map(|id| (index, id.clone()))
+                } else {
+                    None
+                }
             })
             .collect();
         anyhow::ensure!(
-            order.len() == indices.len(),
+            order.len() == prompts.len(),
             "order must contain every queued prompt exactly once"
         );
         let mut by_id = std::collections::HashMap::new();
-        for &index in &indices {
-            let item = &queue[index];
+        for (index, id) in &prompts {
+            let item = &queue[*index];
             anyhow::ensure!(
-                by_id
-                    .insert(item.client_id.clone().unwrap(), item.clone())
-                    .is_none(),
+                by_id.insert(id.clone(), item.clone()).is_none(),
                 "duplicate queued prompt id"
             );
         }
@@ -1073,7 +1072,7 @@ impl SessionControlHandle {
             })?);
         }
         let previous = queue.clone();
-        for (index, item) in indices.into_iter().zip(reordered) {
+        for ((index, _), item) in prompts.into_iter().zip(reordered) {
             queue[index] = item;
         }
         if let Err(error) = crate::soft_interrupt_store::overwrite(&self.session_id, &queue) {
@@ -1529,6 +1528,7 @@ pub(super) async fn queue_soft_interrupt_with_images_for_session(
         guard.get(session_id).and_then(|agent| {
             agent
                 .try_lock()
+                // A busy Agent is normal; persist below and restore on its next turn.
                 .ok()
                 .map(|agent_guard| agent_guard.soft_interrupt_queue())
         })
