@@ -60,10 +60,12 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("GetCompactedHistory", ClientInternal),
     ("GetHistory", Covered),
     ("GetModelCatalog", Covered),
+    ("GetQueuedPrompts", Covered),
     // Create/attach session bootstrap requests state through the API bridge.
     ("GetState", Covered),
     ("GetTodos", Covered),
     ("InputShell", ClientInternal),
+    ("InterruptQueuedPrompt", Covered),
     ("InvalidateAnthropicUsage", Covered),
     ("InvalidateOpenAiUsage", Covered),
     ("Message", Covered),
@@ -71,6 +73,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("PersistSession", ClientInternal),
     // SDK ping/pong also supports the TUI's transport readiness probe.
     ("Ping", Covered),
+    ("QueuePrompt", Covered),
     ("RefreshModels", ClientInternal),
     ("Reload", ClientInternal),
     ("RenameSession", Covered),
@@ -86,6 +89,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("SetFeature", ClientInternal),
     ("SetModel", Covered),
     ("SetPremiumMode", ClientInternal),
+    ("SetQueuedPromptMode", Covered),
     ("SetReasoningEffort", Covered),
     ("SetRoute", ClientInternal),
     ("SetServiceTier", ClientInternal),

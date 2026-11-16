@@ -30,6 +30,8 @@ import {
   type ImageAttachment,
   type ModelRouteInfo,
   type PermissionDecision,
+  type QueuedPrompt,
+  type QueuedPromptMode,
   type RenderedImage,
   type RuntimeCommand,
   type ServerFrame,
@@ -737,6 +739,32 @@ export class JcodeClient extends EventEmitter {
       urgent: options.urgent ?? false,
       client_id: options.clientId,
     });
+  }
+
+  /** Queue a daemon-owned prompt, retaining its caller ID and delivery mode. */
+  async queuePrompt(sessionId: string, prompt: QueuedPrompt): Promise<void> {
+    await this.queuePromptWithReminder(sessionId, prompt);
+  }
+
+  async queuePromptWithReminder(sessionId: string, prompt: QueuedPrompt, systemReminder?: string): Promise<void> {
+    await this.requestOk({
+      req: "queue_prompt", session_id: sessionId, client_id: prompt.client_id,
+      content: prompt.content, images: prompt.images?.length ? prompt.images : undefined,
+      mode: prompt.mode, system_reminder: systemReminder,
+    });
+  }
+
+  async setQueuedPromptMode(sessionId: string, clientId: string, mode: QueuedPromptMode): Promise<void> {
+    await this.requestOk({ req: "set_queued_prompt_mode", session_id: sessionId, client_id: clientId, mode });
+  }
+
+  async interruptQueuedPrompt(sessionId: string, clientId: string): Promise<void> {
+    await this.requestOk({ req: "interrupt_queued_prompt", session_id: sessionId, client_id: clientId });
+  }
+
+  async getQueuedPrompts(sessionId: string): Promise<QueuedPrompt[]> {
+    const frame = await this.expectReply({ req: "get_queued_prompts", session_id: sessionId }, "queued_prompts");
+    return frame.prompts;
   }
 
   async getHistory(sessionId: string): Promise<HistoryMessage[]> {

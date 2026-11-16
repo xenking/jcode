@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 11;
+export const API_VERSION_MINOR = 13;
 
 export type RuntimeCommand = "skills" | "context" | "info" | "cache" | "memory" | "swarm" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout";
 
@@ -179,6 +179,15 @@ export interface RenderedImage {
 /** Base64 image attachment: [mediaType, base64Data]. */
 export type ImageAttachment = [string, string];
 
+/** Delivery point of a daemon-owned prompt. */
+export type QueuedPromptMode = "steer" | "after_yield";
+export interface QueuedPrompt {
+  client_id: string;
+  content: string;
+  images?: ImageAttachment[];
+  mode: QueuedPromptMode;
+}
+
 /** A tool definition exposed to the model. */
 export interface SessionToolDefinition {
   name: string;
@@ -225,6 +234,10 @@ export type ApiRequest =
       /** Opaque id echoed in `soft_interrupt_injected` and accepted by a filtered cancel. */
       client_id?: string;
     }
+  | { req: "queue_prompt"; session_id: string; client_id: string; content: string; images?: ImageAttachment[]; mode: QueuedPromptMode; system_reminder?: string }
+  | { req: "set_queued_prompt_mode"; session_id: string; client_id: string; mode: QueuedPromptMode }
+  | { req: "interrupt_queued_prompt"; session_id: string; client_id: string }
+  | { req: "get_queued_prompts"; session_id: string }
   | { req: "get_history"; session_id: string }
   | { req: "peek_session"; session_id: string; limit?: number }
   | { req: "clear"; session_id: string }
@@ -347,6 +360,7 @@ export type ApiEvent =
   | { ev: "tool_start"; session_id: string; call_id: string; name: string }
   | { ev: "tool_input_delta"; session_id: string; call_id: string; delta: string }
   | { ev: "tool_exec"; session_id: string; call_id: string; name: string }
+  | { ev: "queued_prompts"; session_id: string; prompts: QueuedPrompt[] }
   | { ev: "tools"; session_id: string; tools: SessionToolDefinition[] }
   | { ev: "tool_call"; session_id: string; call_id: string; name: string; input: unknown }
   | {
@@ -550,6 +564,7 @@ export const KNOWN_EVENT_KINDS = [
   "attached",
   "session_forked",
   "history",
+  "queued_prompts",
   "side_pane_images",
   "side_panel_state",
   "applet_state",
@@ -616,6 +631,10 @@ export const KNOWN_REQUEST_KINDS = [
   "send_message",
   "cancel",
   "soft_interrupt",
+  "queue_prompt",
+  "set_queued_prompt_mode",
+  "interrupt_queued_prompt",
+  "get_queued_prompts",
   "get_history",
   "peek_session",
   "clear",
