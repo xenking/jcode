@@ -42,22 +42,27 @@ pub(super) async fn awaited_member_statuses(
     watch_ids
         .iter()
         .map(|session_id| {
-            let (name, status, completion_report) = members
-                .get(session_id)
+            let member = members.get(session_id).or_else(|| {
+                let mut matches = members.values().filter(|member| {
+                    member.swarm_id.as_deref() == Some(swarm_id)
+                        && member.friendly_name.as_deref() == Some(session_id.as_str())
+                });
+                let first = matches.next()?;
+                matches.next().is_none().then_some(first)
+            });
+            let (resolved_id, name, status, completion_report) = member
                 .map(|member| {
                     (
+                        member.session_id.clone(),
                         member.friendly_name.clone(),
                         member.status.clone(),
                         member.latest_completion_report.clone(),
                     )
                 })
-                .unwrap_or((None, "unknown".to_string(), None));
-            let done = target_status.contains(&status)
-                || (status == "unknown"
-                    && (target_status.contains(&"stopped".to_string())
-                        || target_status.contains(&"completed".to_string())));
+                .unwrap_or((session_id.clone(), None, "unknown".to_string(), None));
+            let done = status != "unknown" && target_status.contains(&status);
             AwaitedMemberStatus {
-                session_id: session_id.clone(),
+                session_id: resolved_id,
                 friendly_name: name,
                 status,
                 done,
@@ -71,7 +76,7 @@ fn short_member_name(member: &AwaitedMemberStatus) -> String {
     member
         .friendly_name
         .clone()
-        .unwrap_or_else(|| member.session_id[..8.min(member.session_id.len())].to_string())
+        .unwrap_or_else(|| member.session_id.clone())
 }
 
 pub(super) fn timeout_summary(member_statuses: &[AwaitedMemberStatus]) -> String {
@@ -252,6 +257,9 @@ pub(super) async fn spawn_or_resume_await_members(
     tokio::spawn(async move {
         let mut event_rx = swarm_event_tx.subscribe();
         let deadline = deadline_to_instant(state.deadline_unix_ms);
+        let mut recheck = tokio::time::interval(Duration::from_secs(1));
+        recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        recheck.tick().await;
 
         loop {
             let member_statuses = awaited_member_statuses(
@@ -303,6 +311,9 @@ pub(super) async fn spawn_or_resume_await_members(
                     finalize_await(&await_members_runtime, &state, false, member_statuses, summary).await;
                     return;
                 }
+                // Re-resolve even without an event: a restored member can appear
+                // without broadcasting a change, or belong to another swarm.
+                _ = recheck.tick() => {}
                 event = event_rx.recv() => {
                     match event {
                         Ok(event) => {
