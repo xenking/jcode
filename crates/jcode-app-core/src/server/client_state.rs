@@ -353,7 +353,11 @@ async fn build_model_catalog(
                                 .map(str::to_string)
                                 .collect(),
                         ),
-                        provider.reasoning_effort(),
+                        crate::session_effort::session_effort(&session_id)
+                            .or_else(|| {
+                                persisted.as_ref().and_then(|session| session.reasoning_effort.clone())
+                            })
+                            .or_else(|| provider.reasoning_effort()),
                         "fallback",
                         provider_oauth_email(provider.as_ref()),
                         provider.serving_oauth_account_label(),
