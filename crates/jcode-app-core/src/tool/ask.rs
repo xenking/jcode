@@ -87,7 +87,8 @@ impl Tool for AskTool {
         let raw = response_rx.await.map_err(|_| {
             anyhow!("ask was cancelled: the interactive client disconnected before answering")
         })?;
-        let response: AskResponse = serde_json::from_str(&raw).unwrap_or_default();
+        let response: AskResponse = serde_json::from_str(&raw)
+            .map_err(|error| anyhow!("invalid interactive ask response: {error}"))?;
         let declined = response.answers.is_none();
         let mut output = ToolOutput::new(format_ask_answers(&input.questions, &response));
         if let Some(answers) = response.answers {
@@ -173,6 +174,19 @@ mod tests {
             .send(serde_json::to_string(&AskResponse::declined()).unwrap())
             .unwrap();
         assert!(task.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn corrupt_client_reply_is_not_a_user_decline() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(AskTool.execute(input(), ctx(Some(tx))));
+        rx.recv()
+            .await
+            .unwrap()
+            .response_tx
+            .send("{broken".into())
+            .unwrap();
+        assert!(task.await.unwrap().is_err());
     }
 
     #[tokio::test]

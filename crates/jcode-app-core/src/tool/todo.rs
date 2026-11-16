@@ -271,21 +271,28 @@ fn todo_write_mode(input: &Value) -> &'static str {
 
 fn record_todo_write_mode(input: &Value) {
     static COUNTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let Ok(_guard) = COUNTER_LOCK.lock() else {
-        return;
-    };
-    let mode = todo_write_mode(input);
-    let Ok(dir) = crate::storage::jcode_dir().map(|dir| dir.join("stats")) else {
-        return;
-    };
-    let path = dir.join("todo-write-modes.json");
-    let mut counts: HashMap<String, u64> = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default();
-    *counts.entry(mode.to_string()).or_default() += 1;
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = crate::storage::write_json_fast(&path, &counts);
+    // Diagnostic counters must not fail the actual todo write. Keep failures
+    // observable and preserve unreadable counters instead of replacing them.
+    let result = (|| -> Result<()> {
+        let _guard = COUNTER_LOCK
+            .lock()
+            .map_err(|_| anyhow::anyhow!("todo counter lock poisoned"))?;
+        let dir = crate::storage::jcode_dir()?.join("stats");
+        let path = dir.join("todo-write-modes.json");
+        let mut counts: HashMap<String, u64> = match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(error) => return Err(error.into()),
+        };
+        let count = counts
+            .entry(todo_write_mode(input).to_string())
+            .or_default();
+        *count = count.saturating_add(1);
+        crate::storage::write_json_fast(&path, &counts)
+    })();
+    if let Err(error) = result {
+        crate::logging::debug(&format!("Todo diagnostic counter unavailable: {error:#}"));
+    }
 }
 
 /// Every key an update may carry once names and pauses are normalized: the
@@ -1652,16 +1659,16 @@ impl Tool for TodoTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let write_mode_input = input.clone();
-        let input = apply_todo_patch(input, || {
-            serde_json::to_value(load_todos(&ctx.session_id).unwrap_or_default())
-                .unwrap_or(Value::Array(Vec::new()))
-        })?;
+        let previous = load_todos(&ctx.session_id)?;
+        let stored_goals = load_goals(&ctx.session_id)?;
+        let stored_plan = load_plan(&ctx.session_id)?;
+        let stored = serde_json::to_value(&previous)?;
+        let input = apply_todo_patch(input, || stored)?;
         let params = parse_todo_input(input)?;
         let is_write = params.todos.is_some() || params.goals.is_some() || params.plan.is_some();
         let operation = if is_write { "write" } else { "read" };
         let result = if is_write {
             // Goals/plan-only writes keep the stored todo list.
-            let previous = load_todos(&ctx.session_id).unwrap_or_default();
             let mut todos = params.todos.unwrap_or_else(|| previous.clone());
             crate::todo::stages::normalize_lane_owners(&mut todos);
             crate::todo::store::validate_session_lane_dependencies(
@@ -1690,8 +1697,6 @@ impl Tool for TodoTool {
             record_todo_write_mode(&write_mode_input);
             merge_confidence_history(&previous, &mut todos);
             (|| {
-                let stored_goals = load_goals(&ctx.session_id).unwrap_or_default();
-                let stored_plan = load_plan(&ctx.session_id).unwrap_or_default();
                 let ignored_goals =
                     ignored_goal_groups_note(params.goals.as_deref().unwrap_or_default(), &todos);
                 let goals = prune_orphaned_goals(merge_goals(&stored_goals, params.goals), &todos);
@@ -1763,13 +1768,8 @@ impl Tool for TodoTool {
             })()
         } else {
             record_todo_write_mode(&write_mode_input);
-            (|| {
-                let todos = load_todos(&ctx.session_id)?;
-                let goals = load_goals(&ctx.session_id).unwrap_or_default();
-                let plan = load_plan(&ctx.session_id).unwrap_or_default();
-                record_todo_telemetry(&todos, &todos, &goals, &plan);
-                build_todo_output(todos, plan, goals, None, None, Vec::new())
-            })()
+            record_todo_telemetry(&previous, &previous, &stored_goals, &stored_plan);
+            build_todo_output(previous, stored_plan, stored_goals, None, None, Vec::new())
         };
         result.map_err(|err| {
             crate::logging::warn(&format!(

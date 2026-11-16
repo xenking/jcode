@@ -56,6 +56,33 @@ fn description_steers_toward_scripts_over_many_single_calls() {
     assert!(steer_at < mechanics_at);
 }
 
+#[test]
+fn corrupt_store_is_not_overwritten_by_a_fresh_script() {
+    let _guard = crate::storage::lock_test_env();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let session = format!("codemode-corrupt-{}", uuid::Uuid::new_v4());
+        let path = store_path(&session).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{broken").unwrap();
+        let registry = registry().await;
+        let result = registry
+            .execute(
+                "codemode",
+                json!({"code":"store('replacement', 1); return 1;"}),
+                ctx(&session),
+            )
+            .await;
+        let after = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(result.is_err());
+        assert_eq!(after, "{broken");
+    });
+}
+
 struct JsonTool;
 
 #[async_trait::async_trait]

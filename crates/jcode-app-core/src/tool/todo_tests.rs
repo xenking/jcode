@@ -1,3 +1,24 @@
+#[tokio::test]
+async fn corrupt_goal_state_blocks_todo_replacement() {
+    let _guard = crate::storage::lock_test_env();
+    let session = format!("todo-corrupt-{}", uuid::Uuid::new_v4());
+    let path = crate::todo::store::todo_file_path(
+        &crate::storage::jcode_dir().unwrap(),
+        &session,
+        crate::todo::store::TodoFile::Goals,
+    );
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "{broken").unwrap();
+    let result = TodoTool::new()
+        .execute(json!({"todos":[]}), test_ctx(&session))
+        .await;
+    let after = std::fs::read_to_string(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert!(result.is_err());
+    assert_eq!(after, "{broken");
+    assert!(load_todos(&session).unwrap().is_empty());
+}
+
 #[test]
 fn hierarchy_preserves_declared_order_and_rejects_empty_ids() {
     let item = |id: &str| json!({"id":id,"content":id,"status":"pending","priority":"high"});

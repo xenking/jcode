@@ -9,7 +9,7 @@
 //! script `store()` per session between runs.
 
 use super::{Registry, Tool, ToolContext, ToolOutput, WeakRegistry};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use jcode_codemode::{Host, Limits, ToolInfo};
@@ -86,7 +86,7 @@ pub(crate) fn enabled() -> bool {
     jcode_codemode::AVAILABLE && config.features.code_mode && config.tools.codemode
 }
 
-fn store_path(session_id: &str) -> Option<PathBuf> {
+fn store_path(session_id: &str) -> Result<PathBuf> {
     let safe: String = session_id
         .chars()
         .map(|c| {
@@ -98,38 +98,33 @@ fn store_path(session_id: &str) -> Option<PathBuf> {
         })
         .collect();
     if safe.is_empty() {
-        return None;
+        anyhow::bail!("codemode store requires a nonempty session id");
     }
-    Some(
-        crate::storage::jcode_dir()
-            .ok()?
-            .join("codemode")
-            .join(format!("{safe}.json")),
-    )
+    Ok(crate::storage::jcode_dir()?
+        .join("codemode")
+        .join(format!("{safe}.json")))
 }
 
-fn load_store(session_id: &str) -> Map<String, Value> {
-    store_path(session_id)
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|text| serde_json::from_str::<Map<String, Value>>(&text).ok())
-        .unwrap_or_default()
-}
-
-fn save_store(session_id: &str, store: &Map<String, Value>) {
-    let Some(path) = store_path(session_id) else {
-        return;
+fn load_store(session_id: &str) -> Result<Map<String, Value>> {
+    let path = store_path(session_id)?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
+        Err(error) => return Err(error).context("cannot read codemode store"),
     };
+    serde_json::from_str(&text).context("invalid codemode store; refusing to overwrite it")
+}
+
+fn save_store(session_id: &str, store: &Map<String, Value>) -> Result<()> {
+    let path = store_path(session_id)?;
     if store.is_empty() {
-        let _ = std::fs::remove_file(&path);
-        return;
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).context("cannot clear codemode store"),
+        };
     }
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, Value::Object(store.clone()).to_string()).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
-    }
+    crate::storage::write_json_fast(&path, store).context("cannot persist codemode store")
 }
 
 fn truncate_chars(text: &str, max: usize) -> String {
@@ -149,9 +144,17 @@ fn bound_report(text: String, max: usize, spill: Option<PathBuf>) -> String {
     let total = text.len();
     let saved = spill.and_then(|path| {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok()?;
+            std::fs::create_dir_all(parent)
+                .inspect_err(|error| {
+                    crate::logging::warn(&format!("Codemode spill directory unavailable: {error}"))
+                })
+                .ok()?;
         }
-        std::fs::write(&path, &text).ok()?;
+        std::fs::write(&path, &text)
+            .inspect_err(|error| {
+                crate::logging::warn(&format!("Codemode report spill failed: {error}"))
+            })
+            .ok()?;
         Some(path)
     });
     let cut: String = text.chars().take(max).collect();
@@ -178,6 +181,9 @@ fn spill_path(session_id: &str, call_id: &str) -> Option<PathBuf> {
     };
     Some(
         crate::storage::jcode_dir()
+            .inspect_err(|error| {
+                crate::logging::warn(&format!("Codemode spill path unavailable: {error}"))
+            })
             .ok()?
             .join("codemode")
             .join("spill")
@@ -315,13 +321,18 @@ impl Tool for CodemodeTool {
             ctx: ctx.clone(),
             counter: AtomicUsize::new(0),
         });
-        let store = load_store(&ctx.session_id);
+        let store = load_store(&ctx.session_id)?;
         let limits = Limits {
             timeout: Duration::from_secs(300),
             ..Limits::default()
         };
         let out = jcode_codemode::run(params.code, host, tools, store, limits).await;
-        save_store(&ctx.session_id, &out.store);
+        save_store(&ctx.session_id, &out.store).with_context(|| {
+            format!(
+                "codemode executed but its store was NOT persisted:\n{}",
+                render_report(&out)
+            )
+        })?;
 
         crate::logging::info(&format!(
             "[tool:codemode] session={} calls={} elapsed_ms={} error={}",
