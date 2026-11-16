@@ -1,31 +1,5 @@
-//! `jcode rollout`: ship a matched jcode + Jcode Desktop pair to this machine.
-//!
-//! One command replaces the hand-run sequence (install-fork-cli.sh,
-//! package-macos.sh, install-fork-desktop.sh) that kept going wrong in the
-//! same places: Desktop compiled against a stale jcode tree, a reload landed
-//! while workers were mid-turn, a swapped bundle kept the old bundle's bridge.
-//!
-//! Phases, each reported as one status line:
-//!
-//! 1. plan            resolve both repo SHAs as a pair, what changes, who is mid-turn
-//! 2. build-cli       release build of the jcode SHA in a dedicated worktree
-//! 3. package-desktop package Desktop against the SAME jcode worktree
-//! 4. stage           versions/<sha>, promote shared-server, current + current-version
-//! 5. drain           wait until nothing is mid-turn (`--now` skips, relying on
-//!    reload recovery to resume interrupted turns)
-//! 6. reload          graceful daemon reload; prove the socket runs the new
-//!    binary and every previously live worker came back
-//! 7. desktop-swap    graceful quit, kill only the old bundle's bridges, swap, relaunch
-//! 8. verify          versions, bridge answers search_sessions, Sparkle key
-//!
-//! A failed verify restores the previous bundle only after the previous daemon
-//! is proven running and its channels match. If a safe targeted downgrade is
-//! unavailable, rollback leaves the running pair in place and reports its state.
-//!
-//! Re-running is safe: each phase checks the real state first and skips when
-//! it already holds, and a state file under `~/.jcode/rollout` remembers
-//! finished phases for the same SHA pair, so an interrupted run resumes.
-//! Staging never reloads by itself, matching `display.auto_server_reload=false`.
+//! Build/package are restartable CLI preparation. All mutations from stage onward
+//! belong to the daemon journal, so killing this caller cannot interrupt rollout.
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -33,7 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const MIN_FREE_GB: u64 = 25;
+pub const MIN_FREE_GB: u64 = 30;
 pub const PHASES: [&str; 8] = [
     "plan",
     "build-cli",
@@ -44,9 +18,6 @@ pub const PHASES: [&str; 8] = [
     "desktop-swap",
     "verify",
 ];
-const DRAIN_POLL: Duration = Duration::from_secs(5);
-const RELOAD_SETTLE: Duration = Duration::from_secs(2);
-const RELOAD_SETTLE_ATTEMPTS: u32 = 15;
 
 #[derive(Debug, Clone)]
 pub struct RolloutOptions {
@@ -117,9 +88,6 @@ pub struct Deployed {
     /// `git_hash` of the jcode binary inside the installed bundle.
     pub desktop_cli: Option<String>,
     pub desktop_version: Option<String>,
-    pub sparkle_key: bool,
-    /// Executables of running api-bridge processes.
-    pub bridge_paths: Vec<String>,
 }
 
 /// Where things live, for the plan and the dry run.
@@ -132,56 +100,10 @@ pub struct Layout {
     pub target_dir: PathBuf,
     pub dist_dir: PathBuf,
     pub app: PathBuf,
-    pub app_backup: PathBuf,
     pub builds: PathBuf,
 }
 
-/// Progress remembered across runs of the same pair.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RolloutState {
-    pub cli: String,
-    pub desktop: String,
-    #[serde(default)]
-    pub done: Vec<String>,
-    /// `current-version` before this rollout staged anything.
-    #[serde(default)]
-    pub prev_current: Option<String>,
-    /// `shared-server-version` before this rollout staged anything.
-    #[serde(default)]
-    pub prev_shared: Option<String>,
-    /// The swap saved the previous bundle as the backup.
-    #[serde(default)]
-    pub desktop_backed_up: bool,
-}
-
-impl RolloutState {
-    fn for_pair(pair: &Pair, deployed: &Deployed) -> Self {
-        Self {
-            cli: pair.cli.clone(),
-            desktop: pair.desktop.clone(),
-            prev_current: deployed.cli_current.clone(),
-            prev_shared: deployed.cli_shared.clone(),
-            ..Self::default()
-        }
-    }
-
-    fn matches(&self, pair: &Pair) -> bool {
-        self.cli == pair.cli && self.desktop == pair.desktop
-    }
-
-    fn is_done(&self, phase: &str) -> bool {
-        self.done.iter().any(|done| done == phase)
-    }
-
-    fn mark(&mut self, phase: &str) {
-        if !self.is_done(phase) {
-            self.done.push(phase.to_string());
-        }
-    }
-}
-
-/// Everything the rollout reads or changes on the machine. The real
-/// implementation shells out and touches `~/.jcode`; tests use a fake.
+/// CLI preparation cannot mutate installed channels or reload the daemon.
 pub trait Host {
     fn layout(&self) -> &Layout;
     fn arch(&self) -> String;
@@ -189,35 +111,25 @@ pub trait Host {
     fn resolve(&mut self, repo: Repo, refname: &str, fetch: bool) -> Result<String>;
     fn commits_between(&self, repo: Repo, from: &str, to: &str) -> Option<usize>;
     fn deployed(&self) -> Deployed;
-    /// Sessions with a model turn in flight right now, excluding the session
-    /// that runs this command (its own turn would never drain).
     fn busy_sessions(&self) -> Result<Vec<String>>;
-    /// Headless swarm workers and their lifecycle status.
     fn workers(&self) -> Result<Vec<(String, String)>>;
-    /// An already built CLI binary for `pair`, verified to report its commit.
     fn built_cli(&self, pair: &Pair) -> Option<PathBuf>;
     fn build_cli(&mut self, pair: &Pair) -> Result<PathBuf>;
     fn packaged_app(&self, pair: &Pair) -> Option<PathBuf>;
     fn package_desktop(&mut self, pair: &Pair) -> Result<PathBuf>;
-    fn stage(&mut self, label: &str, binary: &Path) -> Result<()>;
-    fn reload(&mut self, label: &str) -> Result<()>;
-    fn resume_worker(&mut self, session_id: &str) -> Result<()>;
-    /// Quit, back up, swap and relaunch the bundle.
-    fn swap_desktop(&mut self, app: &Path) -> Result<()>;
-    fn bridge_search(&self, desktop: bool) -> Result<()>;
-    fn rollback_daemon(&mut self, shared: &str) -> Result<()>;
-    fn restore_cli_links(&mut self, current: &str, shared: &str) -> Result<()>;
-    fn rollback_desktop(&mut self) -> Result<()>;
-    fn sleep(&mut self, duration: Duration);
-    fn load_state(&self) -> Option<RolloutState>;
-    fn save_state(&mut self, state: &RolloutState) -> Result<()>;
+    fn submit(
+        &mut self,
+        pair: &Pair,
+        binary: &Path,
+        app: Option<&Path>,
+        options: &RolloutOptions,
+    ) -> Result<String>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Planned,
-    Deployed,
-    RolledBack(String),
+    Submitted(String),
 }
 
 /// One phase, one line: `[3/8] stage            ok    detail`.
@@ -266,24 +178,6 @@ fn running_workers<H: Host + ?Sized>(host: &H) -> Result<Vec<String>> {
     ids.sort();
     Ok(ids)
 }
-
-/// Of `before`, the workers the reload left stopped, crashed, failed or gone.
-/// A worker that resumed and already finished (`ready`) is not lost.
-fn lost_workers<H: Host + ?Sized>(host: &H, before: &[String]) -> Result<Vec<String>> {
-    let now = host.workers()?;
-    Ok(before
-        .iter()
-        .filter(|id| {
-            now.iter()
-                .find(|(worker, _)| worker == *id)
-                .is_none_or(|(_, status)| {
-                    matches!(status.as_str(), "stopped" | "crashed" | "failed")
-                })
-        })
-        .cloned()
-        .collect())
-}
-
 struct Run<'a, H: Host, W: Write> {
     host: &'a mut H,
     out: &'a mut W,
@@ -295,11 +189,6 @@ impl<H: Host, W: Write> Run<'_, H, W> {
         writeln!(self.out, "{}", status_line(phase, status, detail.as_ref()))?;
         self.out.flush()?;
         Ok(())
-    }
-
-    fn finish(&mut self, state: &mut RolloutState, phase: &str) -> Result<()> {
-        state.mark(phase);
-        self.host.save_state(state)
     }
 }
 
@@ -371,13 +260,6 @@ pub fn run<H: Host, W: Write>(host: &mut H, opts: &RolloutOptions, out: &mut W) 
         return Ok(outcome);
     }
 
-    let mut state = match run.host.load_state() {
-        Some(state) if state.matches(&pair) => state,
-        _ => RolloutState::for_pair(&pair, &deployed),
-    };
-    state.mark("plan");
-    run.host.save_state(&state)?;
-
     // ---- 2. build-cli ----
     let binary = match run.host.built_cli(&pair) {
         Some(binary) => {
@@ -398,7 +280,6 @@ pub fn run<H: Host, W: Write>(host: &mut H, opts: &RolloutOptions, out: &mut W) 
             binary
         }
     };
-    run.finish(&mut state, "build-cli")?;
 
     // ---- 3. package-desktop ----
     let app = if !opts.desktop {
@@ -425,105 +306,13 @@ pub fn run<H: Host, W: Write>(host: &mut H, opts: &RolloutOptions, out: &mut W) 
         )?;
         Some(app)
     };
-    run.finish(&mut state, "package-desktop")?;
-
-    // ---- 4. stage ----
-    let label = pair.label().to_string();
-    let staged = deployed.cli_current.as_deref() == Some(label.as_str())
-        && deployed.cli_shared.as_deref() == Some(label.as_str());
-    if staged {
-        run.say(
-            "stage",
-            "skip",
-            format!("current and shared-server already {label}"),
-        )?;
-    } else {
-        run.host.stage(&label, &binary)?;
-        run.say(
-            "stage",
-            "ok",
-            format!(
-                "versions/{label}, shared-server {} -> {label}, current {} -> {label} (no reload)",
-                opt(&deployed.cli_shared),
-                opt(&deployed.cli_current)
-            ),
-        )?;
-    }
-    run.finish(&mut state, "stage")?;
-
-    // ---- 5. drain ----
-    drain(&mut run)?;
-    run.finish(&mut state, "drain")?;
-
-    // ---- 6. reload ----
-    if let Err(error) = reload(&mut run, &label) {
-        let now = run.host.deployed();
-        if now.daemon_label.as_deref() != Some(label.as_str()) {
-            return Err(error);
-        }
-        run.say(
-            "reload",
-            "warn",
-            format!(
-                "{error:#}; daemon pid {} demonstrably runs {label}, continuing to desktop-swap",
-                now.daemon_pid.unwrap_or(0)
-            ),
-        )?;
-    }
-    run.finish(&mut state, "reload")?;
-
-    // ---- 7. desktop-swap ----
-    match app.as_deref() {
-        None => run.say("desktop-swap", "skip", "--no-desktop")?,
-        Some(app) => {
-            let now = run.host.deployed();
-            if desktop_matches(&now, &pair) {
-                run.say(
-                    "desktop-swap",
-                    "skip",
-                    format!(
-                        "installed bundle already desktop {} + jcode {label}",
-                        pair.desktop_short()
-                    ),
-                )?;
-            } else {
-                run.host.swap_desktop(app)?;
-                state.desktop_backed_up = true;
-                run.host.save_state(&state)?;
-                let now = run.host.deployed();
-                run.say(
-                    "desktop-swap",
-                    "ok",
-                    format!(
-                        "{} {} with jcode {}, bridges: {}",
-                        layout.app.display(),
-                        opt(&now.desktop_version),
-                        opt(&now.desktop_cli),
-                        now.bridge_paths.join(", ")
-                    ),
-                )?;
-            }
-        }
-    }
-    run.finish(&mut state, "desktop-swap")?;
-
-    // ---- 8. verify ----
-    let failures = verify(run.host, &pair, opts.desktop, &layout);
-    if failures.is_empty() {
-        run.say("verify", "ok", format!("daemon, current and bundle on {label}; bridge answers search_sessions; Sparkle key present"))?;
-        run.finish(&mut state, "verify")?;
-        return Ok(Outcome::Deployed);
-    }
-    let reason = failures.join("; ");
-    run.say("verify", "FAIL", &reason)?;
-    let rollback = roll_back(run.host, &state, opts.desktop);
-    let detail = match &rollback {
-        Ok(detail) => format!("rolled back: {detail}"),
-        Err(error) => format!("rollback FAILED: {error:#}"),
-    };
-    writeln!(run.out, "{}", status_line("verify", "back", &detail))?;
-    rollback?;
-    Ok(Outcome::RolledBack(reason))
+    let id = run.host.submit(&pair, &binary, app.as_deref(), opts)?;
+    run.say(
+        "stage",
+        "sent",
+        format!("daemon owns rollout {id}; jcode rollout --status; caller may exit"),
+    )?;
+    Ok(Outcome::Submitted(id))
 }
 
 fn dry_run_plan<H: Host, W: Write>(
@@ -585,7 +374,7 @@ fn dry_run_plan<H: Host, W: Write>(
         "reload",
         "plan",
         format!(
-            "jcode server reload; daemon pid {} runs {} now, must run {label}; workers live now: {}",
+            "daemon journal pins target and execs; daemon pid {} runs {} now, must run {label}; workers live now: {}",
             deployed.daemon_pid.map_or("?".into(), |pid| pid.to_string()),
             opt(&deployed.daemon_label),
             names(&running_workers(&*run.host)?)
@@ -596,11 +385,11 @@ fn dry_run_plan<H: Host, W: Write>(
             "desktop-swap",
             "plan",
             format!(
-                "quit {} ({}, jcode {}); back up to {}; kill its bridges only; ditto; open",
+                "quit {} ({}, jcode {}); backup beside {}; kill its bridges only; copy next to app, atomic exchange; retain backup; relaunch",
                 layout.app.display(),
                 opt(&deployed.desktop_version),
                 opt(&deployed.desktop_cli),
-                layout.app_backup.display()
+                layout.app.parent().unwrap_or(&layout.app).display()
             ),
         )?;
     } else {
@@ -612,284 +401,6 @@ fn dry_run_plan<H: Host, W: Write>(
         "daemon + current + bundle report the pair; bridge answers search_sessions; SUPublicEDKey set; rollback on failure",
     )?;
     Ok(Outcome::Planned)
-}
-
-fn drain<H: Host, W: Write>(run: &mut Run<'_, H, W>) -> Result<()> {
-    let mut waited = Duration::ZERO;
-    let mut last: Vec<String> = Vec::new();
-    loop {
-        let busy = run.host.busy_sessions()?;
-        if busy.is_empty() {
-            let detail = if waited.is_zero() {
-                "nothing mid-turn".to_string()
-            } else {
-                format!("idle after {}s", waited.as_secs())
-            };
-            return run.say("drain", "ok", detail);
-        }
-        if run.opts.now {
-            return run.say(
-                "drain",
-                "skip",
-                format!(
-                    "--now with {} mid-turn ({}); reload recovery resumes them",
-                    busy.len(),
-                    names(&busy)
-                ),
-            );
-        }
-        if waited >= run.opts.drain_timeout {
-            run.say(
-                "drain",
-                "FAIL",
-                format!(
-                    "still mid-turn after {}s: {}",
-                    waited.as_secs(),
-                    names(&busy)
-                ),
-            )?;
-            bail!(
-                "rollout refused to reload: {} still mid-turn after {}s; wait, raise --drain-timeout, or pass --now",
-                names(&busy),
-                waited.as_secs()
-            );
-        }
-        if busy != last {
-            run.say(
-                "drain",
-                "wait",
-                format!(
-                    "{} ({}s/{}s)",
-                    names(&busy),
-                    waited.as_secs(),
-                    run.opts.drain_timeout.as_secs()
-                ),
-            )?;
-            last = busy;
-        }
-        run.host.sleep(DRAIN_POLL);
-        waited += DRAIN_POLL;
-    }
-}
-
-fn reload<H: Host, W: Write>(run: &mut Run<'_, H, W>, label: &str) -> Result<()> {
-    let before = run.host.deployed();
-    if before.daemon_label.as_deref() == Some(label) {
-        return run.say(
-            "reload",
-            "skip",
-            format!(
-                "daemon pid {} already runs {label}",
-                before.daemon_pid.unwrap_or(0)
-            ),
-        );
-    }
-    let workers = running_workers(&*run.host)?;
-    let reload_error = run.host.reload(label).err();
-    let mut now = run.host.deployed();
-    for _ in 0..RELOAD_SETTLE_ATTEMPTS {
-        if now.daemon_label.as_deref() == Some(label) {
-            break;
-        }
-        run.host.sleep(RELOAD_SETTLE);
-        now = run.host.deployed();
-    }
-    if now.daemon_label.as_deref() != Some(label) {
-        run.say(
-            "reload",
-            "FAIL",
-            format!(
-                "socket daemon runs {}, expected {label}",
-                opt(&now.daemon_label)
-            ),
-        )?;
-        bail!(
-            "reload did not take: daemon runs {}{}",
-            opt(&now.daemon_label),
-            reload_error
-                .as_ref()
-                .map_or(String::new(), |error| format!("; {error:#}"))
-        );
-    }
-    if let Some(error) = reload_error {
-        run.say(
-            "reload",
-            "warn",
-            format!("{error:#}; daemon demonstrably runs {label}"),
-        )?;
-    }
-    // Reload recovery restores interrupted workers on its own. Give it a
-    // moment, then resume any it left stopped, crashed or missing.
-    let mut missing = Vec::new();
-    for _ in 0..RELOAD_SETTLE_ATTEMPTS {
-        missing = lost_workers(&*run.host, &workers)?;
-        if missing.is_empty() {
-            break;
-        }
-        run.host.sleep(RELOAD_SETTLE);
-    }
-    let mut resumed = Vec::new();
-    for id in &missing {
-        run.host.resume_worker(id)?;
-        resumed.push(id.clone());
-    }
-    run.say(
-        "reload",
-        "ok",
-        format!(
-            "daemon pid {} runs {label}; workers restored {}/{}{}",
-            now.daemon_pid.map_or("?".into(), |pid| pid.to_string()),
-            workers.len() - resumed.len(),
-            workers.len(),
-            if resumed.is_empty() {
-                String::new()
-            } else {
-                format!(", resumed: {}", names(&resumed))
-            }
-        ),
-    )
-}
-
-fn desktop_matches(deployed: &Deployed, pair: &Pair) -> bool {
-    deployed
-        .desktop_sha
-        .as_deref()
-        .is_some_and(|sha| same_commit(sha, &pair.desktop))
-        && deployed
-            .desktop_cli
-            .as_deref()
-            .is_some_and(|sha| same_commit(sha, &pair.cli))
-}
-
-/// Every check that failed, in words. Empty means the pair is live.
-pub fn verify<H: Host>(host: &H, pair: &Pair, desktop: bool, layout: &Layout) -> Vec<String> {
-    let label = pair.label();
-    let now = host.deployed();
-    let mut failures = Vec::new();
-    if now.daemon_label.as_deref() != Some(label) {
-        failures.push(format!(
-            "daemon runs {}, not {label}",
-            opt(&now.daemon_label)
-        ));
-    }
-    if now.cli_current.as_deref() != Some(label) {
-        failures.push(format!(
-            "current-version is {}, not {label}",
-            opt(&now.cli_current)
-        ));
-    }
-    if now.cli_shared.as_deref() != Some(label) {
-        failures.push(format!(
-            "shared-server is {}, not {label}",
-            opt(&now.cli_shared)
-        ));
-    }
-    if desktop {
-        if !desktop_matches(&now, pair) {
-            failures.push(format!(
-                "bundle is desktop {} + jcode {}, not {} + {label}",
-                opt(&now.desktop_sha),
-                opt(&now.desktop_cli),
-                pair.desktop_short()
-            ));
-        }
-        if !now.sparkle_key {
-            failures.push("bundle has no SUPublicEDKey".into());
-        }
-        let bundle = layout.app.display().to_string();
-        if !now
-            .bridge_paths
-            .iter()
-            .any(|path| path.starts_with(&bundle))
-        {
-            failures.push(format!("no api-bridge running from {bundle}"));
-        }
-        if let Some(stale) = now.bridge_paths.iter().find(|path| {
-            !path.starts_with(&bundle)
-                && Path::new(path.as_str()).components().any(|part| {
-                    let part = part.as_os_str().to_string_lossy();
-                    part.ends_with(".app") || part.contains(".app.")
-                })
-        }) {
-            failures.push(format!("stale bundle bridge still running: {stale}"));
-        }
-    }
-    if let Err(error) = host.bridge_search(desktop) {
-        failures.push(format!("bridge search_sessions failed: {error:#}"));
-    }
-    failures
-}
-
-fn roll_back<H: Host>(host: &mut H, state: &RolloutState, desktop: bool) -> Result<String> {
-    let mut done = Vec::new();
-    match (state.prev_current.as_deref(), state.prev_shared.as_deref()) {
-        (Some(current), Some(shared)) => {
-            if current != shared {
-                let now = host.deployed();
-                bail!(
-                    "previous current {current} differs from shared {shared}; daemon {}, current {}, shared {}; Desktop not restored",
-                    opt(&now.daemon_label),
-                    opt(&now.cli_current),
-                    opt(&now.cli_shared)
-                );
-            }
-            if let Err(error) = host.rollback_daemon(shared) {
-                let now = host.deployed();
-                bail!(
-                    "rollback could not prove previous daemon {shared}: {error:#}; daemon {}, current {}, shared {}; Desktop not restored",
-                    opt(&now.daemon_label),
-                    opt(&now.cli_current),
-                    opt(&now.cli_shared)
-                );
-            }
-            let mut now = host.deployed();
-            for _ in 0..RELOAD_SETTLE_ATTEMPTS {
-                if now.daemon_label.as_deref() == Some(shared) {
-                    break;
-                }
-                host.sleep(RELOAD_SETTLE);
-                now = host.deployed();
-            }
-            if now.daemon_label.as_deref() != Some(shared) {
-                bail!(
-                    "rollback could not prove previous daemon {shared}: daemon {}, current {}, shared {}; Desktop not restored",
-                    opt(&now.daemon_label),
-                    opt(&now.cli_current),
-                    opt(&now.cli_shared)
-                );
-            }
-            if let Err(error) = host.restore_cli_links(current, shared) {
-                let now = host.deployed();
-                bail!(
-                    "rollback could not restore links: {error:#}; daemon {}, current {}, shared {}; Desktop not restored",
-                    opt(&now.daemon_label),
-                    opt(&now.cli_current),
-                    opt(&now.cli_shared)
-                );
-            }
-            let now = host.deployed();
-            if now.daemon_label.as_deref() != Some(shared)
-                || now.cli_current.as_deref() != Some(current)
-                || now.cli_shared.as_deref() != Some(shared)
-            {
-                bail!(
-                    "rollback could not prove previous daemon {shared}: daemon {}, current {}, shared {}; Desktop not restored",
-                    opt(&now.daemon_label),
-                    opt(&now.cli_current),
-                    opt(&now.cli_shared)
-                );
-            }
-            done.push(format!(
-                "jcode current {current}, shared-server {shared}, daemon verified"
-            ));
-        }
-        _ => bail!("no previous jcode version recorded; cannot safely restore Desktop"),
-    }
-    if desktop && state.desktop_backed_up {
-        host.rollback_desktop()?;
-        done.push("Desktop restored from backup".into());
-    }
-    Ok(done.join("; "))
 }
 
 /// Parse `Jcode Desktop v0.7.0 (e97162a)` into `(version, sha)`.

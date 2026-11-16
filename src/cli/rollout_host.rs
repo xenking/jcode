@@ -1,19 +1,25 @@
 //! The real machine behind `jcode rollout`: git, cargo, the package script,
 //! `~/.jcode/builds`, the daemon socket and `/Applications/Jcode.app`.
 
-use super::rollout::{Deployed, Host, Layout, Pair, Repo, RolloutState, version_label_of};
+use super::rollout::{Deployed, Host, Layout, Pair, Repo, version_label_of};
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-const APP: &str = "/Applications/Jcode.app";
 const TARGET: &str = "aarch64-apple-darwin";
 const DEVELOPER_DIR: &str = "/Applications/Xcode.app/Contents/Developer";
 
 /// `jcode rollout` entry point: map the flags, run on this machine, and
 /// fail the command when verify rolled the pair back.
 pub(crate) fn run_cli(args: super::args::RolloutArgs) -> Result<()> {
+    if args.status {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&crate::server::rollout::status()?)?
+        );
+        return Ok(());
+    }
     let options = super::rollout::RolloutOptions {
         dry_run: args.dry_run,
         now: args.now,
@@ -23,12 +29,9 @@ pub(crate) fn run_cli(args: super::args::RolloutArgs) -> Result<()> {
         desktop: !args.no_desktop,
     };
     let mut host = MacHost::new()?;
-    let outcome = tokio::task::block_in_place(|| {
+    tokio::task::block_in_place(|| {
         super::rollout::run(&mut host, &options, &mut std::io::stdout())
     })?;
-    if let super::rollout::Outcome::RolledBack(reason) = outcome {
-        bail!("rollout verify failed and was rolled back: {reason}");
-    }
     Ok(())
 }
 
@@ -38,7 +41,6 @@ pub struct MacHost {
     /// The session running this command, if any: never waited for.
     own_session: Option<String>,
     daemon_socket: PathBuf,
-    bridge_socket: PathBuf,
 }
 
 impl MacHost {
@@ -54,9 +56,6 @@ impl MacHost {
             .unwrap_or_else(|| jcode_home.join("shared-build/target"));
         let desktop_worktree = worktrees.join("jcode-desktop");
         let runtime_dir = rollout_runtime_dir()?;
-        let bridge_socket = std::env::var_os("JCODE_API_SOCKET")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| runtime_dir.join("jcode-api.sock"));
         let daemon_socket = std::env::var_os("JCODE_SOCKET")
             .map(PathBuf::from)
             .unwrap_or_else(|| runtime_dir.join("jcode.sock"));
@@ -71,14 +70,12 @@ impl MacHost {
                 dist_dir: desktop_worktree.join("dist/macos"),
                 desktop_worktree,
                 target_dir,
-                app: PathBuf::from(APP),
-                app_backup: jcode_home.join("migration/Jcode.app.prev"),
+                app: crate::server::rollout::app_path(),
                 builds: crate::build::builds_dir()?,
             },
             jcode_home,
             own_session: std::env::var("JCODE_SESSION_ID").ok(),
             daemon_socket,
-            bridge_socket,
         })
     }
 
@@ -94,10 +91,6 @@ impl MacHost {
             Repo::Jcode => &self.layout.jcode_worktree,
             Repo::Desktop => &self.layout.desktop_worktree,
         }
-    }
-
-    fn state_path(&self) -> PathBuf {
-        self.jcode_home.join("rollout/state.json")
     }
 
     fn built_binary(&self) -> PathBuf {
@@ -157,16 +150,6 @@ impl MacHost {
         command
     }
 
-    fn jcode(&self) -> Command {
-        let mut command =
-            Command::new(std::env::current_exe().unwrap_or_else(|_| PathBuf::from("jcode")));
-        command.env("JCODE_SOCKET", &self.daemon_socket);
-        if let Some(dir) = self.daemon_socket.parent() {
-            command.env("JCODE_RUNTIME_DIR", dir);
-        }
-        command
-    }
-
     fn daemon(&self) -> Option<(u32, Option<String>)> {
         let identity = daemon_identity(&self.daemon_socket)?;
         let label = if valid_git_hash(&identity.git_hash) {
@@ -175,76 +158,6 @@ impl MacHost {
             installed_daemon_label(identity.pid, &identity.binary_path, &self.layout.builds)
         };
         Some((identity.pid, label))
-    }
-
-    fn bridge_paths(&self) -> Vec<String> {
-        let Ok(listing) = output(Command::new("ps").args(["-Ao", "pid=,command="])) else {
-            return Vec::new();
-        };
-        let (Ok(home), Ok(runtime)) = (system_user_home(), user_runtime_dir()) else {
-            return Vec::new();
-        };
-        listing
-            .lines()
-            .filter(|line| line.contains("api-bridge"))
-            .filter_map(|line| line.split_whitespace().next()?.parse::<u32>().ok())
-            .filter(|pid| process_has_user_environment(*pid, &home, &runtime))
-            .filter_map(executable_of)
-            .map(|exe| exe.display().to_string())
-            .collect()
-    }
-
-    /// Bridges started from a bundle other than the one being installed, or
-    /// from the installed bundle before it is replaced.
-    fn kill_bundle_bridges(&self) {
-        let Ok(listing) = output(Command::new("ps").args(["-Ao", "pid=,command="])) else {
-            return;
-        };
-        let (Ok(home), Ok(runtime)) = (system_user_home(), user_runtime_dir()) else {
-            return;
-        };
-        for line in listing.lines().filter(|line| line.contains("api-bridge")) {
-            let Some(pid) = line
-                .split_whitespace()
-                .next()
-                .and_then(|pid| pid.parse::<i32>().ok())
-            else {
-                continue;
-            };
-            let from_bundle = executable_of(pid as u32)
-                .is_some_and(|exe| exe.starts_with(&self.layout.app))
-                && process_has_user_environment(pid as u32, &home, &runtime);
-            if from_bundle {
-                unsafe {
-                    libc::kill(pid, libc::SIGTERM);
-                }
-            }
-        }
-    }
-
-    fn desktop_running(&self) -> bool {
-        Command::new("pgrep")
-            .arg("-f")
-            .arg(self.layout.app.join("Contents/MacOS/jcode-desktop"))
-            .stdout(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-    }
-
-    fn wait_for(
-        &self,
-        what: &str,
-        timeout: Duration,
-        mut done: impl FnMut() -> bool,
-    ) -> Result<()> {
-        let deadline = std::time::Instant::now() + timeout;
-        while !done() {
-            if std::time::Instant::now() >= deadline {
-                bail!("timed out after {}s waiting for {what}", timeout.as_secs());
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
-        Ok(())
     }
 }
 
@@ -302,13 +215,6 @@ impl Host for MacHost {
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
         .and_then(|json| json["git_hash"].as_str().map(str::to_string));
-        let sparkle_key = output(
-            Command::new("defaults")
-                .arg("read")
-                .arg(self.layout.app.join("Contents/Info"))
-                .arg("SUPublicEDKey"),
-        )
-        .is_ok_and(|key| !key.trim().is_empty());
         let channel_label = |channel: &str| {
             let binary = std::fs::canonicalize(
                 self.layout
@@ -328,8 +234,6 @@ impl Host for MacHost {
             desktop_version: desktop.as_ref().map(|(version, _)| version.clone()),
             desktop_sha: desktop.map(|(_, sha)| sha),
             desktop_cli,
-            sparkle_key,
-            bridge_paths: self.bridge_paths(),
         }
     }
 
@@ -435,154 +339,75 @@ impl Host for MacHost {
         })
     }
 
-    fn stage(&mut self, label: &str, binary: &Path) -> Result<()> {
-        let installed = crate::build::install_binary_at_version(binary, label)?;
-        let reported = output(Command::new(&installed).args(["version", "--json"]))?;
-        if !reported.contains(label) {
-            bail!(
-                "{} does not report {label} after install",
-                installed.display()
-            );
-        }
-        crate::build::promote_version_to_shared_server(label)?;
-        // Promotion only pins the daemon channel; it never reloads.
-        crate::build::update_current_symlink(label)?;
-        Ok(())
-    }
-
-    fn reload(&mut self, label: &str) -> Result<()> {
-        if self
-            .daemon()
-            .is_some_and(|(_, running)| running.as_deref() == Some(label))
-        {
-            return Ok(());
-        }
-        run(self.jcode().args(["server", "reload", "--json"]))
-    }
-
-    fn resume_worker(&mut self, session_id: &str) -> Result<()> {
-        let client = jcode_harness_api_server_client(&self.bridge_socket)?;
-        client
-            .attach_session(session_id)
-            .with_context(|| format!("attach {session_id}"))?;
-        client.send_message(
-            session_id,
-            "The server was reloaded while you were working. Continue exactly where you left off and do not ask the user what to do next.",
-            Vec::new(),
-            Some(Duration::from_secs(10)),
-        )?;
-        Ok(())
-    }
-
-    fn swap_desktop(&mut self, app: &Path) -> Result<()> {
-        if self.desktop_running() {
-            run(Command::new("osascript").args(["-e", "quit app \"Jcode\""]))?;
-            self.wait_for("Jcode to quit", Duration::from_secs(60), || {
-                !self.desktop_running()
-            })?;
-        }
-        // Only the installed bundle's bridges: a CLI-started bridge serves
-        // other clients and the new bundle starts its own.
-        self.kill_bundle_bridges();
-        let backup = &self.layout.app_backup;
-        if self.layout.app.exists() {
-            if backup.exists() {
-                std::fs::remove_dir_all(backup)?;
-            }
-            std::fs::create_dir_all(backup.parent().unwrap_or(backup))?;
-            run(Command::new("ditto").arg(&self.layout.app).arg(backup))?;
-            std::fs::remove_dir_all(&self.layout.app)?;
-        }
-        run(Command::new("ditto").arg(app).arg(&self.layout.app))?;
-        run(Command::new("open").arg(&self.layout.app))?;
-        let home = system_user_home()?;
-        let runtime = user_runtime_dir()?;
-        self.wait_for(
-            "the new bundle's Desktop-owned api-bridge in the user runtime",
-            Duration::from_secs(60),
-            || bundle_bridge_socket(&self.layout.app, &home, &runtime).is_some(),
-        )
-    }
-
-    fn bridge_search(&self, desktop: bool) -> Result<()> {
-        let socket = if desktop {
-            let home = system_user_home()?;
-            let runtime = user_runtime_dir()?;
-            let deadline = std::time::Instant::now() + Duration::from_secs(30);
-            loop {
-                if let Some(socket) = bundle_bridge_socket(&self.layout.app, &home, &runtime) {
-                    break socket;
-                }
-                if std::time::Instant::now() >= deadline {
-                    bail!(
-                        "no Desktop-owned api-bridge with HOME {} and runtime {} after 30s",
-                        home.display(),
-                        runtime.display()
-                    );
-                }
-                std::thread::sleep(Duration::from_millis(500));
-            }
-        } else {
-            self.bridge_socket.clone()
+    fn submit(
+        &mut self,
+        pair: &Pair,
+        binary: &Path,
+        bundle: Option<&Path>,
+        options: &super::rollout::RolloutOptions,
+    ) -> Result<String> {
+        let intent = crate::server::rollout::Intent {
+            cli: pair.label().to_string(),
+            desktop: pair.desktop.clone(),
+            binary: binary.to_path_buf(),
+            bundle: bundle.map(Path::to_path_buf),
+            app: self.layout.app.clone(),
+            now: options.now,
+            drain_timeout_secs: options.drain_timeout.as_secs(),
+            triggering_session: self.own_session.clone(),
         };
-        jcode_harness_api_server_client(&socket)?
-            .search_sessions("rollout", Some(1))
-            .map(|_| ())
-            .map_err(Into::into)
+        let filename = self
+            .daemon_socket
+            .file_name()
+            .and_then(|s| s.to_str())
+            .context("invalid daemon socket")?;
+        let socket = self
+            .daemon_socket
+            .with_file_name(filename.replace(".sock", "-debug.sock"));
+        submit_intent(&socket, &intent)
     }
+}
 
-    fn rollback_daemon(&mut self, shared: &str) -> Result<()> {
-        // The daemon's reload protocol does not accept a target binary and its
-        // downgrade guard can re-exec the newer image even with --force. Never
-        // move either channel until the socket owner is already proven old.
-        if self.deployed().daemon_label.as_deref() != Some(shared) {
-            bail!("safe targeted daemon downgrade is unavailable; links were not changed");
-        }
-        Ok(())
+#[cfg(unix)]
+fn submit_intent(socket: &Path, intent: &crate::server::rollout::Intent) -> Result<String> {
+    use std::io::{BufRead, BufReader, Write};
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).with_context(|| {
+        format!(
+            "daemon-owned rollout requires a running compatible daemon at {}",
+            socket.display()
+        )
+    })?;
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(30)))?;
+    let command = format!("server:rollout_submit:{}", serde_json::to_string(intent)?);
+    writeln!(
+        stream,
+        "{}",
+        serde_json::json!({"type": "debug_command", "id": 1, "command": command})
+    )?;
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line)?;
+    let event: serde_json::Value = serde_json::from_str(&line)?;
+    if event["type"] != "debug_response" || event["ok"] != true {
+        bail!(
+            "rollout intent rejected: {}",
+            event["output"]
+                .as_str()
+                .or_else(|| event["message"].as_str())
+                .unwrap_or("invalid response")
+        );
     }
+    let journal: crate::server::rollout::Journal = serde_json::from_str(
+        event["output"]
+            .as_str()
+            .context("missing rollout journal")?,
+    )?;
+    Ok(journal.id)
+}
 
-    fn restore_cli_links(&mut self, current: &str, shared: &str) -> Result<()> {
-        crate::build::update_current_symlink(current)?;
-        crate::build::update_shared_server_symlink(shared)?;
-        Ok(())
-    }
-
-    fn rollback_desktop(&mut self) -> Result<()> {
-        let backup = self.layout.app_backup.clone();
-        if !backup.exists() {
-            bail!("no Desktop backup at {}", backup.display());
-        }
-        if self.desktop_running() {
-            run(Command::new("osascript").args(["-e", "quit app \"Jcode\""]))?;
-            self.wait_for("Jcode to quit", Duration::from_secs(60), || {
-                !self.desktop_running()
-            })?;
-        }
-        self.kill_bundle_bridges();
-        if self.layout.app.exists() {
-            std::fs::remove_dir_all(&self.layout.app)?;
-        }
-        run(Command::new("ditto").arg(&backup).arg(&self.layout.app))?;
-        run(Command::new("open").arg(&self.layout.app))
-    }
-
-    fn sleep(&mut self, duration: Duration) {
-        std::thread::sleep(duration);
-    }
-
-    fn load_state(&self) -> Option<RolloutState> {
-        let text = std::fs::read_to_string(self.state_path()).ok()?;
-        serde_json::from_str(&text).ok()
-    }
-
-    fn save_state(&mut self, state: &RolloutState) -> Result<()> {
-        let path = self.state_path();
-        std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(state)?)?;
-        std::fs::rename(tmp, path)?;
-        Ok(())
-    }
+#[cfg(not(unix))]
+fn submit_intent(_socket: &Path, _intent: &crate::server::rollout::Intent) -> Result<String> {
+    bail!("daemon-owned rollout requires Unix")
 }
 
 fn valid_git_hash(hash: &str) -> bool {
@@ -644,6 +469,9 @@ fn daemon_identity(socket: &Path) -> Option<crate::protocol::DaemonIdentity> {
         pid,
         binary_path: executable?,
         git_hash: String::new(),
+        version_label: None,
+        reload_id: None,
+        generation: 0,
     })
 }
 
@@ -843,205 +671,6 @@ fn daemon_members(
     bail!("rollout requires Unix sockets")
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct BridgeCandidate {
-    pub executable: PathBuf,
-    pub parent_executable: PathBuf,
-    pub home: PathBuf,
-    pub runtime: PathBuf,
-    pub socket: PathBuf,
-}
-
-fn same_path(a: &Path, b: &Path) -> bool {
-    a == b
-        || std::fs::canonicalize(a)
-            .ok()
-            .zip(std::fs::canonicalize(b).ok())
-            .is_some_and(|(a, b)| a == b)
-}
-
-pub(super) fn select_bundle_bridge(
-    candidates: &[BridgeCandidate],
-    app: &Path,
-    home: &Path,
-    runtime: &Path,
-) -> Option<PathBuf> {
-    let executable = app.join("Contents/MacOS/jcode");
-    let parent = app.join("Contents/MacOS/jcode-desktop");
-    let socket = runtime.join("jcode-api.sock");
-    candidates
-        .iter()
-        .find(|c| {
-            same_path(&c.executable, &executable)
-                && same_path(&c.parent_executable, &parent)
-                && same_path(&c.home, home)
-                && same_path(&c.runtime, runtime)
-                && same_path(&c.socket, &socket)
-        })
-        .map(|c| c.socket.clone())
-}
-
-fn process_has_user_environment(pid: u32, home: &Path, runtime: &Path) -> bool {
-    let Some(environment) = process_environment(pid) else {
-        return false;
-    };
-    let has_env = |key: &str, value: &Path| {
-        let prefix = format!("{key}=");
-        environment
-            .iter()
-            .filter_map(|entry| entry.strip_prefix(&prefix))
-            .any(|actual| same_path(Path::new(actual), value))
-    };
-    has_env("HOME", home) && has_env("JCODE_RUNTIME_DIR", runtime)
-}
-
-#[cfg(target_os = "macos")]
-fn process_environment(pid: u32) -> Option<Vec<String>> {
-    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
-    let mut size: libc::size_t = 0;
-    if unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            3,
-            std::ptr::null_mut(),
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    } != 0
-        || size < 4
-    {
-        return None;
-    }
-    let mut bytes = vec![0u8; size];
-    if unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            3,
-            bytes.as_mut_ptr().cast(),
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    } != 0
-    {
-        return None;
-    }
-    bytes.truncate(size);
-    let argc = i32::from_ne_bytes(bytes.get(..4)?.try_into().ok()?);
-    if argc < 0 {
-        return None;
-    }
-    let mut offset = 4 + bytes.get(4..)?.iter().position(|b| *b == 0)? + 1;
-    while bytes.get(offset) == Some(&0) {
-        offset += 1;
-    }
-    for _ in 0..argc {
-        offset += bytes.get(offset..)?.iter().position(|b| *b == 0)? + 1;
-    }
-    Some(
-        bytes
-            .get(offset..)?
-            .split(|b| *b == 0)
-            .filter_map(|entry| std::str::from_utf8(entry).ok().map(str::to_owned))
-            .collect(),
-    )
-}
-
-#[cfg(not(target_os = "macos"))]
-fn process_environment(pid: u32) -> Option<Vec<String>> {
-    let bytes = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
-    Some(
-        bytes
-            .split(|b| *b == 0)
-            .filter_map(|entry| std::str::from_utf8(entry).ok().map(str::to_owned))
-            .collect(),
-    )
-}
-
-fn bundle_bridge_socket(app: &Path, home: &Path, runtime: &Path) -> Option<PathBuf> {
-    let listing = output(Command::new("ps").args(["-Ao", "pid=,ppid=,command="])).ok()?;
-    let mut candidates = Vec::new();
-    for line in listing.lines() {
-        let mut parts = line.split_whitespace();
-        let Some(pid) = parts.next().and_then(|v| v.parse::<u32>().ok()) else {
-            continue;
-        };
-        let Some(ppid) = parts.next().and_then(|v| v.parse::<u32>().ok()) else {
-            continue;
-        };
-        let Some(_argv0) = parts.next() else { continue };
-        if parts.next() != Some("api-bridge") {
-            continue;
-        }
-        let Some(executable) = executable_of(pid) else {
-            continue;
-        };
-        let Some(parent_executable) = executable_of(ppid) else {
-            continue;
-        };
-        if !same_path(&executable, &app.join("Contents/MacOS/jcode"))
-            || !same_path(
-                &parent_executable,
-                &app.join("Contents/MacOS/jcode-desktop"),
-            )
-        {
-            continue;
-        }
-        if !process_has_user_environment(pid, home, runtime) {
-            continue;
-        }
-        let Ok(sockets) =
-            output(Command::new("lsof").args(["-a", "-p", &pid.to_string(), "-U", "-Fn"]))
-        else {
-            continue;
-        };
-        for socket in sockets
-            .lines()
-            .filter_map(|line| line.strip_prefix('n'))
-            .map(PathBuf::from)
-        {
-            candidates.push(BridgeCandidate {
-                executable: executable.clone(),
-                parent_executable: parent_executable.clone(),
-                home: home.into(),
-                runtime: runtime.into(),
-                socket,
-            });
-        }
-    }
-    select_bundle_bridge(&candidates, app, home, runtime)
-}
-
-#[cfg(unix)]
-fn system_user_home() -> Result<PathBuf> {
-    use std::ffi::CStr;
-    use std::os::unix::ffi::OsStrExt;
-    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
-    let mut buffer = vec![0u8; 65536];
-    let mut result = std::ptr::null_mut();
-    let rc = unsafe {
-        libc::getpwuid_r(
-            libc::getuid(),
-            &mut pwd,
-            buffer.as_mut_ptr().cast(),
-            buffer.len(),
-            &mut result,
-        )
-    };
-    if rc != 0 || result.is_null() || pwd.pw_dir.is_null() {
-        bail!("cannot determine user's home directory");
-    }
-    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(
-        unsafe { CStr::from_ptr(pwd.pw_dir) }.to_bytes(),
-    )))
-}
-
-#[cfg(not(unix))]
-fn system_user_home() -> Result<PathBuf> {
-    dirs::home_dir().context("no home directory")
-}
-
 fn rollout_runtime_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("JCODE_RUNTIME_DIR") {
         return Ok(PathBuf::from(dir));
@@ -1075,17 +704,6 @@ fn user_runtime_dir() -> Result<PathBuf> {
     {
         Ok(crate::storage::runtime_dir())
     }
-}
-
-fn jcode_harness_api_server_client(socket: &Path) -> Result<jcode_sdk::JcodeClient> {
-    jcode_sdk::JcodeClient::connect(jcode_sdk::ConnectOptions {
-        socket_path: Some(socket.to_path_buf()),
-        ensure_runtime: false,
-        request_timeout: Some(Duration::from_secs(20)),
-        client_name: "jcode-rollout".into(),
-        ..jcode_sdk::ConnectOptions::default()
-    })
-    .map_err(Into::into)
 }
 
 fn git(dir: &Path) -> Command {
@@ -1163,6 +781,8 @@ mod tests {
         run(git(&repo).args(["add", "."])).unwrap();
         run(git(&repo).args([
             "-c",
+            "commit.gpgsign=false",
+            "-c",
             "user.name=Test",
             "-c",
             "user.email=test@example.com",
@@ -1190,84 +810,34 @@ mod tests {
                 target_dir: root.join("target"),
                 dist_dir: root.join("dist"),
                 app: root.join("app"),
-                app_backup: root.join("backup"),
                 builds: root.join("builds"),
             },
             jcode_home: root.to_owned(),
             own_session: None,
             daemon_socket: root.join("daemon"),
-            bridge_socket: root.join("bridge"),
         };
         (dir, host, sha)
     }
 
     #[test]
-    fn isolated_desktop_bridge_discovery_uses_real_processes_and_socket() {
-        let dir = tempfile::tempdir().unwrap();
-        let app = dir.path().join("Jcode.app");
-        let macos = app.join("Contents/MacOS");
-        let runtime = dir.path().join("runtime");
-        let home = dir.path().join("home with space");
-        std::fs::create_dir_all(&macos).unwrap();
-        std::fs::create_dir_all(&runtime).unwrap();
-        std::fs::create_dir_all(&home).unwrap();
-        let source = dir.path().join("fixture.c");
-        std::fs::write(&source, r#"
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <sys/wait.h>
-#include <unistd.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-int main(int argc, char **argv) {
-    if (argc == 2 && strcmp(argv[1], "api-bridge") == 0) {
-        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-        struct sockaddr_un addr = {0}; addr.sun_family = AF_UNIX;
-        snprintf(addr.sun_path, sizeof(addr.sun_path), "%s/jcode-api.sock", getenv("JCODE_RUNTIME_DIR"));
-        if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) || listen(fd, 1)) return 2;
-        for (;;) pause();
-    }
-    pid_t child = fork();
-    if (child == 0) execl(getenv("BRIDGE_EXE"), getenv("BRIDGE_EXE"), "api-bridge", NULL);
-    FILE *file = fopen(getenv("BRIDGE_PID"), "w"); if (!file) return 3;
-    fprintf(file, "%d", child); fclose(file); waitpid(child, NULL, 0); return 0;
-}
-"#).unwrap();
-        let desktop = macos.join("jcode-desktop");
-        let bridge = macos.join("jcode");
-        run(Command::new("cc").arg(&source).arg("-o").arg(&desktop)).unwrap();
-        std::fs::copy(&desktop, &bridge).unwrap();
-        let pidfile = dir.path().join("pid");
-        let mut parent = Command::new(&desktop)
-            .env("HOME", &home)
-            .env("JCODE_RUNTIME_DIR", &runtime)
-            .env("BRIDGE_EXE", &bridge)
-            .env("BRIDGE_PID", &pidfile)
-            .spawn()
-            .unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        let found = loop {
-            if let Some(socket) = bundle_bridge_socket(&app, &home, &runtime) {
-                break Some(socket);
-            }
-            if std::time::Instant::now() >= deadline {
-                break None;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        };
-        if let Ok(pid) = std::fs::read_to_string(&pidfile)
-            .unwrap_or_default()
-            .parse::<i32>()
-        {
-            unsafe {
-                libc::kill(pid, libc::SIGTERM);
-            }
-        } else {
-            let _ = parent.kill();
-        }
-        let _ = parent.wait();
-        assert_eq!(found, Some(runtime.join("jcode-api.sock")));
+    fn failed_bundle_copy_never_removes_installed_app() {
+        let (_dir, host, _) = checkout_fixture();
+        std::fs::create_dir_all(&host.layout.app).unwrap();
+        std::fs::write(host.layout.app.join("old-bundle"), "keep me").unwrap();
+        let missing_package = host.jcode_home.join("missing-package.app");
+        assert!(
+            crate::server::rollout_fs::replace_bundle(
+                &missing_package,
+                &host.layout.app,
+                &host.layout.app.with_file_name("Jcode.backup.app")
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(host.layout.app.join("old-bundle")).unwrap(),
+            "keep me",
+            "failed replacement must not leave Applications without Jcode"
+        );
     }
 
     #[test]
@@ -1424,7 +994,7 @@ int main(int argc, char **argv) {
     #[test]
     fn daemon_identity_comes_from_socket_with_same_process_client_open() {
         use std::os::unix::net::UnixStream;
-        let (_dir, mut host, _) = checkout_fixture();
+        let (_dir, host, _) = checkout_fixture();
         let listener = UnixListener::bind(&host.daemon_socket).unwrap();
         let _client = UnixStream::connect(&host.daemon_socket).unwrap();
         let (_accepted_client, _) = listener.accept().unwrap();
@@ -1471,7 +1041,7 @@ int main(int argc, char **argv) {
             true
         });
         let deployed = host.deployed();
-        let reload = host.reload("483d7848f");
+        let identity = host.daemon();
         let answered = server.join().unwrap();
         assert!(
             answered,
@@ -1479,9 +1049,9 @@ int main(int argc, char **argv) {
         );
         assert_eq!(deployed.daemon_pid, Some(std::process::id()));
         assert_eq!(deployed.daemon_label.as_deref(), Some("483d7848f"));
-        assert!(
-            reload.is_ok(),
-            "already-running target must not execute server reload: {reload:?}"
+        assert_eq!(
+            identity,
+            Some((std::process::id(), Some("483d7848f".into())))
         );
     }
 

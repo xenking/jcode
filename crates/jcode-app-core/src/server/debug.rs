@@ -475,6 +475,22 @@ pub(super) async fn handle_debug_client(
                 command,
                 session_id: requested_session,
             } => {
+                let (namespace, rollout_command) = parse_namespaced_command(&command);
+                if namespace == "server" && super::rollout::is_control_command(rollout_command) {
+                    let (ok, output) = match super::rollout::control(
+                        rollout_command,
+                        Arc::clone(&swarm_members),
+                    ) {
+                        Ok(output) => (true, output),
+                        Err(error) => (false, format!("{error:#}")),
+                    };
+                    writer
+                        .write_all(
+                            encode_event(&ServerEvent::DebugResponse { id, ok, output }).as_bytes(),
+                        )
+                        .await?;
+                    continue;
+                }
                 if !debug_command_authorized(&command, debug_control_allowed()) {
                     let event = ServerEvent::Error {
                         id,

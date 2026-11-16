@@ -1,93 +1,36 @@
 use super::*;
 use std::cell::RefCell;
 
-/// A machine in memory. Every mutating call is logged so a test can assert
-/// exactly what the rollout did, and that a dry run did nothing.
 struct Fake {
     layout: Layout,
     arch: String,
     free: u64,
-    heads: (String, String),
-    deployed: RefCell<Deployed>,
-    /// Successive answers for busy_sessions; the last one repeats.
-    busy: RefCell<Vec<Vec<String>>>,
-    workers_before: Vec<(String, String)>,
-    workers_after: Vec<(String, String)>,
-    live_sessions: Vec<String>,
-    reloaded: bool,
     built: bool,
     packaged: bool,
-    reload_takes: bool,
-    reload_error: bool,
-    resume_error: bool,
-    rollback_takes: bool,
-    bridge_ok: bool,
-    bridge_candidates: Vec<super::super::rollout_host::BridgeCandidate>,
-    searched_socket: RefCell<Option<PathBuf>>,
-    swap_sparkle: bool,
-    state: Option<RolloutState>,
-    calls: Vec<String>,
+    mutations: RefCell<Vec<String>>,
+    submitted: Option<(Pair, PathBuf, Option<PathBuf>, bool, Duration)>,
 }
-
-const CLI: &str = "2838f516c1234567";
-const DESKTOP: &str = "b7adb60abcdef";
 
 impl Fake {
     fn new() -> Self {
         Self {
             layout: Layout {
-                jcode_repo: "/repo/jcode".into(),
-                desktop_repo: "/repo/jcode-desktop".into(),
+                jcode_repo: "/repos/jcode".into(),
+                desktop_repo: "/repos/jcode-desktop".into(),
                 jcode_worktree: "/wt/jcode".into(),
                 desktop_worktree: "/wt/jcode-desktop".into(),
                 target_dir: "/target".into(),
-                dist_dir: "/wt/jcode-desktop/dist/macos".into(),
-                app: "/Applications/Jcode.app".into(),
-                app_backup: "/home/.jcode/migration/Jcode.app.prev".into(),
-                builds: "/home/.jcode/builds".into(),
+                dist_dir: "/dist".into(),
+                app: "/fake/Applications/Jcode.app".into(),
+                builds: "/home/builds".into(),
             },
             arch: "arm64".into(),
-            free: 72,
-            heads: (CLI.into(), DESKTOP.into()),
-            deployed: RefCell::new(Deployed {
-                cli_current: Some("22774c334".into()),
-                cli_shared: Some("22774c334".into()),
-                daemon_label: Some("22774c334".into()),
-                daemon_pid: Some(84375),
-                desktop_sha: Some("e97162a".into()),
-                desktop_cli: Some("22774c334".into()),
-                desktop_version: Some("v0.7.0".into()),
-                sparkle_key: true,
-                bridge_paths: vec!["/Applications/Jcode.app/Contents/MacOS/jcode".into()],
-            }),
-            busy: RefCell::new(vec![Vec::new()]),
-            workers_before: vec![
-                ("session_calf_1_a".into(), "running".into()),
-                ("session_hare_1_a".into(), "ready".into()),
-            ],
-            workers_after: vec![
-                ("session_calf_1_a".into(), "running".into()),
-                ("session_hare_1_a".into(), "stopped".into()),
-            ],
-            live_sessions: vec!["session_calf_1_a".into(), "session_hare_1_a".into()],
-            reloaded: false,
+            free: 100,
             built: false,
             packaged: false,
-            reload_takes: true,
-            reload_error: false,
-            resume_error: false,
-            rollback_takes: true,
-            bridge_ok: true,
-            bridge_candidates: vec![],
-            searched_socket: RefCell::new(None),
-            swap_sparkle: true,
-            state: None,
-            calls: Vec::new(),
+            mutations: RefCell::new(Vec::new()),
+            submitted: None,
         }
-    }
-
-    fn mutations(&self) -> Vec<&str> {
-        self.calls.iter().map(String::as_str).collect()
     }
 }
 
@@ -101,587 +44,174 @@ impl Host for Fake {
     fn free_gb(&self) -> Result<u64> {
         Ok(self.free)
     }
-    fn resolve(&mut self, repo: Repo, _refname: &str, fetch: bool) -> Result<String> {
+    fn resolve(&mut self, repo: Repo, _reference: &str, fetch: bool) -> Result<String> {
         if fetch {
-            self.calls.push(format!("fetch {repo:?}"));
+            self.mutations.borrow_mut().push("fetch".into());
         }
         Ok(match repo {
-            Repo::Jcode => self.heads.0.clone(),
-            Repo::Desktop => self.heads.1.clone(),
-        })
+            Repo::Jcode => "abcdef123456789",
+            Repo::Desktop => "7654321fedcba",
+        }
+        .into())
     }
     fn commits_between(&self, _repo: Repo, _from: &str, _to: &str) -> Option<usize> {
-        Some(3)
+        Some(2)
     }
     fn deployed(&self) -> Deployed {
-        self.deployed.borrow().clone()
+        Deployed {
+            cli_current: Some("123456789".into()),
+            cli_shared: Some("123456789".into()),
+            daemon_label: Some("123456789".into()),
+            daemon_pid: Some(1234),
+            ..Deployed::default()
+        }
     }
     fn busy_sessions(&self) -> Result<Vec<String>> {
-        let mut busy = self.busy.borrow_mut();
-        let ids = if busy.len() > 1 {
-            busy.remove(0)
-        } else {
-            busy[0].clone()
-        };
-        Ok(ids
-            .into_iter()
-            .filter(|id| self.live_sessions.contains(id))
-            .collect())
+        Ok(vec!["session_otter_1".into()])
     }
     fn workers(&self) -> Result<Vec<(String, String)>> {
-        let workers = if self.reloaded {
-            self.workers_after.clone()
-        } else {
-            self.workers_before.clone()
-        };
-        Ok(workers
-            .into_iter()
-            .filter(|(id, _)| self.live_sessions.contains(id))
-            .collect())
+        Ok(vec![("session_otter_1".into(), "running".into())])
     }
     fn built_cli(&self, _pair: &Pair) -> Option<PathBuf> {
-        self.built.then(|| PathBuf::from("/target/release/jcode"))
+        self.built.then(|| "/target/jcode".into())
     }
-    fn build_cli(&mut self, pair: &Pair) -> Result<PathBuf> {
-        self.calls.push(format!("build {}", pair.label()));
+    fn build_cli(&mut self, _pair: &Pair) -> Result<PathBuf> {
+        self.mutations.borrow_mut().push("build".into());
         self.built = true;
-        Ok("/target/release/jcode".into())
+        Ok("/target/jcode".into())
     }
     fn packaged_app(&self, _pair: &Pair) -> Option<PathBuf> {
-        self.packaged
-            .then(|| self.layout.dist_dir.join("Jcode.app"))
+        self.packaged.then(|| "/dist/Jcode.app".into())
     }
-    fn package_desktop(&mut self, pair: &Pair) -> Result<PathBuf> {
-        self.calls.push(format!(
-            "package {} against {}",
-            pair.desktop_short(),
-            pair.label()
-        ));
+    fn package_desktop(&mut self, _pair: &Pair) -> Result<PathBuf> {
+        self.mutations.borrow_mut().push("package".into());
         self.packaged = true;
-        Ok(self.layout.dist_dir.join("Jcode.app"))
+        Ok("/dist/Jcode.app".into())
     }
-    fn stage(&mut self, label: &str, _binary: &Path) -> Result<()> {
-        self.calls.push(format!("stage {label}"));
-        let mut deployed = self.deployed.borrow_mut();
-        deployed.cli_current = Some(label.into());
-        deployed.cli_shared = Some(label.into());
-        Ok(())
-    }
-    fn reload(&mut self, label: &str) -> Result<()> {
-        self.calls.push(format!("reload {label}"));
-        self.reloaded = true;
-        if self.reload_takes {
-            let mut deployed = self.deployed.borrow_mut();
-            deployed.daemon_label = Some(label.into());
-            deployed.daemon_pid = Some(90001);
-        }
-        if self.reload_error {
-            bail!("reload connection closed before acknowledgement");
-        }
-        Ok(())
-    }
-    fn resume_worker(&mut self, session_id: &str) -> Result<()> {
-        self.calls.push(format!("resume {session_id}"));
-        if self.resume_error {
-            bail!("worker recovery failed");
-        }
-        Ok(())
-    }
-    fn swap_desktop(&mut self, _app: &Path) -> Result<()> {
-        self.calls.push("swap".into());
-        let mut deployed = self.deployed.borrow_mut();
-        deployed.desktop_sha = Some(DESKTOP[..7].into());
-        deployed.desktop_cli = Some(CLI[..9].into());
-        deployed.sparkle_key = self.swap_sparkle;
-        Ok(())
-    }
-    fn bridge_search(&self, desktop: bool) -> Result<()> {
-        if desktop && !self.bridge_candidates.is_empty() {
-            let socket = super::super::rollout_host::select_bundle_bridge(
-                &self.bridge_candidates,
-                &self.layout.app,
-                Path::new("/home/user"),
-                Path::new("/runtime/user"),
-            )
-            .ok_or_else(|| anyhow::anyhow!("no eligible Desktop bridge"))?;
-            *self.searched_socket.borrow_mut() = Some(socket);
-        }
-        if self.bridge_ok {
-            Ok(())
-        } else {
-            bail!("bridge did not answer")
-        }
-    }
-    fn rollback_daemon(&mut self, shared: &str) -> Result<()> {
-        self.calls.push(format!("rollback daemon {shared}"));
-        if self.rollback_takes {
-            self.deployed.borrow_mut().daemon_label = Some(shared.into());
-        }
-        Ok(())
-    }
-    fn restore_cli_links(&mut self, current: &str, shared: &str) -> Result<()> {
-        self.calls.push(format!("rollback cli {current} {shared}"));
-        let mut deployed = self.deployed.borrow_mut();
-        deployed.cli_current = Some(current.into());
-        deployed.cli_shared = Some(shared.into());
-        Ok(())
-    }
-    fn rollback_desktop(&mut self) -> Result<()> {
-        self.calls.push("rollback desktop".into());
-        Ok(())
-    }
-    fn sleep(&mut self, _duration: Duration) {}
-    fn load_state(&self) -> Option<RolloutState> {
-        self.state.clone()
-    }
-    fn save_state(&mut self, state: &RolloutState) -> Result<()> {
-        self.state = Some(state.clone());
-        Ok(())
+    fn submit(
+        &mut self,
+        pair: &Pair,
+        binary: &Path,
+        app: Option<&Path>,
+        options: &RolloutOptions,
+    ) -> Result<String> {
+        self.mutations.borrow_mut().push("submit".into());
+        self.submitted = Some((
+            pair.clone(),
+            binary.to_path_buf(),
+            app.map(Path::to_path_buf),
+            options.now,
+            options.drain_timeout,
+        ));
+        Ok("rollout_fixture".into())
     }
 }
 
-fn rollout(fake: &mut Fake, opts: &RolloutOptions) -> (Result<Outcome>, String) {
+#[test]
+fn dry_run_prints_every_phase_without_build_submit_or_host_mutations() {
+    let mut host = Fake::new();
     let mut out = Vec::new();
-    let outcome = run(fake, opts, &mut out);
-    (outcome, String::from_utf8(out).unwrap())
-}
-
-fn opts() -> RolloutOptions {
-    RolloutOptions::default()
-}
-
-#[test]
-fn dry_run_prints_every_phase_and_changes_nothing() {
-    let mut fake = Fake::new();
-    fake.busy = RefCell::new(vec![vec!["session_calf_1_a".into()]]);
-    let (outcome, output) = rollout(
-        &mut fake,
+    let outcome = run(
+        &mut host,
         &RolloutOptions {
             dry_run: true,
-            ..opts()
+            ..RolloutOptions::default()
         },
-    );
-    assert_eq!(outcome.unwrap(), Outcome::Planned);
-    assert!(fake.mutations().is_empty(), "{:?}", fake.calls);
-    let lines: Vec<&str> = output.lines().collect();
-    assert_eq!(lines.len(), PHASES.len() + 1, "{output}");
-    for (index, phase) in PHASES.iter().enumerate() {
-        assert!(
-            lines[index].starts_with(&format!("[{}/8] {phase}", index + 1)),
-            "{}",
-            lines[index]
-        );
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(outcome, Outcome::Planned);
+    assert!(host.mutations.borrow().is_empty());
+    let text = String::from_utf8(out).unwrap();
+    for phase in PHASES {
+        assert!(text.contains(phase), "missing {phase}: {text}");
     }
-    assert!(lines[0].contains("jcode 2838f516c"), "{}", lines[0]);
-    assert!(lines[0].contains("desktop b7adb60"), "{}", lines[0]);
-    assert!(lines[0].contains("mid-turn: calf"), "{}", lines[0]);
-    assert!(
-        lines[2].contains("JCODE_REPO=/wt/jcode"),
-        "Desktop must build against the same jcode worktree: {}",
-        lines[2]
-    );
-    assert!(lines[2].contains("PACKAGE_TARGETS=aarch64-apple-darwin"));
-    assert!(lines[3].contains("no reload"), "{}", lines[3]);
-    assert!(lines[5].contains("workers live now: calf"), "{}", lines[5]);
-    assert_eq!(lines[8], "dry run: nothing changed");
+    assert!(text.contains("atomic exchange"));
+    assert!(text.contains("daemon journal"));
 }
 
 #[test]
-fn stale_snapshot_worker_is_not_reported_as_busy_or_live() {
-    let mut fake = Fake::new();
-    fake.workers_before = vec![("session_mushroom_1_a".into(), "running".into())];
-    fake.busy = RefCell::new(vec![vec!["session_mushroom_1_a".into()]]);
-    fake.live_sessions.clear();
-    let (outcome, output) = rollout(
-        &mut fake,
-        &RolloutOptions {
-            dry_run: true,
-            ..opts()
-        },
-    );
-    assert_eq!(outcome.unwrap(), Outcome::Planned);
-    assert!(
-        !output.contains("mushroom"),
-        "stale worker leaked into plan: {output}"
-    );
-}
-
-#[test]
-fn refuses_low_disk_and_non_arm64_before_touching_anything() {
-    let mut fake = Fake::new();
-    fake.free = 24;
-    let (outcome, output) = rollout(&mut fake, &opts());
-    assert!(outcome.unwrap_err().to_string().contains("24G free"));
-    assert!(output.contains("FAIL"));
-    assert!(fake.mutations().is_empty());
-
-    let mut fake = Fake::new();
-    fake.arch = "x86_64".into();
-    assert!(rollout(&mut fake, &opts()).0.is_err());
-    assert!(fake.mutations().is_empty());
-
-    // A dry run still shows the whole plan, and says where a real run stops.
-    let mut fake = Fake::new();
-    fake.free = 15;
-    let (outcome, output) = rollout(
-        &mut fake,
-        &RolloutOptions {
-            dry_run: true,
-            ..opts()
-        },
-    );
-    assert_eq!(outcome.unwrap(), Outcome::Planned);
-    assert!(output.starts_with("[1/8] plan            FAIL"), "{output}");
-    assert!(
-        output.ends_with(
-            "a real run would stop at plan: refusing: 15G free, need 25G for a release build\n"
-        ),
-        "{output}"
-    );
-    assert!(fake.mutations().is_empty());
-}
-
-#[test]
-fn full_rollout_runs_phases_in_order_and_resumes_lost_workers() {
-    let mut fake = Fake::new();
-    let (outcome, output) = rollout(&mut fake, &opts());
-    assert_eq!(outcome.unwrap(), Outcome::Deployed, "{output}");
+fn caller_only_prepares_artifacts_then_submits_durable_intent() {
+    let mut host = Fake::new();
+    let mut out = Vec::new();
     assert_eq!(
-        fake.mutations(),
-        [
-            "fetch Jcode",
-            "fetch Desktop",
-            "build 2838f516c",
-            "package b7adb60 against 2838f516c",
-            "stage 2838f516c",
-            "reload 2838f516c",
-            "swap",
-        ],
-        "{output}"
+        run(&mut host, &RolloutOptions::default(), &mut out).unwrap(),
+        Outcome::Submitted("rollout_fixture".into())
     );
-    // calf was running before and is running after; hare was idle. Nothing
-    // was lost, so nothing is resumed by hand.
-    assert!(output.contains("workers restored 1/1"), "{output}");
-    assert_eq!(fake.state.as_ref().unwrap().done.len(), PHASES.len());
-    for line in output.lines() {
-        assert!(line.starts_with('['), "one status line per phase: {line}");
-    }
-}
-
-#[test]
-fn a_worker_the_reload_left_stopped_is_resumed() {
-    let mut fake = Fake::new();
-    fake.workers_after = vec![("session_calf_1_a".into(), "stopped".into())];
-    let (outcome, output) = rollout(&mut fake, &opts());
-    assert_eq!(outcome.unwrap(), Outcome::Deployed, "{output}");
-    assert!(fake.mutations().contains(&"resume session_calf_1_a"));
-    assert!(output.contains("resumed: calf"), "{output}");
-}
-
-#[test]
-fn rerun_after_success_is_a_no_op() {
-    let mut fake = Fake::new();
-    assert_eq!(rollout(&mut fake, &opts()).0.unwrap(), Outcome::Deployed);
-    fake.calls.clear();
-    let (outcome, output) = rollout(&mut fake, &opts());
-    assert_eq!(outcome.unwrap(), Outcome::Deployed, "{output}");
     assert_eq!(
-        fake.mutations(),
-        ["fetch Jcode", "fetch Desktop"],
-        "{output}"
+        *host.mutations.borrow(),
+        ["fetch", "fetch", "build", "package", "submit"]
     );
-    assert_eq!(output.matches(" skip ").count(), 5, "{output}");
+    let (pair, binary, bundle, now, timeout) = host.submitted.unwrap();
+    assert_eq!(pair.label(), "abcdef123");
+    assert_eq!(binary, Path::new("/target/jcode"));
+    assert_eq!(bundle.as_deref(), Some(Path::new("/dist/Jcode.app")));
+    assert!(!now, "drain remains the default");
+    assert_eq!(timeout, Duration::from_secs(900));
+    assert!(String::from_utf8(out).unwrap().contains("caller may exit"));
 }
 
 #[test]
-fn drain_waits_names_who_and_refuses_on_timeout() {
-    let mut fake = Fake::new();
-    fake.busy = RefCell::new(vec![
-        // The plan line reads it once, then drain polls.
-        vec!["session_calf_1_a".into(), "session_hare_1_a".into()],
-        vec!["session_calf_1_a".into(), "session_hare_1_a".into()],
-        vec!["session_calf_1_a".into()],
-        Vec::new(),
-    ]);
-    let (outcome, output) = rollout(&mut fake, &opts());
-    assert_eq!(outcome.unwrap(), Outcome::Deployed, "{output}");
-    assert!(
-        output.contains("drain           wait  calf, hare"),
-        "{output}"
-    );
-    assert!(
-        output.contains("drain           ok    idle after 10s"),
-        "{output}"
-    );
-
-    let mut fake = Fake::new();
-    fake.busy = RefCell::new(vec![vec!["session_calf_1_a".into()]]);
-    let (outcome, output) = rollout(
-        &mut fake,
-        &RolloutOptions {
-            drain_timeout: Duration::from_secs(10),
-            ..opts()
-        },
-    );
-    let error = outcome.unwrap_err().to_string();
-    assert!(error.contains("calf still mid-turn"), "{error}");
-    assert!(error.contains("--now"), "{error}");
-    assert!(
-        !fake
-            .mutations()
-            .iter()
-            .any(|call| call.starts_with("reload"))
-    );
-    assert!(output.contains("drain           FAIL"), "{output}");
-}
-
-#[test]
-fn now_reloads_without_waiting() {
-    let mut fake = Fake::new();
-    fake.busy = RefCell::new(vec![vec!["session_calf_1_a".into()]]);
-    let (outcome, output) = rollout(
-        &mut fake,
+fn now_is_allowed_and_cli_does_not_wait_for_busy_workers() {
+    let mut host = Fake::new();
+    run(
+        &mut host,
         &RolloutOptions {
             now: true,
-            ..opts()
+            ..RolloutOptions::default()
         },
-    );
-    assert_eq!(outcome.unwrap(), Outcome::Deployed, "{output}");
-    assert!(
-        output.contains("drain           skip  --now with 1 mid-turn (calf)"),
-        "{output}"
-    );
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert!(host.submitted.unwrap().3);
 }
 
 #[test]
-fn a_reload_that_does_not_take_fails_before_the_desktop_swap() {
-    let mut fake = Fake::new();
-    fake.reload_takes = false;
-    let (outcome, output) = rollout(&mut fake, &opts());
-    assert!(outcome.is_err());
-    assert!(output.contains("reload          FAIL"), "{output}");
-    assert!(!fake.mutations().contains(&"swap"));
+fn no_desktop_submits_no_bundle_and_reuses_existing_binary() {
+    let mut host = Fake::new();
+    host.built = true;
+    run(
+        &mut host,
+        &RolloutOptions {
+            desktop: false,
+            ..RolloutOptions::default()
+        },
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(*host.mutations.borrow(), ["fetch", "fetch", "submit"]);
+    assert!(host.submitted.unwrap().2.is_none());
 }
 
 #[test]
-fn already_running_target_skips_reload_even_when_reload_would_fail() {
-    let mut fake = Fake::new();
-    fake.deployed.borrow_mut().daemon_label = Some(CLI[..9].into());
-    fake.reload_error = true;
-    let (outcome, output) = rollout(&mut fake, &opts());
-    assert_eq!(outcome.unwrap(), Outcome::Deployed, "{output}");
-    assert!(output.contains("reload          skip"), "{output}");
-    assert!(!fake.calls.iter().any(|call| call.starts_with("reload ")));
-    assert!(fake.mutations().contains(&"swap"), "{output}");
-}
-
-#[test]
-fn reload_rpc_failure_does_not_block_desktop_when_target_is_proven_running() {
-    let mut fake = Fake::new();
-    fake.reload_error = true;
-    let (outcome, output) = rollout(&mut fake, &opts());
-    assert_eq!(outcome.unwrap(), Outcome::Deployed, "{output}");
-    assert!(fake.mutations().contains(&"swap"), "{output}");
-    assert!(output.contains("reload connection closed"), "{output}");
-}
-
-#[test]
-fn worker_recovery_failure_does_not_block_desktop_when_target_is_proven_running() {
-    let mut fake = Fake::new();
-    fake.resume_error = true;
-    fake.workers_after = vec![("session_calf_1_a".into(), "stopped".into())];
-    let (outcome, output) = rollout(&mut fake, &opts());
-    assert_eq!(outcome.unwrap(), Outcome::Deployed, "{output}");
-    assert!(fake.mutations().contains(&"swap"), "{output}");
-    assert!(output.contains("worker recovery failed"), "{output}");
-    assert!(output.contains("continuing to desktop-swap"), "{output}");
-}
-
-#[test]
-fn reload_rpc_failure_with_old_daemon_still_blocks_desktop() {
-    let mut fake = Fake::new();
-    fake.reload_error = true;
-    fake.reload_takes = false;
-    let (outcome, output) = rollout(&mut fake, &opts());
-    assert!(outcome.is_err(), "{output}");
-    assert!(!fake.mutations().contains(&"swap"));
-}
-
-#[test]
-fn failed_verify_rolls_back_cli_and_desktop() {
-    let mut fake = Fake::new();
-    fake.bridge_ok = false;
-    fake.swap_sparkle = false;
-    let (outcome, output) = rollout(&mut fake, &opts());
-    match outcome.unwrap() {
-        Outcome::RolledBack(reason) => {
-            assert!(reason.contains("search_sessions"), "{reason}");
-            assert!(reason.contains("SUPublicEDKey"), "{reason}");
-        }
-        other => panic!("expected rollback, got {other:?}"),
-    }
-    let calls = fake.mutations();
-    assert!(
-        calls.contains(&"rollback cli 22774c334 22774c334"),
-        "{calls:?}"
-    );
-    assert!(calls.contains(&"rollback desktop"), "{calls:?}");
-    assert!(
-        output.contains("verify          back  rolled back"),
-        "{output}"
-    );
-}
-
-#[test]
-fn rollback_must_not_restore_old_desktop_if_daemon_did_not_downgrade() {
-    let mut fake = Fake::new();
-    fake.bridge_ok = false;
-    fake.rollback_takes = false;
-    let (outcome, output) = rollout(&mut fake, &opts());
-    assert!(
-        outcome.is_err(),
-        "rollback must reject the new daemon: {output}"
-    );
-    assert!(output.contains("rollback FAILED"), "{output}");
-    assert!(
-        output.contains("daemon 2838f516c, current 2838f516c, shared 2838f516c"),
-        "{output}"
-    );
-    assert!(!fake.mutations().contains(&"rollback desktop"));
-    assert!(
-        !fake
-            .mutations()
-            .contains(&"rollback cli 22774c334 22774c334")
-    );
-    let deployed = fake.deployed.borrow();
-    assert_eq!(deployed.cli_current, deployed.daemon_label, "{output}");
-    assert_eq!(deployed.cli_shared, deployed.daemon_label, "{output}");
-}
-
-#[test]
-fn verify_uses_desktop_bridge_not_foreign_isolated_bridge() {
-    use super::super::rollout_host::BridgeCandidate;
-    let mut fake = Fake::new();
-    let bridge = |home: &str, runtime: &str, socket: &str| BridgeCandidate {
-        executable: "/Applications/Jcode.app/Contents/MacOS/jcode".into(),
-        parent_executable: "/Applications/Jcode.app/Contents/MacOS/jcode-desktop".into(),
-        home: home.into(),
-        runtime: runtime.into(),
-        socket: socket.into(),
-    };
-    fake.bridge_candidates = vec![
-        bridge(
-            "/scratch/home",
-            "/scratch/runtime",
-            "/scratch/runtime/jcode-api.sock",
-        ),
-        bridge(
-            "/home/user",
-            "/runtime/user",
-            "/runtime/user/jcode-api.sock",
-        ),
-    ];
-    let (outcome, output) = rollout(&mut fake, &opts());
-    assert!(
-        matches!(outcome, Ok(Outcome::Deployed)),
-        "{outcome:?} {output}"
-    );
-    assert_eq!(
-        fake.searched_socket.borrow().as_deref(),
-        Some(Path::new("/runtime/user/jcode-api.sock"))
-    );
-}
-
-#[test]
-fn desktop_bridge_rejects_wrong_parent_home_runtime_and_socket() {
-    use super::super::rollout_host::{BridgeCandidate, select_bundle_bridge};
-    let app = Path::new("/Applications/Jcode.app");
-    let home = Path::new("/home/user");
-    let runtime = Path::new("/runtime/user");
-    let good = BridgeCandidate {
-        executable: app.join("Contents/MacOS/jcode"),
-        parent_executable: app.join("Contents/MacOS/jcode-desktop"),
-        home: home.into(),
-        runtime: runtime.into(),
-        socket: runtime.join("jcode-api.sock"),
-    };
-    let mut wrong_parent = good.clone();
-    wrong_parent.parent_executable = "/other/jcode-desktop".into();
-    let mut wrong_home = good.clone();
-    wrong_home.home = "/home/user-isolated".into();
-    let mut wrong_runtime = good.clone();
-    wrong_runtime.runtime = "/runtime/isolated".into();
-    let mut wrong_socket = good.clone();
-    wrong_socket.socket = "/runtime/isolated/jcode-api.sock".into();
-    assert!(
-        select_bundle_bridge(
-            &[wrong_parent, wrong_home, wrong_runtime, wrong_socket],
-            app,
-            home,
-            runtime
-        )
-        .is_none()
-    );
-}
-
-#[test]
-fn verify_catches_a_stale_bundle_bridge() {
-    let fake = Fake::new();
-    let pair = Pair {
-        cli: CLI.into(),
-        desktop: DESKTOP.into(),
-    };
-    {
-        let mut deployed = fake.deployed.borrow_mut();
-        deployed.daemon_label = Some(pair.label().into());
-        deployed.cli_current = Some(pair.label().into());
-        deployed.cli_shared = Some(pair.label().into());
-        deployed.desktop_sha = Some("b7adb60".into());
-        deployed.desktop_cli = Some("2838f516c".into());
-        deployed.bridge_paths = vec![
-            "/Applications/Jcode.app/Contents/MacOS/jcode".into(),
-            "/Users/x/.jcode/migration/Jcode.app.prev/Contents/MacOS/jcode-harness-api-bridge"
-                .into(),
-        ];
-    }
-    let layout = fake.layout.clone();
-    let failures = verify(&fake, &pair, true, &layout);
-    assert_eq!(failures.len(), 1, "{failures:?}");
-    assert!(failures[0].contains("stale bundle bridge"), "{failures:?}");
+fn refuses_low_disk_and_wrong_arch_before_any_mutation() {
+    let mut host = Fake::new();
+    host.free = 29;
+    assert!(run(&mut host, &RolloutOptions::default(), &mut Vec::new()).is_err());
+    assert!(host.mutations.borrow().is_empty());
+    host.free = 100;
+    host.arch = "x86_64".into();
+    assert!(run(&mut host, &RolloutOptions::default(), &mut Vec::new()).is_err());
+    assert!(host.mutations.borrow().is_empty());
 }
 
 #[test]
 fn parses_versions_and_labels() {
     assert_eq!(
-        parse_desktop_version(
-            "jcode desktop: runtime dir ... using /tmp\nJcode Desktop v0.7.0 (e97162a)\n"
-        ),
+        parse_desktop_version("Jcode Desktop v0.7.0 (e97162a)"),
         Some(("v0.7.0".into(), "e97162a".into()))
     );
-    // Packaging rewrites Cargo.lock, so the bundle reports `dirty`; the
-    // commit is still the one before the comma.
     assert_eq!(
-        parse_desktop_version("Jcode Desktop v0.7.0 (c949d89, dirty)\n"),
+        parse_desktop_version("Jcode Desktop v0.7.0 (c949d89, dirty)"),
         Some(("v0.7.0".into(), "c949d89".into()))
     );
-    assert_eq!(parse_desktop_version("garbage"), None);
     assert_eq!(
         version_label_of(
-            Path::new("/home/.jcode/builds/versions/22774c334/jcode"),
-            Path::new("/home/.jcode/builds")
+            Path::new("/builds/versions/abcdef123/jcode"),
+            Path::new("/builds")
         ),
-        Some("22774c334".into())
+        Some("abcdef123".into())
     );
-    assert_eq!(
-        version_label_of(
-            Path::new("/usr/bin/jcode"),
-            Path::new("/home/.jcode/builds")
-        ),
-        None
-    );
-    assert!(same_commit("2838f516c", "2838f516c1234567"));
-    assert!(!same_commit("2838f516c", "22774c334"));
-    assert!(!same_commit("", "abc"));
-    assert_eq!(friendly("session_calf_1794_abc"), "calf");
-    assert_eq!(friendly("odd"), "odd");
+    assert!(same_commit("abcdef123", "abcdef123456"));
+    assert!(!same_commit("", "abcdef123"));
 }

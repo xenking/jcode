@@ -1063,7 +1063,9 @@ pub(crate) async fn wait_for_reloading_server() -> bool {
             false
         }
         server::ReloadWaitStatus::Idle => false,
-        server::ReloadWaitStatus::Waiting { .. } => false,
+        server::ReloadWaitStatus::Waiting { .. } | server::ReloadWaitStatus::Unknown { .. } => {
+            false
+        }
     }
 }
 
@@ -1374,7 +1376,12 @@ async fn spawn_server_with_lifetime(
     // The reload marker describes the shared daemon's handoff. An owned server
     // has no predecessor to wait for, and waiting on a marker written by the
     // shared daemon would stall this run for the handoff timeout.
-    let awaits_reload_handoff = lifetime == ServerLifetime::Shared;
+    let rollback_binary = if lifetime == ServerLifetime::Shared {
+        server::rollout::reconcile_before_spawn(&socket_path)?
+    } else {
+        None
+    };
+    let awaits_reload_handoff = lifetime == ServerLifetime::Shared && rollback_binary.is_none();
 
     if awaits_reload_handoff && wait_for_existing_reload_server("server spawn").await {
         startup_profile::mark("server_ready");
@@ -1403,7 +1410,8 @@ async fn spawn_server_with_lifetime(
         )),
     }
     let client_requested_selfdev = selfdev::client_selfdev_requested();
-    let exe = executable
+    let exe = rollback_binary
+        .or(executable)
         .or_else(|| {
             build::shared_server_update_candidate(client_requested_selfdev).map(|(path, _)| path)
         })

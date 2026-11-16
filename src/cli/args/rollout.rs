@@ -3,6 +3,9 @@
 /// stack in unoptimized builds.
 #[derive(clap::Args, Debug)]
 pub(crate) struct RolloutArgs {
+    /// Read durable daemon-owned rollout progress without starting a rollout
+    #[arg(long, conflicts_with = "dry_run")]
+    pub status: bool,
     /// Print the plan for this machine and change nothing
     #[arg(long)]
     pub dry_run: bool,

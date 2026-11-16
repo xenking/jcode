@@ -58,6 +58,9 @@ pub(crate) mod reload_recovery;
 pub use reload_recovery::{ReloadRecoverySummary, recovery_summary as reload_recovery_summary};
 mod reload_state;
 mod reload_trace;
+pub mod rollout;
+mod rollout_desktop;
+pub mod rollout_fs;
 mod runtime;
 mod runtime_commands;
 mod runtime_special_commands;
@@ -968,6 +971,9 @@ impl Server {
         // only stops it from clearing a marker another process owns.
         publish_reload_socket_ready(reload_marker_policy(&self.socket_path));
         signal_ready_fd();
+        if let Err(error) = rollout::reconcile_on_startup(Arc::clone(&self.swarm_state.members)) {
+            crate::logging::error(&format!("rollout startup reconciliation failed: {error:#}"));
+        }
 
         // Older snapshots predate the resume index. Backfill off the first-frame
         // path. Lookups retain an authoritative fallback until it completes.
