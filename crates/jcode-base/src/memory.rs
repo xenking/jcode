@@ -974,7 +974,29 @@ impl MemoryManager {
             .unwrap_or_else(|_| Sidecar::new());
         let extracted = sidecar.extract_memories(transcript).await?;
 
+        let client = if crate::config::config().agents.memory_auto_recall {
+            crate::jev::JevClient::new().ok()
+        } else {
+            None
+        };
+        self.store_extracted_memories(
+            &extracted,
+            session_id,
+            client
+                .as_ref()
+                .map(|c| c as &dyn crate::memory_jev::RelevanceTransport),
+        )
+        .await
+    }
+
+    async fn store_extracted_memories(
+        &self,
+        extracted: &[crate::sidecar::ExtractedMemory],
+        session_id: &str,
+        client: Option<&dyn crate::memory_jev::RelevanceTransport>,
+    ) -> Result<Vec<String>> {
         let mut ids = Vec::new();
+        let mut decisions_available = true;
         for memory in extracted {
             let category: MemoryCategory = memory.category.parse().unwrap_or(MemoryCategory::Fact);
             let trust = match memory.trust.as_str() {
@@ -983,10 +1005,53 @@ impl MemoryManager {
                 _ => TrustLevel::Low,
             };
 
-            let entry = MemoryEntry::new(category, memory.content)
+            let entry = MemoryEntry::new(category, memory.content.clone())
                 .with_source(session_id)
                 .with_trust(trust);
 
+            if let Some(client) = client.filter(|_| decisions_available) {
+                let candidates = prefilter_for_jev(
+                    self.load_project_graph()?
+                        .active_memories()
+                        .cloned()
+                        .collect(),
+                    &entry.content,
+                );
+                let decision = tokio::time::timeout(
+                    std::time::Duration::from_secs(20),
+                    crate::memory_jev::decide_write_with_transport(
+                        client,
+                        &entry.content,
+                        &candidates,
+                    ),
+                )
+                .await;
+                match decision {
+                    Ok(Ok(crate::memory_jev::WriteDecision::Skip)) => continue,
+                    Ok(Ok(crate::memory_jev::WriteDecision::Duplicate(index))) => {
+                        // Re-read before reinforcing, so a removed or edited entry
+                        // is not resurrected from the snapshot sent to Decisions.
+                        let mut graph = self.load_project_graph()?;
+                        let existing = &candidates[index];
+                        if let Some(current) = graph.get_memory_mut(&existing.id)
+                            && current.active
+                            && current.content == existing.content
+                        {
+                            current.reinforce(session_id, 0);
+                            self.save_project_graph(&graph)?;
+                            ids.push(existing.id.clone());
+                            continue;
+                        }
+                    }
+                    Ok(Ok(crate::memory_jev::WriteDecision::Store)) => {}
+                    Ok(Err(_)) | Err(_) => {
+                        decisions_available = false;
+                        crate::logging::info(
+                            "Memory Decisions unavailable; using local exact deduplication",
+                        );
+                    }
+                }
+            }
             // Store in project scope by default
             let id = self.remember_project(entry)?;
             ids.push(id);
@@ -1113,21 +1178,22 @@ impl MemoryManager {
         });
     }
 
-    /// Automatic recall is globally disabled. Explicit recall remains available.
+    /// Automatic recall remains disabled unless explicitly enabled.
     pub async fn get_relevant_parallel(
         &self,
         session_id: &str,
-        _messages: &[crate::message::Message],
-        _event_tx: Option<MemoryEventSink>,
+        messages: &[crate::message::Message],
+        event_tx: Option<MemoryEventSink>,
     ) -> Result<MemoryRelevanceResult> {
-        // Automatic recall is disabled for everyone, including existing configs.
-        // Explicit memory-tool recall still uses memory_jev::recall directly.
-        clear_pending_memory(session_id);
-        Ok(MemoryRelevanceResult::default())
+        if !crate::config::config().agents.memory_auto_recall {
+            clear_pending_memory(session_id);
+            return Ok(MemoryRelevanceResult::default());
+        }
+        self.get_relevant_parallel_enabled(session_id, messages, event_tx)
+            .await
     }
 
-    /// Retained Jev relevance pipeline for potential future opt-in recall.
-    #[allow(dead_code)]
+    /// Opt-in Jev relevance pipeline.
     pub(crate) async fn get_relevant_parallel_enabled(
         &self,
         session_id: &str,

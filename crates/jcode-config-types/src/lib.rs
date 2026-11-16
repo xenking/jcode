@@ -759,6 +759,9 @@ pub struct AgentsConfig {
     /// aimlapi, or jcode. Auto uses a provider-specific BYOK credential before Jcode.
     #[serde(default = "default_memory_jev_provider")]
     pub memory_jev_provider: String,
+    /// Opt in to Decisions-based automatic recall and extraction judging.
+    #[serde(default)]
+    pub memory_auto_recall: bool,
     /// Optional model override for memory Jev Decisions.
     pub memory_jev_model: Option<String>,
     /// Optional model override for browser Jev Decisions.
@@ -878,6 +881,7 @@ impl Default for AgentsConfig {
             swarm_gallery_max_pct: None,
             swarm_strip_layout: SwarmStripLayout::default(),
             memory_jev_provider: default_memory_jev_provider(),
+            memory_auto_recall: false,
             memory_jev_model: None,
             browser_jev_model: None,
             voice_jev_model: None,

@@ -469,6 +469,11 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_PROVIDER") {
             self.agents.memory_jev_provider = v.trim().to_ascii_lowercase();
         }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_AUTO_RECALL") {
+            if let Ok(enabled) = v.trim().parse::<bool>() {
+                self.agents.memory_auto_recall = enabled;
+            }
+        }
         for (key, target) in [
             ("JCODE_MEMORY_JEV_MODEL", &mut self.agents.memory_jev_model),
             (

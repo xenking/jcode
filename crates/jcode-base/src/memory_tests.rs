@@ -11,6 +11,94 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[tokio::test]
+async fn extracted_memory_uses_decisions_and_falls_back_when_offline() {
+    use crate::memory_jev::RelevanceTransport;
+    use async_trait::async_trait;
+    use serde_json::{Map, Value};
+    struct Fixture(bool);
+    #[async_trait]
+    impl RelevanceTransport for Fixture {
+        async fn evaluate(
+            &self,
+            state: Value,
+            questions: Map<String, Value>,
+        ) -> anyhow::Result<Value> {
+            if self.0 {
+                anyhow::bail!("offline")
+            }
+            let candidate = state["candidate"].as_str().unwrap();
+            let mut answers = Map::new();
+            for key in questions.keys() {
+                let score = if key == "remember" && candidate.contains("transient") {
+                    0.1
+                } else {
+                    0.99
+                };
+                answers.insert(key.clone(), json!({"type":"noul", "noul":score}));
+            }
+            Ok(json!({"answers": answers}))
+        }
+    }
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let old = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    let manager = MemoryManager::new().with_project_dir("/memory-decision-test");
+    let id = manager
+        .remember_project(MemoryEntry::new(
+            MemoryCategory::Fact,
+            "Use cargo test for Rust",
+        ))
+        .unwrap();
+    let extracted = |content: &str| crate::sidecar::ExtractedMemory {
+        category: "fact".into(),
+        content: content.into(),
+        trust: "high".into(),
+    };
+    let ids = manager
+        .store_extracted_memories(
+            &[
+                extracted("Rust tests use cargo test"),
+                extracted("transient task progress"),
+            ],
+            "session",
+            Some(&Fixture(false)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ids, vec![id]);
+    assert_eq!(
+        manager
+            .load_project_graph()
+            .unwrap()
+            .active_memories()
+            .count(),
+        1
+    );
+    let ids = manager
+        .store_extracted_memories(
+            &[extracted("A new fact while offline")],
+            "session",
+            Some(&Fixture(true)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(
+        manager
+            .load_project_graph()
+            .unwrap()
+            .active_memories()
+            .count(),
+        2
+    );
+    match old {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}
+
 pub(super) static PENDING_MEMORY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]

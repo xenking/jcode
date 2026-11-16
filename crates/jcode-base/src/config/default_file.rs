@@ -726,6 +726,11 @@ swarm_stall_after_secs = 600
 # override via JCODE_LAYA_BASE_URL or LAYA_BASE_URL, optional LAYA_API_KEY in laya.env).
 # Env override: JCODE_MEMORY_JEV_PROVIDER
 # memory_jev_provider = "auto"
+
+# Opt in to automatic relevance-judged recall and Decisions validation of
+# sidecar-extracted memories (default false). On Decisions failure, automatic
+# recall injects nothing and extraction falls back to local exact deduplication.
+# memory_auto_recall = false
 # Optional per-purpose Jev Decisions model overrides. Unset preserves the
 # selected provider's existing model. Environment overrides take precedence.
 # Env overrides: JCODE_MEMORY_JEV_MODEL, JCODE_BROWSER_JEV_MODEL, JCODE_VOICE_JEV_MODEL
