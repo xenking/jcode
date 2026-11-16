@@ -82,7 +82,7 @@ async fn worker_http_tools(
 ) {
     let registry = Registry::new(provider.clone()).await;
     let mut worker = Agent::new(provider, registry);
-    worker.mark_swarm_worker();
+    worker.mark_swarm_worker().expect("mark swarm worker");
     // Capture the request while the turn runs, then cancel the fake response
     // rather than waiting for retry logic on the intentionally empty SSE body.
     let mut capture = tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(15)));

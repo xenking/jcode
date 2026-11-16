@@ -48,7 +48,7 @@ async fn worker_sends_search_and_codemode_to_provider() {
         });
         let registry = Registry::new(provider.clone()).await;
         let mut worker = Agent::new(provider, registry);
-        worker.mark_swarm_worker();
+        worker.mark_swarm_worker().expect("mark swarm worker");
         worker
             .run_once_capture("test worker tool list")
             .await

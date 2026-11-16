@@ -911,9 +911,9 @@ impl Tool for BashTool {
 }
 
 const READ_HINT_INTERVAL: usize = 10;
-static READ_HINT_COUNTS: LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, (usize, Option<usize>)>>,
-> = LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+type ReadHintCounts = std::collections::HashMap<String, (usize, Option<usize>)>;
+static READ_HINT_COUNTS: LazyLock<std::sync::Mutex<ReadHintCounts>> =
+    LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 pub(super) fn clear_read_hint_session(session_id: &str) {
     READ_HINT_COUNTS
@@ -1008,7 +1008,7 @@ fn pure_read_hint(command: &str) -> Option<&'static str> {
         }
         "cat" => Some(read),
         "sed"
-            if args.iter().any(|a| *a == "-n")
+            if args.contains(&"-n")
                 && !args.iter().any(|a| {
                     a.starts_with("-i") || a.starts_with("--in-place") || a.contains('w')
                 }) =>
