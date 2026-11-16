@@ -128,7 +128,7 @@ test-support = ["jcode-base/test-support"]
 
 [dev-dependencies]
 jcode-harness-api-server = { path = "../jcode-harness-api-server" }
-jcode-provider-anthropic-runtime = { path = "../jcode-provider-anthropic-runtime", features = ["test-support"] }
+jcode-provider-anthropic-runtime = { path = "../jcode-provider-anthropic-runtime", default-features = false, features = ["test-support"] }
 jcode-provider-openai-runtime = { path = "../jcode-provider-openai-runtime" }
 jcode-provider-openrouter-runtime = { path = "../jcode-provider-openrouter-runtime" }
 # The application consumes a corpus registered by the executable. Only its

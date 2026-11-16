@@ -674,6 +674,7 @@ opt-level = 0
 debug = false
 
 [dev-dependencies]
+jcode-provider-anthropic-runtime = { path = "crates/jcode-provider-anthropic-runtime", default-features = false, features = ["test-support"] }
 async-stream = "0.3"
 jcode-harness-api = { path = "crates/jcode-harness-api" }
 # Used by tests/context_window_matrix.rs to assert the shared context-window
