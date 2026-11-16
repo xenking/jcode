@@ -141,12 +141,14 @@ async fn resolve_spawn_working_dir_prefers_explicit_then_spawner_agent_dir() {
             &swarm_members,
         )
         .await
+        .unwrap()
         .as_deref(),
         Some("/tmp/explicit")
     );
     assert_eq!(
         resolve_spawn_working_dir(None, "req", &sessions, &swarm_members)
             .await
+            .unwrap()
             .as_deref(),
         Some("/tmp/spawner-agent")
     );
@@ -168,6 +170,7 @@ async fn resolve_spawn_working_dir_falls_back_to_member_dir() {
     assert_eq!(
         resolve_spawn_working_dir(None, "req", &sessions, &swarm_members)
             .await
+            .unwrap()
             .as_deref(),
         Some("/tmp/member-dir")
     );
@@ -194,10 +197,35 @@ async fn resolve_spawn_working_dir_uses_persisted_session_when_agent_busy() {
     assert_eq!(
         resolve_spawn_working_dir(None, "cwd_busy", &sessions, &members)
             .await
+            .unwrap()
             .as_deref(),
         Some("/tmp/persisted-project")
     );
     crate::env::remove_var("JCODE_HOME");
+}
+
+#[tokio::test]
+async fn resolve_spawn_working_dir_rejects_corrupt_persisted_parent() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    let path = crate::session::session_path("corrupt_spawn_cwd").unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, "{broken").unwrap();
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
+    let members = Arc::new(RwLock::new(HashMap::new()));
+    let result = resolve_spawn_working_dir(None, "corrupt_spawn_cwd", &sessions, &members).await;
+    match previous {
+        Some(previous) => crate::env::set_var("JCODE_HOME", previous),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    assert!(
+        result.is_err(),
+        "corrupt parent cwd must not silently become the daemon cwd"
+    );
 }
 
 #[test]

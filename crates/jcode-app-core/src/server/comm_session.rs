@@ -70,9 +70,10 @@ fn create_visible_spawn_session(
     effort_override: Option<&str>,
     selfdev_requested: bool,
 ) -> anyhow::Result<(String, PathBuf)> {
-    let cwd = working_dir
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let cwd = match working_dir {
+        Some(dir) => PathBuf::from(dir),
+        None => std::env::current_dir()?,
+    };
 
     let mut session = Session::create(None, None);
     session.is_swarm_worker = true;
@@ -111,12 +112,12 @@ async fn resolve_spawn_working_dir(
     req_session_id: &str,
     sessions: &SessionAgents,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-) -> Option<String> {
+) -> anyhow::Result<Option<String>> {
     if requested_working_dir
         .as_deref()
         .is_some_and(|dir| !dir.trim().is_empty())
     {
-        return requested_working_dir;
+        return Ok(requested_working_dir);
     }
 
     if let Some(agent_dir) = {
@@ -129,7 +130,7 @@ async fn resolve_spawn_working_dir(
         })
     } && !agent_dir.trim().is_empty()
     {
-        return Some(agent_dir);
+        return Ok(Some(agent_dir));
     }
 
     let member_dir = swarm_members
@@ -139,12 +140,12 @@ async fn resolve_spawn_working_dir(
         .and_then(|member| member.working_dir.as_ref())
         .map(|dir| dir.display().to_string())
         .filter(|dir| !dir.trim().is_empty());
-    member_dir.or_else(|| {
-        Session::load_startup_stub(req_session_id)
-            .ok()
-            .and_then(|session| session.working_dir)
-            .filter(|dir| !dir.trim().is_empty())
-    })
+    if member_dir.is_some() {
+        return Ok(member_dir);
+    }
+    Ok(Session::load_startup_stub(req_session_id)?
+        .working_dir
+        .filter(|dir| !dir.trim().is_empty()))
 }
 
 /// Launch a headed window for `session_id`, exporting the given spawn context
@@ -189,8 +190,17 @@ use spawn_model_selection::{
 };
 
 fn inherit_visible_spawn_preferences(parent_id: &str, child_id: &str) -> anyhow::Result<()> {
-    let Ok(parent) = Session::load_startup_stub(parent_id) else {
-        return Ok(());
+    let parent = match Session::load_startup_stub(parent_id) {
+        Ok(parent) => parent,
+        // An untouched parent has no persisted preferences to inherit yet.
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
     };
     if parent.agent_model_overrides.is_empty() && parent.pinned_skill.is_none() {
         return Ok(());
@@ -428,7 +438,7 @@ pub(super) async fn spawn_swarm_agent(
         .validate_spawn_allowed_model(requested_model.as_deref())
         .map_err(anyhow::Error::msg)?;
     let resolved_working_dir =
-        resolve_spawn_working_dir(working_dir, req_session_id, sessions, swarm_members).await;
+        resolve_spawn_working_dir(working_dir, req_session_id, sessions, swarm_members).await?;
     let coordinator = resolve_coordinator_spawn_identity(req_session_id, sessions).await;
     let coordinator_is_canary = coordinator.is_canary;
     // Capture the requesting client's terminal env so spawn hooks place the new
