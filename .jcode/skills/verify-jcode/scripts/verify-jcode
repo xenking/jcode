@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import shlex
 import shutil
@@ -56,6 +57,78 @@ def alive(pid):
     result = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
                             capture_output=True, text=True, timeout=5)
     return result.returncode == 0 and not result.stdout.strip().startswith("Z")
+
+
+def launch_agent_path(label):
+    if sys.platform != "darwin":
+        return None
+    result = subprocess.run(["/bin/launchctl", "print", f"gui/{os.getuid()}/{label}"],
+                            capture_output=True, text=True, timeout=5)
+    if result.returncode:
+        if "Could not find service" in result.stderr:
+            return None
+        raise RuntimeError(f"Cannot inspect launch agent {label}: {result.stderr.strip()}")
+    match = re.search(r"(?m)^\s*path = (.+)$", result.stdout)
+    require(match, f"Cannot determine launch agent path: {label}")
+    return match.group(1).strip()
+
+
+def hotkey_path():
+    return launch_agent_path("com.jcode.hotkey")
+
+
+def runtime_helpers(root):
+    listing = run(["ps", "-axo", "pid=,command="]).stdout
+    expected = (root / "jcode").resolve()
+    processes = []
+    for line in listing.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) != 3:
+            continue
+        args = parts[2].split()
+        if args[:1] != ["companion"] and args[:2] != ["setup-hotkey", "--listen-macos-hotkey"]:
+            continue
+        if Path(parts[1]).resolve() != expected:
+            continue
+        pid = int(parts[0])
+        start = identity(pid)
+        if start:
+            processes.append({"pid": pid, "identity": start})
+    return processes
+
+
+def stop_runtime_helpers(root):
+    for process in runtime_helpers(root):
+        pid = process["pid"]
+        if not alive(pid):
+            continue
+        require(identity(pid) == process["identity"], "Helper PID identity changed")
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + 5
+        while alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if alive(pid):
+            require(identity(pid) == process["identity"], "Helper PID reused during cleanup")
+            os.kill(pid, signal.SIGKILL)
+            wait_for(lambda: not alive(pid), "runtime helper shutdown", 5)
+    require(not runtime_helpers(root), "Runtime helper remains after cleanup")
+
+
+def cleanup_runtime_launch_agents(root, original_hotkey):
+    if sys.platform != "darwin":
+        return
+    directory = root / "home/Library/LaunchAgents"
+    for plist in directory.glob("*.plist"):
+        with plist.open("rb") as source:
+            label = plistlib.load(source).get("Label")
+        require(isinstance(label, str) and re.fullmatch(r"[A-Za-z0-9_.-]+", label),
+                f"Invalid runtime launch agent label in {plist}")
+        current = launch_agent_path(label)
+        if not current or Path(current).resolve() != plist.resolve():
+            continue
+        if label == "com.jcode.hotkey" and current == original_hotkey:
+            continue
+        run(["/bin/launchctl", "bootout", f"gui/{os.getuid()}/{label}"])
 
 
 def wait_for(predicate, description, timeout=45):
@@ -452,6 +525,15 @@ class Harness:
         if self.state.get("cleaned"):
             return {"status": "already-cleaned", "evidence": str(self.evidence)}
         errors = []
+        initial_hotkey = self.state.get("hotkey_path")
+        if "hotkey_path" not in self.state:
+            errors.append("Missing initial hotkey path; cannot verify host state")
+        try:
+            current_hotkey = hotkey_path()
+            if current_hotkey != initial_hotkey:
+                errors.append(f"Global hotkey path changed: {initial_hotkey!r} -> {current_hotkey!r}")
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            errors.append(str(error))
         for name in ("client", "tmux", "server", "provider"):
             process = self.state["processes"].get(name)
             if not process or not alive(process["pid"]):
@@ -478,6 +560,18 @@ class Harness:
                 wait_for(lambda: not alive(process["pid"]), f"{name} shutdown", 5)
             except (OSError, RuntimeError, subprocess.SubprocessError) as error:
                 errors.append(str(error))
+        for action in (lambda: cleanup_runtime_launch_agents(self.root, initial_hotkey),
+                       lambda: stop_runtime_helpers(self.root)):
+            try:
+                action()
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                errors.append(str(error))
+        try:
+            final_hotkey = hotkey_path()
+            if final_hotkey != initial_hotkey:
+                errors.append(f"Global hotkey path changed: {initial_hotkey!r} -> {final_hotkey!r}")
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            errors.append(str(error))
         require(not errors, "; ".join(errors))
         # All writers are stopped before the final independent disk snapshot.
         if (self.root / "data/sessions").exists():
@@ -487,6 +581,7 @@ class Harness:
         self.state["cleaned"] = True
         self.save()
         report = {"status": "cleaned", "runtime_removed": not self.root.exists(),
+                  "hotkey_path_before": initial_hotkey, "hotkey_path_after": final_hotkey,
                   "evidence": str(self.evidence), "artifacts": len(list(self.evidence.iterdir()))}
         dump(self.evidence / "cleanup.json", report)
         return report
@@ -499,6 +594,7 @@ def launch(args):
     tmux = shutil.which("tmux")
     require(tmux, "Install tmux before launch")
     binary_sha256 = digest(binary)
+    initial_hotkey = hotkey_path()
     repo_head = run(["git", "-C", REPO, "rev-parse", "HEAD"]).stdout.strip()
     evidence = Path(args.evidence).resolve()
     evidence.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -522,7 +618,7 @@ def launch(args):
              "source_binary": str(binary), "binary_sha256": binary_sha256, "tmux": tmux,
              "helper_sha256": digest(Path(__file__)),
              "provider_sha256": digest(REPO / "scripts/fake_openai_server.py"),
-             "processes": {}, "env": env, "repo_head": repo_head}
+             "processes": {}, "env": env, "repo_head": repo_head, "hotkey_path": initial_hotkey}
     dump(evidence / "run.json", state)
     harness = Harness(evidence)
     try:
@@ -592,24 +688,39 @@ def main():
     lock.mkdir()
     try:
         harness = Harness(evidence)
-        if args.command == "doctor":
-            result = harness.doctor()
-        elif args.command == "drive":
-            result = harness.drive(args.feature, args.mode, args.text, args.keys, args.expect)
-        elif args.command == "frame":
-            harness.doctor()
-            harness.frame(args.label)
-            result = {"frame": str(evidence / f"{args.label}.frame.json")}
-        else:
-            result = harness.cleanup()
+        try:
+            if args.command == "doctor":
+                result = harness.doctor()
+            elif args.command == "drive":
+                result = harness.drive(args.feature, args.mode, args.text, args.keys, args.expect)
+            elif args.command == "frame":
+                harness.doctor()
+                harness.frame(args.label)
+                result = {"frame": str(evidence / f"{args.label}.frame.json")}
+            else:
+                result = harness.cleanup()
+        except BaseException:
+            if args.command != "cleanup":
+                try:
+                    harness.cleanup()
+                except Exception as error:
+                    print(f"verify-jcode: cleanup failed: {error}", file=sys.stderr)
+            raise
         print(json.dumps(result, indent=2))
     finally:
         lock.rmdir()
 
 
 if __name__ == "__main__":
+    def terminate(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, terminate)
     try:
         main()
+    except KeyboardInterrupt:
+        print("verify-jcode: interrupted", file=sys.stderr)
+        sys.exit(130)
     except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"verify-jcode: {error}", file=sys.stderr)
         sys.exit(1)

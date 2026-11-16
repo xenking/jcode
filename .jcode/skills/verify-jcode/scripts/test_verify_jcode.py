@@ -3,6 +3,7 @@
 import importlib.machinery
 import importlib.util
 import json
+import plistlib
 from pathlib import Path
 import tempfile
 import unittest
@@ -27,7 +28,7 @@ class VerificationSafetyTests(unittest.TestCase):
         (self.evidence / "proof.txt").write_text("proof survives\n")
         HELPER.dump(self.evidence / "run.json", {
             "schema": 1, "owner": "test-owner", "evidence": str(self.evidence),
-            "runtime": str(self.root), "env": {}, "processes": {},
+            "runtime": str(self.root), "env": {}, "processes": {}, "hotkey_path": HELPER.hotkey_path(),
         })
         self.harness = HELPER.Harness(self.evidence)
 
@@ -55,6 +56,62 @@ class VerificationSafetyTests(unittest.TestCase):
             kill.assert_not_called()
         self.assertTrue(self.root.exists())
         self.assertTrue((self.evidence / "proof.txt").exists())
+
+    def test_cleanup_stops_runtime_helpers_and_owned_launch_agents(self):
+        with patch.object(HELPER, "stop_runtime_helpers") as companions, \
+                patch.object(HELPER, "cleanup_runtime_launch_agents") as agents, \
+                patch.object(HELPER, "hotkey_path", return_value="/original.plist"):
+            self.harness.state["hotkey_path"] = "/original.plist"
+            self.harness.cleanup()
+        companions.assert_called_once_with(self.root)
+        agents.assert_called_once_with(self.root, "/original.plist")
+
+    def test_cleanup_rejects_changed_global_hotkey_and_keeps_runtime(self):
+        self.harness.state["hotkey_path"] = "/original.plist"
+        with patch.object(HELPER, "stop_runtime_helpers"), \
+                patch.object(HELPER, "cleanup_runtime_launch_agents"), \
+                patch.object(HELPER, "hotkey_path", return_value="/other.plist"):
+            with self.assertRaisesRegex(RuntimeError, "hotkey.*changed"):
+                self.harness.cleanup()
+        self.assertTrue(self.root.exists())
+
+    def test_runtime_process_matching_does_not_claim_other_runs(self):
+        listing = (f"123 {self.root}/jcode companion\n"
+                   f"456 {self.root}-other/jcode companion\n"
+                   f"789 {self.root}/jcode serve\n"
+                   f"321 {self.root}/jcode setup-hotkey --listen-macos-hotkey\n")
+        process = HELPER.subprocess.CompletedProcess([], 0, listing, "")
+        with patch.object(HELPER.subprocess, "run", return_value=process), \
+                patch.object(HELPER, "identity", return_value="start 123"):
+            self.assertEqual(HELPER.runtime_helpers(self.root),
+                             [{"pid": 123, "identity": "start 123"}, {"pid": 321, "identity": "start 123"}])
+
+    def test_agent_cleanup_never_boots_out_unowned_or_original_service(self):
+        directory = self.root / "home/Library/LaunchAgents"
+        directory.mkdir(parents=True)
+        for label in ("com.jcode.hotkey", "com.example.owned", "com.example.other"):
+            (directory / f"{label}.plist").write_bytes(plistlib.dumps({"Label": label}))
+        paths = {"com.jcode.hotkey": str(directory / "com.jcode.hotkey.plist"),
+                 "com.example.owned": str(directory / "com.example.owned.plist"),
+                 "com.example.other": "/unrelated/other.plist"}
+        with patch.object(HELPER.sys, "platform", "darwin"), \
+                patch.object(HELPER, "launch_agent_path", side_effect=paths.get), \
+                patch.object(HELPER, "run") as run:
+            HELPER.cleanup_runtime_launch_agents(self.root, paths["com.jcode.hotkey"])
+        run.assert_called_once_with(["/bin/launchctl", "bootout",
+                                     f"gui/{HELPER.os.getuid()}/com.example.owned"])
+
+    def test_failed_or_interrupted_drive_cleans_runtime(self):
+        for error in (RuntimeError("drive failed"), KeyboardInterrupt()):
+            with self.subTest(error=type(error).__name__), \
+                    patch.object(HELPER.sys, "argv", ["verify-jcode", "drive", "--evidence", str(self.evidence), "tui"]), \
+                    patch.object(HELPER, "Harness", return_value=self.harness), \
+                    patch.object(self.harness, "drive", side_effect=error), \
+                    patch.object(self.harness, "cleanup") as cleanup:
+                with self.assertRaises(type(error)):
+                    HELPER.main()
+                cleanup.assert_called_once_with()
+                self.assertFalse((self.evidence / ".lock").exists())
 
     def test_bad_owner_refuses_loading(self):
         (self.root / "owner").write_text("someone-else")

@@ -24,7 +24,7 @@ If justrust is unavailable, use `scripts/dev_cargo.sh build --target-dir "$BUILD
 
 Launch copies that binary into a short-lived owner-only runtime directory, records its SHA-256/version and checkout revision, starts the existing `scripts/fake_openai_server.py` on a kernel-selected loopback port, starts `serve --socket <private>/app.sock`, completes a real CLI inference and opens a 160x48 TUI in a private `tmux -S` server. Use `launch --cols 60 --rows 30` for a separate narrow-terminal run. It drives the optional first-run welcome screen with Right, Enter. Ready means a completed inference, usable terminal prompt and daemon attachment, not just a socket file.
 
-Both server and clients receive a clean environment with private HOME, JCODE_HOME, JCODE_RUNTIME_DIR, debug-file paths, `JCODE_TEST_SESSION=1` and `JCODE_DEBUG_CONTROL=1` for that private daemon only. The disposable workspace contains only a seeded `verify-probe` skill. Launch neither loads the developer's credentials/skills/config nor repoints or restarts their shared daemon. It refuses an existing evidence directory. Failed launch attempts automatically clean their processes and retain failure logs.
+Both server and clients receive a clean environment with private HOME, JCODE_HOME, JCODE_RUNTIME_DIR, debug-file paths, `JCODE_TEST_SESSION=1`, `JCODE_DEBUG_CONTROL=1`, and `JCODE_NO_MENUBAR=1`. The TUI uses `--fresh-spawn` to skip host setup hints and hotkey installation. The disposable workspace contains only a seeded `verify-probe` skill. Launch neither loads the developer's credentials/skills/config nor repoints or restarts their shared daemon. It refuses an existing evidence directory. Failed or interrupted commands automatically clean their processes and retain failure logs.
 
 ## Doctor
 
@@ -83,7 +83,7 @@ Always run cleanup, including after a failed drive:
 test -s "$E/cleanup.json" && test -s "$E/actions.jsonl"
 ```
 
-Cleanup copies persisted sessions into evidence, stops only processes whose saved start/group identity still matches, stops only the private tmux server, removes the owner-marked runtime directory, and leaves evidence intact. Repeating cleanup is safe. A PID mismatch fails closed and keeps scratch for diagnosis. Do not kill by process name. Each concurrent agent launches a separate run. Commands against one run are serialized by an evidence-directory lock. After an interrupted helper, remove `$E/.lock` only after confirming that no helper command still uses this evidence directory.
+Cleanup copies persisted sessions into evidence, stops only processes whose saved start/group identity still matches, stops the private tmux server, and finds orphaned companions and hotkey listeners by the exact runtime executable path plus PID identity. Runtime-owned launch agents are booted out only when their registered plist path matches the private runtime, never when they match the pre-existing hotkey. The helper records the global hotkey agent path at launch and checks it before and after cleanup. A change fails loudly and preserves runtime evidence. Missing baseline in older manifests also fails closed after stopping owned processes. The owner-marked runtime is removed only after successful checks. Repeating cleanup is safe. Each concurrent agent launches a separate run. Commands against one run are serialized by an evidence-directory lock. After an interrupted helper, remove `$E/.lock` only after confirming that no helper command still uses this evidence directory.
 
 ## Helpers
 
