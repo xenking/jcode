@@ -7,13 +7,35 @@ use std::{
     time::Duration,
 };
 
-/// Send one NDJSON request and receive one response. Each call owns its socket.
+/// Send one request and receive one response. WaitFor polls State on separate
+/// sockets so other clients can continue using the Desktop while waiting.
 #[cfg(unix)]
 pub fn request(
     path: &Path,
     action: DesktopAction,
     timeout: Duration,
 ) -> io::Result<DesktopResponse> {
+    let action = match action {
+        DesktopAction::WaitFor {
+            target,
+            condition,
+            timeout_ms,
+        } => {
+            if !(1..=120_000).contains(&timeout_ms) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "timeout_ms must be between 1 and 120000",
+                ));
+            }
+            return wait_for(
+                path,
+                target,
+                condition,
+                timeout.min(Duration::from_millis(timeout_ms)),
+            );
+        }
+        action => action,
+    };
     use std::os::unix::net::UnixStream;
     let mut socket = UnixStream::connect(path)?;
     socket.set_read_timeout(Some(timeout))?;
@@ -182,14 +204,17 @@ mod tests {
                 writeln!(stream, "{}", serde_json::json!({"status":"ok", "result":{"panel":{"visible_transcript_items":rows}}})).unwrap();
             }
         });
-        let result = wait_for(
+        let result = request(
             &path,
-            DesktopTarget {
-                window_id: "w".into(),
-                session_id: "s".into(),
-            },
-            WaitCondition::SelectorVisible {
-                selector: "tool:c1".into(),
+            DesktopAction::WaitFor {
+                target: DesktopTarget {
+                    window_id: "w".into(),
+                    session_id: "s".into(),
+                },
+                condition: WaitCondition::SelectorVisible {
+                    selector: "tool:c1".into(),
+                },
+                timeout_ms: 2000,
             },
             Duration::from_secs(2),
         )
