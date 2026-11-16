@@ -155,13 +155,11 @@ fn parent_tool_call_id(tool_call_id: &str) -> Option<&str> {
             .find(|c: char| !c.is_ascii_digit())
             .unwrap_or(tool_call_id.len()),
     );
+    // Plain or malformed provider IDs are roots, not failed subcalls.
     let parent_len: usize = digits.parse().ok()?;
     let rest = rest.strip_prefix(':')?;
-    if rest.len() < parent_len + 1 {
-        return None;
-    }
-    let (parent, tail) = rest.split_at(parent_len);
-    tail.strip_prefix(':')?;
+    let parent = rest.get(..parent_len)?;
+    rest.get(parent_len..)?.strip_prefix(':')?;
     Some(parent)
 }
 
@@ -205,6 +203,18 @@ pub trait Tool: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_parent_lengths_never_panic() {
+        for id in [
+            format!("{}:a", usize::MAX),
+            "1:é:child".into(),
+            "3:é".into(),
+        ] {
+            assert!(super::parent_tool_call_id(&id).is_none());
+        }
+        assert_eq!(super::parent_tool_call_id("2:é:child"), Some("é"));
+    }
 
     #[test]
     fn subcall_ids_are_parent_scoped_and_retry_stable() {
