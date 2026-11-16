@@ -39,6 +39,47 @@ pub fn request(
     serde_json::from_str(&line).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
+#[cfg(unix)]
+pub fn socket_dir() -> std::path::PathBuf {
+    std::env::var_os("JCODE_DESKTOP_CONTROL_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(format!("/tmp/jdc-{}", unsafe { libc::geteuid() }))
+        })
+}
+
+/// Discover private endpoints. Reject an unsafe directory rather than trusting
+/// filenames planted by another local user.
+#[cfg(unix)]
+pub fn endpoints() -> io::Result<Vec<std::path::PathBuf>> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let dir = socket_dir();
+    let meta = match std::fs::symlink_metadata(&dir) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "unsafe Desktop control directory",
+        ));
+    }
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let meta = std::fs::symlink_metadata(entry.path())?;
+        if meta.file_type().is_socket()
+            && meta.uid() == unsafe { libc::geteuid() }
+            && meta.mode() & 0o077 == 0
+        {
+            paths.push(entry.path());
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
