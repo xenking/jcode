@@ -34,4 +34,6 @@ pub mod ssh_transport;
 pub mod startup;
 pub mod telemetry;
 pub mod terminal;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod tui_launch;

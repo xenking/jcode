@@ -245,7 +245,8 @@ async fn wait_for_existing_reload_server_uses_reloading_server_instead_of_spawni
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let bind_task = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let listener = Listener::bind(&bind_path).expect("bind replacement listener");
+        let listener =
+            crate::cli::test_support::reload_identity_listener(&bind_path, "reload-test");
         crate::server::write_reload_state(
             "reload-test",
             "hash",
@@ -332,10 +333,17 @@ async fn wait_for_reloading_server_returns_false_when_reload_failed() {
 }
 
 #[tokio::test]
-async fn wait_for_reloading_server_returns_true_for_live_listener() {
+async fn wait_for_reloading_server_returns_true_for_confirmed_generation() {
     let _guard = crate::storage::lock_test_env();
     let env = ReloadTestEnv::new();
-    let _listener = Listener::bind(&env.socket_path).expect("bind listener");
+    crate::server::write_reload_state(
+        "reload-test",
+        "abcdef123",
+        crate::server::ReloadPhase::SocketReady,
+        None,
+    );
+    let _listener =
+        crate::cli::test_support::reload_identity_listener(&env.socket_path, "reload-test");
 
     assert!(wait_for_reloading_server().await);
 }
