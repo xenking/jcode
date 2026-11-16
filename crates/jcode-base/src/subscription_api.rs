@@ -274,19 +274,31 @@ fn error_code(body: &str) -> Option<String> {
         .map(|code| code.chars().take(80).collect())
 }
 
+#[derive(Serialize)]
+struct DeviceAuthorizationRequest {
+    client_name: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requested_tier: Option<&'static str>,
+}
+
+impl DeviceAuthorizationRequest {
+    fn new(requested_tier: Option<JcodeTier>) -> Self {
+        Self {
+            client_name: "jcode-cli",
+            requested_tier: requested_tier.map(JcodeTier::as_str),
+        }
+    }
+}
+
 pub async fn request_device_authorization(
     client: &reqwest::Client,
     api_base: &str,
     requested_tier: Option<JcodeTier>,
 ) -> std::result::Result<DeviceAuthorization, AccountApiError> {
     let url = endpoint_url(api_base, "auth/device");
-    let mut payload = serde_json::json!({ "client_name": "jcode-cli" });
-    if let Some(tier) = requested_tier {
-        payload["requested_tier"] = serde_json::Value::String(tier.as_str().to_string());
-    }
     let response = client
         .post(url)
-        .json(&payload)
+        .json(&DeviceAuthorizationRequest::new(requested_tier))
         .timeout(DEVICE_REQUEST_TIMEOUT)
         .send()
         .await
@@ -328,6 +340,42 @@ pub async fn request_device_authorization(
     })
 }
 
+#[derive(Serialize)]
+struct DeviceTokenRequest<'a> {
+    device_code: &'a str,
+}
+
+#[derive(Serialize)]
+struct EmailCodeStartRequest<'a> {
+    client_name: &'static str,
+    email: &'a str,
+}
+
+impl<'a> EmailCodeStartRequest<'a> {
+    fn new(email: &'a str) -> Self {
+        Self {
+            client_name: "jcode-cli",
+            email: email.trim(),
+        }
+    }
+}
+
+// Keep fields in the sorted order emitted by the legacy JSON maps.
+#[derive(Serialize)]
+struct EmailCodeVerifyRequest<'a> {
+    code: &'a str,
+    login_token: &'a str,
+}
+
+impl<'a> EmailCodeVerifyRequest<'a> {
+    fn new(login_token: &'a str, code: &'a str) -> Self {
+        Self {
+            code: code.trim(),
+            login_token,
+        }
+    }
+}
+
 pub async fn poll_device_token_once(
     client: &reqwest::Client,
     api_base: &str,
@@ -336,7 +384,7 @@ pub async fn poll_device_token_once(
     let url = endpoint_url(api_base, "auth/token");
     let response = client
         .post(url)
-        .json(&serde_json::json!({ "device_code": device_code }))
+        .json(&DeviceTokenRequest { device_code })
         .timeout(DEVICE_REQUEST_TIMEOUT)
         .send()
         .await
@@ -428,7 +476,7 @@ pub async fn request_email_code(
 ) -> std::result::Result<EmailCodeStart, AccountApiError> {
     let response = client
         .post(endpoint_url(api_base, "auth/email/start"))
-        .json(&serde_json::json!({ "client_name": "jcode-cli", "email": email.trim() }))
+        .json(&EmailCodeStartRequest::new(email))
         .timeout(DEVICE_REQUEST_TIMEOUT)
         .send()
         .await
@@ -465,7 +513,7 @@ pub async fn verify_email_code(
 ) -> std::result::Result<EmailCodeVerifyOutcome, AccountApiError> {
     let response = client
         .post(endpoint_url(api_base, "auth/email/verify"))
-        .json(&serde_json::json!({ "login_token": login_token, "code": code.trim() }))
+        .json(&EmailCodeVerifyRequest::new(login_token, code))
         .timeout(DEVICE_REQUEST_TIMEOUT)
         .send()
         .await
@@ -900,3 +948,135 @@ impl PollingBackoff {
 #[cfg(test)]
 #[path = "subscription_api_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod login_request_tests {
+    use super::*;
+
+    #[test]
+    fn login_payloads_match_exact_legacy_wire() {
+        for value in [
+            "",
+            " \t\r\n",
+            "example",
+            "  雪😀\"\\\n\t\u{0000}  ",
+            "\u{2003}雪\u{2003}",
+        ] {
+            let cases = [
+                (
+                    serde_json::to_vec(&DeviceTokenRequest { device_code: value }).unwrap(),
+                    serde_json::json!({ "device_code": value }),
+                ),
+                (
+                    serde_json::to_vec(&EmailCodeStartRequest::new(value)).unwrap(),
+                    serde_json::json!({ "client_name": "jcode-cli", "email": value.trim() }),
+                ),
+                (
+                    serde_json::to_vec(&EmailCodeVerifyRequest::new(value, value)).unwrap(),
+                    serde_json::json!({ "login_token": value, "code": value.trim() }),
+                ),
+            ];
+            for (actual, legacy) in cases {
+                assert_eq!(actual, serde_json::to_vec(&legacy).unwrap());
+            }
+        }
+        assert_eq!(
+            serde_json::to_string(&EmailCodeVerifyRequest::new(" token ", " 123456 ")).unwrap(),
+            r#"{"code":"123456","login_token":" token "}"#,
+        );
+    }
+
+    #[test]
+    fn builders_own_login_bodies_after_borrowed_sources_end() {
+        let client = reqwest::Client::new();
+        for value in ["", " \t\r\n", "  雪😀\"\\\n\t\u{0000}  "] {
+            let cases = {
+                let source = value.to_owned();
+                let device = DeviceTokenRequest {
+                    device_code: &source,
+                };
+                let start = EmailCodeStartRequest::new(&source);
+                let verify = EmailCodeVerifyRequest::new(&source, &source);
+                [
+                    ("auth/token", client.post("http://localhost.invalid/v1/auth/token").json(&device), serde_json::to_vec(&serde_json::json!({ "device_code": source })).unwrap()),
+                    ("auth/email/start", client.post("http://localhost.invalid/v1/auth/email/start").json(&start), serde_json::to_vec(&serde_json::json!({ "client_name": "jcode-cli", "email": source.trim() })).unwrap()),
+                    ("auth/email/verify", client.post("http://localhost.invalid/v1/auth/email/verify").json(&verify), serde_json::to_vec(&serde_json::json!({ "login_token": source, "code": source.trim() })).unwrap()),
+                ]
+            };
+            for (path, builder, expected) in cases {
+                let request = builder.timeout(DEVICE_REQUEST_TIMEOUT).build().unwrap();
+                assert_eq!(request.method(), reqwest::Method::POST);
+                assert_eq!(
+                    request.url().as_str(),
+                    format!("http://localhost.invalid/v1/{path}")
+                );
+                assert_eq!(
+                    request.headers()[reqwest::header::CONTENT_TYPE],
+                    "application/json"
+                );
+                assert!(
+                    !request
+                        .headers()
+                        .contains_key(reqwest::header::AUTHORIZATION)
+                );
+                assert_eq!(request.timeout(), Some(&DEVICE_REQUEST_TIMEOUT));
+                assert_eq!(request.body().unwrap().as_bytes().unwrap(), expected);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod device_authorization_request_tests {
+    use super::*;
+
+    #[test]
+    fn metadata_matches_exact_legacy_wire_for_every_tier() {
+        for tier in std::iter::once(None).chain(JcodeTier::ALL.iter().copied().map(Some)) {
+            let mut legacy = serde_json::json!({ "client_name": "jcode-cli" });
+            if let Some(tier) = tier {
+                legacy["requested_tier"] = serde_json::Value::String(tier.as_str().to_string());
+            }
+            let bytes = serde_json::to_vec(&DeviceAuthorizationRequest::new(tier)).unwrap();
+            assert_eq!(bytes, serde_json::to_vec(&legacy).unwrap());
+            let expected = match tier {
+                Some(tier) => format!(
+                    r#"{{"client_name":"jcode-cli","requested_tier":"{}"}}"#,
+                    tier.as_str()
+                ),
+                None => r#"{"client_name":"jcode-cli"}"#.to_string(),
+            };
+            assert_eq!(bytes, expected.as_bytes());
+        }
+    }
+
+    #[test]
+    fn builder_owns_serialized_metadata_after_source_scope_ends() {
+        let client = reqwest::Client::new();
+        for tier in std::iter::once(None).chain(JcodeTier::ALL.iter().copied().map(Some)) {
+            let (builder, expected) = {
+                let metadata = DeviceAuthorizationRequest::new(tier);
+                let expected = serde_json::to_vec(&metadata).unwrap();
+                let builder = client
+                    .post("http://localhost.invalid/v1/auth/device")
+                    .json(&metadata)
+                    .timeout(DEVICE_REQUEST_TIMEOUT);
+                (builder, expected)
+            };
+            let request = builder.build().unwrap();
+            assert_eq!(request.method(), reqwest::Method::POST);
+            assert_eq!(request.url().path(), "/v1/auth/device");
+            assert_eq!(
+                request.headers()[reqwest::header::CONTENT_TYPE],
+                "application/json"
+            );
+            assert!(
+                !request
+                    .headers()
+                    .contains_key(reqwest::header::AUTHORIZATION)
+            );
+            assert_eq!(request.timeout(), Some(&DEVICE_REQUEST_TIMEOUT));
+            assert_eq!(request.body().unwrap().as_bytes().unwrap(), expected);
+        }
+    }
+}
