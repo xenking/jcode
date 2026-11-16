@@ -56,6 +56,7 @@ pub mod mermaid;
 pub mod permissions {
     pub use jcode_tui_permissions::*;
 }
+mod progress_bar;
 mod redraw_schedule;
 #[allow(unused_imports)]
 pub(crate) use redraw_schedule::{

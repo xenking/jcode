@@ -87,3 +87,40 @@ regression suites run in CI and `scripts/check_guardrails.sh`. Neither gate has
 an allowance list or an adjustable baseline. The broad no-wrap rule remains:
 scalar-width enforcement does not prove every future layout has only one row.
 The fully replaced scalar-count prose was removed from AGENTS.md.
+
+## Copied quota bars drifting from the info widget
+
+Two corrective incidents in the window: `776b05d05` (legacy transcript bar)
+and `0b430381d` (labels and color thresholds). The older originating fix is
+`b331e4cc5` (account-row bar). Repository sessions explicitly repeated the
+shared-renderer requirement. Glyph duplication is the enforced subset of this
+broader style failure; color and wording are still backed by renderer tests.
+
+The quota primitive is already `info_widget_usage.rs`. The source gate rejects
+bar construction throughout production TUI modules, including newly added
+files, rather than grandfathering individual violations. Task progress has a
+different meaning and glyph vocabulary, so its existing three builders were
+migrated to one private `progress_bar.rs` primitive. Quota surfaces cannot call
+that primitive as a workaround. Plain-text wire reports outside the TUI remain
+plain text, and parsing their old glyphs is allowed: display regenerates the
+bar through LimitBar. Progress and usage-card runtime tests verify that this
+ownership change preserves glyphs, widths, styles and quota rendering.
+
+| Gate | Real bad tree | Expected failure | Current tree |
+| --- | --- | --- | --- |
+| `python3 scripts/check_usage_bar_owner.py` | `2ad342b23edd00104d3bccc10b6f67ec11bf1d92` (parent of `776b05d05`) | exit 1, `ui_messages/usage.rs:835-836`: use `info_widget::LimitBar` | exit 0 |
+
+```bash
+past="$(mktemp -d)"
+git archive 2ad342b23edd00104d3bccc10b6f67ec11bf1d92 crates/jcode-tui/src/tui | tar -x -C "$past"
+python3 scripts/check_usage_bar_owner.py --root "$past" # exits 1
+python3 scripts/check_usage_bar_owner.py                # exits 0
+python3 scripts/test_check_usage_bar_owner.py
+justrust test -p jcode-tui --lib progress
+justrust test -p jcode-tui --lib usage_card
+```
+
+The replaced copied-glyph prose is removed from AGENTS.md. Color and
+used/remaining-label prose remains, because glyph ownership alone does not
+prove every future label or color. The gate has no legacy violation allowances.
+

@@ -55,14 +55,7 @@ impl App {
         } else {
             period - phase
         };
-        let mut bar = String::with_capacity(BAR_WIDTH);
-        for idx in 0..BAR_WIDTH {
-            if (start..start + PULSE_WIDTH).contains(&idx) {
-                bar.push('█');
-            } else {
-                bar.push('░');
-            }
-        }
+        let bar = crate::tui::progress_bar::pulse(BAR_WIDTH, start..start + PULSE_WIDTH);
         format!("Compacting context [{}] {:.0}s", bar, elapsed.as_secs_f32())
     }
 

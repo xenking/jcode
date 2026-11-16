@@ -2378,10 +2378,11 @@ fn render_overnight_progress_line(
     .min(inner_width.saturating_sub(fixed_width).max(1));
     let filled = ((percent / 100.0) * bar_width as f32).round() as usize;
     let filled = filled.min(bar_width);
-    let empty = bar_width.saturating_sub(filled);
+    let [filled_bar, empty_bar] =
+        crate::tui::progress_bar::spans(filled, bar_width, filled_style, empty_style);
     let line = Line::from(vec![
-        Span::styled("█".repeat(filled), filled_style),
-        Span::styled("░".repeat(empty), empty_style),
+        filled_bar,
+        empty_bar,
         Span::styled(" ", label_style),
         Span::styled(label, label_style),
         Span::styled(separator, label_style),
@@ -3163,11 +3164,12 @@ fn render_compact_progress_line(
     .min(inner_width.saturating_sub(fixed_width).max(1));
     let filled = ((percent / 100.0) * bar_width as f32).round() as usize;
     let filled = filled.min(bar_width);
-    let empty = bar_width.saturating_sub(filled);
+    let [filled_bar, empty_bar] =
+        crate::tui::progress_bar::spans(filled, bar_width, filled_style, empty_style);
 
     let line = Line::from(vec![
-        Span::styled("█".repeat(filled), filled_style),
-        Span::styled("░".repeat(empty), empty_style),
+        filled_bar,
+        empty_bar,
         Span::styled(" ", label_style),
         Span::styled(label, label_style),
         Span::styled(separator, label_style),

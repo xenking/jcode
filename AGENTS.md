@@ -11,8 +11,7 @@
   truncate with an ellipsis.
   Preserve one logical row per visual row, including at narrow widths.
   Chat prose and other intentionally multiline content may wrap normally.
-- Reuse the info widget's limit-bar renderer for usage indicators instead of
-  introducing a different bar glyph, color, or used/remaining convention.
+- Usage colors and used/remaining labels follow the info widget's conventions.
 
 ## Development Workflow
 
@@ -20,6 +19,7 @@
 | --- | --- |
 | Test helpers isolate persistent homes and machine hooks together, never in production builds | `python3 scripts/check_test_isolation.py` (Cargo feature graph) |
 | Header, status and info-widget measurements use display cells and shared truncation | `python3 scripts/check_tui_chrome.py` (zero scalar-width budget) |
+| Quota bar glyphs have one owner, distinct from task-progress glyphs | `python3 scripts/check_usage_bar_owner.py` (no copied builders) |
 
 - **Commit and push as you go** - Make small, scoped commits and push them to
   the current branch's remote as meaningful work is completed, rather than
