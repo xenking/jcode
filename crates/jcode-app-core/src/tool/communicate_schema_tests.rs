@@ -37,7 +37,14 @@ fn model_facing_swarm_definition_stays_compact() {
         prose_bytes < 1_150,
         "swarm field descriptions grew to {prose_bytes} bytes"
     );
-    for field in ["action", "working_dir", "session_ids", "delivery"] {
+    // working_dir needs its inheritance rule: omission must not accidentally
+    // spawn workers in the daemon's own working directory.
+    let working_dir = schema["properties"]["working_dir"]["description"]
+        .as_str()
+        .expect("working directory override must explain inheritance");
+    assert!(working_dir.contains("override"));
+    assert!(working_dir.contains("inherit the requesting session"));
+    for field in ["action", "session_ids", "delivery"] {
         assert!(
             schema["properties"][field].get("description").is_none(),
             "{field}"
