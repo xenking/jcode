@@ -1097,6 +1097,7 @@ impl Registry {
         let _in_flight = inflight::mark_tool_in_flight(&ctx.tool_call_id);
         let tools = self.tools.read().await;
         let resolved_name = Self::resolve_tool_name_for_session(&ctx.session_id, name);
+        let _turn_activity = crate::turn_activity::global().in_tool(&ctx.session_id, resolved_name);
         let is_custom = sdk::custom(&ctx.session_id, resolved_name);
         if is_custom && let Some(config) = sdk::config(&ctx.session_id) {
             let disabled = config.disabled.into_iter().collect();

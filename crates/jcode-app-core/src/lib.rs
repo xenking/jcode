@@ -55,6 +55,7 @@ pub mod ssh_remote;
 pub mod startup_profile;
 pub(crate) mod stream_batching;
 pub mod tool;
+pub mod turn_activity;
 pub mod turn_cancel_registry;
 pub mod update;
 pub mod wait_registry;

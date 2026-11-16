@@ -93,6 +93,7 @@ impl Drop for ForceStopGuard {
 /// control handle's signal). Without this, one interrupt would leave the flag
 /// permanently set and instantly abort every subsequent turn on the agent.
 pub struct ActiveTurnGuard {
+    _activity: crate::turn_activity::AdmissionGuard,
     session_id: String,
     token: u64,
     signal: InterruptSignal,
@@ -144,6 +145,7 @@ pub fn register_active_turn(session_id: &str, signal: InterruptSignal) -> Active
         session_id, active
     ));
     ActiveTurnGuard {
+        _activity: crate::turn_activity::global().executing(session_id),
         session_id: session_id.to_string(),
         token,
         signal,
@@ -202,6 +204,7 @@ pub fn rename_active_turns(old_session_id: &str, new_session_id: &str) {
             force.insert(new_session_id.to_owned(), entry);
         }
     }
+    crate::turn_activity::global().rename_session(old_session_id, new_session_id);
     let moved = match ACTIVE_TURNS.lock() {
         Ok(mut map) => match map.remove(old_session_id) {
             Some(entries) => {
