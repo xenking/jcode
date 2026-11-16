@@ -537,7 +537,11 @@ impl Provider for CursorCliProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         let payload = canonical_input_payload(&model, system, &prompt);
-        let prompt_items = std::slice::from_ref(payload.get("prompt").unwrap());
+        let prompt_items = std::slice::from_ref(
+            payload
+                .get("prompt")
+                .context("canonical Cursor payload is missing its prompt")?,
+        );
         let system_value = payload.get("system").filter(|value| !value.is_null());
         jcode_provider_core::fingerprint::log_provider_canonical_input(
             "cursor",
