@@ -9,6 +9,61 @@ use super::*;
 /// helps; hopping to the strongest Anthropic route often does.
 const GUARDRAIL_REROUTE_MODEL: &str = "claude-opus-4-8";
 
+fn remap_restored_image_markers(input: &str, image_indices: &[Option<usize>]) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut copied = 0;
+    for (start, _) in input.match_indices("[image ") {
+        let number_start = start + "[image ".len();
+        let digits = input[number_start..]
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .count();
+        let end = number_start + digits;
+        if digits == 0 || input.as_bytes().get(end) != Some(&b']') {
+            continue;
+        }
+        let number = &input[number_start..end];
+        let Ok(number) = number.parse::<usize>() else {
+            continue;
+        };
+        if let Some(index) = number
+            .checked_sub(1)
+            .and_then(|index| image_indices.get(index).copied().flatten())
+        {
+            output.push_str(&input[copied..start]);
+            output.push_str(&format!("[image {index}]"));
+            copied = end + 1;
+        }
+    }
+    output.push_str(&input[copied..]);
+    output
+}
+
+#[cfg(test)]
+mod image_marker_tests {
+    use super::remap_restored_image_markers;
+
+    #[test]
+    fn remapping_is_simultaneous_and_preserves_unavailable_markers() {
+        assert_eq!(
+            remap_restored_image_markers(
+                "[image 1] [image 2] [image 3] [image 0] [image 4]",
+                &[Some(2), Some(1), None],
+            ),
+            "[image 2] [image 1] [image 3] [image 0] [image 4]"
+        );
+    }
+
+    #[test]
+    fn malformed_nested_overflowing_and_unicode_markers_preserve_text() {
+        let text = "ёж [image x[image 1] [image 184467440737095516160] [image ١] [image 2";
+        assert_eq!(
+            remap_restored_image_markers(text, &[Some(7)]),
+            "ёж [image x[image 7] [image 184467440737095516160] [image ١] [image 2"
+        );
+    }
+}
+
 impl App {
     pub(super) fn quota_cause(&self, error: &str) -> Option<String> {
         let details = jcode_provider_core::failover::usage_limit_details(error)?;
@@ -44,6 +99,7 @@ impl App {
         let compact = reason.find('{').and_then(|start| {
             let mut values = serde_json::Deserializer::from_str(&reason[start..])
                 .into_iter::<serde_json::Value>();
+            // Provider bodies need not be JSON; retain the original text on parse failure.
             let value = values.next()?.ok()?;
             let message = value
                 .pointer("/error/message")
@@ -128,13 +184,11 @@ impl App {
                     )
                 })?;
                 let exists = if provider == "openai" {
-                    crate::auth::codex::list_accounts()
-                        .unwrap_or_default()
+                    crate::auth::codex::list_accounts()?
                         .iter()
                         .any(|account| account.label == label)
                 } else {
-                    crate::auth::claude::list_accounts()
-                        .unwrap_or_default()
+                    crate::auth::claude::list_accounts()?
                         .iter()
                         .any(|account| account.label == label)
                 };
@@ -318,19 +372,7 @@ impl App {
             // The composer may already have attachment slots. Remap markers
             // in the recovered prompt once, so swaps and collisions cannot
             // associate its text with a different image.
-            static IMAGE_MARKER: std::sync::LazyLock<regex::Regex> =
-                std::sync::LazyLock::new(|| regex::Regex::new(r"\[image (\d+)\]").unwrap());
-            self.input = IMAGE_MARKER
-                .replace_all(&restored, |captures: &regex::Captures<'_>| {
-                    captures[1]
-                        .parse::<usize>()
-                        .ok()
-                        .and_then(|number| number.checked_sub(1))
-                        .and_then(|index| image_indices.get(index).copied().flatten())
-                        .map(|index| format!("[image {index}]"))
-                        .unwrap_or_else(|| captures[0].to_string())
-                })
-                .into_owned();
+            self.input = remap_restored_image_markers(&restored, &image_indices);
             self.cursor_pos = self.input.len();
         } else if !restored.is_empty() && self.input != restored {
             // Do not turn a partially typed command or prompt into a different
@@ -680,8 +722,8 @@ impl App {
             self.set_status_notice("Paused: automatic failover retry limit reached");
             return;
         }
-        match config.cross_provider_failover {
-            crate::config::CrossProviderFailoverMode::Manual => {
+        match (config.cross_provider_failover, prompt.target_route.as_ref()) {
+            (crate::config::CrossProviderFailoverMode::Manual, _) => {
                 if let Some(payload) = remote_resend {
                     self.restore_failover_payload(payload);
                 }
@@ -691,13 +733,11 @@ impl App {
                     prompt.from_label
                 ));
             }
-            crate::config::CrossProviderFailoverMode::Countdown
-                if prompt.target_route.as_deref().is_some_and(|route| {
-                    self.is_remote
-                        || crate::provider::MultiProvider::is_failover_route_pool_approved(route)
-                }) && (!self.is_remote || remote_resend.is_some()) =>
+            (crate::config::CrossProviderFailoverMode::Countdown, Some(target))
+                if (self.is_remote
+                    || crate::provider::MultiProvider::is_failover_route_pool_approved(target))
+                    && (!self.is_remote || remote_resend.is_some()) =>
             {
-                let target = prompt.target_route.as_ref().expect("approved target");
                 if self.automatic_failover_targets.contains(target)
                     || self.automatic_failover_targets.len()
                         >= usize::from(Self::AUTO_RETRY_MAX_ATTEMPTS)
@@ -1606,12 +1646,10 @@ impl App {
             "RECOVERY_RETRY_RESTORE",
             "terminal_retry_stop",
         );
-        if self
+        if let Some(pending) = self
             .rate_limit_pending_message
-            .as_ref()
-            .is_some_and(|pending| !pending.is_system)
+            .take_if(|pending| !pending.is_system)
         {
-            let pending = self.rate_limit_pending_message.take().unwrap();
             let raw_input = self.last_submitted_input.take();
             self.restore_failover_payload(super::FallbackResendPayload {
                 content: pending.content,
@@ -1956,7 +1994,10 @@ impl App {
             }
 
             // Redraw UI while we wait
-            let _ = terminal.draw(|frame| crate::tui::ui::draw(frame, self));
+            if let Err(error) = terminal.draw(|frame| crate::tui::ui::draw(frame, self)) {
+                crate::logging::warn(&format!("Cannot draw compaction progress: {error}"));
+                return false;
+            }
 
             let compaction = self.registry.compaction();
             let done = if let Ok(mut manager) = compaction.try_write() {
