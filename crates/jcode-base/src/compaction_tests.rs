@@ -2119,6 +2119,16 @@ fn snapcompact_index_keeps_exact_values_and_provenance() {
 }
 
 #[test]
+fn snapcompact_index_preserves_raw_facts_missing_from_prior_page_summary() {
+    let messages = vec![make_text_message(
+        Role::User,
+        "Never remove social-research-hub because it is needed.",
+    )];
+    let index = build_snapcompact_index(&messages, 0, "older summarized history", &[]);
+    assert!(index.contains("[message 0, page UNKNOWN | user] Never remove social-research-hub because it is needed."), "{index}");
+}
+
+#[test]
 fn snapcompact_pages_survive_persistence_and_follow_vision_capability() {
     let mut manager = CompactionManager::new();
     manager.active_summary = Some(Summary {

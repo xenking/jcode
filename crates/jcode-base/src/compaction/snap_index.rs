@@ -13,8 +13,10 @@ fn interesting(line: &str, user: bool) -> bool {
     user || re.is_match(line)
 }
 
-/// Every excerpt is present after normalization. Ambiguous occurrences do not
-/// receive a guessed page. A balanced budget avoids discarding the whole tail.
+/// Excerpts come from raw messages. A page is cited only when its normalized
+/// text has an unambiguous occurrence in the rendered archive. Older pages can
+/// contain an earlier summary instead of the raw message, so missing text must
+/// remain in the index with an UNKNOWN page rather than being discarded.
 pub(super) fn build_snapcompact_index(
     messages: &[Message],
     message_offset: usize,
@@ -69,10 +71,10 @@ pub(super) fn build_snapcompact_index(
                     continue;
                 }
                 let mut matches = source.match_indices(&normalized);
-                let Some((pos, _)) = matches.next() else {
-                    continue;
-                };
-                let page = if matches.next().is_none() {
+                let first = matches.next();
+                let page = if let Some((pos, _)) = first
+                    && matches.next().is_none()
+                {
                     ranges
                         .iter()
                         .find(|range| {
