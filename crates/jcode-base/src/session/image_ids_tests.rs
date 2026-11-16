@@ -142,6 +142,24 @@ fn ask_answer_markers_identify_their_own_images() {
 }
 
 #[test]
+fn ask_comment_with_semicolon_keeps_its_image_reference() {
+    let mut session = Session::create(None, None);
+    session.add_message(Role::User, vec![
+        ContentBlock::ToolResult { tool_use_id: "ask".into(), content: "User answers:\n1. Which? -> B (comment: first; second [#image 1]); Other: plain\n".into(), is_error: None },
+        ContentBlock::Image { media_type: "image/png".into(), data: "comment".into() },
+        ContentBlock::Text { text: "[Attached image associated with the preceding tool result: Question 1 option \"B\" comment, image 1]".into(), cache_control: None },
+    ]);
+    let id = &session.session_images()[0].image_id;
+    let ContentBlock::ToolResult { content, .. } = &session.messages[0].content[0] else {
+        panic!("missing result")
+    };
+    assert!(
+        content.contains(&format!("first; second [#{id}]")),
+        "{content}"
+    );
+}
+
+#[test]
 fn ask_migration_remaps_old_markers_even_when_ids_were_already_appended() {
     let mut session = Session::create(None, None);
     session.add_message(

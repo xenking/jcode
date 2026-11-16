@@ -136,7 +136,27 @@ fn remap_ask_images(content: &str, labels: &[(String, String)]) -> String {
             if line.starts_with(&prefix) {
                 if let Some(field_start) = line.find(&field) {
                     let start = field_start + field.len();
-                    let end = line[start..].find("; ").map_or(line.len(), |i| start + i);
+                    let mut depth = 0usize;
+                    for ch in line[..start].chars() {
+                        match ch {
+                            '(' => depth += 1,
+                            ')' => depth = depth.saturating_sub(1),
+                            _ => {}
+                        }
+                    }
+                    let mut end = line.len();
+                    for (relative, ch) in line[start..].char_indices() {
+                        let index = start + relative;
+                        match ch {
+                            '(' => depth += 1,
+                            ')' => depth = depth.saturating_sub(1),
+                            ';' if depth == 0 && line[index..].starts_with("; ") => {
+                                end = index;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
                     let old = format!("[#image {number}]");
                     if let Some(pos) = line[start..end].find(&old) {
                         let pos = offset + start + pos;
