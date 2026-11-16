@@ -2221,7 +2221,17 @@ impl BridgeState {
             // Argument streaming is not an assistant-message boundary.
             "ask_user_request" => match serde_json::from_value(event["questions"].clone()) {
                 Ok(questions) => vec![ServerFrame::event(ApiEvent::AskRequest {
-                    session_id: session(self),
+                    // The daemon can replay a pending ask before the correlated
+                    // state reply establishes this new connection's identity.
+                    session_id: self
+                        .session_id
+                        .clone()
+                        .or_else(|| {
+                            self.pending_attach_id
+                                .as_ref()
+                                .and_then(|(_, _, target)| target.clone())
+                        })
+                        .unwrap_or_default(),
                     request_id: event["request_id"].as_str().unwrap_or("").to_string(),
                     tool_call_id: event["tool_call_id"].as_str().unwrap_or("").to_string(),
                     questions,
