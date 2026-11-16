@@ -53,6 +53,8 @@ const REQUIRES_ATTACH: &[&str] = &[
     "set_queued_prompt_mode",
     "interrupt_queued_prompt",
     "get_queued_prompts",
+    "remove_queued_prompt",
+    "reorder_queued_prompts",
     "cancel_soft_interrupts",
     "background_tool",
     "clear",
@@ -142,6 +144,7 @@ pub struct BridgeState {
     /// The daemon accepts soft interrupt ids and per-id cancellation, and
     /// replies to `background_tool` with a result.
     pub queued_prompts_supported: bool,
+    pub queued_prompt_mutations_supported: bool,
     pub bounded_history_supported: bool,
     pub soft_interrupt_ids_supported: bool,
     /// Leftover queue size reported just before the current turn's `done`.
@@ -745,7 +748,9 @@ impl BridgeState {
             "queue_prompt"
             | "set_queued_prompt_mode"
             | "interrupt_queued_prompt"
-            | "get_queued_prompts" => {
+            | "get_queued_prompts"
+            | "remove_queued_prompt"
+            | "reorder_queued_prompts" => {
                 if !self.queued_prompts_supported {
                     return vec![Outbound::Reply(ServerFrame::reply(
                         api_id,
@@ -755,9 +760,22 @@ impl BridgeState {
                         },
                     ))];
                 }
+                if matches!(req, "remove_queued_prompt" | "reorder_queued_prompts")
+                    && !self.queued_prompt_mutations_supported
+                {
+                    return vec![Outbound::Reply(ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: "daemon does not advertise queued_prompt_mutations_v1".into(),
+                        },
+                    ))];
+                }
                 let id = self.legacy_id();
                 let kind = if req == "get_queued_prompts" {
                     SimpleKind::QueueSnapshot
+                } else if req == "remove_queued_prompt" {
+                    SimpleKind::QueueRemoval
                 } else {
                     SimpleKind::QueueControl
                 };
@@ -3073,6 +3091,29 @@ impl BridgeState {
                     Some(api_id) => vec![ServerFrame::reply(api_id, payload)],
                     None => vec![ServerFrame::event(payload)],
                 }
+            }
+            "queued_prompt_removed" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let Some(api_id) = self.take_simple(id, SimpleKind::QueueRemoval) else {
+                    return vec![];
+                };
+                let Ok(outcome) = serde_json::from_value(event["outcome"].clone()) else {
+                    return vec![ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: "invalid queued prompt removal outcome".into(),
+                        },
+                    )];
+                };
+                vec![ServerFrame::reply(
+                    api_id,
+                    ApiEvent::QueuedPromptRemoved {
+                        session_id: session(self),
+                        prompt_id: event["prompt_id"].as_str().unwrap_or("").to_string(),
+                        outcome,
+                    },
+                )]
             }
             "soft_interrupt_injected" => {
                 // Daemon-originated injections (background task results,

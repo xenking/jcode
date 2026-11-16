@@ -1089,6 +1089,39 @@ impl JcodeClient {
         }
     }
 
+    pub fn remove_queued_prompt(
+        &self,
+        session_id: &str,
+        client_id: &str,
+        prompt_id: &str,
+    ) -> Result<jcode_harness_api::QueuedPromptRemovalOutcome> {
+        match self
+            .request_ok(ApiRequest::RemoveQueuedPrompt {
+                session_id: session_id.into(),
+                client_id: client_id.into(),
+                prompt_id: prompt_id.into(),
+            })?
+            .event
+        {
+            ApiEvent::QueuedPromptRemoved { outcome, .. } => Ok(outcome),
+            other => Err(unexpected("queued_prompt_removed", &other)),
+        }
+    }
+
+    pub fn reorder_queued_prompts(
+        &self,
+        session_id: &str,
+        client_id: &str,
+        order: Vec<String>,
+    ) -> Result<()> {
+        self.request_ok(ApiRequest::ReorderQueuedPrompts {
+            session_id: session_id.into(),
+            client_id: client_id.into(),
+            order,
+        })
+        .map(drop)
+    }
+
     pub fn get_history(&self, session_id: &str) -> Result<Vec<HistoryMessage>> {
         self.get_history_with_images(session_id)
             .map(|(messages, _)| messages)

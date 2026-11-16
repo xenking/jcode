@@ -6,6 +6,7 @@ use super::{ApiEvent, BridgeState, ErrorCode, ServerFrame, Value};
 pub(super) enum SimpleKind {
     QueueControl,
     QueueSnapshot,
+    QueueRemoval,
     RuntimeCommand,
     Detach,
     Tools,
@@ -58,6 +59,7 @@ impl BridgeState {
                         kind,
                         SimpleKind::QueueControl
                             | SimpleKind::QueueSnapshot
+                            | SimpleKind::QueueRemoval
                             | SimpleKind::Tools
                             | SimpleKind::ToolControl
                             | SimpleKind::OkOnDone

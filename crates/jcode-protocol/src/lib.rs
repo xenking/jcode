@@ -412,7 +412,10 @@ pub type ReloadRecoverySnapshot = jcode_selfdev_types::ReloadRecoveryDirective;
 
 mod wire;
 pub use wire::{AccountUsageSnapshot, AccountUsageWindow, Request, ServerEvent, TurnIdentity};
-pub use wire::{QueuedPrompt, QueuedPromptMode, SessionToolConfig, SessionToolDefinition};
+pub use wire::{
+    QueuedPrompt, QueuedPromptMode, QueuedPromptRemovalOutcome, SessionToolConfig,
+    SessionToolDefinition,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallSummary {
@@ -869,6 +872,8 @@ impl Request {
             Request::QueuePrompt { id, .. }
             | Request::SetQueuedPromptMode { id, .. }
             | Request::InterruptQueuedPrompt { id, .. }
+            | Request::RemoveQueuedPrompt { id, .. }
+            | Request::ReorderQueuedPrompts { id, .. }
             | Request::GetQueuedPrompts { id } => *id,
             Request::SoftInterrupt { id, .. } => *id,
             Request::CancelSoftInterrupts { id, .. } => *id,

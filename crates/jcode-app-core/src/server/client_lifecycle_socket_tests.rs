@@ -3,6 +3,154 @@ use crate::message::Role;
 
 #[cfg(unix)]
 #[tokio::test]
+async fn queue_mutations_survive_daemon_restart_over_socket() {
+    use crate::server::runtime::ServerRuntime;
+    use serde_json::json;
+    let _lock = crate::storage::lock_test_env();
+    let home = IsolatedReloadRecoveryEnv::new();
+    async fn send(writer: &mut crate::transport::WriteHalf, value: serde_json::Value) {
+        writer
+            .write_all(format!("{value}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+    async fn until(
+        reader: &mut BufReader<crate::transport::ReadHalf>,
+        predicate: impl Fn(&ServerEvent) -> bool,
+    ) -> ServerEvent {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                let event: ServerEvent = serde_json::from_str(&line).unwrap();
+                if predicate(&event) {
+                    return event;
+                }
+            }
+        })
+        .await
+        .expect("daemon event timeout")
+    }
+    let provider = TerminalSocketProvider::default();
+    let socket = home._runtime.path().join("mutations-1.sock");
+    let server = crate::server::Server::new_with_paths(
+        Arc::new(provider.clone()),
+        socket.clone(),
+        home._runtime.path().join("mutations-debug-1.sock"),
+    );
+    let runtime = ServerRuntime::from_server(&server);
+    let handle = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
+    let (reader, mut writer) = crate::transport::Stream::connect(&socket)
+        .await
+        .unwrap()
+        .into_split();
+    let mut reader = BufReader::new(reader);
+    send(
+        &mut writer,
+        json!({"type":"subscribe","id":1,"working_dir":home._home.path()}),
+    )
+    .await;
+    until(&mut reader, |e| matches!(e, ServerEvent::Done { id: 1 })).await;
+    let session_id = server.sessions.read().await.keys().next().unwrap().clone();
+    send(
+        &mut writer,
+        json!({"type":"message","id":2,"content":"busy"}),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(5), provider.first_started.notified())
+        .await
+        .unwrap();
+    for (id, prompt) in [(3, "a"), (4, "b"), (5, "c")] {
+        send(&mut writer, json!({"type":"queue_prompt","id":id,"client_id":prompt,"content":prompt,"mode":"after_yield"})).await;
+        until(
+            &mut reader,
+            |e| matches!(e, ServerEvent::Ack { id: n } if *n == id),
+        )
+        .await;
+    }
+    send(
+        &mut writer,
+        json!({"type":"reorder_queued_prompts","id":6,"client_id":"test","order":["c","a","b"]}),
+    )
+    .await;
+    until(&mut reader, |e| matches!(e, ServerEvent::Ack { id: 6 })).await;
+    send(
+        &mut writer,
+        json!({"type":"remove_queued_prompt","id":7,"client_id":"test","prompt_id":"a"}),
+    )
+    .await;
+    until(&mut reader, |e| {
+        matches!(
+            e,
+            ServerEvent::QueuedPromptRemoved {
+                id: 7,
+                outcome: crate::protocol::QueuedPromptRemovalOutcome::Removed,
+                ..
+            }
+        )
+    })
+    .await;
+    drop(writer);
+    drop(reader);
+    tokio::time::timeout(Duration::from_secs(10), runtime.shutdown())
+        .await
+        .unwrap();
+    handle.await.unwrap();
+    for signal in crate::turn_cancel_registry::active_turn_signals(&session_id) {
+        signal.fire();
+    }
+    provider.finish_first.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while crate::turn_cancel_registry::has_active_turn(&session_id) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("old turn did not retire");
+    let provider2 = TerminalSocketProvider::default();
+    let socket2 = home._runtime.path().join("mutations-2.sock");
+    let server2 = crate::server::Server::new_with_paths(
+        Arc::new(provider2),
+        socket2.clone(),
+        home._runtime.path().join("mutations-debug-2.sock"),
+    );
+    let runtime2 = ServerRuntime::from_server(&server2);
+    let handle2 =
+        runtime2.spawn_main_accept_loop(crate::transport::Listener::bind(&socket2).unwrap());
+    let (reader, mut writer) = crate::transport::Stream::connect(&socket2)
+        .await
+        .unwrap()
+        .into_split();
+    let mut reader = BufReader::new(reader);
+    send(
+        &mut writer,
+        json!({"type":"subscribe","id":8,"target_session_id":session_id}),
+    )
+    .await;
+    until(&mut reader, |e| matches!(e, ServerEvent::Done { id: 8 })).await;
+    send(&mut writer, json!({"type":"get_queued_prompts","id":9})).await;
+    let snapshot = until(&mut reader, |e| {
+        matches!(e, ServerEvent::QueuedPrompts { id: 9, .. })
+    })
+    .await;
+    let ServerEvent::QueuedPrompts { prompts, .. } = snapshot else {
+        unreachable!()
+    };
+    assert_eq!(
+        prompts
+            .iter()
+            .map(|p| p.client_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["c", "b"]
+    );
+    drop(writer);
+    drop(reader);
+    runtime2.shutdown().await;
+    handle2.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn daemon_accepts_queue_immediately_after_turn_done() {
     use crate::server::runtime::ServerRuntime;
     use serde_json::json;
@@ -557,12 +705,16 @@ impl Provider for TerminalSocketProvider {
         _: Option<&str>,
     ) -> Result<EventStream> {
         self.images.lock().unwrap().push(
-            messages.iter().flat_map(|message| message.content.iter()).filter_map(|block| {
-                match block {
-                    ContentBlock::Image { media_type, data } => Some((media_type.clone(), data.clone())),
+            messages
+                .iter()
+                .flat_map(|message| message.content.iter())
+                .filter_map(|block| match block {
+                    ContentBlock::Image { media_type, data } => {
+                        Some((media_type.clone(), data.clone()))
+                    }
                     _ => None,
-                }
-            }).collect(),
+                })
+                .collect(),
         );
         self.messages.lock().unwrap().push(
             messages
@@ -641,15 +793,18 @@ impl Provider for TerminalSocketProvider {
     }
 
     fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
-        self.available_models_display().into_iter().map(|model| crate::provider::ModelRoute {
-            model,
-            provider: "fixture".into(),
-            api_method: "fixture".into(),
-            available: true,
-            detail: String::new(),
-            usage: None,
-            cheapness: None,
-        }).collect()
+        self.available_models_display()
+            .into_iter()
+            .map(|model| crate::provider::ModelRoute {
+                model,
+                provider: "fixture".into(),
+                api_method: "fixture".into(),
+                available: true,
+                detail: String::new(),
+                usage: None,
+                cheapness: None,
+            })
+            .collect()
     }
 
     async fn refresh_model_catalog(&self) -> Result<crate::provider::ModelCatalogRefreshSummary> {
@@ -673,7 +828,17 @@ impl Provider for TerminalSocketProvider {
 
 #[tokio::test]
 async fn busy_long_lived_session_receives_catalog_update_after_turn() {
-    sdk_socket_cancel_workflow(false, true, true, false, false, false, false, Some("catalog")).await;
+    sdk_socket_cancel_workflow(
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        Some("catalog"),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -698,7 +863,17 @@ async fn queued_steer_is_injected_without_cancelling_over_socket() {
 
 #[tokio::test]
 async fn busy_session_sets_effort_over_socket_before_turn_finishes() {
-    sdk_socket_cancel_workflow(false, true, true, false, false, false, false, Some("effort")).await;
+    sdk_socket_cancel_workflow(
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        Some("effort"),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -1053,13 +1228,22 @@ async fn sdk_socket_cancel_workflow(
         if queued_test == Some("catalog") {
             // A second client explicitly refreshes the already-fresh catalog while
             // the long-lived session owns its agent lock. No daemon restart.
-            send(&mut legacy_writer, json!({"type":"refresh_models", "id": 88})).await;
-            until(&mut legacy_reader, |event| matches!(event, ServerEvent::Done { id: 88 })).await;
+            send(
+                &mut legacy_writer,
+                json!({"type":"refresh_models", "id": 88}),
+            )
+            .await;
+            until(&mut legacy_reader, |event| {
+                matches!(event, ServerEvent::Done { id: 88 })
+            })
+            .await;
             tokio::time::timeout(Duration::from_secs(5), async {
                 while terminal_provider.catalog_revision.load(Ordering::SeqCst) == 0 {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-            }).await.expect("explicit refresh must bypass the fixture's fresh cache");
+            })
+            .await
+            .expect("explicit refresh must bypass the fixture's fresh cache");
             tokio::time::sleep(Duration::from_millis(1200)).await;
             terminal_provider.finish_first.notify_one();
             let event = until(&mut client_reader, |event| matches!(event,
@@ -1147,9 +1331,16 @@ async fn sdk_socket_cancel_workflow(
                 history.contains("comment: reason") && history.contains("Other: custom"),
                 "{history}"
             );
-            assert!(history.contains("b3RoZXI=") && history.contains("Y29tbWVudA=="), "{history}");
+            assert!(
+                history.contains("b3RoZXI=") && history.contains("Y29tbWVudA=="),
+                "{history}"
+            );
             let reloaded = crate::session::Session::load(&session_id).unwrap();
-            let blocks: Vec<_> = reloaded.messages.iter().flat_map(|message| &message.content).collect();
+            let blocks: Vec<_> = reloaded
+                .messages
+                .iter()
+                .flat_map(|message| &message.content)
+                .collect();
             assert!(blocks.iter().any(|block| matches!(block, ContentBlock::Image { media_type, data } if media_type == "image/png" && data == "b3RoZXI=")));
             assert!(blocks.iter().any(|block| matches!(block, ContentBlock::Image { media_type, data } if media_type == "image/jpeg" && data == "Y29tbWVudA==")));
             assert_eq!(crate::session::render_images(&reloaded).len(), 2);
@@ -1181,12 +1372,26 @@ async fn sdk_socket_cancel_workflow(
             .await;
         }
         if queued_test == Some("effort") {
-            send(&mut client_writer, json!({"type":"set_reasoning_effort","id":49,"effort":"high"})).await;
-            let event = tokio::time::timeout(Duration::from_secs(2), until(&mut client_reader, |event| {
-                matches!(event, ServerEvent::ReasoningEffortChanged { id:49, .. })
-            })).await.expect("effort must be confirmed during the active turn");
-            assert!(matches!(event, ServerEvent::ReasoningEffortChanged { effort: Some(ref effort), error: None, .. } if effort == "high"));
-            assert_eq!(terminal_provider.reasoning_effort().as_deref(), Some("high"));
+            send(
+                &mut client_writer,
+                json!({"type":"set_reasoning_effort","id":49,"effort":"high"}),
+            )
+            .await;
+            let event = tokio::time::timeout(
+                Duration::from_secs(2),
+                until(&mut client_reader, |event| {
+                    matches!(event, ServerEvent::ReasoningEffortChanged { id: 49, .. })
+                }),
+            )
+            .await
+            .expect("effort must be confirmed during the active turn");
+            assert!(
+                matches!(event, ServerEvent::ReasoningEffortChanged { effort: Some(ref effort), error: None, .. } if effort == "high")
+            );
+            assert_eq!(
+                terminal_provider.reasoning_effort().as_deref(),
+                Some("high")
+            );
             assert_eq!(terminal_provider.calls.load(Ordering::SeqCst), 1);
         }
         if let Some(mode) = queued_test.filter(|mode| *mode != "effort") {
@@ -1332,7 +1537,9 @@ async fn sdk_socket_cancel_workflow(
                         assert!(active.replace(identity).is_none());
                     }
                     ServerEvent::TurnEvent { identity, event } => {
-                        if (idle_soft_interrupt || queued_test == Some("effort")) && active.is_none() {
+                        if (idle_soft_interrupt || queued_test == Some("effort"))
+                            && active.is_none()
+                        {
                             // The pickup wait may already have consumed the
                             // asynchronous TurnStarted notification.
                             active = Some(identity.clone());

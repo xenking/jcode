@@ -3,6 +3,58 @@
 use crate::*;
 
 #[test]
+fn queued_prompt_mutations_wire_shape() {
+    let remove = ClientFrame::new(
+        7,
+        ApiRequest::RemoveQueuedPrompt {
+            session_id: "s".into(),
+            client_id: "ui".into(),
+            prompt_id: "p".into(),
+        },
+    );
+    assert_eq!(
+        serde_json::to_value(remove).unwrap(),
+        serde_json::json!({"v":1,"id":7,"req":"remove_queued_prompt","session_id":"s","client_id":"ui","prompt_id":"p"})
+    );
+    let reorder = ClientFrame::new(
+        8,
+        ApiRequest::ReorderQueuedPrompts {
+            session_id: "s".into(),
+            client_id: "ui".into(),
+            order: vec!["b".into(), "a".into()],
+        },
+    );
+    assert_eq!(
+        serde_json::to_value(reorder).unwrap(),
+        serde_json::json!({"v":1,"id":8,"req":"reorder_queued_prompts","session_id":"s","client_id":"ui","order":["b","a"]})
+    );
+    for (outcome, wire) in [
+        (QueuedPromptRemovalOutcome::Removed, "removed"),
+        (QueuedPromptRemovalOutcome::InFlight, "in_flight"),
+        (
+            QueuedPromptRemovalOutcome::AlreadyDelivered,
+            "already_delivered",
+        ),
+        (QueuedPromptRemovalOutcome::NotFound, "not_found"),
+    ] {
+        let frame = ServerFrame::reply(
+            7,
+            ApiEvent::QueuedPromptRemoved {
+                session_id: "s".into(),
+                prompt_id: "p".into(),
+                outcome,
+            },
+        );
+        let value = serde_json::to_value(&frame).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"v":1,"reply_to":7,"ev":"queued_prompt_removed","session_id":"s","prompt_id":"p","outcome":wire})
+        );
+        assert_eq!(serde_json::from_value::<ServerFrame>(value).unwrap(), frame);
+    }
+}
+
+#[test]
 fn create_session_system_prompt_roundtrip_and_legacy_default() {
     let legacy = serde_json::json!({"req": "create_session"});
     let decoded: ApiRequest = serde_json::from_value(legacy.clone()).unwrap();

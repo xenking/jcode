@@ -1053,6 +1053,37 @@ fn queued_prompt_bridge_forwards_and_correlates_controls_and_snapshots() {
 }
 
 #[test]
+fn queued_prompt_mutation_bridge_requires_capability_and_correlates_outcome() {
+    let mut state = BridgeState {
+        session_id: Some("s1".into()),
+        queued_prompts_supported: true,
+        ..Default::default()
+    };
+    let request = json!({"req":"remove_queued_prompt","id":20,"session_id":"s1","client_id":"panel","prompt_id":"p1"});
+    assert!(matches!(
+        &state.api_request_to_legacy(&request)[..],
+        [Outbound::Reply(_)]
+    ));
+    state.queued_prompt_mutations_supported = true;
+    let out = state.api_request_to_legacy(&request);
+    let legacy = legacy_out(&out);
+    assert_eq!(legacy["prompt_id"], "p1");
+    let id = legacy["id"].as_u64().unwrap();
+    let result = state.legacy_event_to_api(&json!({"type":"queued_prompt_removed","id":id,"prompt_id":"p1","outcome":"already_delivered"}));
+    assert!(
+        matches!(&result[..], [frame] if frame.reply_to == Some(20) && matches!(&frame.event, ApiEvent::QueuedPromptRemoved { prompt_id, outcome: jcode_harness_api::QueuedPromptRemovalOutcome::AlreadyDelivered, .. } if prompt_id == "p1"))
+    );
+    let out = state.api_request_to_legacy(&json!({"req":"reorder_queued_prompts","id":21,"session_id":"s1","client_id":"panel","order":["p2","p1"]}));
+    let legacy = legacy_out(&out);
+    assert_eq!(legacy["order"], json!(["p2", "p1"]));
+    let id = legacy["id"].as_u64().unwrap();
+    let err = state.legacy_event_to_api(&json!({"type":"error","id":id,"message":"invalid order"}));
+    assert!(
+        matches!(&err[..], [frame] if frame.reply_to == Some(21) && matches!(&frame.event, ApiEvent::Error { message, .. } if message == "invalid order"))
+    );
+}
+
+#[test]
 fn soft_interrupt_forwards_client_id() {
     let mut state = ids_state();
     let out = state.api_request_to_legacy(&json!({

@@ -38,6 +38,16 @@ pub enum QueuedPromptMode {
     AfterYield,
 }
 
+/// Result of attempting to remove a prompt at the queue's delivery boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedPromptRemovalOutcome {
+    Removed,
+    InFlight,
+    AlreadyDelivered,
+    NotFound,
+}
+
 /// One user-authored message still owned by the daemon queue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueuedPrompt {
@@ -120,6 +130,20 @@ pub enum Request {
     /// Obtain a fresh queue snapshot after reconnecting.
     #[serde(rename = "get_queued_prompts")]
     GetQueuedPrompts { id: u64 },
+
+    #[serde(rename = "remove_queued_prompt")]
+    RemoveQueuedPrompt {
+        id: u64,
+        client_id: String,
+        prompt_id: String,
+    },
+
+    #[serde(rename = "reorder_queued_prompts")]
+    ReorderQueuedPrompts {
+        id: u64,
+        client_id: String,
+        order: Vec<String>,
+    },
 
     /// Soft interrupt: inject message at next safe point without cancelling
     #[serde(rename = "soft_interrupt")]

@@ -934,6 +934,92 @@ impl SessionControlHandle {
             .collect())
     }
 
+    pub(super) fn remove_user_prompt(
+        &self,
+        prompt_id: &str,
+    ) -> anyhow::Result<crate::protocol::QueuedPromptRemovalOutcome> {
+        use crate::protocol::QueuedPromptRemovalOutcome as Outcome;
+        let mut queue = self
+            .soft_interrupt_queue
+            .lock()
+            .map_err(|_| anyhow::anyhow!("queue lock poisoned"))?;
+        if let Some(index) = queue.iter().position(|item| {
+            item.source == SoftInterruptSource::User && item.client_id.as_deref() == Some(prompt_id)
+        }) {
+            if queue[index].mode == jcode_agent_runtime::QueuedMessageMode::InFlight {
+                return Ok(Outcome::InFlight);
+            }
+            let removed = queue.remove(index);
+            if let Err(error) = crate::soft_interrupt_store::overwrite(&self.session_id, &queue) {
+                queue.insert(index, removed);
+                return Err(error);
+            }
+            return Ok(Outcome::Removed);
+        }
+        let delivered = crate::session::Session::load(&self.session_id)
+            .ok()
+            .is_some_and(|session| {
+                session.messages.iter().any(|message| {
+                    message
+                        .id
+                        .strip_prefix("queued:")
+                        .and_then(|ids| serde_json::from_str::<Vec<String>>(ids).ok())
+                        .is_some_and(|ids| ids.iter().any(|id| id == prompt_id))
+                })
+            });
+        Ok(if delivered {
+            Outcome::AlreadyDelivered
+        } else {
+            Outcome::NotFound
+        })
+    }
+
+    pub(super) fn reorder_user_prompts(&self, order: &[String]) -> anyhow::Result<()> {
+        let mut queue = self
+            .soft_interrupt_queue
+            .lock()
+            .map_err(|_| anyhow::anyhow!("queue lock poisoned"))?;
+        let indices: Vec<usize> = queue
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                (item.source == SoftInterruptSource::User
+                    && item.client_id.is_some()
+                    && item.mode != jcode_agent_runtime::QueuedMessageMode::InFlight)
+                    .then_some(index)
+            })
+            .collect();
+        anyhow::ensure!(
+            order.len() == indices.len(),
+            "order must contain every queued prompt exactly once"
+        );
+        let mut by_id = std::collections::HashMap::new();
+        for &index in &indices {
+            let item = &queue[index];
+            anyhow::ensure!(
+                by_id
+                    .insert(item.client_id.clone().unwrap(), item.clone())
+                    .is_none(),
+                "duplicate queued prompt id"
+            );
+        }
+        let mut reordered = Vec::with_capacity(order.len());
+        for id in order {
+            reordered.push(by_id.remove(id).ok_or_else(|| {
+                anyhow::anyhow!("order must contain every queued prompt exactly once")
+            })?);
+        }
+        let previous = queue.clone();
+        for (index, item) in indices.into_iter().zip(reordered) {
+            queue[index] = item;
+        }
+        if let Err(error) = crate::soft_interrupt_store::overwrite(&self.session_id, &queue) {
+            *queue = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub(super) fn set_user_prompt_mode(
         &self,
         client_id: &str,

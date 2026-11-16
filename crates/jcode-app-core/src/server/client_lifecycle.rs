@@ -1220,10 +1220,11 @@ pub(super) async fn handle_client(
 
         // Queue controls are acknowledged after their durable mutation, not
         // by the generic pre-dispatch Ack below.
-        if matches!(&request, Request::QueuePrompt { .. } | Request::SetQueuedPromptMode { .. } | Request::InterruptQueuedPrompt { .. } | Request::GetQueuedPrompts { .. }) {
+        if matches!(&request, Request::QueuePrompt { .. } | Request::SetQueuedPromptMode { .. } | Request::InterruptQueuedPrompt { .. } | Request::GetQueuedPrompts { .. } | Request::RemoveQueuedPrompt { .. } | Request::ReorderQueuedPrompts { .. }) {
             let mut interrupt = false;
             let mut dispatch_if_idle = false;
             let mut already_delivered = None;
+            let mut removal = None;
             let (id, result) = match request {
                 Request::QueuePrompt { id, client_id, content, images, mode, system_reminder } => {
                     let mode = match mode {
@@ -1249,11 +1250,20 @@ pub(super) async fn handle_client(
                     (id, session_control.set_user_prompt_mode(&client_id, jcode_agent_runtime::QueuedMessageMode::AfterYield, true))
                 }
                 Request::GetQueuedPrompts { id } => { dispatch_if_idle = true; (id, Ok(())) },
+                Request::RemoveQueuedPrompt { id, client_id: _, prompt_id } => {
+                    let result = session_control.remove_user_prompt(&prompt_id).map(|outcome| { removal = Some((prompt_id, outcome)); });
+                    (id, result)
+                }
+                Request::ReorderQueuedPrompts { id, client_id: _, order } => (id, session_control.reorder_user_prompts(&order)),
                 _ => unreachable!(),
             };
             match result {
                 Ok(()) => {
-                    let _ = client_event_tx.send(ServerEvent::Ack { id });
+                    if let Some((prompt_id, outcome)) = removal {
+                        let _ = client_event_tx.send(ServerEvent::QueuedPromptRemoved { id, prompt_id, outcome });
+                    } else {
+                        let _ = client_event_tx.send(ServerEvent::Ack { id });
+                    }
                     if let Some((client_id, content)) = already_delivered {
                         let _ = client_event_tx.send(ServerEvent::SoftInterruptInjected { content, display_role: None, point: "already_delivered".into(), tools_skipped: None, client_ids: vec![client_id] });
                     }
@@ -1370,7 +1380,7 @@ pub(super) async fn handle_client(
             connection_client_name = Some(name.clone());
         }
         match request {
-            Request::QueuePrompt { .. } | Request::SetQueuedPromptMode { .. } | Request::InterruptQueuedPrompt { .. } | Request::GetQueuedPrompts { .. } => unreachable!("queue controls dispatched before acknowledgment"),
+            Request::QueuePrompt { .. } | Request::SetQueuedPromptMode { .. } | Request::InterruptQueuedPrompt { .. } | Request::GetQueuedPrompts { .. } | Request::RemoveQueuedPrompt { .. } | Request::ReorderQueuedPrompts { .. } => unreachable!("queue controls dispatched before acknowledgment"),
             Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. } => unreachable!("SDK controls dispatched before acknowledgment"),
             Request::Message {
                 id,

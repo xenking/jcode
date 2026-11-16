@@ -34,6 +34,15 @@ pub enum QueuedPromptMode {
     AfterYield,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedPromptRemovalOutcome {
+    Removed,
+    InFlight,
+    AlreadyDelivered,
+    NotFound,
+}
+
 /// A daemon-owned queued user prompt.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QueuedPrompt {
@@ -195,6 +204,16 @@ pub enum ApiRequest {
     },
     GetQueuedPrompts {
         session_id: String,
+    },
+    RemoveQueuedPrompt {
+        session_id: String,
+        client_id: String,
+        prompt_id: String,
+    },
+    ReorderQueuedPrompts {
+        session_id: String,
+        client_id: String,
+        order: Vec<String>,
     },
 
     /// Fetch conversation history.

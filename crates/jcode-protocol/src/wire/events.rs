@@ -439,6 +439,13 @@ pub enum ServerEvent {
     #[serde(rename = "queued_prompts")]
     QueuedPrompts { id: u64, prompts: Vec<QueuedPrompt> },
 
+    #[serde(rename = "queued_prompt_removed")]
+    QueuedPromptRemoved {
+        id: u64,
+        prompt_id: String,
+        outcome: QueuedPromptRemovalOutcome,
+    },
+
     /// Soft interrupt message was injected at a safe point
     #[serde(rename = "soft_interrupt_injected")]
     SoftInterruptInjected {

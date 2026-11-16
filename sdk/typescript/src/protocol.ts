@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 13;
+export const API_VERSION_MINOR = 14;
 
 export type RuntimeCommand = "skills" | "context" | "info" | "cache" | "memory" | "swarm" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout";
 
@@ -183,6 +183,7 @@ export type ImageAttachment = [string, string];
 
 /** Delivery point of a daemon-owned prompt. */
 export type QueuedPromptMode = "steer" | "after_yield";
+export type QueuedPromptRemovalOutcome = "removed" | "in_flight" | "already_delivered" | "not_found";
 export interface QueuedPrompt {
   client_id: string;
   content: string;
@@ -240,10 +241,14 @@ export type ApiRequest =
   | { req: "set_queued_prompt_mode"; session_id: string; client_id: string; mode: QueuedPromptMode }
   | { req: "interrupt_queued_prompt"; session_id: string; client_id: string }
   | { req: "get_queued_prompts"; session_id: string }
+  | { req: "remove_queued_prompt"; session_id: string; client_id: string; prompt_id: string }
+  | { req: "reorder_queued_prompts"; session_id: string; client_id: string; order: string[] }
   | { req: "get_history"; session_id: string }
   | { req: "get_compacted_history"; session_id: string; visible_messages: number }
   | { req: "get_history_page"; session_id: string; before: string | null; limit: number }
   | { req: "get_history_image_chunk"; session_id: string; key: string; offset: number }
+  | { req: "list_session_images"; session_id: string }
+  | { req: "get_session_image"; session_id: string; image_id: string; offset: number }
   | { req: "peek_session"; session_id: string; limit?: number }
   | { req: "clear"; session_id: string }
   | { req: "rewind"; session_id: string; message_index: number }
@@ -369,6 +374,11 @@ export type ApiEvent =
   | { ev: "tool_input_delta"; session_id: string; call_id: string; delta: string }
   | { ev: "tool_exec"; session_id: string; call_id: string; name: string }
   | { ev: "queued_prompts"; session_id: string; prompts: QueuedPrompt[] }
+  | { ev: "queued_prompt_removed"; session_id: string; prompt_id: string; outcome: QueuedPromptRemovalOutcome }
+  | { ev: "session_images"; session_id: string; images: unknown[] }
+  | { ev: "session_image"; session_id: string; image_id: string; media_type: string; offset: number; total: number; data: string }
+  | { ev: "user_image_ids"; session_id: string; original_content: string; content: string; image_ids: string[] }
+  | { ev: "usage_limit"; session_id: string; provider: string; model: string; account: string | null; window: string; reset: string; action: string; target: string | null; message: string }
   | { ev: "tools"; session_id: string; tools: SessionToolDefinition[] }
   | { ev: "tool_call"; session_id: string; call_id: string; name: string; input: unknown }
   | {
@@ -577,6 +587,11 @@ export const KNOWN_EVENT_KINDS = [
   "history_page",
   "history_image_chunk",
   "queued_prompts",
+  "queued_prompt_removed",
+  "session_images",
+  "session_image",
+  "user_image_ids",
+  "usage_limit",
   "side_pane_images",
   "side_panel_state",
   "applet_state",
@@ -647,6 +662,10 @@ export const KNOWN_REQUEST_KINDS = [
   "set_queued_prompt_mode",
   "interrupt_queued_prompt",
   "get_queued_prompts",
+  "remove_queued_prompt",
+  "reorder_queued_prompts",
+  "list_session_images",
+  "get_session_image",
   "get_history",
   "get_compacted_history",
   "get_history_page",

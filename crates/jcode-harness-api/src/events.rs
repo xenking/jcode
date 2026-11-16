@@ -103,6 +103,12 @@ pub enum ApiEvent {
         prompts: Vec<crate::QueuedPrompt>,
     },
 
+    QueuedPromptRemoved {
+        session_id: String,
+        prompt_id: String,
+        outcome: crate::QueuedPromptRemovalOutcome,
+    },
+
     /// Reply to `Ping`.
     Pong,
 

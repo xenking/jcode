@@ -32,6 +32,7 @@ import {
   type PermissionDecision,
   type QueuedPrompt,
   type QueuedPromptMode,
+  type QueuedPromptRemovalOutcome,
   type RenderedImage,
   type RuntimeCommand,
   type ServerFrame,
@@ -765,6 +766,15 @@ export class JcodeClient extends EventEmitter {
   async getQueuedPrompts(sessionId: string): Promise<QueuedPrompt[]> {
     const frame = await this.expectReply({ req: "get_queued_prompts", session_id: sessionId }, "queued_prompts");
     return frame.prompts;
+  }
+
+  async removeQueuedPrompt(sessionId: string, clientId: string, promptId: string): Promise<QueuedPromptRemovalOutcome> {
+    const frame = await this.expectReply({ req: "remove_queued_prompt", session_id: sessionId, client_id: clientId, prompt_id: promptId }, "queued_prompt_removed");
+    return frame.outcome;
+  }
+
+  async reorderQueuedPrompts(sessionId: string, clientId: string, order: string[]): Promise<void> {
+    await this.requestOk({ req: "reorder_queued_prompts", session_id: sessionId, client_id: clientId, order });
   }
 
   async getHistory(sessionId: string): Promise<HistoryMessage[]> {

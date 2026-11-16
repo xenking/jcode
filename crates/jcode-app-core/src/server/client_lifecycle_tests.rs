@@ -46,6 +46,64 @@ async fn compaction_completion_reaches_each_attached_client() {
 }
 
 #[test]
+fn queue_remove_and_reorder_are_atomic_against_claim() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let control =
+        SessionControlHandle::cancel_only("queue_atomic_test", queue, InterruptSignal::new());
+    for id in ["a", "b", "c"] {
+        control
+            .enqueue_user_prompt(
+                id.into(),
+                id.into(),
+                vec![],
+                jcode_agent_runtime::QueuedMessageMode::AfterYield,
+                None,
+            )
+            .unwrap();
+    }
+    assert!(
+        control
+            .reorder_user_prompts(&["a".into(), "a".into(), "c".into()])
+            .is_err()
+    );
+    control
+        .reorder_user_prompts(&["c".into(), "a".into(), "b".into()])
+        .unwrap();
+    assert_eq!(
+        control
+            .take_next_user_prompt(false)
+            .unwrap()
+            .unwrap()
+            .client_id
+            .as_deref(),
+        Some("c")
+    );
+    assert_eq!(
+        control.remove_user_prompt("c").unwrap(),
+        crate::protocol::QueuedPromptRemovalOutcome::InFlight
+    );
+    assert_eq!(
+        control.remove_user_prompt("a").unwrap(),
+        crate::protocol::QueuedPromptRemovalOutcome::Removed
+    );
+    assert_eq!(
+        control.remove_user_prompt("missing").unwrap(),
+        crate::protocol::QueuedPromptRemovalOutcome::NotFound
+    );
+    assert_eq!(
+        control
+            .queued_user_prompts()
+            .unwrap()
+            .iter()
+            .map(|p| p.client_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["b"]
+    );
+}
+
+#[test]
 fn durable_steer_wakes_blocking_wait_but_follow_up_does_not() {
     let _lock = crate::storage::lock_test_env();
     let _env = IsolatedReloadRecoveryEnv::new();

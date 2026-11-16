@@ -389,6 +389,9 @@ where
     let session_tools_supported = daemon_caps.iter().any(|cap| cap == "session_tools");
     let soft_interrupt_ids_supported = daemon_caps.iter().any(|cap| cap == "soft_interrupt_ids");
     let queued_prompts_supported = daemon_caps.iter().any(|cap| cap == "queued_prompts");
+    let queued_prompt_mutations_supported = daemon_caps
+        .iter()
+        .any(|cap| cap == "queued_prompt_mutations_v1");
     let bounded_history_supported = daemon_caps.iter().any(|cap| cap == "bounded_history_v1");
     let ask_response_images_supported = daemon_caps.iter().any(|cap| cap == "ask_response_images");
     let hello_ok = ServerFrame::reply(
@@ -420,6 +423,9 @@ where
             .chain(runtime_commands_supported.then(|| "runtime_commands".to_string()))
             .chain(session_tools_supported.then(|| "session_tools".to_string()))
             .chain(queued_prompts_supported.then(|| "queued_prompts".to_string()))
+            .chain(
+                queued_prompt_mutations_supported.then(|| "queued_prompt_mutations_v1".to_string()),
+            )
             .chain(bounded_history_supported.then(|| "bounded_history_v1".to_string()))
             .chain(ask_response_images_supported.then(|| "ask_response_images".to_string()))
             .chain(
@@ -445,6 +451,7 @@ where
     state.runtime_commands_supported = runtime_commands_supported;
     state.soft_interrupt_ids_supported = soft_interrupt_ids_supported;
     state.queued_prompts_supported = queued_prompts_supported;
+    state.queued_prompt_mutations_supported = queued_prompt_mutations_supported;
     state.bounded_history_supported = bounded_history_supported;
 
     // 3. Pump both directions in one select loop so translation state stays
