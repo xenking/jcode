@@ -1027,7 +1027,9 @@ impl App {
             needs_redraw = true;
             // The Pong lists what this server supports. Until it arrives no
             // focus is reported, which the server treats as focused.
-            let _ = remote_conn.request_capabilities().await;
+            if let Err(error) = remote_conn.request_capabilities().await {
+                crate::logging::warn(&format!("Failed to request server capabilities: {error}"));
+            }
 
             let mut bus_receiver_remote = Bus::global().subscribe();
             if let Some(status) = Bus::global().latest_update_status() {
@@ -1159,8 +1161,12 @@ impl App {
                 // A closed card stops its turn and drops the connection; the
                 // hidden session stays on disk until the user promotes it.
                 if btw_conn.is_some() && !self.btw_open() {
-                    if let Some(mut connection) = btw_conn.take() {
-                        let _ = connection.cancel().await;
+                    if let Some(mut connection) = btw_conn.take()
+                        && let Err(error) = connection.cancel().await
+                    {
+                        crate::logging::warn(&format!(
+                            "Failed to cancel closed side question: {error}"
+                        ));
                     }
                     needs_redraw = true;
                 }
@@ -1308,8 +1314,9 @@ impl App {
                                 }
                                 _ => false,
                             };
-                            if queue_may_have_changed && remote_conn.supports_queued_prompts() {
-                                let _ = remote_conn.get_queued_prompts().await;
+                            if queue_may_have_changed && remote_conn.supports_queued_prompts()
+                                && let Err(error) = remote_conn.get_queued_prompts().await {
+                                crate::logging::warn(&format!("Failed to refresh queued prompts after turn event: {error}"));
                             }
                             let (outcome, event_redraw) = remote::handle_remote_event(
                                 &mut self,
