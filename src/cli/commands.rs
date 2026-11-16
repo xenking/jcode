@@ -32,7 +32,7 @@ pub use restart::{
     maybe_run_pending_restart_restore_on_startup, run_restart_clear_command,
     run_restart_restore_command, run_restart_save_command, run_restart_status_command,
 };
-pub use titles::run_titles_command;
+pub(crate) use titles::run_titles_command;
 
 pub enum AmbientSubcommand {
     Status,

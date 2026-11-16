@@ -23,7 +23,7 @@ struct BackfillRow {
     detail: Option<String>,
 }
 
-pub async fn run_titles_command(action: TitlesCommand) -> Result<()> {
+pub(crate) async fn run_titles_command(action: TitlesCommand) -> Result<()> {
     match action {
         TitlesCommand::Backfill {
             apply,
