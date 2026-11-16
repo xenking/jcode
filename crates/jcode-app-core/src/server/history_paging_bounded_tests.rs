@@ -75,7 +75,7 @@ fn generate_large_runtime_fixture() {
             text,
             cache_control: None,
         }];
-        if i == 95 {
+        if i == 95 || i == 30 {
             blocks.push(ContentBlock::Image { media_type: "image/png".into(), data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jxFoAAAAASUVORK5CYII=".into() });
         }
         session.add_message(Role::User, blocks);
