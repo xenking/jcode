@@ -246,7 +246,13 @@ impl SearchIndex {
             }
         };
         stats.scanned = sources.len();
-        let known = self.known_fingerprints();
+        let known = match self.known_fingerprints() {
+            Ok(known) => known,
+            Err(error) => {
+                report_error("cannot read fingerprint census", error);
+                return stats;
+            }
+        };
         let mut pending: Vec<(SessionSource, Fingerprint)> = Vec::new();
         for source in sources {
             let Some(fingerprint) = source.fingerprint() else {
@@ -580,26 +586,15 @@ impl SearchIndex {
         })
     }
 
-    fn known_fingerprints(&self) -> BTreeMap<String, String> {
-        let mut statement = match self
+    fn known_fingerprints(&self) -> rusqlite::Result<BTreeMap<String, String>> {
+        let mut statement = self
             .connection
-            .prepare("SELECT session_id, fingerprint FROM search_sessions")
-        {
-            Ok(statement) => statement,
-            Err(error) => {
-                report_error("cannot prepare fingerprint census", error);
-                return BTreeMap::new();
-            }
-        };
+            .prepare("SELECT session_id, fingerprint FROM search_sessions")?;
         statement
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
             .and_then(|rows| rows.collect::<rusqlite::Result<_>>())
-            .unwrap_or_else(|error| {
-                report_error("cannot read fingerprint census", error);
-                BTreeMap::new()
-            })
     }
 
     fn known_fingerprint(&self, session_id: &str) -> Option<String> {

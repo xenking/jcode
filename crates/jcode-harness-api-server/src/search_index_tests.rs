@@ -91,6 +91,42 @@ fn session_ids(results: &SessionSearchResults) -> Vec<String> {
 }
 
 #[test]
+fn failed_fingerprint_census_does_not_reindex_sessions() {
+    let dir = test_dir("fingerprint-census-failure");
+    write_session(&dir, "session_census", "originaltitle", vec![]);
+    let mut index = index_for(&dir);
+    index
+        .connection
+        .execute(
+            "UPDATE search_sessions SET fingerprint = X'00' WHERE session_id = ?1",
+            params!["session_census"],
+        )
+        .unwrap();
+    write_session(&dir, "session_census", "replacementtitle", vec![]);
+
+    let stats = index.sync();
+
+    assert_eq!(stats.indexed, 0);
+    assert_eq!(index.search("originaltitle", None).unwrap().titles.len(), 1);
+    assert!(
+        index
+            .search("replacementtitle", None)
+            .unwrap()
+            .titles
+            .is_empty()
+    );
+    index
+        .connection
+        .execute("UPDATE search_sessions SET fingerprint = ''", [])
+        .unwrap();
+    assert_eq!(index.sync().indexed, 1);
+    assert_eq!(
+        index.search("replacementtitle", None).unwrap().titles.len(),
+        1
+    );
+}
+
+#[test]
 fn failed_prune_preserves_all_previous_search_rows() {
     let dir = test_dir("prune-atomicity");
     let snapshot = write_session(
