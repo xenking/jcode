@@ -1,8 +1,8 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
+mod ask_recovery;
 #[cfg(test)]
 mod cache_monitor_tests;
-mod ask_recovery;
 mod compaction;
 mod conversation_reset;
 mod environment;
@@ -33,8 +33,8 @@ mod utils;
 
 use self::streaming::{send_stream_keepalive_mpsc, stream_keepalive_ticker};
 use self::tools::{
-    cap_sdk_tool_content_for_history, cap_tool_output_for_history, print_tool_summary,
-    tool_output_side_pane_images, tool_output_to_content_blocks,
+    cap_sdk_tool_content_for_history, cap_tool_output_for_history, label_session_images,
+    print_tool_summary, tool_output_side_pane_images, tool_output_to_content_blocks,
 };
 use self::utils::trace_enabled;
 use crate::build;
@@ -1165,46 +1165,46 @@ impl Agent {
         (messages, None)
     }
 
-/// Bound the inline screenshot payload of one outbound request.
-///
-/// Screenshot decay used to run from `Session::append_stored_message`, so
-/// appending one more screenshot rewrote messages that earlier requests had
-/// already sent. Any rewrite invalidates the provider prompt cache from the
-/// first rewritten message to the end of the prompt: on 2026-11-15 a
-/// computer-use turn rebuilt a ~360K-token prefix mid-turn that way, and the
-/// user's `/btw` side question was in flight at the same moment, so the fork
-/// took the blame.
-///
-/// The stored transcript is now read-only while a turn runs. Only the request
-/// copy is trimmed, and only once its payload genuinely approaches the
-/// provider's body limit, so an ordinary screenshot stream never changes a
-/// message that has already been sent.
-fn bounded_outbound_images(mut messages: Vec<Message>) -> Vec<Message> {
-    let total: usize = messages
-        .iter()
-        .flat_map(|message| message.content.iter())
-        .filter_map(|block| match block {
-            ContentBlock::Image { data, .. } => Some(data.len()),
-            _ => None,
-        })
-        .sum();
-    let budget = crate::compaction::TOOL_IMAGE_DECAY_KEEP_CHARS;
-    if total <= budget {
-        return messages;
+    /// Bound the inline screenshot payload of one outbound request.
+    ///
+    /// Screenshot decay used to run from `Session::append_stored_message`, so
+    /// appending one more screenshot rewrote messages that earlier requests had
+    /// already sent. Any rewrite invalidates the provider prompt cache from the
+    /// first rewritten message to the end of the prompt: on 2026-11-15 a
+    /// computer-use turn rebuilt a ~360K-token prefix mid-turn that way, and the
+    /// user's `/btw` side question was in flight at the same moment, so the fork
+    /// took the blame.
+    ///
+    /// The stored transcript is now read-only while a turn runs. Only the request
+    /// copy is trimmed, and only once its payload genuinely approaches the
+    /// provider's body limit, so an ordinary screenshot stream never changes a
+    /// message that has already been sent.
+    fn bounded_outbound_images(mut messages: Vec<Message>) -> Vec<Message> {
+        let total: usize = messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::Image { data, .. } => Some(data.len()),
+                _ => None,
+            })
+            .sum();
+        let budget = crate::compaction::TOOL_IMAGE_DECAY_KEEP_CHARS;
+        if total <= budget {
+            return messages;
+        }
+        let mut contents: Vec<&mut jcode_message_types::SharedContent> = messages
+            .iter_mut()
+            .map(|message| &mut message.content)
+            .collect();
+        let stripped = crate::compaction::strip_large_images_in_contents(&mut contents, budget);
+        drop(contents);
+        if stripped > 0 {
+            logging::warn(&format!(
+                "Outbound image payload {total} chars exceeds the {budget} char budget; stripped {stripped} older screenshot(s) from this request only"
+            ));
+        }
+        messages
     }
-    let mut contents: Vec<&mut jcode_message_types::SharedContent> = messages
-        .iter_mut()
-        .map(|message| &mut message.content)
-        .collect();
-    let stripped = crate::compaction::strip_large_images_in_contents(&mut contents, budget);
-    drop(contents);
-    if stripped > 0 {
-        logging::warn(&format!(
-            "Outbound image payload {total} chars exceeds the {budget} char budget; stripped {stripped} older screenshot(s) from this request only"
-        ));
-    }
-    messages
-}
 
     fn record_client_cache_request(&mut self, messages: &[Message]) {
         if !self.should_track_client_cache() {

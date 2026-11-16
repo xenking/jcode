@@ -79,9 +79,8 @@ impl Agent {
                     (output, false)
                 }
             };
-            let side_pane_images =
+            let mut side_pane_images =
                 tool_output_side_pane_images(&ask.id, "ask", &ask.input, &output);
-            let output_text = output.output.clone();
             let mut blocks = tool_output_to_content_blocks(ask.id.clone(), output);
             if let Some(ContentBlock::ToolResult {
                 is_error: error, ..
@@ -97,9 +96,37 @@ impl Agent {
                     matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == &ask.id)
                 })
                 .expect("interrupted ask has a matching result");
+            let first_ordinal = content[..index]
+                .iter()
+                .filter(|block| match block {
+                    ContentBlock::Image { .. } => true,
+                    ContentBlock::Text { text, .. } => text
+                        .starts_with("[Older tool screenshot omitted from history; jcode-archive:"),
+                    _ => false,
+                })
+                .count();
             content.splice(index..=index, blocks);
             self.session.replace_messages(messages);
             self.persist_session_now()?;
+            let stored = &self.session.messages[ask.result_index];
+            label_session_images(
+                &self.session.id,
+                &stored.id,
+                first_ordinal,
+                &mut side_pane_images,
+            );
+            let output_text = stored
+                .content
+                .iter()
+                .find_map(|block| match block {
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } if tool_use_id == &ask.id => Some(content.clone()),
+                    _ => None,
+                })
+                .expect("recovered ask has a persisted result");
             let _ = event_tx.send(ServerEvent::ToolDone {
                 id: ask.id,
                 name: "ask".into(),

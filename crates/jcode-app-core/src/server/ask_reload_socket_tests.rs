@@ -56,6 +56,9 @@ async fn socket_resume_replays_reload_interrupted_ask_before_provider() {
             is_error: Some(true),
         }],
     );
+    let answer_message_id = persisted.messages.last().unwrap().id.clone();
+    let other_id = crate::session::image_id(session_id, &answer_message_id, 0);
+    let comment_id = crate::session::image_id(session_id, &answer_message_id, 1);
     persisted.save().unwrap();
     let provider = RecoveryProvider::default();
     let provider_template: Arc<dyn Provider> = Arc::new(provider.clone());
@@ -213,13 +216,37 @@ async fn socket_resume_replays_reload_interrupted_ask_before_provider() {
         if matches!(event, ServerEvent::Done { id: 42 }) {
             ack.set(true);
         }
-        if matches!(event, ServerEvent::ToolDone { name, .. } if name == "ask") {
+        if let ServerEvent::ToolDone { name, output, .. } = event
+            && name == "ask"
+        {
+            assert!(
+                output.contains(&format!("custom [#{other_id}]")),
+                "{output}"
+            );
+            assert!(
+                output.contains(&format!("reason [#{comment_id}]")),
+                "{output}"
+            );
             tool_done.set(true);
         }
         if let ServerEvent::SidePaneImages { images, .. } = event
             && images.iter().any(|image| image.data == "b3RoZXI=")
             && images.iter().any(|image| image.data == "Y29tbWVudA==")
         {
+            assert!(images.iter().any(|image| {
+                image.data == "b3RoZXI="
+                    && image
+                        .label
+                        .as_deref()
+                        .is_some_and(|label| label.contains(&other_id))
+            }));
+            assert!(images.iter().any(|image| {
+                image.data == "Y29tbWVudA=="
+                    && image
+                        .label
+                        .as_deref()
+                        .is_some_and(|label| label.contains(&comment_id))
+            }));
             live_images.set(true);
         }
         ack.get() && tool_done.get() && live_images.get()

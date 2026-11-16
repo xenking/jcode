@@ -1583,7 +1583,8 @@ request in this new forked session, using the inherited conversation only as con
         }
     }
 
-    pub fn insert_message(&mut self, index: usize, message: StoredMessage) {
+    pub fn insert_message(&mut self, index: usize, mut message: StoredMessage) {
+        images::annotate_message(&self.id, &mut message);
         self.messages.insert(index, message);
         self.mark_memory_profile_dirty();
         self.mark_messages_full_dirty();
@@ -1591,6 +1592,7 @@ request in this new forked session, using the inherited conversation only as con
 
     pub fn replace_messages(&mut self, messages: Vec<StoredMessage>) {
         self.messages = messages;
+        self.migrate_image_markers();
         self.mark_memory_profile_dirty();
         self.mark_messages_full_dirty();
     }

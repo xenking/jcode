@@ -1,6 +1,31 @@
 use super::*;
 
 #[test]
+fn replacing_a_recovered_ask_assigns_its_image_id_immediately() {
+    let mut session = Session::create(None, None);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::ToolResult {
+            tool_use_id: "ask".into(),
+            content: "interrupted".into(),
+            is_error: Some(true),
+        }],
+    );
+    let mut messages = session.messages.clone();
+    messages[0].content = vec![
+        ContentBlock::ToolResult { tool_use_id: "ask".into(), content: "User answers:\n1. Which? -> Other: picture [#image 1]\n".into(), is_error: None },
+        ContentBlock::Image { media_type: "image/png".into(), data: "payload".into() },
+        ContentBlock::Text { text: "[Attached image associated with the preceding tool result: Question 1 free answer, image 1]".into(), cache_control: None },
+    ].into();
+    session.replace_messages(messages);
+    let id = &session.session_images()[0].image_id;
+    let ContentBlock::ToolResult { content, .. } = &session.messages[0].content[0] else {
+        panic!("missing result")
+    };
+    assert!(content.contains(&format!("picture [#{id}]")), "{content}");
+}
+
+#[test]
 fn screenshot_lookup_survives_reload_decay() -> anyhow::Result<()> {
     let _env_lock = crate::storage::lock_test_env();
     let home = tempfile::tempdir()?;

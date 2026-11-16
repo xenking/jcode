@@ -75,6 +75,22 @@ pub(super) fn tool_output_side_pane_images(
         .collect()
 }
 
+pub(super) fn label_session_images(
+    session_id: &str,
+    message_id: &str,
+    first_ordinal: usize,
+    images: &mut [jcode_session_types::RenderedImage],
+) {
+    for (offset, image) in images.iter_mut().enumerate() {
+        let id = crate::session::image_id(session_id, message_id, first_ordinal + offset);
+        let label = image.label.get_or_insert_with(String::new);
+        if !label.is_empty() {
+            label.push(' ');
+        }
+        label.push_str(&format!("[#{id}]"));
+    }
+}
+
 /// Metadata key a tool sets to load deferred tool definitions into context.
 /// Value: array of registry tool names (e.g. `mcp__github__create_issue`).
 pub(crate) const TOOL_REFERENCES_METADATA_KEY: &str = "tool_references";

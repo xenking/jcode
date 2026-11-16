@@ -35,7 +35,10 @@ impl Agent {
             &self.session.id,
             self.graceful_shutdown.clone(),
         );
-        if !self.resume_interrupted_ask(&event_tx, &turn_cancel_guard).await? {
+        if !self
+            .resume_interrupted_ask(&event_tx, &turn_cancel_guard)
+            .await?
+        {
             return Ok(());
         }
         let trace = trace_enabled();
@@ -1700,15 +1703,46 @@ impl Agent {
                     match result {
                         Ok(output) => {
                             let output = cap_tool_output_for_history(&tc.name, output);
+                            let mut side_pane_images =
+                                tool_output_side_pane_images(&tc.id, &tc.name, &tc.input, &output);
+                            let blocks = tool_output_to_content_blocks(tc.id.clone(), output);
+                            let message_id = self.add_message_with_duration(
+                                Role::User,
+                                blocks,
+                                Some(tool_elapsed.as_millis() as u64),
+                            );
+                            label_session_images(
+                                &self.session.id,
+                                &message_id,
+                                0,
+                                &mut side_pane_images,
+                            );
+                            if !side_pane_images.is_empty() {
+                                // RPC readers may load from disk while this turn holds the agent lock.
+                                self.persist_session_now()?;
+                            }
+                            let output_text = self
+                                .session
+                                .messages
+                                .last()
+                                .and_then(|message| {
+                                    message.content.iter().find_map(|block| match block {
+                                        ContentBlock::ToolResult {
+                                            tool_use_id,
+                                            content,
+                                            ..
+                                        } if tool_use_id == &tc.id => Some(content.clone()),
+                                        _ => None,
+                                    })
+                                })
+                                .unwrap_or_default();
                             let _ = event_tx.send(ServerEvent::ToolDone {
                                 id: tc.id.clone(),
                                 name: tc.name.clone(),
-                                output: output.output.clone(),
+                                output: output_text,
                                 error: None,
                             });
 
-                            let side_pane_images =
-                                tool_output_side_pane_images(&tc.id, &tc.name, &tc.input, &output);
                             if !side_pane_images.is_empty() {
                                 logging::info(&format!(
                                     "SidePaneImages: emitting {} image(s) from tool '{}' (session={})",
@@ -1721,13 +1755,6 @@ impl Agent {
                                     images: side_pane_images,
                                 });
                             }
-
-                            let blocks = tool_output_to_content_blocks(tc.id.clone(), output);
-                            self.add_message_with_duration(
-                                Role::User,
-                                blocks,
-                                Some(tool_elapsed.as_millis() as u64),
-                            );
                             tool_results_dirty = true;
                         }
                         Err(e) => {
