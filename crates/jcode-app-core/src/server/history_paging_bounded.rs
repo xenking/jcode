@@ -51,7 +51,22 @@ pub(super) fn records(session: &crate::session::Session) -> Result<Vec<String>, 
         image_rows[index].push(image);
     }
     let mut records = Vec::with_capacity(image_rows.len());
+    let mut prompt_offset = 0usize;
     for (index, message) in messages.into_iter().enumerate() {
+        let text = message.content.trim();
+        // Keep in sync with Desktop's is_pinnable_prompt: this offset counts
+        // visible user prompts, not background notices or continuation pokes.
+        let is_prompt = message.role == "user"
+            && !text.is_empty()
+            && !crate::todo::is_auto_poke_message(text)
+            && ![
+                "**Background task** `",
+                "**Background task started** `",
+                "**Background task progress** `",
+                "**Background task stalled** `",
+            ]
+            .iter()
+            .any(|prefix| text.starts_with(prefix));
         let tool = if message.role == "tool" {
             message.tool_data
         } else {
@@ -61,7 +76,9 @@ pub(super) fn records(session: &crate::session::Session) -> Result<Vec<String>, 
             "message": { "role": message.role, "content": message.content,
                 "timestamp_ms": message.timestamp_ms, "response_stats": message.response_stats, "tool": tool },
             "images": std::mem::take(&mut image_rows[index]),
+            "prompt_offset": prompt_offset,
         }).to_string());
+        prompt_offset += usize::from(is_prompt);
     }
     if records.is_empty() && !image_rows[0].is_empty() {
         records.push(serde_json::json!({"message":{"role":"system","content":""}, "images":image_rows.remove(0)}).to_string());

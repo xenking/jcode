@@ -14,6 +14,8 @@ pub struct HistoryPage {
     pub messages: Vec<HistoryMessage>,
     pub images: Vec<RenderedImage>,
     pub before: Option<String>,
+    /// Genuine user prompts preceding the first message, if supplied by the server.
+    pub prompt_offset: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -27,6 +29,8 @@ struct Fragment {
 struct Record {
     message: HistoryMessage,
     images: Vec<RenderedImage>,
+    #[serde(default)]
+    prompt_offset: Option<usize>,
 }
 
 pub(crate) fn page(
@@ -107,9 +111,13 @@ pub(crate) fn page(
     let mut messages = Vec::with_capacity(rows.len());
     let mut images = Vec::new();
     let mut users = 0;
+    let mut prompt_offset = None;
     for row in rows {
         let record: Record = serde_json::from_str(&row)
             .map_err(|e| protocol(format!("Invalid history record: {e}")))?;
+        if messages.is_empty() {
+            prompt_offset = record.prompt_offset;
+        }
         for mut image in record.images {
             if let Some(index) = &mut image.history_message_index {
                 *index += messages.len();
@@ -128,6 +136,7 @@ pub(crate) fn page(
         messages,
         images,
         before: cursor,
+        prompt_offset,
     })
 }
 
