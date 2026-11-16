@@ -117,6 +117,68 @@ fn provider_context_names_image_by_its_session_id() {
 }
 
 #[test]
+fn ask_answer_markers_identify_their_own_images() {
+    let mut session = Session::create(None, None);
+    session.add_message(Role::User, vec![
+        ContentBlock::ToolResult { tool_use_id: "ask".into(), content: "User answers:\n1. Which? -> B (comment: reason [#image 1]); Other: custom [#image 1]\n".into(), is_error: None },
+        ContentBlock::Image { media_type: "image/png".into(), data: "other".into() },
+        ContentBlock::Text { text: "[Attached image associated with the preceding tool result: Question 1 free answer, image 1]".into(), cache_control: None },
+        ContentBlock::Image { media_type: "image/png".into(), data: "comment".into() },
+        ContentBlock::Text { text: "[Attached image associated with the preceding tool result: Question 1 option \"B\" comment, image 1]".into(), cache_control: None },
+    ]);
+    let ids = session.session_images();
+    let ContentBlock::ToolResult { content, .. } = &session.messages[0].content[0] else {
+        panic!("missing tool result")
+    };
+    assert!(
+        content.contains(&format!("reason [#{}]", ids[1].image_id)),
+        "{content}"
+    );
+    assert!(
+        content.contains(&format!("custom [#{}]", ids[0].image_id)),
+        "{content}"
+    );
+    assert!(!content.contains("[#image 1]"));
+}
+
+#[test]
+fn ask_migration_remaps_old_markers_even_when_ids_were_already_appended() {
+    let mut session = Session::create(None, None);
+    session.add_message(
+        Role::User,
+        vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "ask".into(),
+                content: "User answers:\n1. Which? -> Other: custom [#image 1]\n".into(),
+                is_error: None,
+            },
+            ContentBlock::Image { media_type: "image/png".into(), data: "other".into() },
+            ContentBlock::Text { text: "[Attached image associated with the preceding tool result: Question 1 free answer, image 1]".into(), cache_control: None },
+        ],
+    );
+    let id = session.session_images()[0].image_id.clone();
+    let ContentBlock::ToolResult { content, .. } = &mut session.messages[0].content[0] else {
+        panic!("missing result")
+    };
+    *content = format!(
+        "User answers:\n1. Which? -> Other: custom [#image 1]\n\nAttached session images: [#{id}]"
+    );
+    assert!(super::images::annotate_message(
+        &session.id,
+        &mut session.messages[0]
+    ));
+    let ContentBlock::ToolResult { content, .. } = &session.messages[0].content[0] else {
+        panic!("missing result")
+    };
+    assert!(content.contains(&format!("custom [#{id}]")), "{content}");
+    assert!(!content.contains("[#image 1]"));
+    assert!(!super::images::annotate_message(
+        &session.id,
+        &mut session.messages[0]
+    ));
+}
+
+#[test]
 fn attaching_an_image_reuses_the_original_payload_allocation() {
     let mut session = Session::create(None, None);
     let data = "a".repeat(1024 * 1024);

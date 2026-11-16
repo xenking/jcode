@@ -91,11 +91,67 @@ fn read_archived_image(id: &str) -> Option<String> {
     std::fs::read_to_string(archive_path(id).ok()?).ok()
 }
 
+fn remap_ask_images(content: &str, labels: &[(String, String)]) -> String {
+    if !content.starts_with("User answers:\n") {
+        return content.to_owned();
+    }
+    let mut result = content.to_owned();
+    for (label, id) in labels {
+        let Some(label) = label
+            .strip_prefix("[Attached image associated with the preceding tool result: Question ")
+            .and_then(|s| s.strip_suffix(']'))
+        else {
+            continue;
+        };
+        let Some((question, detail)) = label.split_once(' ') else {
+            continue;
+        };
+        let Some((kind, number)) = detail.rsplit_once(", image ") else {
+            continue;
+        };
+        if !number.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let field = if kind == "free answer" {
+            "Other: ".to_owned()
+        } else if let Some(option) = kind
+            .strip_prefix("option ")
+            .and_then(|s| s.strip_suffix(" comment"))
+        {
+            let Ok(option) = serde_json::from_str::<String>(option) else {
+                continue;
+            };
+            format!("{option} (comment: ")
+        } else {
+            continue;
+        };
+        let prefix = format!("{question}. ");
+        let mut offset = 0;
+        for line in result.split_inclusive('\n') {
+            if line.starts_with(&prefix) {
+                if let Some(field_start) = line.find(&field) {
+                    let start = field_start + field.len();
+                    let end = line[start..].find("; ").map_or(line.len(), |i| start + i);
+                    let old = format!("[#image {number}]");
+                    if let Some(pos) = line[start..end].find(&old) {
+                        let pos = offset + start + pos;
+                        result.replace_range(pos..pos + old.len(), &format!("[#{id}]"));
+                    }
+                }
+                break;
+            }
+            offset += line.len();
+        }
+    }
+    result
+}
+
 /// Ensure model-visible IDs are persisted alongside the image blocks. Mutating
 /// a uniquely owned content buffer does not clone the image payload.
 pub(super) fn annotate_message(session_id: &str, stored: &mut super::StoredMessage) -> bool {
     let mut ordinal = 0usize;
     let mut ids = Vec::new();
+    let mut labels = Vec::new();
     for block in &stored.content {
         match block {
             ContentBlock::Image { .. } => {
@@ -103,20 +159,37 @@ pub(super) fn annotate_message(session_id: &str, stored: &mut super::StoredMessa
                 ordinal += 1;
             }
             ContentBlock::Text { text, .. } if is_archive_marker(text) => ordinal += 1,
+            ContentBlock::Text { text, .. }
+                if text.starts_with(
+                    "[Attached image associated with the preceding tool result: Question ",
+                ) =>
+            {
+                if let Some(id) = ids.last() {
+                    labels.push((text.clone(), id.clone()));
+                }
+            }
             _ => {}
         }
     }
     if ids.is_empty() {
         return false;
     }
-    if ids.iter().all(|id| {
+    let already_marked = ids.iter().all(|id| {
         let marker = format!("[#{id}]");
         stored.content.iter().any(|block| match block {
             ContentBlock::Text { text, .. } => text.contains(&marker),
             ContentBlock::ToolResult { content, .. } => content.contains(&marker),
             _ => false,
         })
-    }) {
+    });
+    let needs_ask_remap = !labels.is_empty()
+        && stored.content.iter().any(|block| match block {
+            ContentBlock::ToolResult { content, .. } if content.starts_with("User answers:\n") => {
+                remap_ask_images(content, &labels) != *content
+            }
+            _ => false,
+        });
+    if already_marked && !needs_ask_remap {
         return false;
     }
     let has_tool_result = stored
@@ -140,13 +213,18 @@ pub(super) fn annotate_message(session_id: &str, stored: &mut super::StoredMessa
                 }
             }
         } else if let ContentBlock::ToolResult { content, .. } = block {
-            content.push_str("\n\nAttached session images: ");
-            content.push_str(
-                &ids.iter()
-                    .map(|id| format!("[#{id}]"))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            );
+            if !labels.is_empty() && content.starts_with("User answers:\n") {
+                *content = remap_ask_images(content, &labels);
+            }
+            let missing = ids
+                .iter()
+                .filter(|id| !content.contains(&format!("[#{id}]")))
+                .map(|id| format!("[#{id}]"))
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                content.push_str("\n\nAttached session images: ");
+                content.push_str(&missing.join(", "));
+            }
             mapped.fill(true);
         }
     }
