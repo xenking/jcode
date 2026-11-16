@@ -627,6 +627,7 @@ pub enum ErrorCode {
     UnsupportedVersion,
     UnknownRequest,
     UnknownSession,
+    /// The requested queued skill is absent from the daemon's registry.
     UnknownSkill,
     InvalidRequest,
     Internal,
