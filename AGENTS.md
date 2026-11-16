@@ -16,6 +16,10 @@
 
 ## Development Workflow
 
+| Contract | Enforcement |
+| --- | --- |
+| Test helpers isolate persistent homes and machine hooks together, never in production builds | `python3 scripts/check_test_isolation.py` (Cargo feature graph) |
+
 - **Commit and push as you go** - Make small, scoped commits and push them to
   the current branch's remote as meaningful work is completed, rather than
   waiting until the end of the task. Preserve unrelated changes and never

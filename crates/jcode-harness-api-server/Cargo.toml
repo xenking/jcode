@@ -26,7 +26,7 @@ libc = "0.2"
 # of its output: a change to the wire prose then fails here instead of silently
 # turning every client's progress bar off. Dev-only, so the bridge binary stays
 # free of the application foundation.
-jcode-base = { path = "../jcode-base", default-features = false }
+jcode-base = { path = "../jcode-base", default-features = false, features = ["test-support"] }
 jcode-background-types = { path = "../jcode-background-types" }
 
 [[bin]]

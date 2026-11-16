@@ -127,6 +127,13 @@ jobs:
           cargo install cargo-machete --locked
           cargo machete
 
+      - name: Enforce test home and hook isolation
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          python3 scripts/test_check_test_isolation.py
+          python3 scripts/check_test_isolation.py
+
   release-automation:
     name: Release Automation
     runs-on: ubuntu-latest

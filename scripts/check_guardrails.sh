@@ -88,6 +88,8 @@ run_ratchet "panic-prone usage ratchet" check_panic_budget.py
 run_ratchet "swallowed-error usage ratchet" check_swallowed_error_budget.py
 run_gate "crate dependency boundaries" python3 scripts/check_dependency_boundaries.py
 run_gate "wildcard re-export ratchet" python3 scripts/check_wildcard_reexport_budget.py
+run_gate "test isolation gate contracts" python3 scripts/test_check_test_isolation.py
+run_gate "test home and hook isolation" python3 scripts/check_test_isolation.py
 
 # Onboarding state-space invariants. The onboarding flow is a graph, and the
 # properties that keep users unstuck (no dead ends, every failure has a recovery
