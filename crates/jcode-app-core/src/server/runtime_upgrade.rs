@@ -155,6 +155,7 @@ struct PreparedUpgrade {
     path: PathBuf,
     identity: FileIdentity,
     _idle: OwnedRwLockWriteGuard<()>,
+    _turn_idle: crate::turn_activity::AdmissionFence,
 }
 
 enum UpgradeDecision {
@@ -169,11 +170,15 @@ fn reserve_upgrade(
     version: &str,
     current: &str,
     gate: &ActivityGate,
+    activity: &crate::turn_activity::ActivityRegistry,
 ) -> Result<UpgradeDecision> {
     if strict_version(version)? <= strict_version(current)? {
         return Ok(UpgradeDecision::Unchanged);
     }
     let Some(idle) = gate.try_idle() else {
+        return Ok(UpgradeDecision::Busy);
+    };
+    let Ok(turn_idle) = activity.try_quiescent() else {
         return Ok(UpgradeDecision::Busy);
     };
     ensure!(
@@ -184,6 +189,7 @@ fn reserve_upgrade(
         path,
         identity: metadata,
         _idle: idle,
+        _turn_idle: turn_idle,
     }))
 }
 
@@ -196,6 +202,7 @@ async fn prepare_upgrade(candidate: &Path) -> Result<UpgradeDecision> {
         &version,
         jcode_build_meta::update_semver(),
         crate::runtime_activity::global(),
+        crate::turn_activity::global(),
     )
 }
 
@@ -344,13 +351,15 @@ fn replace_after_delivery_checkpoint(
         identity(&prepared.path)? == prepared.identity,
         "candidate changed while notifying the client"
     );
-    let _publication = crate::bus::Bus::global()
-        .try_runtime_delivery_idle(checkpoint)
-        .context("completion events are still queued or being delivered")?;
-    // The shared replace_process helper logs on failure. Logging hooks may
-    // publish bus events, so use raw exec while holding the publication fence.
-    use std::os::unix::process::CommandExt;
-    Ok(command.exec())
+    prepared._turn_idle.while_quiescent(|| {
+        let _publication = crate::bus::Bus::global()
+            .try_runtime_delivery_idle(checkpoint)
+            .context("completion events are still queued or being delivered")?;
+        // The shared replace_process helper logs on failure. Logging hooks may
+        // publish bus events, so use raw exec while holding both fences.
+        use std::os::unix::process::CommandExt;
+        Ok(command.exec())
+    })
 }
 
 type SessionIndex = std::collections::HashMap<String, Arc<Mutex<crate::agent::Agent>>>;
@@ -365,9 +374,17 @@ fn checkpoint_sessions(
         !crate::tool::sdk::has_runtime_overlays(),
         "session-local SDK tool restrictions/callbacks must be reconfigured before an automatic upgrade can proceed"
     );
+    let activity = crate::turn_activity::global().snapshot();
     let index = sessions.try_read().context("session index is changing")?;
     let mut agents = Vec::with_capacity(index.len());
-    for agent in index.values() {
+    for (session_id, agent) in index.iter() {
+        ensure!(
+            !activity
+                .session(session_id)
+                .is_some_and(|session| session.is_busy()),
+            "turn activity blocks checkpoint for {session_id}: {:?}",
+            activity.session(session_id)
+        );
         agents.push(
             agent
                 .clone()

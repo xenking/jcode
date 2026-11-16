@@ -15,7 +15,10 @@ impl Agent {
     /// Keeping the source history means waking is simply lazy cache rebuilding,
     /// with no disk dependency, lifecycle hooks or environment resnapshotting.
     pub(crate) fn hibernate_idle_caches(&mut self) -> Option<IdleCacheRelease> {
-        if crate::turn_cancel_registry::has_active_turn(self.session_id())
+        if crate::turn_activity::global()
+            .snapshot()
+            .session(self.session_id())
+            .is_some_and(|session| session.is_busy())
             || self.session.migration_lease_block().is_some()
             || !self.pending_alerts.is_empty()
         {

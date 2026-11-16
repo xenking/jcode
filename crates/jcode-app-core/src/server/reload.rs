@@ -1,11 +1,11 @@
 use crate::server::reload_recovery::ReloadRecoveryRole;
-use crate::server::{SwarmEvent, SwarmEventType, SwarmMember};
+use crate::server::{SwarmEvent, SwarmMember};
 use crate::tool::selfdev::ReloadContext;
 use jcode_agent_runtime::InterruptSignal;
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{RwLock, broadcast, watch};
 
 use super::SessionAgents;
@@ -193,6 +193,22 @@ pub(super) async fn await_reload_signal(
             continue;
         }
 
+        // Close admission before capturing recovery. A turn admitted after an
+        // earlier observation is included, and later requests get a retryable
+        // rejection rather than disappearing between capture and exec.
+        let _admission = match crate::turn_activity::global().close_admission() {
+            Ok(fence) => fence,
+            Err(error) => {
+                crate::logging::warn(&format!("Server: reload admission deferred: {error}"));
+                crate::server::write_reload_state(
+                    &signal.request_id,
+                    &signal.hash,
+                    crate::server::ReloadPhase::Failed,
+                    signal.triggering_session.clone(),
+                );
+                continue;
+            }
+        };
         persist_reload_recovery_intents(
             &signal.request_id,
             &swarm_members,
@@ -330,92 +346,28 @@ pub(super) async fn await_reload_signal(
 }
 
 /// Swarm status can lag turn startup (or the member can be absent entirely).
-/// Union actual turn registrations with running members and the reload initiator,
-/// retaining known headless metadata even for members not marked running.
-fn reload_recovery_candidates<'a>(
-    members: impl IntoIterator<Item = (&'a str, &'a str, bool)>,
-    active_session_ids: Vec<String>,
-    triggering_session: Option<&str>,
-) -> Vec<(String, bool)> {
-    let members: HashMap<_, _> = members
-        .into_iter()
-        .map(|(id, status, headless)| (id, (status, headless)))
-        .collect();
-    let mut candidates: HashMap<String, bool> = members
-        .iter()
-        .filter(|(_, (status, _))| *status == "running")
-        .map(|(id, (_, headless))| ((*id).to_string(), *headless))
-        .collect();
-    for id in active_session_ids
-        .into_iter()
-        .chain(triggering_session.map(str::to_string))
-    {
-        let headless = members
-            .get(id.as_str())
-            .is_some_and(|(_, headless)| *headless);
-        candidates.entry(id).or_insert(headless);
-    }
-    let mut candidates: Vec<_> = candidates.into_iter().collect();
-    candidates.sort_by(|a, b| a.0.cmp(&b.0));
-    candidates
-}
-
-#[cfg(test)]
-mod recovery_candidate_tests {
-    use super::reload_recovery_candidates;
-    use crate::turn_cancel_registry::{active_session_ids, register_active_turn};
-    use jcode_agent_runtime::InterruptSignal;
-
-    #[test]
-    fn includes_registered_ready_and_absent_members_preserving_headless_metadata() {
-        let ready = "reload_candidates_ready";
-        let absent = "reload_candidates_absent";
-        let _ready_turn = register_active_turn(ready, InterruptSignal::new());
-        let _absent_turn = register_active_turn(absent, InterruptSignal::new());
-        let candidates = reload_recovery_candidates(
-            [(ready, "ready", true), ("idle", "ready", false)],
-            active_session_ids(),
-            Some(ready),
-        );
-        assert!(candidates.contains(&(ready.to_string(), true)));
-        assert!(candidates.contains(&(absent.to_string(), false)));
-        assert!(!candidates.iter().any(|(id, _)| id == "idle"));
-        assert_eq!(candidates.iter().filter(|(id, _)| id == ready).count(), 1);
-    }
-
-    #[test]
-    fn unions_running_active_and_triggering_sessions_in_sorted_unique_order() {
-        assert_eq!(
-            reload_recovery_candidates(
-                [("running", "running", true), ("trigger", "ready", true)],
-                vec![
-                    "running".to_string(),
-                    "active".to_string(),
-                    "active".to_string()
-                ],
-                Some("trigger"),
-            ),
-            vec![
-                ("active".to_string(), false),
-                ("running".to_string(), true),
-                ("trigger".to_string(), true),
-            ]
-        );
-        assert_eq!(
-            reload_recovery_candidates([], Vec::new(), Some("unknown-trigger")),
-            vec![("unknown-trigger".to_string(), false)]
-        );
-    }
-}
-
 async fn persist_reload_recovery_intents(
     reload_id: &str,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     triggering_session: Option<&str>,
 ) {
+    persist_reload_recovery_intents_from_snapshot(
+        reload_id,
+        swarm_members,
+        triggering_session,
+        &crate::turn_activity::global().snapshot(),
+    )
+    .await;
+}
+
+async fn persist_reload_recovery_intents_from_snapshot(
+    reload_id: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    triggering_session: Option<&str>,
+    activity: &crate::turn_activity::ActivitySnapshot,
+) {
     let candidates = {
         let members = swarm_members.read().await;
-        let active_session_ids = crate::turn_cancel_registry::active_session_ids();
         let snapshot = members
             .iter()
             .map(|(session_id, member)| {
@@ -434,16 +386,17 @@ async fn persist_reload_recovery_intents(
             serde_json::json!({
                 "triggering_session": triggering_session,
                 "members": snapshot,
-                "active_session_ids": active_session_ids,
+                "activity": activity,
             }),
         );
-        reload_recovery_candidates(
-            members
-                .iter()
-                .map(|(id, member)| (id.as_str(), member.status.as_str(), member.is_headless)),
-            active_session_ids,
-            triggering_session,
-        )
+        activity
+            .recovery_sessions(triggering_session)
+            .into_iter()
+            .map(|id| {
+                let headless = members.get(&id).is_some_and(|member| member.is_headless);
+                (id, headless)
+            })
+            .collect::<Vec<_>>()
     };
 
     for (session_id, is_headless) in candidates {
@@ -552,163 +505,91 @@ pub(super) async fn graceful_shutdown_sessions(
 async fn graceful_shutdown_sessions_with_timeout(
     reload_id: &str,
     _sessions: &SessionAgents,
-    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    _swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
-    swarm_event_tx: &broadcast::Sender<SwarmEvent>,
+    _swarm_event_tx: &broadcast::Sender<SwarmEvent>,
     timeout: Duration,
     triggering_session: Option<&str>,
-) {
-    let actively_generating: Vec<String> = {
-        let members = swarm_members.read().await;
-        members
-            .iter()
-            .filter(|(_, m)| m.status == "running")
-            .map(|(id, _)| id.clone())
-            .collect()
-    };
+) -> Vec<crate::turn_activity::SessionActivity> {
+    checkpoint_active_sessions(
+        reload_id,
+        crate::turn_activity::global(),
+        shutdown_signals,
+        timeout,
+        triggering_session,
+    )
+    .await
+}
 
-    let (signalable_sessions, unsignalable_sessions) = {
-        let signals = shutdown_signals.read().await;
-        actively_generating
-            .into_iter()
-            .partition::<Vec<_>, _>(|session_id| signals.contains_key(session_id))
-    };
-
-    if !unsignalable_sessions.is_empty() {
-        super::reload_trace::record_value(
-            reload_id,
-            "shutdown_unsignalable_sessions",
-            serde_json::json!({
-                "sessions": unsignalable_sessions,
-            }),
-        );
-        crate::logging::warn(&format!(
-            "Server: {} running session(s) had no shutdown signal and will not block reload: {:?}",
-            unsignalable_sessions.len(),
-            unsignalable_sessions
-        ));
-    }
-
-    if signalable_sessions.is_empty() {
-        crate::logging::info(
-            "Server: no sessions actively generating, proceeding with reload immediately",
-        );
-        return;
-    }
-
-    crate::logging::info(&format!(
-        "Server: signaling {} actively generating session(s) to checkpoint: {:?}",
-        signalable_sessions.len(),
-        signalable_sessions
-    ));
-
+async fn checkpoint_active_sessions(
+    reload_id: &str,
+    activity: &crate::turn_activity::ActivityRegistry,
+    shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
+    timeout: Duration,
+    triggering_session: Option<&str>,
+) -> Vec<crate::turn_activity::SessionActivity> {
+    let active = activity.snapshot().busy_sessions();
+    let mut unsignalable = Vec::new();
     {
         let signals = shutdown_signals.read().await;
-        for session_id in &signalable_sessions {
-            let Some(signal) = signals.get(session_id) else {
-                crate::logging::warn(&format!(
-                    "Server: shutdown signal disappeared before graceful reload handoff for session {}",
-                    session_id
-                ));
-                continue;
-            };
-            signal_session_for_reload(session_id, signal);
+        for session_id in &active {
+            activity.checkpoint_requested(session_id);
+            // Registered execution signals are authoritative even when the
+            // connection has gone away or never published a sender.
+            let mut senders = crate::turn_cancel_registry::active_turn_signals(session_id);
+            if let Some(signal) = signals.get(session_id) {
+                senders.push(signal.clone());
+            }
+            if senders.is_empty() {
+                unsignalable.push(session_id.clone());
+            }
+            for signal in senders {
+                signal_session_for_reload(session_id, &signal);
+            }
             super::reload_trace::record_value(
                 reload_id,
                 "shutdown_signal_sent",
                 serde_json::json!({
                     "session_id": session_id,
                     "triggering_session": triggering_session,
+                    "signal_available": !unsignalable.contains(session_id),
                 }),
             );
-            crate::logging::info(&format!(
-                "Server: sent graceful shutdown signal to session {}",
-                session_id
-            ));
         }
     }
-
-    let watched: std::collections::HashSet<String> = signalable_sessions
-        .into_iter()
-        .filter(|session_id| Some(session_id.as_str()) != triggering_session)
-        .collect();
-
-    if let Some(triggering_session) = triggering_session {
-        crate::logging::info(&format!(
-            "Server: excluding triggering session {} from reload checkpoint wait set",
-            triggering_session
-        ));
-    }
-
-    if watched.is_empty() {
-        crate::logging::info(
-            "Server: no non-triggering running sessions remain to checkpoint, proceeding with reload",
+    if !unsignalable.is_empty() {
+        super::reload_trace::record_value(
+            reload_id,
+            "shutdown_unsignalable_sessions",
+            serde_json::json!({ "sessions": unsignalable }),
         );
-        return;
-    }
-
-    let mut event_rx = swarm_event_tx.subscribe();
-    let deadline = Instant::now() + timeout;
-
-    loop {
-        let still_running: Vec<String> = {
-            let members = swarm_members.read().await;
-            watched
-                .iter()
-                .filter(|id| {
-                    members
-                        .get(*id)
-                        .map(|m| m.status == "running")
-                        .unwrap_or(false)
-                })
-                .cloned()
-                .collect()
-        };
-
-        if still_running.is_empty() {
-            crate::logging::info("Server: all sessions checkpointed, proceeding with reload");
-            break;
-        }
-
-        crate::logging::info(&format!(
-            "Server: waiting for {} session(s) to checkpoint before reload: {:?}",
-            still_running.len(),
-            still_running
+        crate::logging::warn(&format!(
+            "Server: checkpoint participants have no shutdown signal: {unsignalable:?}"
         ));
-
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            crate::logging::warn(&format!(
-                "Server: reload graceful shutdown timed out after {}ms; proceeding with still-running sessions: {:?}",
-                timeout.as_millis(),
-                still_running
-            ));
-            break;
-        }
-
-        match tokio::time::timeout(remaining, event_rx.recv()).await {
-            Ok(Ok(event)) => match &event.event {
-                SwarmEventType::StatusChange { .. } if watched.contains(&event.session_id) => {}
-                SwarmEventType::MemberChange { action }
-                    if action == "left" && watched.contains(&event.session_id) => {}
-                _ => continue,
-            },
-            Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
-            Ok(Err(broadcast::error::RecvError::Closed)) => {
-                crate::logging::warn(
-                    "Server: swarm event channel closed while waiting for reload checkpoint",
-                );
-                break;
-            }
-            Err(_) => {
-                crate::logging::warn(&format!(
-                    "Server: reload graceful shutdown timed out after {}ms; proceeding without waiting for remaining checkpoint events",
-                    timeout.as_millis()
-                ));
-                break;
-            }
-        }
     }
+    let watched: Vec<_> = active
+        .into_iter()
+        .filter(|id| Some(id.as_str()) != triggering_session)
+        .collect();
+    let unfinished = activity.wait_for_checkpoints(&watched, timeout).await;
+    super::reload_trace::record_value(
+        reload_id,
+        "checkpoint_wait_complete",
+        serde_json::json!({
+            "initiator_excluded": triggering_session,
+            "unfinished": unfinished,
+            "timeout_ms": timeout.as_millis(),
+        }),
+    );
+    if unfinished.is_empty() {
+        crate::logging::info("Server: all watched sessions acknowledged durable checkpoints");
+    } else {
+        crate::logging::warn(&format!(
+            "Server: reload checkpoint timeout after {}ms, proceeding under forced-reload policy, unfinished: {unfinished:?}",
+            timeout.as_millis()
+        ));
+    }
+    unfinished
 }
 
 #[cfg(test)]

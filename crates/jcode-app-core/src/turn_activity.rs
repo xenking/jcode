@@ -41,6 +41,12 @@ impl SessionActivity {
     pub fn is_busy(&self) -> bool {
         self.active
     }
+
+    /// A pending ask can be interrupted into a durable checkpoint without a
+    /// user answer. It still owns a lease, so it is not idle-upgrade quiescence.
+    pub fn is_checkpointable(&self) -> bool {
+        matches!(self.phase, TurnPhase::AskBlocked | TurnPhase::Checkpointed)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -213,7 +219,8 @@ impl ActivityRegistry {
     ) -> AdmissionGuard {
         let token = state.next();
         let session = state.sessions.entry(session_id.to_owned()).or_default();
-        if session.participants.is_empty() && !session.checkpoint_requested {
+        if session.participants.is_empty() && matches!(participant, Participant::Admission) {
+            session.checkpoint_requested = false;
             session.checkpointed = false;
         }
         session.participants.insert(token, participant);
@@ -301,17 +308,30 @@ impl ActivityRegistry {
             tokio::pin!(notified);
             notified.as_mut().enable();
             let snapshot = self.snapshot();
-            let unfinished: Vec<_> = snapshot
-                .sessions
-                .into_iter()
-                .filter(|s| sessions.contains(&s.session_id) && s.checkpoint_pending)
+            let mut unfinished: Vec<_> = sessions
+                .iter()
+                .filter_map(|id| match snapshot.session(id) {
+                    Some(session) if session.checkpoint_pending => Some(session.clone()),
+                    Some(_) => None,
+                    None => Some(SessionActivity {
+                        session_id: id.clone(),
+                        phase: TurnPhase::CheckpointRequested,
+                        reason: "checkpoint participant missing from lifecycle snapshot".into(),
+                        active: false,
+                        checkpoint_pending: true,
+                    }),
+                })
                 .collect();
+            unfinished.sort_by(|a, b| a.session_id.cmp(&b.session_id));
             if unfinished.is_empty() {
                 return unfinished;
             }
-            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+            if tokio::time::Instant::now() >= deadline {
                 return unfinished;
             }
+            // Re-snapshot even at timeout so an acknowledgement racing the
+            // deadline is not reported using a stale unfinished list.
+            let _deadline_reached = tokio::time::timeout_at(deadline, notified).await;
         }
     }
 }
@@ -350,6 +370,12 @@ impl AdmissionFence {
     }
 
     pub fn ensure_quiescent(&self) -> Result<()> {
+        self.while_quiescent(|| Ok(()))
+    }
+
+    /// No logging, publication or lifecycle mutation may run inside this final
+    /// synchronous fence. New participants cannot appear between proof and exec.
+    pub fn while_quiescent<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
         let state = self.registry.lock();
         ensure!(
             state.fence == Some(self.token),
@@ -361,7 +387,9 @@ impl AdmissionFence {
             "turns became active before exec: {}",
             busy.join(", ")
         );
-        Ok(())
+        let result = operation();
+        drop(state);
+        result
     }
 }
 

@@ -88,22 +88,24 @@ async fn reclaim_idle_caches(
             (
                 id.clone(),
                 Arc::clone(agent),
-                members
-                    .get(id)
-                    .map(|member| (member.status == "running", member.last_status_change)),
+                members.get(id).map(|member| member.last_status_change),
             )
         })
         .collect();
     drop(members);
     drop(sessions);
+    let activity = crate::turn_activity::global().snapshot();
     let mut releases = Vec::new();
     let mut before = None;
     for (id, agent, member) in candidates {
-        let Some((running, last_status_change)) = member else {
+        let Some(last_status_change) = member else {
             idle.remove(&id);
             continue;
         };
-        if running || crate::turn_cancel_registry::has_active_turn(&id) {
+        if activity
+            .session(&id)
+            .is_some_and(|session| session.is_busy())
+        {
             idle.remove(&id);
             continue;
         }
@@ -231,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_hibernation_monitor_skips_busy_and_running_then_releases_once() {
+    fn idle_hibernation_monitor_uses_admission_not_roster_then_releases_once() {
         let _env = crate::storage::lock_test_env();
         // Serialize process-wide environment outside the asynchronous runtime.
         tokio::runtime::Builder::new_current_thread()
@@ -278,12 +280,14 @@ mod tests {
                 );
                 assert!(idle.is_empty());
                 drop(held);
-                members.write().await.get_mut(&id).unwrap().status = "running".into();
+                let admitted = crate::turn_activity::global().admit(&id).unwrap();
                 assert_eq!(
                     reclaim_idle_caches(&sessions, &members, &mut idle, threshold).await,
                     0
                 );
-                members.write().await.get_mut(&id).unwrap().status = "ready".into();
+                drop(admitted);
+                // A lagging roster is not a turn ownership fact.
+                members.write().await.get_mut(&id).unwrap().status = "running".into();
                 idle.insert(id.clone(), IdleState::new(old, old));
                 assert_eq!(
                     reclaim_idle_caches(&sessions, &members, &mut idle, threshold).await,

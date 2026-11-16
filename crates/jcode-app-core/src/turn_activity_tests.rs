@@ -163,6 +163,13 @@ async fn ask_blocked_is_checkpointable_without_waiting_for_user_answer() {
         activity.snapshot().session("asking").unwrap().phase,
         TurnPhase::AskBlocked
     );
+    assert!(
+        activity
+            .snapshot()
+            .session("asking")
+            .unwrap()
+            .is_checkpointable()
+    );
     activity.checkpoint_requested("asking");
     drop(ask);
     activity.checkpointed("asking");

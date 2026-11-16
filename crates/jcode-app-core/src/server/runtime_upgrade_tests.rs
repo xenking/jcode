@@ -1,6 +1,73 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 
+fn reserve_upgrade(
+    path: PathBuf,
+    metadata: FileIdentity,
+    version: &str,
+    current: &str,
+    gate: &ActivityGate,
+) -> Result<UpgradeDecision> {
+    super::reserve_upgrade(
+        path,
+        metadata,
+        version,
+        current,
+        gate,
+        &crate::turn_activity::ActivityRegistry::default(),
+    )
+}
+
+#[test]
+fn admitted_lease_without_runtime_or_streaming_blocks_idle_upgrade() {
+    let (_dir, path, metadata) = candidate();
+    let gate = ActivityGate::default();
+    let activity = crate::turn_activity::ActivityRegistry::default();
+    let admitted = activity.admit("not-yet-executing").unwrap();
+    assert!(matches!(
+        super::reserve_upgrade(
+            path.clone(),
+            metadata.clone(),
+            "2.0.0",
+            "1.0.0",
+            &gate,
+            &activity
+        )
+        .unwrap(),
+        UpgradeDecision::Busy
+    ));
+    drop(admitted);
+    let UpgradeDecision::Ready(prepared) =
+        super::reserve_upgrade(path, metadata, "2.0.0", "1.0.0", &gate, &activity).unwrap()
+    else {
+        panic!("idle upgrade must be reserved");
+    };
+    assert!(activity.admit("racing-turn").is_err());
+    drop(prepared);
+    assert!(activity.admit("racing-turn").is_ok());
+}
+
+#[test]
+fn late_execution_fact_defers_exec_without_dropping_delivery_fence() {
+    let (_dir, path, metadata) = candidate();
+    let activity = crate::turn_activity::ActivityRegistry::default();
+    let gate = ActivityGate::default();
+    let UpgradeDecision::Ready(prepared) =
+        super::reserve_upgrade(path, metadata, "2.0.0", "1.0.0", &gate, &activity).unwrap()
+    else {
+        panic!("idle upgrade must be reserved");
+    };
+    let late = activity.executing("accepted-before-fence");
+    let mut command = std::process::Command::new("/jcode-test-missing-runtime/no-exec");
+    let error = replace_after_delivery_checkpoint(&mut command, 0, &prepared).unwrap_err();
+    assert!(
+        error.to_string().contains("accepted-before-fence"),
+        "{error}"
+    );
+    drop(late);
+    drop(prepared);
+}
+
 struct TestHome(Option<std::ffi::OsString>, tempfile::TempDir);
 impl TestHome {
     fn new() -> Self {
