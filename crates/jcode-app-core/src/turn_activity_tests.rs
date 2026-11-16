@@ -196,3 +196,23 @@ fn renamed_participants_release_by_identity_not_stale_session_name() {
     drop(guard);
     assert!(activity.snapshot().busy_sessions().is_empty());
 }
+
+#[test]
+fn drain_excludes_checkpointable_asks_but_idle_upgrade_still_sees_ownership() {
+    let activity = ActivityRegistry::default();
+    let _ask_turn = activity.admit("asking").unwrap();
+    let _ask = activity.in_tool("asking", "ask");
+    let _tool_turn = activity.admit("tool").unwrap();
+    let _tool = activity.in_tool("tool", "bash");
+    let _admitted = activity.admit("accepted").unwrap();
+    let _checkpointed = activity.admit("saved").unwrap();
+    activity.checkpoint_requested("saved");
+    activity.checkpointed("saved");
+    let snapshot = activity.snapshot();
+    assert_eq!(snapshot.drain_sessions(), ["accepted", "tool"]);
+    assert_eq!(
+        snapshot.busy_sessions(),
+        ["accepted", "asking", "saved", "tool"]
+    );
+    assert!(activity.try_quiescent().is_err());
+}

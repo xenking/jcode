@@ -65,6 +65,16 @@ impl ActivitySnapshot {
             .collect()
     }
 
+    /// Reload drain waits for computation, not a user answer that can be
+    /// durably checkpointed. Idle upgrades must use `busy_sessions` instead.
+    pub fn drain_sessions(&self) -> Vec<String> {
+        self.sessions
+            .iter()
+            .filter(|session| session.is_busy() && !session.is_checkpointable())
+            .map(|session| session.session_id.clone())
+            .collect()
+    }
+
     pub fn session(&self, session_id: &str) -> Option<&SessionActivity> {
         self.sessions.iter().find(|s| s.session_id == session_id)
     }

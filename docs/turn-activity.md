@@ -19,7 +19,7 @@ A snapshot is serialized from one locked state and includes a revision, admissio
 | Forced reload checkpoint wait | Explicit request and durable acknowledgement | Signal connection and execution interrupt handles. Exclude the initiator only from waiting. Include sender-less sessions in timeout diagnostics. Forced reload may continue after reporting unfinished sessions. |
 | Idle runtime upgrade | Admission and publication ownership | Atomically prove quiescence and close admission. Recheck under the same lifecycle mutex through synchronous exec. Preserve the existing bus delivery checkpoint fence. |
 | Idle hibernation | Snapshot busy state | Busy turns cannot lose caches. Retain the cache reservation and idle-duration checks, but never use roster `running` as ownership. |
-| Rollout drain | Snapshot busy sessions | The daemon and root CLI consume the same serialized snapshot. Recovery `started` receipts, not roster `ready`, define resumed work. |
+| Rollout drain | Snapshot `drain_sessions()` | Wait for admitted/computing/tool work, but not checkpointable asks or already acknowledged checkpoints. `busy_sessions()` still includes their ownership for idle-upgrade safety. The daemon and root CLI consume the same serialized snapshot. Recovery `started` receipts, not roster `ready`, define resumed work. |
 
 An ask is checkpointable without an answer, but still busy for idle upgrades until its ownership is released. Checkpoint acknowledgement does not release an admission or queued-publication lease.
 
