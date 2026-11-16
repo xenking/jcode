@@ -257,6 +257,7 @@ pub async fn run_tui_client(
             print_session_resume_hint(session_id);
         }
         crate::tui::herdr::release();
+        crate::tui::rex::release();
         return Ok(());
     }
 
@@ -284,6 +285,7 @@ pub async fn run_tui_client(
         // The user quit (reload/update exec back into jcode in this pane and
         // keep reporting, so they must not release it).
         crate::tui::herdr::release();
+        crate::tui::rex::release();
     }
 
     Ok(())

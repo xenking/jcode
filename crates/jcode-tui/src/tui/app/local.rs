@@ -84,7 +84,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     app.expire_presumed_focus();
     crate::tui::window_visibility::poll(app.client_focused(), app.is_processing);
     app.refresh_terminal_title_metrics();
-    app.sync_herdr_agent_state();
+    app.sync_terminal_agent_state();
     // Liveness breadcrumb: if the UI loop wedges, the watchdog reports this as
     // the last phase that made progress.
     crate::logging::watchdog::beat("tui.idle_tick");

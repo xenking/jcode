@@ -129,6 +129,10 @@ pub const CLIENT_TERMINAL_ENV_VARS: &[&str] = &[
     "HERDR_BIN_PATH",
     "HERDR_SESSION",
     "HERDR_AGENT",
+    "REX_SESSION",
+    "REX_BLOCK",
+    "REX_SERVER",
+    "REX_BIN_PATH",
     // Terminal emulators
     "TERM",
     "TERM_PROGRAM",
@@ -247,6 +251,9 @@ fn detected_resume_terminal_with_client_env(
     // emulator. Prefer it even when the pane also advertises kitty/wezterm.
     if is_set("HERDR_ENV") && is_set("HERDR_PANE_ID") {
         return Some("herdr".to_string());
+    }
+    if is_set("REX_BLOCK") {
+        return Some("rex".to_string());
     }
     if is_set("HANDTERM_SESSION") || is_set("HANDTERM_PID") {
         return Some("handterm".to_string());
@@ -398,9 +405,8 @@ fn resume_terminal_candidates_with_client_env(
     // A tmux client already owns the user's terminal layout. Prefer a pane in
     // that exact client over opening another emulator window. Explicit
     // JCODE_TERMINAL and configured spawn hooks still take precedence.
-    let in_herdr = terminal_env_value(client_terminal_env, "HERDR_ENV").is_some()
-        && terminal_env_value(client_terminal_env, "HERDR_PANE_ID").is_some();
-    let in_inner_multiplexer = in_herdr
+    let detected = detected_resume_terminal_with_client_env(client_terminal_env);
+    let in_inner_multiplexer = matches!(detected.as_deref(), Some("herdr" | "rex"))
         || terminal_env_value(client_terminal_env, "ZELLIJ").is_some()
         || terminal_env_value(client_terminal_env, "STY").is_some();
     if !in_inner_multiplexer
@@ -409,7 +415,7 @@ fn resume_terminal_candidates_with_client_env(
     {
         push_unique_terminal(&mut candidates, "tmux");
     }
-    if let Some(term) = detected_resume_terminal_with_client_env(client_terminal_env) {
+    if let Some(term) = detected {
         push_unique_terminal(&mut candidates, term);
     }
 
@@ -766,6 +772,28 @@ fn build_spawn_command(term: &str, command: &TerminalCommand, cwd: &Path) -> Opt
                 .args(["-c", script, "jcode-herdr-spawn", &herdr])
                 .arg(cwd)
                 .arg(command_line);
+            if command.fresh_spawn {
+                cmd.env("JCODE_FRESH_SPAWN", "1");
+            }
+        }
+        #[cfg(unix)]
+        "rex" => {
+            let rex = terminal_env_value(&command.client_terminal_env, "REX_BIN_PATH")
+                .unwrap_or_else(|| "rex".to_string());
+            cmd = Command::new(rex);
+            cmd.current_dir(cwd)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            if let Some(server) = terminal_env_value(&command.client_terminal_env, "REX_SERVER") {
+                cmd.args(["-S", &server]);
+            }
+            cmd.arg("split");
+            let block = terminal_env_value(&command.client_terminal_env, "REX_BLOCK")?;
+            cmd.args(["-b", &block, "--split", "right", "-c"])
+                .arg(cwd)
+                .arg("--")
+                .args(command_parts(command));
             if command.fresh_spawn {
                 cmd.env("JCODE_FRESH_SPAWN", "1");
             }
@@ -1262,6 +1290,145 @@ mod tests {
         let candidates = resume_terminal_candidates_with_client_env(&client_env, None);
         assert_eq!(candidates.first().map(String::as_str), Some("herdr"));
         assert!(!candidates.iter().any(|candidate| candidate == "tmux"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rex_context_preserves_override_and_herdr_precedence() {
+        let mut client_env = vec![
+            ("REX_BLOCK".to_string(), "block-42".to_string()),
+            ("KITTY_PID".to_string(), "1234".to_string()),
+            ("TMUX".to_string(), "/tmp/tmux,1,0".to_string()),
+            ("TMUX_PANE".to_string(), "%3".to_string()),
+        ];
+        let candidates = resume_terminal_candidates_with_client_env(&client_env, None);
+        assert_eq!(candidates.first().map(String::as_str), Some("rex"));
+        assert!(!candidates.iter().any(|candidate| candidate == "tmux"));
+        let candidates = resume_terminal_candidates_with_client_env(&client_env, Some("wezterm"));
+        assert_eq!(&candidates[..2], ["wezterm", "rex"]);
+        client_env.extend([
+            ("HERDR_ENV".to_string(), "1".to_string()),
+            ("HERDR_PANE_ID".to_string(), "pane-1".to_string()),
+        ]);
+        assert_eq!(
+            detected_resume_terminal_with_client_env(&client_env).as_deref(),
+            Some("herdr")
+        );
+        let outside_rex = vec![("TERM_PROGRAM".to_string(), "kitty".to_string())];
+        assert_eq!(
+            detected_resume_terminal_with_client_env(&outside_rex).as_deref(),
+            Some("kitty")
+        );
+    }
+
+    #[test]
+    fn rex_env_is_allowlisted_forwarded_and_scrubbed() {
+        let client_env: Vec<_> = [
+            ("REX_SESSION", "session-1"),
+            ("REX_BLOCK", "block-1"),
+            ("REX_SERVER", "localhost:1234"),
+            ("REX_BIN_PATH", "/opt/Rex Server/rex"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+        let mut hook = Command::new("hook");
+        apply_client_terminal_env(&mut hook, &client_env);
+        let command = TerminalCommand::new("jcode", vec![]).client_terminal_env(client_env.clone());
+        let spawn = build_hook_spawn_command("hook", &command, Path::new("/work")).unwrap();
+        for (key, value) in &client_env {
+            assert!(CLIENT_TERMINAL_ENV_VARS.contains(&key.as_str()));
+            for cmd in [&hook, &spawn] {
+                assert_eq!(env_value(cmd, key).as_deref(), Some(value.as_str()));
+                assert_eq!(
+                    env_value(cmd, &format!("JCODE_CLIENT_{key}")).as_deref(),
+                    Some(value.as_str())
+                );
+            }
+        }
+        apply_client_terminal_env(&mut hook, &[]);
+        for (key, _) in &client_env {
+            assert!(
+                hook.get_envs()
+                    .any(|(name, value)| name == key.as_str() && value.is_none())
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rex_spawn_splits_requesting_block_with_literal_argv() {
+        let command = TerminalCommand::new(
+            "/opt/Jcode App/jcode",
+            vec!["--resume".to_string(), "session with 'quotes'".to_string()],
+        )
+        .client_terminal_env(vec![
+            ("REX_BLOCK".to_string(), "block-42".to_string()),
+            ("REX_SERVER".to_string(), "localhost:1234".to_string()),
+            (
+                "REX_BIN_PATH".to_string(),
+                "/opt/Rex Server/rex".to_string(),
+            ),
+        ])
+        .fresh_spawn();
+        let cmd = build_spawn_command("rex", &command, Path::new("/work/a b")).unwrap();
+        assert_eq!(cmd.get_program(), "/opt/Rex Server/rex");
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            [
+                "-S",
+                "localhost:1234",
+                "split",
+                "-b",
+                "block-42",
+                "--split",
+                "right",
+                "-c",
+                "/work/a b",
+                "--",
+                "/opt/Jcode App/jcode",
+                "--resume",
+                "session with 'quotes'",
+            ]
+        );
+        assert_eq!(env_value(&cmd, "JCODE_FRESH_SPAWN").as_deref(), Some("1"));
+        assert_eq!(env_value(&cmd, "REX_BLOCK").as_deref(), Some("block-42"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rex_spawn_uses_path_and_serializes_runtime_context() {
+        let command = TerminalCommand::new("jcode", vec![])
+            .client_terminal_env(vec![("REX_BLOCK".to_string(), "block-1".to_string())])
+            .runtime_env(vec![(
+                "JCODE_SOCKET".to_string(),
+                "/private/rex.sock".to_string(),
+            )]);
+        let cmd = build_spawn_command("rex", &command, Path::new("/work")).unwrap();
+        assert_eq!(cmd.get_program(), "rex");
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            [
+                "split",
+                "-b",
+                "block-1",
+                "--split",
+                "right",
+                "-c",
+                "/work",
+                "--",
+                "env",
+                "-u",
+                "JCODE_API_SOCKET",
+                "-u",
+                "JCODE_NO_AUTO_UPDATE",
+                "JCODE_SOCKET=/private/rex.sock",
+                "jcode",
+            ]
+        );
+        let outside_rex = TerminalCommand::new("jcode", vec![])
+            .client_terminal_env(vec![("TERM".to_string(), "xterm".to_string())]);
+        assert!(build_spawn_command("rex", &outside_rex, Path::new("/work")).is_none());
     }
 
     #[test]

@@ -584,7 +584,7 @@ impl StatusSpinnerRenderer {
             app.force_full_repaint = true;
         }
         app.refresh_terminal_title_metrics();
-        app.sync_herdr_agent_state();
+        app.sync_terminal_agent_state();
         app.poll_oauth_account_telemetry();
         app.enter_idle_hibernation(self.last_frame.as_ref());
         let invalidation = full_frame_invalidation(app.force_full_redraw, app.force_full_repaint);

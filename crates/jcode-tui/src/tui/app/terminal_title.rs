@@ -61,11 +61,19 @@ fn title_with_metrics(
 }
 
 impl App {
-    /// Tell herdr (when running in a herdr pane) whether this client is
-    /// working or idle and which session to resume. Tick-safe: unchanged
-    /// state is a cheap comparison and reports are sent off-thread.
-    pub(super) fn sync_herdr_agent_state(&self) {
-        if self.suppress_terminal_title_updates || !self.is_remote_client() {
+    pub(super) fn sync_terminal_agent_state(&self) {
+        if self.suppress_terminal_title_updates {
+            return;
+        }
+        let state = if self.ask_picker.is_some() {
+            crate::tui::rex::AgentState::BlockedQuestion
+        } else if self.is_processing() {
+            crate::tui::rex::AgentState::Working
+        } else {
+            crate::tui::rex::AgentState::Idle
+        };
+        crate::tui::rex::sync(state);
+        if !self.is_remote_client() {
             return;
         }
         let state = if self.is_processing() {
