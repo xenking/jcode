@@ -211,9 +211,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => break,
-                KeyCode::Char(value @ '1'..='7') if !auto => {
-                    phase = value as usize - '1' as usize
-                }
+                KeyCode::Char(value @ '1'..='7') if !auto => phase = value as usize - '1' as usize,
                 KeyCode::Char(' ') if !auto => phase = (phase + 1) % names.len(),
                 _ => {}
             }

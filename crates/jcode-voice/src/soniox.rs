@@ -397,6 +397,10 @@ mod tests {
 
     /// Mock Soniox server. `script` responses are sent after the first audio
     /// frame; `finished` is sent after the empty end frame.
+    #[allow(
+        clippy::result_large_err,
+        reason = "WebSocket handshake callback uses tungstenite error type"
+    )]
     async fn server(
         key: &'static str,
         script: Vec<Value>,

@@ -362,10 +362,12 @@ fn threshold_tokens_after_overrides(
 #[cfg(test)]
 #[test]
 fn threshold_tokens_takes_the_earlier_trigger() {
-    let mut cfg = crate::config::CompactionConfig::default();
-    cfg.reactive_threshold = 1.0;
-    cfg.reactive_threshold_tokens = 500_000;
-    cfg.max_context_tokens = 1_000_000;
+    let mut cfg = crate::config::CompactionConfig {
+        reactive_threshold: 1.0,
+        reactive_threshold_tokens: 500_000,
+        max_context_tokens: 1_000_000,
+        ..Default::default()
+    };
     assert_eq!(threshold_tokens_for(&cfg, 1_000_000), Some(500_000));
     cfg.max_context_tokens = 0;
     cfg.reactive_threshold = 0.8;

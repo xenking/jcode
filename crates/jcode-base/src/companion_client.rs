@@ -471,6 +471,10 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "legacy deserialization fixture retains the complete wire shape"
+)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum OldCompanionRequest {
