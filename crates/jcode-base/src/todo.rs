@@ -453,8 +453,8 @@ pub fn link_worker_lane(coordinator: &str, worker: &str, lane: &str) -> Result<V
     for session in [coordinator, worker] {
         let mut links = load_lane_links(session);
         links.retain(|existing| {
-            !(existing.lane == link.lane && existing.coordinator == link.coordinator)
-                && !(session == worker && existing.worker == worker)
+            !(existing.lane == link.lane && existing.coordinator == link.coordinator
+                || session == worker && existing.worker == worker)
         });
         links.push(link.clone());
         save_lane_links(session, &links)?;

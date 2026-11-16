@@ -266,9 +266,7 @@ pub(super) fn pick_available_swarm_model(
     routes: &[crate::provider::ModelRoute],
 ) -> Option<String> {
     let configured = configured.filter(|m| !m.trim().is_empty() && !is_inherit_sentinel(m.trim()));
-    let Some(primary) = configured else {
-        return None;
-    };
+    let primary = configured?;
     if fallbacks.is_empty() || routes.is_empty() {
         return Some(primary);
     }

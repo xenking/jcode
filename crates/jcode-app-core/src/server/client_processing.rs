@@ -135,13 +135,13 @@ impl Drop for QueuedPromptClaimGuard {
         let Some(client_id) = self.client_id.as_deref() else {
             return;
         };
-        if let Ok(mut queue) = self.queue.lock() {
-            if let Some(item) = queue.iter_mut().find(|item| {
+        if let Ok(mut queue) = self.queue.lock()
+            && let Some(item) = queue.iter_mut().find(|item| {
                 item.client_id.as_deref() == Some(client_id)
                     && item.mode == jcode_agent_runtime::QueuedMessageMode::InFlight
-            }) {
-                item.mode = jcode_agent_runtime::QueuedMessageMode::AfterYield;
-            }
+            })
+        {
+            item.mode = jcode_agent_runtime::QueuedMessageMode::AfterYield;
         }
     }
 }

@@ -105,6 +105,7 @@ pub(super) fn effort_entries(
 }
 
 /// The model name a row stands for, without its ` (level)` suffix.
+#[cfg(test)]
 pub(super) fn model_name_without_effort(name: &str) -> &str {
     match name.rsplit_once(" (") {
         Some((model, suffix)) if suffix.ends_with(')') => model,

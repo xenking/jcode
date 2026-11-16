@@ -100,6 +100,7 @@ fn model_picker_favorites_path() -> Option<std::path::PathBuf> {
 
 #[path = "inline_interactive_placeholder_routes.rs"]
 pub(super) mod placeholder_routes;
+#[cfg(test)]
 use placeholder_routes::route_supports_reasoning_effort;
 
 /// Apply the `provider.model_picker_providers` allowlist (issue #460).
@@ -1751,7 +1752,7 @@ impl App {
             current_provider,
             remote_provider_name,
             current_api_method,
-            current_effort,
+            current_effort: _,
             recent_authenticated_provider,
         } = ctx;
         // UI preferences may be local, but provider defaults must not be.
@@ -1807,7 +1808,7 @@ impl App {
         if !is_remote {
             crate::model_usage::enrich_routes(&mut routes);
         }
-        let shared_usage: HashMap<_, _> = routes
+        let _shared_usage: HashMap<_, _> = routes
             .iter()
             .filter_map(|route| {
                 route.usage.clone().map(|usage| {

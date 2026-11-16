@@ -346,11 +346,10 @@ fn handle_in(
             }
             let check = transport.check(&id, &candidate);
             match decision(enabled(), check, notice_displayed(&marker)) {
-                Decision::Upload => {
-                    if enabled() {
-                        transport.upload(&id, &candidate);
-                    }
+                Decision::Upload if enabled() => {
+                    transport.upload(&id, &candidate);
                 }
+                Decision::Upload => {}
                 Decision::Notice => {
                     if let Ok(mut pending) = state.lock() {
                         *pending = Some(Pending {

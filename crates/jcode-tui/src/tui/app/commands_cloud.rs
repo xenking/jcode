@@ -864,15 +864,15 @@ fn cloud_failure_details(stderr: &str) -> String {
         .lines()
         .filter(|line| {
             let line = line.trim();
-            !line.starts_with("[cloud ")
-                && !line.starts_with(
+            !(line.starts_with("[cloud ")
+                || line.starts_with(
                     "** WARNING: connection is not using a post-quantum key exchange algorithm.",
                 )
-                && !line.starts_with(
+                || line.starts_with(
                     "** This session may be vulnerable to \"store now, decrypt later\" attacks.",
                 )
-                && !(line.starts_with("** The server may need to be upgraded.")
-                    && line.contains("openssh.com/pq.html"))
+                || (line.starts_with("** The server may need to be upgraded.")
+                    && line.contains("openssh.com/pq.html")))
         })
         .collect::<Vec<_>>()
         .join("\n")

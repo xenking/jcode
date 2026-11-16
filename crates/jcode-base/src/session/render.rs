@@ -877,6 +877,7 @@ fn insert_compaction_rows(
 }
 
 /// One transcript divider row for a completed compaction.
+#[allow(clippy::too_many_arguments)]
 fn compaction_divider_row(
     method: Option<&str>,
     trigger: Option<&str>,

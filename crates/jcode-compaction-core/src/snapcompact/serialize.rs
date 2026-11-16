@@ -327,7 +327,7 @@ fn is_media_type_token(byte: u8) -> bool {
 
 fn is_canonical_base64(text: &str) -> bool {
     let bytes = text.as_bytes();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return false;
     }
     let padding = bytes.iter().rev().take_while(|byte| **byte == b'=').count();

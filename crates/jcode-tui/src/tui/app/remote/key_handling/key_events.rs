@@ -210,55 +210,55 @@ pub(super) async fn handle_remote_key_internal(
         app.set_status_notice("Queue: Alt+↑/↓ select · m mode · Enter interrupt · Esc unfocus");
         return Ok(());
     }
-    if let Some(index) = app.selected_queued_prompt {
-        if modifiers.is_empty() {
-            match code {
-                KeyCode::Esc => {
-                    app.selected_queued_prompt = None;
-                    return Ok(());
-                }
-                KeyCode::Char('m') => {
-                    if let Some(prompt) = app.server_queued_prompts.get(index) {
-                        let mode = match prompt.mode {
-                            crate::protocol::QueuedPromptMode::Steer => {
-                                crate::protocol::QueuedPromptMode::AfterYield
-                            }
-                            crate::protocol::QueuedPromptMode::AfterYield => {
-                                crate::protocol::QueuedPromptMode::Steer
-                            }
-                        };
-                        match remote
-                            .set_queued_prompt_mode(prompt.client_id.clone(), mode)
-                            .await
-                        {
-                            Ok(id) => app.pending_queue_requests.push((id, None)),
-                            Err(error) => app.push_display_message(DisplayMessage::error(format!(
-                                "Failed to change queued prompt mode: {error}"
-                            ))),
-                        }
-                    }
-                    return Ok(());
-                }
-                KeyCode::Enter => {
-                    if let Some(prompt) = app.server_queued_prompts.get(index) {
-                        match remote
-                            .interrupt_queued_prompt(prompt.client_id.clone())
-                            .await
-                        {
-                            Ok(id) => {
-                                app.pending_queue_requests.push((id, None));
-                                app.selected_queued_prompt = None;
-                                app.set_status_notice("Interrupting for selected queued prompt");
-                            }
-                            Err(error) => app.push_display_message(DisplayMessage::error(format!(
-                                "Failed to interrupt for queued prompt: {error}"
-                            ))),
-                        }
-                    }
-                    return Ok(());
-                }
-                _ => app.selected_queued_prompt = None,
+    if let Some(index) = app.selected_queued_prompt
+        && modifiers.is_empty()
+    {
+        match code {
+            KeyCode::Esc => {
+                app.selected_queued_prompt = None;
+                return Ok(());
             }
+            KeyCode::Char('m') => {
+                if let Some(prompt) = app.server_queued_prompts.get(index) {
+                    let mode = match prompt.mode {
+                        crate::protocol::QueuedPromptMode::Steer => {
+                            crate::protocol::QueuedPromptMode::AfterYield
+                        }
+                        crate::protocol::QueuedPromptMode::AfterYield => {
+                            crate::protocol::QueuedPromptMode::Steer
+                        }
+                    };
+                    match remote
+                        .set_queued_prompt_mode(prompt.client_id.clone(), mode)
+                        .await
+                    {
+                        Ok(id) => app.pending_queue_requests.push((id, None)),
+                        Err(error) => app.push_display_message(DisplayMessage::error(format!(
+                            "Failed to change queued prompt mode: {error}"
+                        ))),
+                    }
+                }
+                return Ok(());
+            }
+            KeyCode::Enter => {
+                if let Some(prompt) = app.server_queued_prompts.get(index) {
+                    match remote
+                        .interrupt_queued_prompt(prompt.client_id.clone())
+                        .await
+                    {
+                        Ok(id) => {
+                            app.pending_queue_requests.push((id, None));
+                            app.selected_queued_prompt = None;
+                            app.set_status_notice("Interrupting for selected queued prompt");
+                        }
+                        Err(error) => app.push_display_message(DisplayMessage::error(format!(
+                            "Failed to interrupt for queued prompt: {error}"
+                        ))),
+                    }
+                }
+                return Ok(());
+            }
+            _ => app.selected_queued_prompt = None,
         }
     }
 

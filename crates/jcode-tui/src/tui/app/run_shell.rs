@@ -1273,11 +1273,10 @@ impl App {
                                 crate::tui::backend::RemoteRead::Event(crate::protocol::ServerEvent::Pong { capabilities, .. }) => {
                                     let queue_was_supported = remote_conn.supports_queued_prompts();
                                     remote_conn.note_server_capabilities(capabilities);
-                                    if !queue_was_supported && remote_conn.supports_queued_prompts() {
-                                        if let Ok(id) = remote_conn.get_queued_prompts().await {
+                                    if !queue_was_supported && remote_conn.supports_queued_prompts()
+                                        && let Ok(id) = remote_conn.get_queued_prompts().await {
                                             self.queue_snapshot_request_id = Some(id);
                                         }
-                                    }
                                     super::wake_stats::note("server:pong");
                                 }
                                 crate::tui::backend::RemoteRead::Event(event) => super::wake_stats::note_debug("server", event),

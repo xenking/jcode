@@ -2001,17 +2001,17 @@ impl CompactionManager {
                     });
 
                 let mut content = vec![summary_block];
-                if let Some(archive) = &summary.snapcompact {
-                    if supports_image_input {
-                        content.push(ContentBlock::Text {
-                            text: "The following PNG pages contain earlier conversation history in chronological order.".to_string(),
-                            cache_control: None,
-                        });
-                        content.extend(archive.pages.iter().map(|data| ContentBlock::Image {
-                            media_type: "image/png".to_string(),
-                            data: data.clone(),
-                        }));
-                    }
+                if let Some(archive) = &summary.snapcompact
+                    && supports_image_input
+                {
+                    content.push(ContentBlock::Text {
+                        text: "The following PNG pages contain earlier conversation history in chronological order.".to_string(),
+                        cache_control: None,
+                    });
+                    content.extend(archive.pages.iter().map(|data| ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: data.clone(),
+                    }));
                 }
                 let mut result = Vec::with_capacity(active.len() + 1);
 
@@ -2513,9 +2513,7 @@ async fn generate_compaction_artifact(
             ..Default::default()
         };
         let rendered = tokio::task::spawn_blocking(move || {
-            use jcode_compaction_core::snapcompact::{
-                CompactOptions, compact, prepare_messages_with,
-            };
+            use jcode_compaction_core::snapcompact::{compact, prepare_messages_with};
             let previous = previous.as_ref().map(|(text, is_summary)| {
                 jcode_compaction_core::snapcompact::PreviousArchive {
                     text,

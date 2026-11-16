@@ -483,7 +483,7 @@ impl Agent {
         let messages = self.session.provider_messages();
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
-            let estimate = manager.token_estimate_with(&messages);
+            let estimate = manager.token_estimate_with(messages);
             let accepted = manager.update_observed_input_tokens_with_estimate(observed, estimate);
             manager.push_token_snapshot(accepted);
         };

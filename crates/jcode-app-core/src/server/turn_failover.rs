@@ -293,6 +293,7 @@ pub(super) async fn process_reserved_locked_message_with_server_failover(
 /// `allowed_models` is the worker's hard model allowlist
 /// (`agents.spawn_allowed_models`). When it is non-empty, neither the account
 /// router nor the configured fallbacks may move the worker outside it.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn process_reserved_locked_message_with_swarm_fallbacks(
     agent: &mut Agent,
     lease: &crate::agent::TurnLease,
@@ -366,7 +367,7 @@ impl FallbackTarget {
             _ => (route, model),
         };
         Self {
-            route: route.map(|route| normalize_route(route)),
+            route: route.map(normalize_route),
             model: model.trim().to_string(),
         }
     }

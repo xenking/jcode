@@ -130,6 +130,7 @@ pub(super) async fn spawn_tracked_live_turn(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn spawn_tracked_live_turn_with_images(
     session_id: &str,
     mut agent: OwnedMutexGuard<Agent>,

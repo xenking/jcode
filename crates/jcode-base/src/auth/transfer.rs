@@ -723,12 +723,12 @@ fn cloud_account(
     .map_err(|_| TransferError::InvalidPayload)?;
     let (_, _, access, refresh) = cloud_keys(provider);
     if !normalized["label"].as_str().is_some_and(valid_cloud_label)
-        || !normalized[access]
+        || normalized[access]
             .as_str()
-            .is_some_and(|s| !s.trim().is_empty())
-        || !normalized[refresh]
+            .is_none_or(|s| s.trim().is_empty())
+        || normalized[refresh]
             .as_str()
-            .is_some_and(|s| !s.trim().is_empty())
+            .is_none_or(|s| s.trim().is_empty())
     {
         return Err(TransferError::InvalidPayload);
     }
@@ -1072,8 +1072,8 @@ fn import_cloud_inner(
             // Explicit handoff: a destination copy with no identity hints at all
             // (older stores) is stale data for this label, not a different account.
             let old_identityless = !identity_hints_present(provider, &old);
-            if !(authoritative && old_identityless)
-                && !identity_hints_match(provider, &old, &envelope.credential)
+            if !(authoritative && old_identityless
+                || identity_hints_match(provider, &old, &envelope.credential))
             {
                 return Err(TransferError::AccountConflict);
             }
@@ -1086,7 +1086,7 @@ fn import_cloud_inner(
                     TransferProvider::OpenAi => "account_id",
                     TransferProvider::Claude => "email",
                 };
-                if !old[identity].as_str().is_some_and(|s| !s.trim().is_empty()) {
+                if old[identity].as_str().is_none_or(|s| s.trim().is_empty()) {
                     return Err(TransferError::AccountConflict);
                 }
                 let (_, _, access, refresh) = cloud_keys(provider);

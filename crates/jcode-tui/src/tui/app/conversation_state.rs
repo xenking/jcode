@@ -66,18 +66,6 @@ impl App {
         format!("Compacting context [{}] {:.0}s", bar, elapsed.as_secs_f32())
     }
 
-    pub(super) fn format_compaction_number(value: u64) -> String {
-        let digits = value.to_string();
-        let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
-        for (idx, ch) in digits.chars().rev().enumerate() {
-            if idx > 0 && idx % 3 == 0 {
-                formatted.push(',');
-            }
-            formatted.push(ch);
-        }
-        formatted.chars().rev().collect()
-    }
-
     pub(super) fn add_provider_message(&mut self, message: Message) {
         if self.is_remote {
             self.ensure_provider_messages_hydrated();
@@ -908,7 +896,12 @@ mod tests {
         let mut app = create_test_app();
         app.is_remote = true;
         app.show_compaction_running("idle_precompact".to_string(), 476_000);
-        assert!(app.display_messages().last().unwrap().compaction_is_running());
+        assert!(
+            app.display_messages()
+                .last()
+                .unwrap()
+                .compaction_is_running()
+        );
         app.handle_compaction_event(event, None);
         let rows: Vec<_> = app
             .display_messages()

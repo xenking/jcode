@@ -386,14 +386,14 @@ pub fn parse_openai_response_event(
                 return (!delta.is_empty()).then_some(StreamEvent::TextDelta(delta));
             }
         }
-        "response.reasoning_summary_part.added" => {
-            // Each summary part is a separate paragraph, not another token
-            // chunk. Preserve its boundary just as the item.done fallback's
-            // summary.join("\n") does, without splitting ordinary deltas or
-            // adding a leading blank line before the first part.
-            if event.summary_index.is_some_and(|index| index > 0) && *saw_thinking_delta {
-                return Some(StreamEvent::ThinkingDelta("\n".to_string()));
-            }
+        // Each summary part is a separate paragraph, not another token
+        // chunk. Preserve its boundary just as the item.done fallback's
+        // summary.join("\n") does, without splitting ordinary deltas or
+        // adding a leading blank line before the first part.
+        "response.reasoning_summary_part.added"
+            if event.summary_index.is_some_and(|index| index > 0) && *saw_thinking_delta =>
+        {
+            return Some(StreamEvent::ThinkingDelta("\n".to_string()));
         }
         "response.reasoning.delta" | "response.reasoning_summary_text.delta" => {
             if let Some(delta) = event.delta {

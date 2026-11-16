@@ -420,6 +420,7 @@ pub(super) fn send_event_to_targets<'a>(
 
 /// Return the original payload when every queue is closed or rejects delivery.
 /// A caller can then use its fallback without cloning successful events first.
+#[allow(clippy::result_large_err)]
 fn send_event_to_targets_recover<'a>(
     targets: impl IntoIterator<Item = &'a mpsc::UnboundedSender<ServerEvent>>,
     event: ServerEvent,

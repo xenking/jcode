@@ -1807,13 +1807,13 @@ fn render_todo_plan_update(
             .as_ref()
             .and_then(|plan| plan.understands_user_intent),
     );
-    if !update
+    if !(update
         .fields
         .contains(&crate::todo::TodoPlanField::UnderstandsUserIntent)
-        && !(intent_is_unclear
+        || (intent_is_unclear
             && update
                 .fields
-                .contains(&crate::todo::TodoPlanField::UserIntention))
+                .contains(&crate::todo::TodoPlanField::UserIntention)))
     {
         return Vec::new();
     }
@@ -4213,15 +4213,8 @@ fn render_swarm_tool(msg: &DisplayMessage, width: u16) -> Option<Vec<Line<'stati
             body,
             Some(width.saturating_sub(4).max(1) as usize),
         ));
-        if failed && !text.is_empty() {
-            lines.extend(markdown::render_markdown_with_width(
-                output,
-                Some(width.saturating_sub(4).max(1) as usize),
-            ));
-        } else if action != "message"
-            && action != "dm"
-            && !text.is_empty()
-            && !output.trim().is_empty()
+        if !text.is_empty()
+            && (failed || (action != "message" && action != "dm" && !output.trim().is_empty()))
         {
             lines.extend(markdown::render_markdown_with_width(
                 output,

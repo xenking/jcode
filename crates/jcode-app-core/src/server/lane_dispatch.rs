@@ -49,9 +49,10 @@ static CONTEXT: OnceLock<LaneDispatchContext> = OnceLock::new();
 /// The live swarm member map of the most recently started server. Unlike the
 /// once-only dispatch context it is replaced on every start, so a process that
 /// hosts several servers in turn (tests, embedders) never reads a dead one.
-fn live_members() -> &'static StdMutex<Option<Arc<RwLock<HashMap<String, SwarmMember>>>>> {
-    static MEMBERS: OnceLock<StdMutex<Option<Arc<RwLock<HashMap<String, SwarmMember>>>>>> =
-        OnceLock::new();
+type LiveMembers = StdMutex<Option<Arc<RwLock<HashMap<String, SwarmMember>>>>>;
+
+fn live_members() -> &'static LiveMembers {
+    static MEMBERS: OnceLock<LiveMembers> = OnceLock::new();
     MEMBERS.get_or_init(|| StdMutex::new(None))
 }
 

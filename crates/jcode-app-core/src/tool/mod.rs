@@ -294,7 +294,8 @@ const OUTPUT_WITHHELD_MARKER: &str = "⚠️ OUTPUT WITHHELD";
 /// Strict-schema providers cannot send a key the schema does not declare, so
 /// the flag alone would leave them with no way to opt in. An immediate,
 /// identical repeat is an equally unambiguous yes and needs no schema.
-static WITHHELD_CALLS: LazyLock<StdRwLock<HashMap<String, Vec<(u64, String)>>>> =
+type WithheldCalls = HashMap<String, Vec<(u64, String)>>;
+static WITHHELD_CALLS: LazyLock<StdRwLock<WithheldCalls>> =
     LazyLock::new(|| StdRwLock::new(HashMap::new()));
 
 /// Withheld calls remembered per session. A batch can have several sub-calls
@@ -1648,9 +1649,7 @@ impl Registry {
         let mut tools = self.tools.write().await;
         let mut removed = Vec::new();
         tools.retain(|name, tool| {
-            let keep = !tool
-                .mcp_identity()
-                .is_some_and(|(owner, _)| owner == server);
+            let keep = tool.mcp_identity().is_none_or(|(owner, _)| owner != server);
             if !keep {
                 removed.push(name.clone());
             }

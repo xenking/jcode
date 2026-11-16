@@ -62,6 +62,7 @@ pub(super) struct BtwRequest {
 }
 
 impl App {
+    #[cfg(test)]
     pub(super) fn btw_card(&self) -> Option<&BtwCard> {
         self.btw.as_ref()
     }
@@ -196,9 +197,7 @@ impl App {
         if self.is_remote {
             for message in self.materialized_provider_messages() {
                 // Keep the session context (date, cwd) the daemon wrote.
-                if message.role == Role::User
-                    && message.is_internal_system_reminder()
-                {
+                if message.role == Role::User && message.is_internal_system_reminder() {
                     child.add_message(message.role, message.content);
                 }
             }
@@ -211,10 +210,13 @@ impl App {
                     "assistant" => Role::Assistant,
                     _ => continue,
                 };
-                child.add_message(role, vec![ContentBlock::Text {
-                    text: message.content.clone(),
-                    cache_control: None,
-                }]);
+                child.add_message(
+                    role,
+                    vec![ContentBlock::Text {
+                        text: message.content.clone(),
+                        cache_control: None,
+                    }],
+                );
             }
         } else {
             for message in self.materialized_provider_messages() {
@@ -466,11 +468,7 @@ pub(super) async fn process_btw_with_input(
     };
     // A daemon-backed card streams from its own hidden session, wired into the
     // remote run loop instead of this in-process turn.
-    if app
-        .btw
-        .as_ref()
-        .is_some_and(|card| card.child.is_some())
-    {
+    if app.btw.as_ref().is_some_and(|card| card.child.is_some()) {
         return;
     }
     let request = app.btw_request(&question);
@@ -498,7 +496,7 @@ pub(super) async fn process_btw_with_input(
     let mut redraw_interval = super::run_shell::redraw_timer(redraw_period);
     let mut status_spinner_interval = super::run_shell::status_spinner_interval();
 
-    let mut stream = loop {
+    let stream = loop {
         tokio::select! {
             biased;
             event = event_stream.next() => {

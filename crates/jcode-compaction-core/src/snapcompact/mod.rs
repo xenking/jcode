@@ -22,7 +22,6 @@
 //!
 //! [`compact()`] returns an error if rendering fails or the frame budget
 //! cannot represent the source. Callers must fall back without discarding it.
-use serde::{Deserialize, Serialize};
 pub mod renderer;
 pub mod serialize;
 
@@ -440,18 +439,17 @@ fn family_variant(provider: &str) -> &'static str {
 /// `MAX_FRAMES_DEFAULT`). Providers with no tighter rule keep the default.
 pub fn frame_budget(provider: &str) -> u32 {
     let provider = provider.to_ascii_lowercase();
-    let budget = if provider.contains("xai") || provider.contains("grok") {
-        60
-    } else if provider.contains("cursor") {
-        60
-    } else if provider.contains("antigravity") {
-        20
-    } else if provider.contains("umans") {
-        10
-    } else {
-        MAX_FRAMES_DEFAULT
-    };
-    budget.min(MAX_FRAMES_DEFAULT).max(1)
+    let budget =
+        if provider.contains("xai") || provider.contains("grok") || provider.contains("cursor") {
+            60
+        } else if provider.contains("antigravity") {
+            20
+        } else if provider.contains("umans") {
+            10
+        } else {
+            MAX_FRAMES_DEFAULT
+        };
+    budget.clamp(1, MAX_FRAMES_DEFAULT)
 }
 
 /// Look up a shape by its stable name (omp `SHAPE_VARIANTS` key).
@@ -836,8 +834,7 @@ pub fn compact(
     }
     let max_frames = options
         .max_frames
-        .max(1)
-        .min(MAX_FRAMES_DEFAULT)
+        .clamp(1, MAX_FRAMES_DEFAULT)
         .min(frame_budget(&options.provider)) as usize;
     let plan = plan_frames(&prep.bounded_text, &shape, max_frames);
     if plan.ranges.is_empty() {
