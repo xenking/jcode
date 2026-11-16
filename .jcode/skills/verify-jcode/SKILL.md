@@ -44,10 +44,11 @@ Require `status: ready`. This is read-only against the app: verify the runtime o
 "$V" drive --evidence "$E" cancel
 "$V" drive --evidence "$E" restart
 "$V" drive --evidence "$E" side-panel
+"$V" drive --evidence "$E" mode
 "$V" frame --evidence "$E" --label reviewed
 ```
 
-Run only the recipes relevant to the change, plus their listed entry points. `cli` also accepts `--mode plain` and `--mode ndjson`. Each drive runs doctor first, records actual input and before/after frames, uses a fresh token to reject stale responses, and exits nonzero when an observable assertion fails. `cancel` presses Escape during a file-gated provider request. `restart` stops only the owned private daemon, starts the same copied binary, and resumes the saved session. Neither proves binary reload or real vendor authentication. A failed journey remains failed. Inspect its artifacts, clean up, then launch a fresh run after fixing the cause.
+Run only the recipes relevant to the change, plus their listed entry points. `cli` also accepts `--mode plain` and `--mode ndjson`. Each drive runs doctor first, records actual input and before/after frames, uses a fresh token to reject stale responses, and exits nonzero when an observable assertion fails. `cancel` presses Escape during a file-gated provider request. `mode` pins `verify-probe`, grows context, runs a real `/compact`, then requires the skill body in the first post-compaction provider request and in a spawned worker's first request (about 4 minutes). `restart` stops only the owned private daemon, starts the same copied binary, and resumes the saved session. Neither proves binary reload or real vendor authentication. A failed journey remains failed. Inspect its artifacts, clean up, then launch a fresh run after fixing the cause.
 
 For additional user paths, reuse terminal controls instead of inventing another harness:
 

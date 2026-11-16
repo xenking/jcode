@@ -8,7 +8,7 @@ Maintained verification source for the Rust CLI/TUI agent harness. Read this ind
 - `V` names `.jcode/skills/verify-jcode/scripts/verify-jcode`, `E` names that run's evidence directory.
 - Doctor must return `ready`. Only this run's private daemon, model server, tmux and data may be driven.
 - Seed: empty disposable workspace plus `verify-probe` skill with marker `VERIFY_PROBE_SKILL_BODY`. No real credentials or project repository are seeded.
-- Fake model acknowledges normal turns. The `[e2e:verify-write]` prompt asks it for a real write tool call, followed by a normal ack.
+- Fake model acknowledges normal turns. The `[e2e:verify-write]` prompt asks it for a real write tool call, followed by a normal ack. `[e2e:pad]` returns a long ack to grow real context. `[e2e:spawn]` asks for a real `swarm spawn` whose child prompt carries `[e2e:child]`.
 
 ## Driving conventions
 
@@ -31,6 +31,7 @@ Record the feature ID, exact user entry point, action, resulting frame/response,
 | [Interactive turn and tools](tui-tool.md) | `drive tui`: type, Enter, stream, real write | paste, queued/interrupt turns, tool expansion/collapse |
 | [Slash commands and skills](slash-skill.md) | `drive slash`: /help, /verify-probe prompt | /?, /commands, /skills listing, bare activation, completion picker |
 | [Session resume](resume.md) | `drive resume`: quit UI, --resume exact ID, continue | --resume picker, /resume picker, CLI --resume run, full daemon restart |
+| [Session mode](session-mode.md) | `drive mode`: /mode, padded turns, /compact, post-compaction turn, swarm spawn, /mode off | auto-compaction, resume after compaction, mode switch between skills |
 | [Side panel](side-panel.md) | `drive side-panel`: /splitview on | /splitview off/status, /todos panel, swarm worker lifecycle |
 | [Cancellation and daemon restart](lifecycle.md) | `drive cancel`, `drive restart` | tool cancellation, queue races, binary reload, in-flight reload recovery |
 | [Provider route and auth boundaries](provider-route.md) | `drive cli --mode json` for the synthetic route | multi-route picker, forced catalog refresh, real vendor auth and token refresh |

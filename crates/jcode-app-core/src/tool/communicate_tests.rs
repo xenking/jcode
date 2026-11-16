@@ -641,3 +641,24 @@ include!("communicate_tests/input_format.rs");
 include!("communicate_tests/end_to_end.rs");
 include!("communicate_tests/await_two_socket.rs");
 include!("communicate_tests/assignment.rs");
+
+#[test]
+fn spawned_working_member_ids_counts_only_the_spawners_working_members() {
+    let member = |id: &str, status: &str, parent: Option<&str>| AgentInfo {
+        session_id: id.into(),
+        status: Some(status.into()),
+        report_back_to_session_id: parent.map(str::to_string),
+        ..Default::default()
+    };
+    let members = vec![
+        member("coord", "ready", None),
+        member("w-run", "running", Some("coord")),
+        member("w-queued", "queued", Some("coord")),
+        member("w-done", "completed", Some("coord")),
+        member("other", "running", Some("elsewhere")),
+    ];
+    assert_eq!(
+        super::spawned_working_member_ids(&members, "coord"),
+        vec!["w-queued".to_string(), "w-run".to_string()]
+    );
+}

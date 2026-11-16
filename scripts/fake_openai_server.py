@@ -48,6 +48,9 @@ class H(BaseHTTPRequestHandler):
         flat = json.dumps(msgs)
         seen_notice = "moved from" in flat and "to cloud host" in flat
         text = f"[{LABEL}] ack. saw_cloud_notice={seen_notice}"
+        if "[e2e:pad]" in json.dumps(msgs[-1:] if msgs else []):
+            # Grow real context so manual /compact clears its usage threshold.
+            text += " " + " ".join(f"pad{i}" for i in range(6000))
         last_user = max((i for i, m in enumerate(msgs) if m.get("role") == "user"), default=-1)
         prompt = text_of(msgs[last_user]) if last_user >= 0 else ""
         has_tool_result = any(m.get("role") == "tool" for m in msgs[last_user + 1:])
@@ -65,6 +68,15 @@ class H(BaseHTTPRequestHandler):
                     "intent": "Create an open task for the handoff acceptance test",
                     "todos": [{"id": "acceptance-open", "content": "Continue on cloud",
                                "status": "in_progress", "priority": "high", "confidence": "plausible"}],
+                })}}]
+        elif CONTROL and "[e2e:spawn]" in prompt and not has_tool_result:
+            # Real swarm spawn through the tool executor; the child's provider
+            # requests land in the same FAKE_LOG.
+            tool_calls = [{"id": "call_verification_spawn", "type": "function", "function": {
+                "name": "swarm", "arguments": json.dumps({
+                    "action": "spawn", "intent": "Prove spawned workers inherit the session mode",
+                    "label": "verify-child", "prompt": "[e2e:child] Acknowledge.",
+                    "spawn_mode": "headless",
                 })}}]
         elif CONTROL and (match := re.search(r"\[e2e:hold:([a-z0-9_-]+)\]", prompt)):
             token = match.group(1)
