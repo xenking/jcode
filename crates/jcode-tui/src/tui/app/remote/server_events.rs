@@ -2567,9 +2567,7 @@ fn handle_server_event_inner(
             let reload_recovery = reload_recovery.or_else(|| {
                 ReloadContext::recovery_directive(None, was_interrupted == Some(true), "", None)
             });
-            if let Some(reload_recovery) = reload_recovery
-                && !app.display_messages.is_empty()
-            {
+            if let Some(reload_recovery) = reload_recovery {
                 crate::logging::info(&format!(
                     "History payload requested reload recovery continuation: session={} was_interrupted={:?}",
                     session_id, was_interrupted
@@ -2579,11 +2577,11 @@ fn handle_server_event_inner(
                 {
                     app.reload_info.push(notice.clone());
                 }
-                if !queue_reload_continuation_once(
+                if !show_reload_recovery_notice_once(
                     app,
                     &session_id,
                     reload_recovery,
-                    "Reload complete - continuing because a recovery directive was pending.",
+                    "Reload complete - continuing in the daemon because a recovery directive was pending.",
                 ) {
                     crate::logging::info(&format!(
                         "History payload reload recovery continuation already scheduled: session={}",

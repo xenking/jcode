@@ -263,8 +263,8 @@ fn test_handle_server_event_history_with_interruption_queues_continuation() {
     );
 
     assert!(app.queued_messages().is_empty());
-    assert_eq!(app.hidden_queued_system_messages.len(), 1);
-    assert!(app.hidden_queued_system_messages[0].contains("interrupted by a server reload"));
+    assert!(app.hidden_queued_system_messages.is_empty());
+    assert!(!app.reload_recovery_dispatch_pending);
     assert!(
         app.display_messages()
             .iter()
@@ -334,11 +334,8 @@ fn test_handle_server_event_history_uses_server_owned_reload_recovery_directive(
     app.handle_server_event(event.clone(), &mut remote);
     app.handle_server_event(event, &mut remote);
 
-    assert_eq!(app.hidden_queued_system_messages.len(), 1);
-    assert_eq!(
-        app.hidden_queued_system_messages[0],
-        "Server-owned reload continuation"
-    );
+    assert!(app.hidden_queued_system_messages.is_empty());
+    assert!(!app.reload_recovery_dispatch_pending);
     assert_eq!(
         app.reload_info
             .iter()
@@ -613,12 +610,8 @@ fn test_finalize_reload_reconnect_mentions_persisted_background_task() {
         false,
     );
 
-    assert_eq!(app.hidden_queued_system_messages.len(), 1);
-    let continuation = &app.hidden_queued_system_messages[0];
-    assert!(continuation.contains("Persisted background task(s)"));
-    assert!(continuation.contains(&info.task_id));
-    assert!(continuation.contains("Do not rerun those commands"));
-    assert!(continuation.contains("wait for completion rather than repeatedly polling"));
+    assert!(app.hidden_queued_system_messages.is_empty());
+    assert!(crate::tool::selfdev::ReloadContext::peek_for_session(&session_id).unwrap().is_some(), "only the daemon may consume recovery context");
 
     cleanup_background_task_files(&info.task_id);
     cleanup_reload_context_file(&session_id);
@@ -659,8 +652,7 @@ fn test_finalize_reload_reconnect_is_session_scoped_across_reconnect_order() {
         false,
     );
 
-    assert_eq!(app_b.hidden_queued_system_messages.len(), 1);
-    assert!(app_b.hidden_queued_system_messages[0].contains("new-b"));
+    assert!(app_b.hidden_queued_system_messages.is_empty());
     assert!(
         crate::tool::selfdev::ReloadContext::peek_for_session(&session_a)
             .expect("peek session a")
@@ -670,8 +662,8 @@ fn test_finalize_reload_reconnect_is_session_scoped_across_reconnect_order() {
     assert!(
         crate::tool::selfdev::ReloadContext::peek_for_session(&session_b)
             .expect("peek session b")
-            .is_none(),
-        "session B context should be consumed by its own reconnect"
+            .is_some(),
+        "session B context remains owned by the daemon"
     );
 
     remote::finalize_reload_reconnect(
@@ -684,13 +676,12 @@ fn test_finalize_reload_reconnect_is_session_scoped_across_reconnect_order() {
         false,
     );
 
-    assert_eq!(app_a.hidden_queued_system_messages.len(), 1);
-    assert!(app_a.hidden_queued_system_messages[0].contains("new-a"));
+    assert!(app_a.hidden_queued_system_messages.is_empty());
     assert!(
         crate::tool::selfdev::ReloadContext::peek_for_session(&session_a)
             .expect("peek session a after consume")
-            .is_none(),
-        "session A context should be consumed only by session A reconnect"
+            .is_some(),
+        "session A context remains owned by the daemon"
     );
 }
 
@@ -721,13 +712,12 @@ fn test_finalize_reload_reconnect_supports_repeated_reload_cycles_for_same_sessi
             false,
         );
 
-        assert_eq!(app.hidden_queued_system_messages.len(), 1);
-        assert!(app.hidden_queued_system_messages[0].contains(&version_after));
+        assert!(app.hidden_queued_system_messages.is_empty());
         assert!(
             crate::tool::selfdev::ReloadContext::peek_for_session(&session_id)
                 .expect("peek loop reload context")
-                .is_none(),
-            "reload context should be consumed each cycle"
+                .is_some(),
+            "reload context remains daemon-owned each cycle"
         );
     }
 }

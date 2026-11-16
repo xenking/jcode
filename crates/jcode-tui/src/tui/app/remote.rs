@@ -43,8 +43,9 @@ use queue_recovery::{
 #[allow(unused_imports)]
 pub(super) use reconnect::{
     ConnectOutcome, PostConnectOutcome, ReloadReconnectHints, RemoteRunState, connect_with_retry,
-    finalize_reload_reconnect, handle_post_connect, queue_reload_continuation_once,
-    reload_handoff_active, should_allow_reconnect_takeover, should_use_same_session_fast_path,
+    finalize_reload_reconnect, handle_post_connect, reload_handoff_active,
+    should_allow_reconnect_takeover, should_use_same_session_fast_path,
+    show_reload_recovery_notice_once,
 };
 use reconnect::{format_disconnect_reason, reconnect_status_message};
 use session_persistence::{

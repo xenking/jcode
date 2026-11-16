@@ -239,8 +239,7 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
     assert_eq!(assistant_messages[0].content, "local restored state");
     assert_eq!(app.connection_type.as_deref(), Some("websocket"));
     assert!(app.queued_messages().is_empty());
-    assert_eq!(app.hidden_queued_system_messages.len(), 1);
-    assert!(app.hidden_queued_system_messages[0].contains("interrupted by a server reload"));
+    assert!(app.hidden_queued_system_messages.is_empty());
     assert!(
         app.display_messages()
             .iter()

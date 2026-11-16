@@ -1075,7 +1075,7 @@ fn test_handle_post_connect_defers_reload_followup_to_server_history_payload() {
 }
 
 #[test]
-fn test_handle_post_connect_clears_deferred_dispatch_before_reload_followup() {
+fn test_handle_post_connect_does_not_dispatch_daemon_reload_recovery() {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
     let prev_home = std::env::var_os("JCODE_HOME");
@@ -1119,17 +1119,11 @@ fn test_handle_post_connect_clears_deferred_dispatch_before_reload_followup() {
         .expect("post connect should succeed");
 
     assert!(matches!(outcome, super::remote::PostConnectOutcome::Ready));
-    assert!(
-        !app.pending_queued_dispatch,
-        "post-connect should clear deferred dispatch before sending reload continuation"
-    );
+    assert!(app.pending_queued_dispatch, "recovery observation does not consume queued user dispatch");
     assert!(app.hidden_queued_system_messages.is_empty());
-    assert!(
-        app.is_processing,
-        "reload continuation should still dispatch"
-    );
-    assert!(matches!(app.status, ProcessingStatus::Sending));
-    assert!(app.current_message_id.is_some());
+    assert!(!app.is_processing);
+    assert!(matches!(app.status, ProcessingStatus::Idle));
+    assert!(app.current_message_id.is_none());
 
     cleanup_reload_context_file(session_id);
     if let Some(prev_home) = prev_home {
@@ -1701,7 +1695,7 @@ fn test_pending_startup_notice_survives_history_bootstrap_for_fresh_session() {
 }
 
 #[test]
-fn test_reload_recovery_turn_runs_before_user_queued_followups() {
+fn test_reload_recovery_notice_does_not_block_queued_user_followup() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -1715,7 +1709,7 @@ fn test_reload_recovery_turn_runs_before_user_queued_followups() {
         reconnect_notice: None,
         continuation_message: "continue interrupted turn".to_string(),
     };
-    assert!(remote::queue_reload_continuation_once(
+    assert!(remote::show_reload_recovery_notice_once(
         &mut app,
         "session_reload_queue_order",
         directive,
@@ -1723,12 +1717,8 @@ fn test_reload_recovery_turn_runs_before_user_queued_followups() {
     ));
 
     rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
-    assert!(app.is_processing, "recovery continuation should start a turn");
+    assert!(app.is_processing, "queued user follow-up should start a turn");
     assert!(app.hidden_queued_system_messages.is_empty());
-    assert_eq!(
-        app.queued_messages(),
-        &["queued before reload"],
-        "user follow-up must wait for the recovery turn to finish"
-    );
+    assert!(app.queued_messages().is_empty());
     assert!(!app.reload_recovery_blocks_queue());
 }

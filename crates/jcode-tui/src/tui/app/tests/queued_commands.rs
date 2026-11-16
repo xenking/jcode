@@ -102,6 +102,7 @@ fn send_modes_selection_switches_and_interrupts_selected_prompt() {
 
 #[test]
 fn send_modes_reload_reconciles_unconfirmed_prompt_by_id() {
+    let _env_guard = crate::storage::lock_test_env();
     let session_id = format!("send-modes-reload-{}", crate::id::new_id("test"));
     let prompt = crate::protocol::QueuedPrompt {
         client_id: "persisted-id".into(),

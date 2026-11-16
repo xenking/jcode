@@ -464,15 +464,16 @@ fn reload_recovery_preserves_visible_turn_timer_through_dispatch() {
             },
             true,
         );
-        assert!(!app.is_processing);
-        assert!(app.processing_started.is_none());
-        assert_eq!(app.visible_turn_started, Some(started));
+        assert!(app.is_processing);
+        assert_eq!(app.processing_started, Some(started));
+        assert_eq!(app.visible_turn_started, has_visible_timer.then_some(started));
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
         remote.mark_history_loaded();
         rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
         assert!(app.is_processing);
-        assert!(app.current_message_id.is_some());
-        assert_eq!(app.visible_turn_started, Some(started));
+        assert!(app.current_message_id.is_none());
+        assert!(app.hidden_queued_system_messages.is_empty());
+        assert_eq!(app.visible_turn_started, has_visible_timer.then_some(started));
         assert!(app.elapsed().unwrap() >= Duration::from_secs(90));
     }
 }
@@ -496,7 +497,7 @@ fn reload_recovery_delayed_history_after_dispatch_does_not_send_again() {
         },
         false,
     );
-    assert_eq!(app.hidden_queued_system_messages.len(), 1);
+    assert!(app.hidden_queued_system_messages.is_empty());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -504,7 +505,7 @@ fn reload_recovery_delayed_history_after_dispatch_does_not_send_again() {
     remote.mark_history_loaded();
     rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
     assert!(app.hidden_queued_system_messages.is_empty());
-    assert!(app.current_message_id.is_some());
+    assert!(app.current_message_id.is_none());
     let after_first_send = remote.next_request_id_for_test();
 
     // The server assembled this snapshot before accepting the first request.
@@ -533,7 +534,9 @@ fn reload_recovery_delayed_history_after_completion_does_not_restart_turn() {
     rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
     let after_first_send = remote.next_request_id_for_test();
     assert!(app.hidden_queued_system_messages.is_empty());
-    let id = app.current_message_id.unwrap();
+    assert!(app.current_message_id.is_none());
+    let id = 42;
+    app.current_message_id = Some(id);
     app.handle_server_event(
         crate::protocol::ServerEvent::TextDelta {
             text: "Task complete.".to_string(),
@@ -561,7 +564,7 @@ fn reload_recovery_history_then_local_context_preserves_active_turn() {
     let directive =
         ReloadContext::recovery_directive(Some(&ctx), true, "different background note", None)
             .unwrap();
-    assert!(remote::queue_reload_continuation_once(
+    assert!(remote::show_reload_recovery_notice_once(
         &mut app,
         &session_id,
         directive,
@@ -594,20 +597,20 @@ fn reload_recovery_dedup_is_session_scoped_and_resets_for_new_reload() {
         None,
     )
     .unwrap();
-    assert!(remote::queue_reload_continuation_once(
+    assert!(remote::show_reload_recovery_notice_once(
         &mut app,
         "session-a",
         directive.clone(),
         "continue"
     ));
     app.hidden_queued_system_messages.clear();
-    assert!(!remote::queue_reload_continuation_once(
+    assert!(!remote::show_reload_recovery_notice_once(
         &mut app,
         "session-a",
         directive.clone(),
         "continue"
     ));
-    assert!(remote::queue_reload_continuation_once(
+    assert!(remote::show_reload_recovery_notice_once(
         &mut app,
         "session-b",
         directive.clone(),
@@ -621,7 +624,7 @@ fn reload_recovery_dedup_is_session_scoped_and_resets_for_new_reload() {
         crate::protocol::ServerEvent::Reloading { new_socket: None, reload_id: None },
         &mut remote,
     );
-    assert!(remote::queue_reload_continuation_once(
+    assert!(remote::show_reload_recovery_notice_once(
         &mut app,
         "session-a",
         directive,
