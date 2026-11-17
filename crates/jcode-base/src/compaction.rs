@@ -28,7 +28,7 @@ use anyhow::Result;
 use base64::Engine as _;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::task::JoinHandle;
 
 pub use jcode_compaction_core::shake::{ShakeConfig, ShakeOutcome};
@@ -264,13 +264,16 @@ pub struct CompactionManager {
     /// Monotonic recency counter for the semantic embedding cache LRU.
     semantic_embed_cache_counter: u64,
 
-    /// When the previous successful provider response completed. Drives the cache-expiry
-    /// shake: a prefix older than the provider cache TTL is cold anyway.
-    last_response_at: Option<Instant>,
+    /// When the previous successful provider request touched the prompt cache.
+    /// Wall clock on purpose: it is seeded from the persisted session after a
+    /// daemon reload or resume, when no `Instant` from the old process exists.
+    /// Drives the cache-expiry shake: a prefix older than the provider cache
+    /// TTL is cold anyway.
+    last_response_at: Option<SystemTime>,
     last_response_cache_read: bool,
     /// Response timestamp whose cold stretch already got a cache-expiry
     /// snapcompact, so a failed or skipped attempt does not repeat every turn.
-    cache_expiry_compacted_for: Option<Instant>,
+    cache_expiry_compacted_for: Option<SystemTime>,
 }
 
 /// Trigger label for snapcompact started by an expired prompt cache.
@@ -379,6 +382,14 @@ fn threshold_tokens_takes_the_earlier_trigger() {
     assert_eq!(threshold_tokens_for(&cfg, 200_000), Some(160_000));
     cfg.mode = crate::config::CompactionMode::Semantic;
     assert_eq!(threshold_tokens_for(&cfg, 200_000), None);
+}
+
+/// Wall-clock elapsed time, tolerant of a backwards clock jump.
+///
+/// `SystemTime::saturating_duration_since` is still unstable, and the prompt
+/// cache clock is a wall clock precisely so it survives a process restart.
+fn wall_clock_elapsed(now: SystemTime, earlier: SystemTime) -> Duration {
+    now.duration_since(earlier).unwrap_or_default()
 }
 
 /// Why a shake pass is allowed to rewrite the prompt prefix.
@@ -1152,7 +1163,7 @@ impl CompactionManager {
     pub fn plan_shake(
         &self,
         all_messages: &[Message],
-        now: Instant,
+        now: SystemTime,
         cache_ttl_secs: Option<u64>,
     ) -> Option<(ShakeReason, ShakeConfig)> {
         self.plan_shake_with(all_messages, now, cache_ttl_secs, false)
@@ -1170,7 +1181,7 @@ impl CompactionManager {
     pub fn plan_shake_with(
         &self,
         all_messages: &[Message],
-        now: Instant,
+        now: SystemTime,
         cache_ttl_secs: Option<u64>,
         snapcompact_preferred: bool,
     ) -> Option<(ShakeReason, ShakeConfig)> {
@@ -1180,7 +1191,7 @@ impl CompactionManager {
         if self.compaction_config.shake_cache_expiry
             && let (Some(ttl), Some(last)) =
                 (cache_ttl_secs.filter(|ttl| *ttl > 0), self.last_response_at)
-            && now.saturating_duration_since(last) >= Duration::from_secs(ttl)
+            && wall_clock_elapsed(now, last) >= Duration::from_secs(ttl)
         {
             return Some((ShakeReason::CacheExpiry, cfg));
         }
@@ -1193,18 +1204,32 @@ impl CompactionManager {
         let ttl = cache_ttl_secs.filter(|t| *t > 0)?;
         if self.last_response_cache_read
             && let Some(last) = self.last_response_at
-            && now.saturating_duration_since(last) < Duration::from_secs(ttl)
+            && wall_clock_elapsed(now, last) < Duration::from_secs(ttl)
         {
             return None;
         }
         let last = self.last_response_at?;
         (self.compaction_config.shake_cache_expiry
-            && now.saturating_duration_since(last).as_secs() >= ttl)
+            && wall_clock_elapsed(now, last).as_secs() >= ttl)
             .then_some((ShakeReason::CacheExpiry, cfg))
     }
 
+    /// Seed the cache-expiry clock from persisted session state.
+    ///
+    /// A daemon reload, `exec` or session resume builds a fresh manager, so the
+    /// `Instant` of the last request is gone. Without this seed the cold-cache
+    /// check sees no previous request and silently skips the shake, which is
+    /// how a warm-looking, fully cold 409K request was re-sent at full price.
+    /// The previous response's cache-hit flag is deliberately not restored: a
+    /// restored request is history, not an observed hit, so the TTL decides.
+    pub fn seed_last_provider_request_at(&mut self, at: Option<SystemTime>) {
+        if self.last_response_at.is_none() {
+            self.last_response_at = at;
+        }
+    }
+
     /// Record the end of a successful provider response, the latest cache touch.
-    pub fn note_provider_response(&mut self, now: Instant, cache_read_tokens: Option<u64>) {
+    pub fn note_provider_response(&mut self, now: SystemTime, cache_read_tokens: Option<u64>) {
         self.last_response_at = Some(now);
         self.last_response_cache_read = cache_read_tokens.unwrap_or(0) > 0;
     }
@@ -1392,7 +1417,7 @@ impl CompactionManager {
     pub fn plan_cache_expiry_compaction(
         &self,
         all_messages: &[Message],
-        now: Instant,
+        now: SystemTime,
         cache_ttl_secs: Option<u64>,
     ) -> bool {
         let cfg = &self.compaction_config;
@@ -1419,7 +1444,7 @@ impl CompactionManager {
     pub fn cache_expiry_request_target(
         &self,
         all_messages: &[Message],
-        now: Instant,
+        now: SystemTime,
         cache_ttl_secs: Option<u64>,
     ) -> Option<usize> {
         let cfg = &self.compaction_config;
@@ -1428,7 +1453,7 @@ impl CompactionManager {
         (cfg.snapcompact
             && cfg.snapcompact_cache_expiry
             && cfg.cache_expiry_threshold_tokens > 0
-            && now.saturating_duration_since(last) >= Duration::from_secs(ttl)
+            && wall_clock_elapsed(now, last) >= Duration::from_secs(ttl)
             && self.effective_token_count_with(all_messages) >= cfg.cache_expiry_threshold_tokens)
             .then_some(cfg.cache_expiry_threshold_tokens)
     }
@@ -1479,14 +1504,14 @@ impl CompactionManager {
     /// nothing else to do, so it must not pay the cache loss a live turn would
     /// avoid. It waits the TTL out instead: a cold cache (a long wait) or a
     /// provider without a cache estimate (nothing to lose) both arm it.
-    fn prompt_cache_is_warm(&self, now: Instant, cache_ttl_secs: Option<u64>) -> bool {
+    fn prompt_cache_is_warm(&self, now: SystemTime, cache_ttl_secs: Option<u64>) -> bool {
         let Some(ttl) = cache_ttl_secs.filter(|ttl| *ttl > 0) else {
             return false;
         };
         let Some(last) = self.last_response_at else {
             return false;
         };
-        now.saturating_duration_since(last) < Duration::from_secs(ttl)
+        wall_clock_elapsed(now, last) < Duration::from_secs(ttl)
     }
 
     /// Whether an idle-waiting session should compact right now.
@@ -1498,7 +1523,7 @@ impl CompactionManager {
     pub fn plan_idle_precompaction_with(
         &self,
         all_messages: &[Message],
-        now: Instant,
+        now: SystemTime,
         cache_ttl_secs: Option<u64>,
     ) -> bool {
         // `suppress_compaction_until_new_message` is deliberately NOT consulted.

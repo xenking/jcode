@@ -153,6 +153,12 @@ pub struct Session {
     /// Last time the session was marked active
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_active_at: Option<DateTime<Utc>>,
+    /// Wall-clock time of the last provider request that wrote or refreshed the
+    /// prompt cache. Persisted (unlike the compaction manager's in-memory
+    /// clock) so the cold-cache shake still fires after a daemon reload, exec,
+    /// or session resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_provider_request_at: Option<DateTime<Utc>>,
     /// Whether this is a debug/test session (created via debug socket)
     #[serde(default)]
     pub is_debug: bool,
@@ -878,6 +884,7 @@ impl Session {
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),
             last_active_at: Some(now),
+            last_provider_request_at: None,
             is_debug,
             hidden: false,
             saved: false,
@@ -941,6 +948,7 @@ impl Session {
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),
             last_active_at: Some(now),
+            last_provider_request_at: None,
             is_debug,
             hidden: false,
             saved: false,

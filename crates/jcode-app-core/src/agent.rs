@@ -752,6 +752,10 @@ impl Agent {
         manager.set_active_model(Some(self.provider.name()), Some(&self.provider.model()));
         let budget = self.provider.context_window();
         manager.set_budget(budget);
+        // The cold-cache clock must survive the reload that created this
+        // manager; otherwise every restored session looks like it never made a
+        // request and the cache-expiry shake is skipped on a fully cold prompt.
+        manager.seed_last_provider_request_at(self.persisted_last_provider_request_at());
         if let Some(state) = self.session.compaction.as_ref() {
             manager.restore_persisted_stored_state_with(state, &self.session.messages);
         } else {
@@ -1130,8 +1134,9 @@ impl Agent {
     fn maybe_shake_before_request(
         &mut self,
         manager: &mut crate::compaction::CompactionManager,
-    ) -> Option<String> {
-        let now = std::time::Instant::now();
+    ) -> Option<(String, Option<CompactionEvent>)> {
+        let now = std::time::SystemTime::now();
+        let started = Instant::now();
         let ttl = self.cache_expiry_ttl_secs(manager);
         // omp `methodOrder` is remote, snapcompact, handoff, shake, soft: when
         // snapcompact can archive this compaction the bitmap archive wins, and
@@ -1149,24 +1154,51 @@ impl Agent {
         let tokens_before = manager.effective_token_count_with(self.session.provider_messages());
         let outcome = self.session.shake_stored_messages(start, &cfg);
         manager.record_shake(reason, outcome);
+        let tokens_after = manager.effective_token_count_with(self.session.provider_messages());
         logging::info(&format!(
             "[compaction] strategy={} tokens_before={} tokens_after={} changed={}",
             reason.label(),
             tokens_before,
-            manager.effective_token_count_with(self.session.provider_messages()),
+            tokens_after,
             outcome != crate::compaction::ShakeOutcome::NoChange,
         ));
-        if outcome != crate::compaction::ShakeOutcome::NoChange {
+        // A shake rewrites the provider-facing prefix exactly like a
+        // compaction, so it reports through the same event and divider. Clients
+        // used to learn nothing: only the log line hinted that the cold request
+        // had been reduced.
+        let event = match outcome {
+            crate::compaction::ShakeOutcome::Shaken {
+                regions_elided,
+                tokens_saved,
+            } => Some(CompactionEvent {
+                trigger: reason.label().to_string(),
+                method: Some("shake".to_string()),
+                pre_tokens: Some(tokens_before as u64),
+                post_tokens: Some(tokens_after as u64),
+                tokens_saved: Some(tokens_saved as u64),
+                duration_ms: Some(started.elapsed().as_millis() as u64),
+                messages_dropped: None,
+                messages_compacted: Some(regions_elided),
+                summary_chars: None,
+                active_messages: None,
+            }),
+            crate::compaction::ShakeOutcome::NoChange => None,
+        };
+        if let Some(event) = event.as_ref() {
+            // Record the divider here instead of through the caller's single
+            // compaction-event slot: a hard compact triggered right after the
+            // shake would overwrite that slot and leave the shake invisible.
+            self.note_compaction_applied();
+            self.record_compaction_divider(event);
             self.persist_session_best_effort("shake compaction");
         }
-        (reason == crate::compaction::ShakeReason::CacheExpiry).then(|| {
-            format!(
-                "🧊 Cache cold · {} · ~{}K → ~{}K tok",
-                reason.label(),
-                tokens_before / 1000,
-                manager.effective_token_count_with(self.session.provider_messages()) / 1000,
-            )
-        })
+        let detail = format!(
+            "🧊 Cache cold · {} · ~{}K → ~{}K tok",
+            reason.label(),
+            tokens_before / 1000,
+            tokens_after / 1000,
+        );
+        (reason == crate::compaction::ShakeReason::CacheExpiry).then_some((detail, event))
     }
 
     /// Cold-cache snapcompact: once the prompt cache TTL lapsed, fold history
@@ -1175,7 +1207,7 @@ impl Agent {
         &mut self,
         manager: &mut crate::compaction::CompactionManager,
     ) {
-        let now = std::time::Instant::now();
+        let now = std::time::SystemTime::now();
         let ttl = self.cache_expiry_ttl_secs(manager);
         let messages = self.session.provider_messages();
         if !manager.plan_cache_expiry_compaction(messages, now, ttl) {
@@ -1191,8 +1223,37 @@ impl Agent {
         ));
     }
 
-    async fn note_shake_provider_response(&self, cache_read_tokens: Option<u64>) {
-        let now = std::time::Instant::now();
+    /// Remember the wall clock of the request that is about to leave.
+    ///
+    /// The compaction manager's cold-cache clock is a `SystemTime` for exactly
+    /// this reason: a daemon reload, `exec` or resume starts a new process, and
+    /// the persisted session is the only place that timestamp can come from.
+    fn note_provider_request_sent(&mut self) {
+        self.session.last_provider_request_at = Some(chrono::Utc::now());
+    }
+
+    /// The last provider request time, from the session file when possible.
+    ///
+    /// Older sessions have no stored value, so fall back to the timestamp of
+    /// the last assistant message: it was written right after that request.
+    fn persisted_last_provider_request_at(&self) -> Option<std::time::SystemTime> {
+        self.session
+            .last_provider_request_at
+            .or_else(|| {
+                self.session
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| matches!(message.role, Role::Assistant))
+                    .and_then(|message| message.timestamp)
+            })
+            .map(std::time::SystemTime::from)
+    }
+
+    async fn note_shake_provider_response(&mut self, cache_read_tokens: Option<u64>) {
+        let now = std::time::SystemTime::now();
+        self.session.last_provider_request_at =
+            Some(chrono::DateTime::<chrono::Utc>::from(now));
         self.registry
             .compaction()
             .write()
@@ -1218,13 +1279,18 @@ impl Agent {
                         manager.effective_token_count_with(self.session.provider_messages());
                     let target = manager.cache_expiry_request_target(
                         self.session.provider_messages(),
-                        Instant::now(),
+                        std::time::SystemTime::now(),
                         ttl,
                     );
-                    if let Some(detail) = self.maybe_shake_before_request(&mut manager) {
+                    if let Some((detail, event)) = self.maybe_shake_before_request(&mut manager) {
                         logging::info(&detail);
                         if let Some(tx) = event_tx {
                             let _ = tx.send(ServerEvent::StatusDetail { detail });
+                            // The divider is already persisted; tell attached
+                            // clients now so the shake is visible immediately.
+                            if let Some(event) = event.as_ref() {
+                                let _ = tx.send(crate::compaction::compaction_server_event(event));
+                            }
                         }
                     }
                     self.maybe_cache_expiry_compaction(&mut manager);
@@ -1234,7 +1300,7 @@ impl Agent {
                     let target = target.or_else(|| {
                         manager.cache_expiry_request_target(
                             self.session.provider_messages(),
-                            Instant::now(),
+                            std::time::SystemTime::now(),
                             ttl,
                         )
                     });
@@ -1398,6 +1464,7 @@ impl Agent {
     }
 
     fn record_client_cache_request(&mut self, messages: &[Message]) {
+        self.note_provider_request_sent();
         if !self.should_track_client_cache() {
             return;
         }

@@ -342,6 +342,47 @@ fn test_handle_server_event_compaction_shows_completion_message_in_remote_mode()
 }
 
 #[test]
+fn test_handle_server_event_renders_a_shake_divider() {
+    // A cold-cache shake rewrites the prefix like a compaction, so the daemon
+    // sends the same divider event. It used to be invisible: the request went
+    // out with no divider and no log line after a daemon reload.
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Compaction {
+            trigger: "shake_cache_expiry".to_string(),
+            method: Some("shake".to_string()),
+            pre_tokens: Some(409_105),
+            post_tokens: Some(210_000),
+            tokens_saved: Some(199_105),
+            duration_ms: Some(120),
+            messages_dropped: None,
+            messages_compacted: Some(3),
+            summary_chars: None,
+            active_messages: None,
+            divider: Some(
+                "compacted · shake · 409k→210k · 0.1s\n\ntrigger: shake_cache_expiry"
+                    .to_string(),
+            ),
+        },
+        &mut remote,
+    );
+
+    let last = app
+        .display_messages()
+        .last()
+        .expect("missing shake divider");
+    assert_eq!(last.role, "compaction");
+    assert_eq!(
+        last.content.lines().next().unwrap_or_default(),
+        "compacted · shake · 409k→210k · 0.1s"
+    );
+}
+
+#[test]
 fn test_handle_server_event_compaction_mode_changed_updates_remote_mode() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();

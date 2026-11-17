@@ -34,6 +34,11 @@ impl App {
             "reactive" => "reactive",
             "auto_recovery" => "automatic recovery",
             "hard_compact" => "emergency",
+            // Shake rewrites the same prefix a compaction does, so it reports
+            // and renders through the same divider instead of staying invisible.
+            "shake_cache_expiry" => "shake · expired cache",
+            "shake_pre_compact" => "shake · before summary",
+            "shake_emergency" => "shake · emergency",
             _ => "automatic",
         }
     }

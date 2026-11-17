@@ -71,7 +71,7 @@ impl Agent {
         if !self.provider.uses_jcode_compaction() {
             return false;
         }
-        let now = std::time::Instant::now();
+        let now = std::time::SystemTime::now();
         let compaction = self.registry.compaction();
         let mut manager = match compaction.try_write() {
             Ok(manager) => manager,

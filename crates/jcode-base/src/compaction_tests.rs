@@ -1,7 +1,7 @@
 use super::*;
 use crate::provider::{EventStream, Provider};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Opt-in measurement against an explicitly supplied COPY, never the live session store.
 #[tokio::test]
@@ -1912,7 +1912,7 @@ fn shake_manager() -> CompactionManager {
 fn shake_does_not_expire_during_a_long_provider_response() {
     let msgs = shake_session(20, 2000);
     let mut m = shake_manager();
-    let start = Instant::now();
+    let start = SystemTime::now();
     let response_end = start + Duration::from_secs(290);
     m.note_provider_response(response_end, Some(100));
     assert!(
@@ -1955,11 +1955,11 @@ fn snapcompact_preference_suppresses_pre_compaction_shake() {
     let over = shake_session(40, 2000);
     assert!(m.should_compact_with(&over));
     assert!(
-        m.plan_shake_with(&over, Instant::now(), Some(3600), true)
+        m.plan_shake_with(&over, SystemTime::now(), Some(3600), true)
             .is_none()
     );
     assert_eq!(
-        m.plan_shake_with(&over, Instant::now(), Some(3600), false)
+        m.plan_shake_with(&over, SystemTime::now(), Some(3600), false)
             .map(|(reason, _)| reason),
         Some(ShakeReason::PreCompact)
     );
@@ -1970,7 +1970,7 @@ fn cold_cache_shake_precedes_snapcompact_above_the_normal_threshold() {
     let mut m = shake_manager_with_budget(40_000);
     m.compaction_config.reactive_threshold = 0.80;
     let over = shake_session(40, 2000);
-    let now = Instant::now();
+    let now = SystemTime::now();
     m.note_provider_response(now - Duration::from_secs(3601), Some(40_000));
     assert!(m.should_compact_with(&over));
     assert_eq!(
@@ -1984,7 +1984,7 @@ fn cold_cache_shake_precedes_snapcompact_above_the_normal_threshold() {
 fn shake_never_runs_while_prompt_cache_is_warm() {
     let msgs = shake_session(20, 2000);
     let mut m = shake_manager();
-    let t0 = Instant::now();
+    let t0 = SystemTime::now();
     assert!(
         m.plan_shake(&msgs, t0, Some(300)).is_none(),
         "first request: no prior cache to expire"
@@ -2015,6 +2015,66 @@ fn shake_never_runs_while_prompt_cache_is_warm() {
 }
 
 #[test]
+fn shake_reports_through_the_compaction_divider() {
+    // Both clients render the divider body the daemon builds, so a shake has
+    // to name itself there instead of only appearing in the log.
+    let event = CompactionEvent {
+        trigger: "shake_cache_expiry".to_string(),
+        method: Some("shake".to_string()),
+        pre_tokens: Some(409_105),
+        post_tokens: Some(210_000),
+        tokens_saved: Some(199_105),
+        duration_ms: Some(120),
+        messages_dropped: None,
+        messages_compacted: Some(3),
+        summary_chars: None,
+        active_messages: None,
+    };
+    match compaction_server_event(&event) {
+        crate::protocol::ServerEvent::Compaction {
+            divider,
+            method,
+            trigger,
+            ..
+        } => {
+            assert_eq!(method.as_deref(), Some("shake"));
+            assert_eq!(trigger, "shake_cache_expiry");
+            let divider = divider.expect("a completed compaction carries a divider");
+            assert!(
+                divider.starts_with("compacted · shake · 409k→210k"),
+                "{divider}"
+            );
+            assert!(divider.contains("trigger: shake_cache_expiry"), "{divider}");
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[test]
+fn restored_manager_seeds_the_cold_cache_clock() {
+    // A daemon reload, `/resume`, or `exec` builds a new manager. Before this
+    // seed the cold-cache check had no previous request at all and silently
+    // skipped, which is how a restored session re-sent a fully cold 409K
+    // prompt instead of shaking first.
+    let msgs = shake_session(20, 2000);
+    let now = SystemTime::now();
+    let mut restored = shake_manager();
+    restored.seed_last_provider_request_at(Some(now - Duration::from_secs(7_200)));
+    assert_eq!(
+        restored.plan_shake(&msgs, now, Some(3_600)).unwrap().0,
+        ShakeReason::CacheExpiry
+    );
+    // A recent persisted request stays warm: seeding must not force a shake.
+    let mut warm = shake_manager();
+    warm.seed_last_provider_request_at(Some(now - Duration::from_secs(60)));
+    assert!(warm.plan_shake(&msgs, now, Some(3_600)).is_none());
+    // No persisted value at all: still nothing to compare against.
+    let mut unseeded = shake_manager();
+    unseeded.seed_last_provider_request_at(None);
+    assert!(unseeded.plan_shake(&msgs, now, Some(3_600)).is_none());
+}
+
+#[test]
 fn pre_compaction_shake_is_not_suppressed_by_a_warm_cache() {
     // 2026-11-15 07:20Z incident: claude-opus-5-5 with ttl=3600, last response
     // 1s earlier and a cache read of 871082, over the 400K reactive token cap.
@@ -2025,7 +2085,7 @@ fn pre_compaction_shake_is_not_suppressed_by_a_warm_cache() {
     let mut m = shake_manager();
     m.set_budget(100_000);
     m.compaction_config.reactive_threshold = 0.5;
-    let now = Instant::now();
+    let now = SystemTime::now();
     m.note_provider_response(now, Some(871_082));
     assert!(
         m.should_compact_with(&over),
@@ -2046,7 +2106,7 @@ fn shake_precompact_respects_recent_cache_hit() {
     let mut m = shake_manager();
     m.set_budget(100_000);
     m.compaction_config.reactive_threshold = 0.5;
-    let now = Instant::now();
+    let now = SystemTime::now();
     m.note_provider_response(now, Some(1));
     assert_eq!(
         m.plan_shake(&msgs, now + Duration::from_secs(1), Some(300))
@@ -2084,7 +2144,7 @@ fn shake_runs_before_llm_compaction_and_reduces_tokens() {
     m.compaction_config.reactive_threshold = 0.5;
     let before = m.token_estimate_with(&msgs);
     let (reason, cfg) = m
-        .plan_shake(&msgs, Instant::now(), None)
+        .plan_shake(&msgs, SystemTime::now(), None)
         .expect("pre-compact");
     assert_eq!(reason, ShakeReason::PreCompact);
     let out = m.shake_with(&mut msgs, reason, &cfg);
@@ -2539,7 +2599,7 @@ fn cache_expiry_manager() -> CompactionManager {
 fn cache_expiry_snapcompact_never_runs_while_cache_is_warm() {
     let msgs = shake_session(20, 2000);
     let mut m = cache_expiry_manager();
-    let t0 = Instant::now();
+    let t0 = SystemTime::now();
     assert!(
         !m.plan_cache_expiry_compaction(&msgs, t0, Some(300)),
         "no prior response, nothing to expire"
@@ -2565,7 +2625,7 @@ fn cache_expiry_snapcompact_never_runs_while_cache_is_warm() {
 async fn cache_expiry_snapcompact_runs_on_first_turn_after_ttl_once() {
     let msgs = shake_session(20, 2000);
     let mut m = cache_expiry_manager();
-    let t0 = Instant::now();
+    let t0 = SystemTime::now();
     m.note_provider_response(t0, Some(100));
     let after = t0 + Duration::from_secs(300);
     assert!(m.plan_cache_expiry_compaction(&msgs, after, Some(300)));
@@ -2633,7 +2693,7 @@ fn idle_precompaction_arms_at_the_configured_ratio_of_the_threshold() {
         tokens >= target,
         "fixture must sit above the idle target: tokens={tokens} target={target}"
     );
-    let now = Instant::now();
+    let now = SystemTime::now();
     assert!(
         case.manager
             .plan_idle_precompaction_with(&case.messages, now, None)
@@ -2659,7 +2719,7 @@ fn idle_precompaction_stays_off_below_the_ratio() {
     assert!(
         !short
             .manager
-            .plan_idle_precompaction_with(&short.messages, Instant::now(), None),
+            .plan_idle_precompaction_with(&short.messages, SystemTime::now(), None),
         "idle pre-compaction must not fire under the ratio"
     );
 }
@@ -2669,7 +2729,7 @@ fn idle_precompaction_respects_the_warm_cache_guard() {
     let case = idle_case(80);
     let mut manager = case.manager;
     let messages = case.messages;
-    let now = Instant::now();
+    let now = SystemTime::now();
     manager.note_provider_response(now, Some(0));
 
     assert!(
@@ -2692,7 +2752,7 @@ fn idle_precompaction_can_be_disabled() {
     let mut manager = case.manager;
     manager.compaction_config.idle_precompact = false;
     assert!(manager.idle_precompaction_tokens().is_none());
-    assert!(!manager.plan_idle_precompaction_with(&case.messages, Instant::now(), None));
+    assert!(!manager.plan_idle_precompaction_with(&case.messages, SystemTime::now(), None));
 }
 
 /// Restoring history suppresses compaction so the restore itself cannot trigger
@@ -2704,7 +2764,7 @@ fn idle_precompaction_ignores_the_restore_suppression() {
     let mut manager = case.manager;
     manager.suppress_compaction_until_new_message = true;
     assert!(
-        manager.plan_idle_precompaction_with(&case.messages, Instant::now(), None),
+        manager.plan_idle_precompaction_with(&case.messages, SystemTime::now(), None),
         "a resumed, waiting, nearly-full session must still fold on the idle tick"
     );
 }
@@ -2723,7 +2783,7 @@ fn idle_precompaction_stops_once_the_fold_drops_the_context() {
         "the feature stays armed"
     );
     assert!(
-        !manager.plan_idle_precompaction_with(&folded, Instant::now(), None),
+        !manager.plan_idle_precompaction_with(&folded, SystemTime::now(), None),
         "a compacted transcript must not compact again"
     );
 }

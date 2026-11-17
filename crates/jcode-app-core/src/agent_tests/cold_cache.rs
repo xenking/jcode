@@ -122,7 +122,7 @@ reactive_threshold_tokens = 900000
         manager.set_context_cap_override(Some(1_000_000));
         manager.set_budget(1_000_000);
         manager.note_provider_response(
-            std::time::Instant::now() - Duration::from_secs(3_601),
+            std::time::SystemTime::now() - Duration::from_secs(3_601),
             Some(433_000),
         );
         before = manager.token_estimate_with(agent.session.provider_messages());
@@ -136,6 +136,22 @@ reactive_threshold_tokens = 900000
         );
     }
     (home, agent, before)
+}
+
+/// Triggers of the shake dividers persisted in the session replay log.
+fn shake_dividers(agent: &Agent) -> Vec<String> {
+    agent
+        .session
+        .replay_events
+        .iter()
+        .filter_map(|record| match &record.kind {
+            crate::session::StoredReplayEventKind::Compaction {
+                trigger: Some(trigger),
+                ..
+            } if trigger.starts_with("shake_") => Some(trigger.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 async fn cold_request(configured_ttl: u64) {
@@ -182,9 +198,13 @@ async fn daemon_cold_cache_shake_alone_avoids_background_compaction() {
     let _guard = crate::storage::lock_test_env();
     let (_home, mut agent, before) = fixture(0, 1_000, 20_000).await;
     let (outgoing, event) = agent.messages_for_provider(None).await.unwrap();
+    // The shake reports its own divider, but it must not start an LLM summary.
+    assert!(event.is_none(), "a shake is not a background compaction");
+    assert!(agent.session.compaction.is_none());
     assert!(
-        event.is_none(),
-        "local shake must not launch a summary when it is sufficient"
+        shake_dividers(&agent).contains(&"shake_cache_expiry".to_string()),
+        "the shake divider must be persisted: {:?}",
+        shake_dividers(&agent)
     );
     let after = outgoing
         .iter()
@@ -196,6 +216,72 @@ async fn daemon_cold_cache_shake_alone_avoids_background_compaction() {
     eprintln!("cold-cache shake-only outgoing tokens: {before} -> {after}");
 }
 
+/// A daemon reload, `/resume`, or `exec` builds a fresh compaction manager, so
+/// the in-memory cold-cache clock is gone. The persisted request time must
+/// still make the next request shake: on 2026-11-18 a restored session
+/// re-sent a fully cold 409K prompt at full price because no shake fired.
+#[tokio::test]
+async fn daemon_reload_keeps_the_cold_cache_clock() {
+    let _guard = crate::storage::lock_test_env();
+    let (_home, mut agent, before) = fixture(0, 1_000, 20_000).await;
+    // The reloaded process only has the session file to go on.
+    agent.session.last_provider_request_at =
+        Some(chrono::Utc::now() - chrono::Duration::hours(2));
+    agent.seed_compaction_from_session();
+
+    let (outgoing, event) = agent.messages_for_provider(None).await.unwrap();
+    assert!(event.is_none(), "a shake is not a background compaction");
+    let after = outgoing
+        .iter()
+        .map(crate::compaction::message_char_count)
+        .sum::<usize>()
+        / crate::compaction::CHARS_PER_TOKEN;
+    assert!(before > 400_000 && after < 60_000, "{before} -> {after}");
+    assert!(
+        shake_dividers(&agent).contains(&"shake_cache_expiry".to_string()),
+        "restored cold cache must shake and persist its divider: {:?}",
+        shake_dividers(&agent)
+    );
+    let divider = agent
+        .session
+        .replay_events
+        .iter()
+        .find_map(|record| match &record.kind {
+            crate::session::StoredReplayEventKind::Compaction {
+                trigger: Some(trigger),
+                pre_tokens: Some(pre),
+                post_tokens: Some(post),
+                ..
+            } if trigger == "shake_cache_expiry" => Some((*pre, *post)),
+            _ => None,
+        })
+        .expect("shake divider with token counts");
+    assert!(divider.0 > divider.1, "shake must record the reduction: {divider:?}");
+}
+
+/// Older session files have no stored request time, so the clock falls back to
+/// the last assistant message, which was written right after that request.
+#[tokio::test]
+async fn restored_cold_cache_clock_falls_back_to_the_last_assistant_message() {
+    let _guard = crate::storage::lock_test_env();
+    let (_home, mut agent, _) = fixture(0, 1_000, 20_000).await;
+    agent.session.last_provider_request_at = None;
+    let stale = chrono::Utc::now() - chrono::Duration::hours(2);
+    let last_assistant = agent
+        .session
+        .messages
+        .iter_mut()
+        .rev()
+        .find(|message| matches!(message.role, Role::Assistant))
+        .expect("fixture has assistant messages");
+    last_assistant.timestamp = Some(stale);
+    agent.seed_compaction_from_session();
+
+    let (_, event) = agent.messages_for_provider(None).await.unwrap();
+    assert!(event.is_none(), "a shake is not a background compaction");
+    assert_eq!(shake_dividers(&agent), vec!["shake_cache_expiry".to_string()]);
+}
+
 #[tokio::test]
 async fn daemon_cold_cache_warm_hour_does_not_rewrite_history() {
     let _guard = crate::storage::lock_test_env();
@@ -205,7 +291,7 @@ async fn daemon_cold_cache_warm_hour_does_not_rewrite_history() {
         .compaction()
         .write()
         .await
-        .note_provider_response(Instant::now() - Duration::from_secs(3_599), Some(433_000));
+        .note_provider_response(std::time::SystemTime::now() - Duration::from_secs(3_599), Some(433_000));
     let original = agent.session.messages_for_provider().to_vec();
     let (outgoing, event) = agent.messages_for_provider(None).await.unwrap();
     assert!(event.is_none());
