@@ -2228,29 +2228,19 @@ impl App {
         self.kv_cache.cold_cache_warned_baseline_completed_at = Some(baseline.completed_at);
 
         let expired_ago_secs = age_secs.saturating_sub(ttl_secs);
-        let tokens = baseline.input_tokens;
-        let token_label = if tokens >= 1_000_000 {
-            format!("{:.1}M", tokens as f64 / 1_000_000.0)
-        } else if tokens >= 1_000 {
-            format!("{}K", tokens / 1_000)
-        } else {
-            tokens.to_string()
-        };
         // Keep this to a single short line. The idle trigger fires the moment
         // the TTL expires, so an "N ago" detail would always read ~0s there;
         // the request-start fallback can fire long after expiry (e.g.
         // suspended TUI), where the age is genuinely informative.
-        let message = match trigger {
-            ColdCacheWarningTrigger::IdleExpiry => format!(
-                "🧊 Prompt cache went cold · next turn may resend ~{} tok · /cache extends",
-                token_label
-            ),
-            ColdCacheWarningTrigger::RequestStart => format!(
-                "🧊 Prompt cache went cold {} ago · this request may resend ~{} tok",
-                crate::tui::format_compact_age(expired_ago_secs),
-                token_label
-            ),
-        };
+        let compaction_config = crate::config::config()
+            .compaction
+            .resolve(Some(&baseline.provider), Some(&baseline.model));
+        let message = Self::cold_cache_warning_text(
+            &compaction_config,
+            trigger,
+            baseline.input_tokens,
+            expired_ago_secs,
+        );
         self.push_display_message(DisplayMessage::system(message));
         true
     }

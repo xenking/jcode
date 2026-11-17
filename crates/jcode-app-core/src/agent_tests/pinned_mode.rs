@@ -23,8 +23,8 @@ fn mode_announcements(messages: &[Message]) -> usize {
     )).count()
 }
 
-#[test]
-fn pinned_mode_restores_without_duplicate_announcements_or_prompt_changes() {
+#[tokio::test]
+async fn pinned_mode_restores_without_duplicate_announcements_or_prompt_changes() {
     let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
     let (_project, mut agent) = mode_agent();
     let prompt = agent.build_system_prompt_split(None).static_part;
@@ -35,7 +35,10 @@ fn pinned_mode_restores_without_duplicate_announcements_or_prompt_changes() {
         serde_json::to_value(Session::load(&id).unwrap()).unwrap()["pinned_skill"],
         "pinned-probe"
     );
-    assert_eq!(mode_announcements(&agent.messages_for_provider().0), 1);
+    assert_eq!(
+        mode_announcements(&agent.messages_for_provider(None).await.unwrap().0),
+        1
+    );
     let loaded = Session::load(&id).unwrap();
     let mut attached = Agent::new_with_session(
         Arc::new(ArchiveVisionProvider),
@@ -47,7 +50,10 @@ fn pinned_mode_restores_without_duplicate_announcements_or_prompt_changes() {
         attached.runtime_skills_snapshot()["active_skill"],
         "pinned-probe"
     );
-    assert_eq!(mode_announcements(&attached.messages_for_provider().0), 1);
+    assert_eq!(
+        mode_announcements(&attached.messages_for_provider(None).await.unwrap().0),
+        1
+    );
     agent.clear();
     assert!(agent.runtime_skills_snapshot()["active_skill"].is_null());
     agent.restore_session(&id).unwrap();
@@ -55,7 +61,10 @@ fn pinned_mode_restores_without_duplicate_announcements_or_prompt_changes() {
         agent.runtime_skills_snapshot()["active_skill"],
         "pinned-probe"
     );
-    assert_eq!(mode_announcements(&agent.messages_for_provider().0), 1);
+    assert_eq!(
+        mode_announcements(&agent.messages_for_provider(None).await.unwrap().0),
+        1
+    );
     assert_eq!(agent.build_system_prompt_split(None).static_part, prompt);
     assert_eq!(
         agent.build_system_prompt_split(None).dynamic_part,
@@ -116,14 +125,17 @@ async fn pinned_mode_reappears_once_in_compacted_provider_transcript() {
         if poll_first {
             assert!(agent.poll_compaction_completion_event().is_some());
         }
-        let (messages, _) = agent.messages_for_provider();
+        let (messages, _) = agent.messages_for_provider(None).await.unwrap();
         assert_eq!(
             mode_announcements(&messages),
             1,
             "first request after compaction, poll_first={poll_first}"
         );
         let len = agent.session.messages.len();
-        assert_eq!(mode_announcements(&agent.messages_for_provider().0), 1);
+        assert_eq!(
+            mode_announcements(&agent.messages_for_provider(None).await.unwrap().0),
+            1
+        );
         assert!(agent.poll_compaction_completion_event().is_none());
         assert_eq!(agent.session.messages.len(), len);
     }

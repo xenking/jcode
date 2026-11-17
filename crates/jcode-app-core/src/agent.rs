@@ -1127,7 +1127,10 @@ impl Agent {
 
     /// Shake hook: before LLM compaction or on the first request after the
     /// provider prompt cache expired. Never while the cache is warm.
-    fn maybe_shake_before_request(&mut self, manager: &mut crate::compaction::CompactionManager) {
+    fn maybe_shake_before_request(
+        &mut self,
+        manager: &mut crate::compaction::CompactionManager,
+    ) -> Option<String> {
         let now = std::time::Instant::now();
         let ttl = self.cache_expiry_ttl_secs(manager);
         // omp `methodOrder` is remote, snapcompact, handoff, shake, soft: when
@@ -1141,9 +1144,7 @@ impl Agent {
             ttl,
             snapcompact_preferred,
         );
-        let Some((reason, cfg)) = plan else {
-            return;
-        };
+        let (reason, cfg) = plan?;
         let start = manager.active_start(self.session.provider_messages());
         let tokens_before = manager.effective_token_count_with(self.session.provider_messages());
         let outcome = self.session.shake_stored_messages(start, &cfg);
@@ -1158,6 +1159,14 @@ impl Agent {
         if outcome != crate::compaction::ShakeOutcome::NoChange {
             self.persist_session_best_effort("shake compaction");
         }
+        (reason == crate::compaction::ShakeReason::CacheExpiry).then(|| {
+            format!(
+                "🧊 Cache cold · {} · ~{}K → ~{}K tok",
+                reason.label(),
+                tokens_before / 1000,
+                manager.effective_token_count_with(self.session.provider_messages()) / 1000,
+            )
+        })
     }
 
     /// Cold-cache snapcompact: once the prompt cache TTL lapsed, fold history
@@ -1191,83 +1200,144 @@ impl Agent {
             .note_provider_response(now, cache_read_tokens);
     }
 
-    fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
+    async fn messages_for_provider(
+        &mut self,
+        event_tx: Option<&crate::stream_batching::BatchingSender>,
+    ) -> Result<(Vec<Message>, Option<CompactionEvent>)> {
         if self.provider.supports_compaction() || self.session.compaction.is_some() {
             let compaction = self.registry.compaction();
-            match compaction.try_write() {
-                Ok(mut manager) => {
-                    let discarded_oversized_native =
-                        manager.discard_oversized_openai_native_compaction();
-                    if self.provider.uses_jcode_compaction() {
-                        self.maybe_shake_before_request(&mut manager);
-                        self.maybe_cache_expiry_compaction(&mut manager);
-                    }
-                    let mut messages = {
-                        let all_messages = self.session.provider_messages();
-                        if self.provider.uses_jcode_compaction() {
-                            let action =
-                                manager.ensure_context_fits(all_messages, self.provider.clone());
-                            match action {
-                                crate::compaction::CompactionAction::BackgroundStarted {
-                                    trigger,
-                                } => {
-                                    logging::info(&format!(
-                                        "Background compaction started ({})",
-                                        trigger
-                                    ));
-                                }
-                                crate::compaction::CompactionAction::HardCompacted(dropped) => {
-                                    logging::warn(&format!(
-                                        "Emergency hard compact: dropped {} messages (context was critical)",
-                                        dropped
-                                    ));
-                                }
-                                crate::compaction::CompactionAction::None => {}
-                            }
+            {
+                // Never fall back to the full transcript if a diagnostics
+                // reader happens to hold the manager at this boundary.
+                let mut manager = compaction.write().await;
+                let discarded_oversized_native =
+                    manager.discard_oversized_openai_native_compaction();
+                if self.provider.uses_jcode_compaction() {
+                    let ttl = self.cache_expiry_ttl_secs(&manager);
+                    let cold_tokens_before =
+                        manager.effective_token_count_with(self.session.provider_messages());
+                    let target = manager.cache_expiry_request_target(
+                        self.session.provider_messages(),
+                        Instant::now(),
+                        ttl,
+                    );
+                    if let Some(detail) = self.maybe_shake_before_request(&mut manager) {
+                        logging::info(&detail);
+                        if let Some(tx) = event_tx {
+                            let _ = tx.send(ServerEvent::StatusDetail { detail });
                         }
-                        manager.messages_for_api_with_vision(
-                            all_messages,
+                    }
+                    self.maybe_cache_expiry_compaction(&mut manager);
+                    // Expiry can cross the boundary while local shake runs.
+                    // Recheck before allowing an asynchronously-started fold
+                    // to race the foreground request.
+                    let target = target.or_else(|| {
+                        manager.cache_expiry_request_target(
+                            self.session.provider_messages(),
+                            Instant::now(),
+                            ttl,
+                        )
+                    });
+                    if let Some(target) = target {
+                        let started = Instant::now();
+                        while manager.is_compacting() {
+                            manager
+                                .check_and_apply_compaction_with(self.session.provider_messages());
+                            if !manager.is_compacting() {
+                                break;
+                            }
+                            anyhow::ensure!(
+                                !self.is_graceful_shutdown(),
+                                "Cancelled while reducing cold-cache context"
+                            );
+                            anyhow::ensure!(
+                                started.elapsed() < Duration::from_secs(120),
+                                "Cold-cache compaction timed out; refusing to resend the oversized prompt"
+                            );
+                            tokio::time::sleep(Duration::from_millis(25)).await;
+                        }
+                        let after =
+                            manager.effective_token_count_with(self.session.provider_messages());
+                        anyhow::ensure!(
+                            after < target,
+                            "Cold-cache context is still ~{}K tokens (target <{}K); refusing to resend the oversized prompt: {}",
+                            after / 1000,
+                            target / 1000,
+                            manager
+                                .take_compaction_error()
+                                .unwrap_or_else(|| "protected history could not be reduced".into())
+                        );
+                        let detail = format!(
+                            "🧊 Cache cold · reduced ~{}K → ~{}K tok before sending",
+                            cold_tokens_before / 1000,
+                            after / 1000
+                        );
+                        logging::info(&detail);
+                        if let Some(tx) = event_tx {
+                            let _ = tx.send(ServerEvent::StatusDetail { detail });
+                        }
+                    }
+                }
+                let mut messages = {
+                    let all_messages = self.session.provider_messages();
+                    if self.provider.uses_jcode_compaction() {
+                        let action =
+                            manager.ensure_context_fits(all_messages, self.provider.clone());
+                        match action {
+                            crate::compaction::CompactionAction::BackgroundStarted { trigger } => {
+                                logging::info(&format!(
+                                    "Background compaction started ({})",
+                                    trigger
+                                ));
+                            }
+                            crate::compaction::CompactionAction::HardCompacted(dropped) => {
+                                logging::warn(&format!(
+                                    "Emergency hard compact: dropped {} messages (context was critical)",
+                                    dropped
+                                ));
+                            }
+                            crate::compaction::CompactionAction::None => {}
+                        }
+                    }
+                    manager.messages_for_api_with_vision(
+                        all_messages,
+                        crate::compaction::snapcompact_pages_usable(
+                            self.provider.supports_image_input(),
+                            &self.provider.model(),
+                        ),
+                    )
+                };
+                let event = manager.take_compaction_event();
+                if event.is_some() || discarded_oversized_native {
+                    self.sync_session_compaction_state_from_manager(&manager);
+                }
+                if let Some(event) = event.as_ref() {
+                    self.note_compaction_applied();
+                    self.record_compaction_divider(event);
+                    self.persist_session_best_effort("compaction completion");
+                    if self.session.pinned_skill.is_some() {
+                        messages = manager.messages_for_api_with_vision(
+                            self.session.provider_messages(),
                             crate::compaction::snapcompact_pages_usable(
                                 self.provider.supports_image_input(),
                                 &self.provider.model(),
                             ),
-                        )
-                    };
-                    let event = manager.take_compaction_event();
-                    if event.is_some() || discarded_oversized_native {
-                        self.sync_session_compaction_state_from_manager(&manager);
+                        );
                     }
-                    if let Some(event) = event.as_ref() {
-                        self.note_compaction_applied();
-                        self.record_compaction_divider(event);
-                        self.persist_session_best_effort("compaction completion");
-                        if self.session.pinned_skill.is_some() {
-                            messages = manager.messages_for_api_with_vision(
-                                self.session.provider_messages(),
-                                crate::compaction::snapcompact_pages_usable(
-                                    self.provider.supports_image_input(),
-                                    &self.provider.model(),
-                                ),
-                            );
-                        }
-                    }
-                    let user_count = messages
-                        .iter()
-                        .filter(|message| matches!(message.role, Role::User))
-                        .count();
-                    let assistant_count = messages.len().saturating_sub(user_count);
-                    logging::info(&format!(
-                        "messages_for_provider (compaction): returning {} messages (user={}, assistant={})",
-                        messages.len(),
-                        user_count,
-                        assistant_count,
-                    ));
-                    return (Self::bounded_outbound_images(messages), event);
                 }
-                Err(_) => {
-                    logging::info("messages_for_provider: compaction lock failed, using session");
-                }
-            };
+                let user_count = messages
+                    .iter()
+                    .filter(|message| matches!(message.role, Role::User))
+                    .count();
+                let assistant_count = messages.len().saturating_sub(user_count);
+                logging::info(&format!(
+                    "messages_for_provider (compaction): returning {} messages (user={}, assistant={})",
+                    messages.len(),
+                    user_count,
+                    assistant_count,
+                ));
+                return Ok((Self::bounded_outbound_images(messages), event));
+            }
         }
 
         let all_messages = self.session.provider_messages();
@@ -1283,7 +1353,7 @@ impl Agent {
             user_count,
             assistant_count,
         ));
-        (messages, None)
+        Ok((messages, None))
     }
 
     /// Bound the inline screenshot payload of one outbound request.

@@ -3,6 +3,40 @@
 use super::*;
 
 impl App {
+    pub(super) fn cold_cache_warning_text(
+        config: &crate::config::CompactionConfig,
+        trigger: ColdCacheWarningTrigger,
+        tokens: u64,
+        expired_ago_secs: u64,
+    ) -> String {
+        if config.snapcompact
+            && config.snapcompact_cache_expiry
+            && config.cache_expiry_threshold_tokens > 0
+            && tokens >= config.cache_expiry_threshold_tokens as u64
+        {
+            // Only the daemon can measure the outgoing context after reducing
+            // it. Never present a cached baseline as the next request's size.
+            return "🧊 Prompt cache went cold · context will shrink before the next request"
+                .into();
+        }
+        let token_label = if tokens >= 1_000_000 {
+            format!("{:.1}M", tokens as f64 / 1_000_000.0)
+        } else if tokens >= 1_000 {
+            format!("{}K", tokens / 1_000)
+        } else {
+            tokens.to_string()
+        };
+        match trigger {
+            ColdCacheWarningTrigger::IdleExpiry => format!(
+                "🧊 Prompt cache went cold · next turn may resend ~{token_label} tok · /cache extends"
+            ),
+            ColdCacheWarningTrigger::RequestStart => format!(
+                "🧊 Prompt cache went cold {} ago · this request may resend ~{token_label} tok",
+                crate::tui::format_compact_age(expired_ago_secs),
+            ),
+        }
+    }
+
     pub(super) fn kv_cache_diagnostic_fields(
         &self,
         request: &PendingKvCacheRequest,

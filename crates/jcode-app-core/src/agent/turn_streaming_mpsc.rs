@@ -85,7 +85,7 @@ impl Agent {
                     repaired
                 ));
             }
-            let (tools, split_prompt, messages) = self.prepare_stream_request(&event_tx).await;
+            let (tools, split_prompt, messages) = self.prepare_stream_request(&event_tx).await?;
 
             let messages: std::sync::Arc<[Message]> = messages.into();
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn

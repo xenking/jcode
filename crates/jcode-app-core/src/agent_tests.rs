@@ -38,6 +38,9 @@ mod compile_remote;
 #[path = "agent_tests/mcp_remote_cache.rs"]
 mod mcp_remote_cache;
 
+#[path = "agent_tests/cold_cache.rs"]
+mod cold_cache;
+
 struct DelayedProvider {
     open_delay: Duration,
     first_event_delay: Duration,
@@ -1302,7 +1305,7 @@ async fn messages_for_provider_caps_restored_snapcompact_pages() {
         compacted_count: 0,
     }));
     agent.seed_compaction_from_session();
-    let (request, event) = agent.messages_for_provider();
+    let (request, event) = agent.messages_for_provider(None).await.unwrap();
     assert!(event.is_none());
     let images: Vec<_> = request
         .iter()
@@ -1346,7 +1349,7 @@ async fn messages_for_provider_replays_persisted_native_compaction_in_auto_mode(
         .apply_openai_native_compaction("enc_auto".to_string(), 1)
         .expect("persist native compaction");
 
-    let (messages, event) = agent.messages_for_provider();
+    let (messages, event) = agent.messages_for_provider(None).await.unwrap();
     assert!(event.is_none());
     assert!(!messages.is_empty());
     match &messages[0].content[0] {
@@ -1401,7 +1404,7 @@ async fn oversized_openai_native_compaction_is_persisted_as_text_fallback() {
             .contains("OpenAI native compaction state was discarded")
     );
 
-    let (messages, event) = agent.messages_for_provider();
+    let (messages, event) = agent.messages_for_provider(None).await.unwrap();
     assert!(event.is_none());
     assert!(!messages.is_empty());
     assert!(messages.iter().all(|message| {
@@ -1451,7 +1454,7 @@ async fn messages_for_provider_applies_manual_compaction_in_native_auto_mode() {
     let mut event = None;
     let mut compacted_messages = Vec::new();
     while Instant::now() < deadline {
-        let (messages, maybe_event) = agent.messages_for_provider();
+        let (messages, maybe_event) = agent.messages_for_provider(None).await.unwrap();
         if maybe_event.is_some() {
             event = maybe_event;
             compacted_messages = messages;

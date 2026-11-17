@@ -118,6 +118,18 @@ impl App {
     /// even after another detail has replaced the status label.
     pub(super) fn apply_status_detail(&mut self, detail: String) {
         const OVERLOAD_PREFIX: &str = "OpenAI reported server overload";
+        // This is an authoritative daemon result, not the pre-request cached
+        // baseline. Retain the measured reduction after transport status moves on.
+        if detail.starts_with("🧊 Cache cold · reduced ")
+            && !self
+                .display_messages
+                .iter()
+                .rev()
+                .take_while(|message| message.role != "user")
+                .any(|message| message.role == "system" && message.content == detail)
+        {
+            self.push_display_message(DisplayMessage::system(detail.clone()));
+        }
         if detail.starts_with(OVERLOAD_PREFIX)
             && !self
                 .display_messages

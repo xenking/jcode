@@ -1166,6 +1166,15 @@ impl CompactionManager {
         snapcompact_preferred: bool,
     ) -> Option<(ShakeReason, ShakeConfig)> {
         let cfg = self.shake_config()?;
+        // Cache expiry is a request-boundary reduction, not a choice between
+        // ordinary compaction strategies. Always try the cheap local pass first.
+        if self.compaction_config.shake_cache_expiry
+            && let (Some(ttl), Some(last)) =
+                (cache_ttl_secs.filter(|ttl| *ttl > 0), self.last_response_at)
+            && now.saturating_duration_since(last) >= Duration::from_secs(ttl)
+        {
+            return Some((ShakeReason::CacheExpiry, cfg));
+        }
         if self.should_compact_with(all_messages) {
             if snapcompact_preferred {
                 return None;
@@ -1381,24 +1390,38 @@ impl CompactionManager {
         if !cfg.snapcompact || !cfg.snapcompact_cache_expiry {
             return false;
         }
-        if cfg.cache_expiry_threshold_tokens == 0
-            || self.pending_task.is_some()
-            || self.suppress_compaction_until_new_message
+        if self.pending_task.is_some() {
+            return false;
+        }
+        if self
+            .cache_expiry_request_target(all_messages, now, cache_ttl_secs)
+            .is_none()
         {
             return false;
         }
-        let (Some(ttl), Some(last)) = (cache_ttl_secs.filter(|t| *t > 0), self.last_response_at)
-        else {
-            return false;
-        };
-        if now.saturating_duration_since(last) < Duration::from_secs(ttl) {
-            return false;
-        }
-        if self.cache_expiry_compacted_for == Some(last) {
+        if self.cache_expiry_compacted_for == self.last_response_at {
             return false;
         }
         self.active_messages(all_messages).len() > RECENT_TURNS_TO_KEEP
-            && self.effective_token_count_with(all_messages) >= cfg.cache_expiry_threshold_tokens
+    }
+
+    /// A cold request must reach this target before it can leave the daemon.
+    /// Unlike the background-task planner this remains armed while work runs.
+    pub fn cache_expiry_request_target(
+        &self,
+        all_messages: &[Message],
+        now: Instant,
+        cache_ttl_secs: Option<u64>,
+    ) -> Option<usize> {
+        let cfg = &self.compaction_config;
+        let ttl = cache_ttl_secs.filter(|ttl| *ttl > 0)?;
+        let last = self.last_response_at?;
+        (cfg.snapcompact
+            && cfg.snapcompact_cache_expiry
+            && cfg.cache_expiry_threshold_tokens > 0
+            && now.saturating_duration_since(last) >= Duration::from_secs(ttl)
+            && self.effective_token_count_with(all_messages) >= cfg.cache_expiry_threshold_tokens)
+            .then_some(cfg.cache_expiry_threshold_tokens)
     }
 
     /// Start snapcompact because the prompt cache went cold. Returns whether a
@@ -1551,7 +1574,15 @@ impl CompactionManager {
             .filter(|shape| !shape.trim().is_empty() && !shape.trim().eq_ignore_ascii_case("auto"));
         let shake_config = self.shake_config();
         let remaining_chars: usize = active[cutoff..].iter().map(message_char_count).sum();
-        let token_budget = self.token_budget;
+        let token_budget = if mode_label == CACHE_EXPIRY_COMPACTION_TRIGGER {
+            self.token_budget.min(
+                self.compaction_config
+                    .cache_expiry_threshold_tokens
+                    .saturating_mul(2),
+            )
+        } else {
+            self.token_budget
+        };
         let estimated_tokens = self.effective_token_count_with(all_messages);
         crate::logging::info(&format!(
             "[TIMING] compaction_start: trigger={}, active_messages={}, cutoff={}, estimated_tokens={}, has_existing_summary={}",
@@ -2519,9 +2550,9 @@ impl Default for CompactionManager {
 
 #[path = "compaction/summary_generation.rs"]
 mod summary_generation;
-use summary_generation::{generate_compaction_artifact, generate_effective_compaction_artifact};
 #[cfg(test)]
 use summary_generation::{extract_snapcompact_decisions, validate_compaction_summary};
+use summary_generation::{generate_compaction_artifact, generate_effective_compaction_artifact};
 
 #[path = "compaction_transfer.rs"]
 mod transfer;

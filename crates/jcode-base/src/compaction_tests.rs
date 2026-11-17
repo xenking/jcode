@@ -1867,6 +1867,21 @@ fn snapcompact_preference_suppresses_pre_compaction_shake() {
 }
 
 #[test]
+fn cold_cache_shake_precedes_snapcompact_above_the_normal_threshold() {
+    let mut m = shake_manager_with_budget(40_000);
+    m.compaction_config.reactive_threshold = 0.80;
+    let over = shake_session(40, 2000);
+    let now = Instant::now();
+    m.note_provider_response(now - Duration::from_secs(3601), Some(40_000));
+    assert!(m.should_compact_with(&over));
+    assert_eq!(
+        m.plan_shake_with(&over, now, Some(3600), true)
+            .map(|(reason, _)| reason),
+        Some(ShakeReason::CacheExpiry)
+    );
+}
+
+#[test]
 fn shake_never_runs_while_prompt_cache_is_warm() {
     let msgs = shake_session(20, 2000);
     let mut m = shake_manager();
