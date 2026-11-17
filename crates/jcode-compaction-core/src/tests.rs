@@ -216,6 +216,23 @@ fn effective_context_subset_accounting_does_not_double_count() {
 }
 
 #[test]
+fn effective_context_openai_compatible_profiles_never_double_count_cache_reads() {
+    // OpenCode Go and the OpenRouter slot report input inclusively (OpenAI
+    // Responses accounting), so a cache read that is a subset of input must not
+    // be added back on top. The reported 231k context stays 231k, matching the
+    // compaction trigger's figure instead of the 431k double-count a client can
+    // otherwise show.
+    assert_eq!(
+        effective_context_tokens_from_usage("opencode-go", 231_621, Some(231_424), None),
+        231_621
+    );
+    assert_eq!(
+        effective_context_tokens_from_usage("openrouter", 231_621, Some(231_424), None),
+        231_621
+    );
+}
+
+#[test]
 fn effective_context_infers_split_accounting_from_counter_shape() {
     // cache_read > input implies input can't already contain it.
     assert_eq!(

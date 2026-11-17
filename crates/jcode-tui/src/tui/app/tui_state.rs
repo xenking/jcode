@@ -1775,6 +1775,7 @@ impl crate::tui::TuiState for App {
             workspace_animation_tick,
             ambient_info: gather_ambient_info(crate::config::config().ambient.enabled),
             observed_context_tokens: self.current_stream_context_tokens(),
+            last_reported_context_tokens: self.last_persisted_context_tokens(),
             cache_hit_info,
             compaction_info,
             is_compacting: if !self.is_remote && self.provider.uses_jcode_compaction() {

@@ -735,6 +735,11 @@ pub struct InfoWidgetData {
     /// Actual API-reported context tokens (from last streaming response)
     /// When available, this is more accurate than the char-based estimate in context_info
     pub observed_context_tokens: Option<u64>,
+    /// Last provider-reported context tokens persisted with the session, used
+    /// when no live streaming report is available. This is the same counter the
+    /// compaction trigger uses, so the displayed figure never disagrees with it
+    /// the way the char-based estimate in context_info can.
+    pub last_reported_context_tokens: Option<u64>,
     /// Session-level cache read ratio, when the active provider reports cache telemetry.
     pub cache_hit_info: Option<CacheHitInfo>,
     /// Conversation compaction status, shown as a compact rounded status card.
@@ -1480,20 +1485,20 @@ fn overview_footer(data: &InfoWidgetData) -> String {
     if data.context_info_stale {
         return "context syncing".into();
     }
-    let used = data.observed_context_tokens.or_else(|| {
-        data.context_info
-            .as_ref()
-            .filter(|info| info.total_chars > 0)
-            .map(|info| info.estimated_tokens() as u64)
-    });
+    let used = data
+        .observed_context_tokens
+        .or(data.last_reported_context_tokens)
+        .or_else(|| {
+            data.context_info
+                .as_ref()
+                .filter(|info| info.total_chars > 0)
+                .map(|info| info.estimated_tokens() as u64)
+        });
+    let reported = data.observed_context_tokens.is_some() || data.last_reported_context_tokens.is_some();
     match (used, data.context_limit) {
         (Some(used), _) if data.compaction_threshold_tokens.is_some_and(|t| t > 0) => {
             let threshold = data.compaction_threshold_tokens.unwrap_or_default() as u64;
-            let estimate = if data.observed_context_tokens.is_none() {
-                "~"
-            } else {
-                ""
-            };
+            let estimate = if reported { "" } else { "~" };
             format!(
                 "{}{estimate}{}/{} to compact",
                 if data.historical_context {
@@ -1507,11 +1512,7 @@ fn overview_footer(data: &InfoWidgetData) -> String {
         }
         (Some(used), Some(limit)) => {
             let left = (limit as u64).saturating_sub(used);
-            let estimate = if data.observed_context_tokens.is_none() {
-                "~"
-            } else {
-                ""
-            };
+            let estimate = if reported { "" } else { "~" };
             format!(
                 "{}{estimate}{} ctx left",
                 if data.historical_context {

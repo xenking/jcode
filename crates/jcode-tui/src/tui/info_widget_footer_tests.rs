@@ -467,3 +467,19 @@ fn overview_footer_shows_compaction_threshold_when_known() {
     };
     assert_eq!(super::super::overview_footer(&data), "233K/500K to compact");
 }
+
+#[test]
+fn overview_footer_prefers_persisted_provider_context_over_char_estimate() {
+    let data = InfoWidgetData {
+        observed_context_tokens: None,
+        last_reported_context_tokens: Some(231_000),
+        context_limit: Some(1_000_000),
+        compaction_threshold_tokens: Some(400_000),
+        context_info: Some(crate::prompt::ContextInfo {
+            total_chars: 1_724_000,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert_eq!(super::super::overview_footer(&data), "231K/400K to compact");
+}

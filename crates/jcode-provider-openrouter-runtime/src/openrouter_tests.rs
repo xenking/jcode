@@ -2736,6 +2736,25 @@ fn runtime_display_name_for_profile_runtime_instance() {
 }
 
 #[test]
+fn compatible_profile_runtime_uses_jcode_compaction() {
+    let _lock = ENV_LOCK.lock();
+    let temp = TempDir::new().expect("create temp home");
+    let jcode_home = temp.path().join("jcode-home");
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", &jcode_home);
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _env = isolate_openrouter_autodetect_env();
+    let _key = EnvVarGuard::set("NVIDIA_API_KEY", "nim-test-key");
+
+    let nim = OpenRouterProvider::new_openai_compatible_profile_runtime(
+        jcode_base::provider_catalog::NVIDIA_NIM_PROFILE,
+    )
+    .expect("build nvidia-nim runtime");
+    assert!(Provider::supports_compaction(&nim));
+    assert!(Provider::uses_jcode_compaction(&nim));
+}
+
+#[test]
 fn jcode_subscription_runtime_has_explicit_display_and_route_identity() {
     let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp home");

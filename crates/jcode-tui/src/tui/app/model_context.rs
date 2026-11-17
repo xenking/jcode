@@ -1247,6 +1247,24 @@ impl App {
         ))
     }
 
+    /// The last provider-reported prompt size persisted with this session.
+    ///
+    /// This is the same counter the compaction trigger feeds from the provider
+    /// usage report, so the context figure stays consistent with the trigger
+    /// even after a reload or while the live stream has no usage yet. The
+    /// char-based estimate in `ContextInfo` includes system, skill and tool
+    /// text and can disagree with it by a wide margin.
+    pub(super) fn last_persisted_context_tokens(&self) -> Option<u64> {
+        if self.is_remote {
+            return None;
+        }
+        self.session
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| message.token_usage.as_ref()?.prompt_tokens)
+    }
+
     /// Apply a provider usage report's input/cache counters to the streaming
     /// state, with per-call reset semantics.
     ///
