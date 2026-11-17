@@ -693,6 +693,9 @@ pub struct CompactResult {
     pub truncated_chars: usize,
     /// Characters represented by frames plus plain text.
     pub total_chars: usize,
+    /// Pages actually rasterized and encoded in this pass.
+    pub rendered_frames: usize,
+    pub render_timings: renderer::snapcompact_render::RenderTimings,
 }
 
 /// A reference to a rendered frame.
@@ -705,6 +708,15 @@ pub struct FrameRef {
 }
 
 impl CompactResult {
+    /// Borrow rendered pages for a subsequent append-only compaction.
+    pub fn frame_cache(&self) -> FrameCache<'_> {
+        FrameCache {
+            source: &self.source_text,
+            render_key: format!("v1:{:?}", self.shape),
+            frames: &self.frames,
+        }
+    }
+
     /// Drop the frame bytes; the bounded source + ranges remain.
     pub fn into_bounded_source(&self) -> BoundedSource {
         BoundedSource {
@@ -721,6 +733,13 @@ impl CompactResult {
                 .collect(),
         }
     }
+}
+
+/// A cache is reusable only for the identical renderer geometry and text.
+pub struct FrameCache<'a> {
+    pub source: &'a str,
+    pub render_key: String,
+    pub frames: &'a [FrameRef],
 }
 
 /// Convert a [`Shape`] into the renderer's option struct.
@@ -775,8 +794,42 @@ struct FramePlan {
 /// Plan frames for `text`, keeping both chronological ends when the source does
 /// not fit `max_frames` (omp `planArchive` foveation: the least-important
 /// middle of a long archive is dropped rather than failing the pass).
-fn plan_frames(text: &str, shape: &Shape, max_frames: usize) -> FramePlan {
-    let all = chunk_into_frames(text, shape, usize::MAX);
+fn plan_frames(
+    text: &str,
+    shape: &Shape,
+    max_frames: usize,
+    previous: Option<&FrameCache<'_>>,
+) -> FramePlan {
+    let all = if let Some(previous) = previous.filter(|p| text.starts_with(p.source)) {
+        let last = previous.frames.last().expect("validated nonempty cache");
+        let mut ranges: Vec<_> = previous.frames[..previous.frames.len() - 1]
+            .iter()
+            .map(|frame| FrameRange {
+                index: frame.index,
+                source_start: frame.source_start,
+                source_end: frame.source_end,
+            })
+            .collect();
+        let tail_byte = text
+            .char_indices()
+            .nth(last.source_start)
+            .map_or(text.len(), |(byte, _)| byte);
+        ranges.extend(
+            chunk_into_frames(&text[tail_byte..], shape, usize::MAX)
+                .into_iter()
+                .map(|mut range| {
+                    range.source_start += last.source_start;
+                    range.source_end += last.source_start;
+                    range
+                }),
+        );
+        for (index, range) in ranges.iter_mut().enumerate() {
+            range.index = index as u32;
+        }
+        ranges
+    } else {
+        chunk_into_frames(text, shape, usize::MAX)
+    };
     if all.len() <= max_frames {
         let head_count = all.len();
         return FramePlan {
@@ -818,6 +871,16 @@ pub fn compact(
     prep: &CompactPreparation,
     options: &CompactOptions,
 ) -> Result<CompactResult, String> {
+    compact_reusing(prep, options, None)
+}
+
+/// Reuse only pages whose complete renderer input (including dim state) and
+/// geometry are unchanged. Changed partial pages and foveated tails rebuild.
+pub fn compact_reusing(
+    prep: &CompactPreparation,
+    options: &CompactOptions,
+    previous: Option<FrameCache<'_>>,
+) -> Result<CompactResult, String> {
     let mut shape: Shape = options
         .shape
         .clone()
@@ -838,33 +901,139 @@ pub fn compact(
         .max_frames
         .clamp(1, MAX_FRAMES_DEFAULT)
         .min(frame_budget(&options.provider)) as usize;
-    let plan = plan_frames(&prep.bounded_text, &shape, max_frames);
+    let render_key = format!("v1:{shape:?}");
+    let previous = previous.filter(|previous| {
+        let chars = previous.source.chars().count();
+        previous.render_key == render_key
+            && !previous.frames.is_empty()
+            && previous
+                .frames
+                .first()
+                .is_some_and(|frame| frame.source_start == 0)
+            && previous
+                .frames
+                .last()
+                .is_some_and(|frame| frame.source_end == chars)
+            && previous.frames.iter().all(|frame| {
+                frame.source_start < frame.source_end
+                    && frame.source_end <= chars
+                    && !frame.bytes.is_empty()
+            })
+            && previous
+                .frames
+                .windows(2)
+                .all(|pair| pair[0].source_end <= pair[1].source_start)
+    });
+    let plan = plan_frames(&prep.bounded_text, &shape, max_frames, previous.as_ref());
     if plan.ranges.is_empty() {
         return Err("snapcompact frame budget cannot represent all source text".into());
     }
     let render_opts = shape_to_render_options(&shape);
+    let mut cached = std::collections::HashMap::new();
+    if let Some(previous) = previous {
+        let boundaries: Vec<_> = previous
+            .source
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain(std::iter::once(previous.source.len()))
+            .collect();
+        let valid = previous.frames.iter().all(|frame| {
+            frame.source_start < frame.source_end
+                && frame.source_end < boundaries.len()
+                && !frame.bytes.is_empty()
+        }) && previous
+            .frames
+            .windows(2)
+            .all(|pair| pair[0].source_end <= pair[1].source_start);
+        if valid {
+            let mut dim = false;
+            for frame in previous.frames {
+                let start = boundaries[frame.source_start];
+                let end = boundaries[frame.source_end];
+                let text = finish_frame_text(&previous.source[start..end], &mut dim);
+                cached.insert(text, frame.bytes.as_slice());
+            }
+        }
+    }
+    let boundaries: Vec<_> = prep
+        .bounded_text
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain(std::iter::once(prep.bounded_text.len()))
+        .collect();
     let mut dim_open = false;
-    let rendered: Vec<FrameRef> = plan
+    let mut pages: Vec<_> = plan
         .ranges
         .iter()
-        .map(|range| -> Result<FrameRef, String> {
-            let slice = slice_char_range(&prep.bounded_text, range.source_start, range.source_end);
-            let slice = finish_frame_text(&slice, &mut dim_open);
-            let bytes = self::renderer::render_snapcompact_png(slice, render_opts.clone())
-                .map_err(|error| format!("snapcompact frame {}: {error}", range.index))?;
-            Ok(FrameRef {
-                index: range.index,
-                source_start: range.source_start,
-                source_end: range.source_end,
-                bytes,
-            })
+        .map(|range| {
+            let slice =
+                &prep.bounded_text[boundaries[range.source_start]..boundaries[range.source_end]];
+            let text = finish_frame_text(slice, &mut dim_open);
+            let cached = cached.get(&text);
+            (
+                FrameRef {
+                    index: range.index,
+                    source_start: range.source_start,
+                    source_end: range.source_end,
+                    bytes: cached.map_or_else(Vec::new, |bytes| bytes.to_vec()),
+                },
+                cached.is_none().then_some(text),
+            )
         })
-        .collect::<Result<_, _>>()?;
+        .collect();
+    let rendered_frames = pages.iter().filter(|(_, text)| text.is_some()).count();
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(8)
+        .min(rendered_frames.max(1));
+    let render_timings = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for batch in pages.chunks_mut(plan.ranges.len().div_ceil(workers)) {
+            let options = render_opts.clone();
+            handles.push(scope.spawn(move || {
+                let mut timings = renderer::snapcompact_render::RenderTimings::default();
+                for (frame, text) in batch {
+                    if let Some(text) = text.take() {
+                        let (bytes, timing) =
+                            renderer::snapcompact_render::render_snapcompact_png_measured(
+                                text,
+                                options.clone(),
+                            )
+                            .map_err(|error| {
+                                format!("snapcompact frame {}: {error}", frame.index)
+                            })?;
+                        frame.bytes = bytes;
+                        timings.font += timing.font;
+                        timings.raster += timing.raster;
+                        timings.encode += timing.encode;
+                    }
+                }
+                Ok::<_, String>(timings)
+            }));
+        }
+        handles.into_iter().try_fold(
+            renderer::snapcompact_render::RenderTimings::default(),
+            |mut all, handle| {
+                let timing = handle
+                    .join()
+                    .map_err(|_| "snapcompact render worker panicked".to_string())??;
+                all.font += timing.font;
+                all.raster += timing.raster;
+                all.encode += timing.encode;
+                Ok::<_, String>(all)
+            },
+        )
+    })?;
+    let mut rendered: Vec<_> = pages.into_iter().map(|(frame, _)| frame).collect();
     let truncated_chars = plan
         .elided
         .map(|(start, end)| end.saturating_sub(start))
         .unwrap_or(0);
-    let source_text = render_kept_source(&prep.bounded_text, &plan);
+    let (source_text, kept_ranges) = render_kept_source(&prep.bounded_text, &plan, &boundaries);
+    for (frame, kept) in rendered.iter_mut().zip(kept_ranges) {
+        frame.source_start = kept.source_start;
+        frame.source_end = kept.source_end;
+    }
     let total_chars = rendered
         .iter()
         .map(|frame| frame.source_end.saturating_sub(frame.source_start))
@@ -873,6 +1042,8 @@ pub fn compact(
     Ok(CompactResult {
         summary,
         source_text,
+        rendered_frames,
+        render_timings,
         frames: rendered,
         shape,
         truncated_chars,
@@ -882,26 +1053,42 @@ pub fn compact(
 
 /// Archive source text a reader without image input can still use: the frames'
 /// slices in chronological order, with the dropped middle replaced by a marker.
-fn render_kept_source(text: &str, plan: &FramePlan) -> String {
+fn render_kept_source(
+    text: &str,
+    plan: &FramePlan,
+    boundaries: &[usize],
+) -> (String, Vec<FrameRange>) {
     let mut out = String::with_capacity(text.len());
+    let mut ranges = Vec::with_capacity(plan.ranges.len());
+    let mut cursor = 0;
+    let mut previous_end = 0;
     for (position, range) in plan.ranges.iter().enumerate() {
         if position == plan.head_count
             && let Some((start, end)) = plan.elided
         {
-            out.push(NEWLINE_GLYPH);
-            out.push_str(&format!(
-                "[snapcompact: {} chars elided from the middle of the archive]",
+            let marker = format!(
+                "{NEWLINE_GLYPH}[snapcompact: {} chars elided from the middle of the archive]{NEWLINE_GLYPH}",
                 end.saturating_sub(start)
-            ));
-            out.push(NEWLINE_GLYPH);
+            );
+            cursor += marker.chars().count();
+            out.push_str(&marker);
+        } else if previous_end < range.source_start {
+            // An older foveation marker is not part of any rendered page.
+            let gap = &text[boundaries[previous_end]..boundaries[range.source_start]];
+            cursor += range.source_start - previous_end;
+            out.push_str(gap);
         }
-        out.push_str(&slice_char_range(
-            text,
-            range.source_start,
-            range.source_end,
-        ));
+        out.push_str(&text[boundaries[range.source_start]..boundaries[range.source_end]]);
+        let end = cursor + range.source_end - range.source_start;
+        ranges.push(FrameRange {
+            index: range.index,
+            source_start: cursor,
+            source_end: end,
+        });
+        cursor = end;
+        previous_end = range.source_end;
     }
-    out
+    (out, ranges)
 }
 
 /// Reading guide rendered as the compaction summary (omp
@@ -1090,15 +1277,112 @@ fn chunk_into_frames(text: &str, shape: &Shape, max_frames: usize) -> Vec<FrameR
     out
 }
 
-fn slice_char_range(s: &str, start: usize, end: usize) -> String {
-    s.chars()
-        .skip(start)
-        .take(end.saturating_sub(start))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires JCODE_SNAPCOMPACT_FIXTURE copied session"]
+    fn profile_copied_archive_render() {
+        let path = std::env::var("JCODE_SNAPCOMPACT_FIXTURE").unwrap();
+        let fixture: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let source = fixture["compaction"]["snapcompact"]["source"]
+            .as_str()
+            .unwrap();
+        let prep = super::CompactPreparation {
+            text: source.into(),
+            bounded_text: source.into(),
+            remaining_text: String::new(),
+            included_previous_summary: false,
+        };
+        let now = std::time::Instant::now();
+        let result = super::compact(
+            &prep,
+            &super::CompactOptions {
+                model_id: "claude-opus-5-5".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        eprintln!(
+            "RENDER_PROFILE wall_ms={} font_ms={} raster_ms={} encode_ms={} pages={} png_bytes={}",
+            now.elapsed().as_millis(),
+            result.render_timings.font.as_millis(),
+            result.render_timings.raster.as_millis(),
+            result.render_timings.encode.as_millis(),
+            result.frames.len(),
+            result.frames.iter().map(|f| f.bytes.len()).sum::<usize>()
+        );
+    }
+
+    #[test]
+    fn foveated_archive_keeps_prior_page_boundaries_when_appending() {
+        let mut shape = super::resolve_shape("claude");
+        shape.frame_size = 64;
+        let options = super::CompactOptions {
+            shape: Some(shape),
+            max_frames: 8,
+            ..Default::default()
+        };
+        let first = super::compact(
+            &super::prepare(&"abcdefghij".repeat(50), 1000, 1000),
+            &options,
+        )
+        .unwrap();
+        assert!(first.truncated_chars > 0);
+        let preparation = super::prepare_messages(
+            &[jcode_message_types::Message::user("tail")],
+            Some(&first.source_text),
+            usize::MAX,
+        )
+        .unwrap();
+        let second =
+            super::compact_reusing(&preparation, &options, Some(first.frame_cache())).unwrap();
+        assert!(
+            second.rendered_frames <= 2,
+            "preserve old foveated page boundaries, rendered {} pages",
+            second.rendered_frames
+        );
+        assert_eq!(second.frames[0].bytes, first.frames[0].bytes);
+        assert_eq!(second.frames[1].bytes, first.frames[1].bytes);
+        for frame in &second.frames {
+            assert!(
+                frame.source_start < frame.source_end
+                    && frame.source_end <= second.source_text.chars().count()
+            );
+        }
+    }
+
+    #[test]
+    fn second_compaction_renders_only_changed_tail_pages() {
+        let mut shape = super::resolve_shape("claude");
+        shape.frame_size = 64;
+        let options = super::CompactOptions {
+            shape: Some(shape),
+            ..Default::default()
+        };
+        let first =
+            super::compact(&super::prepare(&"a".repeat(130), 1000, 1000), &options).unwrap();
+        assert!(first.frames.len() > 2);
+        let preparation = super::prepare_messages(
+            &[jcode_message_types::Message::user("new tail")],
+            Some(&first.source_text),
+            usize::MAX,
+        )
+        .unwrap();
+        let second =
+            super::compact_reusing(&preparation, &options, Some(first.frame_cache())).unwrap();
+        assert_eq!(
+            second.rendered_frames, 2,
+            "only the partial last page and appended page need rendering"
+        );
+        let rebuilt = super::compact(&preparation, &options).unwrap();
+        for (reused, fresh) in second.frames.iter().zip(&rebuilt.frames) {
+            assert_eq!(reused.bytes, fresh.bytes);
+            assert_eq!(reused.source_start, fresh.source_start);
+            assert_eq!(reused.source_end, fresh.source_end);
+        }
+    }
+
     #[test]
     fn normalize_collapses_whitespace_and_folds_box_drawing() {
         assert_eq!(

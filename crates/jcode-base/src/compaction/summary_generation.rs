@@ -15,7 +15,11 @@ pub(super) async fn extract_snapcompact_decisions(provider: &dyn Provider, index
         "Extract decisions with their reasons, user rules and preferences from the following indexed excerpts. Preserve negations, uncertainty, and who said what. Do not infer missing reasons. Each line must begin with the exact [message N, page P | role] tag from its supporting excerpt. Do not invent facts. Output only supported lines.\n\n{input}"
     );
     let started = Instant::now();
-    crate::logging::info(&format!("[TIMING] snapcompact_decisions_start: model={}, input_chars={}", provider.model(), input.chars().count()));
+    crate::logging::info(&format!(
+        "[TIMING] snapcompact_decisions_start: model={}, input_chars={}",
+        provider.model(),
+        input.chars().count()
+    ));
     let result = tokio::time::timeout(
         Duration::from_secs(60),
         provider.complete_simple_with_usage(
@@ -24,7 +28,12 @@ pub(super) async fn extract_snapcompact_decisions(provider: &dyn Provider, index
         ),
     )
     .await;
-    crate::logging::info(&format!("[TIMING] snapcompact_decisions: model={}, elapsed_ms={}, success={}", provider.model(), started.elapsed().as_millis(), matches!(&result, Ok(Ok(_)))));
+    crate::logging::info(&format!(
+        "[TIMING] snapcompact_decisions: model={}, elapsed_ms={}, success={}",
+        provider.model(),
+        started.elapsed().as_millis(),
+        matches!(&result, Ok(Ok(_)))
+    ));
     let Ok(Ok((response, usage))) = result else {
         return String::new();
     };
@@ -212,6 +221,8 @@ pub(super) async fn generate_compaction_artifact_indexed(
             ));
         } else if native.openai_encrypted_content.is_some() || native.summary_text.is_some() {
             return Ok(CompactionResult {
+                completed_at: Instant::now(),
+                decisions_job: None,
                 summary_text: native.summary_text.unwrap_or_default(),
                 openai_encrypted_content: native.openai_encrypted_content,
                 snapcompact: None,
@@ -224,12 +235,23 @@ pub(super) async fn generate_compaction_artifact_indexed(
 
     let mut snapcompact = None;
     let mut snapcompact_summary = None;
+    let mut decisions_job = None;
     if snapcompact_enabled
         && existing_summary
             .as_ref()
             .is_none_or(|s| s.openai_encrypted_content.is_none())
     {
         let input = messages.clone();
+        let message_offset = archive_history.len().saturating_sub(input.len());
+        let prior_archive = existing_summary
+            .as_ref()
+            .and_then(|s| s.snapcompact.as_ref());
+        let previous_decisions = prior_archive
+            .map(|a| a.decisions.clone())
+            .unwrap_or_default();
+        let cache = prior_archive
+            .filter(|a| !a.render_key.is_empty() && a.pages.len() == a.page_ranges.len())
+            .map(|a| (a.render_key.clone(), a.page_ranges.clone(), a.pages.clone()));
         // A previous archive source is re-folded as history; a previous text
         // summary is labelled (`[Summary of earlier history]`) the way omp
         // folds a pre-snapcompact summary into the archive head.
@@ -255,7 +277,7 @@ pub(super) async fn generate_compaction_artifact_indexed(
             ..Default::default()
         };
         let rendered = tokio::task::spawn_blocking(move || {
-            use jcode_compaction_core::snapcompact::{compact, prepare_messages_with};
+            use jcode_compaction_core::snapcompact::{compact_reusing, prepare_messages_with, FrameCache, FrameRef};
             let previous = previous.as_ref().map(|(text, is_summary)| {
                 jcode_compaction_core::snapcompact::PreviousArchive {
                     text,
@@ -266,9 +288,19 @@ pub(super) async fn generate_compaction_artifact_indexed(
             let preparation = prepare_messages_with(&input, previous, usize::MAX)?;
             crate::logging::info(&format!("[TIMING] snapcompact_prepare: elapsed_ms={}, source_chars={}", phase.elapsed().as_millis(), preparation.bounded_text.chars().count()));
             let phase = Instant::now();
-            let result = compact(&preparation, &options)?;
-            crate::logging::info(&format!("[TIMING] snapcompact_render: elapsed_ms={}, pages={}, new_pages={}", phase.elapsed().as_millis(), result.frames.len(), result.frames.len()));
-            let ranges = if result.truncated_chars == 0 {
+            let cached_frames = cache.as_ref().and_then(|(_, ranges, pages)| {
+                pages.iter().zip(ranges).enumerate().map(|(index, (page, &(source_start, source_end)))| {
+                    base64::engine::general_purpose::STANDARD.decode(page).map(|bytes| FrameRef { index: index as u32, source_start, source_end, bytes })
+                }).collect::<Result<Vec<_>, _>>().ok()
+            });
+            let frame_cache = cache.as_ref().zip(cached_frames.as_ref()).and_then(|((key, _, _), frames)| {
+                previous.map(|p| FrameCache { source: p.text, render_key: key.clone(), frames })
+            });
+            crate::logging::info(&format!("[TIMING] snapcompact_cache_decode: elapsed_ms={}, cached_pages={}", phase.elapsed().as_millis(), cached_frames.as_ref().map_or(0, Vec::len)));
+            let phase = Instant::now();
+            let result = compact_reusing(&preparation, &options, frame_cache)?;
+            crate::logging::info(&format!("[TIMING] snapcompact_render: elapsed_ms={}, pages={}, new_pages={}, font_ms={}, raster_ms={}, png_encode_ms={}", phase.elapsed().as_millis(), result.frames.len(), result.rendered_frames, result.render_timings.font.as_millis(), result.render_timings.raster.as_millis(), result.render_timings.encode.as_millis()));
+            let ranges =
                 result
                     .frames
                     .iter()
@@ -277,10 +309,7 @@ pub(super) async fn generate_compaction_artifact_indexed(
                         source_start: f.source_start,
                         source_end: f.source_end,
                     })
-                    .collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            };
+                    .collect::<Vec<_>>();
             let phase = Instant::now();
             let index = build_snapcompact_index(&archive_history, 0, &result.source_text, &ranges);
             crate::logging::info(&format!("[TIMING] snapcompact_index: elapsed_ms={}, index_chars={}, history_messages={}", phase.elapsed().as_millis(), index.chars().count(), archive_history.len()));
@@ -293,14 +322,25 @@ pub(super) async fn generate_compaction_artifact_indexed(
                     .iter()
                     .map(|r| (r.source_start, r.source_end))
                     .collect();
-                let decisions = extract_snapcompact_decisions(&*provider, &index).await;
+                let decisions = snap_decisions::retain_supported(&previous_decisions, &index);
+                let new_index = snap_decisions::index_since(&index, message_offset);
+                if !new_index.is_empty() {
+                    decisions_job = Some(snap_decisions::DecisionsJob {
+                        provider: provider.clone(),
+                        index: new_index,
+                    });
+                }
+                let render_key = format!("v1:{:?}", result.shape);
                 let phase = Instant::now();
                 let pages = result
                     .frames
                     .into_iter()
                     .map(|frame| base64::engine::general_purpose::STANDARD.encode(frame.bytes))
                     .collect();
-                crate::logging::info(&format!("[TIMING] snapcompact_base64: elapsed_ms={}", phase.elapsed().as_millis()));
+                crate::logging::info(&format!(
+                    "[TIMING] snapcompact_base64: elapsed_ms={}",
+                    phase.elapsed().as_millis()
+                ));
                 snapcompact_summary = Some(result.summary);
                 snapcompact = Some(jcode_message_types::SnapcompactArchive {
                     source: result.source_text,
@@ -308,6 +348,7 @@ pub(super) async fn generate_compaction_artifact_indexed(
                     index,
                     decisions,
                     page_ranges,
+                    render_key,
                 });
             }
             Ok(Err(error)) => {
@@ -377,6 +418,8 @@ pub(super) async fn generate_compaction_artifact_indexed(
             }
         }
         return Ok(CompactionResult {
+            completed_at: Instant::now(),
+            decisions_job,
             summary_text: summary,
             openai_encrypted_content: None,
             snapcompact,
@@ -423,6 +466,8 @@ pub(super) async fn generate_compaction_artifact_indexed(
     );
 
     Ok(CompactionResult {
+        completed_at: Instant::now(),
+        decisions_job: None,
         summary_text: validate_compaction_summary(summary)?,
         openai_encrypted_content: None,
         snapcompact,

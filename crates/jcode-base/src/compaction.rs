@@ -15,6 +15,7 @@
 //! - **Semantic**: compact based on embedding-detected topic shifts and
 //!   relevance scoring. Falls back to proactive if embeddings are unavailable.
 
+mod snap_decisions;
 mod snap_index;
 use snap_index::build_snapcompact_index;
 
@@ -79,6 +80,8 @@ const REPORT_SLACK_TOKENS: u64 = 4_096;
 
 /// Result from background compaction task
 struct CompactionResult {
+    completed_at: Instant,
+    decisions_job: Option<snap_decisions::DecisionsJob>,
     summary_text: String,
     openai_encrypted_content: Option<String>,
     snapcompact: Option<jcode_message_types::SnapcompactArchive>,
@@ -184,6 +187,8 @@ pub struct CompactionManager {
 
     /// Background compaction task handle
     pending_task: Option<JoinHandle<Result<CompactionResult>>>,
+    pending_decisions: Option<snap_decisions::PendingDecisions>,
+    decisions_updated: bool,
 
     /// User-facing trigger label for the currently running background compaction.
     pending_trigger: Option<String>,
@@ -406,6 +411,8 @@ impl CompactionManager {
             active_summary: None,
             active_chars: ActiveCharEstimate::default(),
             pending_task: None,
+            pending_decisions: None,
+            decisions_updated: false,
             pending_trigger: None,
             pending_cutoff: 0,
             total_turns: 0,
@@ -614,6 +621,8 @@ impl CompactionManager {
         total_messages: usize,
     ) {
         self.pending_task = None;
+        self.pending_decisions = None;
+        self.decisions_updated = false;
         self.pending_trigger = None;
         self.pending_cutoff = 0;
         self.observed_input_tokens = None;
@@ -1876,6 +1885,7 @@ impl CompactionManager {
     /// Check if background compaction is done and apply it, updating rolling
     /// token-estimate state from the provided full message list.
     pub fn check_and_apply_compaction_with(&mut self, all_messages: &[Message]) {
+        self.poll_decisions();
         self.clamp_compacted_count_to_messages(all_messages, "check_and_apply_start");
         let task = match self.pending_task.take() {
             Some(task) => task,
@@ -1892,6 +1902,10 @@ impl CompactionManager {
         // Get result
         match futures::executor::block_on(task) {
             Ok(Ok(result)) => {
+                crate::logging::info(&format!(
+                    "[TIMING] snapcompact_apply_wait: elapsed_ms={}",
+                    result.completed_at.elapsed().as_millis()
+                ));
                 let trigger = self
                     .pending_trigger
                     .clone()
@@ -1967,6 +1981,13 @@ impl CompactionManager {
 
                 // Store summary
                 self.active_summary = Some(summary);
+                self.pending_decisions = result.decisions_job.map(|job| {
+                    snap_decisions::start(
+                        job,
+                        self.compaction_config.snapcompact_decisions_model.clone(),
+                        self.compacted_count,
+                    )
+                });
                 self.discard_oversized_openai_native_compaction();
                 self.observed_input_tokens = None;
                 self.observed_estimate_tokens = None;
@@ -2561,6 +2582,10 @@ pub use transfer::build_transfer_compaction_state;
 #[cfg(test)]
 #[path = "compaction_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "compaction_speed_tests.rs"]
+mod speed_tests;
 
 #[cfg(test)]
 #[path = "compaction_usage_plausibility_tests.rs"]

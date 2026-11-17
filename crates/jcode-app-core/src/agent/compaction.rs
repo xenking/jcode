@@ -37,13 +37,14 @@ impl Agent {
     pub fn poll_compaction_completion_event(&mut self) -> Option<CompactionEvent> {
         let provider_messages = self.session.messages_for_provider();
         let compaction = self.registry.compaction();
-        let event = match compaction.try_write() {
+        let (event, decisions_updated) = match compaction.try_write() {
             Ok(mut manager) => {
                 let event = manager.poll_compaction_event_with(&provider_messages);
-                if event.is_some() {
+                let decisions_updated = manager.take_decisions_updated();
+                if event.is_some() || decisions_updated {
                     self.sync_session_compaction_state_from_manager(&manager);
                 }
-                event
+                (event, decisions_updated)
             }
             Err(_) => return None,
         };
@@ -51,7 +52,9 @@ impl Agent {
         if let Some(event) = event.as_ref() {
             self.note_compaction_applied();
             self.record_compaction_divider(event);
-            self.persist_session_best_effort("compaction completion");
+        }
+        if event.is_some() || decisions_updated {
+            self.persist_session_best_effort("compaction completion/enrichment");
         }
 
         event

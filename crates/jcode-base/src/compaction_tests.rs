@@ -23,13 +23,82 @@ async fn snapcompact_copied_session_pipeline_benchmark() {
     });
     let now = Instant::now();
     let result = summary_generation::generate_compaction_artifact_indexed(
-        Arc::new(VisionSummaryProvider), messages[count..].to_vec(), messages.clone(),
-        existing, true, None, None,
-    ).await.unwrap();
+        Arc::new(VisionSummaryProvider),
+        messages[count..].to_vec(),
+        messages.clone(),
+        existing,
+        true,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     let archive = result.snapcompact.unwrap();
-    eprintln!("SNAPCOMPACT_BENCH wall_ms={} new_messages={} history_messages={} source_chars={} pages={} index_chars={} png_base64_bytes={}", now.elapsed().as_millis(), messages.len()-count, messages.len(), archive.source.chars().count(), archive.pages.len(), archive.index.chars().count(), archive.pages.iter().map(String::len).sum::<usize>());
+    eprintln!(
+        "SNAPCOMPACT_BENCH wall_ms={} new_messages={} history_messages={} source_chars={} pages={} index_chars={} png_base64_bytes={}",
+        now.elapsed().as_millis(),
+        messages.len() - count,
+        messages.len(),
+        archive.source.chars().count(),
+        archive.pages.len(),
+        archive.index.chars().count(),
+        archive.pages.iter().map(String::len).sum::<usize>()
+    );
 }
 
+#[tokio::test]
+#[ignore = "requires JCODE_SNAPCOMPACT_FIXTURE pointing to a copied session"]
+async fn snapcompact_copied_session_incremental_benchmark() {
+    crate::logging::init();
+    let fixture = std::env::var("JCODE_SNAPCOMPACT_FIXTURE").unwrap();
+    let session: crate::session::Session =
+        serde_json::from_slice(&std::fs::read(fixture).unwrap()).unwrap();
+    let messages: Vec<_> = session.messages.iter().map(|m| m.to_message()).collect();
+    let state = session.compaction.unwrap();
+    let count = state.compacted_count;
+    let split = count + (messages.len() - count) / 2;
+    let mut prior = Some(Summary {
+        text: state.summary_text.clone(),
+        openai_encrypted_content: None,
+        snapcompact: state.snapcompact.clone(),
+        covers_up_to_turn: state.covers_up_to_turn,
+        original_turn_count: state.original_turn_count,
+    });
+    for (label, start, end) in [
+        ("cold_split", count, split),
+        ("warm_tail", split, messages.len()),
+    ] {
+        let now = Instant::now();
+        let result = summary_generation::generate_compaction_artifact_indexed(
+            Arc::new(VisionSummaryProvider),
+            messages[start..end].to_vec(),
+            messages[..end].to_vec(),
+            prior.take(),
+            true,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let archive = result.snapcompact.as_ref().unwrap();
+        eprintln!(
+            "SNAPCOMPACT_INCREMENTAL label={label} wall_ms={} new_messages={} source_chars={} pages={} index_chars={} png_base64_bytes={}",
+            now.elapsed().as_millis(),
+            end - start,
+            archive.source.chars().count(),
+            archive.pages.len(),
+            archive.index.chars().count(),
+            archive.pages.iter().map(String::len).sum::<usize>()
+        );
+        prior = Some(Summary {
+            text: result.summary_text,
+            openai_encrypted_content: None,
+            snapcompact: result.snapcompact,
+            covers_up_to_turn: end,
+            original_turn_count: end,
+        });
+    }
+}
 
 struct MockSummaryProvider;
 
@@ -167,6 +236,7 @@ fn snapcompact_request_caps_old_pages_without_discarding_archive() {
             index: "[message 0, page 1 | user] earlier fact\n".into(),
             decisions: String::new(),
             page_ranges: Vec::new(),
+            render_key: String::new(),
         }),
         covers_up_to_turn: 0,
         original_turn_count: 0,
@@ -298,6 +368,7 @@ async fn ineffective_snapcompact_escalates_to_text_summary() {
             index: String::new(),
             decisions: String::new(),
             page_ranges: Vec::new(),
+            render_key: String::new(),
         }),
         covers_up_to_turn: 1,
         original_turn_count: 1,
@@ -323,7 +394,7 @@ async fn ineffective_snapcompact_escalates_to_text_summary() {
         "ineffective archive must not be accepted"
     );
     assert!(result.summary_text.starts_with("summary("));
-    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -2163,9 +2234,9 @@ async fn snapcompact_decisions_preserve_supported_negation_and_reject_unknown_ta
     assert!(!decisions.contains("invented rule"));
 }
 
-/// Snapcompact makes only the bounded decisions-and-rules extraction call.
+/// Snapcompact defers optional decisions extraction until after apply.
 #[tokio::test]
-async fn snapcompact_extracts_decisions_without_full_summarizer() {
+async fn snapcompact_defers_decisions_without_full_summarizer() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let provider = Arc::new(CountingVisionProvider {
         calls: calls.clone(),
@@ -2182,8 +2253,8 @@ async fn snapcompact_extracts_decisions_without_full_summarizer() {
     .unwrap();
     assert_eq!(
         calls.load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "snapcompact should call the bounded decisions extractor once"
+        0,
+        "snapcompact must not call the decisions extractor before apply"
     );
     assert!(
         result
@@ -2194,6 +2265,7 @@ async fn snapcompact_extracts_decisions_without_full_summarizer() {
     );
     assert!(result.summary_text.contains("HISTORY"));
     assert!(result.snapcompact.is_some());
+    assert!(result.decisions_job.is_some());
 
     // Without image input the text summarizer still runs.
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2422,6 +2494,7 @@ fn snapcompact_pages_survive_persistence_and_follow_vision_capability() {
             index: String::new(),
             decisions: String::new(),
             page_ranges: Vec::new(),
+            render_key: String::new(),
         }),
         covers_up_to_turn: 0,
         original_turn_count: 0,

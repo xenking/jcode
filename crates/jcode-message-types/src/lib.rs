@@ -121,6 +121,9 @@ pub struct SnapcompactArchive {
     /// Character ranges in `source`, one per page, when available.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub page_ranges: Vec<(usize, usize)>,
+    /// Renderer version and complete geometry. Empty legacy keys rebuild once.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub render_key: String,
 }
 
 /// A message in the conversation

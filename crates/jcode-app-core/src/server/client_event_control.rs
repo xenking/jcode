@@ -55,7 +55,11 @@ pub(super) async fn session_is_idle_waiting(session_id: &str) -> bool {
 }
 
 /// Compact opportunistically while a session is parked on external work.
-pub(super) async fn maybe_idle_precompact(agent: &Arc<Mutex<Agent>>, session_id: &str, processing: bool) {
+pub(super) async fn maybe_idle_precompact(
+    agent: &Arc<Mutex<Agent>>,
+    session_id: &str,
+    processing: bool,
+) {
     if processing {
         return;
     }
@@ -68,11 +72,23 @@ pub(super) async fn maybe_idle_precompact(agent: &Arc<Mutex<Agent>>, session_id:
     agent.maybe_idle_precompact();
 }
 
-pub(super) async fn poll_agent_compaction_completion(agent: Arc<Mutex<Agent>>) -> Option<ServerEvent> {
+pub(super) async fn poll_agent_compaction_completion(
+    agent: Arc<Mutex<Agent>>,
+) -> Option<ServerEvent> {
     // CompactionFinished is published from inside the worker, just before its
     // JoinHandle becomes finished. The first poll can therefore be too early.
     loop {
-        let (event, error, pending) = agent.lock().await.poll_compaction_status();
+        let wait = std::time::Instant::now();
+        let mut owner = agent.lock().await;
+        let waited = wait.elapsed();
+        if waited >= std::time::Duration::from_millis(10) {
+            crate::logging::info(&format!(
+                "[TIMING] compaction_agent_lock_wait: elapsed_ms={}, reason=active_turn_owner",
+                waited.as_millis()
+            ));
+        }
+        let (event, error, pending) = owner.poll_compaction_status();
+        drop(owner);
         if let Some(event) = event {
             return Some(compaction_server_event(event));
         }
@@ -163,4 +179,3 @@ pub(super) async fn refresh_session_control_handle(
     )
     .with_provider(agent_guard.provider_handle())
 }
-

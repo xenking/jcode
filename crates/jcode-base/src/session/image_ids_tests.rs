@@ -35,6 +35,7 @@ fn image_identity_survives_shake_and_snapcompact_persistence() -> anyhow::Result
                 index: String::new(),
                 decisions: String::new(),
                 page_ranges: Vec::new(),
+                render_key: String::new(),
             }),
             covers_up_to_turn: 1,
             original_turn_count: 1,

@@ -287,6 +287,9 @@ impl ReasoningDisplayMode {
     }
 }
 
+#[cfg(test)]
+mod lib_snapcompact_config_tests;
+
 /// Compaction configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -350,6 +353,9 @@ pub struct CompactionConfig {
     /// `auto` picks the shape tuned for the active model; any `SHAPE_VARIANTS`
     /// name (`11on16-bw`, `8on22-bw`, `6x6u-sent`, ...) forces that geometry.
     pub snapcompact_shape: String,
+    /// Post-apply decisions extraction route. `auto` selects an available cheap
+    /// model (luna/haiku/flash/mini/nano), `off` disables enrichment. Never Opus.
+    pub snapcompact_decisions_model: String,
 
     /// Enable LLM-free "shake" elision of stale large tool outputs and code
     /// blocks. Runs only when the prompt prefix is being rewritten anyway:
@@ -424,6 +430,7 @@ pub struct CompactionOverride {
     pub max_context_tokens: Option<usize>,
     pub snapcompact: Option<bool>,
     pub snapcompact_shape: Option<String>,
+    pub snapcompact_decisions_model: Option<String>,
     pub shake: Option<bool>,
     pub shake_protect_tokens: Option<usize>,
     pub shake_min_region_tokens: Option<usize>,
@@ -459,6 +466,7 @@ impl CompactionOverride {
             max_context_tokens,
             snapcompact,
             snapcompact_shape,
+            snapcompact_decisions_model,
             shake,
             shake_protect_tokens,
             shake_min_region_tokens,
@@ -551,6 +559,7 @@ impl Default for CompactionConfig {
             max_context_tokens: 0,
             snapcompact: true,
             snapcompact_shape: "auto".to_string(),
+            snapcompact_decisions_model: "auto".to_string(),
             shake: false,
             // omp `DEFAULT_SHAKE_CONFIG`: protectTokens 16000, minSavings 4000.
             shake_protect_tokens: 16_000,

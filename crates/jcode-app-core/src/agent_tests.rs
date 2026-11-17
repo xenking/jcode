@@ -1299,6 +1299,7 @@ async fn messages_for_provider_caps_restored_snapcompact_pages() {
             index: "[message 0, page 1 | user] old fact\n".into(),
             decisions: String::new(),
             page_ranges: Vec::new(),
+            render_key: String::new(),
         }),
         covers_up_to_turn: 0,
         original_turn_count: 0,

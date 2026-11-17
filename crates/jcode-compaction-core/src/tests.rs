@@ -378,6 +378,7 @@ fn dense_png_dimensions_and_archive_cap_are_counted_consistently() {
             index: String::new(),
             decisions: String::new(),
             page_ranges: vec![],
+            render_key: String::new(),
         }),
         covers_up_to_turn: 0,
         original_turn_count: 0,

@@ -1291,10 +1291,44 @@ pub fn render_snapcompact_png(
     render_snapcompact_png_sync(text, options)
 }
 
+/// CPU phase durations for a single page, excluding pagination and cache lookup.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RenderTimings {
+    pub font: std::time::Duration,
+    pub raster: std::time::Duration,
+    pub encode: std::time::Duration,
+}
+
+/// The same renderer with phase measurements for compaction diagnostics.
+pub fn render_snapcompact_png_measured(
+    text: String,
+    options: SnapcompactRenderOptions,
+) -> Result<(Vec<u8>, RenderTimings), SnapcompactError> {
+    let mut timings = RenderTimings::default();
+    let bytes =
+        render_snapcompact_png_profiled(text, options, &mut timings, png::Compression::Best)?;
+    Ok((bytes, timings))
+}
+
 fn render_snapcompact_png_sync(
     text: String,
     options: SnapcompactRenderOptions,
 ) -> Result<Vec<u8>, SnapcompactError> {
+    render_snapcompact_png_profiled(
+        text,
+        options,
+        &mut RenderTimings::default(),
+        png::Compression::Best,
+    )
+}
+
+fn render_snapcompact_png_profiled(
+    text: String,
+    options: SnapcompactRenderOptions,
+    timings: &mut RenderTimings,
+    compression: png::Compression,
+) -> Result<Vec<u8>, SnapcompactError> {
+    let phase = std::time::Instant::now();
     let size = options.size;
     if size == 0 || size > MAX_FRAME_SIZE {
         return Err(SnapcompactError::Render(format!(
@@ -1344,6 +1378,8 @@ fn render_snapcompact_png_sync(
     let wide_cells = matches!(font, RenderFont::Bitmap(_));
     let used = used_rows(&text, &grid, doc, wide_cells);
     let height = used * grid.repeat * grid.cell_h;
+    timings.font = phase.elapsed();
+    let phase = std::time::Instant::now();
 
     match font {
         RenderFont::Ttf(font) => {
@@ -1352,12 +1388,11 @@ fn render_snapcompact_png_sync(
             } else {
                 render_ttf_rgb(&text, size, height, font, &grid, black_ink)
             };
-            Ok(encode_rgb_png(
-                &pixels,
-                size,
-                height,
-                png::Compression::Best,
-            )?)
+            timings.raster = phase.elapsed();
+            let phase = std::time::Instant::now();
+            let bytes = encode_rgb_png(&pixels, size, height, compression)?;
+            timings.encode = phase.elapsed();
+            Ok(bytes)
         }
         RenderFont::Bitmap(font) => {
             let fallback = silver_font()?;
@@ -1372,7 +1407,11 @@ fn render_snapcompact_png_sync(
                 } else {
                     render_bitmap(&text, size, height, font, &grid, black_ink, fallback)
                 };
-                return encode_indexed_png(&pixels, size, height, png::Compression::Best);
+                timings.raster = phase.elapsed();
+                let phase = std::time::Instant::now();
+                let bytes = encode_indexed_png(&pixels, size, height, compression)?;
+                timings.encode = phase.elapsed();
+                return Ok(bytes);
             }
 
             // Stretch shape: rasterize at the font's natural cell on a tight canvas
@@ -1408,7 +1447,11 @@ fn render_snapcompact_png_sync(
                     *d = s.round().clamp(0.0, 255.0) as u8;
                 }
             }
-            Ok(encode_rgb_png(&frame, size, dst_h, png::Compression::Best)?)
+            timings.raster = phase.elapsed();
+            let phase = std::time::Instant::now();
+            let bytes = encode_rgb_png(&frame, size, dst_h, compression)?;
+            timings.encode = phase.elapsed();
+            Ok(bytes)
         }
     }
 }
@@ -1416,6 +1459,98 @@ fn render_snapcompact_png_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decoded_pixels(bytes: &[u8]) -> (u32, u32, png::ColorType, Vec<u8>) {
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        decoder.set_transformations(png::Transformations::EXPAND);
+        let mut reader = decoder.read_info().unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut pixels).unwrap();
+        pixels.truncate(info.buffer_size());
+        (info.width, info.height, info.color_type, pixels)
+    }
+
+    #[test]
+    fn measured_png_has_identical_pixels_for_every_shape() {
+        for shape in crate::snapcompact::SHAPES {
+            let mut shape = shape.clone();
+            shape.frame_size = 128;
+            let options = crate::snapcompact::shape_to_render_options(&shape);
+            let text = "¶user:Never delete.█Русский 世界\u{e} tool output\u{f} done.";
+            let fast = render_snapcompact_png(text.into(), options.clone()).unwrap();
+            let best = render_snapcompact_png_profiled(
+                text.into(),
+                options,
+                &mut RenderTimings::default(),
+                png::Compression::Best,
+            )
+            .unwrap();
+            assert_eq!(
+                decoded_pixels(&fast),
+                decoded_pixels(&best),
+                "{}",
+                shape.name
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires JCODE_SNAPCOMPACT_FIXTURE copied session"]
+    fn copied_archive_parallel_png_pixels_match_serial() {
+        use crate::snapcompact::*;
+        let path = std::env::var("JCODE_SNAPCOMPACT_FIXTURE").unwrap();
+        let fixture: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let source = fixture["compaction"]["snapcompact"]["source"]
+            .as_str()
+            .unwrap();
+        let prep = CompactPreparation {
+            text: source.into(),
+            bounded_text: source.into(),
+            remaining_text: String::new(),
+            included_previous_summary: false,
+        };
+        let result = compact(
+            &prep,
+            &CompactOptions {
+                model_id: "claude-opus-5-5".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let options = shape_to_render_options(&result.shape);
+        let mut dim = false;
+        let mut best_bytes = 0;
+        for frame in &result.frames {
+            let text: String = result
+                .source_text
+                .chars()
+                .skip(frame.source_start)
+                .take(frame.source_end - frame.source_start)
+                .collect();
+            let text = finish_frame_text(&text, &mut dim);
+            let best = render_snapcompact_png_profiled(
+                text,
+                options.clone(),
+                &mut RenderTimings::default(),
+                png::Compression::Best,
+            )
+            .unwrap();
+            best_bytes += best.len();
+            assert_eq!(
+                decoded_pixels(&frame.bytes),
+                decoded_pixels(&best),
+                "page {}",
+                frame.index
+            );
+        }
+        eprintln!(
+            "PNG_EQUIVALENCE pages={} identical_pixels=true best_bytes={} parallel_bytes={}",
+            result.frames.len(),
+            best_bytes,
+            result.frames.iter().map(|f| f.bytes.len()).sum::<usize>()
+        );
+    }
 
     fn render_bitmap(
         text: &str,
