@@ -223,6 +223,7 @@ pub(super) async fn generate_compaction_artifact_indexed(
             return Ok(CompactionResult {
                 completed_at: Instant::now(),
                 decisions_job: None,
+                pending_decisions: None,
                 summary_text: native.summary_text.unwrap_or_default(),
                 openai_encrypted_content: native.openai_encrypted_content,
                 snapcompact: None,
@@ -247,7 +248,7 @@ pub(super) async fn generate_compaction_artifact_indexed(
             .as_ref()
             .and_then(|s| s.snapcompact.as_ref());
         let previous_decisions = prior_archive
-            .map(|a| a.decisions.clone())
+            .map(|a| format!("{}{}", a.decisions, a.deferred_decisions))
             .unwrap_or_default();
         let index_prior = prior_archive.map(|archive| jcode_message_types::SnapcompactArchive {
             source: archive.source.clone(),
@@ -255,6 +256,7 @@ pub(super) async fn generate_compaction_artifact_indexed(
             page_ranges: archive.page_ranges.clone(),
             pages: Vec::new(),
             decisions: String::new(),
+            deferred_decisions: String::new(),
             render_key: String::new(),
         });
         let cache = prior_archive
@@ -332,7 +334,7 @@ pub(super) async fn generate_compaction_artifact_indexed(
                     .iter()
                     .map(|r| (r.source_start, r.source_end))
                     .collect();
-                let decisions = snap_decisions::retain_supported(&previous_decisions, &index);
+                let decisions = snap_decisions::retag_supported(&previous_decisions, &index);
                 let new_index = snap_decisions::index_since(&index, message_offset);
                 if !new_index.is_empty() {
                     decisions_job = Some(snap_decisions::DecisionsJob {
@@ -357,6 +359,7 @@ pub(super) async fn generate_compaction_artifact_indexed(
                     pages,
                     index,
                     decisions,
+                    deferred_decisions: String::new(),
                     page_ranges,
                     render_key,
                 });
@@ -430,6 +433,7 @@ pub(super) async fn generate_compaction_artifact_indexed(
         return Ok(CompactionResult {
             completed_at: Instant::now(),
             decisions_job,
+            pending_decisions: None,
             summary_text: summary,
             openai_encrypted_content: None,
             snapcompact,
@@ -478,6 +482,7 @@ pub(super) async fn generate_compaction_artifact_indexed(
     Ok(CompactionResult {
         completed_at: Instant::now(),
         decisions_job: None,
+        pending_decisions: None,
         summary_text: validate_compaction_summary(summary)?,
         openai_encrypted_content: None,
         snapcompact,

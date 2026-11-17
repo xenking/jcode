@@ -118,6 +118,9 @@ pub struct SnapcompactArchive {
     /// Model-extracted decisions and rules, labelled as derived, not verbatim.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub decisions: String,
+    /// Decisions extracted after this archive was applied, held for the next compaction.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub deferred_decisions: String,
     /// Character ranges in `source`, one per page, when available.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub page_ranges: Vec<(usize, usize)>,

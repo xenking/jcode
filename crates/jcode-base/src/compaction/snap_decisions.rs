@@ -1,4 +1,4 @@
-//! Optional, grounded enrichment. Never part of the archive/apply critical path.
+//! Grounded enrichment, bounded before apply and deferred if it runs long.
 use super::*;
 
 pub(super) struct DecisionsJob {
@@ -31,6 +31,35 @@ pub(super) fn retain_supported(decisions: &str, index: &str) -> String {
     {
         if output.len() + line.len() < 24_000 {
             output.push_str(line);
+            output.push('\n');
+        }
+    }
+    output
+}
+
+pub(super) fn retag_supported(decisions: &str, index: &str) -> String {
+    let mut output = String::new();
+    for line in decisions.lines() {
+        let Some(old_tag) = tag(line) else { continue };
+        let Some((message, role)) = old_tag
+            .strip_prefix("[message ")
+            .and_then(|s| s.strip_suffix(']'))
+            .and_then(|s| s.split_once(", page "))
+            .and_then(|(message, rest)| rest.split_once(" | ").map(|(_, role)| (message, role)))
+        else {
+            continue;
+        };
+        if let Some(new_tag) = index.lines().filter_map(tag).find(|candidate| {
+            candidate
+                .strip_prefix("[message ")
+                .and_then(|s| s.strip_suffix(']'))
+                .and_then(|s| s.split_once(", page "))
+                .and_then(|(m, rest)| rest.split_once(" | ").map(|(_, r)| (m, r)))
+                == Some((message, role))
+        }) && output.len() + line.len() < 24_000
+        {
+            output.push_str(new_tag);
+            output.push_str(&line[old_tag.len()..]);
             output.push('\n');
         }
     }
@@ -141,9 +170,32 @@ pub(super) fn start(job: DecisionsJob, model: String, compacted_count: usize) ->
     PendingDecisions { task, result }
 }
 
+pub(super) async fn prepare(
+    mut result: CompactionResult,
+    model: String,
+    count: usize,
+) -> CompactionResult {
+    let Some(job) = result.decisions_job.take() else {
+        return result;
+    };
+    let mut pending = start(job, model, count);
+    match tokio::time::timeout(Duration::from_secs(1), &mut pending.result).await {
+        Ok(Ok((_, decisions))) => {
+            if let Some(archive) = result.snapcompact.as_mut() {
+                let supported = retain_supported(&decisions, &archive.index);
+                archive.decisions.push_str(&supported);
+                archive.decisions = retain_supported(&archive.decisions, &archive.index);
+            }
+        }
+        Ok(Err(_)) => {}
+        Err(_) => result.pending_decisions = Some(pending),
+    }
+    result
+}
+
 impl CompactionManager {
     pub fn has_pending_decisions(&self) -> bool {
-        self.pending_decisions.is_some()
+        !self.pending_decisions.is_empty()
     }
 
     /// Allows the session owner to persist enrichment without another divider.
@@ -152,36 +204,37 @@ impl CompactionManager {
     }
 
     pub(super) fn poll_decisions(&mut self) {
-        let Some(pending) = self.pending_decisions.as_mut() else {
-            return;
-        };
-        let (count, decisions) = match pending.result.try_recv() {
-            Ok(result) => result,
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return,
-            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                self.pending_decisions = None;
-                return;
+        let mut completed = Vec::new();
+        self.pending_decisions
+            .retain_mut(|pending| match pending.result.try_recv() {
+                Ok(result) => {
+                    completed.push(result);
+                    false
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => true,
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => false,
+            });
+        for (count, decisions) in completed {
+            if count > self.compacted_count || decisions.is_empty() {
+                continue;
             }
-        };
-        self.pending_decisions = None;
-        if count != self.compacted_count || decisions.is_empty() {
-            return;
-        }
-        if let Some(archive) = self
-            .active_summary
-            .as_mut()
-            .and_then(|summary| summary.snapcompact.as_mut())
-        {
-            let supported = retain_supported(&decisions, &archive.index);
-            if !supported.is_empty() {
-                archive.decisions.push_str(&supported);
-                archive.decisions = retain_supported(&archive.decisions, &archive.index);
-                self.decisions_updated = true;
-                crate::logging::info(&format!(
-                    "[TIMING] snapcompact_decisions_attached: compacted_count={}, chars={}",
-                    count,
-                    supported.chars().count()
-                ));
+            if let Some(archive) = self
+                .active_summary
+                .as_mut()
+                .and_then(|summary| summary.snapcompact.as_mut())
+            {
+                let supported = retag_supported(&decisions, &archive.index);
+                if !supported.is_empty() {
+                    archive.deferred_decisions.push_str(&supported);
+                    archive.deferred_decisions =
+                        retain_supported(&archive.deferred_decisions, &archive.index);
+                    self.decisions_updated = true;
+                    crate::logging::info(&format!(
+                        "[TIMING] snapcompact_decisions_deferred: compacted_count={}, chars={}",
+                        count,
+                        supported.chars().count()
+                    ));
+                }
             }
         }
     }

@@ -394,6 +394,7 @@ fn dense_png_dimensions_and_archive_cap_are_counted_consistently() {
             pages: vec![page; 74],
             index: String::new(),
             decisions: String::new(),
+            deferred_decisions: String::new(),
             page_ranges: vec![],
             render_key: String::new(),
         }),

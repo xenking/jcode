@@ -97,11 +97,41 @@ fn decisions_delta_keeps_only_new_grounded_tags_and_bounds_enrichment() {
 }
 
 #[tokio::test]
+async fn fast_decisions_are_included_before_apply() {
+    let provider: Arc<dyn Provider> = Arc::new(SlowDecisionsProvider {
+        model: Mutex::new("claude-opus-5-5".into()),
+        calls: Arc::new(Mutex::new(Vec::new())),
+        delay: Duration::ZERO,
+    });
+    let result = generate_compaction_artifact(
+        provider,
+        vec![Message::user(
+            "Never force push because history must remain intact.",
+        )],
+        None,
+        true,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let result = snap_decisions::prepare(result, "auto".into(), 1).await;
+    assert!(result.pending_decisions.is_none());
+    assert!(
+        result
+            .snapcompact
+            .unwrap()
+            .decisions
+            .contains("Never force push")
+    );
+}
+
+#[tokio::test]
 async fn decisions_attach_to_applied_archive_without_second_compaction_event() {
     let provider: Arc<dyn Provider> = Arc::new(SlowDecisionsProvider {
         model: Mutex::new("claude-opus-5-5".into()),
         calls: Arc::new(Mutex::new(Vec::new())),
-        delay: Duration::from_millis(300),
+        delay: Duration::from_millis(1300),
     });
     let messages: Vec<_> = (0..13)
         .map(|_| Message::user("Never force push because history must remain intact."))
@@ -110,6 +140,7 @@ async fn decisions_attach_to_applied_archive_without_second_compaction_event() {
         generate_compaction_artifact(provider, vec![messages[0].clone()], None, true, None, None)
             .await
             .unwrap();
+    let result = snap_decisions::prepare(result, "auto".into(), 1).await;
     let mut manager = CompactionManager::new().with_budget(1_000_000);
     manager.seed_restored_messages_with(&messages);
     manager.pending_cutoff = 1;
@@ -120,14 +151,19 @@ async fn decisions_attach_to_applied_archive_without_second_compaction_event() {
             tokio::task::yield_now().await;
         }
         assert!(manager.take_compaction_event().is_some());
-        let first_request = serde_json::to_vec(&manager.messages_for_api_with(&messages)[0]).unwrap();
+        let first_request =
+            serde_json::to_vec(&manager.messages_for_api_with(&messages)[0]).unwrap();
         while manager.has_pending_decisions() {
             manager.check_and_apply_compaction_with(&messages);
             tokio::task::yield_now().await;
         }
         assert!(manager.take_compaction_event().is_none());
-        let next_request = serde_json::to_vec(&manager.messages_for_api_with(&messages)[0]).unwrap();
-        assert_eq!(first_request, next_request, "sent summary must remain byte-identical after decisions arrive");
+        let next_request =
+            serde_json::to_vec(&manager.messages_for_api_with(&messages)[0]).unwrap();
+        assert_eq!(
+            first_request, next_request,
+            "sent summary must remain byte-identical after decisions arrive"
+        );
     })
     .await
     .unwrap();
@@ -138,16 +174,38 @@ async fn decisions_attach_to_applied_archive_without_second_compaction_event() {
         .snapcompact
         .as_ref()
         .unwrap();
-    assert!(archive.decisions.contains("Never force push"));
+    assert!(archive.deferred_decisions.contains("Never force push"));
     assert!(manager.take_decisions_updated());
     assert!(!manager.take_decisions_updated());
+    let next = summary_generation::generate_compaction_artifact_indexed(
+        Arc::new(SlowDecisionsProvider {
+            model: Mutex::new("claude-opus-5-5".into()),
+            calls: Arc::new(Mutex::new(Vec::new())),
+            delay: Duration::ZERO,
+        }),
+        vec![messages[1].clone()],
+        messages[..2].to_vec(),
+        manager.active_summary.clone(),
+        true,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let next = next.snapcompact.unwrap();
+    assert!(
+        next.decisions.contains("Never force push"),
+        "index={:?}; decisions={:?}",
+        next.index,
+        next.decisions
+    );
     assert!(
         manager
             .persisted_state()
             .unwrap()
             .snapcompact
             .unwrap()
-            .decisions
+            .deferred_decisions
             .contains("Never force push")
     );
 }
@@ -173,14 +231,13 @@ async fn snapcompact_applies_before_thirty_second_decisions_llm() {
     let started = Instant::now();
     manager.pending_cutoff = 1;
     let input = vec![messages[0].clone()];
-    manager.pending_task = Some(tokio::spawn(generate_compaction_artifact(
-        provider.clone(),
-        input,
-        None,
-        true,
-        None,
-        None,
-    )));
+    let background_provider = provider.clone();
+    manager.pending_task = Some(tokio::spawn(async move {
+        let result =
+            generate_compaction_artifact(background_provider, input, None, true, None, None)
+                .await?;
+        Ok(snap_decisions::prepare(result, "auto".into(), 1).await)
+    }));
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             manager.check_and_apply_compaction_with(&messages);

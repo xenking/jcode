@@ -82,6 +82,7 @@ const REPORT_SLACK_TOKENS: u64 = 4_096;
 struct CompactionResult {
     completed_at: Instant,
     decisions_job: Option<snap_decisions::DecisionsJob>,
+    pending_decisions: Option<snap_decisions::PendingDecisions>,
     summary_text: String,
     openai_encrypted_content: Option<String>,
     snapcompact: Option<jcode_message_types::SnapcompactArchive>,
@@ -187,7 +188,7 @@ pub struct CompactionManager {
 
     /// Background compaction task handle
     pending_task: Option<JoinHandle<Result<CompactionResult>>>,
-    pending_decisions: Option<snap_decisions::PendingDecisions>,
+    pending_decisions: Vec<snap_decisions::PendingDecisions>,
     decisions_updated: bool,
 
     /// User-facing trigger label for the currently running background compaction.
@@ -422,7 +423,7 @@ impl CompactionManager {
             active_summary: None,
             active_chars: ActiveCharEstimate::default(),
             pending_task: None,
-            pending_decisions: None,
+            pending_decisions: Vec::new(),
             decisions_updated: false,
             pending_trigger: None,
             pending_cutoff: 0,
@@ -632,7 +633,7 @@ impl CompactionManager {
         total_messages: usize,
     ) {
         self.pending_task = None;
-        self.pending_decisions = None;
+        self.pending_decisions.clear();
         self.decisions_updated = false;
         self.pending_trigger = None;
         self.pending_cutoff = 0;
@@ -1640,6 +1641,8 @@ impl CompactionManager {
         });
 
         // Spawn background task that notifies via Bus when done
+        let decisions_model = self.compaction_config.snapcompact_decisions_model.clone();
+        let decisions_count = self.compacted_count.saturating_add(cutoff);
         self.pending_task = crate::runtime_activity::spawn(async move {
             let start = std::time::Instant::now();
             let result = generate_effective_compaction_artifact(
@@ -1654,6 +1657,12 @@ impl CompactionManager {
                 token_budget,
             )
             .await;
+            let result = match result {
+                Ok(result) => {
+                    Ok(snap_decisions::prepare(result, decisions_model, decisions_count).await)
+                }
+                Err(error) => Err(error),
+            };
             let duration_ms = start.elapsed().as_millis() as u64;
             crate::logging::info(&format!(
                 "Compaction ({}) {} in {:.2}s ({} messages processed)",
@@ -1875,6 +1884,8 @@ impl CompactionManager {
         self.pending_trigger = Some("manual".to_string());
         self.last_compaction_error = None;
 
+        let decisions_model = self.compaction_config.snapcompact_decisions_model.clone();
+        let decisions_count = self.compacted_count.saturating_add(cutoff);
         self.pending_task = crate::runtime_activity::spawn(async move {
             let start = std::time::Instant::now();
             let result = generate_effective_compaction_artifact(
@@ -1889,6 +1900,12 @@ impl CompactionManager {
                 token_budget,
             )
             .await;
+            let result = match result {
+                Ok(result) => {
+                    Ok(snap_decisions::prepare(result, decisions_model, decisions_count).await)
+                }
+                Err(error) => Err(error),
+            };
             let duration_ms = start.elapsed().as_millis() as u64;
             crate::logging::info(&format!(
                 "Compaction {} in {:.2}s ({} messages processed)",
@@ -1979,7 +1996,7 @@ impl CompactionManager {
                 let remaining_chars = self
                     .active_message_chars_with(all_messages)
                     .saturating_sub(compacted_chars);
-                let summary = Summary {
+                let mut summary = Summary {
                     text: result.summary_text,
                     openai_encrypted_content: result.openai_encrypted_content.map(Into::into),
                     snapcompact: result.snapcompact,
@@ -2005,14 +2022,25 @@ impl CompactionManager {
                 self.active_chars.set_exact(remaining_chars);
 
                 // Store summary
+                if let (Some(previous), Some(next)) = (
+                    self.active_summary
+                        .as_ref()
+                        .and_then(|s| s.snapcompact.as_ref()),
+                    summary.snapcompact.as_mut(),
+                ) {
+                    let late =
+                        snap_decisions::retag_supported(&previous.deferred_decisions, &next.index);
+                    for line in late.lines() {
+                        if !next.decisions.lines().any(|existing| existing == line) {
+                            next.decisions.push_str(line);
+                            next.decisions.push('\n');
+                        }
+                    }
+                }
                 self.active_summary = Some(summary);
-                self.pending_decisions = result.decisions_job.map(|job| {
-                    snap_decisions::start(
-                        job,
-                        self.compaction_config.snapcompact_decisions_model.clone(),
-                        self.compacted_count,
-                    )
-                });
+                if let Some(pending) = result.pending_decisions {
+                    self.pending_decisions.push(pending);
+                }
                 self.discard_oversized_openai_native_compaction();
                 self.observed_input_tokens = None;
                 self.observed_estimate_tokens = None;

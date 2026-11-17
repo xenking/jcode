@@ -34,6 +34,7 @@ fn image_identity_survives_shake_and_snapcompact_persistence() -> anyhow::Result
                 pages: vec!["cG5n".into()],
                 index: String::new(),
                 decisions: String::new(),
+                deferred_decisions: String::new(),
                 page_ranges: Vec::new(),
                 render_key: String::new(),
             }),

@@ -169,6 +169,7 @@ fn snap_index_reuses_only_unchanged_prefix_pages_and_rechecks_suffix() {
         pages: vec![],
         render_key: String::new(),
         decisions: String::new(),
+        deferred_decisions: String::new(),
         page_ranges: vec![(0, prefix.len())],
         index: legacy::build_snapcompact_index(&messages, 0, prefix, &prior_ranges),
     };
@@ -230,6 +231,7 @@ fn snap_index_reuses_only_unchanged_prefix_pages_and_rechecks_suffix() {
         pages: vec![],
         render_key: String::new(),
         decisions: String::new(),
+        deferred_decisions: String::new(),
         page_ranges: vec![(0, 9)],
         index: legacy::build_snapcompact_index(
             &messages,
