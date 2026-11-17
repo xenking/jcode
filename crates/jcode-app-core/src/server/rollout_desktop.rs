@@ -617,20 +617,40 @@ fn process_has_user_environment_with(
         .iter()
         .find_map(|entry| entry.strip_prefix("HOME="))
         .with_context(|| format!("cannot determine process {pid} home directory"))?;
-    let runtime_value = ["JCODE_RUNTIME_DIR", "XDG_RUNTIME_DIR", "TMPDIR"]
-        .into_iter()
-        .find_map(|key| {
-            let prefix = format!("{key}=");
-            environment
-                .iter()
-                .find_map(|entry| entry.strip_prefix(&prefix))
-        });
+    let explicit = |key: &str| {
+        let prefix = format!("{key}=");
+        environment
+            .iter()
+            .find_map(|entry| entry.strip_prefix(&prefix))
+            .map(PathBuf::from)
+    };
+    // Same rule as `storage::runtime_dir`: explicit overrides first; on macOS
+    // the per-user Darwin temp dir, never `$TMPDIR` (jcode points TMPDIR of
+    // the processes it spawns, including a Desktop started by a rollout, at a
+    // scratch dir, and that Desktop still serves the user's runtime).
+    let runtime_value = explicit("JCODE_RUNTIME_DIR")
+        .or_else(|| explicit("XDG_RUNTIME_DIR"))
+        .or_else(|| default_runtime_dir(|| explicit("TMPDIR")));
     if !same_path(Path::new(process_home), home) {
         return Ok(false);
     }
     let runtime_value = runtime_value
         .with_context(|| format!("cannot determine process {pid} runtime directory"))?;
-    Ok(same_path(Path::new(runtime_value), runtime))
+    Ok(same_path(&runtime_value, runtime))
+}
+
+/// The runtime dir a process without explicit overrides uses: on macOS the
+/// user's Darwin temp dir (the same for every process of the user), elsewhere
+/// its `$TMPDIR`.
+fn default_runtime_dir(tmpdir: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        user_runtime_dir().ok().or_else(tmpdir)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        tmpdir()
+    }
 }
 
 #[cfg(unix)]
@@ -816,6 +836,28 @@ fn executable_of(pid: u32) -> Option<PathBuf> {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_scratch_tmpdir_does_not_hide_a_user_runtime_process() {
+        // A rollout-launched Desktop inherits the daemon's TMPDIR (a scratch
+        // dir) yet serves the user's runtime, like every jcode process does.
+        let runtime = user_runtime_dir().unwrap();
+        let home = Path::new("/Users/u");
+        let env = |_| {
+            Some(vec![
+                "HOME=/Users/u".to_string(),
+                "TMPDIR=/Users/u/.jcode/scratch".to_string(),
+            ])
+        };
+        assert!(process_has_user_environment_with(77, home, &runtime, env, |_| true).unwrap());
+        let pinned = |_| {
+            Some(vec![
+                "HOME=/Users/u".to_string(),
+                "JCODE_RUNTIME_DIR=/elsewhere".to_string(),
+            ])
+        };
+        assert!(!process_has_user_environment_with(77, home, &runtime, pinned, |_| true).unwrap());
+    }
 
     #[test]
     fn a_process_that_exited_mid_census_owns_nothing() {
