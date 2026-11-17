@@ -1,8 +1,6 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
-mod ambient_info;
 mod clipboard_helper;
-use ambient_info::gather_ambient_info_inner;
 mod git_line_cache;
 #[cfg_attr(test, allow(dead_code))]
 mod git_watch;

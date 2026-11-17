@@ -57,6 +57,7 @@ mod cached_size_tests {
             covers_up_to_turn: 3,
             original_turn_count: 7,
             compacted_count: 2,
+            snapcompact: None,
         })
     }
 

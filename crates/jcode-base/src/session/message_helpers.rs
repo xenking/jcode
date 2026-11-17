@@ -1,18 +1,5 @@
 use super::*;
 
-pub(super) fn stored_messages_to_messages(messages: &[StoredMessage]) -> Vec<Message> {
-    messages.iter().map(StoredMessage::to_message).collect()
-}
-
-pub(super) fn message_has_tool_image(content: &[ContentBlock]) -> bool {
-    content
-        .iter()
-        .any(|block| matches!(block, ContentBlock::Image { .. }))
-        && content
-            .iter()
-            .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
-}
-
 pub(super) fn is_internal_system_reminder_message(message: &StoredMessage) -> bool {
     message
         .content

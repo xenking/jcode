@@ -85,6 +85,8 @@ impl Provider for TitleProvider {
         Ok((
             self.answer.to_string(),
             jcode_provider_core::SimpleCompletionUsage {
+                requested_model: None,
+                resolved_model: None,
                 input_tokens: None,
                 output_tokens: None,
                 cache_read_input_tokens: None,
