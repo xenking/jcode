@@ -14,6 +14,8 @@ pub(super) async fn extract_snapcompact_decisions(provider: &dyn Provider, index
     let prompt = format!(
         "Extract decisions with their reasons, user rules and preferences from the following indexed excerpts. Preserve negations, uncertainty, and who said what. Do not infer missing reasons. Each line must begin with the exact [message N, page P | role] tag from its supporting excerpt. Do not invent facts. Output only supported lines.\n\n{input}"
     );
+    let started = Instant::now();
+    crate::logging::info(&format!("[TIMING] snapcompact_decisions_start: model={}, input_chars={}", provider.model(), input.chars().count()));
     let result = tokio::time::timeout(
         Duration::from_secs(60),
         provider.complete_simple_with_usage(
@@ -22,6 +24,7 @@ pub(super) async fn extract_snapcompact_decisions(provider: &dyn Provider, index
         ),
     )
     .await;
+    crate::logging::info(&format!("[TIMING] snapcompact_decisions: model={}, elapsed_ms={}, success={}", provider.model(), started.elapsed().as_millis(), matches!(&result, Ok(Ok(_)))));
     let Ok(Ok((response, usage))) = result else {
         return String::new();
     };
@@ -144,7 +147,7 @@ pub(super) async fn generate_effective_compaction_artifact(
     Ok(result)
 }
 
-async fn generate_compaction_artifact_indexed(
+pub(super) async fn generate_compaction_artifact_indexed(
     provider: Arc<dyn Provider>,
     mut messages: Vec<Message>,
     archive_history: Vec<Message>,
@@ -259,8 +262,12 @@ async fn generate_compaction_artifact_indexed(
                     is_summary: *is_summary,
                 }
             });
+            let phase = Instant::now();
             let preparation = prepare_messages_with(&input, previous, usize::MAX)?;
+            crate::logging::info(&format!("[TIMING] snapcompact_prepare: elapsed_ms={}, source_chars={}", phase.elapsed().as_millis(), preparation.bounded_text.chars().count()));
+            let phase = Instant::now();
             let result = compact(&preparation, &options)?;
+            crate::logging::info(&format!("[TIMING] snapcompact_render: elapsed_ms={}, pages={}, new_pages={}", phase.elapsed().as_millis(), result.frames.len(), result.frames.len()));
             let ranges = if result.truncated_chars == 0 {
                 result
                     .frames
@@ -274,7 +281,9 @@ async fn generate_compaction_artifact_indexed(
             } else {
                 Vec::new()
             };
+            let phase = Instant::now();
             let index = build_snapcompact_index(&archive_history, 0, &result.source_text, &ranges);
+            crate::logging::info(&format!("[TIMING] snapcompact_index: elapsed_ms={}, index_chars={}, history_messages={}", phase.elapsed().as_millis(), index.chars().count(), archive_history.len()));
             Ok::<_, String>((result, ranges, index))
         })
         .await;
@@ -285,11 +294,13 @@ async fn generate_compaction_artifact_indexed(
                     .map(|r| (r.source_start, r.source_end))
                     .collect();
                 let decisions = extract_snapcompact_decisions(&*provider, &index).await;
+                let phase = Instant::now();
                 let pages = result
                     .frames
                     .into_iter()
                     .map(|frame| base64::engine::general_purpose::STANDARD.encode(frame.bytes))
                     .collect();
+                crate::logging::info(&format!("[TIMING] snapcompact_base64: elapsed_ms={}", phase.elapsed().as_millis()));
                 snapcompact_summary = Some(result.summary);
                 snapcompact = Some(jcode_message_types::SnapcompactArchive {
                     source: result.source_text,

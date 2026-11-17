@@ -3,6 +3,34 @@ use crate::provider::{EventStream, Provider};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Opt-in measurement against an explicitly supplied COPY, never the live session store.
+#[tokio::test]
+#[ignore = "requires JCODE_SNAPCOMPACT_FIXTURE pointing to a copied session"]
+async fn snapcompact_copied_session_pipeline_benchmark() {
+    crate::logging::init();
+    let fixture = std::env::var("JCODE_SNAPCOMPACT_FIXTURE").unwrap();
+    let session: crate::session::Session =
+        serde_json::from_slice(&std::fs::read(fixture).unwrap()).unwrap();
+    let messages: Vec<_> = session.messages.iter().map(|m| m.to_message()).collect();
+    let state = session.compaction.unwrap();
+    let count = state.compacted_count;
+    let existing = Some(Summary {
+        text: state.summary_text.clone(),
+        openai_encrypted_content: None,
+        snapcompact: state.snapcompact.clone(),
+        covers_up_to_turn: state.covers_up_to_turn,
+        original_turn_count: state.original_turn_count,
+    });
+    let now = Instant::now();
+    let result = summary_generation::generate_compaction_artifact_indexed(
+        Arc::new(VisionSummaryProvider), messages[count..].to_vec(), messages.clone(),
+        existing, true, None, None,
+    ).await.unwrap();
+    let archive = result.snapcompact.unwrap();
+    eprintln!("SNAPCOMPACT_BENCH wall_ms={} new_messages={} history_messages={} source_chars={} pages={} index_chars={} png_base64_bytes={}", now.elapsed().as_millis(), messages.len()-count, messages.len(), archive.source.chars().count(), archive.pages.len(), archive.index.chars().count(), archive.pages.iter().map(String::len).sum::<usize>());
+}
+
+
 struct MockSummaryProvider;
 
 #[async_trait::async_trait]
@@ -2033,7 +2061,7 @@ impl Provider for VisionSummaryProvider {
         "vision-test"
     }
     fn model(&self) -> String {
-        "claude-opus-4-6".to_string()
+        "claude-opus-5-5".to_string()
     }
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self)
@@ -2074,7 +2102,7 @@ impl Provider for CountingVisionProvider {
         "vision-test"
     }
     fn model(&self) -> String {
-        "claude-opus-4-6".to_string()
+        "claude-opus-5-5".to_string()
     }
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self {
