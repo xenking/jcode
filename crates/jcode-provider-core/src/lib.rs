@@ -249,6 +249,21 @@ pub trait Provider: Send + Sync {
         self.set_model(&selection.routed_model_spec())
     }
 
+    /// Select a background route without changing this provider or process-wide
+    /// activation state. Orchestrators must fork the selected execution runtime,
+    /// not perform a foreground profile switch on a cloned orchestrator.
+    fn fork_for_background_route(&self, selection: &RouteSelection) -> Result<Arc<dyn Provider>> {
+        let fork = self.fork();
+        if std::ptr::eq(
+            self as *const Self as *const (),
+            Arc::as_ptr(&fork) as *const (),
+        ) {
+            anyhow::bail!("Provider does not offer an independent background fork");
+        }
+        fork.set_route_selection(selection)?;
+        Ok(fork)
+    }
+
     /// List available models for this provider.
     fn available_models(&self) -> Vec<&'static str> {
         vec![]

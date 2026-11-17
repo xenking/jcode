@@ -66,12 +66,16 @@ pub(super) fn choose_provider(
     if configured.eq_ignore_ascii_case("off") || configured.to_ascii_lowercase().contains("opus") {
         return None;
     }
-    let fork = provider.fork();
-    if Arc::ptr_eq(&fork, &provider) {
-        return None;
-    }
+    let current = |model: &str| jcode_provider_core::RouteSelection {
+        model: model.into(),
+        runtime_key: jcode_provider_core::RuntimeKey::Current,
+        api_method: "current".into(),
+        provider_label: provider.name().into(),
+        detail: String::new(),
+    };
     if !configured.is_empty() && !configured.eq_ignore_ascii_case("auto") {
-        if fork.set_model(configured).is_ok() && !fork.model().to_ascii_lowercase().contains("opus")
+        if let Ok(fork) = provider.fork_for_background_route(&current(configured))
+            && !fork.model().to_ascii_lowercase().contains("opus")
         {
             return Some(fork);
         }
@@ -96,12 +100,9 @@ pub(super) fn choose_provider(
         )
     });
     for route in routes {
-        if fork
-            .set_route_selection(&jcode_provider_core::RouteSelection::from_model_route(
-                &route,
-            ))
-            .is_ok()
-            && cheap_family(&fork.model())
+        if let Ok(fork) = provider.fork_for_background_route(
+            &jcode_provider_core::RouteSelection::from_model_route(&route),
+        ) && cheap_family(&fork.model())
         {
             return Some(fork);
         }
@@ -111,7 +112,9 @@ pub(super) fn choose_provider(
         .into_iter()
         .filter(|model| cheap_family(model))
     {
-        if fork.set_model(&model).is_ok() && cheap_family(&fork.model()) {
+        if let Ok(fork) = provider.fork_for_background_route(&current(&model))
+            && cheap_family(&fork.model())
+        {
             return Some(fork);
         }
     }

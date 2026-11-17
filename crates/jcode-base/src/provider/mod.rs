@@ -5,6 +5,7 @@ pub mod activation;
 pub mod anthropic;
 pub mod antigravity;
 pub mod auto_reset_trigger;
+mod background_routes;
 pub mod bedrock;
 mod catalog_memo;
 mod catalog_refresh;
@@ -2248,6 +2249,10 @@ impl Provider for MultiProvider {
             // Unknown model - try current provider.
             self.set_model_on_provider(self.active_provider(), model)
         }
+    }
+
+    fn fork_for_background_route(&self, selection: &RouteSelection) -> Result<Arc<dyn Provider>> {
+        self.fork_background_runtime(selection)
     }
 
     fn set_route_selection(&self, selection: &RouteSelection) -> Result<()> {
