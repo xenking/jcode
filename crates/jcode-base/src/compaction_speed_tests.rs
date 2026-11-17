@@ -101,7 +101,7 @@ async fn decisions_attach_to_applied_archive_without_second_compaction_event() {
     let provider: Arc<dyn Provider> = Arc::new(SlowDecisionsProvider {
         model: Mutex::new("claude-opus-5-5".into()),
         calls: Arc::new(Mutex::new(Vec::new())),
-        delay: Duration::ZERO,
+        delay: Duration::from_millis(300),
     });
     let messages: Vec<_> = (0..13)
         .map(|_| Message::user("Never force push because history must remain intact."))
@@ -120,11 +120,14 @@ async fn decisions_attach_to_applied_archive_without_second_compaction_event() {
             tokio::task::yield_now().await;
         }
         assert!(manager.take_compaction_event().is_some());
+        let first_request = serde_json::to_vec(&manager.messages_for_api_with(&messages)[0]).unwrap();
         while manager.has_pending_decisions() {
             manager.check_and_apply_compaction_with(&messages);
             tokio::task::yield_now().await;
         }
         assert!(manager.take_compaction_event().is_none());
+        let next_request = serde_json::to_vec(&manager.messages_for_api_with(&messages)[0]).unwrap();
+        assert_eq!(first_request, next_request, "sent summary must remain byte-identical after decisions arrive");
     })
     .await
     .unwrap();
