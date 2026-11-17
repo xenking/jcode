@@ -34,6 +34,9 @@ fn http_status_hint(status: u16, api_base: &str, model: &str) -> &'static str {
         402 => {
             "Hint: this is a billing limit, not a network problem. The key's balance or token allowance is used up: raise the limit or top up in the provider's dashboard, use another key, or switch to another provider with /model."
         }
+        429 => {
+            "Hint: the provider rate limit or usage allowance was reached. Check the reset time or switch to another model or provider with /model."
+        }
         // Local servers (Ollama, LM Studio) answer 404 for a model that is
         // not installed or loaded, which their own hint already explains.
         404 if !is_local => {
@@ -142,6 +145,13 @@ pub(super) async fn run_stream_with_retries(
                 let saw_output = attempt_guard.finish().await;
                 // Full anyhow chain ({:#}) so a `.context(...)`-wrapped transport
                 // cause (e.g. TLS BadRecordMac) is visible to the classifier.
+                let server_delay = jcode_provider_core::retry_after::retry_after_from_error(&e);
+                if jcode_provider_core::retry_after::retry_after_exceeds_max(&e)
+                    || server_delay.is_some_and(|delay| delay > retry_backoff_cap)
+                {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
                 if retryable_stream_failure(&e) && attempt + 1 < max_retries {
                     if saw_output {
                         // Partial output already reached the consumer; tell it
@@ -163,7 +173,7 @@ pub(super) async fn run_stream_with_retries(
                             e
                         ));
                     }
-                    next_retry_delay = jcode_provider_core::retry_after::retry_after_from_error(&e);
+                    next_retry_delay = server_delay;
                     last_error = Some(e);
                     continue;
                 }
@@ -492,6 +502,8 @@ fn parsed_http_status(error_str: &str) -> Option<u16> {
 fn is_exhausted_quota_error(error_str: &str) -> bool {
     [
         "freeusagelimiterror",
+        "gousagelimiterror",
+        "opencode go usage limit",
         "free usage limit",
         "insufficient_quota",
         "insufficient quota",
@@ -536,6 +548,14 @@ fn is_retryable_error(error_str: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opencode_go_exhausted_five_hour_allowance_does_not_retry() {
+        let error = r#"openai-compatible chat request failed
+  status: 429 too many requests
+  response: {"type":"error","error":{"type":"gousagelimiterror","message":"opencode go usage limit reached (5-hour, resets in 3h 40m)."}}"#;
+        assert!(!is_retryable_error(error));
+    }
 
     #[test]
     fn local_endpoint_hint_mentions_ollama_actions() {
