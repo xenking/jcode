@@ -645,11 +645,6 @@ fn executable_of(pid: u32) -> Option<PathBuf> {
     Some(PathBuf::from(String::from_utf8(buffer).ok()?))
 }
 
-#[cfg(all(test, not(target_os = "macos")))]
-fn executable_of(pid: u32) -> Option<PathBuf> {
-    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
-}
-
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
