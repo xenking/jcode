@@ -145,24 +145,17 @@ pub(super) fn pick_failover_target(agent: &Agent, error: &str) -> Option<Failove
 }
 
 /// Effective worker model allowlist for a turn whose caller has no spawn-time
-/// knowledge (server wake, followup poke): the configured allowlist applies
-/// whenever the session already runs a model inside it, which is true of every
-/// spawned worker. A user-started session on any other model stays
-/// unrestricted.
+/// knowledge (server wake, followup poke, planned task).
+///
+/// The session's persisted `is_swarm_worker` flag decides, not its current
+/// model: a worker that predates the allowlist (or that ran on a model since
+/// removed from it) must still be unable to fail over outside the list. A
+/// user-started session is never restricted.
 pub(super) fn effective_worker_allowed_models(agent: &Agent) -> Vec<String> {
-    let configured = crate::config::config().agents.spawn_allowed_models.clone();
-    if configured.is_empty() {
+    if !agent.is_swarm_worker() {
         return Vec::new();
     }
-    let agents = crate::config::AgentsConfig {
-        spawn_allowed_models: configured.clone(),
-        ..Default::default()
-    };
-    if agents.worker_may_use_model(&agent.provider_model()) {
-        configured
-    } else {
-        Vec::new()
-    }
+    crate::config::config().agents.spawn_allowed_models.clone()
 }
 
 /// Whether an account-router target is inside the worker model allowlist.
@@ -1806,5 +1799,76 @@ mod tests {
         // Context overflows are handled by compaction, not account switching.
         assert!(!error_wants_failover("context length exceeded"));
         assert!(!error_wants_failover("stream closed unexpectedly"));
+    }
+
+    #[test]
+    fn worker_allowlist_follows_the_worker_flag_not_the_current_model() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[agents]\nspawn_allowed_models = [\"claude:claude-opus-5-5\"]\n",
+        )
+        .unwrap();
+        crate::config::Config::invalidate_cache();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let provider: Arc<dyn Provider> = Arc::new(TwoAccountProvider {
+                    on_openai: Arc::new(StdMutex::new(false)),
+                    calls: Arc::new(StdMutex::new(Vec::new())),
+                });
+                let mut session = crate::session::Session::create_with_id(
+                    "session_worker_outside_allowlist".into(),
+                    None,
+                    None,
+                );
+                // A worker spawned before this allowlist existed still runs on
+                // fable. Its server-initiated turns must stay inside the list
+                // instead of turning into an unrestricted session.
+                session.model = Some("claude-fable-5".into());
+                session.is_swarm_worker = true;
+                let worker = Agent::new_with_session(
+                    Arc::clone(&provider),
+                    crate::tool::Registry::new(Arc::clone(&provider)).await,
+                    session,
+                    None,
+                );
+                let mut user_session = crate::session::Session::create_with_id(
+                    "session_user_outside_allowlist".into(),
+                    None,
+                    None,
+                );
+                user_session.model = Some("claude-fable-5".into());
+                let user = Agent::new_with_session(
+                    Arc::clone(&provider),
+                    crate::tool::Registry::new(Arc::clone(&provider)).await,
+                    user_session,
+                    None,
+                );
+
+                let worker_allowed = super::effective_worker_allowed_models(&worker);
+                let user_allowed = super::effective_worker_allowed_models(&user);
+
+                match prev_home {
+                    Some(value) => crate::env::set_var("JCODE_HOME", value),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+                crate::config::Config::invalidate_cache();
+
+                assert_eq!(
+                    worker_allowed,
+                    vec!["claude:claude-opus-5-5".to_string()],
+                    "a worker stays inside the allowlist even when it currently runs outside it"
+                );
+                assert!(
+                    user_allowed.is_empty(),
+                    "a user-started session is never restricted: {user_allowed:?}"
+                );
+            });
     }
 }

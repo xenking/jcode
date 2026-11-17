@@ -89,6 +89,12 @@ impl Agent {
         self.session.save_prepared()
     }
 
+    /// Whether this session was created as a swarm worker. Persisted with the
+    /// session, so a resumed or pre-existing worker is still recognized.
+    pub(crate) fn is_swarm_worker(&self) -> bool {
+        self.session.is_swarm_worker
+    }
+
     pub(crate) fn has_worker_effort_cap(&self) -> bool {
         self.session.is_swarm_worker
             && worker_effort_cap(

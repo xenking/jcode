@@ -51,7 +51,10 @@ three places a worker model can change:
 
 An empty list keeps the legacy behaviour (`swarm_model` plus its configured
 fallbacks are trusted). A user-started session is never restricted: only
-spawned workers are.
+spawned workers are, and the decision uses the session's persisted
+`is_swarm_worker` flag rather than its current model, so a worker that predates
+the list (or runs on a model since removed from it) still cannot fail over
+outside it.
 
 ## Route prefixes
 
