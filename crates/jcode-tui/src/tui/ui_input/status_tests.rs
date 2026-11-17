@@ -16,27 +16,11 @@ fn overscroll_window_percentages_use_shared_usage_wording() {
         error: None,
     };
     let line = overscroll_multi_usage_windows(&[("Claude", account)]).unwrap();
-    let expected = crate::tui::info_widget::render_inline_limit_bar(
-        73,
-        0,
-        crate::config::config().display.usage_display_used(),
-    )
-    .iter()
-    .map(|span| span.content.as_ref())
-    .collect::<String>();
-    assert!(line.contains(expected.trim()), "{line:?} != {expected:?}");
+    assert_eq!(line, "\u{ec82} 27%");
 }
 
 #[test]
 fn overscroll_local_window_uses_shared_usage_wording() {
-    let expected = crate::tui::info_widget::render_inline_limit_bar(
-        73,
-        0,
-        crate::config::config().display.usage_display_used(),
-    )
-    .iter()
-    .map(|span| span.content.as_ref())
-    .collect::<String>();
     use crate::tui::info_widget::{AuthMethod, InfoWidgetData, UsageInfo, UsageProvider};
     let data = InfoWidgetData {
         auth_method: AuthMethod::OpenAIOAuth,
@@ -50,7 +34,7 @@ fn overscroll_local_window_uses_shared_usage_wording() {
         ..Default::default()
     };
     let local = overscroll_usage_windows(&data).unwrap();
-    assert!(local.contains(expected.trim()), "{local:?} != {expected:?}");
+    assert_eq!(local, "\u{ec81} 27%");
 }
 
 #[test]
@@ -74,11 +58,49 @@ fn overscroll_multi_provider_windows_ignore_unknown_values() {
     assert_eq!(
         overscroll_multi_usage_windows(&accounts),
         Some(format!(
-            "Claude 7d {} · Codex 7d {}",
+            "\u{ec82} {} · \u{ec81} {}",
             overscroll_usage_percentage(27),
             overscroll_usage_percentage(95)
         ))
     );
+}
+
+#[test]
+fn status_usage_colors_and_reset_visibility() {
+    let facts = OverscrollFacts {
+        machine: None,
+        dir: None,
+        branch: None,
+        git: None,
+        context: Some((50, 100)),
+        cache: None,
+        account_remaining: None,
+        account_windows: Some("\u{ec82} 49% 6d 80% 10h · \u{ec81} 50% 12m".into()),
+        auth: None,
+        provider: None,
+        model: Some("Opus".into()),
+        effort: None,
+    };
+    for width in [119, 120, 200] {
+        let (spans, fits) = overscroll_fit_facts(&facts, width);
+        assert!(fits);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text.contains("6d"), width >= 120, "{text}");
+        assert_eq!(text.contains("10h"), width >= 120, "{text}");
+        assert_eq!(text.contains("12m"), width >= 120, "{text}");
+        for (value, color) in [
+            ("49%", rgb(140, 140, 150)),
+            ("50%", rgb(255, 200, 100)),
+            ("80%", rgb(255, 100, 100)),
+        ] {
+            assert!(
+                spans
+                    .iter()
+                    .any(|s| s.content == value && s.style.fg == Some(color)),
+                "{text}: {value}"
+            );
+        }
+    }
 }
 
 fn background_row(
@@ -346,22 +368,18 @@ fn overscroll_context_shows_small_bar_and_counts_and_compacts_when_narrow() {
         model: Some("Opus".into()),
         effort: None,
     };
-    for width in [16, 40, 200] {
+    for width in [20, 40, 200] {
         let (spans, fits) = overscroll_fit_facts(&facts, width);
         let text: String = spans.iter().map(|span| span.content.as_ref()).collect();
         assert!(fits, "{width}: {text}");
         assert!(text.contains("29%"), "{width}: {text}");
-        if width >= 40 {
-            assert!(text.contains("74k/256k ▰▱▱▱ 29% used"), "{width}: {text}");
-        } else {
-            assert!(!text.contains("74k"), "{width}: {text}");
-            assert!(!text.contains('▰') && !text.contains('▱'));
-        }
+        assert!(text.contains("󰍛 29%"), "{width}: {text}");
+        assert!(!text.contains("74k") && !text.contains('▰') && !text.contains('▱'));
     }
     for (used, limit, expected, color) in [
-        (0, 0, "0%", rgb(100, 200, 100)),
-        (50, 100, "50%", rgb(100, 200, 100)),
-        (80, 100, "80%", rgb(255, 200, 100)),
+        (0, 0, "0%", rgb(140, 140, 150)),
+        (50, 100, "50%", rgb(255, 200, 100)),
+        (80, 100, "80%", rgb(255, 100, 100)),
         (200, 100, "100%", rgb(255, 100, 100)),
     ] {
         let span = overscroll_context_percentage(used, limit);
@@ -372,11 +390,11 @@ fn overscroll_context_shows_small_bar_and_counts_and_compacts_when_narrow() {
 
 #[test]
 fn overscroll_context_uses_the_shared_usage_palette() {
-    for used in [0, 69, 70, 89, 90, 100] {
+    for used in [0, 49, 50, 79, 80, 100] {
         let span = overscroll_context_percentage(used, 100);
         assert_eq!(
             span.style.fg,
-            Some(crate::tui::info_widget::usage_limit_color(100 - used as u8)),
+            Some(overscroll_usage_color(used as u8)),
             "{used}% used"
         );
     }
@@ -398,7 +416,7 @@ fn overscroll_window_labels_show_reported_usage_without_inventing_windows() {
         }),
         ..Default::default()
     };
-    let expected = format!("7-day {}", overscroll_usage_percentage(94));
+    let expected = format!("\u{ec81} {}", overscroll_usage_percentage(94));
     assert_eq!(overscroll_usage_windows(&data), Some(expected.clone()));
     let line = preview_overscroll_line(&data, 160);
     let text: String = line
@@ -413,7 +431,7 @@ fn overscroll_window_labels_show_reported_usage_without_inventing_windows() {
         .iter()
         .map(|span| span.content.as_ref())
         .collect();
-    assert!(!text.contains(&expected), "{text}");
+    assert!(text.contains(&expected), "{text}");
 }
 
 #[test]
@@ -1057,12 +1075,12 @@ fn cache_info(remaining_secs: u64) -> crate::tui::CacheTtlInfo {
 fn the_status_line_counts_the_prompt_cache_down() {
     let warm = cache_info(47 * 60 + 12);
     let spans = overscroll_cache_spans(&warm).expect("warm cache has a countdown");
-    assert_eq!(spans[0].content, "cache 48m");
+    assert_eq!(spans[0].content, "󰆼 48m");
     assert_eq!(spans[0].style.fg, Some(rgb(140, 140, 150)), "warm is quiet");
 
     let expiring = cache_info(2 * 60);
     let spans = overscroll_cache_spans(&expiring).unwrap();
-    assert_eq!(spans[0].content, "cache 2m");
+    assert_eq!(spans[0].content, "󰆼 2m");
     assert_eq!(
         spans[0].style.fg,
         Some(rgb(255, 193, 7)),
@@ -1072,12 +1090,12 @@ fn the_status_line_counts_the_prompt_cache_down() {
     let mut estimate = cache_info(47 * 60);
     estimate.is_estimate = true;
     let spans = overscroll_cache_spans(&estimate).unwrap();
-    assert_eq!(spans[0].content, "cache ~47m", "estimates are marked");
+    assert_eq!(spans[0].content, "󰆼 ~47m", "estimates are marked");
 
     let mut cold = cache_info(0);
     cold.cold_for_secs = 600;
     let spans = overscroll_cache_spans(&cold).unwrap();
-    assert_eq!(spans[0].content, "cache cold");
+    assert_eq!(spans[0].content, "󰆼 0s");
     assert_eq!(spans[0].style.fg, Some(rgb(100, 100, 110)), "cold is dim");
 }
 

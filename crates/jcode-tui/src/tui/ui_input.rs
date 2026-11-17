@@ -1056,7 +1056,7 @@ pub(crate) fn overscroll_cache_spans(
     info: &crate::tui::CacheTtlInfo,
 ) -> Option<Vec<Span<'static>>> {
     let text = if info.is_cold {
-        "cache cold".to_string()
+        "󰆼 0s".to_string()
     } else {
         let remaining = info.remaining_secs;
         let span = if remaining >= 60 {
@@ -1065,7 +1065,7 @@ pub(crate) fn overscroll_cache_spans(
             format!("{remaining}s")
         };
         let tilde = if info.is_estimate { "~" } else { "" };
-        format!("cache {tilde}{span}")
+        format!("󰆼 {tilde}{span}")
     };
     let ink = if info.is_cold {
         rgb(100, 100, 110)
@@ -1271,6 +1271,7 @@ const OVERSCROLL_LADDER: &[fn(&mut OverscrollLevels)] = &[
 fn overscroll_fact_spans(
     facts: &OverscrollFacts,
     levels: OverscrollLevels,
+    show_resets: bool,
 ) -> Vec<Vec<Span<'static>>> {
     let muted = Style::default().fg(rgb(140, 140, 150));
     let mut out: Vec<Vec<Span<'static>>> = Vec::new();
@@ -1333,28 +1334,10 @@ fn overscroll_fact_spans(
     }
 
     if let Some((used, limit)) = facts.context {
-        let mut spans = Vec::new();
-        if levels.context == 0 {
-            spans.push(Span::styled(
-                format!(
-                    "{}/{} ",
-                    overscroll_format_tokens(used),
-                    overscroll_format_tokens(limit)
-                ),
-                muted,
-            ));
-        }
-        if levels.context == 0 && levels.context_bar == 0 {
-            let pct = ((used as f64 / limit.max(1) as f64).clamp(0.0, 1.0) * 100.0).round() as u8;
-            spans.extend(crate::tui::info_widget::render_inline_limit_bar(
-                100 - pct,
-                4,
-                true,
-            ));
-        } else {
-            spans.push(overscroll_context_percentage(used, limit));
-        }
-        out.push(spans);
+        out.push(vec![
+            Span::styled("󰍛 ", muted),
+            overscroll_context_percentage(used, limit),
+        ]);
     }
 
     if levels.cache == 0
@@ -1364,35 +1347,39 @@ fn overscroll_fact_spans(
         out.push(spans);
     }
 
-    if levels.auth == 0
-        && let Some((label, color)) = facts.auth
-    {
-        out.push(vec![Span::styled(
-            label.to_string(),
-            Style::default().fg(color),
-        )]);
-    }
-
-    if levels.provider == 0
-        && let Some(provider) = &facts.provider
-    {
-        let mut group = vec![Span::styled(provider.clone(), muted)];
-        if levels.account_windows == 0
-            && let Some(windows) = &facts.account_windows
-        {
-            group.push(Span::styled(format!(" {windows}"), muted));
-        }
-        if let Some(remaining) = facts.account_remaining {
-            let cells = if levels.account_bar == 0 { 4 } else { 0 };
-            if cells > 0 {
-                group.push(Span::raw(" "));
+    if levels.provider == 0 && levels.account_windows == 0 {
+        if let Some(windows) = &facts.account_windows {
+            let mut group = Vec::new();
+            for (i, word) in windows
+                .split_whitespace()
+                .filter(|word| {
+                    show_resets
+                        || !word
+                            .strip_suffix(['d', 'h', 'm'])
+                            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+                })
+                .enumerate()
+            {
+                if i > 0 {
+                    group.push(Span::raw(" "));
+                }
+                let color = word
+                    .strip_suffix('%')
+                    .and_then(|s| s.parse::<u8>().ok())
+                    .map(overscroll_usage_color)
+                    .unwrap_or(rgb(140, 140, 150));
+                group.push(Span::styled(word.to_owned(), Style::default().fg(color)));
             }
-            group.extend(crate::tui::info_widget::render_inline_limit_bar(
-                remaining, cells, false,
-            ));
+            out.push(group);
+        } else if let (Some(provider), Some(remaining)) = (&facts.provider, facts.account_remaining)
+        {
+            out.push(vec![
+                Span::styled(format!("{} ", overscroll_provider_glyph(provider)), muted),
+                overscroll_percent(100 - remaining),
+            ]);
         }
-        out.push(group);
     }
+    let _ = facts.auth;
 
     if let Some(model) = &facts.model {
         let mut group = vec![Span::styled(
@@ -1420,7 +1407,7 @@ fn overscroll_fit_facts(facts: &OverscrollFacts, max_width: usize) -> (Vec<Span<
     use unicode_width::UnicodeWidthStr;
     let render = |levels: OverscrollLevels| {
         let mut out: Vec<Span<'static>> = Vec::new();
-        for group in overscroll_fact_spans(facts, levels) {
+        for group in overscroll_fact_spans(facts, levels, max_width >= 120) {
             if !out.is_empty() {
                 out.push(Span::raw(" "));
             }
@@ -1718,36 +1705,57 @@ fn overscroll_usage_windows(data: &crate::tui::info_widget::InfoWidgetData) -> O
     let parts: Vec<String> = windows
         .into_iter()
         .filter_map(|(label, ratio, reset)| {
-            let label = label.as_deref()?;
+            label.as_deref()?;
             if !ratio.is_finite() {
                 return None;
             }
             let reset = reset
                 .as_deref()
-                .map(crate::usage::format_reset_time)
+                .and_then(overscroll_short_reset)
                 .map(|value| format!(" {value}"))
                 .unwrap_or_default();
             let used = (ratio.clamp(0., 1.) * 100.).round() as u8;
-            Some(format!(
-                "{label} {}{reset}",
-                overscroll_usage_percentage(used)
-            ))
+            Some(format!("{}{reset}", overscroll_usage_percentage(used)))
         })
         .collect();
-    (!parts.is_empty()).then(|| parts.join(" "))
+    (!parts.is_empty()).then(|| {
+        format!(
+            "{} {}",
+            overscroll_provider_glyph(match info.provider {
+                crate::tui::info_widget::UsageProvider::Anthropic => "Claude",
+                crate::tui::info_widget::UsageProvider::OpenAI => "Codex",
+                _ => "",
+            }),
+            parts.join(" ")
+        )
+    })
 }
 
 fn overscroll_usage_percentage(used: u8) -> String {
-    crate::tui::info_widget::render_inline_limit_bar(
-        100u8.saturating_sub(used),
-        0,
-        crate::config::config().display.usage_display_used(),
-    )
-    .iter()
-    .map(|span| span.content.as_ref())
-    .collect::<String>()
-    .trim()
-    .to_owned()
+    format!("{used}%")
+}
+
+fn overscroll_provider_glyph(provider: &str) -> &'static str {
+    match provider.to_ascii_lowercase().as_str() {
+        "claude" | "anthropic" => "\u{ec82}",
+        "codex" | "openai" => "\u{ec81}",
+        _ => "󰚩",
+    }
+}
+
+fn overscroll_short_reset(at: &str) -> Option<String> {
+    let reset = chrono::DateTime::parse_from_rfc3339(at).ok()?;
+    let seconds = reset
+        .signed_duration_since(chrono::Utc::now())
+        .num_seconds()
+        .max(0);
+    Some(if seconds >= 86_400 {
+        format!("{}d", seconds / 86_400)
+    } else if seconds >= 3600 {
+        format!("{}h", seconds / 3600)
+    } else {
+        format!("{}m", (seconds + 59) / 60)
+    })
 }
 
 fn overscroll_multi_usage_windows(
@@ -1769,26 +1777,30 @@ fn overscroll_multi_usage_windows(
                     let ratio =
                         ratio.filter(|ratio| ratio.is_finite() && (0.0..=1.0).contains(ratio))?;
                     let used = (ratio * 100.0).round() as u8;
-                    Some(format!(
-                        "{} {}",
-                        label.as_deref()?,
-                        overscroll_usage_percentage(used)
-                    ))
+                    label.as_deref()?;
+                    Some(overscroll_usage_percentage(used))
                 })
                 .collect();
             let reset = (parts.len() == 1)
                 .then_some(account.resets_at.as_deref())
                 .flatten()
-                .map(crate::usage::format_reset_time)
+                .and_then(overscroll_short_reset)
                 .map(|reset| format!(" {reset}"))
                 .unwrap_or_default();
-            (!parts.is_empty()).then(|| format!("{provider} {}{reset}", parts.join(" ")))
+            (!parts.is_empty()).then(|| {
+                format!(
+                    "{} {}{reset}",
+                    overscroll_provider_glyph(provider),
+                    parts.join(" ")
+                )
+            })
         })
         .collect();
     (!providers.is_empty()).then(|| providers.join(" · "))
 }
 
 /// Format context counts compactly while retaining useful precision.
+#[cfg(test)]
 fn overscroll_format_tokens(tokens: usize) -> String {
     if tokens >= 1_000_000 {
         format!("{:.1}M", tokens as f64 / 1_000_000.0)
@@ -1807,8 +1819,24 @@ fn overscroll_context_percentage(used: usize, limit: usize) -> Span<'static> {
     let ratio = (used as f64 / limit as f64).clamp(0.0, 1.0);
     let pct = (ratio * 100.0).round() as u16;
 
-    let fill_color = crate::tui::info_widget::usage_limit_color(100u8.saturating_sub(pct as u8));
-    Span::styled(format!("{}%", pct), Style::default().fg(fill_color).bold())
+    overscroll_percent(pct as u8)
+}
+
+fn overscroll_usage_color(used: u8) -> Color {
+    if used >= 80 {
+        rgb(255, 100, 100)
+    } else if used >= 50 {
+        rgb(255, 200, 100)
+    } else {
+        rgb(140, 140, 150)
+    }
+}
+
+fn overscroll_percent(used: u8) -> Span<'static> {
+    Span::styled(
+        format!("{used}%"),
+        Style::default().fg(overscroll_usage_color(used)),
+    )
 }
 
 /// The idle resume composer uses the live input wrapper, but never reads the

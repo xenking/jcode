@@ -430,6 +430,33 @@ fn overscroll_line_row(state: &TestState, width: u16) -> String {
 }
 
 #[test]
+fn overscroll_line_compact_percentages_at_120_and_200_columns() {
+    let mut state = overscroll_line_state();
+    state.info_widget_data.auth_method = info_widget::AuthMethod::OpenAIOAuth;
+    state.info_widget_data.usage_info = Some(info_widget::UsageInfo {
+        provider: info_widget::UsageProvider::OpenAI,
+        available: true,
+        primary_limit_label: Some("5h".into()),
+        secondary_limit_label: Some("7-day".into()),
+        five_hour: 0.27,
+        seven_day: 0.88,
+        ..Default::default()
+    });
+    for width in [120, 200] {
+        let row = overscroll_line_row(&state, width);
+        eprintln!("{width}: {row}");
+        for forbidden in ["used", "left", "OAuth", "7-day", "74k/256k", "▰", "▱"] {
+            assert!(!row.contains(forbidden), "{width}: {row}");
+        }
+        assert!(
+            row.contains("29%") && row.contains("27%") && row.contains("88%"),
+            "{width}: {row}"
+        );
+        assert!(row.contains('\u{ec81}'), "{width}: {row}");
+    }
+}
+
+#[test]
 fn overscroll_line_orders_dir_git_context_then_model_on_the_right() {
     let row = overscroll_line_row(&overscroll_line_state(), 200);
     let dir = row.find("~/jcode").expect("dir shown");
@@ -445,11 +472,8 @@ fn overscroll_line_orders_dir_git_context_then_model_on_the_right() {
         dir < branch && branch < git && git < context && context < model,
         "{row}"
     );
-    assert!(
-        row.contains("74k/256k ▰▱▱▱ 29% used"),
-        "token counts and small context bar: {row}"
-    );
-    assert!(row.contains("OAuth") && row.contains("OpenAI"), "{row}");
+    assert!(row.contains("󰍛 29%"), "compact context: {row}");
+    assert!(!row.contains("OAuth") && !row.contains("OpenAI"), "{row}");
     assert!(
         !row.contains("(overscroll"),
         "no countdown on the pinned line: {row}"
@@ -502,8 +526,8 @@ fn overscroll_line_shows_remaining_account_allowance_after_provider() {
         ..Default::default()
     });
     let row = overscroll_line_row(&state, 200);
-    assert!(row.contains("OpenAI ▰▰▱▱ 40% left"), "{row}");
-    assert!(row.contains("74k/256k ▰▱▱▱ 29% used"), "{row}");
+    assert!(row.contains("\u{ec81} 60%"), "{row}");
+    assert!(row.contains("󰍛 29%"), "{row}");
     state
         .info_widget_data
         .usage_info
@@ -511,7 +535,7 @@ fn overscroll_line_shows_remaining_account_allowance_after_provider() {
         .unwrap()
         .available = false;
     let row = overscroll_line_row(&state, 200);
-    assert!(row.contains("OpenAI"), "{row}");
+    assert!(!row.contains('\u{ec81}'), "{row}");
     assert!(!row.contains("% left"), "{row}");
     for width in [20, 40, 63, 80] {
         let row = overscroll_line_row(&state, width);
