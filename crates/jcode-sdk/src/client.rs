@@ -2022,6 +2022,7 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | AskRequest { session_id, .. }
         | PermissionRequest { session_id, .. }
         | SessionStatus { session_id, .. }
+        | SwarmStatus { session_id, .. }
         | SessionRecovery { session_id, .. }
         | ModelInfo { session_id, .. }
         | RuntimeInfo { session_id, .. }

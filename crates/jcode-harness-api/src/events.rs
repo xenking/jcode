@@ -45,6 +45,15 @@ pub enum ApiEvent {
         workers: std::collections::HashMap<String, WorkerMeta>,
     },
 
+    /// Authoritative live swarm snapshot for the attached session. Unlike a
+    /// session-list reply, this is pushed on every lifecycle transition.
+    SwarmStatus {
+        session_id: String,
+        /// Daemon snapshot order, retained through bridge and client queues.
+        updated_at_unix_ms: u64,
+        members: Vec<SwarmMemberInfo>,
+    },
+
     /// Reply to `CreateSession` / `AttachSession`.
     Attached { session: SessionInfo },
 
@@ -692,6 +701,18 @@ pub struct SessionInfo {
     pub archived: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at_ms: Option<u64>,
+}
+
+/// Live ownership and lifecycle facts. Transcript metadata cannot establish
+/// whether a worker is still running.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SwarmMemberInfo {
+    pub session_id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_label: Option<String>,
 }
 
 /// What a session's own record says about it: the model and effort it runs

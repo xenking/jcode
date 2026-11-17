@@ -132,7 +132,7 @@ struct Meta {
     #[serde(default)]
     reasoning_effort: Option<String>,
     #[serde(default)]
-    status: Option<String>,
+    status: Option<jcode_session_types::SessionStatus>,
 }
 
 #[derive(Deserialize)]
@@ -338,14 +338,14 @@ fn read_checked(home: &Path, session_id: &str) -> std::io::Result<Option<WorkerM
     let mut closed = snapshot
         .meta
         .status
-        .as_deref()
-        .is_some_and(|status| status.eq_ignore_ascii_case("closed"));
+        .as_ref()
+        .is_some_and(session_is_terminal);
     for line in &journal {
         meta.model = clean(line.meta.model.clone()).or(meta.model);
         meta.provider = clean(line.meta.provider_key.clone()).or(meta.provider);
         meta.effort = clean(line.meta.reasoning_effort.clone()).or(meta.effort);
-        if let Some(status) = line.meta.status.as_deref() {
-            closed = status.eq_ignore_ascii_case("closed");
+        if let Some(status) = line.meta.status.as_ref() {
+            closed = session_is_terminal(status);
         }
         for message in &line.append_messages {
             totals.add(message);
@@ -376,6 +376,15 @@ fn read_checked(home: &Path, session_id: &str) -> std::io::Result<Option<WorkerM
     // appended as messages arrive, so its mtime moves with the turn.
     meta.last_activity_ms = stamp_millis(home, session_id);
     Ok(Some(meta))
+}
+
+fn session_is_terminal(status: &jcode_session_types::SessionStatus) -> bool {
+    matches!(
+        status,
+        jcode_session_types::SessionStatus::Closed
+            | jcode_session_types::SessionStatus::Crashed { .. }
+            | jcode_session_types::SessionStatus::Error { .. }
+    )
 }
 
 fn clean(value: Option<String>) -> Option<String> {

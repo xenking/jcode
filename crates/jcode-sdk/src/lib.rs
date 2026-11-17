@@ -208,8 +208,8 @@ pub use jcode_harness_api::{
     RenderedImage, RenderedImageAnchor, RenderedImageSource, ResponseStats, SessionInfo,
     SessionSearchHighlight, SessionSearchHit, SessionSearchResults, SessionSearchRole,
     SessionToolDefinition, SidePanelPage, SidePanelPageFormat, SidePanelPageSource,
-    SidePanelSnapshot, TextMatch, ToolConfiguration, TurnStopReason, WorkerMeta, WorkerPhase,
-    api_socket_path,
+    SidePanelSnapshot, SwarmMemberInfo, TextMatch, ToolConfiguration, TurnStopReason, WorkerMeta,
+    WorkerPhase, api_socket_path,
 };
 pub use jcode_harness_api::{
     ModelUsage, RuntimeCommand, RuntimeCommandOutput, compare_model_usage,

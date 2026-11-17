@@ -49,6 +49,14 @@ export interface SessionInfo {
   archived_at_ms?: number;
 }
 
+/** Live lifecycle fact from one daemon publication. */
+export interface SwarmMemberInfo {
+  session_id: string;
+  status: string;
+  parent_session_id?: string;
+  agent_label?: string;
+}
+
 /** What a session's own record says: model, effort, spend and live phase. */
 export interface WorkerMeta {
   model?: string;
@@ -363,6 +371,7 @@ export type ApiEvent =
   | { ev: "runtime_command_result"; session_id: string; command: RuntimeCommand; data: unknown; message: string }
   | { ev: "error"; code: ErrorCode; message: string }
   | { ev: "sessions"; sessions: SessionInfo[]; workers?: Record<string, WorkerMeta> }
+  | { ev: "swarm_status"; session_id: string; updated_at_unix_ms: number; members: SwarmMemberInfo[] }
   | { ev: "attached"; session: SessionInfo }
   | { ev: "session_forked"; session: SessionInfo }
   | { ev: "history"; session_id: string; messages: HistoryMessage[]; images?: RenderedImage[] }
@@ -587,6 +596,7 @@ export const KNOWN_EVENT_KINDS = [
   "ok",
   "error",
   "sessions",
+  "swarm_status",
   "attached",
   "session_forked",
   "history",

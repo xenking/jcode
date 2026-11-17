@@ -801,10 +801,17 @@ async fn swarm_status_immediate_broadcasts_preserve_snapshot_order() {
     a.await.expect("broadcast task");
 
     let mut statuses = Vec::new();
+    let mut timestamps = Vec::new();
     while let Ok(event) = worker_rx.try_recv() {
         if let ServerEvent::SwarmStatus { members } = event {
             assert_eq!(members.len(), 1);
             assert_eq!(members[0].session_id, "worker");
+            timestamps.push(
+                members[0]
+                    .runtime
+                    .snapshot_at_unix_ms
+                    .expect("publication stamp"),
+            );
             statuses.push(members[0].status.clone());
         }
     }
@@ -813,6 +820,7 @@ async fn swarm_status_immediate_broadcasts_preserve_snapshot_order() {
         vec!["ready".to_string(), "running".to_string()],
         "snapshot publication must not invert newer and older statuses"
     );
+    assert!(timestamps.windows(2).all(|pair| pair[0] < pair[1]));
 }
 
 /// Restored (persisted) plan participants with dead channels starve live

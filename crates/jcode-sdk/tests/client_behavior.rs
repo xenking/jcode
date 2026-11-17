@@ -24,6 +24,8 @@ mod protocol_disconnect;
 mod protocol_partial_disconnect;
 #[path = "client_behavior/search_sessions.rs"]
 mod search_sessions;
+#[path = "client_behavior/swarm_status.rs"]
+mod swarm_status;
 
 /// A socket-pair transport, so the test drives the client over the same code
 /// path a real connection uses.

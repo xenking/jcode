@@ -30,6 +30,22 @@ fn write(home: &Path, session_id: &str, snapshot: &str, journal: &str) {
 const SILENT: &str = r#"{"id":"s"}"#;
 
 #[test]
+fn structured_session_status_does_not_discard_the_worker_identity() {
+    let home = home("structured-status");
+    write(
+        &home,
+        "session_piglet_1_a",
+        r#"{"model":"deepseek-v4.1-flash","provider_key":"opencode-go","status":"Active"}"#,
+        "{\"meta\":{\"status\":{\"Crashed\":{\"error\":\"interrupted\"}}}}\n",
+    );
+    let meta = worker_meta(&home, "session_piglet_1_a")
+        .expect("persisted model survives a structured status");
+    assert_eq!(meta.model.as_deref(), Some("deepseek-v4.1-flash"));
+    assert_eq!(meta.provider.as_deref(), Some("opencode-go"));
+    std::fs::remove_dir_all(home).ok();
+}
+
+#[test]
 fn model_effort_and_spend_come_from_the_record() {
     let home = home("spend");
     write(

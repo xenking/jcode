@@ -798,6 +798,17 @@ async fn broadcast_swarm_status_now(
     if targets.is_empty() {
         return;
     }
+    // Allocate under the publication lock: delayed bridge/SDK consumers can
+    // reject older snapshots even when two transitions happen in one millis.
+    static LAST_SNAPSHOT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    LAST_SNAPSHOT_MS.fetch_max(now_ms, std::sync::atomic::Ordering::Relaxed);
+    let snapshot_at_unix_ms = LAST_SNAPSHOT_MS
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .saturating_add(1);
     let broadcast_terminal_retention = swarm_status_broadcast_terminal_retention();
     let members_list: Vec<crate::protocol::SwarmMemberStatus> = session_ids
         .iter()
@@ -832,6 +843,7 @@ async fn broadcast_swarm_status_now(
                         todo_progress: m.todo_progress,
                         todo_items: m.todo_items.clone(),
                         runtime: crate::protocol::SwarmMemberRuntime {
+                            snapshot_at_unix_ms: Some(snapshot_at_unix_ms),
                             live_status: super::live_status::snapshot(&m.session_id),
                             wait_reason: wait.as_ref().map(|(reason, _)| reason.clone()).or_else(
                                 || {

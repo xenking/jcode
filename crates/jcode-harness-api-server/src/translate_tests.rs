@@ -1,6 +1,46 @@
 use super::*;
 
 #[test]
+fn legacy_swarm_statuses_have_distinct_receive_order_stamps() {
+    let mut state = state_with_session();
+    let stamps = ["ready", "running"].map(|status| {
+        let frames = state.legacy_event_to_api(&json!({
+            "type":"swarm_status",
+            "members":[{"session_id":"worker", "status":status}]
+        }));
+        let ApiEvent::SwarmStatus {
+            updated_at_unix_ms, ..
+        } = frames[0].event
+        else {
+            panic!("missing swarm status")
+        };
+        updated_at_unix_ms
+    });
+    assert!(stamps[0] < stamps[1]);
+}
+
+#[test]
+fn swarm_spawn_ready_then_running_is_forwarded_without_dropping_either_snapshot() {
+    let mut state = state_with_session();
+    for (status, timestamp) in [("ready", 1_000), ("running", 1_065)] {
+        let frames = state.legacy_event_to_api(&json!({
+            "type": "swarm_status",
+            "members": [{
+                "session_id": "gorilla", "status": status,
+                "report_back_to_session_id": "s1", "task_label": "worker",
+                "runtime": {"snapshot_at_unix_ms": timestamp}
+            }]
+        }));
+        assert_eq!(frames.len(), 1, "must forward {status}, not drop it");
+        let event = serde_json::to_value(&frames[0].event).unwrap();
+        assert_eq!(event["ev"], "swarm_status");
+        assert_eq!(event["session_id"], "s1");
+        assert_eq!(event["members"][0]["status"], status);
+        assert_eq!(event["updated_at_unix_ms"], timestamp);
+    }
+}
+
+#[test]
 fn malformed_image_metadata_is_not_a_successful_empty_history() {
     for field in ["images", "messages"] {
         let mut state = state_with_session();

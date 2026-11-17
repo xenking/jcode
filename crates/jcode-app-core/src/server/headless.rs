@@ -51,6 +51,7 @@ pub(super) async fn create_headless_session(
     effort_override: Option<String>,
     mcp_pool: Option<Arc<crate::mcp::SharedMcpPool>>,
     report_back_to_session_id: Option<String>,
+    has_initial_turn: bool,
     memory_scope: HeadlessMemoryScope,
 ) -> Result<String> {
     let _runtime_activity = crate::runtime_activity::global().try_enter()?;
@@ -281,7 +282,9 @@ pub(super) async fn create_headless_session(
                 working_dir: working_dir.clone(),
                 swarm_id: swarm_id.clone(),
                 swarm_enabled,
-                status: "ready".to_string(),
+                // A spawned worker owns a pending first turn already. Publishing
+                // ready here falsely completes coordinator awaits before launch.
+                status: if has_initial_turn { "running" } else { "ready" }.to_string(),
                 detail: None,
                 task_label: None,
                 friendly_name: Some(friendly_name.clone()),

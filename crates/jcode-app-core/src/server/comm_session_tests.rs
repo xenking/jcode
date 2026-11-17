@@ -120,6 +120,56 @@ async fn test_agent_with_working_dir(session_id: &str, working_dir: &str) -> Arc
 }
 
 #[tokio::test]
+async fn headless_spawn_is_running_before_its_first_turn() {
+    assert_headless_initial_status(true, "running").await;
+}
+
+#[tokio::test]
+async fn headless_session_without_a_pending_turn_is_ready() {
+    assert_headless_initial_status(false, "ready").await;
+}
+
+async fn assert_headless_initial_status(has_initial_turn: bool, expected: &str) {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    crate::env::set_var("JCODE_HOME", home.path());
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
+    let members = Arc::new(RwLock::new(HashMap::new()));
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let result = super::create_headless_session(
+        &sessions,
+        &Arc::new(RwLock::new(String::new())),
+        &provider,
+        "create_session:",
+        &members,
+        &Arc::new(RwLock::new(HashMap::new())),
+        &Arc::new(RwLock::new(HashMap::new())),
+        &Arc::new(RwLock::new(HashMap::new())),
+        &Arc::new(RwLock::new(HashMap::new())),
+        false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some("owner".into()),
+        has_initial_turn,
+        crate::server::headless::HeadlessMemoryScope::IsolatedTest,
+    )
+    .await;
+    crate::env::remove_var("JCODE_HOME");
+    let result: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+    let members = members.read().await;
+    let worker = &members[result["session_id"].as_str().unwrap()];
+    assert_eq!(
+        worker.status, expected,
+        "only a pending first turn makes a fresh worker running"
+    );
+}
+
+#[tokio::test]
 async fn resolve_spawn_working_dir_prefers_explicit_then_spawner_agent_dir() {
     let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
         HashMap::new(),

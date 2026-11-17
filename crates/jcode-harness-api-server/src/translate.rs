@@ -3253,6 +3253,48 @@ impl BridgeState {
                     },
                 )]
             }
+            "swarm_status" => {
+                let members = match Self::daemon_list::<Value>(event, "members") {
+                    Ok(members) => members,
+                    Err(message) => {
+                        return vec![ServerFrame::event(ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message,
+                        })];
+                    }
+                };
+                let updated_at_unix_ms = members
+                    .iter()
+                    .filter_map(|member| member["runtime"]["snapshot_at_unix_ms"].as_u64())
+                    .max()
+                    .unwrap_or_else(|| {
+                        // Older daemons have no publication stamp. Preserve
+                        // their receive order, including same-millisecond
+                        // transitions, rather than creating equal LWW keys.
+                        static LAST_MS: std::sync::atomic::AtomicU64 =
+                            std::sync::atomic::AtomicU64::new(0);
+                        LAST_MS.fetch_max(Self::now_ms(), std::sync::atomic::Ordering::Relaxed);
+                        LAST_MS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+                    });
+                let members = members
+                    .into_iter()
+                    .filter_map(|member| {
+                        Some(jcode_harness_api::SwarmMemberInfo {
+                            session_id: member["session_id"].as_str()?.to_string(),
+                            status: member["status"].as_str()?.to_string(),
+                            parent_session_id: member["report_back_to_session_id"]
+                                .as_str()
+                                .map(str::to_owned),
+                            agent_label: member["task_label"].as_str().map(str::to_owned),
+                        })
+                    })
+                    .collect();
+                vec![ServerFrame::event(ApiEvent::SwarmStatus {
+                    session_id: session(self),
+                    updated_at_unix_ms,
+                    members,
+                })]
+            }
             // Everything else on the legacy stream is not part of the stable
             // API surface yet; drop it.
             _ => vec![],

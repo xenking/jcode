@@ -725,6 +725,10 @@ pub struct SwarmMemberStatus {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SwarmMemberRuntime {
+    /// Daemon publication order as monotonic Unix milliseconds. This versions
+    /// the whole swarm snapshot, not a transcript or a liveness heartbeat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_at_unix_ms: Option<u64>,
     /// Current turn's event-derived status. Absent for older producers and
     /// sessions that have not emitted live telemetry. Never session totals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -774,7 +778,8 @@ pub struct SwarmMemberRuntime {
 
 impl SwarmMemberRuntime {
     fn is_empty(&self) -> bool {
-        self.live_status.is_none()
+        self.snapshot_at_unix_ms.is_none()
+            && self.live_status.is_none()
             && self.wait_reason.is_none()
             && self.todo_blocked_reason.is_none()
             && self.wait_age_secs.is_none()
