@@ -303,6 +303,56 @@ struct IsolatedReloadRecoveryEnv {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_fetches_complete_background_output_through_runtime() {
+    use crate::server::runtime::ServerRuntime;
+    let _lock = crate::storage::lock_test_env();
+    let home = IsolatedReloadRecoveryEnv::new();
+    let daemon_socket = home._runtime.path().join("bg-daemon.sock");
+    let api_socket = home._runtime.path().join("bg-api.sock");
+    let server = crate::server::Server::new_with_paths(
+        Arc::new(CompleteImmediatelyProvider),
+        daemon_socket.clone(),
+        home._runtime.path().join("bg-debug.sock"),
+    );
+    let runtime = ServerRuntime::from_server(&server);
+    let daemon =
+        runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&daemon_socket).unwrap());
+    let mut bridge = tokio::spawn(jcode_harness_api_server::run_bridge(
+        api_socket.clone(),
+        daemon_socket,
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !api_socket.exists() {
+            if bridge.is_finished() {
+                panic!("bridge exited: {:?}", (&mut bridge).await);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::task::spawn_blocking(move || {
+        let client = jcode_sdk::JcodeClient::connect(jcode_sdk::ConnectOptions {
+            socket_path: Some(api_socket), client_name: "desktop-bg-test".into(),
+            request_timeout: Some(Duration::from_secs(5)), ensure_runtime: false, ..Default::default()
+        }).unwrap();
+        let session = client.create_session(None).unwrap();
+        let manager = crate::background::global();
+        let status = serde_json::json!({"task_id":"bgtest123", "tool_name":"bash", "session_id":session.session_id, "status":"completed", "exit_code":0, "error":null, "started_at":"2026-01-01T00:00:00Z", "completed_at":null, "duration_secs":1.0});
+        std::fs::write(manager.status_path_for("bgtest123"), status.to_string()).unwrap();
+        let output = format!("{}last complete line", "line\n".repeat(300));
+        std::fs::write(manager.output_path_for("bgtest123"), &output).unwrap();
+        let result = client.runtime_command(&session.session_id, jcode_sdk::api::RuntimeCommand::BackgroundOutput, vec!["bgtest123".into()]).unwrap();
+        assert_eq!(result.data["output"], output);
+        assert!(client.runtime_command(&session.session_id, jcode_sdk::api::RuntimeCommand::BackgroundOutput, vec!["../other".into()]).is_err());
+    }).await.unwrap();
+    bridge.abort();
+    runtime.shutdown().await;
+    daemon.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desktop_queued_skill_crosses_real_bridge_and_daemon_into_journal() {
     use crate::server::runtime::ServerRuntime;
     let _lock = crate::storage::lock_test_env();

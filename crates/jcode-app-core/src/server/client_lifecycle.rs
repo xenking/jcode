@@ -2601,6 +2601,9 @@ pub(super) async fn handle_client(
                         return super::runtime_ssh_host::execute(&mut guard, &command, &args).await;
                     }
                     let parsed: jcode_harness_api::RuntimeCommand = serde_json::from_value(serde_json::json!(command))?;
+                    if parsed == jcode_harness_api::RuntimeCommand::BackgroundOutput {
+                        return super::runtime_commands::background_output(crate::background::global(), &client_session_id, &args).await;
+                    }
                     if parsed == jcode_harness_api::RuntimeCommand::ServerReload {
                         if !args.is_empty() { anyhow::bail!("Server reload accepts no arguments. Forced reload is intentionally not exposed."); }
                         send_client_event_best_effort(&client_event_tx, ServerEvent::RuntimeCommandResult { id, command: command.clone(),

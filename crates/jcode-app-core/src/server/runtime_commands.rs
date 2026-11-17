@@ -4,6 +4,69 @@ use anyhow::{Result, bail};
 use jcode_harness_api::RuntimeCommand;
 use serde_json::{Value, json};
 
+pub(super) async fn background_output(
+    manager: &crate::background::BackgroundTaskManager,
+    session_id: &str,
+    args: &[String],
+) -> Result<(Value, String)> {
+    let [task_id] = args else {
+        bail!("Expected a task identifier")
+    };
+    if task_id.is_empty()
+        || !task_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        bail!("Invalid task identifier");
+    }
+    let task = manager
+        .status(task_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Background task not found"))?;
+    if task.session_id != session_id {
+        bail!("Background task not found");
+    }
+    let output = manager
+        .output(task_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Background output unavailable"))?;
+    Ok((json!({"task_id": task_id, "output": output}), String::new()))
+}
+
+#[cfg(test)]
+mod background_output_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn full_output_is_scoped_to_the_attached_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager =
+            crate::background::BackgroundTaskManager::with_output_dir(dir.path().to_owned());
+        let status = json!({"task_id":"abc", "tool_name":"bash", "session_id":"owner", "status":"completed", "exit_code":0, "error":null, "started_at":"2026-01-01T00:00:00Z", "completed_at":null, "duration_secs":1.0});
+        tokio::fs::write(manager.status_path_for("abc"), status.to_string())
+            .await
+            .unwrap();
+        let output = format!("{}last line", "line\n".repeat(300));
+        tokio::fs::write(manager.output_path_for("abc"), &output)
+            .await
+            .unwrap();
+        let (result, _) = background_output(&manager, "owner", &["abc".into()])
+            .await
+            .unwrap();
+        assert_eq!(result["output"], output);
+        assert!(
+            background_output(&manager, "other", &["abc".into()])
+                .await
+                .is_err()
+        );
+        assert!(
+            background_output(&manager, "owner", &["../abc".into()])
+                .await
+                .is_err()
+        );
+    }
+}
+
 pub(super) fn boolean_action(
     args: &[String],
     current: bool,
@@ -40,6 +103,9 @@ pub(super) async fn execute(
 ) -> Result<(Value, String)> {
     let config = crate::config::Config::load();
     let data = match command {
+        RuntimeCommand::BackgroundOutput => {
+            bail!("Background output must be handled by the session runtime")
+        }
         RuntimeCommand::Mode => {
             let message = agent.mode_command(&args.join(" "))?;
             return Ok((
