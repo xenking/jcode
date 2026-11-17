@@ -124,30 +124,24 @@ fn short_swarm_dm_is_expandable() {
     assert!(app.toggle_swarm_message_expand(index));
 }
 #[test]
-fn decision_card_is_a_numbered_user_turn_and_click_expands_it() {
+fn decision_card_is_a_numbered_user_turn_and_wraps_without_clicking() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
     app.push_display_message(DisplayMessage::tool(
-        "User answers:\n1. Which? -> B (comment: because)\n2. When? -> Later\n",
+        "User answers:\n1. Which database should we use for the long term project? -> B (comment: because)\n2. When? -> Later\n",
         crate::message::ToolCall { id: "decision".into(), name: "ask".into(),
             input: serde_json::json!({"questions":[
-                {"header":"Choice", "question":"Which?", "options":[{"label":"A"},{"label":"B"}]},
+                {"header":"Choice", "question":"Which database should we use for the long term project?", "options":[{"label":"A"},{"label":"B"}]},
                 {"question":"When?", "options":[{"label":"Now"},{"label":"Later"}]}
             ]}), intent: None, thought_signature: None },
     ));
     assert_eq!(app.display_user_message_count, 1);
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 36)).unwrap();
-    let collapsed = render_and_snap(&app, &mut terminal);
-    assert!(collapsed.contains("Decision") && collapsed.contains("✓ B"), "{collapsed}");
-    assert!(!collapsed.contains("When?"), "{collapsed}");
-    let buffer = terminal.backend().buffer();
-    let (column, row) = (0..buffer.area().height).find_map(|row| {
-        let line = (0..buffer.area().width).map(|col| buffer[(col, row)].symbol()).collect::<String>();
-        line.find("Decision").map(|byte| (unicode_width::UnicodeWidthStr::width(&line[..byte]) as u16, row))
-    }).expect("decision header");
-    assert!(app.try_toggle_decision_expand_at(column, row));
-    let expanded = render_and_snap(&app, &mut terminal);
-    assert!(expanded.contains("Choice") && expanded.contains("because") && expanded.contains("✓ Later"), "{expanded}");
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 36)).unwrap();
+    let frame = render_and_snap(&app, &mut terminal);
+    println!("TUI 40-column decision frame:\n{frame}");
+    assert!(frame.contains("Which database should we use") && frame.contains("long term project?"), "{frame}");
+    assert!(frame.contains("✓ B") && frame.contains("because") && frame.contains("✓ Later") && frame.contains("When?"), "{frame}");
+    assert!(!frame.contains('▸') && !frame.contains("questions answered"), "{frame}");
 }
 
 #[test]
@@ -166,5 +160,5 @@ fn reloaded_decision_keeps_questions_and_user_turn_count() {
     assert_eq!(decision.tool_data.as_ref().unwrap().input["questions"][0]["question"], "Which?");
     let lines = crate::tui::ui::render_tool_message(decision, 90, crate::config::DiffDisplayMode::Off);
     let plain = lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
-    assert!(plain.contains("Decision") && plain.contains("✓ B"), "{plain}");
+    assert!(plain.contains("Decision") && plain.contains("Which?") && plain.contains("✓ B"), "{plain}");
 }

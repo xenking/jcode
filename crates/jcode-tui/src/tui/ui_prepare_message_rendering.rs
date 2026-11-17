@@ -225,9 +225,7 @@ pub(super) fn render_message_into(
                         expandable,
                     ));
                 }
-                if (!msg.is_ask_decision() || msg.title.as_deref() == Some("decision:expanded"))
-                    && let (Some(app), Some(items)) =
-                        (ctx.app, ctx.anchored_images.by_tool.get(&tc.id))
+                if let (Some(app), Some(items)) = (ctx.app, ctx.anchored_images.by_tool.get(&tc.id))
                 {
                     for line in super::super::inline_image_ui::anchored_image_lines(
                         items,

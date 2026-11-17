@@ -2,7 +2,7 @@
 use super::*;
 
 #[test]
-fn answered_ask_is_rendered_as_a_compact_user_decision() {
+fn answered_ask_is_rendered_as_a_full_user_decision() {
     let msg = DisplayMessage::tool(
         "User answers:\n1. Which database? -> Postgres (comment: reliable)\n2. When? -> Now\n",
         crate::message::ToolCall {
@@ -23,12 +23,12 @@ fn answered_ask_is_rendered_as_a_compact_user_decision() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        text.contains("Decision") && text.contains("2 questions answered"),
+        text.contains("Decision") && text.contains("Which database?") && text.contains("When?"),
         "{text}"
     );
     assert!(text.contains("✓ Postgres"), "{text}");
     assert!(
-        !text.contains("questions\":") && !text.contains("When?"),
+        !text.contains("questions\":") && !text.contains("questions answered"),
         "{text}"
     );
 }

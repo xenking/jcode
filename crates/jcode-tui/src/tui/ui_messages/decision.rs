@@ -33,11 +33,7 @@ fn entries(msg: &DisplayMessage) -> Vec<Answer> {
                 .get("question")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Question");
-            let title = q
-                .get("header")
-                .and_then(|v| v.as_str())
-                .filter(|v| !v.trim().is_empty())
-                .unwrap_or(question);
+            let title = question;
             let prefix = format!("{}. {} -> ", i + 1, question);
             let text = result
                 .find(&prefix)
@@ -99,7 +95,16 @@ fn mark_choices(answer: &Answer, answered: bool) -> String {
                         .strip_prefix(label)
                         .is_some_and(|tail| tail.starts_with(" (comment: "))
             }) {
-                format!("✓ {part}")
+                if let Some((label, comment)) = part.split_once(" (comment: ") {
+                    format!(
+                        "✓ {label}\nUser comment: {}",
+                        comment.strip_suffix(')').unwrap_or(comment)
+                    )
+                } else {
+                    format!("✓ {part}")
+                }
+            } else if let Some(other) = part.strip_prefix("Other: ") {
+                format!("User answer: {other}")
             } else {
                 part.to_owned()
             }
@@ -111,44 +116,33 @@ fn mark_choices(answer: &Answer, answered: bool) -> String {
 pub(super) fn render(msg: &DisplayMessage) -> Vec<Line<'static>> {
     let answers = entries(msg);
     let answered = msg.content.starts_with("User answers:") || msg.content.contains(" -> ");
-    let expanded = msg.title.as_deref() == Some("decision:expanded");
     let status = if answered {
-        format!(
-            "{} question{} answered",
-            answers.len(),
-            if answers.len() == 1 { "" } else { "s" }
-        )
+        ""
     } else if msg.content.to_lowercase().contains("declin") {
-        "Declined".into()
+        "Declined"
     } else if msg.content.to_lowercase().contains("timeout") {
-        "Timed out".into()
+        "Timed out"
     } else if msg.content.to_lowercase().contains("cancel") {
-        "Cancelled".into()
+        "Cancelled"
     } else {
-        "No response".into()
+        "No response"
     };
     let style = Style::default().fg(user_text()).bg(user_bg());
     let accent = Style::default().fg(user_color()).bg(user_bg());
     let mut lines = vec![Line::from(vec![
         Span::styled("Decision ", accent.add_modifier(Modifier::BOLD)),
         Span::styled(status, style),
-        Span::styled(if expanded { "  ▾" } else { "  ▸" }, accent),
     ])];
-    if expanded {
-        for answer in &answers {
+    for answer in &answers {
+        for question_line in answer.title.lines() {
             lines.push(Line::from(Span::styled(
-                format!("  {}", answer.title),
+                format!("  {question_line}"),
                 style.add_modifier(Modifier::BOLD),
             )));
-            for part in mark_choices(answer, answered).lines() {
-                lines.push(Line::from(Span::styled(format!("  {part}"), accent)));
-            }
         }
-    } else if let Some(first) = answers.first() {
-        lines.push(Line::from(Span::styled(
-            format!("  {}", mark_choices(first, answered).replace('\n', "  ")),
-            accent,
-        )));
+        for part in mark_choices(answer, answered).lines() {
+            lines.push(Line::from(Span::styled(format!("  {part}"), accent)));
+        }
     }
     lines
 }

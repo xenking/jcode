@@ -290,30 +290,6 @@ impl App {
         true
     }
 
-    pub(super) fn toggle_decision_message_expand(&mut self, msg_idx: usize) -> bool {
-        let Some(message) = self
-            .display_messages
-            .get(msg_idx)
-            .filter(|m| m.is_ask_decision())
-        else {
-            return false;
-        };
-        let expanded = message.title.as_deref() != Some("decision:expanded");
-        let content = message.content.clone();
-        self.replace_display_message_title_and_content(
-            msg_idx,
-            expanded.then(|| "decision:expanded".to_string()),
-            content,
-        )
-    }
-
-    pub(super) fn try_toggle_decision_expand_at(&mut self, column: u16, row: u16) -> bool {
-        let Some(index) = super::super::ui::chat_message_index_from_screen(column, row) else {
-            return false;
-        };
-        self.toggle_decision_message_expand(index)
-    }
-
     /// Toggle the compaction divider under a click. Returns `false` when the
     /// click landed on something else.
     pub(super) fn try_toggle_compaction_expand_at(&mut self, column: u16, row: u16) -> bool {
@@ -1782,12 +1758,6 @@ impl App {
             && self.try_cycle_image_expand_at(mouse.column, mouse.row)
         {
             finish_mouse_event!(false, "cycle_image_expand");
-        }
-
-        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
-            && self.try_toggle_decision_expand_at(mouse.column, mouse.row)
-        {
-            finish_mouse_event!(false, "toggle_decision_expand");
         }
 
         if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
