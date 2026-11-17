@@ -282,6 +282,13 @@ pub async fn inspect_reload_wait_status_for(
     }
     let pid = state.as_ref().map(|state| state.pid).or(last_known_pid);
     match observe_serving_socket(socket_path).await {
+        // No live reload evidence: the reload this client remembers either
+        // finished long ago or was abandoned (its marker aged out or was
+        // removed). The daemon actually serving is then the only truth, and
+        // waiting for a confirmation that can never arrive hangs every client.
+        SocketObservation::Serving(_) if recent_reload_state(max_age).is_none() => {
+            return ReloadWaitStatus::Ready;
+        }
         SocketObservation::Serving(serving) => {
             let Some(id) = reload_id else {
                 return ReloadWaitStatus::Unknown {

@@ -920,6 +920,51 @@ async fn await_reload_handoff_returns_failed_after_marker_transition() {
     }
 }
 
+/// A reload that never finished leaves clients holding its request id (or none)
+/// after the marker is gone. With no live reload evidence, the daemon that is
+/// actually serving is the only truth: waiting for a confirmation that can never
+/// arrive hung every client in "Waiting for reload handoff" indefinitely.
+#[cfg(unix)]
+#[tokio::test]
+async fn live_listener_without_reload_marker_is_ready_even_for_an_abandoned_reload() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+    clear_reload_marker();
+
+    let socket_path = temp.path().join("identity.sock");
+    let (_confirm, reload_id) = tokio::sync::watch::channel(Some("earlier-reload".to_owned()));
+    let listener = identity_listener(&socket_path, reload_id);
+
+    for remembered in [Some("abandoned-reload"), None] {
+        let status = tokio::time::timeout(
+            Duration::from_secs(2),
+            crate::server::inspect_reload_wait_status_for(
+                &socket_path,
+                Duration::from_secs(30),
+                Some(std::process::id()),
+                remembered,
+                None,
+            ),
+        )
+        .await
+        .expect("inspect must not block");
+        assert_eq!(
+            status,
+            ReloadWaitStatus::Ready,
+            "remembered reload {remembered:?} with no marker must attach to the live daemon"
+        );
+    }
+    listener.abort();
+
+    if let Some(prev_runtime) = prev_runtime {
+        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+    } else {
+        crate::env::remove_var("JCODE_RUNTIME_DIR");
+    }
+}
+
 /// An older build can see the shared socket as custom (it resolved the runtime
 /// dir from `$TMPDIR`) and lock only `jcode.sock.daemon.lock`. A newer build
 /// that locked only `jcode-daemon.lock` then started a second daemon on the
