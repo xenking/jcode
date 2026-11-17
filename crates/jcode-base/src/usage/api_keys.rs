@@ -78,8 +78,7 @@ const OPENCODE_USAGE_WINDOWS: [(&str, &str); 3] = [
 /// Parse an OpenCode (Zen / Go) quota payload:
 /// `{"usage":{"rolling":{"status":"ok","percent":23,"resetsAt":"..."}, ...}}`.
 ///
-/// Only windows the service reports as `ok` with a finite percentage become
-/// limits: an unavailable window must not read as a healthy zero.
+/// Unavailable windows must not read as a healthy zero.
 fn opencode_usage_limits(payload: &serde_json::Value) -> Vec<UsageLimit> {
     let Some(usage) = payload.get("usage") else {
         return Vec::new();
@@ -88,7 +87,10 @@ fn opencode_usage_limits(payload: &serde_json::Value) -> Vec<UsageLimit> {
         .iter()
         .filter_map(|(key, label)| {
             let window = usage.get(*key)?;
-            if window.get("status").and_then(|status| status.as_str()) != Some("ok") {
+            if !matches!(
+                window.get("status").and_then(|status| status.as_str()),
+                Some("ok" | "rate-limited")
+            ) {
                 return None;
             }
             let percent = window.get("percent")?.as_f64()? as f32;
@@ -916,6 +918,22 @@ mod tests {
         assert_eq!(limits[0].name, "Rolling window");
         // No windows at all is not a healthy zero.
         assert!(opencode_usage_limits(&serde_json::json!({"usage":{}})).is_empty());
+    }
+
+    #[test]
+    fn opencode_usage_keeps_rate_limited_window() {
+        let payload = serde_json::json!({"usage":{
+            "rolling":{"status":"rate-limited","percent":100,"resetsAt":"2026-11-17T20:16:01.000Z"},
+            "weekly":{"status":"ok","percent":43},
+            "monthly":{"status":"ok","percent":34}
+        }});
+        let limits = opencode_usage_limits(&payload);
+        assert_eq!(limits.len(), 3);
+        assert_eq!(limits[0].usage_percent, 100.0);
+        assert_eq!(
+            limits[0].resets_at.as_deref(),
+            Some("2026-11-17T20:16:01.000Z")
+        );
     }
 
     #[test]
