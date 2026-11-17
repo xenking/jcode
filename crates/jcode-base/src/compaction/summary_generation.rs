@@ -249,6 +249,14 @@ pub(super) async fn generate_compaction_artifact_indexed(
         let previous_decisions = prior_archive
             .map(|a| a.decisions.clone())
             .unwrap_or_default();
+        let index_prior = prior_archive.map(|archive| jcode_message_types::SnapcompactArchive {
+            source: archive.source.clone(),
+            index: archive.index.clone(),
+            page_ranges: archive.page_ranges.clone(),
+            pages: Vec::new(),
+            decisions: String::new(),
+            render_key: String::new(),
+        });
         let cache = prior_archive
             .filter(|a| !a.render_key.is_empty() && a.pages.len() == a.page_ranges.len())
             .map(|a| (a.render_key.clone(), a.page_ranges.clone(), a.pages.clone()));
@@ -311,7 +319,9 @@ pub(super) async fn generate_compaction_artifact_indexed(
                     })
                     .collect::<Vec<_>>();
             let phase = Instant::now();
-            let index = build_snapcompact_index(&archive_history, 0, &result.source_text, &ranges);
+            let index = snap_index::build_snapcompact_index_with_previous(
+                &archive_history, 0, &result.source_text, &ranges, index_prior.as_ref(),
+            );
             crate::logging::info(&format!("[TIMING] snapcompact_index: elapsed_ms={}, index_chars={}, history_messages={}", phase.elapsed().as_millis(), index.chars().count(), archive_history.len()));
             Ok::<_, String>((result, ranges, index))
         })

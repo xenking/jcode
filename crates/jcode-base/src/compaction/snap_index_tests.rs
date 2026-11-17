@@ -364,26 +364,40 @@ fn snap_index_copied_real_session_golden_and_timing() {
     let expected =
         legacy::build_snapcompact_index(&messages, 0, &rendered.source_text, &page_ranges);
     let old_elapsed = started.elapsed();
-    let started = Instant::now();
-    let actual = build_snapcompact_index(&messages, 0, &rendered.source_text, &page_ranges);
-    let cold_elapsed = started.elapsed();
-    assert!(
-        actual.as_bytes() == expected.as_bytes(),
-        "real-session cold index differs from legacy (contents remain private)"
-    );
-    let started = Instant::now();
-    let reused = build_snapcompact_index_with_previous(
-        &messages,
-        0,
-        &rendered.source_text,
-        &page_ranges,
-        Some(prior),
-    );
-    let reused_elapsed = started.elapsed();
-    assert!(
-        reused.as_bytes() == expected.as_bytes(),
-        "real-session reused index differs from legacy (contents remain private)"
-    );
+    // Keep the 500 ms budget, but use a median rather than failing on a
+    // scheduler tick while other isolated worktrees build on the same host.
+    let mut cold_times = Vec::new();
+    let mut actual = String::new();
+    for _ in 0..3 {
+        let started = Instant::now();
+        let sample = build_snapcompact_index(&messages, 0, &rendered.source_text, &page_ranges);
+        cold_times.push(started.elapsed());
+        assert!(
+            sample.as_bytes() == expected.as_bytes(),
+            "real-session cold index differs from legacy (contents remain private)"
+        );
+        actual = sample;
+    }
+    cold_times.sort_unstable();
+    let cold_elapsed = cold_times[1];
+    let mut reused_times = Vec::new();
+    for _ in 0..3 {
+        let started = Instant::now();
+        let reused = build_snapcompact_index_with_previous(
+            &messages,
+            0,
+            &rendered.source_text,
+            &page_ranges,
+            Some(prior),
+        );
+        reused_times.push(started.elapsed());
+        assert!(
+            reused.as_bytes() == expected.as_bytes(),
+            "real-session reused index differs from legacy (contents remain private)"
+        );
+    }
+    reused_times.sort_unstable();
+    let reused_elapsed = reused_times[1];
     eprintln!(
         "snap_index real: old_ms={} cold_ms={} reused_ms={} messages={} source_chars={} index_bytes={} sha256={:x}",
         old_elapsed.as_millis(),

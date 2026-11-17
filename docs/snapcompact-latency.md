@@ -15,18 +15,18 @@ The copied fixture has 6,202 stored messages, a compacted prefix of 6,149 messag
 | Base64 | 3 ms |
 | Artifact pipeline total | 60,424 ms |
 
-After the integrated change, the same 53-message copied input completed in **1,792 ms** (33.7× less local wall time). This comparison uses the same unoptimized test profile and excludes compilation and external inference.
+After the integrated change, the same 53-message copied input completed in **1,756 ms** (34.4× less local wall time). This comparison uses the same unoptimized test profile and excludes compilation and external inference.
 
 | Phase | Cold legacy archive, 53 new messages | Warm appended tail, 27 new messages |
 | --- | ---: | ---: |
 | Prepare | 36 ms | 26 ms |
-| Render | 1,276 ms, 80 new pages | 315 ms, 3 new / 77 reused pages |
-| Index | 475 ms | 461 ms |
-| Base64 | 2 ms | 2 ms |
-| Artifact pipeline total | **1,792 ms** | **813 ms** |
+| Render | 1,247 ms, 80 new pages | 307 ms, 3 new / 77 reused pages |
+| Index | 468 ms | 451 ms |
+| Base64 | 3 ms | 2 ms |
+| Artifact pipeline total | **1,756 ms** | **792 ms** |
 | Decisions | deferred until after apply | deferred until after apply |
 
-The warm run follows a real first pass over the first 26 of those 53 messages (1,899 ms), then appends the remaining 27. It is not directly interchangeable with the 53-message cold comparison. Both final archives have 80 pages, 1,674,875 source characters, and 13,984,968 base64 bytes. Valid saved page coordinates replace some formerly `UNKNOWN` index references, so the corrected final index is 110,980 rather than 111,002 characters.
+The warm run follows a real first pass over the first 26 of those 53 messages (1,886 ms), then appends the remaining 27. It is not directly interchangeable with the 53-message cold comparison. Both final archives have 80 pages, 1,674,875 source characters, and 13,984,968 base64 bytes. Valid saved page coordinates replace some formerly `UNKNOWN` index references, so the corrected final index is 110,980 rather than 111,002 characters.
 
 A separate original serial-render profile measured 10,068 ms: font/layout 30 ms, raster 1,004 ms, PNG encoding 8,176 ms. `Compression::Fast` reduced serial rendering to 5,146 ms, but increased the fixture PNGs from 10,408,068 to 24,778,718 bytes. That tradeoff was rejected. Production retains the original `Best` compression and raster geometry, with at most eight page workers. Render subphase counters sum worker CPU wall durations and can exceed total parallel-render wall time.
 
@@ -72,4 +72,4 @@ justrust test -p jcode-compaction-core --lib copied_archive -- --ignored --nocap
 
 The incremental benchmark splits the 53 real new messages chronologically into 26 and 27 messages. It measures a legacy cold pass and then a genuinely appended warm tail. It does not duplicate already archived messages or inject synthetic session content. The pixel check decodes every copied-fixture PNG and compares it with the original serial renderer: all 80 pages have identical pixels and the same aggregate 10,408,068 encoded bytes. Fonts, density, geometry and production PNG compression are unchanged. This preserves the image input relevant to the 2026-11-16 recall study. It is not a new paid model-recall experiment and does not claim unchanged LLM-generated decisions quality.
 
-Behavioral regressions assert exact new-render counts on a second compaction, foveated page-boundary reuse, apply before a 30-second fake decisions response within a 2-second budget, eventual grounded decisions persistence without another compaction event, config/override round trips, and runtime-fork selection without foreground credential activation. Index tests compare output byte-for-byte with the previous algorithm, including Unicode, ambiguous/overlapping matches, source-boundary matches, and corrected page provenance.
+Behavioral regressions assert exact new-render counts on a second compaction, foveated page-boundary reuse, apply before a 30-second fake decisions response within a 2-second budget, eventual grounded decisions persistence without another compaction event, config/override round trips, and runtime-fork selection without foreground credential activation. Index tests compare output byte-for-byte with the previous algorithm, including Unicode, ambiguous/overlapping matches, source-boundary matches, and corrected page provenance. The copied real index comparison measured 47,840 ms for the frozen legacy implementation versus 469 ms cold / 470 ms optional-prior, with identical output bytes. Its opt-in 500 ms performance gate uses the median of three independently verified new-index runs, rather than a single scheduler-sensitive sample. The production caller supplies only prior source/index/range metadata, without cloning prior PNG payloads for index reuse.
