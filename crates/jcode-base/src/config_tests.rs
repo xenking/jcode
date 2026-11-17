@@ -380,8 +380,6 @@ fn spawn_allowed_models_is_a_hard_worker_allowlist() {
         "opencode-go:deepseek-v4.1-flash",
         "claude:claude-sonnet-5-5",
         "claude:claude-opus-5-5",
-        // A bare model id names the allowed entry's model.
-        "claude-opus-5-5",
     ] {
         assert!(
             agents.validate_spawn_allowed_model(Some(allowed)).is_ok(),
@@ -393,6 +391,9 @@ fn spawn_allowed_models_is_a_hard_worker_allowlist() {
         "claude:claude-fable-5",
         "claude:claude-astra-5",
         "claude-fable-5",
+        // A bare model id is not a configured entry: resolving it could pick a
+        // provider the user never allowed.
+        "claude-opus-5-5",
         // A provider swap for an allowed model is still outside the list.
         "openrouter:z-ai/glm-5.2",
     ] {

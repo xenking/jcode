@@ -922,33 +922,23 @@ impl AgentsConfig {
     }
 
     /// Whether a spawned worker may run on `model`. Empty allowlist means
-    /// unrestricted. Matching is exact on the configured spec, plus the bare
-    /// model id when the request carries no provider prefix of its own.
+    /// unrestricted.
+    ///
+    /// Matching is exact: the request must repeat one configured entry. A bare
+    /// model id is rejected even when an allowed entry ends with that id,
+    /// because resolving it could pick a different provider's route than the
+    /// one the user allowed. The swarm tool advertises exactly the configured
+    /// strings, so an agent never has to guess.
     pub fn worker_may_use_model(&self, model: &str) -> bool {
         if self.spawn_allowed_models.is_empty() {
             return true;
         }
         let model = model.trim();
-        if model.is_empty() {
-            return false;
-        }
-        let bare_request = model.split_once(':').map(|(_, bare)| bare.trim());
-        self.spawn_allowed_models.iter().any(|allowed| {
-            let allowed = allowed.trim();
-            if allowed == model {
-                return true;
-            }
-            // A request without its own provider prefix may name the allowed
-            // entry by bare model id ("claude-opus-5-5" for
-            // "claude:claude-opus-5-5"); a prefixed request must match exactly.
-            match bare_request {
-                None => allowed
-                    .split_once(':')
-                    .map(|(_, bare)| bare.trim() == model)
-                    .unwrap_or(false),
-                Some(_) => false,
-            }
-        })
+        !model.is_empty()
+            && self
+                .spawn_allowed_models
+                .iter()
+                .any(|allowed| allowed.trim() == model)
     }
 
     /// Validate an agent-supplied override before resolving any provider route.

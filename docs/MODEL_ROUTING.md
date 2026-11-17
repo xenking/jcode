@@ -38,7 +38,9 @@ Resolution for a swarm spawn (`server/spawn_model_selection.rs`):
 ### `spawn_allowed_models`: the hard worker boundary
 
 `[agents] spawn_allowed_models` is a worker-only allowlist, enforced in all
-three places a worker model can change:
+three places a worker model can change. Entries are compared as exact strings:
+`claude:claude-opus-5-5` and `claude-opus-5-5` are different requests, and only
+the configured spelling is accepted.
 
 1. **Spawn** - the server rejects any agent-requested worker model outside the
    list, and the swarm tool's `model` field is advertised with exactly those
