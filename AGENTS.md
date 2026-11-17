@@ -106,4 +106,5 @@ Two things that waste time otherwise:
 ## Fork notes (xenking/jcode, keep at end for clean upstream merges)
 - Fork-only features: codemode (`crates/jcode-codemode`, docs `CODEMODE.md`, `[features] code_mode`), MCP `MCP-Protocol-Version` header on initialize, Soniox realtime `stt-rt-v6` in `crates/jcode-voice` (`[dictation] backend`), native `ask` tool (`crates/jcode-app-core/src/tool/ask.rs`, exposed on harness API), self-update source defaults to `xenking/jcode` branch `master`.
 - Verify a slice: `justrust check -p jcode-codemode -p jcode-voice`. Upstream merges: keep this section last.
+- Upstream sync: `scripts/xk-upstream-agent.sh` starts a separate jcode session that runs `scripts/xk-upstream-sync.sh` (jcode + Desktop) and OpenRig's catch-up; `--dry-run` shows the gap.
 - Parallel agents (swarm workers, other sessions) never share a checkout: each works in its own `git worktree` under `~/.jcode/wt/<name>-<repo>` off origin, ships by rebase + fast-forward push to the primary branch, then removes the worktree and branch. This overrides "Prefer master/main" for parallel work.
