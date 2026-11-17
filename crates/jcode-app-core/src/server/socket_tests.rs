@@ -919,3 +919,41 @@ async fn await_reload_handoff_returns_failed_after_marker_transition() {
         crate::env::remove_var("JCODE_RUNTIME_DIR");
     }
 }
+
+/// An older build can see the shared socket as custom (it resolved the runtime
+/// dir from `$TMPDIR`) and lock only `jcode.sock.daemon.lock`. A newer build
+/// that locked only `jcode-daemon.lock` then started a second daemon on the
+/// same path, replaced the live daemon's socket, idled out, and left nothing
+/// listening. A shared-socket server must contend for both names.
+#[cfg(unix)]
+#[test]
+fn shared_socket_contends_with_a_socket_scoped_lock_holder() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+    let runtime_dir = std::fs::canonicalize(temp.path()).expect("canonicalize tempdir");
+    crate::env::set_var("JCODE_RUNTIME_DIR", &runtime_dir);
+
+    let shared = runtime_dir.join("jcode.sock");
+    let older_build_lock = try_acquire_daemon_lock(&runtime_dir.join("jcode.sock.daemon.lock"))
+        .expect("acquire socket-scoped lock")
+        .expect("socket-scoped lock should be free");
+
+    assert!(
+        super::socket::acquire_daemon_lock_for(&shared).is_err(),
+        "a daemon holding the socket-scoped lock must block a second shared daemon"
+    );
+    assert!(
+        try_acquire_daemon_lock(&runtime_dir.join("jcode-daemon.lock"))
+            .expect("probe runtime lock")
+            .is_some(),
+        "a refused start must release the locks it took"
+    );
+
+    drop(older_build_lock);
+    if let Some(prev_runtime) = prev_runtime {
+        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+    } else {
+        crate::env::remove_var("JCODE_RUNTIME_DIR");
+    }
+}
