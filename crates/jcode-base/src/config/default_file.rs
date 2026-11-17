@@ -194,8 +194,8 @@ auto_server_reload = true
 # Capture mouse events (enables scroll wheel; disables terminal text selection)
 mouse_capture = true
 
-# Enable debug socket for external control/testing (default: false)
-debug_socket = false
+# Enable debug socket for external control/testing (default: true)
+debug_socket = true
 
 # Render emoji in terminal-facing TUI and CLI output (default: true).
 # Set false here or set JCODE_NO_EMOJI=1 for ASCII fallbacks.
@@ -1068,6 +1068,10 @@ mod tests {
         assert!(
             config.display.show_thinking,
             "the shipped user config must request model reasoning"
+        );
+        assert!(
+            config.display.debug_socket,
+            "the shipped user config must enable the owner-only debug socket"
         );
         assert_eq!(
             config.display.reasoning_display(),
