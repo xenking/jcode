@@ -269,8 +269,13 @@ fn desktop_uses_bundle_bridge(
         if !same_path(&executable, &desktop) || !process_has_user_environment(pid, home, runtime)? {
             continue;
         }
-        let sockets = unix_sockets(pid)
-            .with_context(|| format!("cannot inspect Desktop {pid} Unix sockets"))?;
+        let sockets = match unix_sockets(pid) {
+            Ok(sockets) => sockets,
+            Err(_) if !process_exists(pid) => continue,
+            Err(error) => {
+                return Err(error.context(format!("cannot inspect Desktop {pid} Unix sockets")));
+            }
+        };
         desktops.push(sockets);
     }
     verify_desktop_connections(&desktops, &bridges, &target, socket)
@@ -454,14 +459,21 @@ fn user_bridge_processes(home: &Path, runtime: &Path) -> Result<Vec<BridgeProces
         if !process_has_user_environment(pid, home, runtime)? {
             return Ok(None);
         }
-        let executable = executable_of(pid)
-            .with_context(|| format!("cannot inspect bridge {pid} executable"))?;
-        let observed = unix_sockets(pid).with_context(|| {
-            format!(
-                "cannot inspect bridge {pid} ({}); inspect clients with `lsof -nP -a -p {pid} -U`",
-                executable.display()
-            )
-        })?;
+        let executable = match executable_of(pid) {
+            Some(executable) => executable,
+            None if !process_exists(pid) => return Ok(None),
+            None => bail!("cannot inspect bridge {pid} executable"),
+        };
+        let observed = match unix_sockets(pid) {
+            Ok(observed) => observed,
+            Err(_) if !process_exists(pid) => return Ok(None),
+            Err(error) => {
+                return Err(error.context(format!(
+                    "cannot inspect bridge {pid} ({}); inspect clients with `lsof -nP -a -p {pid} -U`",
+                    executable.display()
+                )));
+            }
+        };
         let mut sockets = observed.paths;
         sockets.sort();
         sockets.dedup();
@@ -581,8 +593,26 @@ pub(super) async fn retire_stale_bridges(app: &Path, target_app: &Path) -> Resul
 // Missing, unreadable, or non-UTF-8 ownership fields fail closed below. Other
 // unrecognised environment entries are irrelevant to ownership.
 fn process_has_user_environment(pid: u32, home: &Path, runtime: &Path) -> Result<bool> {
-    let environment = process_environment(pid)
-        .with_context(|| format!("cannot inspect process {pid} environment"))?;
+    process_has_user_environment_with(pid, home, runtime, process_environment, process_exists)
+}
+
+/// A process listed by `ps` can exit before its environment is read: an old
+/// Desktop's bridge does exactly that while a rollout quits it. A process
+/// that is gone owns nothing, so only a live process with an unreadable
+/// environment fails closed.
+fn process_has_user_environment_with(
+    pid: u32,
+    home: &Path,
+    runtime: &Path,
+    read_environment: impl Fn(u32) -> Option<Vec<String>>,
+    exists: impl Fn(u32) -> bool,
+) -> Result<bool> {
+    let Some(environment) = read_environment(pid) else {
+        if !exists(pid) {
+            return Ok(false);
+        }
+        bail!("cannot inspect process {pid} environment");
+    };
     let process_home = environment
         .iter()
         .find_map(|entry| entry.strip_prefix("HOME="))
@@ -601,6 +631,18 @@ fn process_has_user_environment(pid: u32, home: &Path, runtime: &Path) -> Result
     let runtime_value = runtime_value
         .with_context(|| format!("cannot determine process {pid} runtime directory"))?;
     Ok(same_path(Path::new(runtime_value), runtime))
+}
+
+#[cfg(unix)]
+fn process_exists(pid: u32) -> bool {
+    // EPERM still means the pid exists (owned by someone else).
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(not(unix))]
+fn process_exists(_pid: u32) -> bool {
+    true
 }
 
 #[cfg(target_os = "macos")]
@@ -774,6 +816,25 @@ fn executable_of(pid: u32) -> Option<PathBuf> {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_process_that_exited_mid_census_owns_nothing() {
+        let home = Path::new("/Users/u");
+        let runtime = Path::new("/run/u");
+        // Listed by ps, gone before its environment could be read.
+        assert!(
+            !process_has_user_environment_with(77, home, runtime, |_| None, |_| false).unwrap()
+        );
+        // Alive but unreadable still fails closed.
+        assert!(process_has_user_environment_with(77, home, runtime, |_| None, |_| true).is_err());
+        let env = |_| {
+            Some(vec![
+                "HOME=/Users/u".to_string(),
+                "JCODE_RUNTIME_DIR=/run/u".to_string(),
+            ])
+        };
+        assert!(process_has_user_environment_with(77, home, runtime, env, |_| true).unwrap());
+    }
 
     #[test]
     fn desktop_launch_never_inherits_the_daemon_runtime_pin() {
