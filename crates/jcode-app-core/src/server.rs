@@ -552,7 +552,11 @@ use self::util::{
 };
 
 mod file_activity;
-use self::file_activity::file_activity_scope_label;
+use self::file_activity::{
+    FileActivityEntry, PendingFileActivityNotice, deliver_file_activity_notice,
+    file_activity_display_path, file_activity_scope_label, format_file_activity_notice,
+    parse_file_activity_line_range,
+};
 
 mod file_touch_service;
 pub(crate) use self::file_touch_service::FileTouchService;
@@ -651,6 +655,9 @@ pub struct Server {
     running_before_restart: HashSet<String>,
     swarm_restore_completed_at: Instant,
 }
+
+#[path = "server_headless_recovery.rs"]
+mod server_headless_recovery;
 
 impl Server {
     pub fn new(provider: Arc<dyn Provider>) -> Self {
@@ -798,124 +805,6 @@ impl Server {
         });
     }
 
-    async fn recover_headless_sessions_on_startup(&self) -> Vec<tokio::task::JoinHandle<()>> {
-        // Migrate legacy snapshots into the same durable owner. An existing
-        // record, including Stop/superseded tombstones, is authoritative.
-        let current_reload_id = recent_reload_state(Duration::from_secs(600))
-            .filter(|state| state.pid == std::process::id())
-            .map(|state| state.request_id);
-        let candidates = {
-            let coordinators = self.swarm_state.coordinators.read().await.clone();
-            let members = self.swarm_state.members.read().await;
-            members
-                .values()
-                .filter(|member| {
-                    let owner_live = worker_has_live_coordinator(
-                        member,
-                        &members,
-                        &coordinators,
-                        &self.live_before_restart,
-                        self.swarm_restore_completed_at,
-                    );
-                    self.running_before_restart.contains(&member.session_id)
-                        || (member.is_headless
-                            && owner_live
-                            && (headless_member_should_restore(&member.status, true)
-                                || worker_revive::has_open_lane(&member.session_id)))
-                })
-                .map(|member| member.session_id.clone())
-                .collect::<Vec<_>>()
-        };
-        if let Some(delay) = startup_headless_recovery_test_delay() {
-            tokio::time::sleep(delay).await;
-        }
-        for session_id in candidates {
-            if reload_recovery::peek_for_session(&session_id)
-                .ok()
-                .flatten()
-                .is_some()
-            {
-                continue;
-            }
-            let Ok(session) = crate::session::Session::load(&session_id) else {
-                continue;
-            };
-            let (owner_live, headless) = {
-                let coordinators = self.swarm_state.coordinators.read().await.clone();
-                let members = self.swarm_state.members.read().await;
-                let Some(member) = members.get(&session_id) else {
-                    continue;
-                };
-                (
-                    worker_has_live_coordinator(
-                        member,
-                        &members,
-                        &coordinators,
-                        &self.live_before_restart,
-                        self.swarm_restore_completed_at,
-                    ),
-                    member.is_headless,
-                )
-            };
-            if headless && !owner_live && !self.running_before_restart.contains(&session_id) {
-                continue;
-            }
-            let interrupted = session.messages.last().is_some_and(|message| {
-                message.role == crate::message::Role::User
-                    || self::client_session::last_message_has_pending_tool(message)
-                    || message.content.iter().any(|block| match block {
-                        crate::message::ContentBlock::Text { text, .. } => {
-                            text.contains("server reloading")
-                        }
-                        crate::message::ContentBlock::ToolResult { content, .. } => {
-                            content.contains("server reload")
-                                || content.contains("Reload initiated.")
-                        }
-                        _ => false,
-                    })
-            });
-            let open_lane = owner_live
-                .then(|| worker_revive::open_lane_continuation(&session_id))
-                .flatten();
-            let reminder = if interrupted {
-                headless_reload_continuation_message(
-                    ReloadContext::peek_for_session(&session_id).ok().flatten(),
-                )
-            } else {
-                open_lane
-            };
-            if let Some(reminder) = reminder {
-                let reload_id = current_reload_id
-                    .clone()
-                    .unwrap_or_else(|| format!("startup-{}", std::process::id()));
-                let role = if headless {
-                    reload_recovery::ReloadRecoveryRole::Headless
-                } else {
-                    reload_recovery::ReloadRecoveryRole::InterruptedPeer
-                };
-                if let Err(error) = reload_recovery::persist_intent(
-                    &reload_id,
-                    &session_id,
-                    role,
-                    crate::tool::selfdev::ReloadRecoveryDirective {
-                        continuation_message: reminder,
-                        reconnect_notice: Some("Resumed after reload".into()),
-                    },
-                    "migrated interrupted startup snapshot",
-                ) {
-                    crate::logging::warn(&format!(
-                        "Cannot migrate recovery intent for {session_id}: {error}"
-                    ));
-                }
-            }
-        }
-        // Both attached and headless sessions, including records whose session
-        // is absent from the swarm snapshot, enter this one admission path.
-        reload_recovery::RecoveryOwner::new(self)
-            .reconcile_once()
-            .await
-    }
-
     async fn finish_startup_after_bind(
         &self,
         main_listener: Listener,
@@ -950,13 +839,16 @@ impl Server {
             client_connections: Arc::clone(&self.client_connections),
         });
         lane_dispatch::spawn_startup_scan(Duration::from_secs(5));
+        let temporary_server = lifecycle::temporary_server_enabled();
         // Every resume History asks whether the session has persisted
         // background tasks. The first ask after a reload scans the whole task
         // directory (~250ms) while clients are reconnecting; build the index
         // now, off the async workers, so the storm only sees cache hits.
-        std::thread::spawn(|| {
-            let _ = crate::background::global().persisted_detached_running_tasks_for_session("");
-        });
+        if !temporary_server {
+            std::thread::spawn(|| {
+                let _ = crate::background::global().persisted_detached_running_tasks_for_session("");
+            });
+        }
         let registry_info = self.build_registry_info();
 
         let runtime = self.runtime();
@@ -978,7 +870,9 @@ impl Server {
 
         // Older snapshots predate the resume index. Backfill off the first-frame
         // path. Lookups retain an authoritative fallback until it completes.
-        crate::recent_session_index::backfill_resume_metadata_in_background();
+        if !temporary_server {
+            crate::recent_session_index::backfill_resume_metadata_in_background();
+        }
 
         // Persist auxiliary discovery metadata after the server is already live.
         self.spawn_registry_metadata_publisher(registry_info);
@@ -1020,7 +914,9 @@ impl Server {
         // Warm the lightweight session-search index after daemon startup. This
         // keeps the first agent `session_search` call from paying the cold
         // indexing cost while leaving exhaustive searches available on demand.
-        crate::tool::spawn_recent_index_warmup();
+        if temporary_server_policy.is_none() {
+            crate::tool::spawn_recent_index_warmup();
+        }
 
         // Reconcile background-task status files orphaned by a previous
         // process image (crash or exec-based reload). Non-detached tasks die
@@ -1782,6 +1678,9 @@ impl Server {
         swarm_event_tx: broadcast::Sender<SwarmEvent>,
     ) {
         let mut last_cleanup = Instant::now();
+        // Per-recipient notice still waiting for injection, so bursts of peer
+        // edits fold into one model-facing message.
+        let mut pending_file_notices: HashMap<String, PendingFileActivityNotice> = HashMap::new();
         const TOUCH_EXPIRY: Duration = Duration::from_secs(30 * 60); // 30 min
         const CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60); // 5 min
 
@@ -1820,6 +1719,8 @@ impl Server {
                                 intent: touch.intent.clone(),
                                 summary: touch.summary.clone(),
                                 detail: touch.detail.clone(),
+                                added: touch.added,
+                                removed: touch.removed,
                             },
                         )
                         .await;
@@ -1914,30 +1815,45 @@ impl Server {
                         let members = swarm_members.read().await;
                         let current_member = members.get(&session_id);
                         let current_name = current_member.and_then(|m| m.friendly_name.clone());
+                        // The editor only needs to hear about earlier peer
+                        // changes once, on its first edit of this file. Later
+                        // peer edits already reach it as "just edited" notices.
+                        let first_own_modification =
+                            file_touch.accesses_for_path(&path).await.is_none_or(|all| {
+                                all.iter()
+                                    .filter(|access| {
+                                        access.session_id == session_id
+                                            && access.op.is_modification()
+                                    })
+                                    .count()
+                                    <= 1
+                            });
 
                         // Alert the current agent about previous peer touches (one per agent).
-                        if let Some(member) = current_member {
+                        if let Some(member) = current_member.filter(|_| first_own_modification) {
                             for prev in &previous_touches {
                                 let prev_member = members.get(&prev.session_id);
                                 let prev_name = prev_member.and_then(|m| m.friendly_name.clone());
-                                let scope = file_activity_scope_label(prev, &touch);
-                                let intent_suffix = prev
-                                    .intent
-                                    .as_ref()
-                                    .map(|intent| format!(" — intent: {}", intent))
-                                    .unwrap_or_default();
-                                let alert_msg = format!(
-                                    "⚠ File activity: {} — {} — {} previously {} this file{}{}",
-                                    path.display(),
-                                    scope,
-                                    prev_name.as_deref().unwrap_or(&prev.session_id[..8]),
-                                    prev.op.as_str(),
-                                    prev.summary
-                                        .as_ref()
-                                        .map(|s| format!(": {}", s))
-                                        .unwrap_or_default(),
-                                    intent_suffix
-                                );
+                                let entry = FileActivityEntry {
+                                    agent: prev_name.clone().unwrap_or_else(|| {
+                                        prev.session_id[..8.min(prev.session_id.len())].to_string()
+                                    }),
+                                    operation: prev.op.as_str().to_string(),
+                                    previously: true,
+                                    path: file_activity_display_path(
+                                        &path,
+                                        member.working_dir.as_deref(),
+                                    ),
+                                    added: prev.added,
+                                    removed: prev.removed,
+                                    edits: 1,
+                                    lines: parse_file_activity_line_range(prev.summary.as_deref()),
+                                    overlap: file_activity_scope_label(prev, &touch)
+                                        == "overlapping lines",
+                                    intent: prev.intent.clone(),
+                                };
+                                let alert_msg =
+                                    format_file_activity_notice(std::slice::from_ref(&entry));
                                 let notification = ServerEvent::Notification {
                                     from_session: prev.session_id.clone(),
                                     from_name: prev_name,
@@ -1947,53 +1863,47 @@ impl Server {
                                         intent: prev.intent.clone(),
                                         summary: prev.summary.clone(),
                                         detail: prev.detail.clone(),
+                                        added: Some(prev.added),
+                                        removed: Some(prev.removed),
                                     },
                                     message: alert_msg.clone(),
                                 };
                                 let _ = member.event_tx.send(notification);
 
-                                if !queue_soft_interrupt_for_session(
+                                deliver_file_activity_notice(
                                     &session_id,
-                                    alert_msg.clone(),
-                                    false,
-                                    SoftInterruptSource::System,
+                                    entry,
+                                    &mut pending_file_notices,
                                     &soft_interrupt_queues,
                                     &sessions,
                                 )
-                                .await
-                                {
-                                    crate::logging::warn(&format!(
-                                        "Failed to queue file-activity soft interrupt for session {}",
-                                        session_id
-                                    ));
-                                }
+                                .await;
                             }
                         }
 
                         // Alert previous agents about the current modification.
                         for prev in &previous_touches {
                             if let Some(prev_member) = members.get(&prev.session_id) {
-                                let scope = file_activity_scope_label(prev, &touch);
-                                let intent_suffix = touch
-                                    .intent
-                                    .as_ref()
-                                    .map(|intent| format!(" — intent: {}", intent))
-                                    .unwrap_or_default();
-                                let alert_msg = format!(
-                                    "⚠ File activity: {} — {} — {} just {} this file you previously worked with{}{}",
-                                    path.display(),
-                                    scope,
-                                    current_name
-                                        .as_deref()
-                                        .unwrap_or(&session_id[..8.min(session_id.len())]),
-                                    touch.op.as_str(),
-                                    touch
-                                        .summary
-                                        .as_ref()
-                                        .map(|s| format!(": {}", s))
-                                        .unwrap_or_default(),
-                                    intent_suffix
-                                );
+                                let entry = FileActivityEntry {
+                                    agent: current_name.clone().unwrap_or_else(|| {
+                                        session_id[..8.min(session_id.len())].to_string()
+                                    }),
+                                    operation: touch.op.as_str().to_string(),
+                                    previously: false,
+                                    path: file_activity_display_path(
+                                        &path,
+                                        prev_member.working_dir.as_deref(),
+                                    ),
+                                    added: touch.added,
+                                    removed: touch.removed,
+                                    edits: 1,
+                                    lines: parse_file_activity_line_range(touch.summary.as_deref()),
+                                    overlap: file_activity_scope_label(prev, &touch)
+                                        == "overlapping lines",
+                                    intent: touch.intent.clone(),
+                                };
+                                let alert_msg =
+                                    format_file_activity_notice(std::slice::from_ref(&entry));
                                 let notification = ServerEvent::Notification {
                                     from_session: session_id.clone(),
                                     from_name: current_name.clone(),
@@ -2003,26 +1913,21 @@ impl Server {
                                         intent: touch.intent.clone(),
                                         summary: touch.summary.clone(),
                                         detail: touch.detail.clone(),
+                                        added: Some(touch.added),
+                                        removed: Some(touch.removed),
                                     },
                                     message: alert_msg.clone(),
                                 };
                                 let _ = prev_member.event_tx.send(notification);
 
-                                if !queue_soft_interrupt_for_session(
+                                deliver_file_activity_notice(
                                     &prev.session_id,
-                                    alert_msg.clone(),
-                                    false,
-                                    SoftInterruptSource::System,
+                                    entry,
+                                    &mut pending_file_notices,
                                     &soft_interrupt_queues,
                                     &sessions,
                                 )
-                                .await
-                                {
-                                    crate::logging::warn(&format!(
-                                        "Failed to queue file-activity soft interrupt for session {}",
-                                        prev.session_id
-                                    ));
-                                }
+                                .await;
                             }
                         }
                     }
@@ -2127,6 +2032,7 @@ impl Server {
                 // Compact todo names and progress are surfaced on the inline
                 // swarm strip so a coordinator can see each managed agent's work.
                 BusEvent::TodoUpdated(event) => {
+                    crate::agents_status::todos_updated(&event.session_id, &event.todos);
                     dispatch_swarm_todo_progress(&event, &swarm_members, &swarms_by_id).await;
                     // Worker-owned lanes whose dependencies are met get a
                     // worker automatically; no launch call is involved.

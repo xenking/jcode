@@ -132,6 +132,130 @@ success/error bytes, authorization, endpoint, and timeout remain unchanged. All
 and chained-error wire coverage. No real commands were dispatched. These gains
 are structural reductions in duplicate allocation and source lifetime only.
 
+Mobile claim polling also borrows hostname metadata into direct serialization,
+dropping the converted environment value before network waits. Empty and
+Unicode/escaped hostnames preserve exact legacy bytes, endpoint, authorization,
+and timeout. The hosted mobile runner group passed 46 tests with 1 ignored.
+These include overlapping completion/local-runner coverage, not 46 additional
+independent tests to add to earlier counts. No claim was sent to production.
+
+Subscription device-token polling, email-code start, and email-code verification
+serialize borrowed fields rather than allocating intermediate JSON maps. Exact
+legacy bytes preserve which fields are trimmed and which are not, including
+Unicode whitespace, empty strings, escaping, and control characters. All 14
+hosted serial subscription API tests passed for this followup, including the
+earlier device-metadata tests. No real login or email was initiated.
+
+Scalar account request metadata now serializes stack-owned numeric fields
+directly instead of constructing JSON maps. Exact bytes for zero, one, and
+`u64::MAX` are checked using builders only. All 15 hosted subscription API tests
+passed after this followup. No financial API was invoked, and validation,
+authorization, endpoint, timeout, response handling, and billing policy did not
+change. These tests overlap the earlier 14-test group.
+
+Claude weekly/earned reset request metadata uses typed serialization instead of
+temporary JSON maps and copied grant/request IDs. Pure builder tests verify exact
+legacy bytes after input release. The existing local-fixture safety suites also
+passed: 9 weekly-reset tests and 8 earned-reset tests. Confirmation, eligibility,
+locking, durable pending markers, journal writes, idempotency, invalidation, and
+non-refundable operation sequencing are untouched. No real reset request was
+made and no grant was consumed. This is source-allocation reduction only.
+
+### Catalog persistence ownership acceptance (2026-11-16)
+
+Antigravity, Gemini, Copilot, Cursor, and Bedrock persistence serialize borrowed
+catalog views instead of cloning model strings and collections solely to write
+JSON. Antigravity's project request also borrows its optional project string.
+Cache paths, endpoint/region scope, freshness rules, refresh behavior, and model
+discovery remain unchanged. Exact compact and pretty legacy JSON tests include
+arbitrary future models absent from fallback lists, Unicode, escaping, optional
+fields, and empty collections. Bedrock additionally checks 64 combinations of
+model/profile/route/set population and region, preserving its old set iteration
+sequence without temporary cloned vectors.
+
+Hosted validation passed: the full Gemini and Cursor runtime groups (98 tests
+combined), the full Copilot runtime group (39 tests), the focused Bedrock test,
+and both Antigravity persistence/request tests. Copilot declares its already
+locked `serde` dependency directly for the new serialization view, adding no
+new package version. The integrated locked CLI test-target check also passed.
+These remove transient collection copies, not the useful catalogs themselves.
+No provider calls or production RSS reduction were used as acceptance evidence.
+
+The OpenRouter disk-cache writer's model copy is different: it publishes an
+owned in-memory memo that survives the caller's borrowed slice. Removing it
+requires an ownership/API redesign, not merely a borrowed write-only view.
+Likewise, discovery returns that separately populate a retained cache are not
+automatically redundant clones. Those paths were classified rather than
+silently weakening caching or claiming the allocation was unnecessary.
+
+### Scoped catalog and diagnostic ownership followup (2026-11-16)
+
+Freshly parsed OpenAI/Anthropic catalog stores now transfer the selected scope
+into hydration rather than cloning it. Context-limit population consumes its
+owned map and moves new String keys into the cache. Account-scoped reasoning
+and service-tier reads likewise move their owned maps out of the parsed store,
+while preserving missing-versus-empty capability behavior and leaving disk
+bytes unchanged. Background OpenAI refresh persists its borrowed snapshot first,
+then transfers context limits and model IDs into the live caches. Hosted checks,
+all 3 catalog ownership tests, and an offline refresh-completion test passed.
+These are structural clone reductions, not measured CPU or RSS savings.
+
+The shared scoped catalog writer was then investigated with a concrete borrowed
+serialization overlay rather than dismissed for missing evidence. It retains
+the original HashMap insertion/iteration layout, drops the replaced owned
+scope, and serializes the replacement directly from borrowed collections. Exact
+compact and pretty legacy bytes passed for existing/new scopes and 0/1/32/2048
+models. Empty-input no-write behavior, timestamps, account isolation, and eight
+concurrent scope updates also passed; the original write lock remains intact.
+
+A hosted release experiment alternated old/new update-plus-serialization paths
+for nine rounds using per-thread CPU time. Median old/new nanoseconds were:
+
+| Fixture | Existing scope | New scope |
+|---|---:|---:|
+| Tiny, 1 model | 1,017 / 770 | 1,418 / 1,174 |
+| Small, 32 models | 55,967 / 47,347 | 61,026 / 52,325 |
+| Large, 2,048 models | 6,462,648 / 5,820,302 | 6,784,973 / 6,140,190 |
+
+This supported accepting the overlay: the tested medians improved about 9–24%
+while eliminating the temporary deep copy. This measures the in-memory operation,
+not end-to-end disk latency, production CPU, peak memory, or RSS. Five hosted
+catalog ownership/persistence tests passed with the optional CPU probe ignored;
+the explicitly requested release probe passed separately. Reproduce with
+`justrust test --release --locked -p jcode-base --lib scoped_writer_release_cpu_comparison -- --ignored --nocapture --test-threads=1`.
+
+Debug job summaries/status no longer explicitly clone strings and optional
+output/error fields before JSON serialization makes its required owned result.
+Both hosted regression tests passed, covering all job states, null/empty values,
+Unicode/escaping, large output, and source/result isolation. Provider doctor
+reports similarly removed 28 explicit cloned JSON inputs. Its hosted check and
+2 credential-free equality/source-ownership tests passed without running live
+provider probes or changing their opt-in gating. These changes eliminate
+transient intermediate copies, not the independent owned diagnostic response.
+Adjacent swarm diagnostics also borrow the friendly name and git-common path
+when building JSON, and transfer the consumed resolver path without cloning it.
+The existing isolated swarm-write regression and hosted app-core test-target
+check passed. A read-only `swarm:id` result was captured for comparison after
+activation; no real notification was sent as a runtime test.
+
+The bounded direct-JSON-input sweep also removed 13 explicit clones from
+OpenAI/OpenRouter/Copilot missing-tool-output construction and TUI remote status
+metadata. The resulting JSON still owns its values independently of the source.
+Hosted checks and 17 focused tests passed across those four areas, including
+multiple repaired tool outputs and null/empty/Unicode remote metadata. No live
+provider request or real session mutation was used as a test. Legacy-oracle
+clones in test code were deliberately retained.
+
+The CLI test targets also passed the final hosted locked integrated check.
+
+Model picker alias expansion additionally transfers each consumed original
+String into its output rather than cloning it a second time. The separate
+owned deduplication set remains unchanged. A pointer-identity regression checks
+that the first unique strings retain their backing allocations and output
+order while empty and duplicate entries are handled as before. The final
+catalog ownership suite passed 6 tests with the optional CPU probe ignored.
+This is an allocation-copy reduction, not a measured production RAM saving.
+
 ### Schema, reranking, and retry ownership acceptance (2026-11-16)
 
 The MCP schema cache now shares immutable catalog backing between memoized
@@ -374,8 +498,11 @@ Private-page growth was also lower but noisier, so this is not a guaranteed
 production PSS reduction. The pinned builds contain concurrent changes, while
 pointer-sharing, copy-on-write and byte-identical JSON tests independently
 verify the removed encrypted-body allocation. No history or cache was discarded.
-Custom tool catalogs and transcript/provider-cache payload duplication remain
-separate candidates requiring their own ownership and mutation analysis.
+At that stage, custom tool catalogs and transcript/provider-cache payload
+copies remained separate candidates. Later rounds added MCP schema snapshot
+sharing and shared transcript payloads with copy-on-write isolation, documented
+above. Those fixes do not prove that every custom tool or request owner is
+redundant, or that all remaining production heap is fully attributed.
 
 ## Hard caps
 

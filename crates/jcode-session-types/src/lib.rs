@@ -300,6 +300,7 @@ pub struct StoredMessage {
 pub enum StoredDisplayRole {
     System,
     BackgroundTask,
+    FileActivity,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -549,61 +549,6 @@ async fn test_force_compact_applies_summary() {
 
 // ── ensure_context_fits tests ──────────────────────────────
 
-#[tokio::test]
-async fn test_guard_below_80_does_nothing() {
-    let mut manager = CompactionManager::new().with_budget(10_000);
-    let mut messages = Vec::new();
-    for i in 0..15 {
-        messages.push(make_text_message(Role::User, &format!("msg {}", i)));
-        manager.notify_message_added();
-    }
-    // Char estimate is tiny, observed tokens well below 80%
-    manager.update_observed_input_tokens(5_000);
-
-    let provider: Arc<dyn Provider> = Arc::new(MockSummaryProvider);
-    let action = manager.ensure_context_fits(&messages, provider);
-    assert_eq!(
-        action,
-        CompactionAction::None,
-        "should do nothing below 80%"
-    );
-    assert!(
-        !manager.is_compacting(),
-        "should NOT start background compaction below 80%"
-    );
-    assert_eq!(manager.compacted_count, 0);
-}
-
-#[tokio::test]
-async fn test_guard_between_80_and_95_starts_background_only() {
-    let mut manager = CompactionManager::new().with_budget(1_000);
-    let mut messages = Vec::new();
-    for i in 0..20 {
-        messages.push(make_text_message(Role::User, &format!("msg {}", i)));
-        manager.notify_message_added();
-    }
-    // 85% usage — above 80% threshold but below 95% critical
-    manager.update_observed_input_tokens(850);
-
-    let provider: Arc<dyn Provider> = Arc::new(MockSummaryProvider);
-    let action = manager.ensure_context_fits(&messages, provider);
-    assert_eq!(
-        action,
-        CompactionAction::BackgroundStarted {
-            trigger: "reactive".to_string()
-        },
-        "should start background compaction at 85%"
-    );
-    assert!(
-        manager.is_compacting(),
-        "SHOULD start background compaction at 85%"
-    );
-    assert_eq!(
-        manager.compacted_count, 0,
-        "compacted_count should stay 0 (no hard compact)"
-    );
-}
-
 /// Regression: a hard compact that runs while a background (reactive)
 /// compaction is in flight must abort the background task and discard its
 /// stale `pending_cutoff`. Otherwise, when the background task completes,
@@ -2666,3 +2611,6 @@ fn idle_precompaction_stops_once_the_fold_drops_the_context() {
         "a compacted transcript must not compact again"
     );
 }
+
+#[path = "compaction_tests_additional_tests.rs"]
+mod additional_test_new_manager;

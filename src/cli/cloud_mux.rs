@@ -148,9 +148,14 @@ fn spawn_master(config: &[String], dir: &std::path::Path, deadline: Duration) ->
         std::thread::sleep(Duration::from_millis(20));
     };
     if !status.success() || !master_running(config) {
-        let detail = std::fs::read_to_string(&log_path)
-            .unwrap_or_else(|error| format!("could not read {}: {error}", log_path.display()));
-        let detail = detail.lines().last().unwrap_or_default();
+        let detail = match std::fs::read_to_string(&log_path) {
+            Ok(log) => log,
+            Err(error) => format!("cannot read SSH master log: {error}"),
+        };
+        let detail = detail
+            .lines()
+            .last()
+            .unwrap_or("SSH master produced no diagnostic");
         bail!("shared cloud SSH connection failed ({status}): {detail}");
     }
     Ok(())

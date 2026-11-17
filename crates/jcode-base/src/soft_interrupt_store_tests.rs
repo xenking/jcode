@@ -38,7 +38,7 @@ fn append_take_and_clear_round_trip() {
             content: "world".to_string(),
             images: Vec::new(),
             urgent: false,
-            source: SoftInterruptSource::BackgroundTask,
+            source: SoftInterruptSource::FileActivity,
             mode: jcode_agent_runtime::QueuedMessageMode::AfterYield,
             client_id: None,
         },
@@ -58,6 +58,7 @@ fn append_take_and_clear_round_trip() {
         loaded[1].mode,
         jcode_agent_runtime::QueuedMessageMode::AfterYield
     );
+    assert_eq!(loaded[1].source, SoftInterruptSource::FileActivity);
 
     let taken = take(session_id).expect("take interrupts");
     assert_eq!(taken.len(), 2);

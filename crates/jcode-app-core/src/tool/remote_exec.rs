@@ -117,9 +117,8 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 fn fail_all(pending: &Pending, reason: &str) {
     let mut pending = pending.lock().unwrap_or_else(|e| e.into_inner());
     for (_, tx) in pending.drain() {
-        // The call future may already have been canceled. Its receiver owns no work.
         if tx.send(Err(anyhow::anyhow!("{reason}"))).is_err() {
-            crate::logging::debug("execution worker failure receiver was canceled");
+            crate::logging::debug("Execution worker failure receiver already dropped");
         }
     }
 }
@@ -233,7 +232,7 @@ async fn client() -> Result<Arc<Client>> {
                     })
                     .is_err()
             {
-                crate::logging::debug("execution worker result receiver was canceled");
+                crate::logging::debug(&format!("Execution result receiver dropped for call {id}"));
             }
         }
         reader_stopped.store(true, Ordering::Release);
@@ -272,7 +271,10 @@ impl Drop for CancelOnDrop {
                 .send(Frame::Cancel { id: self.id })
                 .is_err()
             {
-                crate::logging::debug("execution worker already disconnected during cancellation");
+                crate::logging::debug(&format!(
+                    "Execution worker disconnected before cancel {}",
+                    self.id
+                ));
             }
         }
     }
@@ -487,9 +489,9 @@ where
                         },
                     };
                     if results.send(frame).is_err() {
-                        crate::logging::debug(
-                            "execution worker output closed before tool completion",
-                        );
+                        crate::logging::debug(&format!(
+                            "Execution worker output closed for call {id}"
+                        ));
                     }
                 });
                 running.insert(id, task.abort_handle());

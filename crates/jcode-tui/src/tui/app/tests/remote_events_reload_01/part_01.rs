@@ -1,55 +1,4 @@
 #[test]
-fn test_local_bus_dictation_completion_ignores_other_session() {
-    let mut app = create_test_app();
-    let session_id = app.session.id.clone();
-    app.input = "draft".to_string();
-    app.cursor_pos = app.input.len();
-    app.dictation_in_flight = true;
-    app.dictation_request_id = Some("dictation_123".to_string());
-    app.dictation_target_session_id = Some(session_id);
-
-    let handled = crate::tui::app::local::handle_bus_event(
-        &mut app,
-        Ok(crate::bus::BusEvent::DictationCompleted {
-            dictation_id: "dictation_other".to_string(),
-            session_id: Some("session_other".to_string()),
-            text: " dictated text".to_string(),
-            mode: crate::protocol::TranscriptMode::Append,
-        }),
-    );
-
-    assert!(!handled);
-    assert_eq!(app.input, "draft");
-    assert!(app.dictation_in_flight);
-}
-
-#[test]
-fn test_remote_bus_dictation_completion_ignores_other_session() {
-    let mut app = create_test_app();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let mut remote = rt.block_on(async { crate::tui::backend::RemoteConnection::dummy() });
-    app.is_remote = true;
-    app.remote_session_id = Some("session_remote".to_string());
-    app.dictation_in_flight = true;
-    app.dictation_request_id = Some("dictation_123".to_string());
-    app.dictation_target_session_id = Some("session_remote".to_string());
-
-    rt.block_on(crate::tui::app::remote::handle_bus_event(
-        &mut app,
-        &mut remote,
-        Ok(crate::bus::BusEvent::DictationCompleted {
-            dictation_id: "dictation_other".to_string(),
-            session_id: Some("session_other".to_string()),
-            text: " dictated text".to_string(),
-            mode: crate::protocol::TranscriptMode::Append,
-        }),
-    ));
-
-    assert!(app.dictation_in_flight);
-    assert_eq!(app.dictation_request_id.as_deref(), Some("dictation_123"));
-}
-
-#[test]
 fn test_remote_bus_productivity_failure_clears_refresh_state() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -504,7 +453,8 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
             id: 2,
             session_id: "session_rewind_preview".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
-                response_stats: None, timestamp_ms: None,
+                response_stats: None,
+                timestamp_ms: None,
                 role: "user".to_string(),
                 content: "first message kept by the rewind".to_string(),
                 tool_calls: None,
@@ -622,7 +572,8 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
             id: 3,
             session_id: "session_midstream_dup".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
-                response_stats: None, timestamp_ms: None,
+                response_stats: None,
+                timestamp_ms: None,
                 role: "user".to_string(),
                 content: "truncated payload from another client's rewind".to_string(),
                 tool_calls: None,
@@ -712,7 +663,8 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
                 id: 3,
                 session_id: "session_midstream_dup".to_string(),
                 messages: vec![crate::protocol::HistoryMessage {
-                    response_stats: None, timestamp_ms: None,
+                    response_stats: None,
+                    timestamp_ms: None,
                     role: "user".to_string(),
                     content: "truncated payload from another client's rewind".to_string(),
                     tool_calls: None,
@@ -822,7 +774,8 @@ fn test_handle_server_event_history_same_session_rewind_then_late_done_does_not_
             id: 2,
             session_id: "session_rewind_done_race".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
-                response_stats: None, timestamp_ms: None,
+                response_stats: None,
+                timestamp_ms: None,
                 role: "user".to_string(),
                 content: "first message kept by the rewind".to_string(),
                 tool_calls: None,
@@ -1128,7 +1081,10 @@ fn test_handle_post_connect_does_not_dispatch_daemon_reload_recovery() {
         .expect("post connect should succeed");
 
     assert!(matches!(outcome, super::remote::PostConnectOutcome::Ready));
-    assert!(app.pending_queued_dispatch, "recovery observation does not consume queued user dispatch");
+    assert!(
+        app.pending_queued_dispatch,
+        "recovery observation does not consume queued user dispatch"
+    );
     assert!(app.hidden_queued_system_messages.is_empty());
     assert!(!app.is_processing);
     assert!(matches!(app.status, ProcessingStatus::Idle));
@@ -1727,8 +1683,14 @@ fn test_reload_recovery_notice_does_not_block_queued_user_followup() {
     ));
 
     rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
-    assert!(app.is_processing, "queued user follow-up should start a turn");
+    assert!(
+        app.is_processing,
+        "queued user follow-up should start a turn"
+    );
     assert!(app.hidden_queued_system_messages.is_empty());
     assert!(app.queued_messages().is_empty());
     assert!(!app.reload_recovery_blocks_queue());
 }
+
+#[path = "part_01_additional_tests.rs"]
+mod additional_test_local_bus_dictation_completion_ignores_other_session;

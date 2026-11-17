@@ -2255,3 +2255,6 @@ async fn streamed_text_is_coalesced_only_when_every_client_is_unfocused() {
         crate::stream_batching::forget_connection(&connection);
     }
 }
+
+#[path = "client_lifecycle_tests_additional_tests.rs"]
+mod additional_identity_transport_negotiation_preserves_legacy_payload_shape;

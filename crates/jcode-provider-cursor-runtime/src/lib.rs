@@ -7,6 +7,13 @@
 //! The pure model-catalog data (`AVAILABLE_MODELS`, `is_known_model`) stays in
 //! `jcode_base::provider::cursor` because base's model-routing logic needs it
 //! without a runtime.
+//!
+//! Response model attribution is currently unavailable: the decoded ChatService
+//! and AgentService response schemas do not expose a verified served-model
+//! field. Catalog IDs and AgentService's locally resolved request model are
+//! request metadata, not evidence of which model answered. Do not emit
+//! `StreamEvent::ResolvedModel` from those values. Unknown protobuf fields must
+//! not be guessed to contain model identity.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -250,6 +257,13 @@ struct PersistedCatalog {
     fetched_at_rfc3339: String,
 }
 
+/// Write-only view that keeps the caller's model strings in place.
+#[derive(Serialize)]
+struct PersistedCatalogRef<'a> {
+    models: &'a [String],
+    fetched_at_rfc3339: String,
+}
+
 fn merge_cursor_models(dynamic: &[String], current: &str) -> Vec<String> {
     let mut merged = Vec::new();
 
@@ -459,8 +473,8 @@ impl CursorCliProvider {
         let Ok(path) = Self::persisted_catalog_path() else {
             return;
         };
-        let payload = PersistedCatalog {
-            models: models.to_vec(),
+        let payload = PersistedCatalogRef {
+            models,
             fetched_at_rfc3339: Utc::now().to_rfc3339(),
         };
         if let Err(error) = jcode_base::storage::write_json(&path, &payload) {
@@ -863,6 +877,50 @@ async fn run_native_text_command(
             .await
         }
         Err(err) => Err(err),
+    }
+}
+
+#[cfg(test)]
+mod catalog_persistence_tests {
+    use super::*;
+
+    #[test]
+    fn borrowed_catalog_matches_owned_json_without_copying_models() {
+        for models in [
+            Vec::<String>::new(),
+            vec![
+                "future-cursor-model-2099".to_string(),
+                "模型-🦀".to_string(),
+                "escaped-\"model\"\\path\n\t".to_string(),
+            ],
+        ] {
+            let timestamp = "2026-11-16T06:29:12.910+00:00";
+            let legacy = PersistedCatalog {
+                models: models.clone(),
+                fetched_at_rfc3339: timestamp.to_string(),
+            };
+            let borrowed = PersistedCatalogRef {
+                models: &models,
+                fetched_at_rfc3339: timestamp.to_string(),
+            };
+            assert_eq!(borrowed.models.as_ptr(), models.as_ptr());
+            for (view, source) in borrowed.models.iter().zip(&models) {
+                assert!(std::ptr::eq(view, source));
+                assert_eq!(view.as_ptr(), source.as_ptr());
+            }
+            assert_eq!(
+                serde_json::to_vec(&borrowed).unwrap(),
+                serde_json::to_vec(&legacy).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_vec_pretty(&borrowed).unwrap(),
+                serde_json::to_vec_pretty(&legacy).unwrap()
+            );
+            let round_trip: PersistedCatalog =
+                serde_json::from_slice(&serde_json::to_vec(&borrowed).unwrap()).unwrap();
+            assert_eq!(round_trip.models, models);
+            assert_eq!(round_trip.fetched_at_rfc3339, timestamp);
+        }
     }
 }
 

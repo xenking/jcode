@@ -1401,3 +1401,6 @@ fn cached_anthropic_usage_for_label_returns_stale_entries_without_probing() {
 
 #[path = "model_scoped_tests.rs"]
 mod model_scoped;
+
+#[path = "tests_additional_tests.rs"]
+mod additional_test_usage_data_default;

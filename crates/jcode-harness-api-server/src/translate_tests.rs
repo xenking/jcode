@@ -4657,3 +4657,5 @@ fn credential_provisioning_stores_openai_compatible_catalog_keys_under_their_own
         }
     ));
 }
+#[path = "translate_tests_additional_tests.rs"]
+mod additional_session_mutations_correlate_interleaved_terminals_after_receipt;
