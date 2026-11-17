@@ -73,26 +73,44 @@ pub(super) async fn quit(app: &Path) -> Result<()> {
 }
 
 pub(super) async fn launch(app: &Path) -> Result<()> {
+    let mut command = launch_command(app);
     if app == Path::new("/Applications/Jcode.app") {
-        let status = tokio::process::Command::new("open")
-            .arg(app)
-            .status()
-            .await?;
+        // `open` returns once launch services accepted the app.
+        let status = tokio::process::Command::from(command).status().await?;
         if !status.success() {
             bail!("Desktop launch failed: {status}");
         }
     } else {
-        // An overridden Applications path never invokes global launch services.
-        Command::new(app.join("Contents/MacOS/jcode-desktop"))
-            .env_remove(jcode_build_support::runtime_generation::TARGET_ENV)
-            .env_remove(jcode_build_support::runtime_generation::RELOAD_ID_ENV)
-            .env_remove(jcode_build_support::runtime_generation::GENERATION_ENV)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
+        // The Desktop binary itself runs until quit; do not wait for it.
+        command.spawn()?;
     }
     Ok(())
+}
+
+/// The daemon's own runtime pin must not reach Desktop: `open` passes the
+/// caller's environment to the app, Desktop passes it to its bundled
+/// `jcode api-bridge`, and that bridge refuses to start because its image is
+/// not the daemon's pinned binary. The rollout then saw no bundle bridge,
+/// failed verification and rolled back.
+fn launch_command(app: &Path) -> Command {
+    let mut command = if app == Path::new("/Applications/Jcode.app") {
+        let mut open = Command::new("open");
+        open.arg(app);
+        open
+    } else {
+        // An overridden Applications path never invokes global launch services.
+        let mut direct = Command::new(app.join("Contents/MacOS/jcode-desktop"));
+        direct
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        direct
+    };
+    command
+        .env_remove(jcode_build_support::runtime_generation::TARGET_ENV)
+        .env_remove(jcode_build_support::runtime_generation::RELOAD_ID_ENV)
+        .env_remove(jcode_build_support::runtime_generation::GENERATION_ENV);
+    command
 }
 
 pub(super) async fn verify(app: &Path, cli: &str, desktop: &str) -> Result<()> {
@@ -756,6 +774,29 @@ fn executable_of(pid: u32) -> Option<PathBuf> {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_launch_never_inherits_the_daemon_runtime_pin() {
+        use jcode_build_support::runtime_generation::{GENERATION_ENV, RELOAD_ID_ENV, TARGET_ENV};
+        for app in [
+            Path::new("/Applications/Jcode.app"),
+            Path::new("/tmp/Other/Jcode.app"),
+        ] {
+            let command = launch_command(app);
+            let removed: Vec<_> = command
+                .get_envs()
+                .filter(|(_, value)| value.is_none())
+                .map(|(key, _)| key.to_string_lossy().into_owned())
+                .collect();
+            for key in [TARGET_ENV, RELOAD_ID_ENV, GENERATION_ENV] {
+                assert!(
+                    removed.iter().any(|k| k == key),
+                    "{} launch keeps {key}",
+                    app.display()
+                );
+            }
+        }
+    }
 
     #[test]
     fn malformed_bridge_process_census_fails_closed() {

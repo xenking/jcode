@@ -222,6 +222,16 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
         .unwrap_or_else(|| PathBuf::from("jcode"));
     let mut command = Command::new(&binary);
     crate::process::no_console_window(&mut command);
+    // A runtime pin inherited from a daemon (Desktop started by a rollout, an
+    // agent's shell) names that daemon's binary; the bridge we launch here is
+    // `binary`, and refuses to start under a pin that is not its own image.
+    {
+        use jcode_build_support::runtime_generation as generation;
+        command
+            .env_remove(generation::TARGET_ENV)
+            .env_remove(generation::RELOAD_ID_ENV)
+            .env_remove(generation::GENERATION_ENV);
+    }
     command
         // `--no-update` turns off the bridge's own background update check, which
         // also runs for source builds.
