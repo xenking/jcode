@@ -1412,10 +1412,23 @@ impl OpenAIProvider {
             tools.push(serde_json::json!({ "type": "image_generation" }));
         }
 
+        // GPT-6.2 appends top-level instructions after input and never caches them.
+        let cache_instructions_in_input = model_id == "gpt-6.2" || model_id.starts_with("gpt-6.2-");
+        let mut request_input =
+            Vec::with_capacity(input.len() + usize::from(cache_instructions_in_input));
+        if cache_instructions_in_input && !instructions.is_empty() {
+            request_input.push(serde_json::json!({"role": "developer", "content": instructions}));
+        }
+        request_input.extend_from_slice(input);
+        let request_instructions = if cache_instructions_in_input {
+            ""
+        } else {
+            &instructions
+        };
         let mut request = serde_json::json!({
             "model": model_id,
-            "instructions": instructions,
-            "input": input,
+            "instructions": request_instructions,
+            "input": request_input,
             "tools": tools,
             "tool_choice": "auto",
             "parallel_tool_calls": false,

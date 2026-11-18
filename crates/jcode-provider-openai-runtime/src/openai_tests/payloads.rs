@@ -543,6 +543,21 @@ fn test_build_response_request_passes_system_prompt_through_verbatim() {
     }
 }
 
+#[test]
+fn gpt_6_2_places_stable_instructions_before_conversation() {
+    for chatgpt in [true, false] {
+        let input = vec![serde_json::json!({"role":"user", "content":"hello"})];
+        let request = OpenAIProvider::build_response_request(
+            "gpt-6.2-sol", "system marker".into(), &input, &[], chatgpt,
+            None, None, None, Some("session"), None, None,
+        );
+        assert!(request.get("instructions").is_none() || request["instructions"] == "");
+        assert_eq!(request["input"][0]["role"], "developer");
+        assert_eq!(request["input"][0]["content"], "system marker");
+        assert_eq!(request["input"][1], input[0]);
+    }
+}
+
 #[tokio::test]
 async fn configured_swarm_root_effort_resolves_without_changing_stored_mode() {
     let provider = OpenAIProvider::new_browser_only();

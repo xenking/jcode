@@ -216,8 +216,14 @@ impl Provider for OpenAIProvider {
                 native_web_search::downgrade_web_search_calls(&mut input);
             }
         }
-        let input_item_count = input.len();
         let request = self.response_request(&input, tools, system).await;
+        // The request builder may prepend a cacheable developer message. The
+        // continuation cursor must describe the exact serialized input.
+        let input = request["input"]
+            .as_array()
+            .expect("Responses request input is an array")
+            .clone();
+        let input_item_count = input.len();
         let model_id = openai_request_model(&request);
         let is_chatgpt_mode = Self::is_chatgpt_mode(&*self.credentials.read().await);
 
