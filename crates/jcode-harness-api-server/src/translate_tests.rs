@@ -3520,6 +3520,37 @@ fn model_change_reports_the_effort_the_new_model_runs_with() {
     assert!(state.current_effort.is_none());
 }
 
+/// A catalog fanout carries no effort and names the provider by display label,
+/// while the attach identity probe reports the session's persisted provider
+/// key. Every later fanout then looked like a provider switch and cleared the
+/// effort, so the Desktop composer lost its reasoning pill for good.
+#[test]
+fn catalog_fanout_does_not_erase_the_effort_the_attach_probe_reported() {
+    let mut state = state_with_session();
+    // The fanout can beat the identity probe on attach.
+    state.legacy_event_to_api(&json!({
+        "type": "available_models_updated", "provider_name": "OpenAI",
+        "provider_model": "gpt-6.2-sol", "available_models": ["gpt-6.2-sol"]
+    }));
+    // The probe answers with the session's persisted key and its effort.
+    state.note_models(&json!({
+        "provider_name": "openai-oauth@openai-otter", "provider_model": "gpt-6.2-sol",
+        "reasoning_effort": "high", "available_models": ["gpt-6.2-sol"]
+    }));
+    // The next fanout repeats the same model under the display label. That is
+    // not a provider move, so it must keep the level instead of clearing it.
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "available_models_updated", "provider_name": "OpenAI",
+        "provider_model": "gpt-6.2-sol", "available_models": ["gpt-6.2-sol"]
+    }));
+    assert!(
+        matches!(&frames[0].event, ApiEvent::ModelInfo { reasoning_effort, .. }
+        if reasoning_effort.as_deref() == Some("high")),
+        "{:?}",
+        frames[0].event
+    );
+}
+
 #[test]
 fn observer_and_server_initiated_turns_finish_without_a_local_message_id() {
     for id in [0, 999_999] {

@@ -3369,11 +3369,22 @@ impl BridgeState {
                 .collect();
             self.available_models = names;
         }
+        let model_changed = event["provider_model"]
+            .as_str()
+            .is_some_and(|model| self.current_model.as_deref() != Some(model));
         if let Some(model) = event["provider_model"].as_str() {
             self.current_model = Some(model.to_string());
         }
         if let Some(provider) = event["provider_name"].as_str() {
-            self.note_provider(provider);
+            // A catalog names the provider by its display label while model
+            // switches use its short name, so the same provider can arrive as
+            // two strings. Only a real move to another provider (a new model
+            // along with the new label) invalidates the effort.
+            if model_changed {
+                self.note_provider(provider);
+            } else {
+                self.current_provider = Some(provider.to_string());
+            }
         }
         self.note_credential(event);
         if event.get("reasoning_effort").is_some() {
