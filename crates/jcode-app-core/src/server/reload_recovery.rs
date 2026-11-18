@@ -15,6 +15,12 @@ fn lock_store() -> std::sync::MutexGuard<'static, ()> {
 
 const PENDING_RECORD_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
+#[test]
+fn unknown_recovery_status_is_not_admitted() {
+    let status: ReloadRecoveryStatus = serde_json::from_str("\"future_status\"").unwrap();
+    assert!(!status.needs_admission());
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum ReloadRecoveryRole {

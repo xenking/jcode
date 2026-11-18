@@ -13,6 +13,16 @@ const FINAL_STATE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const PENDING_STATE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 static STATE_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[test]
+fn partial_await_record_loads_without_resuming_an_unidentifiable_swarm() {
+    let record = serde_json::json!({
+        "key": "wait", "session_id": "session", "created_at_unix_ms": 1,
+        "deadline_unix_ms": u64::MAX, "background": true, "final_response": null
+    });
+    let state: PersistedAwaitMembersState = serde_json::from_value(record).unwrap();
+    assert!(!state.is_pending());
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedAwaitMembersResult {
     pub completed: bool,
