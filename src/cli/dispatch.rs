@@ -25,6 +25,7 @@ use provider_init::ProviderChoice;
 mod debug_parent;
 use debug_parent::*;
 pub(crate) async fn run_main(mut args: Args) -> Result<()> {
+    adopt_runtime_handoff_env(args.command.as_ref());
     arm_debug_client_parent_death_signal();
     if args.ssh.is_some() {
         // A remote session ID and working directory belong to the remote host.
@@ -644,6 +645,30 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Take the daemon-private exec-handoff variables out of this process
+/// environment before anything can spawn a child.
+///
+/// `serve` is the only process a reload hands a target to, so it consumes them
+/// into its immutable identity here (this is the capture every later pong and
+/// rollout decision reads). Every other invocation merely inherited them from a
+/// parent that was itself a daemon child; a stale target describes another
+/// image and must never reject a CLI, so those are ignored outright.
+fn adopt_runtime_handoff_env(command: Option<&Command>) {
+    use crate::build::runtime_generation;
+    if matches!(command, Some(Command::Serve { .. })) {
+        if let Err(error) = runtime_generation::serving_identity(jcode_build_meta::git_hash()) {
+            crate::logging::warn(&format!(
+                "runtime handoff: serving identity unknown: {error:#}"
+            ));
+        } else if let Some(warning) = runtime_generation::identity_warning() {
+            crate::logging::warn(&format!(
+                "runtime handoff: dropped the inherited runtime target: {warning}"
+            ));
+        }
+    }
+    runtime_generation::forget_inherited_handoff_env();
 }
 
 /// Transport for `--provider-profile <name>` (issue #1560: this used to force
