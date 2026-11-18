@@ -327,3 +327,36 @@ This design emphasizes parallelism, explicit communication, and optional worktre
 isolation. The coordinator is responsible for planning and plan updates; worktree
 managers are responsible for integration; agents collaborate directly to resolve
 conflicts.
+
+## Escalated `ask`
+
+A spawned worker runs its turns on the daemon with no attached client, so the
+`ask` tool cannot prompt a human. Instead of failing, it escalates:
+
+1. The worker's tool call parks on an answer channel. Nothing runs the model, so
+   a parked worker spends no tokens. Its member row shows
+   `waiting for the coordinator to answer ask`.
+2. The swarm root of the spawn chain (`report_back_to_session_id` ancestry)
+   receives two deliveries:
+   - `ServerEvent::AskEscalated` on its client stream, shaped as
+     `{request_id, worker_session_id, worker_name, lane, questions,
+     timeout_secs}`, where `questions` is the normal `AskQuestion` array with
+     each recommended option still labelled `(Recommended)`;
+   - a `BusEvent::SwarmAskEscalated` wake, so an idle coordinator starts a turn
+     with the rendered question (a busy one gets it as a system interrupt).
+3. The coordinator answers with `swarm action="answer"`,
+   `to_session=<worker>`, `answers` in `AskResponse` shape
+   (`answers: [{selected, other, comments}]`, one object per question), and
+   optionally `request_id` when the worker has several pending asks. The answer
+   is delivered as the ordinary `ask` tool result (`format_ask_answers`), so the
+   worker continues as if a human had answered. If the owner must decide, the
+   coordinator calls `ask` itself first and passes that answer on.
+4. `ServerEvent::AskEscalationClosed` (`answered`, `withdrawn`, `timed_out`)
+   lets clients clear the escalation card.
+
+Fallbacks: if no interactive client exists anywhere in the chain, the
+recommended options are assumed and the tool result says so. The same happens
+after a 30 minute timeout. Stopping or removing the worker withdraws the parked
+ask and fails its tool call as cancelled. A daemon reload interrupts the worker
+turn; reload recovery replays the ask tool call, and revived headless workers
+get a fresh escalation route, so the question is cleanly re-issued.

@@ -143,6 +143,10 @@ pub(super) async fn live_or_revived_agent(
     crate::logging::info(&format!(
         "Revived headless swarm worker {session_id} from disk"
     ));
+    // Reload recovery replays a reload-interrupted `ask` tool call. Give the
+    // revived worker the same escalation route its spawn had, so the replay
+    // re-issues the question to the coordinator instead of failing.
+    super::ask_escalation::install_bridge(session_id, Arc::clone(swarm_members));
     Some(agent)
 }
 

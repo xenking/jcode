@@ -753,6 +753,62 @@ pub(super) async fn dispatch_ui_activity(
     }
 }
 
+
+/// A headless worker parked on `ask`. Wake the coordinator so its model sees
+/// the question and answers with `swarm action="answer"` (or re-asks the human
+/// with its own `ask`). Unlike a worker report, the coordinator's turn is
+/// expected to end with an answer, not with more fan-out.
+pub(super) async fn dispatch_swarm_ask_escalated(
+    event: &crate::bus::SwarmAskEscalated,
+    sessions: &SessionAgents,
+    soft_interrupt_queues: &SessionInterruptQueues,
+    swarm: LiveTurnSwarmContext,
+) {
+    // Never revive a coordinator the user explicitly stopped.
+    if swarm
+        .members
+        .read()
+        .await
+        .get(&event.session_id)
+        .is_none_or(|member| matches!(member.status.as_str(), "stopped" | "crashed" | "failed"))
+    {
+        return;
+    }
+    if emit_external_wake(
+        &event.session_id,
+        "swarm_ask_escalated",
+        &event.notification,
+        &swarm.members,
+    )
+    .await
+    {
+        return;
+    }
+    let reminder = "A worker is parked on ask waiting for your decision. Answer it with the `swarm` tool action=\"answer\" (to_session = the worker session id, answers = one object per question). If the human owner must decide, call `ask` yourself first. The worker will resume with your answer.".to_string();
+    if !run_live_turn_if_idle(
+        &event.session_id,
+        &event.notification,
+        Some(reminder.clone()),
+        sessions,
+        swarm,
+    )
+    .await
+    {
+        let queued = queue_soft_interrupt_for_session(
+            &event.session_id,
+            format!("{}\n\n{reminder}", event.notification),
+            false,
+            SoftInterruptSource::System,
+            soft_interrupt_queues,
+            sessions,
+        )
+        .await;
+        if !queued {
+            crate::logging::warn("Could not queue escalated ask for coordinator session");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

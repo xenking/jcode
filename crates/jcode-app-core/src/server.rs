@@ -57,6 +57,7 @@ mod provider_control;
 mod reload;
 pub(crate) mod reload_recovery;
 pub use reload_recovery::{ReloadRecoverySummary, recovery_summary as reload_recovery_summary};
+pub(crate) mod ask_escalation;
 mod reload_state;
 mod reload_trace;
 pub mod rollout;
@@ -2001,6 +2002,21 @@ impl Server {
                 }
                 BusEvent::SwarmWorkerReported(event) => {
                     background_tasks::dispatch_swarm_worker_report(
+                        &event,
+                        &sessions,
+                        &soft_interrupt_queues,
+                        live_turn::LiveTurnSwarmContext::new(
+                            &swarm_members,
+                            &swarms_by_id,
+                            &event_history,
+                            &event_counter,
+                            &swarm_event_tx,
+                        ),
+                    )
+                    .await;
+                }
+                BusEvent::SwarmAskEscalated(event) => {
+                    background_tasks::dispatch_swarm_ask_escalated(
                         &event,
                         &sessions,
                         &soft_interrupt_queues,

@@ -3268,6 +3268,25 @@ pub(super) async fn handle_client(
                 .await;
             }
 
+            Request::CommAnswerEscalatedAsk {
+                id,
+                session_id: req_session_id,
+                worker_session_id,
+                request_id,
+                answers,
+            } => {
+                super::ask_escalation::handle_answer_request(
+                    id,
+                    &req_session_id,
+                    &worker_session_id,
+                    request_id,
+                    answers,
+                    &client_event_tx,
+                    &swarm_members,
+                )
+                .await;
+            }
+
             Request::CommAssignRole {
                 id,
                 session_id: req_session_id,

@@ -597,6 +597,7 @@ const ADVERTISED_SWARM_ACTIONS: &[&str] = &[
     "list_swarms",
     "sessions",
     "focus",
+    "answer",
 ];
 
 #[derive(Clone, Deserialize)]
@@ -681,6 +682,14 @@ struct CommunicateInput {
     /// active phase.
     #[serde(default, alias = "stage")]
     phase: Option<u32>,
+    /// Escalated `ask` answer payload, in `AskResponse` shape: one object per
+    /// question. Used by `action = "answer"`.
+    #[serde(default)]
+    answers: Option<Vec<crate::protocol::AskAnswer>>,
+    /// Escalation id from the `ask_escalated` event or the coordinator
+    /// notification. Optional when the worker has one pending escalated ask.
+    #[serde(default)]
+    request_id: Option<String>,
 }
 
 impl CommunicateInput {
@@ -847,6 +856,22 @@ impl Tool for CommunicateTool {
                     "type": "string",
                     "enum": ["notify", "interrupt", "wake"]
                 },
+                "answers": {
+                    "type": "array",
+                    "description": "answer: one object per question, in order.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "selected": {"type": "array", "items": {"type": "string"}},
+                            "other": {"type": "string"},
+                            "comments": {"type": "object", "additionalProperties": {"type": "string"}}
+                        }
+                    }
+                },
+                "request_id": {
+                    "type": "string",
+                    "description": "answer: escalation id when the worker has several pending asks."
+                },
             }
         });
 
@@ -889,6 +914,30 @@ impl Tool for CommunicateTool {
         params.action = canonical_swarm_action(&params.action).to_string();
 
         match params.action.as_str() {
+            "answer" => {
+                let worker = params
+                    .to_session
+                    .clone()
+                    .or_else(|| params.target_session.clone())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "'to_session' is required for answer action: the worker whose escalated ask you are answering"
+                        )
+                    })?;
+                let request = Request::CommAnswerEscalatedAsk {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    worker_session_id: worker.clone(),
+                    request_id: params.request_id.clone(),
+                    answers: params.answers.clone(),
+                };
+                let response = send_request(request).await?;
+                ensure_success(&response)?;
+                return Ok(ToolOutput::new(format!(
+                    "Escalated ask answered. Worker {worker} resumes with your answer."
+                ))
+                .with_title("Ask answered"));
+            }
             "share" | "share_append" => {
                 let key = params
                     .key

@@ -1,8 +1,9 @@
 //! `ask`: block the turn on the user answering 1-4 multiple-choice questions.
 //!
 //! Rides the per-client stdin request channel. Sessions without an attached
-//! interactive client (headless `jcode run`, headless swarm workers) have no
-//! channel and get a model-handleable error instead.
+//! interactive client (headless swarm workers) escalate the question to the
+//! swarm root coordinator and park until it answers; when no coordinator has a
+//! client either, the recommended options are assumed and the result says so.
 use super::{StdinInputRequest, Tool, ToolContext, ToolOutput};
 use crate::protocol::{AskQuestion, AskResponse, format_ask_answers, validate_ask_questions};
 use anyhow::{Result, anyhow};
@@ -12,7 +13,7 @@ use serde_json::{Value, json};
 
 pub(super) struct AskTool;
 
-pub(super) const NO_INTERACTIVE_USER: &str = "ask is unavailable: no interactive user is attached to this session (headless run or swarm worker). Do not wait for an answer. Make the decision yourself using the recommended option and state the assumption, or, as a swarm worker, report the question to your coordinator via swarm report/message.";
+pub(super) const NO_INTERACTIVE_USER_NOTE: &str = "No interactive user is attached anywhere in this spawn chain, so the recommended options were assumed. State the assumption if it affects the result. (A swarm worker with a root coordinator is escalated instead; this is the last-resort fallback.)";
 
 #[derive(Deserialize)]
 struct Input {
@@ -29,7 +30,8 @@ impl Tool for AskTool {
         "Ask the user 1-4 multiple-choice questions, blocking until they answer. For a genuine \
          owner decision you cannot research, instead of a free-text question; never for facts you \
          can look up. Batch pending decisions into one call and label your recommended option \
-         \"(Recommended)\"."
+         \"(Recommended)\". A headless swarm worker without a client escalates the question to the \
+         swarm root coordinator and waits for its answer."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -72,25 +74,36 @@ impl Tool for AskTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let input: Input = serde_json::from_value(input)?;
         validate_ask_questions(&input.questions).map_err(|e| anyhow!(e))?;
-        let tx = super::interactive::sender(&ctx.session_id)
-            .or(ctx.stdin_request_tx.clone())
-            .ok_or_else(|| anyhow!(NO_INTERACTIVE_USER))?;
-        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-        tx.send(StdinInputRequest {
-            request_id: format!("ask-{}", ctx.tool_call_id),
-            prompt: ctx.tool_call_id.clone(),
-            is_password: false,
-            ask_questions: Some(serde_json::to_value(&input.questions)?),
-            response_tx,
-        })
-        .map_err(|_| anyhow!(NO_INTERACTIVE_USER))?;
-        let raw = response_rx.await.map_err(|_| {
-            anyhow!("ask was cancelled: the interactive client disconnected before answering")
-        })?;
-        let response: AskResponse = serde_json::from_str(&raw)
-            .map_err(|error| anyhow!("invalid interactive ask response: {error}"))?;
-        let declined = response.answers.is_none();
-        let mut output = ToolOutput::new(format_ask_answers(&input.questions, &response));
+        let route = super::interactive::sender(&ctx.session_id).or(ctx.stdin_request_tx.clone());
+        let (response, answer_note) = match route {
+            Some(tx) => (
+                ask_client(tx, &input.questions, &ctx.tool_call_id).await?,
+                None,
+            ),
+            None => {
+                match crate::server::ask_escalation::escalate(
+                    &ctx.session_id,
+                    &ctx.tool_call_id,
+                    &input.questions,
+                )
+                .await
+                {
+                    Some(Ok(escalated)) => (escalated.response, escalated.note),
+                    Some(Err(error)) => return Err(error),
+                    None => (
+                        crate::server::ask_escalation::recommended_response(&input.questions),
+                        Some(NO_INTERACTIVE_USER_NOTE.to_string()),
+                    ),
+                }
+            }
+        };
+        let declined = response.answers.is_none() && answer_note.is_none();
+        let mut text = format_ask_answers(&input.questions, &response);
+        if let Some(note) = answer_note.as_deref() {
+            text.push('\n');
+            text.push_str(note);
+        }
+        let mut output = ToolOutput::new(text);
         if let Some(answers) = response.answers {
             for (question_index, answer) in answers.into_iter().enumerate() {
                 for (index, (media_type, data)) in answer.other_images.into_iter().enumerate() {
@@ -122,11 +135,33 @@ impl Tool for AskTool {
         }
         output.title = Some(if declined {
             "User declined".into()
+        } else if answer_note.is_some() {
+            "Assumed recommended options".into()
         } else {
             "User answered".into()
         });
         Ok(output)
     }
+}
+
+async fn ask_client(
+    tx: tokio::sync::mpsc::UnboundedSender<StdinInputRequest>,
+    questions: &[AskQuestion],
+    tool_call_id: &str,
+) -> Result<AskResponse> {
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    tx.send(StdinInputRequest {
+        request_id: format!("ask-{tool_call_id}"),
+        prompt: tool_call_id.to_string(),
+        is_password: false,
+        ask_questions: Some(serde_json::to_value(questions)?),
+        response_tx,
+    })
+    .map_err(|_| anyhow!(NO_INTERACTIVE_USER_NOTE))?;
+    let raw = response_rx.await.map_err(|_| {
+        anyhow!("ask was cancelled: the interactive client disconnected before answering")
+    })?;
+    serde_json::from_str(&raw).map_err(|error| anyhow!("invalid interactive ask response: {error}"))
 }
 
 #[cfg(test)]
@@ -151,9 +186,94 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn headless_session_errors_cleanly() {
-        let err = AskTool.execute(input(), ctx(None)).await.unwrap_err();
-        assert!(err.to_string().contains("no interactive user"), "{err}");
+    async fn headless_session_assumes_recommended_and_says_so() {
+        let out = AskTool.execute(input(), ctx(None)).await.unwrap();
+        assert!(
+            out.output.contains("1. Which? -> A (Recommended)"),
+            "{}",
+            out.output
+        );
+        assert!(out.output.contains("assumed"), "{}", out.output);
+        assert_eq!(out.title.as_deref(), Some("Assumed recommended options"));
+    }
+
+    #[tokio::test]
+    async fn worker_ask_returns_coordinator_answer_as_tool_result() {
+        use crate::server::SwarmMember;
+        use crate::server::ask_escalation;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        let _lock = crate::storage::lock_test_env();
+        ask_escalation::clear_for_test();
+        let member = |id: &str, parent: Option<&str>| {
+            let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+            (
+                SwarmMember {
+                    session_id: id.into(),
+                    event_tx,
+                    event_txs: Default::default(),
+                    working_dir: None,
+                    swarm_id: Some("ask-tool-swarm".into()),
+                    swarm_enabled: true,
+                    status: "running".into(),
+                    detail: None,
+                    task_label: None,
+                    friendly_name: Some(id.into()),
+                    report_back_to_session_id: parent.map(str::to_string),
+                    latest_completion_report: None,
+                    role: "agent".into(),
+                    joined_at: std::time::Instant::now(),
+                    last_status_change: std::time::Instant::now(),
+                    is_headless: parent.is_some(),
+                    output_tail: None,
+                    todo_progress: None,
+                    todo_items: Vec::new(),
+                    runtime: Default::default(),
+                },
+                event_rx,
+            )
+        };
+        let (root, mut root_rx) = member("ask-tool-root", None);
+        let (worker, _worker_rx) = member("ask-tool-worker", Some("ask-tool-root"));
+        let members = Arc::new(RwLock::new(std::collections::HashMap::from([
+            ("ask-tool-root".to_string(), root),
+            ("ask-tool-worker".to_string(), worker),
+        ])));
+        let (stdin_tx, _stdin_rx) = tokio::sync::mpsc::unbounded_channel();
+        let _client = super::super::interactive::attach("ask-tool-root", stdin_tx);
+        ask_escalation::install_bridge("ask-tool-worker", Arc::clone(&members));
+
+        let mut context = ctx(None);
+        context.session_id = "ask-tool-worker".into();
+        let task = tokio::spawn(AskTool.execute(input(), context));
+        let request_id = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let event = root_rx.recv().await.expect("root event channel closed");
+                if let crate::protocol::ServerEvent::AskEscalated { request_id, .. } = event {
+                    return request_id;
+                }
+            }
+        })
+        .await
+        .expect("escalation did not reach the root");
+        ask_escalation::answer(
+            "ask-tool-root",
+            "ask-tool-worker",
+            Some(&request_id),
+            AskResponse {
+                answers: Some(vec![AskAnswer {
+                    selected: vec!["B".into()],
+                    ..AskAnswer::default()
+                }]),
+            },
+        )
+        .unwrap();
+        let out = task.await.unwrap().unwrap();
+        assert!(out.output.contains("1. Which? -> B"), "{}", out.output);
+        assert!(!out.output.contains("assumed"), "{}", out.output);
+        ask_escalation::withdraw_worker("ask-tool-worker");
+        ask_escalation::clear_for_test();
     }
 
     #[tokio::test]
