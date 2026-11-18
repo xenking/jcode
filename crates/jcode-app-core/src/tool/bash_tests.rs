@@ -562,9 +562,20 @@ async fn test_reload_persistable_bash_continues_in_background() {
     let tool = BashTool::new();
     let signal = jcode_agent_runtime::InterruptSignal::new();
     let ctx = make_agent_ctx(signal.clone());
+    // A live turn registers its cancel signal; the interruption reason is
+    // recorded against that registration.
+    let _turn = crate::turn_cancel_registry::register_active_turn("test-session", signal.clone());
 
     let signal_task = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        // A reload is the only shutdown that keeps the command running, and the
+        // server records that reason before firing the signal
+        // (`signal_session_for_reload`). Without it a fired signal means a user
+        // cancel, which kills the command.
+        crate::turn_cancel_registry::mark_interruption(
+            "test-session",
+            crate::turn_cancel_registry::TurnInterruptionReason::Reload,
+        );
         signal.fire();
     });
 

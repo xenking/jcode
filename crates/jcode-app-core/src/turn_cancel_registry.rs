@@ -466,6 +466,51 @@ mod tests {
         assert!(registered[0].same_instance(&first));
     }
 
+    /// One session can own more than one abortable supervisor (a client turn
+    /// plus a server-initiated turn). Force stop must abort every live one: a
+    /// single slot per session let the later registration replace the live
+    /// turn, so the abort hit an already-finished task and the turn the user
+    /// was watching kept running.
+    #[tokio::test]
+    async fn force_stop_aborts_every_registration_for_a_session() {
+        let session_id = "turn_cancel_registry_force_stop_multi";
+        let (first_handle, first_registration) = futures::future::AbortHandle::new_pair();
+        let (second_handle, second_registration) = futures::future::AbortHandle::new_pair();
+        let first_guard = register_force_stop(session_id, first_handle);
+        let second_guard = register_force_stop(session_id, second_handle);
+
+        let first_task = tokio::spawn(futures::future::Abortable::new(
+            tokio::time::sleep(std::time::Duration::from_secs(30)),
+            first_registration,
+        ));
+        let second_task = tokio::spawn(futures::future::Abortable::new(
+            tokio::time::sleep(std::time::Duration::from_secs(30)),
+            second_registration,
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        assert!(force_stop(session_id));
+        assert!(
+            first_task.await.unwrap().is_err(),
+            "the older supervisor must be aborted too"
+        );
+        assert!(
+            second_task.await.unwrap().is_err(),
+            "the newer supervisor must be aborted"
+        );
+        assert!(force_stop_in_progress(session_id));
+
+        // Dropping one guard must leave the other registration intact.
+        drop(second_guard);
+        assert!(
+            force_stop_in_progress(session_id),
+            "the remaining guard keeps the session registered"
+        );
+        drop(first_guard);
+        assert!(!force_stop_in_progress(session_id));
+        assert!(!force_stop(session_id), "nothing is registered any more");
+    }
+
     /// Issue #732: a session renamed mid-turn (attach/resume) must carry its
     /// in-flight turn registration to the new id, otherwise a cancel routed
     /// through the new session id reaches no running turn.
