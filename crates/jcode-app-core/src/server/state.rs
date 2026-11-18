@@ -1104,6 +1104,7 @@ impl SessionControlHandle {
 
     /// Release every editing hold owned by a connection that went away, so a
     /// dropped client can never strand a queued prompt.
+    #[cfg(test)]
     pub(crate) fn release_user_prompt_edits(&self, holder: &str) {
         let Ok(mut queue) = self.soft_interrupt_queue.lock() else {
             return;
