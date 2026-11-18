@@ -541,3 +541,40 @@ async fn viewer_disconnect_keeps_headless_worker_alive() {
     assert!(fixture.swarms.read().await["worker-swarm"].contains(&fixture.id));
     assert!(fixture.connections.read().await.is_empty());
 }
+
+/// After a daemon reload the server itself resumes an interrupted turn: the
+/// connection that drops while it runs never owned it (no processing task).
+/// Cleanup used to unpublish the Agent anyway. The turn kept running and kept
+/// the only strong handle, so every Desktop reattach failed with "still has a
+/// runtime owner" until the turn ended (chick, 2026-11-18 16:16).
+#[tokio::test]
+async fn disconnect_keeps_server_owned_turn_published() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = Home::new();
+    crate::server::clear_reload_marker();
+    let fixture = Fixture::new(true).await;
+    let lease = fixture.agent.lock().await.claim_server_turn().unwrap();
+    // The server-owned turn holds the agent for its whole duration.
+    let turn_guard = fixture.agent.clone().lock_owned().await;
+    timeout(
+        Duration::from_secs(1),
+        fixture.cleanup(true, Duration::ZERO),
+    )
+    .await
+    .expect("cleanup must not wait on a turn this connection does not own");
+    drop(turn_guard);
+    drop(lease);
+    assert!(
+        fixture
+            .sessions
+            .read()
+            .await
+            .get(&fixture.id)
+            .is_some_and(|agent| Arc::ptr_eq(agent, &fixture.agent)),
+        "the running turn's Agent stays attachable"
+    );
+    assert!(fixture.connections.read().await.is_empty());
+    let members = fixture.members.read().await;
+    let member = members.get(&fixture.id).expect("session stays a member");
+    assert!(member.event_txs.is_empty(), "only the transport is released");
+}

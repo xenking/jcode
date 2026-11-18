@@ -210,7 +210,18 @@ pub(super) async fn cleanup_client_connection(
     // viewing it. A Desktop/TUI viewer closing must only release its own
     // transport; tearing the worker down here stopped it mid-turn and dropped
     // it from its swarm, so the coordinator lost the worker for good.
-    if continue_on_disconnect || server_owned_worker {
+    // A turn this connection did not start (reload recovery, swarm wake,
+    // server failover) is owned by the server, like a headless worker's. Its
+    // Agent must stay published: unpublishing it while the turn holds the only
+    // strong handle made every reattach fail with "still has a runtime owner"
+    // until the turn ended.
+    let server_owned_turn = processing_task
+        .as_ref()
+        .is_none_or(|task| task.is_finished())
+        && sessions
+            .turn_observer(client_session_id)
+            .is_some_and(|observer| observer.snapshot().1.is_some());
+    if continue_on_disconnect || server_owned_worker || server_owned_turn {
         // Remote continuation is a session lifetime policy, not merely a
         // promise to finish the current turn. Idle coordinators must remain
         // addressable for worker reports and future wake turns after EOF.

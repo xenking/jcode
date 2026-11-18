@@ -274,3 +274,36 @@ async fn target_subscribe_preserves_explicit_directory_and_its_validation() {
     .unwrap();
     assert!(initial_subscribe_working_dir(&request).is_err());
 }
+
+/// A session mid-turn holds its Agent mutex. When its swarm member carries no
+/// root (a plain chat that never joined a swarm records none), attaching must
+/// fall back to the persisted root instead of reporting an unknown session:
+/// a Desktop window reopening a working chat would otherwise loop on
+/// "Unknown session" until the turn ends.
+#[tokio::test]
+async fn target_subscribe_busy_agent_without_member_root_uses_persisted_root() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = Home::new();
+    let mut session = crate::session::Session::create(None, Some("busy".into()));
+    session.working_dir = Some("/workspace/busy-persisted".into());
+    session.save().unwrap();
+    let id = session.id.clone();
+    let agent = live_agent(&id, "/workspace/busy-persisted").await;
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(id.clone(), agent.clone())]),
+    ));
+    let members = Arc::new(RwLock::new(HashMap::new()));
+    let _busy = agent.lock().await;
+    let mut request = subscribe(&id);
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        resolve_target_subscribe_working_dir(&mut request, &sessions, &members),
+    )
+    .await
+    .expect("must not wait on busy Agent")
+    .expect("a busy live session is not unknown");
+    assert_eq!(
+        initial_subscribe_working_dir(&request).unwrap(),
+        "/workspace/busy-persisted"
+    );
+}
