@@ -225,8 +225,7 @@ async fn daemon_reload_keeps_the_cold_cache_clock() {
     let _guard = crate::storage::lock_test_env();
     let (_home, mut agent, before) = fixture(0, 1_000, 20_000).await;
     // The reloaded process only has the session file to go on.
-    agent.session.last_provider_request_at =
-        Some(chrono::Utc::now() - chrono::Duration::hours(2));
+    agent.session.last_provider_request_at = Some(chrono::Utc::now() - chrono::Duration::hours(2));
     agent.seed_compaction_from_session();
 
     let (outgoing, event) = agent.messages_for_provider(None).await.unwrap();
@@ -256,7 +255,10 @@ async fn daemon_reload_keeps_the_cold_cache_clock() {
             _ => None,
         })
         .expect("shake divider with token counts");
-    assert!(divider.0 > divider.1, "shake must record the reduction: {divider:?}");
+    assert!(
+        divider.0 > divider.1,
+        "shake must record the reduction: {divider:?}"
+    );
 }
 
 /// Older session files have no stored request time, so the clock falls back to
@@ -279,7 +281,10 @@ async fn restored_cold_cache_clock_falls_back_to_the_last_assistant_message() {
 
     let (_, event) = agent.messages_for_provider(None).await.unwrap();
     assert!(event.is_none(), "a shake is not a background compaction");
-    assert_eq!(shake_dividers(&agent), vec!["shake_cache_expiry".to_string()]);
+    assert_eq!(
+        shake_dividers(&agent),
+        vec!["shake_cache_expiry".to_string()]
+    );
 }
 
 #[tokio::test]
@@ -291,7 +296,10 @@ async fn daemon_cold_cache_warm_hour_does_not_rewrite_history() {
         .compaction()
         .write()
         .await
-        .note_provider_response(std::time::SystemTime::now() - Duration::from_secs(3_599), Some(433_000));
+        .note_provider_response(
+            std::time::SystemTime::now() - Duration::from_secs(3_599),
+            Some(433_000),
+        );
     let original = agent.session.messages_for_provider().to_vec();
     let (outgoing, event) = agent.messages_for_provider(None).await.unwrap();
     assert!(event.is_none());

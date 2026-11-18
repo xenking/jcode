@@ -1164,6 +1164,9 @@ pub(super) async fn handle_client(
                     (id, session_control.set_user_prompt_editing(&prompt_id, &client_connection_id, editing))
                 }
                 Request::EditQueuedPrompt { id, client_id: _, prompt_id, content, images } => {
+                    // A saved edit is an ordinary queued prompt again: if the
+                    // turn that was running has already ended, deliver it now.
+                    dispatch_if_idle = true;
                     let result = session_control
                         .edit_user_prompt(&prompt_id, content, images)
                         .map(|outcome| edit_outcome = Some((prompt_id, outcome)));

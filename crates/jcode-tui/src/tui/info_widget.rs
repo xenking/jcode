@@ -1494,7 +1494,8 @@ fn overview_footer(data: &InfoWidgetData) -> String {
                 .filter(|info| info.total_chars > 0)
                 .map(|info| info.estimated_tokens() as u64)
         });
-    let reported = data.observed_context_tokens.is_some() || data.last_reported_context_tokens.is_some();
+    let reported =
+        data.observed_context_tokens.is_some() || data.last_reported_context_tokens.is_some();
     match (used, data.context_limit) {
         (Some(used), _) if data.compaction_threshold_tokens.is_some_and(|t| t > 0) => {
             let threshold = data.compaction_threshold_tokens.unwrap_or_default() as u64;

@@ -3,7 +3,9 @@
 use super::*;
 
 impl Server {
-    pub(super) async fn recover_headless_sessions_on_startup(&self) -> Vec<tokio::task::JoinHandle<()>> {
+    pub(super) async fn recover_headless_sessions_on_startup(
+        &self,
+    ) -> Vec<tokio::task::JoinHandle<()>> {
         // Migrate legacy snapshots into the same durable owner. An existing
         // record, including Stop/superseded tombstones, is authoritative.
         let current_reload_id = recent_reload_state(Duration::from_secs(600))
@@ -120,5 +122,4 @@ impl Server {
             .reconcile_once()
             .await
     }
-
 }

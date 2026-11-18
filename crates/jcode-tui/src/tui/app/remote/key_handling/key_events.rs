@@ -759,6 +759,11 @@ pub(super) async fn handle_remote_key_internal(
                 return Ok(());
             }
             KeyCode::Up => {
+                if app.queued_prompt_edit_active() {
+                    // Up owns queue walking while an edit is open; do not let a
+                    // modifier chord replace the text being edited.
+                    return Ok(());
+                }
                 let had_server_interrupts = !app.pending_soft_interrupts.is_empty();
                 let legacy_ids = app.pending_soft_interrupt_client_ids();
                 if had_server_interrupts

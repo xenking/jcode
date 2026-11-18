@@ -1252,8 +1252,7 @@ impl Agent {
 
     async fn note_shake_provider_response(&mut self, cache_read_tokens: Option<u64>) {
         let now = std::time::SystemTime::now();
-        self.session.last_provider_request_at =
-            Some(chrono::DateTime::<chrono::Utc>::from(now));
+        self.session.last_provider_request_at = Some(chrono::DateTime::<chrono::Utc>::from(now));
         self.registry
             .compaction()
             .write()
