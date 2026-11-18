@@ -632,6 +632,7 @@ fn send_system_reminder_is_hidden_and_does_not_wait_for_acceptance() {
     assert_eq!(
         received.recv_timeout(Duration::from_secs(5)).unwrap(),
         ApiRequest::SendMessage {
+            attachments: Vec::new(),
             session_id: "mine".into(),
             content: String::new(),
             system_reminder: Some("continue task".into()),

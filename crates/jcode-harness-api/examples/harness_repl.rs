@@ -59,6 +59,7 @@ fn run_session<R: BufRead, W: Write>(mut client: HarnessClient<R, W>, message: &
 
     client
         .send(ApiRequest::SendMessage {
+            attachments: Vec::new(),
             session_id: session_id.clone(),
             content: message.to_string(),
             images: vec![],

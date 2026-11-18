@@ -277,6 +277,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
         &prepared.raw_input,
         &prepared.expanded,
         &prepared.pasted_contents,
+        remote.supports_file_attachments(),
     );
     // Keyboard dispatch propagates Err to the TUI event loop. A failed write
     // is recoverable: keep the consumed composer (including attachments) and
@@ -428,7 +429,7 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
         app,
         remote,
         input::PreparedInput {
-            pasted_contents: prepared.pasted_contents,
+            pasted_contents: Vec::new(),
             raw_input: prepared.raw_input,
             expanded: expanded_prompt,
             images: prepared.images,

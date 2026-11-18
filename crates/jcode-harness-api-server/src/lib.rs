@@ -459,6 +459,9 @@ where
     let force_stop_turn_supported = daemon_caps.iter().any(|cap| cap == "force_stop_turn_v1");
     let soft_interrupt_ids_supported = daemon_caps.iter().any(|cap| cap == "soft_interrupt_ids");
     let queued_prompts_supported = daemon_caps.iter().any(|cap| cap == "queued_prompts");
+    let file_attachments_supported = daemon_caps
+        .iter()
+        .any(|cap| cap == jcode_harness_api::FILE_ATTACHMENTS_CAPABILITY);
     let queued_prompt_batch_interrupt_supported = daemon_caps
         .iter()
         .any(|cap| cap == "queued_prompt_batch_interrupt_v1");
@@ -508,6 +511,10 @@ where
             .chain(force_stop_turn_supported.then(|| "force_stop_turn_v1".to_string()))
             .chain(queued_prompts_supported.then(|| "queued_prompts".to_string()))
             .chain(
+                file_attachments_supported
+                    .then(|| jcode_harness_api::FILE_ATTACHMENTS_CAPABILITY.to_string()),
+            )
+            .chain(
                 queued_prompt_batch_interrupt_supported
                     .then(|| "queued_prompt_batch_interrupt_v1".to_string()),
             )
@@ -545,6 +552,7 @@ where
     state.runtime_commands_supported = runtime_commands_supported;
     state.soft_interrupt_ids_supported = soft_interrupt_ids_supported;
     state.queued_prompts_supported = queued_prompts_supported;
+    state.file_attachments_supported = file_attachments_supported;
     state.queued_prompt_batch_interrupt_supported = queued_prompt_batch_interrupt_supported;
     state.queued_prompt_mutations_supported = queued_prompt_mutations_supported;
     state.queued_prompt_editing_supported = queued_prompt_editing_supported;

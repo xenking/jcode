@@ -45,7 +45,9 @@ pub use events::*;
 pub use jcode_applet_types;
 pub use jcode_selfdev_types::ServingIdentity;
 pub use jcode_session_types::{AskAnswer, AskOption, AskQuestion, AskResponse};
-pub use jcode_session_types::{Attachment, TurnStopReason};
+pub use jcode_session_types::{
+    Attachment, FILE_ATTACHMENTS_CAPABILITY, StoredAttachment, TurnStopReason,
+};
 pub use jcode_side_panel_types::{
     SidePanelPage, SidePanelPageFormat, SidePanelPageSource, SidePanelSnapshot,
 };

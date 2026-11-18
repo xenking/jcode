@@ -3111,7 +3111,11 @@ pub(super) fn paste_attachment_payload(
     raw: &str,
     expanded: &str,
     pastes: &[String],
+    supported: bool,
 ) -> (String, Vec<jcode_session_types::Attachment>) {
+    if !supported || pastes.is_empty() {
+        return (expanded.to_owned(), Vec::new());
+    }
     let mut content = raw.to_owned();
     let mut attachments = Vec::new();
     for text in pastes.iter().rev() {
@@ -3143,6 +3147,7 @@ mod paste_attachment_tests {
             "A [pasted 2 lines] B [pasted 2 lines]",
             "expanded",
             &pastes,
+            true,
         );
         assert_eq!(content, "A [Pasted text] B [Pasted text]");
         assert_eq!(
@@ -3156,6 +3161,18 @@ mod paste_attachment_tests {
                 }
             ]
         );
+    }
+
+    #[test]
+    fn older_daemon_receives_expanded_text() {
+        let (content, attachments) = super::paste_attachment_payload(
+            "[pasted 2 lines]",
+            "one\ntwo",
+            &["one\ntwo".into()],
+            false,
+        );
+        assert_eq!(content, "one\ntwo");
+        assert!(attachments.is_empty());
     }
 }
 

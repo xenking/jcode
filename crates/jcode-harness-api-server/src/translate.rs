@@ -148,6 +148,7 @@ pub struct BridgeState {
     /// The daemon accepts soft interrupt ids and per-id cancellation, and
     /// replies to `background_tool` with a result.
     pub queued_prompts_supported: bool,
+    pub file_attachments_supported: bool,
     pub queued_prompt_batch_interrupt_supported: bool,
     pub queued_prompt_mutations_supported: bool,
     pub queued_prompt_editing_supported: bool,
@@ -691,6 +692,17 @@ impl BridgeState {
                 ]
             }
             "send_message" | "send_skill_message" => {
+                if request["attachments"]
+                    .as_array()
+                    .is_some_and(|items| !items.is_empty())
+                    && !self.file_attachments_supported
+                {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "daemon does not advertise file_attachments_v1",
+                    );
+                }
                 let id = self.legacy_id();
                 let no_reply = request["no_reply"].as_bool().unwrap_or(false);
                 if no_reply {
@@ -800,6 +812,18 @@ impl BridgeState {
                         api_id,
                         ErrorCode::InvalidRequest,
                         "daemon does not advertise queued_prompt_active_skill",
+                    );
+                }
+                if matches!(req, "queue_prompt" | "edit_queued_prompt")
+                    && request["attachments"]
+                        .as_array()
+                        .is_some_and(|items| !items.is_empty())
+                    && !self.file_attachments_supported
+                {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "daemon does not advertise file_attachments_v1",
                     );
                 }
                 if req == "interrupt_queued_prompts"

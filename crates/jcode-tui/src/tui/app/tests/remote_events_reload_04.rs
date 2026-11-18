@@ -2658,6 +2658,7 @@ fn resumed_history_restores_last_provider_reported_context_usage() {
             messages: vec![
                 crate::protocol::HistoryMessage {
                     timestamp_ms: Some(1),
+                    attachments: Vec::new(),
                     response_stats: None,
                     role: "user".to_string(),
                     content: "first prompt".to_string(),
@@ -2666,6 +2667,7 @@ fn resumed_history_restores_last_provider_reported_context_usage() {
                 },
                 crate::protocol::HistoryMessage {
                     timestamp_ms: Some(2),
+                    attachments: Vec::new(),
                     response_stats: Some(jcode_session_types::ResponseStats {
                         duration_secs: None,
                         prompt_tokens: Some(231_000),

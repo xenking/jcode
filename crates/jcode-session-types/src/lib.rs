@@ -18,6 +18,8 @@ pub use transcription::{
     TRANSCRIPTION_CLOSE, TRANSCRIPTION_OPEN, strip_transcription, wrap_transcription,
 };
 
+pub const FILE_ATTACHMENTS_CAPABILITY: &str = "file_attachments_v1";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Attachment {

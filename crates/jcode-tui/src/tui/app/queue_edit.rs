@@ -120,6 +120,7 @@ impl App {
             &prepared.raw_input,
             &prepared.expanded,
             &prepared.pasted_contents,
+            remote.supports_file_attachments(),
         );
         let mut attachments = self
             .server_queued_prompts

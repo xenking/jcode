@@ -287,6 +287,7 @@ pub struct RemoteConnection {
     server_accepts_focus: bool,
     server_accepts_queued_prompts: bool,
     server_accepts_queue_editing: bool,
+    server_accepts_file_attachments: bool,
     server_accepts_force_stop: bool,
     last_keyboard_cancel: Option<Instant>,
     /// Last (focused, hidden) state reported to this server, if any.
@@ -485,6 +486,7 @@ impl RemoteConnection {
             server_accepts_focus: false,
             server_accepts_queued_prompts: false,
             server_accepts_queue_editing: false,
+            server_accepts_file_attachments: false,
             reported_focus: None,
             last_account_usage_poll: None,
             call_output_tokens_seen: 0,
@@ -900,6 +902,12 @@ impl RemoteConnection {
     /// Record the capability list from a Pong. Stream keepalive Pongs carry
     /// none and must not clear what the server already advertised.
     pub fn note_server_capabilities(&mut self, capabilities: &[String]) {
+        if capabilities
+            .iter()
+            .any(|cap| cap == jcode_session_types::FILE_ATTACHMENTS_CAPABILITY)
+        {
+            self.server_accepts_file_attachments = true;
+        }
         if capabilities.iter().any(|cap| cap == "force_stop_turn_v1") {
             self.server_accepts_force_stop = true;
         }
@@ -925,6 +933,10 @@ impl RemoteConnection {
 
     pub fn supports_queued_prompts(&self) -> bool {
         self.server_accepts_queued_prompts
+    }
+
+    pub fn supports_file_attachments(&self) -> bool {
+        self.server_accepts_file_attachments
     }
 
     /// The daemon can hold a queued prompt open for in-place editing.
@@ -1629,6 +1641,7 @@ impl RemoteConnection {
             server_accepts_focus: false,
             server_accepts_queued_prompts: false,
             server_accepts_queue_editing: false,
+            server_accepts_file_attachments: false,
             reported_focus: None,
             last_account_usage_poll: None,
             call_output_tokens_seen: 0,

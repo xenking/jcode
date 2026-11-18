@@ -68,6 +68,7 @@ fn queued_skills_require_capability_before_any_socket_write() {
         )
         .unwrap();
         let prompt = QueuedPrompt {
+            attachments: Vec::new(),
             client_id: "q".into(),
             content: "hello".into(),
             images: vec![],
@@ -86,6 +87,7 @@ fn queued_skills_require_capability_before_any_socket_write() {
             assert_eq!(error.kind, ErrorKind::UnsupportedCapability);
             let error = client
                 .request(ApiRequest::QueuePrompt {
+                    attachments: Vec::new(),
                     session_id: "s".into(),
                     client_id: "q".into(),
                     content: "hello".into(),

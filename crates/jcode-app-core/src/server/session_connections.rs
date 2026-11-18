@@ -44,6 +44,7 @@ pub(super) async fn connection_presence_pong(
             "queued_prompt_mutations_v1".into(),
             "queued_prompt_editing".into(),
             "queued_prompt_active_skill".into(),
+            jcode_session_types::FILE_ATTACHMENTS_CAPABILITY.into(),
             "bounded_history_v1".into(),
             "ask_response_images".into(),
             "runtime_commands".into(),

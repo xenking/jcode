@@ -4132,8 +4132,21 @@ fn message_forwards_attachments_to_daemon() {
         {"type":"file", "name":"code.rs", "mime":"text/plain", "size":3, "data":"YWJj"},
         {"type":"pasted_text", "text":"one\ntwo"}
     ]);
-    let out = state.api_request_to_legacy(&json!({"req":"send_message", "id":90,
-        "session_id":"s1", "content":"hello", "attachments":attachments}));
+    let request = json!({"req":"send_message", "id":90,
+        "session_id":"s1", "content":"hello", "attachments":attachments});
+    let rejected = state.api_request_to_legacy(&request);
+    assert!(matches!(
+        &rejected[..],
+        [Outbound::Reply(ServerFrame {
+            event: ApiEvent::Error {
+                code: ErrorCode::InvalidRequest,
+                ..
+            },
+            ..
+        })]
+    ));
+    state.file_attachments_supported = true;
+    let out = state.api_request_to_legacy(&request);
     let Outbound::Legacy(message) = &out[0] else {
         panic!("message")
     };

@@ -49,6 +49,7 @@ pub(in crate::tui::app) async fn send_prepared_queued_prompt(
         &prepared.raw_input,
         &prepared.expanded,
         &prepared.pasted_contents,
+        remote.supports_file_attachments(),
     );
     send_queued_prompt_with_attachments(
         app,

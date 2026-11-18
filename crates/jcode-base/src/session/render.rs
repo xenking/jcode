@@ -919,6 +919,7 @@ fn render_messages_and_images_internal(
 /// recalled.
 fn memory_injection_row(injection: &StoredMemoryInjection) -> RenderedMessage {
     RenderedMessage {
+        attachments: Vec::new(),
         response_stats: None,
         tool_duration_ms: None,
         role: "memory".to_string(),
