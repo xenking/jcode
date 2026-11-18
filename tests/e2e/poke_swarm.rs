@@ -331,6 +331,7 @@ async fn run_scenario(assign_todo_to_worker: bool, await_worker: bool) -> Result
         // One ordinary coordinator turn. Its end is the poke decision point.
         client
             .send(serde_json::to_value(Request::Message {
+                attachments: Vec::new(),
                 id: 3,
                 content: "Coordinate the lane.".into(),
                 images: vec![],

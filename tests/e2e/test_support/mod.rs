@@ -396,6 +396,7 @@ impl WsTestClient {
         let id = self.next_id;
         self.next_id += 1;
         self.send_request(Request::Message {
+            attachments: Vec::new(),
             id,
             content: content.to_string(),
             images: vec![],
