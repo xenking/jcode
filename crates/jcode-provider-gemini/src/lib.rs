@@ -410,7 +410,8 @@ pub fn build_contents_with_signature_policy(
                     }
                     ContentBlock::OpenAICompaction { .. }
                     | ContentBlock::ToolReference { .. }
-                    | ContentBlock::ProviderNative { .. } => {}
+                    | ContentBlock::ProviderNative { .. }
+                    | ContentBlock::Unknown => {}
                 }
             }
             if parts.is_empty() {

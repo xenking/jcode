@@ -326,6 +326,7 @@ impl ContentBlockMemoryStats {
                 self.max_tool_result_bytes = self.max_tool_result_bytes.max(bytes);
                 self.record_bytes(bytes);
             }
+            ContentBlock::Unknown => {}
         }
     }
 

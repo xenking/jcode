@@ -815,7 +815,9 @@ fn render_messages_and_images_internal(
                         timestamp_ms: msg_timestamp_ms,
                     });
                 }
-                ContentBlock::OpenAICompaction { .. } | ContentBlock::ToolReference { .. } => {}
+                ContentBlock::OpenAICompaction { .. }
+                | ContentBlock::ToolReference { .. }
+                | ContentBlock::Unknown => {}
             }
         }
 

@@ -676,7 +676,8 @@ fn build_web_prompt(
                 | ContentBlock::OpenAIReasoning { .. }
                 | ContentBlock::OpenAICompaction { .. }
                 | ContentBlock::ToolReference { .. }
-                | ContentBlock::ProviderNative { .. } => {}
+                | ContentBlock::ProviderNative { .. }
+                | ContentBlock::Unknown => {}
             }
         }
         conversation.push(json!({

@@ -166,7 +166,7 @@ pub struct RenderedImage {
     pub history_message_index: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
 pub enum SessionStatus {
     #[default]
     Active,
@@ -180,6 +180,63 @@ pub enum SessionStatus {
     Error {
         message: String,
     },
+    Unknown,
+}
+
+#[derive(Deserialize)]
+#[serde(remote = "SessionStatus")]
+enum KnownSessionStatus {
+    Active,
+    Closed,
+    Crashed {
+        message: Option<String>,
+    },
+    Reloaded,
+    Compacted,
+    RateLimited,
+    Error {
+        message: String,
+    },
+    #[serde(skip)]
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for SessionStatus {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let tag = match &value {
+            serde_json::Value::String(tag) => Some(tag.as_str()),
+            serde_json::Value::Object(map) if map.len() == 1 => {
+                map.keys().next().map(String::as_str)
+            }
+            _ => None,
+        };
+        match tag {
+            Some(
+                "Active" | "Closed" | "Crashed" | "Reloaded" | "Compacted" | "RateLimited"
+                | "Error",
+            ) => KnownSessionStatus::deserialize(value).map_err(D::Error::custom),
+            Some(_) => Ok(Self::Unknown),
+            None => Err(D::Error::custom("invalid session status")),
+        }
+    }
+}
+
+#[test]
+fn session_status_unknown_and_known_payloads() {
+    assert_eq!(
+        serde_json::from_str::<SessionStatus>(r#""future""#).unwrap(),
+        SessionStatus::Unknown
+    );
+    let status = SessionStatus::Error {
+        message: "failed".into(),
+    };
+    assert_eq!(
+        serde_json::from_value::<SessionStatus>(serde_json::to_value(&status).unwrap()).unwrap(),
+        status
+    );
+    assert!(serde_json::from_str::<SessionStatus>(r#"{"Error":{"other":1}}"#).is_err());
 }
 
 impl SessionStatus {
@@ -192,6 +249,7 @@ impl SessionStatus {
             SessionStatus::Compacted => "compacted",
             SessionStatus::RateLimited => "rate limited",
             SessionStatus::Error { .. } => "error",
+            SessionStatus::Unknown => "unknown",
         }
     }
 
@@ -204,6 +262,7 @@ impl SessionStatus {
             SessionStatus::Compacted => "📦",
             SessionStatus::RateLimited => "⏳",
             SessionStatus::Error { .. } => "❌",
+            SessionStatus::Unknown => "?",
         }
     }
 

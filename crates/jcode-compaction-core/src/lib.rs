@@ -264,7 +264,8 @@ pub fn build_compaction_conversation_text(
                 | ContentBlock::ReasoningTrace { .. }
                 | ContentBlock::AnthropicThinking { .. }
                 | ContentBlock::OpenAIReasoning { .. }
-                | ContentBlock::ToolReference { .. } => {}
+                | ContentBlock::ToolReference { .. }
+                | ContentBlock::Unknown => {}
                 ContentBlock::Image { .. } => conversation_text.push_str("[Image]\n"),
                 ContentBlock::OpenAICompaction { .. } => {
                     conversation_text.push_str("[OpenAI native compaction]\n")
@@ -408,6 +409,7 @@ pub fn content_char_count(content: &[ContentBlock]) -> usize {
             // Search results are billed as input tokens on replay; the raw JSON
             // (mostly encrypted page content) is a reasonable size proxy.
             ContentBlock::ProviderNative { item, .. } => item.to_string().len(),
+            ContentBlock::Unknown => 0,
         })
         .sum()
 }

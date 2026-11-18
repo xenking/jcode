@@ -106,7 +106,8 @@ fn stored_message_visible_text(message: &crate::session::StoredMessage) -> Strin
             }
             ContentBlock::OpenAICompaction { .. }
             | ContentBlock::ToolReference { .. }
-            | ContentBlock::ProviderNative { .. } => {}
+            | ContentBlock::ProviderNative { .. }
+            | ContentBlock::Unknown => {}
         }
     }
     parts.join("\n\n")

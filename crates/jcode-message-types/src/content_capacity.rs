@@ -164,6 +164,7 @@ impl<'a> ContentCapacityAccounting<'a> {
                 self.string(provider);
                 self.json(item);
             }
+            ContentBlock::Unknown => {}
         }
     }
 }

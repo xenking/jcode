@@ -163,7 +163,8 @@ impl SourceHasher {
                     | ContentBlock::OpenAIReasoning { .. }
                     | ContentBlock::OpenAICompaction { .. }
                     | ContentBlock::ToolReference { .. }
-                    | ContentBlock::ProviderNative { .. } => {}
+                    | ContentBlock::ProviderNative { .. }
+                    | ContentBlock::Unknown => {}
                 }
             }
             0u8.hash(self);

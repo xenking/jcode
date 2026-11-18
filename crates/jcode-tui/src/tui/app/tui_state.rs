@@ -1301,6 +1301,7 @@ impl crate::tui::TuiState for App {
                             tool_result_count += 1;
                             tool_result_chars += item.to_string().len();
                         }
+                        ContentBlock::Unknown => {}
                     }
                 }
             }

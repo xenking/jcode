@@ -245,6 +245,8 @@ pub enum ContentBlock {
         provider: String,
         item: serde_json::Value,
     },
+    #[serde(other)]
+    Unknown,
 }
 
 impl Message {

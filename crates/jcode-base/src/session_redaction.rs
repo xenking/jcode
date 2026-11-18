@@ -75,7 +75,8 @@ fn redacted_field(block: &ContentBlock) -> Option<RedactedField> {
         }
         ContentBlock::Image { .. }
         | ContentBlock::OpenAICompaction { .. }
-        | ContentBlock::ToolReference { .. } => None,
+        | ContentBlock::ToolReference { .. }
+        | ContentBlock::Unknown => None,
     }
 }
 

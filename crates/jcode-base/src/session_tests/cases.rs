@@ -4,13 +4,20 @@ use anyhow::{Result, anyhow};
 #[test]
 fn session_loads_future_content_block() {
     let mut session = Session::create_with_id("session_future_block".into(), None, None);
-    session.add_message(Role::User, vec![ContentBlock::Text {
-        text: "kept".into(), cache_control: None,
-    }]);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "kept".into(),
+            cache_control: None,
+        }],
+    );
     let mut json = serde_json::to_value(&session).unwrap();
-    json["messages"][0]["content"].as_array_mut().unwrap().push(serde_json::json!({
-        "type": "future_content", "payload": {"x": 1}
-    }));
+    json["messages"][0]["content"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "type": "future_content", "payload": {"x": 1}
+        }));
     let restored: Session = serde_json::from_value(json).unwrap();
     assert_eq!(restored.messages[0].content_preview(), "kept");
 }

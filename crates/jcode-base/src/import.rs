@@ -417,7 +417,8 @@ fn imported_message_text(blocks: &[ContentBlock], truncate_blocks: bool) -> (Str
             | ContentBlock::OpenAIReasoning { .. }
             | ContentBlock::OpenAICompaction { .. }
             | ContentBlock::ToolReference { .. }
-            | ContentBlock::ProviderNative { .. } => {
+            | ContentBlock::ProviderNative { .. }
+            | ContentBlock::Unknown => {
                 changed = true;
                 continue;
             }

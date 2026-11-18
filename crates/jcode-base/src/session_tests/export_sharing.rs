@@ -89,7 +89,8 @@ fn legacy_redact(blocks: &mut [ContentBlock]) {
             ContentBlock::ProviderNative { item, .. } => redact_json_value(item),
             ContentBlock::Image { .. }
             | ContentBlock::OpenAICompaction { .. }
-            | ContentBlock::ToolReference { .. } => {}
+            | ContentBlock::ToolReference { .. }
+            | ContentBlock::Unknown => {}
         }
     }
 }

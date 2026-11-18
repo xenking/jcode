@@ -328,6 +328,7 @@ fn reason_and_tags(status: &SessionStatus) -> (String, Vec<String>) {
             vec!["failed".to_string(), "error".to_string()],
         ),
         SessionStatus::Active => ("Still active.".to_string(), vec!["active".to_string()]),
+        SessionStatus::Unknown => ("Status is unknown.".to_string(), vec!["unknown".to_string()]),
     }
 }
 
@@ -548,6 +549,7 @@ fn status_icon(status: &SessionStatus) -> &'static str {
         SessionStatus::RateLimited => "⏳",
         SessionStatus::Crashed { .. } | SessionStatus::Error { .. } => "🔴",
         SessionStatus::Active => "▶",
+        SessionStatus::Unknown => "?",
     }
 }
 
@@ -559,6 +561,7 @@ fn status_label(status: &SessionStatus) -> &'static str {
         SessionStatus::RateLimited => "waiting",
         SessionStatus::Crashed { .. } | SessionStatus::Error { .. } => "failed",
         SessionStatus::Active => "active",
+        SessionStatus::Unknown => "unknown",
     }
 }
 
