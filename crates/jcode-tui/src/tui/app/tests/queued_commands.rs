@@ -106,6 +106,7 @@ fn send_modes_reload_reconciles_unconfirmed_prompt_by_id() {
     let _env_guard = crate::storage::lock_test_env();
     let session_id = format!("send-modes-reload-{}", crate::id::new_id("test"));
     let prompt = crate::protocol::QueuedPrompt {
+            attachments: Vec::new(),
         client_id: "persisted-id".into(),
         content: "only once".into(),
         images: vec![],
@@ -145,6 +146,7 @@ fn send_modes_unconfirmed_missing_snapshot_restores_draft_without_resending() {
     let mut app = create_test_app();
     app.uncertain_queue_prompts
         .push(crate::protocol::QueuedPrompt {
+            attachments: Vec::new(),
             client_id: "maybe-consumed".into(),
             content: "check me".into(),
             images: vec![],
@@ -180,6 +182,7 @@ fn send_modes_server_rejection_preserves_active_turn_and_draft() {
     app.pending_queue_requests.push((
         9,
         Some(crate::protocol::QueuedPrompt {
+            attachments: Vec::new(),
             client_id: "rejected".into(),
             content: "recover me".into(),
             images: vec![],
@@ -246,6 +249,7 @@ fn send_modes_snapshot_does_not_duplicate_legacy_pending_rows() {
         crate::protocol::ServerEvent::QueuedPrompts {
             id: 1,
             prompts: vec![crate::protocol::QueuedPrompt {
+            attachments: Vec::new(),
                 client_id: crate::tui::backend::soft_interrupt_client_id(41),
                 content: "legacy".into(),
                 images: vec![],
@@ -492,6 +496,7 @@ fn queue_prompts(app: &mut App, entries: &[(&str, &str, bool)]) {
     app.server_queued_prompts = entries
         .iter()
         .map(|(id, content, after_yield)| crate::protocol::QueuedPrompt {
+            attachments: Vec::new(),
             client_id: (*id).into(),
             content: (*content).into(),
             images: vec![],

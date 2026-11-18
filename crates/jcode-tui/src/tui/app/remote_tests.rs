@@ -305,6 +305,7 @@ fn submit_prepared_remote_input_defers_until_history_loads() {
     assert!(!remote.has_loaded_history());
 
     let prepared = crate::tui::app::input::PreparedInput {
+                pasted_contents: Vec::new(),
         raw_input: "hi".to_string(),
         expanded: "hi".to_string(),
         images: vec![],
@@ -374,6 +375,7 @@ fn remote_skill_invocation_with_prompt_sends_remote_turn() {
         &mut app,
         &mut remote,
         crate::tui::app::input::PreparedInput {
+                pasted_contents: Vec::new(),
             raw_input: "/remote-skill explain the change".to_string(),
             expanded: "/remote-skill explain the change".to_string(),
             images: vec![],
@@ -1238,6 +1240,7 @@ fn remote_dropped_file_path_is_sent_as_a_prompt_not_a_slash_command() {
         &mut app,
         &mut remote,
         crate::tui::app::input::PreparedInput {
+                pasted_contents: Vec::new(),
             raw_input: dropped.clone(),
             expanded: dropped.clone(),
             images: vec![],
@@ -1275,6 +1278,7 @@ fn remote_embedded_known_slash_commands_are_sent_as_prompt_text() {
         &mut app,
         &mut remote,
         crate::tui::app::input::PreparedInput {
+                pasted_contents: Vec::new(),
             raw_input: prompt.to_string(),
             expanded: prompt.to_string(),
             images: vec![],
@@ -1311,6 +1315,7 @@ fn remote_multiple_known_slash_commands_use_the_local_command_boundary() {
         &mut app,
         &mut remote,
         crate::tui::app::input::PreparedInput {
+                pasted_contents: Vec::new(),
             raw_input: "/help compact /test help".to_string(),
             expanded: "/help compact /test help".to_string(),
             images: vec![],

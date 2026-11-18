@@ -229,6 +229,7 @@ pub(super) async fn process_message_with_server_failover(
         event_tx,
         enabled,
         None,
+        None,
     )
     .await
 }
@@ -243,6 +244,7 @@ pub(super) async fn process_reserved_message_with_server_failover(
     event_tx: mpsc::UnboundedSender<ServerEvent>,
     enabled: bool,
     queued_client_id: Option<Vec<String>>,
+    attachment_data: Option<jcode_session_types::MessageAttachments>,
 ) -> anyhow::Result<()> {
     let reminder = system_reminder.clone();
     let mut guard = agent.lock().await;
@@ -254,6 +256,7 @@ pub(super) async fn process_reserved_message_with_server_failover(
         system_reminder,
         event_tx.clone(),
         queued_client_id,
+        attachment_data,
     )
     .await;
     if !enabled && result.is_err() {
@@ -345,6 +348,7 @@ pub(super) async fn process_reserved_locked_message_with_swarm_fallbacks(
         images,
         system_reminder,
         event_tx.clone(),
+        None,
         None,
     )
     .await;
@@ -561,6 +565,7 @@ pub(super) async fn process_reserved_locked_context_with_server_failover(
             system_reminder,
             event_tx.clone(),
             Some(display_role),
+            None,
             None,
         )
         .await;

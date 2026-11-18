@@ -575,6 +575,7 @@ fn test_message_request_roundtrip_preserves_images_and_system_reminder() -> Resu
             ("image/png".to_string(), "AAA".to_string()),
             ("image/jpeg".to_string(), "BBB".to_string()),
         ],
+        attachments: vec![],
         system_reminder: Some("be concise".to_string()),
         active_skill: Some("verification".to_string()),
         no_reply: true,
@@ -588,6 +589,7 @@ fn test_message_request_roundtrip_preserves_images_and_system_reminder() -> Resu
         system_reminder,
         active_skill,
         no_reply,
+        ..
     } = decoded
     else {
         return Err(anyhow!("expected Message"));

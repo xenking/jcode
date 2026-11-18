@@ -169,6 +169,7 @@ mod cached_size_tests {
     #[test]
     fn stored_sizes_match_full_serialization_after_metadata_and_content_changes() {
         let mut message = super::super::StoredMessage {
+            attachment_data: None,
             id: "escaped\"id".into(),
             role: crate::message::Role::User,
             content: vec![ContentBlock::Text {

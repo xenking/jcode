@@ -138,6 +138,7 @@ async fn first_turn_publishes_a_session_renamed_event() {
             "Use model claude-opus-5-5. Repo ~/projects/github.com/xenking/jcode\n\n\
              Authoritative assigned todo lane:\nYour todo list is this lane, in order.",
             Vec::new(),
+            None,
         )
         .expect("append user message");
 
@@ -169,7 +170,7 @@ async fn a_manual_rename_blocks_generation_and_the_event() {
     let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
     let (mut agent, calls) = titled_agent("Fix flaky session titles").await;
     agent
-        .append_user_context_message("fix the titles", Vec::new())
+        .append_user_context_message("fix the titles", Vec::new(), None)
         .expect("append user message");
     agent.session.rename_title(Some("My session".to_string()));
 
@@ -191,7 +192,7 @@ async fn debug_sessions_never_spend_a_title_call() {
     let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
     let (mut agent, calls) = titled_agent("Fix flaky session titles").await;
     agent
-        .append_user_context_message("fix the titles", Vec::new())
+        .append_user_context_message("fix the titles", Vec::new(), None)
         .expect("append user message");
     agent.session.is_debug = true;
 
@@ -217,7 +218,7 @@ async fn third_turn_refines_its_own_title_once() {
     let mut agent = Agent::new(provider, registry);
 
     agent
-        .append_user_context_message("fix the titles", Vec::new())
+        .append_user_context_message("fix the titles", Vec::new(), None)
         .expect("first user message");
     let (tx, mut rx) = mpsc::unbounded_channel();
     agent.refresh_session_title(Some(&tx)).await;
@@ -225,7 +226,7 @@ async fn third_turn_refines_its_own_title_once() {
     assert!(rx.try_recv().is_ok());
 
     agent
-        .append_user_context_message("also handle renamed sessions", Vec::new())
+        .append_user_context_message("also handle renamed sessions", Vec::new(), None)
         .expect("second user message");
     agent.refresh_session_title(Some(&tx)).await;
     assert_eq!(
@@ -235,7 +236,7 @@ async fn third_turn_refines_its_own_title_once() {
     );
 
     agent
-        .append_user_context_message("and the third turn settles the topic", Vec::new())
+        .append_user_context_message("and the third turn settles the topic", Vec::new(), None)
         .expect("third user message");
     agent.refresh_session_title(Some(&tx)).await;
     assert_eq!(

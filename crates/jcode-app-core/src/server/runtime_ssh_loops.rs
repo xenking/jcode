@@ -497,6 +497,7 @@ pub(super) async fn run_reserved_followups(
             None,
             event_tx.clone(),
             None,
+            None,
         )
         .await;
         let allowed_models = super::turn_failover::effective_worker_allowed_models(agent);

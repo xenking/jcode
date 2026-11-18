@@ -288,6 +288,8 @@ pub struct HistoryMessage {
     pub response_stats: Option<jcode_session_types::ResponseStats>,
     pub role: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<jcode_session_types::StoredAttachment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]

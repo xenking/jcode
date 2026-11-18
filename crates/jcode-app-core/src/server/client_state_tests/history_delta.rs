@@ -3,6 +3,7 @@ fn delta_test_messages() -> Vec<crate::protocol::HistoryMessage> {
         .into_iter()
         .enumerate()
         .map(|(index, content)| crate::protocol::HistoryMessage {
+            attachments: Vec::new(),
             response_stats: None,
             timestamp_ms: None,
             role: if index % 2 == 0 { "user" } else { "assistant" }.to_string(),
@@ -35,6 +36,7 @@ fn recent_history_counts_ask_answers_but_preserves_image_ordinals() {
     messages.insert(
         1,
         crate::protocol::HistoryMessage {
+            attachments: Vec::new(),
             response_stats: None,
             timestamp_ms: None,
             role: "tool".into(),
@@ -136,6 +138,7 @@ fn history_images_base_omits_only_matching_image_sets() {
 fn recent_history_bounds_seven_thousand_message_bootstrap() {
     let messages: Vec<_> = (0..7000)
         .map(|index| crate::protocol::HistoryMessage {
+            attachments: Vec::new(),
             response_stats: None,
             timestamp_ms: None,
             role: if index % 2 == 0 { "user" } else { "assistant" }.to_owned(),
@@ -168,6 +171,7 @@ fn recent_history_bounds_seven_thousand_message_bootstrap() {
 fn recent_history_preserves_archive_prompt_offset_and_rebases_images() {
     let mut messages = delta_test_messages();
     messages.insert(0, crate::protocol::HistoryMessage {
+        attachments: Vec::new(),
         response_stats: None, timestamp_ms: None, role: "system".to_owned(),
         content: "Earlier conversation compacted - 10 historical messages hidden from the UI. Scroll to the top to load older history. Hidden user prompts: 7.".to_owned(),
         tool_calls: None, tool_data: None,
@@ -286,6 +290,7 @@ async fn recent_history_live_and_busy_bootstrap_and_expansion() {
     let mut session = crate::session::Session::create_with_id(session_id.to_owned(), None, None);
     for index in 0..8 {
         session.append_stored_message(crate::session::StoredMessage {
+            attachment_data: None,
             id: format!("message-{index}"),
             role: if index % 2 == 0 {
                 crate::message::Role::User

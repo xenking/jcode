@@ -499,6 +499,7 @@ mod tests {
                 Some("continue after reload".into()),
                 event_tx,
                 None,
+                None,
                 None
             ),
             reply
@@ -550,6 +551,7 @@ mod tests {
                 vec![],
                 Some("continue after reload".into()),
                 event_tx,
+                None,
                 None,
                 None
             ),

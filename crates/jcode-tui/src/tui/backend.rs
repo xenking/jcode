@@ -787,6 +787,24 @@ impl RemoteConnection {
         system_reminder: Option<String>,
         active_skill: Option<String>,
     ) -> Result<u64> {
+        self.send_message_with_attachments(
+            content,
+            images,
+            Vec::new(),
+            system_reminder,
+            active_skill,
+        )
+        .await
+    }
+
+    pub async fn send_message_with_attachments(
+        &mut self,
+        content: String,
+        images: Vec<(String, String)>,
+        attachments: Vec<jcode_session_types::Attachment>,
+        system_reminder: Option<String>,
+        active_skill: Option<String>,
+    ) -> Result<u64> {
         // Output token usage snapshots are cumulative within a single API call.
         self.last_keyboard_cancel = None;
         // Reset per-call watermark before sending the next user request.
@@ -797,6 +815,7 @@ impl RemoteConnection {
             id,
             content,
             images,
+            attachments,
             system_reminder,
             active_skill,
             no_reply: false,
@@ -1383,6 +1402,7 @@ impl RemoteConnection {
             client_id: prompt.client_id,
             content: prompt.content,
             images: prompt.images,
+            attachments: prompt.attachments,
             mode: prompt.mode,
             system_reminder: None,
             active_skill: prompt.active_skill,
@@ -1447,6 +1467,7 @@ impl RemoteConnection {
         prompt_id: String,
         content: String,
         images: Vec<(String, String)>,
+        attachments: Vec<jcode_session_types::Attachment>,
     ) -> Result<u64> {
         let id = self.next_request_id;
         self.next_request_id += 1;
@@ -1456,6 +1477,7 @@ impl RemoteConnection {
             prompt_id,
             content,
             images,
+            attachments,
         })
         .await?;
         Ok(id)

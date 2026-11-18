@@ -16,6 +16,37 @@ pub(in crate::tui::app) async fn begin_remote_send(
     auto_retry: bool,
     retry_attempts: u8,
 ) -> Result<u64> {
+    begin_remote_send_with_attachments(
+        app,
+        remote,
+        content.clone(),
+        images,
+        Vec::new(),
+        content,
+        is_system,
+        system_reminder,
+        auto_retry,
+        retry_attempts,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve retry content independently of wire attachment payload"
+)]
+async fn begin_remote_send_with_attachments(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    content: String,
+    images: Vec<(String, String)>,
+    attachments: Vec<jcode_session_types::Attachment>,
+    retry_content: String,
+    is_system: bool,
+    system_reminder: Option<String>,
+    auto_retry: bool,
+    retry_attempts: u8,
+) -> Result<u64> {
     if let Err(error) = app.prepare_cloud_environment(remote).await {
         crate::logging::info(&format!(
             "RECOVERY_SEND_FAILED session_id={:?} previous_request_id={:?} request_id=unassigned phase=prepare content_bytes={} images={} retry_attempts={}",
@@ -56,9 +87,10 @@ pub(in crate::tui::app) async fn begin_remote_send(
         }
     });
     let msg_id = remote
-        .send_message_with_images_reminder_and_skill(
+        .send_message_with_attachments(
             content.clone(),
             images.clone(),
+            attachments,
             system_reminder.clone(),
             None,
         )
@@ -119,7 +151,7 @@ pub(in crate::tui::app) async fn begin_remote_send(
     app.thinking_prefix_emitted = false;
     app.thinking_buffer.clear();
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content,
+        content: retry_content,
         images,
         is_system,
         system_reminder,
@@ -147,6 +179,7 @@ pub(in crate::tui::app) fn restore_prepared_remote_input(
     app.input = prepared.raw_input;
     app.cursor_pos = app.input.len();
     app.pending_images = prepared.images;
+    app.pasted_contents = prepared.pasted_contents;
 }
 
 pub(in crate::tui::app) fn history_matches_pending_startup_prompt(app: &App) -> bool {
@@ -240,17 +273,27 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
     app.automatic_failover_stopped = false;
     let echo_index = app.display_messages().len();
     app.push_display_message(DisplayMessage::user(prepared.raw_input.clone()));
+    let (wire_content, attachments) = input::paste_attachment_payload(
+        &prepared.raw_input,
+        &prepared.expanded,
+        &prepared.pasted_contents,
+    );
     // Keyboard dispatch propagates Err to the TUI event loop. A failed write
     // is recoverable: keep the consumed composer (including attachments) and
     // report it here rather than exiting the client or claiming delivery.
-    if let Err(error) = app
-        .begin_remote_send(
-            remote,
-            prepared.expanded.clone(),
-            prepared.images.clone(),
-            false,
-        )
-        .await
+    if let Err(error) = begin_remote_send_with_attachments(
+        app,
+        remote,
+        wire_content,
+        prepared.images.clone(),
+        attachments,
+        prepared.expanded.clone(),
+        false,
+        None,
+        false,
+        0,
+    )
+    .await
     {
         crate::logging::info(&format!(
             "RECOVERY_SUBMISSION_RESTORED session_id={:?} request_id={:?} content_bytes={} images={} queued={}",
@@ -270,6 +313,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
             auto_retry: false,
             retry_attempts: 0,
         });
+        app.pasted_contents = prepared.pasted_contents;
         app.push_display_message(DisplayMessage::error(format!(
             "Failed to send message: {error}"
         )));
@@ -384,6 +428,7 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
         app,
         remote,
         input::PreparedInput {
+            pasted_contents: prepared.pasted_contents,
             raw_input: prepared.raw_input,
             expanded: expanded_prompt,
             images: prepared.images,
@@ -416,6 +461,7 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
                 .pending_split_prompt
                 .take()
                 .map(|prompt| input::PreparedInput {
+                    pasted_contents: Vec::new(),
                     raw_input: prepared.raw_input,
                     expanded: prompt.content,
                     images: prompt.images,
@@ -438,6 +484,7 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
             .pending_split_prompt
             .take()
             .map(|prompt| input::PreparedInput {
+                pasted_contents: Vec::new(),
                 raw_input: prepared.raw_input,
                 expanded: prompt.content,
                 images: prompt.images,
@@ -851,6 +898,7 @@ mod ssh_slash_tests {
                     &mut app,
                     &mut remote,
                     input::PreparedInput {
+                        pasted_contents: Vec::new(),
                         raw_input: command.to_string(),
                         expanded: command.to_string(),
                         images: Vec::new(),
@@ -887,6 +935,7 @@ mod ssh_slash_tests {
                 &mut app,
                 &mut remote,
                 input::PreparedInput {
+                    pasted_contents: Vec::new(),
                     raw_input: "/local".to_string(),
                     expanded: "/local".to_string(),
                     images: images.clone(),
@@ -980,6 +1029,7 @@ mod ssh_slash_tests {
                     &mut app,
                     &mut remote,
                     input::PreparedInput {
+                        pasted_contents: Vec::new(),
                         raw_input: input.into(),
                         expanded: input.into(),
                         images: Vec::new(),
@@ -1028,6 +1078,7 @@ mod ssh_slash_tests {
                     &mut app,
                     &mut remote,
                     input::PreparedInput {
+                        pasted_contents: Vec::new(),
                         raw_input: command.to_string(),
                         expanded: command.to_string(),
                         images: Vec::new(),
@@ -1056,6 +1107,7 @@ mod ssh_slash_tests {
                     &mut app,
                     &mut remote,
                     input::PreparedInput {
+                        pasted_contents: Vec::new(),
                         raw_input: command.to_string(),
                         expanded: command.to_string(),
                         images: Vec::new(),

@@ -153,6 +153,7 @@ impl Agent {
             event_tx,
             display_role,
             None,
+            None,
         )
         .await
     }
@@ -167,6 +168,7 @@ impl Agent {
         event_tx: mpsc::UnboundedSender<ServerEvent>,
         display_role: Option<crate::session::StoredDisplayRole>,
         queued_client_id: Option<Vec<String>>,
+        attachment_data: Option<jcode_session_types::MessageAttachments>,
     ) -> Result<()> {
         self.validate_server_turn(lease)?;
         let _runtime_activity =
@@ -236,7 +238,9 @@ impl Agent {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let has_queued_skills = queued_items.iter().any(|item| item.active_skill.is_some());
+            let has_queued_skills = queued_items
+                .iter()
+                .any(|item| item.active_skill.is_some() || !item.attachments.is_empty());
             let session_id = self.session.id.clone();
             if !crate::server::reload_recovery::admit_input(
                 &session_id,
@@ -248,7 +252,7 @@ impl Agent {
                         let previous_skill = self.active_skill.clone();
                         let previous_pinned_skill = self.session.pinned_skill.clone();
                         let result = (|| {
-                            for item in queued_items {
+                            for mut item in queued_items {
                                 if let Some(skill) = item.active_skill {
                                     anyhow::ensure!(
                                         self.set_queued_active_skill(Some(skill)),
@@ -258,12 +262,30 @@ impl Agent {
                                     self.set_queued_active_skill(None);
                                 }
                                 let ids: Vec<String> = item.client_id.into_iter().collect();
+                                let attachment_data = if item.attachments.is_empty() {
+                                    None
+                                } else {
+                                    let display_content = item.content.clone();
+                                    let dir = crate::session::session_path(&session_id)?
+                                        .with_extension("attachments");
+                                    let prepared =
+                                        crate::server::attachment::prepare(&dir, item.attachments)?;
+                                    item.content.push_str(&prepared.text);
+                                    item.images.extend(prepared.images);
+                                    (!prepared.items.is_empty()).then_some(
+                                        jcode_session_types::MessageAttachments {
+                                            display_content,
+                                            items: prepared.items,
+                                        },
+                                    )
+                                };
                                 self.append_user_context_message_unpersisted(
                                     &item.content,
                                     item.images,
                                     display_role,
                                     continues_turn,
                                     Some(&ids),
+                                    attachment_data,
                                 )?;
                             }
                             self.session.save()
@@ -281,6 +303,7 @@ impl Agent {
                             display_role,
                             continues_turn,
                             queued_client_id.as_deref(),
+                            attachment_data,
                         )
                     }
                 },
@@ -499,8 +522,16 @@ impl Agent {
         &mut self,
         user_message: &str,
         images: Vec<(String, String)>,
+        attachment_data: Option<jcode_session_types::MessageAttachments>,
     ) -> Result<()> {
-        self.append_user_context_message_with_display_role(user_message, images, None, false, None)
+        self.append_user_context_message_with_display_role(
+            user_message,
+            images,
+            None,
+            false,
+            None,
+            attachment_data,
+        )
     }
 
     fn append_user_context_message_with_display_role(
@@ -512,6 +543,7 @@ impl Agent {
         // turn, so it must not start a new model-usage turn.
         continues_turn: bool,
         queued_client_id: Option<&[String]>,
+        attachment_data: Option<jcode_session_types::MessageAttachments>,
     ) -> Result<()> {
         self.append_user_context_message_unpersisted(
             user_message,
@@ -519,6 +551,7 @@ impl Agent {
             display_role,
             continues_turn,
             queued_client_id,
+            attachment_data,
         )?;
         self.session.save()
     }
@@ -530,6 +563,7 @@ impl Agent {
         display_role: Option<crate::session::StoredDisplayRole>,
         continues_turn: bool,
         queued_client_id: Option<&[String]>,
+        attachment_data: Option<jcode_session_types::MessageAttachments>,
     ) -> Result<()> {
         let mut blocks: Vec<ContentBlock> = images
             .into_iter()
@@ -557,6 +591,9 @@ impl Agent {
 
         let starts_turn = !continues_turn && (blocks.len() > 1 || !user_message.trim().is_empty());
         let mut input_id = self.add_message_with_display_role(Role::User, blocks, display_role);
+        if let Some(attachment_data) = attachment_data {
+            self.session.set_last_message_attachments(attachment_data);
+        }
         if let Some(client_ids) = queued_client_id {
             input_id = format!("queued:{}", serde_json::to_string(client_ids)?);
             self.session.rename_last_message(input_id.clone());
@@ -1450,6 +1487,7 @@ impl Agent {
         crate::session::render_messages(&self.session)
             .into_iter()
             .map(|msg| HistoryMessage {
+                attachments: msg.attachments,
                 response_stats: msg.response_stats,
                 timestamp_ms: msg.timestamp_ms,
                 role: msg.role,
@@ -1477,6 +1515,7 @@ impl Agent {
         let history = messages
             .into_iter()
             .map(|msg| HistoryMessage {
+                attachments: msg.attachments,
                 response_stats: msg.response_stats,
                 timestamp_ms: msg.timestamp_ms,
                 role: msg.role,
@@ -1508,6 +1547,7 @@ impl Agent {
         let history = messages
             .into_iter()
             .map(|msg| HistoryMessage {
+                attachments: msg.attachments,
                 response_stats: msg.response_stats,
                 timestamp_ms: msg.timestamp_ms,
                 role: msg.role,

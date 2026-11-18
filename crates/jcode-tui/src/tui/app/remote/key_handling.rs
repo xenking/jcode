@@ -1126,6 +1126,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             // parent's next message.
             let images = app.take_pending_image_payloads();
             let prepared = input::PreparedInput {
+                pasted_contents: Vec::new(),
                 raw_input: prompt.to_string(),
                 expanded: prompt.to_string(),
                 images,
@@ -1987,18 +1988,22 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
         match app.send_action(false) {
             SendAction::Submit => submit_prepared_remote_input(app, remote, prepared).await?,
             SendAction::Queue => {
-                update::send_queued_prompt(
+                update::send_prepared_queued_prompt(
                     app,
-                    prepared.expanded,
-                    prepared.images,
+                    prepared,
                     crate::protocol::QueuedPromptMode::AfterYield,
                     remote,
                 )
                 .await;
             }
             SendAction::Interleave => {
-                app.send_interleave_now(prepared.expanded, prepared.images, remote)
-                    .await;
+                update::send_prepared_queued_prompt(
+                    app,
+                    prepared,
+                    crate::protocol::QueuedPromptMode::Steer,
+                    remote,
+                )
+                .await;
             }
         }
     }

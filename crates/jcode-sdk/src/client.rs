@@ -937,6 +937,7 @@ impl JcodeClient {
             content: String::new(),
             system_reminder: Some(reminder.to_string()),
             images: Vec::new(),
+            attachments: Vec::new(),
             no_reply: false,
         })
     }
@@ -973,6 +974,7 @@ impl JcodeClient {
             active_skill: active_skill.to_string(),
             system_reminder: system_reminder.map(str::to_owned),
             images,
+            attachments: Vec::new(),
         })
     }
 
@@ -987,6 +989,43 @@ impl JcodeClient {
         system_reminder: Option<&str>,
         wait_for_accept: Option<Duration>,
     ) -> Result<()> {
+        self.send_message_with_attachments_and_reminder(
+            session_id,
+            content,
+            images,
+            Vec::new(),
+            system_reminder,
+            wait_for_accept,
+        )
+    }
+
+    pub fn send_message_with_attachments(
+        &self,
+        session_id: &str,
+        content: &str,
+        images: Vec<(String, String)>,
+        attachments: Vec<jcode_harness_api::Attachment>,
+        wait_for_accept: Option<Duration>,
+    ) -> Result<()> {
+        self.send_message_with_attachments_and_reminder(
+            session_id,
+            content,
+            images,
+            attachments,
+            None,
+            wait_for_accept,
+        )
+    }
+
+    fn send_message_with_attachments_and_reminder(
+        &self,
+        session_id: &str,
+        content: &str,
+        images: Vec<(String, String)>,
+        attachments: Vec<jcode_harness_api::Attachment>,
+        system_reminder: Option<&str>,
+        wait_for_accept: Option<Duration>,
+    ) -> Result<()> {
         // Subscribe *before* writing: an ack that lands between the write and
         // the subscribe would otherwise be missed and time out a healthy turn.
         let stream = wait_for_accept.map(|_| self.events(Some(session_id)));
@@ -998,6 +1037,7 @@ impl JcodeClient {
                 .filter(|reminder| !reminder.is_empty())
                 .map(str::to_owned),
             images,
+            attachments,
             no_reply: false,
         })?;
         if let (Some(stream), Some(timeout)) = (stream, wait_for_accept) {
@@ -1110,6 +1150,7 @@ impl JcodeClient {
             client_id: prompt.client_id,
             content: prompt.content,
             images: prompt.images,
+            attachments: prompt.attachments,
             mode: prompt.mode,
             system_reminder: system_reminder.map(str::to_owned),
             active_skill: prompt.active_skill,
@@ -1223,6 +1264,25 @@ impl JcodeClient {
         content: String,
         images: Vec<(String, String)>,
     ) -> Result<jcode_harness_api::QueuedPromptEditOutcome> {
+        self.edit_queued_prompt_with_attachments(
+            session_id,
+            client_id,
+            prompt_id,
+            content,
+            images,
+            Vec::new(),
+        )
+    }
+
+    pub fn edit_queued_prompt_with_attachments(
+        &self,
+        session_id: &str,
+        client_id: &str,
+        prompt_id: &str,
+        content: String,
+        images: Vec<(String, String)>,
+        attachments: Vec<jcode_harness_api::Attachment>,
+    ) -> Result<jcode_harness_api::QueuedPromptEditOutcome> {
         match self
             .request_ok(ApiRequest::EditQueuedPrompt {
                 session_id: session_id.into(),
@@ -1230,6 +1290,7 @@ impl JcodeClient {
                 prompt_id: prompt_id.into(),
                 content,
                 images,
+                attachments,
             })?
             .event
         {

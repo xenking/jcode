@@ -1713,6 +1713,7 @@ fn handle_server_event_inner(
                     prefix
                         .into_iter()
                         .map(|msg| crate::protocol::HistoryMessage {
+                            attachments: Vec::new(),
                             response_stats: None,
                             timestamp_ms: None,
                             role: msg.role,
@@ -2215,7 +2216,10 @@ fn handle_server_event_inner(
                             .into_iter()
                             .map(|msg| DisplayMessage {
                                 role: msg.role,
-                                content: msg.content,
+                                content: jcode_tui_messages::format_attachment_chips(
+                                    msg.content,
+                                    &msg.attachments,
+                                ),
                                 tool_calls: msg.tool_calls.unwrap_or_default(),
                                 duration_secs: None,
                                 title: None,

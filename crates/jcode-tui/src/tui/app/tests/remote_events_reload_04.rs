@@ -746,6 +746,7 @@ fn test_new_for_remote_uses_startup_stub_without_loading_full_transcript() {
     );
     session.model = Some("gpt-5.4".to_string());
     session.append_stored_message(crate::session::StoredMessage {
+        attachment_data: None,
         id: "msg-startup-stub".to_string(),
         role: crate::message::Role::User,
         content: vec![crate::message::ContentBlock::Text {

@@ -135,6 +135,7 @@ mod tests {
 
     fn user_message() -> SoftInterruptMessage {
         SoftInterruptMessage {
+            attachments: Vec::new(),
             active_skill: None,
             system_reminder: None,
             content: "hello".into(),

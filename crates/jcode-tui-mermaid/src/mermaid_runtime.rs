@@ -217,6 +217,7 @@ fn parse_env_bool(raw: &str) -> Option<bool> {
 ///   so the probe respects that setting. Other terminals keep the fast path because
 ///   the upstream stdio probe can block for two seconds if they do not answer.
 ///   Multiplexer users can opt into the probe with `JCODE_MERMAID_PICKER_PROBE=1`.
+///
 /// Terminals that answer capability queries promptly but do not advertise
 /// graphics support through TERM/TERM_PROGRAM (Rex sets `TERM=xterm-256color`,
 /// `TERM_PROGRAM=rex` yet implements the Kitty graphics protocol).

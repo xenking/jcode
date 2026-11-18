@@ -80,6 +80,7 @@ async fn failed_uploads_skip_unchanged_reloads_but_retry_changes_deadlines_and_g
     .unwrap();
     let mut session = Session::create_with_id("failing".into(), None, None);
     session.messages.push(jcode_session_types::StoredMessage {
+        attachment_data: None,
         id: "backoff-message".into(),
         role: Role::User,
         content: vec![ContentBlock::Text {

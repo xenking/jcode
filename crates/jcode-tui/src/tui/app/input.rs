@@ -102,6 +102,7 @@ pub(super) struct PreparedInput {
     pub raw_input: String,
     pub expanded: String,
     pub images: Vec<(String, String)>,
+    pub pasted_contents: Vec<String>,
 }
 
 // Roughly 500k English words at ~6 bytes/word including spaces. This is still
@@ -3018,7 +3019,7 @@ pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
     let raw_input = std::mem::take(&mut app.input);
     app.record_prompt_history(&raw_input);
     let expanded = expand_paste_placeholders(app, &raw_input);
-    app.pasted_contents.clear();
+    let pasted_contents = std::mem::take(&mut app.pasted_contents);
     let images = app.take_pending_image_payloads();
     app.cursor_pos = 0;
     app.clear_input_undo_history();
@@ -3026,6 +3027,7 @@ pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
         raw_input,
         expanded,
         images,
+        pasted_contents,
     }
 }
 
@@ -3103,6 +3105,58 @@ fn paste_placeholder(content: &str) -> String {
         line_count,
         if line_count == 1 { "" } else { "s" }
     )
+}
+
+pub(super) fn paste_attachment_payload(
+    raw: &str,
+    expanded: &str,
+    pastes: &[String],
+) -> (String, Vec<jcode_session_types::Attachment>) {
+    let mut content = raw.to_owned();
+    let mut attachments = Vec::new();
+    for text in pastes.iter().rev() {
+        let placeholder = paste_placeholder(text);
+        if let Some(position) = content.rfind(&placeholder) {
+            content.replace_range(position..position + placeholder.len(), "[Pasted text]");
+            attachments.push(jcode_session_types::Attachment::PastedText { text: text.clone() });
+        }
+    }
+    attachments.reverse();
+    if attachments.is_empty() {
+        (expanded.to_owned(), attachments)
+    } else {
+        (content, attachments)
+    }
+}
+
+#[cfg(test)]
+mod paste_attachment_tests {
+    #[test]
+    fn wire_preserves_same_sized_pastes_and_ignores_deleted_placeholders() {
+        use jcode_session_types::Attachment;
+        let pastes = vec![
+            "one\ntwo".into(),
+            "three\nfour".into(),
+            "stale\ntext\nignored".into(),
+        ];
+        let (content, attachments) = super::paste_attachment_payload(
+            "A [pasted 2 lines] B [pasted 2 lines]",
+            "expanded",
+            &pastes,
+        );
+        assert_eq!(content, "A [Pasted text] B [Pasted text]");
+        assert_eq!(
+            attachments,
+            vec![
+                Attachment::PastedText {
+                    text: "one\ntwo".into()
+                },
+                Attachment::PastedText {
+                    text: "three\nfour".into()
+                }
+            ]
+        );
+    }
 }
 
 impl App {

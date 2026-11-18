@@ -10,7 +10,7 @@
 export const API_VERSION_MAJOR = 1;
 export const API_VERSION_MINOR = 15;
 
-export type RuntimeCommand = "mode" | "skills" | "context" | "info" | "cache" | "memory" | "swarm" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout";
+export type RuntimeCommand = "mode" | "skills" | "context" | "info" | "cache" | "memory" | "swarm" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout" | "background_output";
 
 export type PermissionDecision = "allow" | "allow_always" | "deny";
 
@@ -166,6 +166,7 @@ export interface HistoryMessage {
   /** "user" | "assistant" | "tool" */
   role: string;
   content: string;
+  attachments?: StoredAttachment[];
 }
 
 export type RenderedImageSource =
@@ -190,13 +191,24 @@ export interface RenderedImage {
 /** Base64 image attachment: [mediaType, base64Data]. */
 export type ImageAttachment = [string, string];
 
+export type Attachment =
+  | { type: "file"; name: string; mime: string; size: number; data: string; path?: never }
+  | { type: "file"; name: string; mime: string; size: number; path: string; data?: never }
+  | { type: "pasted_text"; text: string };
+
+export type StoredAttachment =
+  | { type: "file"; name: string; mime: string; size: number; path?: string }
+  | { type: "pasted_text"; text: string };
+
 /** Delivery point of a daemon-owned prompt. */
 export type QueuedPromptMode = "steer" | "after_yield";
 export type QueuedPromptRemovalOutcome = "removed" | "in_flight" | "already_delivered" | "not_found";
+export type QueuedPromptEditOutcome = "edited" | "in_flight" | "already_delivered" | "not_found";
 export interface QueuedPrompt {
   client_id: string;
   content: string;
   images?: ImageAttachment[];
+  attachments?: Attachment[];
   mode: QueuedPromptMode;
   active_skill?: string;
 }
@@ -234,6 +246,7 @@ export type ApiRequest =
       session_id: string;
       content: string;
       images?: ImageAttachment[];
+      attachments?: Attachment[];
       no_reply?: boolean;
       system_reminder?: string;
     }
@@ -249,7 +262,9 @@ export type ApiRequest =
       /** Opaque id echoed in `soft_interrupt_injected` and accepted by a filtered cancel. */
       client_id?: string;
     }
-  | { req: "queue_prompt"; session_id: string; client_id: string; content: string; images?: ImageAttachment[]; mode: QueuedPromptMode; system_reminder?: string; active_skill?: string }
+  | { req: "queue_prompt"; session_id: string; client_id: string; content: string; images?: ImageAttachment[]; attachments?: Attachment[]; mode: QueuedPromptMode; system_reminder?: string; active_skill?: string }
+  | { req: "edit_queued_prompt"; session_id: string; client_id: string; prompt_id: string; content: string; images?: ImageAttachment[]; attachments?: Attachment[] }
+  | { req: "set_queued_prompt_editing"; session_id: string; client_id: string; prompt_id: string; editing: boolean }
   | { req: "set_queued_prompt_mode"; session_id: string; client_id: string; mode: QueuedPromptMode }
   | { req: "interrupt_queued_prompt"; session_id: string; client_id: string }
   | { req: "interrupt_queued_prompts"; session_id: string; ids: string[] }
@@ -389,6 +404,7 @@ export type ApiEvent =
   | { ev: "tool_exec"; session_id: string; call_id: string; name: string }
   | { ev: "queued_prompts"; session_id: string; prompts: QueuedPrompt[] }
   | { ev: "queued_prompt_removed"; session_id: string; prompt_id: string; outcome: QueuedPromptRemovalOutcome }
+  | { ev: "queued_prompt_edited"; session_id: string; prompt_id: string; outcome: QueuedPromptEditOutcome }
   | { ev: "session_images"; session_id: string; images: unknown[] }
   | { ev: "session_image"; session_id: string; image_id: string; media_type: string; offset: number; total: number; data: string }
   | { ev: "user_image_ids"; session_id: string; original_content: string; content: string; image_ids: string[] }
@@ -605,6 +621,7 @@ export const KNOWN_EVENT_KINDS = [
   "history_image_chunk",
   "queued_prompts",
   "queued_prompt_removed",
+  "queued_prompt_edited",
   "session_images",
   "session_image",
   "user_image_ids",
@@ -679,6 +696,8 @@ export const KNOWN_REQUEST_KINDS = [
   "force_stop_turn",
   "soft_interrupt",
   "queue_prompt",
+  "edit_queued_prompt",
+  "set_queued_prompt_editing",
   "set_queued_prompt_mode",
   "interrupt_queued_prompt",
   "interrupt_queued_prompts",

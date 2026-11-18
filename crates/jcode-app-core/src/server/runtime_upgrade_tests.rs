@@ -132,6 +132,7 @@ fn checkpoint_preserves_blank_session_ids_overrides_and_queued_input() {
         .lock()
         .unwrap()
         .push(jcode_agent_runtime::SoftInterruptMessage {
+            attachments: Vec::new(),
             active_skill: None,
             system_reminder: None,
             content: "accepted follow-up".into(),
@@ -164,6 +165,7 @@ fn checkpoint_refuses_queue_write_failure_instead_of_losing_accepted_input() {
         .lock()
         .unwrap()
         .push(jcode_agent_runtime::SoftInterruptMessage {
+            attachments: Vec::new(),
             active_skill: None,
             system_reminder: None,
             content: "never lose this input".into(),

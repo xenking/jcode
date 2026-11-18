@@ -998,6 +998,127 @@ impl Provider for SdkCallbackProvider {
 
 type CapturedImages = Arc<std::sync::Mutex<Vec<Vec<(String, String)>>>>;
 
+#[tokio::test]
+async fn attachments_reach_the_provider_over_daemon_socket() {
+    use crate::server::runtime::ServerRuntime;
+    use serde_json::json;
+    let _lock = crate::storage::lock_test_env();
+    let home = IsolatedReloadRecoveryEnv::new();
+    let provider = TerminalSocketProvider::default();
+    let socket = home._runtime.path().join("attachments.sock");
+    let server = crate::server::Server::new_with_paths(
+        Arc::new(provider.clone()),
+        socket.clone(),
+        home._runtime.path().join("attachments-debug.sock"),
+    );
+    let runtime = ServerRuntime::from_server(&server);
+    let handle = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
+    let (reader, mut writer) = crate::transport::Stream::connect(&socket)
+        .await
+        .unwrap()
+        .into_split();
+    let mut reader = BufReader::new(reader);
+    writer
+        .write_all(
+            format!(
+                "{}\n",
+                json!({"type":"subscribe","id":1,"working_dir":home._home.path()})
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        if matches!(
+            serde_json::from_str::<ServerEvent>(&line).unwrap(),
+            ServerEvent::Done { id: 1 }
+        ) {
+            break;
+        }
+    }
+    writer
+        .write_all(
+            format!(
+                "{}\n",
+                json!({"type":"message","id":2,"content":"inspect","attachments":[
+                    {"type":"file","name":"example.rs","mime":"text/plain","size":3,"data":"YWJj"},
+                    {"type":"file","name":"image.png","mime":"image/png","size":3,"data":"AQID"},
+                    {"type":"pasted_text","text":"one\ntwo"}
+                ]})
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), provider.first_started.notified())
+        .await
+        .unwrap();
+    let messages = provider.messages.lock().unwrap().clone();
+    assert!(messages[0].iter().any(|text| text.contains("example.rs")
+        && text.contains("abc")
+        && text.contains("one\ntwo")));
+    assert!(provider.images.lock().unwrap()[0].contains(&("image/png".into(), "AQID".into())));
+    provider.finish_first.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).await.unwrap() > 0);
+            if matches!(
+                serde_json::from_str::<ServerEvent>(&line).unwrap(),
+                ServerEvent::Done { id: 2 }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    writer
+        .write_all(b"{\"type\":\"get_history\",\"id\":3}\n")
+        .await
+        .unwrap();
+    let history = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).await.unwrap() > 0);
+            if let ServerEvent::History {
+                id: 3,
+                session_id,
+                messages,
+                ..
+            } = serde_json::from_str::<ServerEvent>(&line).unwrap()
+            {
+                break (session_id, messages);
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let user = history
+        .1
+        .iter()
+        .find(|message| message.role == "user")
+        .unwrap();
+    assert_eq!(user.content, "inspect");
+    assert_eq!(user.attachments.len(), 3);
+    assert!(
+        matches!(&user.attachments[2], jcode_session_types::StoredAttachment::PastedText { text } if text == "one\ntwo")
+    );
+    let persisted = crate::session::Session::load(&history.0).unwrap();
+    assert!(persisted.messages.iter().any(|message| {
+        message
+            .attachment_data
+            .as_ref()
+            .is_some_and(|data| data.items.len() == 3)
+    }));
+    drop(writer);
+    drop(reader);
+    runtime.shutdown().await;
+    handle.await.unwrap();
+}
+
 #[derive(Clone, Default)]
 struct TerminalSocketProvider {
     calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -2345,6 +2466,7 @@ async fn sdk_socket_cancel_workflow(
     other_session.title = Some("sdk other session".into());
     for index in 0..8 {
         other_session.append_stored_message(crate::session::StoredMessage {
+            attachment_data: None,
             id: format!("history-{index}"),
             role: if index % 2 == 0 {
                 crate::message::Role::User

@@ -1342,6 +1342,7 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
         app.session.provider_key = Some("test-provider".to_string());
         app.session.system_prompt = Some("custom transfer prompt".to_string());
         app.session.messages.push(crate::session::StoredMessage {
+            attachment_data: None,
             id: "msg-1".to_string(),
             role: Role::User,
             content: vec![ContentBlock::Text {

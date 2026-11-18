@@ -208,6 +208,7 @@ pub(super) async fn start_next_queued_prompt(
     const QUEUED_TURN_REQUEST_ID: u64 = 0;
     start_processing_message(
         ProcessingMessage {
+            attachment_data: None,
             id: QUEUED_TURN_REQUEST_ID,
             queued_client_id: Some(client_ids),
             content: content_parts.join("\n\n"),
@@ -244,6 +245,7 @@ pub(super) async fn append_context_message(
     id: u64,
     content: &str,
     images: Vec<(String, String)>,
+    attachment_data: Option<jcode_session_types::MessageAttachments>,
     client_session_id: &str,
     client_is_processing: bool,
     agent: &Arc<Mutex<Agent>>,
@@ -259,7 +261,7 @@ pub(super) async fn append_context_message(
         );
         return;
     };
-    let result = agent.append_user_context_message(content, images);
+    let result = agent.append_user_context_message(content, images, attachment_data);
     let event = match result {
         Ok(()) => ServerEvent::ContextMessageAdded { id },
         Err(error) => ServerEvent::Error {
@@ -294,6 +296,7 @@ pub(super) async fn start_processing_message(
     swarm: &SwarmStatusRefs<'_>,
 ) {
     let ProcessingMessage {
+        attachment_data,
         id,
         queued_client_id,
         content,
@@ -498,6 +501,7 @@ pub(super) async fn start_processing_message(
                     event_tx,
                     server_failover,
                     queued_client_id,
+                    attachment_data,
                 ),
             ),
             force_registration,

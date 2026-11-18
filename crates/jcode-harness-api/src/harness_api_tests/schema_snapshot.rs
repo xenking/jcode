@@ -20,6 +20,17 @@ fn queued_skill_wire_is_optional_and_round_trips() {
 }
 
 #[test]
+fn queued_attachment_wire_roundtrip() {
+    for request in [
+        serde_json::json!({"req":"queue_prompt", "session_id":"s", "client_id":"p", "content":"", "mode":"after_yield", "attachments":[{"type":"pasted_text","text":"one\ntwo"}]}),
+        serde_json::json!({"req":"edit_queued_prompt", "session_id":"s", "client_id":"ui", "prompt_id":"p", "content":"", "attachments":[{"type":"file","name":"a.txt","mime":"text/plain","size":3,"data":"YWJj"}]}),
+    ] {
+        let decoded: ApiRequest = serde_json::from_value(request.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), request);
+    }
+}
+
+#[test]
 fn queued_prompt_mutations_wire_shape() {
     let remove = ClientFrame::new(
         7,
@@ -94,6 +105,7 @@ fn queued_prompt_edit_wire_shape() {
             prompt_id: "p".into(),
             content: "new text".into(),
             images: Vec::new(),
+            attachments: Vec::new(),
         },
     );
     assert_eq!(
@@ -182,6 +194,19 @@ fn token_usage_preserves_cache_creation_and_accepts_legacy_frames() {
 }
 
 #[test]
+fn send_message_preserves_attachments() {
+    let input = serde_json::json!({"v":1,"id":1,"req":"send_message","session_id":"s1","content":"hello","attachments":[
+        {"type":"file","name":"a.txt","mime":"text/plain","size":3,"data":"YWJj"},
+        {"type":"pasted_text","text":"one\ntwo"},
+        {"type":"future_attachment"}
+    ]});
+    let frame: ClientFrame = serde_json::from_value(input).unwrap();
+    let output = serde_json::to_value(frame).unwrap();
+    assert_eq!(output["attachments"][0]["name"], "a.txt");
+    assert_eq!(output["attachments"][1]["text"], "one\ntwo");
+}
+
+#[test]
 fn client_frame_wire_shape() {
     let frame = ClientFrame::new(
         7,
@@ -189,6 +214,7 @@ fn client_frame_wire_shape() {
             session_id: "s1".into(),
             content: "hi".into(),
             images: vec![],
+            attachments: vec![],
             system_reminder: None,
             no_reply: false,
         },
@@ -208,6 +234,7 @@ fn send_message_no_reply_wire_shape_and_legacy_default() {
             session_id: "s1".into(),
             content: "context".into(),
             images: vec![],
+            attachments: vec![],
             system_reminder: None,
             no_reply: true,
         },
@@ -740,6 +767,7 @@ fn hidden_system_reminder_wire_shape_and_legacy_default() {
             content: String::new(),
             system_reminder: Some("continue task".into()),
             images: vec![],
+            attachments: vec![],
             no_reply: false,
         },
     );

@@ -717,6 +717,11 @@ impl BridgeState {
                 {
                     message["images"] = json!(images);
                 }
+                if let Some(attachments) = request["attachments"].as_array()
+                    && !attachments.is_empty()
+                {
+                    message["attachments"] = json!(attachments);
+                }
                 vec![Outbound::Legacy(message)]
             }
             "fork_session" => {
@@ -2509,6 +2514,8 @@ impl BridgeState {
                 let messages = raw_messages
                     .iter()
                     .map(|m| HistoryMessage {
+                        attachments: serde_json::from_value(m["attachments"].clone())
+                            .unwrap_or_default(),
                         // Statistics were optional in older daemon history. Malformed
                         // optional display metadata must not discard the transcript.
                         response_stats: serde_json::from_value(m["response_stats"].clone())
@@ -2697,6 +2704,8 @@ impl BridgeState {
                         messages
                             .iter()
                             .map(|m| HistoryMessage {
+                                attachments: serde_json::from_value(m["attachments"].clone())
+                                    .unwrap_or_default(),
                                 response_stats: serde_json::from_value(m["response_stats"].clone())
                                     .unwrap_or(None),
                                 timestamp_ms: m["timestamp_ms"].as_i64(),
@@ -4092,8 +4101,15 @@ impl BridgeState {
                 if role != "user" && role != "assistant" {
                     return None;
                 }
-                let content = flatten_content(&message["content"]);
-                (!content.trim().is_empty()).then(|| HistoryMessage {
+                let content = message["attachment_data"]["display_content"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| flatten_content(&message["content"]));
+                let attachments: Vec<jcode_session_types::StoredAttachment> =
+                    serde_json::from_value(message["attachment_data"]["items"].clone())
+                        .unwrap_or_default();
+                (!content.trim().is_empty() || !attachments.is_empty()).then(|| HistoryMessage {
+                    attachments,
                     response_stats: None,
                     timestamp_ms: None,
                     role: role.to_string(),

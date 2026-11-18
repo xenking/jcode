@@ -206,6 +206,7 @@ impl Agent {
         if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
             let pending_before = queue.len();
             queue.push(SoftInterruptMessage {
+                attachments: Vec::new(),
                 active_skill: None,
                 system_reminder: None,
                 content,
@@ -549,6 +550,59 @@ impl Agent {
                     queue.push(message);
                     continue;
                 }
+            }
+            if !message.attachments.is_empty() {
+                if let Some(source) = current_source.take() {
+                    flush_group(
+                        self,
+                        &mut injected,
+                        source,
+                        &mut current_parts,
+                        &mut current_images,
+                        &mut current_ids,
+                    );
+                }
+                let prepared = crate::session::session_path(self.session_id()).and_then(|path| {
+                    crate::server::attachment::prepare(
+                        &path.with_extension("attachments"),
+                        message.attachments.clone(),
+                    )
+                });
+                let prepared = match prepared {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        logging::warn(&format!("Failed to prepare queued attachment: {error:#}"));
+                        queue.push(message);
+                        continue;
+                    }
+                };
+                let display_content = message.content.clone();
+                let mut content = message.content;
+                content.push_str(&prepared.text);
+                current_parts.push(content);
+                current_images.extend(message.images);
+                current_images.extend(prepared.images);
+                current_ids.extend(message.client_id);
+                flush_group(
+                    self,
+                    &mut injected,
+                    message.source,
+                    &mut current_parts,
+                    &mut current_images,
+                    &mut current_ids,
+                );
+                if !prepared.items.is_empty() {
+                    self.session.set_last_message_attachments(
+                        jcode_session_types::MessageAttachments {
+                            display_content: display_content.clone(),
+                            items: prepared.items,
+                        },
+                    );
+                }
+                if let Some(event) = injected.last_mut() {
+                    event.content = display_content;
+                }
+                continue;
             }
             // User follow-ups may share a model message. Notifications must
             // retain their own delivery events and transcript entries.

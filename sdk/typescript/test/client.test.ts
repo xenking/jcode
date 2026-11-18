@@ -307,6 +307,51 @@ test("sendMessage retains the legacy images argument", async () => {
   await server.close();
 });
 
+test("sendMessage transmits file and pasted text attachments", async () => {
+  let received: unknown;
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      if (request.req === "send_message") {
+        received = request.attachments;
+        send({ v: 1, ev: "message_accepted", session_id: request.session_id });
+      }
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  const attachments = [
+    { type: "file", name: "a.txt", mime: "text/plain", size: 3, data: "YWJj" },
+    { type: "pasted_text", text: "one\ntwo" },
+  ];
+  try {
+    await client.sendMessage("s1", "hello", { attachments });
+    assert.deepEqual(received, attachments);
+  } finally {
+    client.close();
+    await server.close();
+  }
+});
+
+test("editQueuedPrompt transmits attachments", async () => {
+  let received: unknown;
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      if (request.req === "edit_queued_prompt") {
+        received = request.attachments;
+        send({ v: 1, reply_to: request.id, ev: "queued_prompt_edited", session_id: request.session_id, prompt_id: request.prompt_id, outcome: "edited" });
+      }
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  const attachments = [{ type: "pasted_text" as const, text: "one\ntwo" }];
+  try {
+    assert.equal(await client.editQueuedPrompt("s1", "c1", "p1", "hello", [], attachments), "edited");
+    assert.deepEqual(received, attachments);
+  } finally {
+    client.close();
+    await server.close();
+  }
+});
+
 test("sendMessage noReply waits for request ok and does not wait for turn events", async () => {
   let observed: any;
   const server = await startMockHarness({

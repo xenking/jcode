@@ -30,6 +30,7 @@ fn compacted_prompt_marker_hydrates_remote_stub_and_composer_numbering() {
         ]
         .into_iter()
         .map(|message| crate::protocol::HistoryMessage {
+            attachments: Vec::new(),
             role: message.role,
             content: message.content,
             tool_calls: None,
@@ -80,6 +81,7 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
     );
     session.model = Some("gpt-5.4".to_string());
     session.append_stored_message(crate::session::StoredMessage {
+        attachment_data: None,
         id: "msg-fast-resume".to_string(),
         role: crate::message::Role::Assistant,
         content: vec![crate::message::ContentBlock::Text {
@@ -186,6 +188,7 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
             id: 1,
             session_id: "ses_fast_path".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
+                attachments: Vec::new(),
                 response_stats: None, timestamp_ms: None,
                 role: "assistant".to_string(),
                 content: "server history replay".to_string(),
@@ -392,6 +395,7 @@ fn test_compacted_history_event_applies_expanded_window() {
             session_id: "session_lazy_history".to_string(),
             messages: vec![
                 crate::protocol::HistoryMessage {
+                    attachments: Vec::new(),
                     response_stats: None, timestamp_ms: None,
                     role: "system".to_string(),
                     content: "Earlier conversation compacted - 64 older historical messages hidden. Showing 64 of 128 compacted messages. Scroll to the top to load more.".to_string(),
@@ -399,6 +403,7 @@ fn test_compacted_history_event_applies_expanded_window() {
                     tool_data: None,
                 },
                 crate::protocol::HistoryMessage {
+                    attachments: Vec::new(),
                     response_stats: None, timestamp_ms: None,
                     role: "assistant".to_string(),
                     content: "older response".to_string(),
@@ -406,6 +411,7 @@ fn test_compacted_history_event_applies_expanded_window() {
                     tool_data: None,
                 },
                 crate::protocol::HistoryMessage {
+                    attachments: Vec::new(),
                     response_stats: None, timestamp_ms: None,
                     role: "user".to_string(),
                     content: "current prompt".to_string(),
@@ -785,6 +791,7 @@ fn test_delta_history_rebuilds_transcript_from_advertised_prefix() {
         }]),
     });
     let tail = vec![crate::protocol::HistoryMessage {
+        attachments: Vec::new(),
         response_stats: None, timestamp_ms: None,
         role: "assistant".to_string(),
         content: "new since reload".to_string(),

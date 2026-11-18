@@ -837,18 +837,22 @@ pub(super) async fn handle_remote_key_internal(
             match app.send_action(true) {
                 SendAction::Submit => submit_prepared_remote_input(app, remote, prepared).await?,
                 SendAction::Queue => {
-                    super::update::send_queued_prompt(
+                    super::update::send_prepared_queued_prompt(
                         app,
-                        prepared.expanded,
-                        prepared.images,
+                        prepared,
                         crate::protocol::QueuedPromptMode::AfterYield,
                         remote,
                     )
                     .await;
                 }
                 SendAction::Interleave => {
-                    app.send_interleave_now(prepared.expanded, prepared.images, remote)
-                        .await;
+                    super::update::send_prepared_queued_prompt(
+                        app,
+                        prepared,
+                        crate::protocol::QueuedPromptMode::Steer,
+                        remote,
+                    )
+                    .await;
                 }
             }
         }

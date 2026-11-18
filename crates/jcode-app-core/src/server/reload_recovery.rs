@@ -909,6 +909,7 @@ impl RecoveryOwner {
             events.sender(),
             true,
             Some(vec![record.input_id()]),
+            None,
         );
         let result = tokio::select! {
             biased;

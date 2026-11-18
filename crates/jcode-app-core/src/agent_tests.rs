@@ -712,6 +712,7 @@ async fn steering_recovery_filters_committed_ids_after_crash_window() {
     ]
     .into_iter()
     .map(|(id, mode)| SoftInterruptMessage {
+        attachments: Vec::new(),
         active_skill: None,
         system_reminder: None,
         content: id.into(),
@@ -759,6 +760,7 @@ async fn steering_injection_preserves_after_yield_messages_in_order() {
         ("later two", QueuedMessageMode::AfterYield),
     ] {
         queue.lock().unwrap().push(SoftInterruptMessage {
+            attachments: Vec::new(),
             active_skill: None,
             system_reminder: None,
             content: content.into(),
@@ -2129,6 +2131,7 @@ async fn env_snapshot_detail_is_minimal_for_empty_sessions_and_full_after_histor
     agent
         .session
         .append_stored_message(crate::session::StoredMessage {
+            attachment_data: None,
             id: "msg_env_snapshot_detail".to_string(),
             role: crate::message::Role::User,
             content: vec![ContentBlock::Text {

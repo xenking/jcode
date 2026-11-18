@@ -220,6 +220,7 @@ fn in_flight_count_excludes_foreign_queued_session() {
 fn latest_assistant_report_uses_last_non_empty_assistant_message() {
     let messages = vec![
         HistoryMessage {
+            attachments: Vec::new(),
             response_stats: None,
             timestamp_ms: None,
             role: "assistant".to_string(),
@@ -228,6 +229,7 @@ fn latest_assistant_report_uses_last_non_empty_assistant_message() {
             tool_data: None,
         },
         HistoryMessage {
+            attachments: Vec::new(),
             response_stats: None,
             timestamp_ms: None,
             role: "user".to_string(),
@@ -236,6 +238,7 @@ fn latest_assistant_report_uses_last_non_empty_assistant_message() {
             tool_data: None,
         },
         HistoryMessage {
+            attachments: Vec::new(),
             response_stats: None,
             timestamp_ms: None,
             role: "assistant".to_string(),
@@ -461,6 +464,7 @@ impl RawClient {
             id,
             content: content.to_string(),
             images: vec![],
+            attachments: vec![],
             system_reminder: None,
             active_skill: None,
             no_reply: false,

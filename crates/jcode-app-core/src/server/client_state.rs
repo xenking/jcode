@@ -488,6 +488,7 @@ pub(super) fn recent_history_window(
     }
     messages = messages.split_off(start);
     messages.insert(0, HistoryMessage {
+        attachments: Vec::new(),
         response_stats: None, timestamp_ms: None,
         role: "system".to_owned(),
         content: format!("{}{start} older historical messages hidden. Showing {} of {total} messages. Scroll to the top to load more. Hidden user prompts: {hidden_user_prompts}.", crate::protocol::RECENT_HISTORY_MARKER_PREFIX, info.visible_messages),
@@ -600,6 +601,7 @@ pub(super) fn apply_history_images_base(
 
 fn rendered_to_history_message(msg: crate::session::RenderedMessage) -> HistoryMessage {
     HistoryMessage {
+        attachments: msg.attachments,
         response_stats: msg.response_stats,
         timestamp_ms: msg.timestamp_ms,
         role: msg.role,

@@ -3906,6 +3906,7 @@ fn history_response_stats_cross_real_render_protocol_and_sdk_boundary() {
     let legacy: Vec<_> = jcode_base::session::render_messages(&session)
         .into_iter()
         .map(|row| jcode_base::protocol::HistoryMessage {
+            attachments: Vec::new(),
             role: row.role,
             content: row.content,
             tool_calls: None,
@@ -4122,6 +4123,21 @@ fn attachment_recovery_is_cleared_on_attach_failure() {
         .legacy_event_to_api(&json!({"type":"error", "id":history["id"], "message":"missing"}));
     assert!(matches!(frames[0].event, ApiEvent::Error { .. }));
     assert!(state.legacy_event_to_api(&history).is_empty());
+}
+
+#[test]
+fn message_forwards_attachments_to_daemon() {
+    let mut state = state_with_session();
+    let attachments = json!([
+        {"type":"file", "name":"code.rs", "mime":"text/plain", "size":3, "data":"YWJj"},
+        {"type":"pasted_text", "text":"one\ntwo"}
+    ]);
+    let out = state.api_request_to_legacy(&json!({"req":"send_message", "id":90,
+        "session_id":"s1", "content":"hello", "attachments":attachments}));
+    let Outbound::Legacy(message) = &out[0] else {
+        panic!("message")
+    };
+    assert_eq!(message["attachments"], attachments);
 }
 
 #[test]

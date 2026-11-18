@@ -2,6 +2,7 @@ use super::*;
 
 fn message() -> StoredMessage {
     StoredMessage {
+        attachment_data: None,
         id: "id\n\"\\\0界🦀".repeat(16),
         role: Role::Assistant,
         content: vec![ContentBlock::Text {

@@ -1,4 +1,18 @@
 #[test]
+fn message_attachments_survive_roundtrip_and_future_variants() -> Result<()> {
+    let wire = serde_json::json!({"type":"message", "id":1, "content":"hi", "attachments":[
+        {"type":"file", "name":"a.txt", "mime":"text/plain", "size":3, "data":"YWJj"},
+        {"type":"pasted_text", "text":"one\ntwo"},
+        {"type":"future_type", "extra":true}
+    ]});
+    let request: Request = serde_json::from_value(wire)?;
+    let encoded = serde_json::to_value(request)?;
+    assert_eq!(encoded["attachments"][0]["name"], "a.txt");
+    assert_eq!(encoded["attachments"][1]["text"], "one\ntwo");
+    Ok(())
+}
+
+#[test]
 fn provider_oauth_account_label_defaults_and_roundtrips() -> Result<()> {
     for legacy in [
         r#"{"type":"history","id":1,"session_id":"test","messages":[]}"#,
@@ -132,6 +146,7 @@ fn test_request_roundtrip() -> Result<()> {
         id: 1,
         content: "hello".to_string(),
         images: vec![],
+        attachments: vec![],
         system_reminder: None,
         active_skill: Some("verification".to_string()),
         no_reply: false,
@@ -746,6 +761,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         id: 101,
         session_id: "ses_test_456".to_string(),
         messages: vec![HistoryMessage {
+            attachments: Vec::new(),
             response_stats: None, timestamp_ms: None,
             role: "assistant".to_string(),
             content: "hello".to_string(),
@@ -847,6 +863,7 @@ fn test_compacted_history_event_roundtrip() -> Result<()> {
         id: 77,
         session_id: "ses_compact_123".to_string(),
         messages: vec![HistoryMessage {
+            attachments: Vec::new(),
             response_stats: None, timestamp_ms: None,
             role: "assistant".to_string(),
             content: "older response".to_string(),
@@ -1006,6 +1023,7 @@ fn test_agent_models_session_setter_and_response_roundtrip() -> Result<()> {
 #[test]
 fn history_prefix_fingerprint_is_stable_and_streaming_consistent() {
     let message = |role: &str, content: &str| HistoryMessage {
+        attachments: Vec::new(),
         response_stats: None, timestamp_ms: None,
         role: role.to_string(),
         content: content.to_string(),

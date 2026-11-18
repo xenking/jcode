@@ -486,6 +486,7 @@ fn test_new_for_remote_fresh_spawn_restores_local_transcript() {
         );
         session.model = Some("gpt-5.4".to_string());
         session.append_stored_message(crate::session::StoredMessage {
+            attachment_data: None,
             id: "msg_spawn_fresh_skip".to_string(),
             role: crate::message::Role::Assistant,
             content: vec![crate::message::ContentBlock::Text {
@@ -554,6 +555,7 @@ fn test_new_for_remote_restores_display_history_without_retaining_session_transc
         );
         session.model = Some("gpt-5.4".to_string());
         session.append_stored_message(crate::session::StoredMessage {
+            attachment_data: None,
             id: "msg_remote_restore_1".to_string(),
             role: crate::message::Role::Assistant,
             content: vec![crate::message::ContentBlock::Text {
@@ -589,6 +591,7 @@ fn test_remote_startup_restores_swarm_delivery_as_compact_card() {
             crate::session::Session::create_with_id(session_id.to_string(), None, None);
         let body = "Detailed implementation report. ".repeat(40);
         session.append_stored_message(crate::session::StoredMessage {
+            attachment_data: None,
             id: "msg_restored_dm".to_string(),
             role: crate::message::Role::User,
             content: vec![crate::message::ContentBlock::Text {
@@ -1042,6 +1045,7 @@ fn test_remote_prompt_defers_while_model_switch_is_in_flight() {
         &mut app,
         &mut remote,
         crate::tui::app::input::PreparedInput {
+                pasted_contents: Vec::new(),
             raw_input: "hello after model switch".to_string(),
             expanded: "hello after model switch".to_string(),
             images: vec![("image/png".to_string(), "abc123".to_string())],
@@ -1080,6 +1084,7 @@ fn test_remote_prompt_defers_while_post_login_model_setup_is_pending() {
         &mut app,
         &mut remote,
         crate::tui::app::input::PreparedInput {
+                pasted_contents: Vec::new(),
             raw_input: "review my project".to_string(),
             expanded: "review my project".to_string(),
             images: Vec::new(),
@@ -1115,6 +1120,7 @@ fn test_remote_model_switch_failure_restores_deferred_prompt() {
     app.is_remote = true;
     app.remote_model_switch_in_flight = true;
     app.pending_prompt_after_model_switch = Some(crate::tui::app::input::PreparedInput {
+                pasted_contents: Vec::new(),
         raw_input: "please use the selected model".to_string(),
         expanded: "please use the selected model".to_string(),
         images: vec![("image/jpeg".to_string(), "def456".to_string())],

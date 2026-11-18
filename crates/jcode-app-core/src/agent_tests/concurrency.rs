@@ -126,6 +126,7 @@ async fn deferred_restore_save_persists_when_called() {
 
     let mut stored = Session::create(None, Some("Deferred save fixture".to_owned()));
     stored.append_stored_message(crate::session::StoredMessage {
+        attachment_data: None,
         id: "msg_deferred".to_string(),
         role: crate::message::Role::User,
         content: vec![crate::message::ContentBlock::Text {

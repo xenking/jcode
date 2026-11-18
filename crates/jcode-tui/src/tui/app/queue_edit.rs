@@ -116,14 +116,31 @@ impl App {
             return false;
         };
         let prepared = input::take_prepared_input(self);
-        if prepared.expanded.trim().is_empty() && prepared.images.is_empty() {
+        let (content, new_attachments) = input::paste_attachment_payload(
+            &prepared.raw_input,
+            &prepared.expanded,
+            &prepared.pasted_contents,
+        );
+        let mut attachments = self
+            .server_queued_prompts
+            .iter()
+            .find(|prompt| prompt.client_id == edit.prompt_id)
+            .map(|prompt| prompt.attachments.clone())
+            .unwrap_or_default();
+        attachments.extend(new_attachments);
+        if content.trim().is_empty() && prepared.images.is_empty() && attachments.is_empty() {
             // An empty composer is not a prompt: keep the queued item as it was.
             self.restore_queued_prompt_draft(edit, remote).await;
             self.set_status_notice("Kept queued prompt unchanged");
             return true;
         }
         match remote
-            .edit_queued_prompt(edit.prompt_id.clone(), prepared.expanded, prepared.images)
+            .edit_queued_prompt(
+                edit.prompt_id.clone(),
+                content,
+                prepared.images,
+                attachments,
+            )
             .await
         {
             Ok(id) => {

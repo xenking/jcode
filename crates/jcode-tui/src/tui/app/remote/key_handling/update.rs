@@ -27,13 +27,58 @@ pub(in crate::tui::app) async fn send_queued_prompt(
     mode: crate::protocol::QueuedPromptMode,
     remote: &mut RemoteConnection,
 ) {
-    if content.trim().is_empty() && images.is_empty() {
+    send_queued_prompt_with_attachments(
+        app,
+        content.clone(),
+        images,
+        Vec::new(),
+        content,
+        mode,
+        remote,
+    )
+    .await;
+}
+
+pub(in crate::tui::app) async fn send_prepared_queued_prompt(
+    app: &mut App,
+    prepared: input::PreparedInput,
+    mode: crate::protocol::QueuedPromptMode,
+    remote: &mut RemoteConnection,
+) {
+    let (content, attachments) = input::paste_attachment_payload(
+        &prepared.raw_input,
+        &prepared.expanded,
+        &prepared.pasted_contents,
+    );
+    send_queued_prompt_with_attachments(
+        app,
+        content,
+        prepared.images,
+        attachments,
+        prepared.expanded,
+        mode,
+        remote,
+    )
+    .await;
+}
+
+async fn send_queued_prompt_with_attachments(
+    app: &mut App,
+    content: String,
+    images: Vec<(String, String)>,
+    attachments: Vec<jcode_session_types::Attachment>,
+    fallback_content: String,
+    mode: crate::protocol::QueuedPromptMode,
+    remote: &mut RemoteConnection,
+) {
+    if content.trim().is_empty() && images.is_empty() && attachments.is_empty() {
         return;
     }
     let prompt = crate::protocol::QueuedPrompt {
         client_id: crate::id::new_id("prompt"),
         content: content.clone(),
         images: images.clone(),
+        attachments,
         active_skill: None,
         mode,
         editing: false,
@@ -41,7 +86,7 @@ pub(in crate::tui::app) async fn send_queued_prompt(
     match remote.queue_prompt(prompt.clone()).await {
         Err(e) => {
             app.restore_failover_payload(app_mod::FallbackResendPayload {
-                content,
+                content: fallback_content,
                 images,
                 is_system: false,
                 system_reminder: None,

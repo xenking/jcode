@@ -98,6 +98,7 @@ impl Provider for TitleProvider {
 
 fn user(text: &str) -> StoredMessage {
     StoredMessage {
+        attachment_data: None,
         id: format!("m{}", text.len()),
         role: Role::User,
         content: vec![ContentBlock::Text {
@@ -114,6 +115,7 @@ fn user(text: &str) -> StoredMessage {
 
 fn assistant(text: &str) -> StoredMessage {
     StoredMessage {
+        attachment_data: None,
         id: format!("a{}", text.len()),
         role: Role::Assistant,
         content: vec![ContentBlock::Text {

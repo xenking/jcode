@@ -183,6 +183,7 @@ impl AmbientRunnerHandle {
             && let Ok(mut q) = q.lock()
         {
             q.push(SoftInterruptMessage {
+                attachments: Vec::new(),
                 active_skill: None,
                 system_reminder: None,
                 content: format!("[{} message from user]\n{}", source, text),

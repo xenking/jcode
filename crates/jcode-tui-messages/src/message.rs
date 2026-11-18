@@ -1,5 +1,25 @@
 use jcode_message_types::ToolCall;
 use jcode_session_types::RenderedMessage;
+
+pub fn format_attachment_chips(
+    mut content: String,
+    attachments: &[jcode_session_types::StoredAttachment],
+) -> String {
+    for attachment in attachments {
+        let label = match attachment {
+            jcode_session_types::StoredAttachment::File { name, .. } => format!("[{name}]"),
+            jcode_session_types::StoredAttachment::PastedText { text } => {
+                format!("[Pasted text, {} lines]", text.lines().count().max(1))
+            }
+            jcode_session_types::StoredAttachment::Unknown => continue,
+        };
+        if !content.is_empty() {
+            content.push('\n');
+        }
+        content.push_str(&label);
+    }
+    content
+}
 use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -316,7 +336,7 @@ impl DisplayMessage {
         let title = (item.role == "compaction").then(|| COMPACTION_COLLAPSED_TITLE.to_string());
         Self {
             role: item.role,
-            content: item.content,
+            content: format_attachment_chips(item.content, &item.attachments),
             tool_calls: item.tool_calls,
             duration_secs,
             title,
@@ -616,6 +636,7 @@ mod tests {
     #[test]
     fn tool_duration_restored_metadata_wins_and_missing_stays_unknown() {
         let mut row = RenderedMessage {
+            attachments: Vec::new(),
             response_stats: None,
             timestamp_ms: None,
             tool_duration_ms: Some(1234),
@@ -648,8 +669,38 @@ mod tests {
     }
 
     #[test]
+    fn rendered_attachments_are_collapsed_in_transcript() {
+        let rendered = RenderedMessage {
+            attachments: vec![
+                jcode_session_types::StoredAttachment::File {
+                    name: "main.rs".into(),
+                    mime: "text/plain".into(),
+                    size: 3,
+                    path: None,
+                },
+                jcode_session_types::StoredAttachment::PastedText {
+                    text: "one\ntwo\nthree".into(),
+                },
+            ],
+            response_stats: None,
+            timestamp_ms: None,
+            tool_duration_ms: None,
+            role: "user".into(),
+            content: "Review".into(),
+            tool_calls: vec![],
+            tool_data: None,
+            stored_index: None,
+        };
+        let display = DisplayMessage::from_rendered_message(rendered);
+        assert!(display.content.contains("main.rs"));
+        assert!(display.content.contains("Pasted text, 3 lines"));
+        assert!(!display.content.contains("one\ntwo\nthree"));
+    }
+
+    #[test]
     fn rendered_messages_convert_to_display_messages() {
         let rendered = RenderedMessage {
+            attachments: Vec::new(),
             response_stats: None,
             timestamp_ms: None,
             tool_duration_ms: None,

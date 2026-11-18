@@ -13,6 +13,7 @@ pub enum QueuedMessageMode {
 /// A message queued for delivery at a safe point or after the active turn.
 #[derive(Debug, Clone)]
 pub struct SoftInterruptMessage {
+    pub attachments: Vec<jcode_session_types::Attachment>,
     pub content: String,
     /// Hidden instruction delivered when this prompt starts its own turn.
     pub system_reminder: Option<String>,

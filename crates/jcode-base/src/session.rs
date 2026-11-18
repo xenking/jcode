@@ -1430,6 +1430,7 @@ request in this new forked session, using the inherited conversation only as con
     ) -> String {
         let id = new_id("message");
         self.append_stored_message(StoredMessage {
+            attachment_data: None,
             id: id.clone(),
             role,
             content: content.into(),
@@ -1453,6 +1454,17 @@ request in this new forked session, using the inherited conversation only as con
         self.adopt_prompt_title(&message);
         self.messages.push(message);
         self.mark_messages_append_dirty();
+    }
+
+    pub fn set_last_message_attachments(
+        &mut self,
+        attachments: jcode_session_types::MessageAttachments,
+    ) {
+        if let Some(message) = self.messages.last_mut() {
+            message.attachment_data = Some(attachments);
+            self.mark_memory_profile_dirty();
+            self.mark_messages_full_dirty();
+        }
     }
 
     pub(super) fn migrate_image_markers(&mut self) {

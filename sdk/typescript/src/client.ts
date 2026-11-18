@@ -26,11 +26,13 @@ import {
   type ApiEvent,
   type ApiRequest,
   type AskResponse,
+  type Attachment,
   type HistoryMessage,
   type ImageAttachment,
   type ModelRouteInfo,
   type PermissionDecision,
   type QueuedPrompt,
+  type QueuedPromptEditOutcome,
   type QueuedPromptMode,
   type QueuedPromptRemovalOutcome,
   type RenderedImage,
@@ -196,6 +198,7 @@ export interface RunOptions {
 export interface SendMessageOptions {
   /** Attach images to the persisted user message. */
   images?: ImageAttachment[];
+  attachments?: Attachment[];
   /** Persist the message as context without starting a model turn. */
   noReply?: boolean;
   /** Wait for message_accepted when starting a normal model turn. */
@@ -625,6 +628,7 @@ export class JcodeClient extends EventEmitter {
         session_id: sessionId,
         content,
         images,
+        attachments: options.attachments,
         no_reply: true,
       });
       return;
@@ -636,8 +640,12 @@ export class JcodeClient extends EventEmitter {
           options.acceptTimeoutMs ?? 10_000,
         )
       : undefined;
-    this.notify({ req: "send_message", session_id: sessionId, content, images });
+    this.notify({ req: "send_message", session_id: sessionId, content, images, attachments: options.attachments });
     await accepted;
+  }
+
+  async sendMessageWithAttachments(sessionId: string, content: string, attachments: Attachment[], options: SendMessageOptions = {}): Promise<void> {
+    await this.sendMessage(sessionId, content, { ...options, attachments });
   }
 
   /** Send a prompt with its skill resolved and activated by the daemon. */
@@ -788,8 +796,15 @@ export class JcodeClient extends EventEmitter {
     await this.requestOk({
       req: "queue_prompt", session_id: sessionId, client_id: prompt.client_id,
       content: prompt.content, images: prompt.images?.length ? prompt.images : undefined,
+      attachments: prompt.attachments?.length ? prompt.attachments : undefined,
       mode: prompt.mode, system_reminder: systemReminder, active_skill: prompt.active_skill,
     });
+  }
+
+  async editQueuedPrompt(sessionId: string, clientId: string, promptId: string, content: string, images: ImageAttachment[] = [], attachments: Attachment[] = []): Promise<QueuedPromptEditOutcome> {
+    const frame = await this.expectReply({ req: "edit_queued_prompt", session_id: sessionId, client_id: clientId,
+      prompt_id: promptId, content, images, attachments }, "queued_prompt_edited");
+    return frame.outcome;
   }
 
   async setQueuedPromptMode(sessionId: string, clientId: string, mode: QueuedPromptMode): Promise<void> {

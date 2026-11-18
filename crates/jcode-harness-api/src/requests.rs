@@ -60,6 +60,8 @@ pub struct QueuedPrompt {
     pub content: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<jcode_session_types::Attachment>,
     pub mode: QueuedPromptMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_skill: Option<String>,
@@ -151,6 +153,8 @@ pub enum ApiRequest {
         /// (media_type, base64_data) pairs.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<jcode_session_types::Attachment>,
         /// Persist the message as context without starting a model turn.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         no_reply: bool,
@@ -165,6 +169,8 @@ pub enum ApiRequest {
         system_reminder: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<jcode_session_types::Attachment>,
     },
 
     /// Replace the attached session's tool configuration.
@@ -220,6 +226,8 @@ pub enum ApiRequest {
         content: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<jcode_session_types::Attachment>,
         mode: QueuedPromptMode,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_reminder: Option<String>,
@@ -271,6 +279,8 @@ pub enum ApiRequest {
         content: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<jcode_session_types::Attachment>,
     },
 
     /// Fetch conversation history.

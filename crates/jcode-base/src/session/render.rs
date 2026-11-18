@@ -493,6 +493,7 @@ fn render_messages_and_images_internal(
             ));
         }
         rendered.push(RenderedMessage {
+            attachments: Vec::new(),
             response_stats: None,
             tool_duration_ms: None,
             role: "system".to_string(),
@@ -563,6 +564,7 @@ fn render_messages_and_images_internal(
     memory_rows.sort_by_key(|injection| injection.before_message.unwrap_or(usize::MAX));
     let mut memory_rows = memory_rows.into_iter().peekable();
     let render_error = |content: String| RenderedMessage {
+        attachments: Vec::new(),
         response_stats: None,
         tool_duration_ms: None,
         role: "error".to_string(),
@@ -611,6 +613,7 @@ fn render_messages_and_images_internal(
         // check happened, so replace the body with a one-liner.
         if let Some(summary) = auto_poke_user_message_display_summary(msg) {
             rendered.push(RenderedMessage {
+                attachments: Vec::new(),
                 response_stats: None,
                 tool_duration_ms: None,
                 role: "system".to_string(),
@@ -725,6 +728,7 @@ fn render_messages_and_images_internal(
                         text.clear();
                         reasoning.clear();
                         rendered.push(RenderedMessage {
+                            attachments: Vec::new(),
                             response_stats: None,
                             tool_duration_ms: None,
                             role: role.to_string(),
@@ -758,6 +762,7 @@ fn render_messages_and_images_internal(
                     }
 
                     rendered.push(RenderedMessage {
+                        attachments: Vec::new(),
                         response_stats: None,
                         tool_duration_ms: msg.tool_duration_ms,
                         role: "tool".to_string(),
@@ -822,6 +827,7 @@ fn render_messages_and_images_internal(
                         text.clear();
                         reasoning.clear();
                         rendered.push(RenderedMessage {
+                            attachments: Vec::new(),
                             response_stats: None,
                             tool_duration_ms: None,
                             role: role.to_string(),
@@ -843,6 +849,7 @@ fn render_messages_and_images_internal(
                         }
                     });
                     rendered.push(RenderedMessage {
+                        attachments: Vec::new(),
                         response_stats: None,
                         tool_duration_ms: None,
                         role: "tool".to_string(),
@@ -859,12 +866,20 @@ fn render_messages_and_images_internal(
             }
         }
 
-        let combined = format!("{}{}", reasoning, text);
-        if !combined.is_empty() {
+        let combined = msg.attachment_data.as_ref().map_or_else(
+            || format!("{}{}", reasoning, text),
+            |metadata| metadata.display_content.clone(),
+        );
+        if !combined.is_empty() || msg.attachment_data.is_some() {
             if role == "user" && !is_attached_image_label_text(&text) {
                 user_prompt_count += 1;
             }
             rendered.push(RenderedMessage {
+                attachments: msg
+                    .attachment_data
+                    .as_ref()
+                    .map(|metadata| metadata.items.clone())
+                    .unwrap_or_default(),
                 response_stats: None,
                 tool_duration_ms: None,
                 role: role.to_string(),
@@ -1075,6 +1090,7 @@ fn compaction_divider_row(
     idle: bool,
 ) -> RenderedMessage {
     RenderedMessage {
+        attachments: Vec::new(),
         response_stats: None,
         tool_duration_ms: None,
         role: "compaction".to_string(),

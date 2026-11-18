@@ -718,6 +718,7 @@ pub(super) fn enqueue_soft_interrupt_with_id(
     if let Ok(mut pending) = queue.lock() {
         let pending_before = pending.len();
         pending.push(SoftInterruptMessage {
+            attachments: Vec::new(),
             active_skill: None,
             system_reminder: None,
             content,
@@ -884,7 +885,15 @@ impl SessionControlHandle {
         mode: jcode_agent_runtime::QueuedMessageMode,
         system_reminder: Option<String>,
     ) -> anyhow::Result<bool> {
-        self.enqueue_user_prompt_with_skill(client_id, content, images, mode, system_reminder, None)
+        self.enqueue_user_prompt_with_skill(
+            client_id,
+            content,
+            images,
+            mode,
+            system_reminder,
+            None,
+            Vec::new(),
+        )
     }
 
     /// Missing snapshots are valid for new sessions, but unreadable histories
@@ -914,6 +923,7 @@ impl SessionControlHandle {
         mode: jcode_agent_runtime::QueuedMessageMode,
         system_reminder: Option<String>,
         active_skill: Option<String>,
+        attachments: Vec<jcode_session_types::Attachment>,
     ) -> anyhow::Result<bool> {
         anyhow::ensure!(
             self.queue_available,
@@ -922,12 +932,13 @@ impl SessionControlHandle {
         anyhow::ensure!(!client_id.trim().is_empty(), "client_id must not be empty");
         if content.trim().is_empty()
             && images.is_empty()
+            && attachments.is_empty()
             && let Some(reminder) = system_reminder.as_deref()
             && super::reload_recovery::is_delivered_continuation(&self.session_id, reminder)?
         {
             return Ok(true);
         }
-        if !content.trim().is_empty() || !images.is_empty() {
+        if !content.trim().is_empty() || !images.is_empty() || !attachments.is_empty() {
             super::reload_recovery::supersede(&self.session_id)?;
         }
         let mut queue = self
@@ -941,6 +952,7 @@ impl SessionControlHandle {
             anyhow::ensure!(
                 existing.content == content
                     && existing.images == images
+                    && existing.attachments == attachments
                     && existing.active_skill == active_skill
                     && existing.system_reminder == system_reminder
                     && (existing.mode == mode
@@ -956,6 +968,7 @@ impl SessionControlHandle {
             return Ok(true);
         }
         queue.push(SoftInterruptMessage {
+            attachments,
             active_skill,
             system_reminder,
             content,
@@ -999,6 +1012,7 @@ impl SessionControlHandle {
                     client_id: message.client_id.clone()?,
                     content: message.content.clone(),
                     images: message.images.clone(),
+                    attachments: message.attachments.clone(),
                     active_skill: message.active_skill.clone(),
                     editing: message.editing_by.is_some(),
                     mode: match message.mode {
@@ -1065,6 +1079,7 @@ impl SessionControlHandle {
         prompt_id: &str,
         content: String,
         images: Vec<(String, String)>,
+        attachments: Vec<jcode_session_types::Attachment>,
     ) -> anyhow::Result<crate::protocol::QueuedPromptEditOutcome> {
         use crate::protocol::QueuedPromptEditOutcome as Outcome;
         anyhow::ensure!(
@@ -1072,7 +1087,7 @@ impl SessionControlHandle {
             "session queue unavailable while reconnecting"
         );
         anyhow::ensure!(
-            !content.trim().is_empty() || !images.is_empty(),
+            !content.trim().is_empty() || !images.is_empty() || !attachments.is_empty(),
             "edited queued prompt must not be empty"
         );
         let mut queue = self
@@ -1093,10 +1108,12 @@ impl SessionControlHandle {
         }
         let previous_content = std::mem::replace(&mut queue[index].content, content);
         let previous_images = std::mem::replace(&mut queue[index].images, images);
+        let previous_attachments = std::mem::replace(&mut queue[index].attachments, attachments);
         queue[index].editing_by = None;
         if let Err(error) = crate::soft_interrupt_store::overwrite(&self.session_id, &queue) {
             queue[index].content = previous_content;
             queue[index].images = previous_images;
+            queue[index].attachments = previous_attachments;
             return Err(error);
         }
         Ok(Outcome::Edited)
@@ -1692,6 +1709,7 @@ pub(super) async fn queue_soft_interrupt_with_images_for_session(
         crate::soft_interrupt_store::append(
             session_id,
             SoftInterruptMessage {
+                attachments: Vec::new(),
                 active_skill: None,
                 system_reminder: None,
                 content,

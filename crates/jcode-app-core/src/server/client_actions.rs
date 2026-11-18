@@ -1221,6 +1221,7 @@ pub(super) async fn handle_agent_task(
         None,
         events.sender(),
         None,
+        None,
     )
     .await;
     match result {

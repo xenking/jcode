@@ -853,6 +853,8 @@ pub struct HistoryMessage {
     /// and "memory" (daemon-formatted label and expandable detail).
     pub role: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<jcode_session_types::StoredAttachment>,
     /// On "tool" rows: the call this result answers, so clients can rebuild
     /// tool cards after a reload. `content` is the tool output. Absent from
     /// older servers.

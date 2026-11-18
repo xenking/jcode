@@ -18,6 +18,48 @@ pub use transcription::{
     TRANSCRIPTION_CLOSE, TRANSCRIPTION_OPEN, strip_transcription, wrap_transcription,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Attachment {
+    File {
+        name: String,
+        mime: String,
+        size: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    PastedText {
+        text: String,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StoredAttachment {
+    File {
+        name: String,
+        mime: String,
+        size: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    PastedText {
+        text: String,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageAttachments {
+    pub display_content: String,
+    pub items: Vec<StoredAttachment>,
+}
+
 /// Identifies a session to resume, across the agent backends jcode can import
 /// from. This is pure data (only ids/paths) with no UI dependency; it lives in
 /// `jcode-session-types` so the foundation/import layer can match on it without
@@ -106,6 +148,8 @@ pub struct RenderedMessage {
     pub response_stats: Option<ResponseStats>,
     pub role: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<StoredAttachment>,
     pub tool_calls: Vec<String>,
     pub tool_data: Option<ToolCall>,
     /// Index of the stored session message this rendered message came from.
@@ -352,6 +396,8 @@ pub struct StoredMessage {
     pub id: String,
     pub role: Role,
     pub content: SharedContent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_data: Option<MessageAttachments>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_role: Option<StoredDisplayRole>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

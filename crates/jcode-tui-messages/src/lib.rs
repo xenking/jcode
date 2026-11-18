@@ -15,8 +15,8 @@ pub use cache::{
 };
 pub use message::{
     DisplayMessage, TranscriptPreviewLabels, display_messages_from_rendered_messages,
-    latest_user_transcript_preview, normalize_transcript_preview_text, transcript_preview_line,
-    transcript_preview_lines, truncate_transcript_preview,
+    format_attachment_chips, latest_user_transcript_preview, normalize_transcript_preview_text,
+    transcript_preview_line, transcript_preview_lines, truncate_transcript_preview,
 };
 pub use prepared::{
     CopyTarget, EditToolRange, ImageRegion, ImageRegionRender, MessageBoundary, PreparedChatFrame,

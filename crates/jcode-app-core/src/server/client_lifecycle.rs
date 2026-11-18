@@ -89,6 +89,7 @@ mod subscribe_context;
 use subscribe_context::*;
 
 struct ProcessingMessage {
+    attachment_data: Option<jcode_session_types::MessageAttachments>,
     id: u64,
     queued_client_id: Option<Vec<String>>,
     content: String,
@@ -1103,7 +1104,14 @@ pub(super) async fn handle_client(
             let mut removal = None;
             let mut edit_outcome = None;
             let (id, result) = match request {
-                Request::QueuePrompt { id, client_id, content, images, mode, system_reminder, active_skill } => {
+                Request::QueuePrompt { id, client_id, content, images, attachments, mode, system_reminder, active_skill } => {
+                    let attachments = match super::attachment::normalize(attachments) {
+                        Ok(attachments) => attachments,
+                        Err(error) => {
+                            send_client_event_best_effort(&client_event_tx, ServerEvent::Error { id, message: format!("Invalid attachment: {error:#}"), retry_after_secs: None }, "client_lifecycle: Error");
+                            continue;
+                        }
+                    };
                     if let Some(name) = active_skill.as_deref() {
                         let working_dir = match queued_skill_working_dir(&client_session_id, &initial_working_dir) {
                             Ok(working_dir) => working_dir,
@@ -1133,7 +1141,7 @@ pub(super) async fn handle_client(
                         crate::protocol::QueuedPromptMode::AfterYield => jcode_agent_runtime::QueuedMessageMode::AfterYield,
                     };
                     dispatch_if_idle = true;
-                    let result = session_control.enqueue_user_prompt_with_skill(client_id.clone(), content.clone(), images, mode, system_reminder, active_skill).map(|delivered| {
+                    let result = session_control.enqueue_user_prompt_with_skill(client_id.clone(), content.clone(), images, mode, system_reminder, active_skill, attachments).map(|delivered| {
                         if delivered { already_delivered = Some((client_id, content)); }
                     });
                     (id, result)
@@ -1163,12 +1171,19 @@ pub(super) async fn handle_client(
                 Request::SetQueuedPromptEditing { id, client_id: _, prompt_id, editing } => {
                     (id, session_control.set_user_prompt_editing(&prompt_id, &client_connection_id, editing))
                 }
-                Request::EditQueuedPrompt { id, client_id: _, prompt_id, content, images } => {
+                Request::EditQueuedPrompt { id, client_id: _, prompt_id, content, images, attachments } => {
+                    let attachments = match super::attachment::normalize(attachments) {
+                        Ok(attachments) => attachments,
+                        Err(error) => {
+                            send_client_event_best_effort(&client_event_tx, ServerEvent::Error { id, message: format!("Invalid attachment: {error:#}"), retry_after_secs: None }, "client_lifecycle: Error");
+                            continue;
+                        }
+                    };
                     // A saved edit is an ordinary queued prompt again: if the
                     // turn that was running has already ended, deliver it now.
                     dispatch_if_idle = true;
                     let result = session_control
-                        .edit_user_prompt(&prompt_id, content, images)
+                        .edit_user_prompt(&prompt_id, content, images, attachments)
                         .map(|outcome| edit_outcome = Some((prompt_id, outcome)));
                     (id, result)
                 }
@@ -1304,12 +1319,34 @@ pub(super) async fn handle_client(
             Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. } => unreachable!("SDK controls dispatched before acknowledgment"),
             Request::Message {
                 id,
-                content,
-                images,
+                mut content,
+                mut images,
+                attachments,
                 system_reminder,
                 active_skill,
                 no_reply,
             } => {
+                let mut attachment_data = None;
+                if !attachments.is_empty() {
+                    let prepared = crate::session::session_path(&client_session_id)
+                        .and_then(|path| super::attachment::prepare(&path.with_extension("attachments"), attachments));
+                    match prepared {
+                        Ok(prepared) => {
+                            if !prepared.items.is_empty() {
+                                attachment_data = Some(jcode_session_types::MessageAttachments {
+                                    display_content: content.clone(),
+                                    items: prepared.items,
+                                });
+                            }
+                            content.push_str(&prepared.text);
+                            images.extend(prepared.images);
+                        }
+                        Err(error) => {
+                            send_client_event_best_effort(&client_event_tx, ServerEvent::Error { id, message: format!("Invalid attachment: {error:#}"), retry_after_secs: None }, "client_lifecycle: Error");
+                            continue;
+                        }
+                    }
+                }
                 if !no_reply
                     && crate::tool::interactive::answer_with_text(&client_session_id, &content, images.clone())
                 {
@@ -1321,6 +1358,7 @@ pub(super) async fn handle_client(
                         id,
                         &content,
                         images,
+                        attachment_data,
                         &client_session_id,
                         client_is_processing,
                         &agent,
@@ -1342,9 +1380,24 @@ pub(super) async fn handle_client(
                         info.current_tool_name = None;
                     }
                 }
-                let peer_content = content.clone();
+                let peer_content = if let Some(data) = &attachment_data {
+                    let mut display = data.display_content.clone();
+                    for item in &data.items {
+                        let label = match item {
+                            jcode_session_types::StoredAttachment::File { name, .. } => format!("[{name}]"),
+                            jcode_session_types::StoredAttachment::PastedText { text } => format!("[Pasted text, {} lines]", text.lines().count().max(1)),
+                            jcode_session_types::StoredAttachment::Unknown => continue,
+                        };
+                        if !display.is_empty() { display.push('\n'); }
+                        display.push_str(&label);
+                    }
+                    display
+                } else {
+                    content.clone()
+                };
                 start_processing_message(
                     ProcessingMessage {
+                        attachment_data,
                         id,
                         queued_client_id: None,
                         content,
@@ -1466,6 +1519,7 @@ pub(super) async fn handle_client(
                     let accepted_content = content.clone();
                     start_processing_message(
                         ProcessingMessage {
+                            attachment_data: None,
                             id,
                             queued_client_id: None,
                             content,
@@ -2708,6 +2762,7 @@ pub(super) async fn handle_client(
                             }
                             start_processing_message(
                                 ProcessingMessage {
+                                    attachment_data: None,
                                     id, queued_client_id: None, content, images: Vec::new(), system_reminder: None,
                                     active_skill: None, server_failover: true,
                                 },
@@ -3790,6 +3845,7 @@ pub(super) async fn process_locked_message_streaming_mpsc(
         system_reminder,
         event_tx,
         None,
+        None,
     )
     .await
 }
@@ -3803,6 +3859,7 @@ pub(super) async fn process_reserved_message_streaming_mpsc(
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
     queued_client_id: Option<Vec<String>>,
+    attachment_data: Option<jcode_session_types::MessageAttachments>,
 ) -> Result<()> {
     agent.validate_server_turn(lease)?;
     let session_id = agent.session_id().to_string();
@@ -3815,6 +3872,7 @@ pub(super) async fn process_reserved_message_streaming_mpsc(
             event_tx,
             None,
             queued_client_id,
+            attachment_data,
         )
         .await;
     if result.is_ok() {

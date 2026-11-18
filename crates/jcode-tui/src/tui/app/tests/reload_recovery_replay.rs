@@ -6,6 +6,7 @@ fn reload_replay_history(
         id: 1,
         session_id: session_id.to_string(),
         messages: vec![crate::protocol::HistoryMessage {
+            attachments: Vec::new(),
             response_stats: None, timestamp_ms: None,
             role: "assistant".to_string(),
             content: "Work interrupted by reload".to_string(),
@@ -337,6 +338,7 @@ fn reload_recovery_prepared_send_failure_restores_draft_without_exiting() {
         &mut app,
         &mut connection,
         input::PreparedInput {
+                pasted_contents: Vec::new(),
             raw_input: "Continue the interrupted work".to_string(),
             expanded: "Expanded instructions for the interrupted work".to_string(),
             images: images.clone(),
@@ -408,6 +410,7 @@ fn reload_recovery_deferred_send_failure_preserves_newer_draft() {
             &mut app,
             &mut connection,
             input::PreparedInput {
+                pasted_contents: Vec::new(),
                 raw_input: "Held prompt [image 1]".to_string(),
                 expanded: "Expanded held prompt".to_string(),
                 images: vec![held_image.clone()],

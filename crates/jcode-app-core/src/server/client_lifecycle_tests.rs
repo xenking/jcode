@@ -153,7 +153,7 @@ fn queued_edit_hold_survives_turn_end_and_saves_in_place_once() {
 
     assert_eq!(
         control
-            .edit_user_prompt("b", "text b edited".into(), vec![])
+            .edit_user_prompt("b", "text b edited".into(), vec![], vec![])
             .unwrap(),
         QueuedPromptEditOutcome::Edited
     );
@@ -173,7 +173,7 @@ fn queued_edit_hold_survives_turn_end_and_saves_in_place_once() {
     assert!(control.take_next_user_prompt(false).unwrap().is_none());
     assert_eq!(
         control
-            .edit_user_prompt("b", "late".into(), vec![])
+            .edit_user_prompt("b", "late".into(), vec![], vec![])
             .unwrap(),
         QueuedPromptEditOutcome::InFlight
     );
@@ -497,6 +497,7 @@ async fn desktop_queued_skill_crosses_real_bridge_and_daemon_into_journal() {
                     client_id: "desktop-skill-1".into(),
                     content: "fix this please".into(),
                     images: vec![],
+                    attachments: vec![],
                     mode: jcode_sdk::api::QueuedPromptMode::AfterYield,
                     active_skill: Some("poteto-mode".into()),
                     editing: false,
@@ -1199,6 +1200,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
 
         start_processing_message(
             ProcessingMessage {
+                attachment_data: None,
                 queued_client_id: None,
                 id: 42,
                 content: "do not start during reload".to_string(),
@@ -1308,6 +1310,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
 
     start_processing_message(
         ProcessingMessage {
+            attachment_data: None,
             queued_client_id: None,
             id: 479,
             content: "stream to every attachment".to_string(),
@@ -1534,6 +1537,7 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
     let other_connection = agent.lock().await.claim_server_turn().unwrap();
     start_processing_message(
         ProcessingMessage {
+            attachment_data: None,
             queued_client_id: None,
             id: 1,
             content: "must not enter transcript".into(),
@@ -1562,6 +1566,7 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
     for (id, content) in [(1, "first turn"), (2, "acceptance back on laptop")] {
         request_tx
             .send(ProcessingMessage {
+                attachment_data: None,
                 queued_client_id: None,
                 id,
                 content: content.into(),
@@ -1840,6 +1845,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
 
         start_processing_message(
             ProcessingMessage {
+                attachment_data: None,
                 queued_client_id: None,
                 id: 77,
                 content: "continue after reload".to_string(),
@@ -1902,6 +1908,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
         // delivered_replay_is_reminder_only), so it is not a no-op.
         start_processing_message(
             ProcessingMessage {
+                attachment_data: None,
                 queued_client_id: None,
                 id: 78,
                 content: String::new(),
@@ -1967,6 +1974,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             }
             start_processing_message(
                 ProcessingMessage {
+                    attachment_data: None,
                     queued_client_id: None,
                     id,
                     content: continuation.to_string(),
@@ -2062,6 +2070,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
 
             start_processing_message(
                 ProcessingMessage {
+                    attachment_data: None,
                     queued_client_id: None,
                     id: message_id,
                     content: format!("do not start {session_id} during reload"),

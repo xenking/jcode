@@ -420,6 +420,7 @@ fn load_startup_stub_preserves_metadata_but_skips_heavy_vectors() -> Result<()> 
     session.route_api_method = Some("openai-api".to_string());
     session.set_canary("self-dev");
     session.append_stored_message(StoredMessage {
+        attachment_data: None,
         id: "msg_1".to_string(),
         role: Role::User,
         content: vec![ContentBlock::Text {
@@ -495,6 +496,7 @@ fn load_for_remote_startup_preserves_messages_and_replay_but_skips_heavy_vectors
     session.model = Some("gpt-5.4".to_string());
     session.reasoning_effort = Some("medium".to_string());
     session.append_stored_message(StoredMessage {
+        attachment_data: None,
         id: "msg_remote_1".to_string(),
         role: Role::Assistant,
         content: vec![ContentBlock::Text {
@@ -2320,6 +2322,7 @@ fn reasoning_trace_survives_session_save_and_load() -> Result<()> {
     let session_id = "session_reasoning_trace_roundtrip";
     let mut session = Session::create_with_id(session_id.to_string(), None, None);
     session.append_stored_message(StoredMessage {
+        attachment_data: None,
         id: "msg_assistant".to_string(),
         role: Role::Assistant,
         content: vec![
@@ -3058,6 +3061,7 @@ fn env_snapshot_past_cap_appends_instead_of_rewriting_snapshot() -> Result<()> {
     let session_id = "session_env_snapshot_append";
     let mut session = Session::create_with_id(session_id.to_string(), None, None);
     session.append_stored_message(StoredMessage {
+        attachment_data: None,
         id: "msg_env_1".to_string(),
         role: Role::User,
         content: vec![ContentBlock::Text {
@@ -3133,6 +3137,7 @@ fn metadata_change_on_large_session_is_journaled_not_rewritten() -> Result<()> {
     let big = "x".repeat(64 * 1024);
     for i in 0..24 {
         session.append_stored_message(StoredMessage {
+            attachment_data: None,
             id: format!("msg_{i}"),
             role: Role::User,
             content: vec![ContentBlock::Text {
@@ -3199,6 +3204,7 @@ fn route_journal_roundtrip(large: bool) -> Result<()> {
     session.model = Some("same-model".into());
     session.route_api_method = Some("account:first".into());
     session.append_stored_message(StoredMessage {
+        attachment_data: None,
         id: "message".into(),
         role: Role::User,
         content: vec![ContentBlock::Text {
@@ -3306,6 +3312,7 @@ fn journal_entries_elide_unchanged_compaction_but_loads_keep_it() -> Result<()> 
     let session_id = "session_compaction_elide";
     let mut session = Session::create_with_id(session_id.to_string(), None, None);
     let msg = |i: usize| StoredMessage {
+        attachment_data: None,
         id: format!("m{i}"),
         role: Role::User,
         content: vec![ContentBlock::Text {
@@ -3376,6 +3383,7 @@ fn legacy_journal_entries_with_inline_compaction_still_load() -> Result<()> {
     let session_id = "session_compaction_legacy";
     let mut session = Session::create_with_id(session_id.to_string(), None, None);
     session.append_stored_message(StoredMessage {
+        attachment_data: None,
         id: "m0".into(),
         role: Role::User,
         content: vec![ContentBlock::Text {
@@ -3424,6 +3432,7 @@ fn write_compaction_elision_compat_fixture() -> Result<()> {
     let mut session = Session::create_with_id("session_compat_fixture_1".to_string(), None, None);
     for i in 0..4 {
         session.append_stored_message(StoredMessage {
+            attachment_data: None,
             id: format!("m{i}"),
             role: Role::User,
             content: vec![ContentBlock::Text {

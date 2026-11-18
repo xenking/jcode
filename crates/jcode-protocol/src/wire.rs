@@ -72,6 +72,8 @@ pub struct QueuedPrompt {
     pub content: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<jcode_session_types::Attachment>,
     pub mode: QueuedPromptMode,
     /// Skill name resolved by the daemon when this item is delivered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -105,6 +107,8 @@ pub enum Request {
         content: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<jcode_session_types::Attachment>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_reminder: Option<String>,
         /// Skill selected by the client for this and subsequent turns. The
@@ -138,6 +142,8 @@ pub enum Request {
         content: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<jcode_session_types::Attachment>,
         mode: QueuedPromptMode,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_reminder: Option<String>,
@@ -202,6 +208,8 @@ pub enum Request {
         content: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<jcode_session_types::Attachment>,
     },
 
     /// Soft interrupt: inject message at next safe point without cancelling

@@ -1225,6 +1225,7 @@ mod tests {
             .lock()
             .unwrap()
             .push(jcode_agent_runtime::SoftInterruptMessage {
+                attachments: Vec::new(),
                 active_skill: None,
                 system_reminder: None,
                 content: "hi".into(),
