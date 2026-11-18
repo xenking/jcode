@@ -1676,6 +1676,7 @@ fn handle_server_event_inner(
             side_panel,
             ..
         } => {
+            let full_history_payload = messages_base_count.is_none();
             if let Some(base_count) = messages_base_count {
                 // Delta History: the server verified our advertised prefix and
                 // sent only the messages after it. Rebuild the full list so the
@@ -1733,6 +1734,13 @@ fn handle_server_event_inner(
             let history_handler_start = Instant::now();
             let mut history_lap = Instant::now();
             let mut history_laps: Vec<(&'static str, u128)> = Vec::new();
+            // The last completed turn's final provider request carries the
+            // current context size. A resumed remote client has no local
+            // transcript to read it from, so restore it from History.
+            let restored_context_tokens = messages
+                .iter()
+                .rev()
+                .find_map(|message| message.response_stats.as_ref()?.prompt_tokens);
             let prev_session_id = app.remote_session_id.clone();
             app.remote_provider_oauth_email = provider_oauth_email.clone();
             app.remote_provider_oauth_account_label = provider_oauth_account_label;
@@ -2174,6 +2182,12 @@ fn handle_server_event_inner(
                         "Preserving locally restored display history for metadata-only History bootstrap",
                     );
                 } else {
+                    // A full payload is authoritative, including "no completed
+                    // turn" after a rewind; a delta only updates when it carries
+                    // a newer reported size.
+                    if full_history_payload || restored_context_tokens.is_some() {
+                        app.remote_context_tokens = restored_context_tokens;
+                    }
                     let fingerprint = history_payload_fingerprint(&messages);
                     let last_applied =
                         last_applied_history_fingerprint(&app.remote_client_instance_id);

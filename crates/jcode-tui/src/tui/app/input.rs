@@ -3635,6 +3635,7 @@ impl App {
         self.streaming.streaming_context_stale = false;
         self.streaming.streaming_usage_call_reset_pending = false;
         self.kv_cache.current_api_usage_recorded = false;
+        self.remote_context_tokens = None;
     }
 
     /// Discard all client-side render state for the current streaming attempt:

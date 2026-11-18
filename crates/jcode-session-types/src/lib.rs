@@ -70,6 +70,12 @@ pub struct ResponseStats {
     /// so restored history leaves this absent. Never inferred from tool timings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_secs: Option<f64>,
+    /// Full prompt size of this turn's final provider request, resolved with
+    /// the provider that actually served it. Unlike the summed `input_tokens`
+    /// field this is the current context size, not the sum of every tool round,
+    /// so clients can restore it after a restart without a local transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

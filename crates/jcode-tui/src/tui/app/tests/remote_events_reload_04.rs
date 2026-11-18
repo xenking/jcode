@@ -2637,5 +2637,99 @@ fn test_remote_model_changed_updates_reasoning_effort() {
     );
 }
 
+#[test]
+fn resumed_history_restores_last_provider_reported_context_usage() {
+    // A restarted TUI is a remote client: it keeps only rendered messages, not
+    // the stored transcript that carries token usage. Without the restored
+    // figure the context footer fell back to "context not reported" until the
+    // next turn finished.
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::History {
+            id: 1,
+            session_id: "ses_restore_context_tokens".to_string(),
+            messages: vec![
+                crate::protocol::HistoryMessage {
+                    timestamp_ms: Some(1),
+                    response_stats: None,
+                    role: "user".to_string(),
+                    content: "first prompt".to_string(),
+                    tool_calls: None,
+                    tool_data: None,
+                },
+                crate::protocol::HistoryMessage {
+                    timestamp_ms: Some(2),
+                    response_stats: Some(jcode_session_types::ResponseStats {
+                        duration_secs: None,
+                        prompt_tokens: Some(231_000),
+                        input_tokens: Some(1_000),
+                        output_tokens: Some(500),
+                        cache_read_tokens: Some(230_000),
+                        cache_creation_tokens: None,
+                        tool_calls: None,
+                    }),
+                    role: "assistant".to_string(),
+                    content: "answer".to_string(),
+                    tool_calls: None,
+                    tool_data: None,
+                },
+            ],
+            messages_base_count: None,
+            images_unchanged: false,
+            images: vec![],
+            provider_name: Some("claude".to_string()),
+            provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            subagent_model: None,
+            pinned_skill: None,
+            agent_model_overrides: Default::default(),
+            autoreview_enabled: None,
+            autojudge_enabled: None,
+            available_models: vec![],
+            available_model_routes: vec![],
+            mcp_servers: vec![],
+            skills: vec![],
+            total_tokens: None,
+            token_usage_totals: None,
+            all_sessions: vec![],
+            client_count: Some(1),
+            is_canary: Some(false),
+            server_version: None,
+            server_name: None,
+            server_icon: None,
+            server_has_update: None,
+            was_interrupted: None,
+            reload_recovery: None,
+            connection_type: Some("websocket".to_string()),
+            status_detail: None,
+            upstream_provider: None,
+            provider_oauth_email: None,
+            provider_oauth_account_label: None,
+            resolved_credential: None,
+            reasoning_effort: None,
+            service_tier: None,
+            available_service_tiers: None,
+            compaction_mode: crate::config::CompactionMode::Reactive,
+            activity: None,
+            side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            applets: Default::default(),
+        },
+        &mut remote,
+    );
+
+    let data = crate::tui::TuiState::info_widget_data(&app);
+    assert_eq!(data.observed_context_tokens, None);
+    assert_eq!(
+        data.last_reported_context_tokens,
+        Some(231_000),
+        "restart must restore the provider-reported context size from history"
+    );
+}
+
 #[path = "remote_events_reload_04_additional_tests.rs"]
 mod additional_test_remote_fast_status_tracks_history_tier_including_explicit_off;

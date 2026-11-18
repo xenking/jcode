@@ -1657,6 +1657,10 @@ fn overscroll_context_usage(
 ) -> Option<(usize, usize)> {
     let used_tokens = if let Some(observed) = data.observed_context_tokens {
         observed as usize
+    } else if let Some(reported) = data.last_reported_context_tokens {
+        // A resumed client has no local transcript, but History restores the
+        // last prompt size the provider reported.
+        reported as usize
     } else {
         let info = data.context_info.as_ref()?;
         if info.total_chars == 0 {

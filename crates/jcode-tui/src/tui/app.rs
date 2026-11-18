@@ -1414,6 +1414,10 @@ pub struct App {
     remote_total_tokens: Option<(u64, u64)>,
     // Detailed persisted token/cache usage totals (from server in remote mode)
     remote_token_usage_totals: Option<crate::protocol::TokenUsageTotals>,
+    // Last provider-reported context (prompt) size restored from History. The
+    // remote client holds no local transcript copy, so this is the only way the
+    // context figure survives a restart before the next turn reports usage.
+    remote_context_tokens: Option<u64>,
     // Whether the remote session is canary/self-dev (from server)
     remote_is_canary: Option<bool>,
     // Remote server version (from server)

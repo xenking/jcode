@@ -1256,7 +1256,10 @@ impl App {
     /// text and can disagree with it by a wide margin.
     pub(super) fn last_persisted_context_tokens(&self) -> Option<u64> {
         if self.is_remote {
-            return None;
+            // The remote client does not retain the session transcript; History
+            // restores the last reported prompt size instead so a restart keeps
+            // showing the real context figure.
+            return self.remote_context_tokens;
         }
         self.session
             .messages

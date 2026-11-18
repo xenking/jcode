@@ -6,6 +6,7 @@ fn seed_stale_clear_usage(app: &mut App) {
     app.streaming.streaming_context_stale = true;
     app.streaming.streaming_usage_call_reset_pending = true;
     app.kv_cache.current_api_usage_recorded = true;
+    app.remote_context_tokens = Some(231_000);
 }
 
 fn assert_clear_usage_reset(app: &App) {
@@ -17,6 +18,7 @@ fn assert_clear_usage_reset(app: &App) {
     assert!(!app.streaming.streaming_context_stale);
     assert!(!app.streaming.streaming_usage_call_reset_pending);
     assert!(!app.kv_cache.current_api_usage_recorded);
+    assert_eq!(app.remote_context_tokens, None);
 }
 
 fn seed_stale_clear_image(app: &mut App) -> u64 {

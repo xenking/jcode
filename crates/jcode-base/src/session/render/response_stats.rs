@@ -79,13 +79,18 @@ fn attach_turn(
         .collect();
     let stats = ResponseStats {
         duration_secs: None,
+        prompt_tokens: assistants
+            .iter()
+            .rev()
+            .find_map(|&i| messages[i].token_usage.as_ref()?.prompt_tokens),
         tool_calls: (!calls.is_empty()).then_some(calls.len() as u64),
         input_tokens: sum(|usage| Some(usage.input_tokens)),
         output_tokens: sum(|usage| Some(usage.output_tokens)),
         cache_read_tokens: sum(|usage| usage.cache_read_input_tokens),
         cache_creation_tokens: sum(|usage| usage.cache_creation_input_tokens),
     };
-    if stats.input_tokens.is_some()
+    if stats.prompt_tokens.is_some()
+        || stats.input_tokens.is_some()
         || stats.output_tokens.is_some()
         || stats.cache_read_tokens.is_some()
         || stats.cache_creation_tokens.is_some()
@@ -240,6 +245,42 @@ mod tests {
         assert_eq!(wire["response_stats"]["input_tokens"], 30);
         assert!(wire["response_stats"].get("duration_secs").is_none());
     }
+    #[test]
+    fn response_stats_prompt_tokens_describe_the_final_call_not_round_sums() {
+        let mut first = usage(10);
+        first.as_mut().unwrap().prompt_tokens = Some(9_000);
+        let mut final_round = usage(20);
+        final_round.as_mut().unwrap().prompt_tokens = Some(12_500);
+        let messages = vec![
+            text(Role::User, "prompt", None),
+            text(Role::Assistant, "", first),
+            text(Role::Assistant, "answer", final_round),
+        ];
+        let mut rows = vec![row(2)];
+        attach(&messages, &mut rows);
+        let stats = rows[0].response_stats.as_ref().unwrap();
+        assert_eq!(stats.input_tokens, Some(30));
+        assert_eq!(
+            stats.prompt_tokens,
+            Some(12_500),
+            "restored context is the last call's prompt size, not the turn sum"
+        );
+    }
+
+    #[test]
+    fn response_stats_legacy_records_without_prompt_tokens_stay_unknown() {
+        let messages = vec![
+            text(Role::User, "prompt", None),
+            text(Role::Assistant, "answer", usage(20)),
+        ];
+        let mut rows = vec![row(1)];
+        attach(&messages, &mut rows);
+        assert_eq!(
+            rows[0].response_stats.as_ref().unwrap().prompt_tokens,
+            None
+        );
+    }
+
     #[test]
     fn response_stats_internal_rows_do_not_split_and_overflow_is_unknown() {
         let mut internal = text(Role::User, "internal continuation", None);
