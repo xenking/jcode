@@ -150,13 +150,44 @@ pub fn validate_target(target: &ImmutableTarget) -> Result<()> {
     Ok(())
 }
 
+/// Why an inherited runtime target was dropped instead of adopted.
+static IDENTITY_WARNING: OnceLock<String> = OnceLock::new();
+
+/// Generation this process reports, kept after the handoff env is forgotten so
+/// reloads keep counting up instead of restarting at 1.
+static SERVING_GENERATION: OnceLock<u64> = OnceLock::new();
+
 /// Freeze process image identity once, before any installation channel can move.
+///
+/// Only a successful capture is cached: an unreadable handoff environment must
+/// not make a running process permanently unidentifiable.
 pub fn serving_identity(git_hash: &str) -> Result<ServingIdentity> {
-    static IDENTITY: OnceLock<std::result::Result<ServingIdentity, String>> = OnceLock::new();
-    IDENTITY
-        .get_or_init(|| capture_identity(git_hash).map_err(|e| format!("{e:#}")))
-        .clone()
-        .map_err(anyhow::Error::msg)
+    static IDENTITY: OnceLock<ServingIdentity> = OnceLock::new();
+    if let Some(identity) = IDENTITY.get() {
+        return Ok(identity.clone());
+    }
+    let identity = capture_identity(git_hash)?;
+    Ok(IDENTITY.get_or_init(|| identity).clone())
+}
+
+/// Diagnostic for the identity actually captured, when a stale inherited
+/// runtime target had to be dropped. Daemons log this; it is never a failure.
+pub fn identity_warning() -> Option<String> {
+    IDENTITY_WARNING.get().cloned()
+}
+
+/// Remove the daemon-private handoff variables from this process environment.
+///
+/// Identity lives in [`serving_identity`] once captured, so the raw values are
+/// never needed again. Dropping them here is what stops them from reaching
+/// child processes (bash tool shells, background tasks, MCP servers, workers)
+/// and from being re-inherited by an exec that does not go through
+/// [`prepare_exec`]. Call [`serving_identity`] first in a daemon; call this
+/// directly in any process that must ignore a handoff.
+pub fn forget_inherited_handoff_env() {
+    for key in [TARGET_ENV, RELOAD_ID_ENV, GENERATION_ENV] {
+        jcode_core::env::remove_var(key);
+    }
 }
 
 fn parse_generation(value: Option<&str>) -> Result<u64> {
@@ -186,38 +217,72 @@ fn inherited_generation() -> Result<u64> {
     }
 }
 
+/// Generation for the next exec: the captured one when this process already
+/// froze its identity (the env is gone by then), else whatever was inherited.
+fn current_generation() -> Result<u64> {
+    match SERVING_GENERATION.get() {
+        Some(generation) => Ok(*generation),
+        None => inherited_generation(),
+    }
+}
+
+/// Adopt an inherited target only when it describes the executing image.
+fn adopt_inherited_target(raw: &str, observed: &FileIdentity) -> Result<ImmutableTarget> {
+    let target: ImmutableTarget =
+        serde_json::from_str(raw).context("inherited runtime target is malformed")?;
+    validate_target(&target)?;
+    let expected = target
+        .payload_identity
+        .as_ref()
+        .or(target.file_identity.as_ref())
+        .context("inherited immutable runtime target has no file identity")?;
+    if expected != observed {
+        bail!("executing image does not match inherited immutable runtime target");
+    }
+    Ok(target)
+}
+
 fn capture_identity(git_hash: &str) -> Result<ServingIdentity> {
     let exe = std::env::current_exe().context("running executable path unavailable")?;
     // proc_pidpath may return another hardlink. Inherited target is authoritative
     // only when it is the same image, not merely because the environment says so.
-    let target: Option<ImmutableTarget> = optional_identity_env(TARGET_ENV)?
-        .map(|raw| serde_json::from_str(&raw))
-        .transpose()?;
-    let binary_path = if let Some(target) = &target {
-        validate_target(target)?;
-        let observed = file_identity(&exe)?;
-        if Some(&observed)
-            != target
-                .payload_identity
-                .as_ref()
-                .or(target.file_identity.as_ref())
-        {
-            bail!("executing image does not match inherited immutable runtime target");
-        }
-        target.binary_path.clone()
-    } else {
-        std::fs::canonicalize(&exe).unwrap_or(exe)
+    // A stale target is reported and dropped, never fatal: a daemon that
+    // cannot identify itself cannot answer a pong or accept a rollout, which
+    // is a worse failure than serving as the image it actually is.
+    let inherited = optional_identity_env(TARGET_ENV)?;
+    let observed = file_identity(&exe)?;
+    let adopted = match inherited.as_deref() {
+        None => None,
+        Some(raw) => match adopt_inherited_target(raw, &observed) {
+            Ok(target) => Some(target),
+            Err(error) => {
+                let _ = IDENTITY_WARNING.set(format!("{error:#}"));
+                None
+            }
+        },
     };
+    let binary_path = adopted
+        .as_ref()
+        .map(|target| target.binary_path.clone())
+        .unwrap_or_else(|| std::fs::canonicalize(&exe).unwrap_or(exe));
+    let generation = match inherited_generation() {
+        Ok(generation) => generation,
+        Err(error) => {
+            let _ = IDENTITY_WARNING.set(format!("{error:#}; restarting the counter at 1"));
+            1
+        }
+    };
+    let _ = SERVING_GENERATION.set(generation);
     Ok(ServingIdentity {
         pid: std::process::id(),
-        version_label: target
+        version_label: adopted
             .as_ref()
             .and_then(|t| t.version_label.clone())
             .or_else(|| installed_label(&binary_path)),
         binary_path,
         git_hash: git_hash.to_owned(),
         reload_id: optional_identity_env(RELOAD_ID_ENV)?.filter(|id| !id.is_empty()),
-        generation: inherited_generation()?,
+        generation,
     })
 }
 
@@ -230,7 +295,7 @@ pub fn prepare_exec(cmd: &mut Command, target: &ImmutableTarget, reload_id: &str
     if reload_id.is_empty() {
         bail!("reload id must not be empty");
     }
-    let generation = inherited_generation()?;
+    let generation = current_generation()?;
     cmd.env(TARGET_ENV, serde_json::to_string(target)?)
         .env(RELOAD_ID_ENV, reload_id)
         .env(

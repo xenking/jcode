@@ -232,3 +232,236 @@ fn requested_target_missing_or_replaced_is_an_error_without_fallback() {
             .contains("changed")
     );
 }
+
+/// The daemon's handoff vars describe exactly one process image. They must be
+/// consumed into the identity and then leave the process environment, so no
+/// child (bash tool shell, background task, MCP server, worker) inherits them
+/// and no later exec can point a fresh image at a stale target.
+#[cfg(unix)]
+mod handoff_env {
+    use super::{Path, PathBuf, executable, file_identity};
+    use crate::runtime_generation::*;
+
+    const CHILD: &str = "JCODE_TEST_HANDOFF_ENV_CHILD";
+
+    fn handoff_keys() -> [&'static str; 3] {
+        [TARGET_ENV, RELOAD_ID_ENV, GENERATION_ENV]
+    }
+
+    /// The immutable target that describes the currently executing image.
+    fn self_target() -> ImmutableTarget {
+        let binary_path =
+            std::fs::canonicalize(std::env::current_exe().unwrap()).expect("current exe");
+        let payload = crate::resolve_binary_payload(&binary_path);
+        ImmutableTarget {
+            payload_identity: Some(file_identity(&payload).unwrap()),
+            file_identity: Some(file_identity(&binary_path).unwrap()),
+            binary_path,
+            git_hash: Some("abcdef123".into()),
+            version_label: None,
+        }
+    }
+
+    /// A well-formed target for a different image (the daemon a reload replaced).
+    fn foreign_target(dir: &Path) -> ImmutableTarget {
+        let binary = dir.join("versions/old/jcode");
+        executable(&binary, "oldhash");
+        let binary_path = std::fs::canonicalize(&binary).unwrap();
+        let payload = crate::resolve_binary_payload(&binary_path);
+        ImmutableTarget {
+            payload_identity: Some(file_identity(&payload).unwrap()),
+            file_identity: Some(file_identity(&binary_path).unwrap()),
+            binary_path,
+            git_hash: Some("oldhash123".into()),
+            version_label: Some("old".into()),
+        }
+    }
+
+    fn child(mode: &str) -> std::process::Command {
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            "--exact",
+            "--nocapture",
+            &format!("runtime_generation::tests::handoff_env::child_{mode}"),
+        ]);
+        for key in handoff_keys() {
+            cmd.env_remove(key);
+        }
+        cmd.env(CHILD, mode);
+        cmd
+    }
+
+    /// A filtered child that matched nothing exits 0, which would make every
+    /// assertion in it vacuous. Require its marker on stdout.
+    fn assert_child_ran(output: std::process::Output, mode: &str) {
+        assert!(
+            output.status.success(),
+            "child {mode} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("HANDOFF-CHILD-OK"),
+            "child {mode} assertions did not run:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn capture_consumes_handoff_env_into_identity() {
+        let target = self_target();
+        let mut cmd = child("consume");
+        cmd.env(TARGET_ENV, serde_json::to_string(&target).unwrap())
+            .env(RELOAD_ID_ENV, "reload-consume")
+            .env(GENERATION_ENV, "2");
+        assert_child_ran(cmd.output().unwrap(), "consume");
+    }
+
+    /// Runs inside the child spawned by the test above.
+    #[test]
+    fn child_consume() {
+        if std::env::var_os(CHILD).as_deref() != Some(std::ffi::OsStr::new("consume")) {
+            return;
+        }
+        let expected = self_target();
+        let identity = capture_identity("abcdef123").expect("inherited target is adopted");
+        assert_eq!(identity.binary_path, expected.binary_path);
+        assert_eq!(identity.reload_id.as_deref(), Some("reload-consume"));
+        assert_eq!(identity.generation, 2);
+        assert!(identity_warning().is_none());
+
+        forget_inherited_handoff_env();
+        for key in handoff_keys() {
+            assert!(
+                std::env::var_os(key).is_none(),
+                "{key} must not survive identity capture"
+            );
+        }
+        // The real spawn path a bash tool shell takes: no handoff vars visible.
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg("env")
+            .output()
+            .expect("spawn env");
+        let env_text = String::from_utf8_lossy(&out.stdout);
+        for key in handoff_keys() {
+            assert!(
+                !env_text.contains(key),
+                "child environment leaked {key}:\n{env_text}"
+            );
+        }
+        println!("HANDOFF-CHILD-OK");
+    }
+
+    /// A target for a different image must not make the daemon unidentifiable:
+    /// warn, drop the stale target, identify as the executing image.
+    #[test]
+    fn stale_foreign_target_still_yields_a_usable_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = foreign_target(dir.path());
+        let mut cmd = child("stale");
+        cmd.env(TARGET_ENV, serde_json::to_string(&target).unwrap())
+            .env(RELOAD_ID_ENV, "reload-stale")
+            .env(GENERATION_ENV, "4");
+        assert_child_ran(cmd.output().unwrap(), "stale");
+    }
+
+    #[test]
+    fn child_stale() {
+        if std::env::var_os(CHILD).as_deref() != Some(std::ffi::OsStr::new("stale")) {
+            return;
+        }
+        let identity = capture_identity("abcdef123").expect("a stale target must not be fatal");
+        let executing = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        assert_eq!(identity.binary_path, executing);
+        assert!(
+            identity_warning()
+                .as_deref()
+                .is_some_and(|warning| warning.contains("does not match inherited")),
+            "the dropped target must be reported: {:?}",
+            identity_warning()
+        );
+        assert_eq!(identity.generation, 4);
+
+        forget_inherited_handoff_env();
+        for key in handoff_keys() {
+            assert!(std::env::var_os(key).is_none(), "{key} must be dropped");
+        }
+        println!("HANDOFF-CHILD-OK");
+    }
+
+    /// A non-daemon CLI (rollout, run, --version) ignores inherited runtime-target
+    /// vars: it is not the image a reload handed off to.
+    #[test]
+    fn non_serve_cli_ignores_inherited_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = foreign_target(dir.path());
+        let mut cmd = child("ignore");
+        cmd.env(TARGET_ENV, serde_json::to_string(&target).unwrap())
+            .env(RELOAD_ID_ENV, "reload-ignore")
+            .env(GENERATION_ENV, "9");
+        assert_child_ran(cmd.output().unwrap(), "ignore");
+    }
+
+    #[test]
+    fn child_ignore() {
+        if std::env::var_os(CHILD).as_deref() != Some(std::ffi::OsStr::new("ignore")) {
+            return;
+        }
+        forget_inherited_handoff_env();
+        let identity = capture_identity("abcdef123").expect("ignored target cannot reject");
+        let executing = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        assert_eq!(identity.binary_path, executing);
+        assert!(identity_warning().is_none());
+        assert_eq!(identity.generation, 1);
+        println!("HANDOFF-CHILD-OK");
+    }
+
+    /// Generation must stay monotonic after the env is scrubbed: prepare_exec
+    /// reads the captured serving generation, not the (now absent) env var.
+    #[test]
+    fn exec_after_scrub_keeps_the_generation_counter_monotonic() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = foreign_target(dir.path());
+        let exec_binary = dir.path().join("versions/next/jcode");
+        std::fs::create_dir_all(exec_binary.parent().unwrap()).unwrap();
+        std::fs::write(
+            &exec_binary,
+            "#!/bin/sh\nprintf '%s\\n' \"$JCODE_RUNTIME_GENERATION\"\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exec_binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut cmd = child("generation");
+        cmd.env(TARGET_ENV, serde_json::to_string(&target).unwrap())
+            .env(GENERATION_ENV, "7")
+            .env("JCODE_TEST_HANDOFF_EXEC_BINARY", &exec_binary);
+        assert_child_ran(cmd.output().unwrap(), "generation");
+    }
+
+    #[test]
+    fn child_generation() {
+        if std::env::var_os(CHILD).as_deref() != Some(std::ffi::OsStr::new("generation")) {
+            return;
+        }
+        let identity = capture_identity("abcdef123").expect("identity captured");
+        assert_eq!(identity.generation, 7);
+        forget_inherited_handoff_env();
+
+        let script = PathBuf::from(
+            std::env::var("JCODE_TEST_HANDOFF_EXEC_BINARY").expect("exec binary path"),
+        );
+        let target = pin_path(&script).unwrap();
+        let mut exec = Command::new(&target.binary_path);
+        prepare_exec(&mut exec, &target, "reload-next").unwrap();
+        let output = exec.output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "8",
+            "prepare_exec must continue the captured generation after the env scrub"
+        );
+        println!("HANDOFF-CHILD-OK");
+    }
+}
