@@ -1,5 +1,114 @@
 use super::bounded::page_records;
 
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "exercise the busy-agent history path"
+)]
+async fn journal_tail_pages_from_live_to_busy_with_snapshot_replay_events() {
+    use super::*;
+    use crate::message::{ContentBlock, Role};
+    use crate::provider::Provider;
+    use crate::tool::Registry;
+    let _env = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let old_home = std::env::var_os("JCODE_HOME");
+    struct Restore(Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(value) = self.0.take() {
+                crate::env::set_var("JCODE_HOME", value);
+            } else {
+                crate::env::remove_var("JCODE_HOME");
+            }
+        }
+    }
+    let _restore = Restore(old_home);
+    crate::env::set_var("JCODE_HOME", home.path());
+    let id = "session_paging_busy_journal";
+    let mut session = crate::session::Session::create_with_id(id.into(), None, None);
+    let add = |s: &mut crate::session::Session, text: &str| {
+        s.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: text.into(),
+                cache_control: None,
+            }],
+        )
+    };
+    add(&mut session, "old");
+    session.record_replay_display_message("error", None, "historical failure");
+    session.replay_events[0].timestamp = chrono::Utc::now() - chrono::Duration::seconds(1);
+    add(&mut session, "middle");
+    session.save().unwrap();
+    add(&mut session, "journal tail");
+    session.save().unwrap();
+    assert!(
+        home.path()
+            .join("sessions")
+            .join(format!("{id}.journal.jsonl"))
+            .exists()
+    );
+    struct TestProvider;
+    #[async_trait::async_trait]
+    impl Provider for TestProvider {
+        async fn complete(
+            &self,
+            _: &[crate::message::Message],
+            _: &[crate::message::ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<crate::provider::EventStream> {
+            anyhow::bail!("unexpected provider call")
+        }
+        fn name(&self) -> &str {
+            "test"
+        }
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self)
+        }
+    }
+    let provider: Arc<dyn Provider> = Arc::new(TestProvider);
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider,
+        Registry::empty(),
+        session,
+        None,
+    )));
+    async fn request(
+        agent: &Arc<Mutex<Agent>>,
+        id: &str,
+        before: Option<String>,
+    ) -> crate::protocol::ServerEvent {
+        let (stream, peer) = crate::transport::stream_pair().unwrap();
+        let (_, write) = stream.into_split();
+        let writer = Arc::new(Mutex::new(write));
+        handle_history_page(1, id, agent, &writer, before, 1)
+            .await
+            .unwrap();
+        let mut reader = tokio::io::BufReader::new(peer);
+        let mut line = String::new();
+        tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut line)
+            .await
+            .unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+    let crate::protocol::ServerEvent::HistoryPage {
+        before: Some(cursor),
+        ..
+    } = request(&agent, id, None).await
+    else {
+        panic!("missing first page")
+    };
+    let guard = agent.lock().await;
+    let event = request(&agent, id, Some(cursor)).await;
+    drop(guard);
+    let crate::protocol::ServerEvent::HistoryPage { fragments, .. } = event else {
+        panic!("expected older page, got {event:?}")
+    };
+    assert!(fragments[0]["text"].as_str().unwrap().contains("middle"));
+}
+
 #[test]
 fn generated_seventy_megabyte_history_is_bounded_and_lossless() {
     let entries: Vec<String> = (0..70).map(|i| serde_json::json!({"role":"user", "content":format!("{i}:{}", "\"\\\nЖ".repeat(170_000))}).to_string()).collect();
@@ -40,6 +149,47 @@ fn cursor_survives_append_but_rejects_changed_boundary() {
     );
     rows[0] = "rewritten".into();
     assert!(page_records(&rows, Some(&cursor), 1).is_err());
+}
+
+#[test]
+fn cursor_survives_rows_inserted_before_boundary() {
+    let live = vec!["old".to_owned(), "boundary".to_owned(), "new".to_owned()];
+    let cursor = page_records(&live, None, 1).unwrap().before.unwrap();
+    let persisted = vec![
+        "inserted".to_owned(),
+        "old".to_owned(),
+        "boundary".to_owned(),
+        "new".to_owned(),
+    ];
+    let page = page_records(&persisted, Some(&cursor), 1).unwrap();
+    assert_eq!(page.fragments[0].text, "boundary");
+}
+
+#[test]
+fn shifted_partial_row_keeps_fragment_identity() {
+    let row = "x".repeat(1_200_000);
+    let first = page_records(std::slice::from_ref(&row), None, 1).unwrap();
+    let shifted = vec!["inserted".to_owned(), row];
+    let second = page_records(&shifted, first.before.as_deref(), 1).unwrap();
+    let third = page_records(&shifted, second.before.as_deref(), 1).unwrap();
+    assert_eq!(first.fragments[0].index, second.fragments[0].index);
+    assert_eq!(first.fragments[0].index, third.fragments[0].index);
+    assert_eq!(third.fragments[0].start, 0);
+}
+
+#[test]
+fn shifted_ambiguous_boundary_is_not_guessed() {
+    let first = vec!["boundary".to_owned(), "tail".to_owned()];
+    let cursor = page_records(&first, None, 1).unwrap().before.unwrap();
+    let changed = vec![
+        "other".to_owned(),
+        "boundary".to_owned(),
+        "boundary".to_owned(),
+    ];
+    assert_eq!(
+        page_records(&changed, Some(&cursor), 1).unwrap_err(),
+        "stale cursor"
+    );
 }
 
 #[test]
