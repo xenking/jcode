@@ -21,7 +21,8 @@ use super::state::fanout_session_event;
 use crate::protocol::{AskAnswer, AskQuestion, AskResponse, ServerEvent};
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use tokio::sync::{RwLock, mpsc, oneshot};
@@ -53,11 +54,10 @@ pub(crate) fn set_timeout_for_test(millis: u64) {
 
 type SwarmMembers = Arc<RwLock<HashMap<String, SwarmMember>>>;
 
-static NEXT_ESCALATION: AtomicU64 = AtomicU64::new(1);
-
 struct Bridge {
     tx: mpsc::UnboundedSender<EscalationRequest>,
     cancelled: CancellationToken,
+    members: SwarmMembers,
 }
 
 static BRIDGES: LazyLock<Mutex<HashMap<String, Bridge>>> =
@@ -120,6 +120,7 @@ pub(crate) fn install_bridge(session_id: &str, members: SwarmMembers) {
             Bridge {
                 tx,
                 cancelled: cancelled.clone(),
+                members: Arc::clone(&members),
             },
         ) {
             previous.cancelled.cancel();
@@ -132,19 +133,26 @@ pub(crate) fn install_bridge(session_id: &str, members: SwarmMembers) {
                 _ = cancelled.cancelled() => break,
                 request = rx.recv() => match request {
                     None => break,
-                    Some(request) => {
+                    Some(mut request) => {
                         let worker = worker_session_id.clone();
                         let members = Arc::clone(&members);
+                        let cancelled = cancelled.clone();
                         tokio::spawn(async move {
-                            let reply = handle_escalation(
+                            let outcome = handle_escalation(
                                 worker,
                                 request.request_id,
                                 request.questions,
                                 request.tool_call_id,
                                 members,
+                                async {
+                                    tokio::select! {
+                                        _ = cancelled.cancelled() => {},
+                                        _ = request.reply.closed() => {},
+                                    }
+                                },
                             )
                             .await;
-                            let _ = request.reply.send(reply);
+                            let _ = request.reply.send(outcome);
                         });
                     }
                 },
@@ -158,6 +166,28 @@ pub(crate) fn has_bridge(session_id: &str) -> bool {
     lock_bridges()
         .get(session_id)
         .is_some_and(|bridge| !bridge.tx.is_closed())
+}
+
+pub(crate) async fn wait_for_recovery_coordinator(session_id: &str) -> bool {
+    let members = lock_bridges()
+        .get(session_id)
+        .map(|bridge| Arc::clone(&bridge.members));
+    let Some(members) = members else {
+        return false;
+    };
+    let root = super::swarm::swarm_ancestors(&*members.read().await, session_id).pop();
+    if let Some(root) = root {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(30),
+            crate::tool::interactive::wait_for_sender(&root),
+        )
+        .await;
+    }
+    true
+}
+
+pub(super) fn is_pending(request_id: &str) -> bool {
+    lock_pending().contains_key(request_id)
 }
 
 /// Ask the coordinator, from inside the `ask` tool.
@@ -175,46 +205,21 @@ pub(crate) async fn escalate(
         .get(session_id)
         .filter(|bridge| !bridge.tx.is_closed())
         .map(|bridge| bridge.tx.clone())?;
-    let request_id = format!(
-        "ask-esc-{session_id}-{}",
-        NEXT_ESCALATION.fetch_add(1, Ordering::Relaxed)
-    );
+    let request_id = format!("ask-esc-{session_id}-{}", uuid::Uuid::new_v4());
     let (reply, answer) = oneshot::channel();
     tx.send(EscalationRequest {
-        request_id: request_id.clone(),
+        request_id,
         tool_call_id: tool_call_id.to_string(),
         questions: questions.to_vec(),
         reply,
     })
     .ok()?;
-    // If the tool future is dropped (turn cancelled, worker stopped), withdraw
-    // the parked question so the coordinator is not left answering a dead ask.
-    let _withdraw_on_drop = WithdrawOnDrop {
-        request_id,
-    };
     Some(match answer.await {
         Ok(result) => result,
         Err(_) => Err(anyhow!(
             "ask was cancelled: the session's coordinator route closed before answering"
         )),
     })
-}
-
-struct WithdrawOnDrop {
-    request_id: String,
-}
-
-impl Drop for WithdrawOnDrop {
-    fn drop(&mut self) {
-        let entry = lock_pending().remove(&self.request_id);
-        if let Some(entry) = entry {
-            entry.closed.cancel();
-            crate::logging::info(&format!(
-                "ASK_ESCALATION_WITHDRAWN request={} worker={}",
-                self.request_id, entry.worker_session_id
-            ));
-        }
-    }
 }
 
 /// Handle `Request::CommAnswerEscalatedAsk` from a client.
@@ -302,9 +307,20 @@ async fn handle_escalation(
     questions: Vec<AskQuestion>,
     tool_call_id: String,
     members: SwarmMembers,
+    cancelled: impl Future<Output = ()>,
 ) -> Result<EscalatedAsk> {
-    let (root_session_id, worker_name, lane) = {
-        let members = members.read().await;
+    let mut cancelled = std::pin::pin!(cancelled);
+    let withdrawal = || {
+        anyhow!(
+            "ask was cancelled: worker {worker_session_id} stopped waiting before the coordinator answered"
+        )
+    };
+    let (root_session_id, worker_name, task_label) = {
+        let members = tokio::select! {
+            biased;
+            _ = &mut cancelled => return Err(withdrawal()),
+            members = members.read() => members,
+        };
         let ancestors = super::swarm::swarm_ancestors(&members, &worker_session_id);
         let root_session_id = ancestors
             .last()
@@ -314,10 +330,8 @@ async fn handle_escalation(
         let worker_name = member
             .and_then(|member| member.friendly_name.clone())
             .unwrap_or_else(|| worker_session_id.clone());
-        let lane = member
-            .and_then(|member| member.task_label.clone())
-            .or_else(|| active_lane(&worker_session_id));
-        (root_session_id, worker_name, lane)
+        let task_label = member.and_then(|member| member.task_label.clone());
+        (root_session_id, worker_name, task_label)
     };
     if root_session_id == worker_session_id {
         return Ok(assumed(&questions, ESCALATION_NO_ROOT_NOTE));
@@ -328,6 +342,7 @@ async fn handle_escalation(
     if crate::tool::interactive::sender(&root_session_id).is_none() {
         return Ok(assumed(&questions, ESCALATION_NO_CLIENT_NOTE));
     }
+    let lane = active_lane(&worker_session_id).or(task_label);
 
     let (answer_tx, mut answer_rx) = mpsc::unbounded_channel::<AskResponse>();
     let closed = CancellationToken::new();
@@ -345,7 +360,7 @@ async fn handle_escalation(
         );
     }
 
-    let delivered = fanout_session_event(
+    let delivery = fanout_session_event(
         &members,
         &root_session_id,
         ServerEvent::AskEscalated {
@@ -356,8 +371,15 @@ async fn handle_escalation(
             questions: questions.clone(),
             timeout_secs: escalated_ask_timeout().as_secs(),
         },
-    )
-    .await;
+    );
+    let delivered = tokio::select! {
+        biased;
+        _ = &mut cancelled => {
+            lock_pending().remove(&request_id);
+            return Err(withdrawal());
+        }
+        delivered = delivery => delivered,
+    };
     if delivered == 0 {
         // No client channel accepted the structured event. Withdraw instead of
         // leaving the worker parked on an escalation nobody can see.
@@ -387,23 +409,17 @@ async fn handle_escalation(
         "waiting for the coordinator to answer ask",
     );
     let (outcome, reason) = tokio::select! {
+        biased;
         answer = answer_rx.recv() => match answer {
             Some(response) => (Some(response), "answered"),
             None => (None, "withdrawn"),
         },
+        _ = &mut cancelled => (None, "withdrawn"),
         _ = closed.cancelled() => (None, "withdrawn"),
         _ = tokio::time::sleep(escalated_ask_timeout()) => (None, "timed_out"),
     };
     drop(wait);
-    {
-        let mut pending = lock_pending();
-        if pending
-            .get(&request_id)
-            .is_some_and(|entry| entry.request_id == request_id)
-        {
-            pending.remove(&request_id);
-        }
-    }
+    lock_pending().remove(&request_id);
     let _ = fanout_session_event(
         &members,
         &root_session_id,
@@ -421,9 +437,7 @@ async fn handle_escalation(
             note: None,
         }),
         (None, "timed_out") => Ok(assumed(&questions, ESCALATION_TIMEOUT_NOTE)),
-        _ => Err(anyhow!(
-            "ask was cancelled: worker {worker_session_id} was stopped before the coordinator answered"
-        )),
+        _ => Err(withdrawal()),
     }
 }
 
@@ -644,4 +658,4 @@ pub(crate) fn clear_for_test() {
 
 #[cfg(test)]
 #[path = "ask_escalation_tests.rs"]
-mod tests;
+pub(super) mod tests;

@@ -753,7 +753,6 @@ pub(super) async fn dispatch_ui_activity(
     }
 }
 
-
 /// A headless worker parked on `ask`. Wake the coordinator so its model sees
 /// the question and answers with `swarm action="answer"` (or re-asks the human
 /// with its own `ask`). Unlike a worker report, the coordinator's turn is
@@ -764,6 +763,9 @@ pub(super) async fn dispatch_swarm_ask_escalated(
     soft_interrupt_queues: &SessionInterruptQueues,
     swarm: LiveTurnSwarmContext,
 ) {
+    if !super::ask_escalation::is_pending(&event.request_id) {
+        return;
+    }
     // Never revive a coordinator the user explicitly stopped.
     if swarm
         .members

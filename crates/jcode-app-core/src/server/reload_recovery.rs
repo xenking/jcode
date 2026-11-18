@@ -838,9 +838,14 @@ impl RecoveryOwner {
             )?;
             return Ok(None);
         }
-        if self.swarm.members.read().await.get(session_id).is_some_and(|member| {
-            member.is_headless && member.report_back_to_session_id.is_some()
-        }) {
+        if self
+            .swarm
+            .members
+            .read()
+            .await
+            .get(session_id)
+            .is_some_and(|member| member.is_headless && member.report_back_to_session_id.is_some())
+        {
             super::ask_escalation::install_bridge(session_id, Arc::clone(&self.swarm.members));
         }
         if crate::tool::interactive::sender(session_id).is_none()

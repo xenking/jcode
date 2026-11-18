@@ -74,7 +74,8 @@ impl Tool for AskTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let input: Input = serde_json::from_value(input)?;
         validate_ask_questions(&input.questions).map_err(|e| anyhow!(e))?;
-        let route = super::interactive::sender(&ctx.session_id).or(ctx.stdin_request_tx.clone());
+        let route = super::interactive::sender(&ctx.session_id)
+            .or_else(|| ctx.stdin_request_tx.filter(|tx| !tx.is_closed()));
         let (response, answer_note) = match route {
             Some(tx) => (
                 ask_client(tx, &input.questions, &ctx.tool_call_id).await?,
@@ -100,6 +101,9 @@ impl Tool for AskTool {
         let declined = response.answers.is_none() && answer_note.is_none();
         let mut text = format_ask_answers(&input.questions, &response);
         if let Some(note) = answer_note.as_deref() {
+            if text.starts_with("User answers:") {
+                text.replace_range(.."User answers:".len(), "Assumed answers:");
+            }
             text.push('\n');
             text.push_str(note);
         }

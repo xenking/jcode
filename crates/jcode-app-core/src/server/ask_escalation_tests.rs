@@ -14,7 +14,7 @@ fn test_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn member(
+pub(in crate::server) fn member(
     session_id: &str,
     role: &str,
     is_headless: bool,

@@ -34,6 +34,163 @@ async fn socket_resume_replays_reload_interrupted_ask_before_provider() {
     socket_reload_ask_workflow("normal").await;
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn socket_recovery_reissues_headless_ask_to_reattached_root() {
+    use crate::server::ask_escalation::tests::member;
+    use crate::server::{ask_escalation, reload_recovery, runtime::ServerRuntime};
+
+    let _lock = crate::storage::lock_test_env();
+    let home = IsolatedReloadRecoveryEnv::new();
+    let root = "session_ask_reload_root";
+    let worker = "session_ask_reload_worker";
+    let mut coordinator = crate::session::Session::create_with_id(root.into(), None, None);
+    coordinator.add_message(
+        crate::message::Role::User,
+        vec![ContentBlock::Text {
+            text: "Coordinate the worker.".into(),
+            cache_control: None,
+        }],
+    );
+    coordinator.save().unwrap();
+    assert!(crate::session::session_exists(root));
+    let mut persisted = crate::session::Session::create_with_id(worker.into(), None, None);
+    persisted.add_message(crate::message::Role::Assistant, vec![ContentBlock::ToolUse {
+        id: "worker-ask".into(), name: "ask".into(),
+        input: json!({"questions":[{"question":"Which?","options":[{"label":"A (Recommended)"},{"label":"B"}]}]}),
+        thought_signature: None,
+    }]);
+    persisted.add_message(
+        crate::message::Role::User,
+        vec![ContentBlock::ToolResult {
+            tool_use_id: "worker-ask".into(),
+            content: "[Tool 'ask' interrupted by server reload after 0.2s]".into(),
+            is_error: Some(true),
+        }],
+    );
+    persisted.save().unwrap();
+    reload_recovery::persist_intent(
+        "ask-reload-test",
+        worker,
+        reload_recovery::ReloadRecoveryRole::Headless,
+        crate::tool::selfdev::ReloadRecoveryDirective {
+            reconnect_notice: None,
+            continuation_message: "Resume the worker's interrupted turn.".into(),
+        },
+        "socket replay test",
+    )
+    .unwrap();
+
+    let provider = RecoveryProvider::default();
+    let socket = home._runtime.path().join("ask-reload.sock");
+    let server = crate::server::Server::new_with_paths(
+        Arc::new(provider.clone()),
+        socket.clone(),
+        home._runtime.path().join("ask-debug.sock"),
+    );
+    let (member, _worker_events) = member(worker, "agent", true, Some(root));
+    server
+        .swarm_state
+        .members
+        .write()
+        .await
+        .insert(worker.into(), member);
+    let runtime = ServerRuntime::from_server(&server);
+    let daemon = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
+    let recovery = reload_recovery::RecoveryOwner::new(&server)
+        .reconcile_once()
+        .await;
+    assert_eq!(
+        recovery.len(),
+        1,
+        "the daemon must admit the headless worker"
+    );
+
+    let (reader, mut writer) = crate::transport::Stream::connect(&socket)
+        .await
+        .unwrap()
+        .into_split();
+    let mut reader = BufReader::new(reader);
+    async fn event(
+        reader: &mut BufReader<crate::transport::ReadHalf>,
+        predicate: impl Fn(&ServerEvent) -> bool,
+    ) -> ServerEvent {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                let event = serde_json::from_str(&line).unwrap();
+                if predicate(&event) {
+                    return event;
+                }
+            }
+        })
+        .await
+        .expect("socket event timeout")
+    }
+
+    writer.write_all(format!("{}\n", json!({"type":"subscribe","id":1,"target_session_id":root,"working_dir":home._home.path(),"continue_on_disconnect":true})).as_bytes()).await.unwrap();
+    let received = event(&mut reader, |e| {
+        if let ServerEvent::SessionId { session_id } = e {
+            assert_eq!(session_id, root, "socket did not reattach to the root");
+        }
+        matches!(e, ServerEvent::AskEscalated { .. })
+    })
+    .await;
+    let ServerEvent::AskEscalated {
+        request_id,
+        worker_session_id,
+        questions,
+        ..
+    } = received
+    else {
+        unreachable!()
+    };
+    assert_eq!(worker_session_id, worker);
+    assert_eq!(questions[0].options[0].label, "A (Recommended)");
+    assert_eq!(
+        provider.0.load(Ordering::SeqCst),
+        0,
+        "the worker must be parked before provider continuation"
+    );
+    writer.write_all(format!("{}\n", json!({"type":"comm_answer_escalated_ask","id":2,"session_id":root,"worker_session_id":worker,"request_id":request_id,"answers":[{"selected":["B"]}]})).as_bytes()).await.unwrap();
+    let acknowledged = std::cell::Cell::new(false);
+    let closed = std::cell::Cell::new(false);
+    event(&mut reader, |e| {
+        match e {
+            ServerEvent::Done { id: 2 } => acknowledged.set(true),
+            ServerEvent::AskEscalationClosed { reason, .. } => {
+                assert_eq!(reason, "answered");
+                closed.set(true);
+            }
+            _ => {}
+        }
+        acknowledged.get() && closed.get()
+    })
+    .await;
+    for task in recovery {
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let restored = crate::session::Session::load(worker).unwrap();
+    assert!(
+        restored
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .any(|block| matches!(block,
+                ContentBlock::ToolResult { tool_use_id, content, is_error: None }
+                    if tool_use_id == "worker-ask" && content == "User answers:\n1. Which? -> B\n"
+            ))
+    );
+
+    ask_escalation::withdraw_worker(worker);
+    runtime.shutdown().await;
+    daemon.await.unwrap();
+}
+
 #[tokio::test]
 async fn compaction_event_during_pending_ask_does_not_block_cancel() {
     socket_reload_ask_workflow("cancel").await;

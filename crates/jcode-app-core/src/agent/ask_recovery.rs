@@ -115,7 +115,11 @@ impl Agent {
                 }
                 result = async {
                     let mut ctx = ctx;
-                    ctx.stdin_request_tx = Some(crate::tool::interactive::wait_for_sender(&ctx.session_id).await);
+                    if crate::tool::interactive::sender(&ctx.session_id).is_none()
+                        && !crate::server::ask_escalation::wait_for_recovery_coordinator(&ctx.session_id).await
+                    {
+                        ctx.stdin_request_tx = Some(crate::tool::interactive::wait_for_sender(&ctx.session_id).await);
+                    }
                     self.registry.execute("ask", ask.input.clone(), ctx).await
                 } => {
                     // No attached user or another transient failure is not an answer.
