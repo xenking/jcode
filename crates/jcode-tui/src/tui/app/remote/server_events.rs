@@ -1709,19 +1709,21 @@ fn handle_server_event_inner(
                 }
                 let tail = std::mem::take(&mut messages);
                 messages.reserve(prefix.len() + tail.len());
-                messages.extend(
-                    prefix
-                        .into_iter()
-                        .map(|msg| crate::protocol::HistoryMessage {
-                            attachments: Vec::new(),
-                            response_stats: None,
-                            timestamp_ms: None,
-                            role: msg.role,
-                            content: msg.content,
-                            tool_calls: (!msg.tool_calls.is_empty()).then_some(msg.tool_calls),
-                            tool_data: msg.tool_data,
-                        }),
-                );
+                messages.extend(prefix.into_iter().map(|msg| {
+                    crate::protocol::HistoryMessage {
+                        attachments: Vec::new(),
+                        response_stats: None,
+                        timestamp_ms: None,
+                        tool_duration_ms: (msg.role == "tool")
+                            .then_some(msg.duration_secs)
+                            .flatten()
+                            .map(|secs| (secs * 1000.0).round() as u64),
+                        role: msg.role,
+                        content: msg.content,
+                        tool_calls: (!msg.tool_calls.is_empty()).then_some(msg.tool_calls),
+                        tool_data: msg.tool_data,
+                    }
+                }));
                 messages.extend(tail);
                 crate::logging::info(&format!(
                     "Applied delta History for {}: base={}, total={}",

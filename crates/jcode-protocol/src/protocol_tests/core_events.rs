@@ -761,6 +761,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         id: 101,
         session_id: "ses_test_456".to_string(),
         messages: vec![HistoryMessage {
+            tool_duration_ms: None,
             attachments: Vec::new(),
             response_stats: None, timestamp_ms: None,
             role: "assistant".to_string(),
@@ -863,6 +864,7 @@ fn test_compacted_history_event_roundtrip() -> Result<()> {
         id: 77,
         session_id: "ses_compact_123".to_string(),
         messages: vec![HistoryMessage {
+            tool_duration_ms: None,
             attachments: Vec::new(),
             response_stats: None, timestamp_ms: None,
             role: "assistant".to_string(),
@@ -1023,6 +1025,7 @@ fn test_agent_models_session_setter_and_response_roundtrip() -> Result<()> {
 #[test]
 fn history_prefix_fingerprint_is_stable_and_streaming_consistent() {
     let message = |role: &str, content: &str| HistoryMessage {
+        tool_duration_ms: None,
         attachments: Vec::new(),
         response_stats: None, timestamp_ms: None,
         role: role.to_string(),

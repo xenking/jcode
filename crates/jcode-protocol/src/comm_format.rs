@@ -702,6 +702,7 @@ mod truncation_tests {
             "probe must straddle a code point"
         );
         let messages = vec![HistoryMessage {
+            tool_duration_ms: None,
             attachments: Vec::new(),
             response_stats: None,
             timestamp_ms: None,

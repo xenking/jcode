@@ -2657,6 +2657,7 @@ fn resumed_history_restores_last_provider_reported_context_usage() {
             session_id: "ses_restore_context_tokens".to_string(),
             messages: vec![
                 crate::protocol::HistoryMessage {
+                    tool_duration_ms: None,
                     timestamp_ms: Some(1),
                     attachments: Vec::new(),
                     response_stats: None,
@@ -2666,6 +2667,7 @@ fn resumed_history_restores_last_provider_reported_context_usage() {
                     tool_data: None,
                 },
                 crate::protocol::HistoryMessage {
+                    tool_duration_ms: None,
                     timestamp_ms: Some(2),
                     attachments: Vec::new(),
                     response_stats: Some(jcode_session_types::ResponseStats {
