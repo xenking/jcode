@@ -3,7 +3,7 @@ mod response_stats;
 #[cfg(test)]
 mod prompt_count_tests;
 
-use super::{Session, StoredDisplayRole};
+use super::{Session, StoredDisplayRole, StoredMemoryInjection};
 use crate::message::{ContentBlock, Role, ToolCall};
 use jcode_config_types::ReasoningDisplayMode;
 pub use jcode_session_types::{
@@ -533,6 +533,35 @@ fn render_messages_and_images_internal(
         .collect();
     errors.sort_by_key(|(timestamp, _)| *timestamp);
     let mut errors = errors.into_iter().peekable();
+    // Automatic memory injections are transcript rows for humans only, exactly
+    // like errors: the recalled text reached the model as a system reminder, so
+    // re-rendering it here must not turn it into user context. Deriving the row
+    // from the stored session is what lets a reload show the same
+    // "auto-recalled …" line the live client painted.
+    // An injection recorded inside the compacted prefix was folded into the
+    // summary with the turns around it. Rebuilding the compacted window must
+    // not resurrect a stale recall row, even when the guardrail chooses to
+    // paint the old messages themselves.
+    let compacted_boundary = session
+        .compaction
+        .as_ref()
+        .map(|state| state.compacted_count.min(session.messages.len()))
+        .unwrap_or(0);
+    let mut memory_rows: Vec<&StoredMemoryInjection> = session
+        .memory_injections
+        .iter()
+        .filter(|injection| {
+            injection
+                .before_message
+                .is_none_or(|before| before >= render_start_idx)
+                && (compacted_boundary == 0
+                    || injection
+                        .before_message
+                        .is_none_or(|before| before > compacted_boundary))
+        })
+        .collect();
+    memory_rows.sort_by_key(|injection| injection.before_message.unwrap_or(usize::MAX));
+    let mut memory_rows = memory_rows.into_iter().peekable();
     let render_error = |content: String| RenderedMessage {
         response_stats: None,
         tool_duration_ms: None,
@@ -544,6 +573,15 @@ fn render_messages_and_images_internal(
         timestamp_ms: None,
     };
     for (stored_index, msg) in session.messages.iter().enumerate().skip(render_start_idx) {
+        while memory_rows.peek().is_some_and(|injection| {
+            injection
+                .before_message
+                .is_none_or(|before| before <= stored_index)
+        }) {
+            if let Some(injection) = memory_rows.next() {
+                rendered.push(memory_injection_row(injection));
+            }
+        }
         while errors
             .peek()
             .is_some_and(|(timestamp, _)| msg.timestamp.is_some_and(|next| *timestamp < next))
@@ -848,10 +886,36 @@ fn render_messages_and_images_internal(
         }
     }
 
+    // Injections recorded after the last stored message (and those whose
+    // position was never recorded) close the transcript.
+    for injection in memory_rows {
+        rendered.push(memory_injection_row(injection));
+    }
     rendered.extend(errors.map(|(_, content)| render_error(content)));
     insert_compaction_rows(session, &mut rendered, render_start_idx);
     response_stats::attach(&session.messages, &mut rendered);
     (rendered, images, compacted_info, image_ids)
+}
+
+/// One stored memory injection as a transcript row.
+///
+/// The body is the shared label-plus-display text, so the reloaded row and the
+/// live `memory_injected` event a client received cannot disagree about what was
+/// recalled.
+fn memory_injection_row(injection: &StoredMemoryInjection) -> RenderedMessage {
+    RenderedMessage {
+        response_stats: None,
+        tool_duration_ms: None,
+        role: "memory".to_string(),
+        content: jcode_session_types::memory_injection_content(
+            injection.count as usize,
+            &injection.content,
+        ),
+        tool_calls: Vec::new(),
+        tool_data: None,
+        stored_index: None,
+        timestamp_ms: Some(injection.timestamp.timestamp_millis()),
+    }
 }
 
 /// The transcript divider body for a compaction: `label` + blank line + detail.

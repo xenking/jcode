@@ -3,6 +3,7 @@ use std::ffi::OsString;
 
 mod home_isolation;
 mod journal_recovery;
+mod memory_render_tests;
 mod torn_journal_recovery;
 
 fn lock_env() -> std::sync::MutexGuard<'static, ()> {

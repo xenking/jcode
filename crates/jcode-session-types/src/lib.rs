@@ -4,8 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 mod ask;
+mod memory;
 mod title;
 pub use ask::*;
+pub use memory::{memory_injection_content, memory_injection_label};
 mod transcription;
 pub use title::{
     DEFAULT_TITLE_MODELS, TITLE_CHAR_MAX, TITLE_SYSTEM_PROMPT, TITLE_WORD_MAX, TitleAction,
