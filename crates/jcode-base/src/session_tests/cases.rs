@@ -2,6 +2,30 @@ use super::*;
 use anyhow::{Result, anyhow};
 
 #[test]
+fn session_loads_unknown_replay_event_without_losing_messages() {
+    let mut session = Session::create_with_id("future_event_test".into(), None, None);
+    for text in ["before", "after"] {
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: text.into(),
+                cache_control: None,
+            }],
+        );
+    }
+    let mut json = serde_json::to_value(&session).unwrap();
+    json["replay_events"] = serde_json::json!([{
+        "timestamp": "2026-11-18T00:00:00Z",
+        "event": "future_display_event",
+        "new_payload": {"value": 42}
+    }]);
+    let restored: Session = serde_json::from_value(json).unwrap();
+    assert_eq!(restored.messages.len(), 2);
+    assert_eq!(restored.messages[0].content_preview(), "before");
+    assert_eq!(restored.messages[1].content_preview(), "after");
+}
+
+#[test]
 fn token_usage_totals_counts_cache_reported_inputs_only_when_cache_fields_exist() {
     let mut session = Session::create_with_id(
         "session_token_usage_totals_test".to_string(),
