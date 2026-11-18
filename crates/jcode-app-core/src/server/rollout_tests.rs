@@ -231,3 +231,22 @@ async fn staged_generation_is_a_snapshot_and_never_overwrites_an_existing_image(
     assert_eq!(std::fs::metadata(&target).unwrap().ino(), inode);
     assert_eq!(std::fs::read_to_string(&target).unwrap(), good);
 }
+
+/// A Desktop-only rollout (daemon already serves the target) never reloads
+/// the daemon, so busy sessions must not hold it. The initiating session is
+/// waiting on the rollout itself and must never block its drain. Both used to
+/// run the drain into its timeout and roll the whole rollout back.
+#[test]
+fn drain_skips_unchanged_daemon_and_never_waits_on_initiator() {
+    let (_dir, _store, mut journal) = fixture();
+    let busy = || vec!["initiator".to_string(), "worker".to_string()];
+    journal.intent.triggering_session = Some("initiator".into());
+
+    assert!(drain_blockers(busy(), &journal.intent, "abcdef123456").is_empty());
+    assert_eq!(
+        drain_blockers(busy(), &journal.intent, "0000000"),
+        vec!["worker".to_string()]
+    );
+    journal.intent.now = true;
+    assert!(drain_blockers(busy(), &journal.intent, "0000000").is_empty());
+}

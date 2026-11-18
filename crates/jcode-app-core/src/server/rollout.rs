@@ -389,8 +389,12 @@ async fn execute(store: &Store, journal: &mut Journal) -> Result<()> {
         let deadline =
             tokio::time::Instant::now() + Duration::from_secs(journal.intent.drain_timeout_secs);
         loop {
-            let busy = crate::turn_activity::global().snapshot().drain_sessions();
-            if journal.intent.now || busy.is_empty() {
+            let busy = drain_blockers(
+                crate::turn_activity::global().snapshot().drain_sessions(),
+                &journal.intent,
+                jcode_build_meta::git_hash(),
+            );
+            if busy.is_empty() {
                 break;
             }
             if tokio::time::Instant::now() >= deadline {
@@ -478,6 +482,21 @@ async fn execute(store: &Store, journal: &mut Journal) -> Result<()> {
         rollback(store, journal).await?;
     }
     Ok(())
+}
+
+/// Sessions the daemon must wait for before it may exec the new generation.
+///
+/// Nothing blocks when the daemon already serves the target (a Desktop-only
+/// rollout never reloads it), or with `--now`. The initiating session is never
+/// a blocker: it is waiting on this rollout, so waiting on it only ran the
+/// drain into its timeout. Reload recovery resumes it like any other turn.
+fn drain_blockers(busy: Vec<String>, intent: &Intent, serving: &str) -> Vec<String> {
+    if intent.now || same_commit(serving, &intent.cli) {
+        return Vec::new();
+    }
+    busy.into_iter()
+        .filter(|session| intent.triggering_session.as_deref() != Some(session.as_str()))
+        .collect()
 }
 
 fn same_commit(a: &str, b: &str) -> bool {

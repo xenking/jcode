@@ -357,7 +357,13 @@ fn dry_run_plan<H: Host, W: Write>(
             opt(&deployed.cli_current)
         ),
     )?;
-    let drain = if run.opts.now {
+    let drain = if deployed
+        .daemon_label
+        .as_deref()
+        .is_some_and(|serving| same_commit(serving, label))
+    {
+        format!("none: daemon already runs {label}, no reload")
+    } else if run.opts.now {
         format!(
             "--now: reload with {} mid-turn, reload recovery resumes them",
             busy.len()
