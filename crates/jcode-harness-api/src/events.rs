@@ -360,6 +360,27 @@ pub enum ApiEvent {
         from_name: Option<String>,
     },
 
+    /// Relevant memory was injected into this turn's context.
+    ///
+    /// `content` is the finished transcript row body: a label, a blank line,
+    /// then the display-only memory text. The daemon writes the identical row
+    /// into session history, so the live row and the one a reload returns agree
+    /// without the bridge re-deriving what was recalled.
+    MemoryInjected {
+        session_id: String,
+        /// Number of memories injected.
+        count: usize,
+        /// Row body: label, blank line, display text.
+        content: String,
+    },
+
+    /// Complete memory pipeline activity for the attached session. Display-only:
+    /// clients draw a status line, not transcript content.
+    MemoryActivity {
+        session_id: String,
+        activity: crate::MemoryActivitySnapshot,
+    },
+
     /// A context compaction started or finished.
     ///
     /// `content` is the finished divider body (label, blank line, detail) the
@@ -828,7 +849,8 @@ pub struct HistoryMessage {
     /// user turn. Tool-only intermediate rounds contribute to these totals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_stats: Option<ResponseStats>,
-    /// "user" | "assistant" | "tool".
+    /// "user" | "assistant" | "tool", plus display-only rows: "compaction"
+    /// and "memory" (daemon-formatted label and expandable detail).
     pub role: String,
     pub content: String,
     /// On "tool" rows: the call this result answers, so clients can rebuild

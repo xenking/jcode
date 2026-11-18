@@ -20,9 +20,13 @@ mod client;
 pub mod desktop_control;
 mod edit_stats;
 mod events;
+mod memory_activity;
 pub use edit_stats::{
     SessionEditStats, enrich_sessions_from_edit_stats, enrich_sessions_from_local_edit_stats,
     record_session_edit,
+};
+pub use memory_activity::{
+    MemoryActivitySnapshot, MemoryPipeline, MemoryState, MemoryStepResult, MemoryStepStatus,
 };
 mod requests;
 mod runtime_commands;
@@ -64,7 +68,7 @@ mod capability_coverage_tests;
 /// Protocol major version. Breaking changes only.
 pub const API_VERSION_MAJOR: u32 = 1;
 /// Protocol minor version. Additive changes.
-pub const API_VERSION_MINOR: u32 = 15;
+pub const API_VERSION_MINOR: u32 = 16;
 
 /// Envelope wrapping every client-to-server frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

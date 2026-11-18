@@ -909,3 +909,74 @@ fn turn_stopped_schema_and_future_reason_compatibility() {
             .unwrap();
     assert!(matches!(done.event, ApiEvent::TurnDone { .. }));
 }
+
+#[test]
+fn memory_events_wire_shape() {
+    let injected = ServerFrame::event(ApiEvent::MemoryInjected {
+        session_id: "s".into(),
+        count: 2,
+        content: "auto-recalled 2 memories\n\n- [fact] the build uses mold".into(),
+    });
+    let wire = serde_json::to_value(&injected).unwrap();
+    assert_eq!(
+        wire,
+        serde_json::json!({
+            "v": 1,
+            "ev": "memory_injected",
+            "session_id": "s",
+            "count": 2,
+            "content": "auto-recalled 2 memories\n\n- [fact] the build uses mold"
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<ServerFrame>(wire).unwrap(),
+        injected
+    );
+
+    let activity = ServerFrame::event(ApiEvent::MemoryActivity {
+        session_id: "s".into(),
+        activity: MemoryActivitySnapshot {
+            state: MemoryState::FoundRelevant { count: 3 },
+            state_age_ms: 12,
+            pipeline: Some(MemoryPipeline {
+                search: MemoryStepStatus::Done,
+                search_result: Some(MemoryStepResult {
+                    summary: "3 matches".into(),
+                    latency_ms: 4,
+                }),
+                verify: MemoryStepStatus::Running,
+                verify_result: None,
+                verify_progress: Some((1, 3)),
+                inject: MemoryStepStatus::Pending,
+                inject_result: None,
+                maintain: MemoryStepStatus::Skipped,
+                maintain_result: None,
+            }),
+        },
+    });
+    let wire = serde_json::to_value(&activity).unwrap();
+    assert_eq!(
+        wire,
+        serde_json::json!({
+            "v": 1,
+            "ev": "memory_activity",
+            "session_id": "s",
+            "activity": {
+                "state": {"found_relevant": {"count": 3}},
+                "state_age_ms": 12,
+                "pipeline": {
+                    "search": "done",
+                    "search_result": {"summary": "3 matches", "latency_ms": 4},
+                    "verify": "running",
+                    "verify_progress": [1, 3],
+                    "inject": "pending",
+                    "maintain": "skipped"
+                }
+            }
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<ServerFrame>(wire).unwrap(),
+        activity
+    );
+}
