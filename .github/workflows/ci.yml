@@ -134,6 +134,13 @@ jobs:
           python3 scripts/test_check_test_isolation.py
           python3 scripts/check_test_isolation.py
 
+      - name: Enforce swarm registry lock order
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          (cd scripts && python3 test_check_lock_order.py)
+          python3 scripts/check_lock_order.py
+
       - name: Enforce display-cell chrome widths
         if: ${{ !cancelled() }}
         shell: bash

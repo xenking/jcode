@@ -23,6 +23,20 @@ class LockOrderTests(unittest.TestCase):
         self.assertTrue(self.scan('if let Some(id) = swarm_members.read().await.get("x").cloned() '
                                   '{ persist(id).await; }'))
 
+    def test_reload_recovery_wedge_2026_11_18(self):
+        # The daemon wedged for three hours when a reload recovery turn ended:
+        # the scrutinee read guard lived through persist_swarm_state_for, which
+        # reads members again. A writer queued in between blocks both forever.
+        self.assertTrue(self.scan(
+            'if let Some(swarm_id) = self.swarm.members.read().await.get(session_id)'
+            '.and_then(|member| member.swarm_id.clone()) '
+            '{ super::persist_swarm_state_for(&swarm_id, &self.swarm).await; }'))
+        self.assertFalse(self.scan(
+            'let swarm_id = self.swarm.members.read().await.get(session_id)'
+            '.and_then(|member| member.swarm_id.clone()); '
+            'if let Some(swarm_id) = swarm_id '
+            '{ super::persist_swarm_state_for(&swarm_id, &self.swarm).await; }'))
+
     def test_order_and_snapshot(self):
         self.assertFalse(self.scan('let members = swarm_members.read().await; '
                                    'let plans = swarm_plans.write().await;'))
