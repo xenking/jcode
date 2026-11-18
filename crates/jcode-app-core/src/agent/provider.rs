@@ -547,7 +547,11 @@ impl Agent {
         // Keep the side-table in sync (see `restore_reasoning_effort_from_session`).
         crate::session_effort::record_session_effort(&self.session.id, current.as_deref());
         self.log_env_snapshot("set_reasoning_effort");
-        self.session.save()?;
+        // Effort is explicit session state: persist it even before the first
+        // visible message, like the model and title. `save()` skips that case,
+        // which silently dropped an effort chosen during a new session's first
+        // turn (the deferred busy-turn path has no other way to persist it).
+        self.session.save_prepared()?;
         Ok(current)
     }
 

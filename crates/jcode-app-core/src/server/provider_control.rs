@@ -611,13 +611,7 @@ pub(super) async fn handle_set_reasoning_effort(
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     let result = if let Ok(mut agent_guard) = agent.try_lock() {
-        if is_swarm_worker {
-            agent_guard
-                .mark_swarm_worker()
-                .and_then(|()| agent_guard.set_reasoning_effort(&effort))
-        } else {
-            agent_guard.set_reasoning_effort(&effort)
-        }
+        apply_reasoning_effort(&mut agent_guard, &effort, is_swarm_worker)
     } else if let Some(provider) = provider {
         let requested = if is_swarm_worker {
             let session_id = session_id.to_owned();
@@ -659,17 +653,49 @@ pub(super) async fn handle_set_reasoning_effort(
         send_reasoning_effort_result(id, result, client_event_tx);
         return;
     } else {
-        send_reasoning_effort_result(
+        // The running turn holds the agent lock, and the out-of-band provider
+        // registration can be a stale weak reference that no longer upgrades.
+        // Failing here made a normal busy turn look broken. Record the choice
+        // now and apply it through the agent as soon as the turn releases the
+        // lock, so it governs the next provider request.
+        crate::session_effort::record_session_effort(session_id, Some(&effort));
+        let deferred_effort = effort.clone();
+        spawn_deferred_agent_mutation(
+            "set_reasoning_effort",
             id,
-            Err(anyhow::anyhow!(
-                "Cannot change effort while the session is busy: live provider unavailable"
-            )),
-            client_event_tx,
+            Arc::clone(agent),
+            client_event_tx.clone(),
+            move |agent_guard, _| {
+                match apply_reasoning_effort(agent_guard, &deferred_effort, is_swarm_worker) {
+                    Ok(current) => {
+                        crate::logging::info(&format!(
+                            "Applied queued reasoning effort '{}' after the turn released the agent",
+                            current.as_deref().unwrap_or(&deferred_effort)
+                        ));
+                    }
+                    Err(error) => crate::logging::warn(&format!(
+                        "Could not apply queued reasoning effort '{}': {error}",
+                        deferred_effort
+                    )),
+                }
+            },
         );
+        send_reasoning_effort_result(id, Ok(Some(effort)), client_event_tx);
         return;
     };
 
     send_reasoning_effort_result(id, result, client_event_tx);
+}
+
+fn apply_reasoning_effort(
+    agent: &mut Agent,
+    effort: &str,
+    is_swarm_worker: bool,
+) -> anyhow::Result<Option<String>> {
+    if is_swarm_worker {
+        agent.mark_swarm_worker()?;
+    }
+    agent.set_reasoning_effort(effort)
 }
 
 fn send_reasoning_effort_result(

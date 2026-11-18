@@ -404,6 +404,95 @@ async fn set_reasoning_effort_does_not_wait_for_busy_agent_lock() {
     }
 }
 
+/// The live provider registration is a weak reference that can fail to
+/// upgrade while a turn owns the agent. That must queue the change for the
+/// next turn, not reject it as "live provider unavailable".
+#[tokio::test]
+async fn set_reasoning_effort_without_provider_queues_for_next_turn() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    let _runtime = IsolatedRuntimeDir::new();
+
+    let (provider, agent, client_event_tx, mut client_event_rx) =
+        test_agent("session_busy_reasoning_effort_without_provider").await;
+    let busy_agent_lock = agent.lock().await;
+
+    timeout(
+        Duration::from_millis(100),
+        handle_set_reasoning_effort(
+            8,
+            "high".to_string(),
+            false,
+            &agent,
+            "session_busy_reasoning_effort_without_provider",
+            None,
+            &client_event_tx,
+        ),
+    )
+    .await
+    .expect("a busy turn must acknowledge the effort change without the agent lock");
+
+    let event = timeout(Duration::from_secs(1), client_event_rx.recv())
+        .await
+        .expect("a busy turn must confirm the queued effort change");
+    assert!(
+        matches!(
+            event,
+            Some(ServerEvent::ReasoningEffortChanged {
+                id: 8,
+                effort: Some(ref effort),
+                error: None,
+            }) if effort == "high"
+        ),
+        "unexpected event: {event:?}"
+    );
+    assert_eq!(
+        crate::session_effort::session_effort("session_busy_reasoning_effort_without_provider")
+            .as_deref(),
+        Some("high"),
+        "the requested effort must be visible while the turn is still running"
+    );
+    assert_eq!(
+        provider.reasoning_effort(),
+        None,
+        "the in-flight provider must not be mutated before the agent is free"
+    );
+
+    drop(busy_agent_lock);
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if provider.reasoning_effort().as_deref() == Some("high") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("queued effort must reach the provider after the agent unlocks");
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if crate::session::Session::load("session_busy_reasoning_effort_without_provider")
+                .ok()
+                .and_then(|session| session.reasoning_effort)
+                .as_deref()
+                == Some("high")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("queued effort must persist after the agent unlocks");
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
 #[tokio::test]
 async fn automatic_failover_revalidates_after_waiting_for_agent_lock() {
     let _guard = crate::storage::lock_test_env();
