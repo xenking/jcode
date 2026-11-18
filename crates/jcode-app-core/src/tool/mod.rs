@@ -5,6 +5,10 @@ pub mod ambient;
 mod apply_patch;
 mod ask;
 mod bash;
+// The bash tool is the only place a turn cancel has to kill a process group,
+// so its behaviour is exercised from the agent-side cancel tests too.
+#[cfg(test)]
+pub(crate) use bash::BashTool as TestBashTool;
 mod batch;
 mod bg;
 #[cfg(unix)]

@@ -45,7 +45,13 @@ fn active_turns() -> MutexGuard<'static, HashMap<String, SessionTurnSignals>> {
     })
 }
 
-static FORCE_STOPS: LazyLock<Mutex<HashMap<String, (u64, futures::future::AbortHandle)>>> =
+/// A session can own more than one abortable supervisor: the client-processing
+/// turn and a server-initiated `spawn_tracked_live_turn` (swarm wake, recovery)
+/// can both be live for the same id. Keeping one entry per session meant the
+/// later registration silently replaced the earlier one, so a force stop
+/// aborted a supervisor that had already finished and the turn the user was
+/// staring at kept running.
+static FORCE_STOPS: LazyLock<Mutex<HashMap<String, Vec<(u64, futures::future::AbortHandle)>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// The supervisor owns this registration until the turn and its cleanup finish.
@@ -61,22 +67,25 @@ pub fn register_force_stop(
     FORCE_STOPS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(session_id.to_owned(), (token, handle));
+        .entry(session_id.to_owned())
+        .or_default()
+        .push((token, handle));
     ForceStopGuard { token }
 }
 
+/// Abort every supervisor registered for `session_id`. Returns whether at
+/// least one live registration was aborted.
 pub fn force_stop(session_id: &str) -> bool {
-    let handle = FORCE_STOPS
+    let handles: Vec<futures::future::AbortHandle> = FORCE_STOPS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(session_id)
-        .map(|(_, handle)| handle.clone());
-    if let Some(handle) = handle {
+        .map(|entries| entries.iter().map(|(_, handle)| handle.clone()).collect())
+        .unwrap_or_default();
+    for handle in &handles {
         handle.abort();
-        true
-    } else {
-        false
     }
+    !handles.is_empty()
 }
 
 /// True after an abort request until the supervisor has finished cleanup.
@@ -85,13 +94,16 @@ pub fn force_stop_in_progress(session_id: &str) -> bool {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(session_id)
-        .is_some_and(|(_, handle)| handle.is_aborted())
+        .is_some_and(|entries| entries.iter().any(|(_, handle)| handle.is_aborted()))
 }
 
 impl Drop for ForceStopGuard {
     fn drop(&mut self) {
         let mut map = FORCE_STOPS.lock().unwrap_or_else(|e| e.into_inner());
-        map.retain(|_, (token, _)| *token != self.token);
+        map.retain(|_, entries| {
+            entries.retain(|(token, _)| *token != self.token);
+            !entries.is_empty()
+        });
     }
 }
 
@@ -135,6 +147,37 @@ pub fn mark_interruption(session_id: &str, reason: TurnInterruptionReason) {
             let _ = stored.compare_exchange(0, reason as u8, Ordering::Release, Ordering::Relaxed);
         }
     }
+}
+
+/// The reason recorded for the first interruption of a running turn in
+/// `session_id`, if any.
+///
+/// Tools need this to tell a user cancel from a server reload: both fire the
+/// same `graceful_shutdown` signal, but a cancel must kill the command it is
+/// running while a reload leaves it running so the work survives the restart.
+/// A cancel wins when two turns of one session disagree, because stopping the
+/// user's command is the recoverable direction.
+pub fn current_interruption_reason(session_id: &str) -> Option<TurnInterruptionReason> {
+    let entries = active_turns();
+    let stored = entries.get(session_id)?;
+    let mut reload = false;
+    for (_, _, reason) in stored {
+        match reason.load(Ordering::Acquire) {
+            1 => return Some(TurnInterruptionReason::Cancel),
+            2 => reload = true,
+            _ => {}
+        }
+    }
+    reload.then_some(TurnInterruptionReason::Reload)
+}
+
+/// Whether a fired shutdown signal for `session_id` must stop running work.
+///
+/// Only a reload is allowed to leave work running. An unrecorded interruption
+/// counts as a cancel: nothing else fires a turn's shutdown signal, and a
+/// command the user asked to stop is always the safe default.
+pub fn cancellation_stops_running_work(session_id: &str) -> bool {
+    current_interruption_reason(session_id) != Some(TurnInterruptionReason::Reload)
 }
 
 /// Register `signal` as the cancel signal for a turn running in `session_id`.

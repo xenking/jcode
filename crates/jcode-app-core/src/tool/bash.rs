@@ -1087,6 +1087,14 @@ impl BashTool {
             command.current_dir(dir);
         }
         let mut child = command.spawn()?;
+        #[cfg_attr(not(unix), allow(unused_variables))]
+        let command_pid = child.id();
+        // The command runs in its own session, so only a group kill reaches the
+        // children of a shell loop. Dropping this future (turn cancel, or force
+        // stop aborting the turn) must kill the group too: `kill_on_drop` only
+        // reaps the direct child, which the detached work task still owns.
+        #[cfg(unix)]
+        let mut process_group_guard = ProcessGroupKillGuard::new(command_pid);
 
         let stdin_handle = child.stdin.take();
         let stdout_handle = child.stdout.take();
@@ -1108,6 +1116,13 @@ impl BashTool {
         // Run the command (read stdout/stderr, service stdin, wait for exit) in a
         // dedicated task so that, if it exceeds the foreground timeout, we can hand
         // the still-running task off to the background manager instead of killing it.
+        //
+        // The turn-cancel watch lives inside that task, not in the caller:
+        // promotion moves the task to the background manager, and a cancel must
+        // still reach the command it was promoted with.
+        let mut shutdown_in_work = ctx.graceful_shutdown_signal.clone();
+        let work_pid = command_pid;
+        let work_session = ctx.session_id.clone();
         let mut work_handle: tokio::task::JoinHandle<Result<ToolOutput>> =
             tokio::spawn(async move {
                 let stdout_task = tokio::spawn(collect_output_reporting_progress(
@@ -1124,7 +1139,37 @@ impl BashTool {
                 // anything that reads it gets EOF immediately.
                 drop(stdin_handle);
 
-                let status = child.wait().await?;
+                let shutdown_requested = async {
+                    match shutdown_in_work.as_mut() {
+                        Some(signal) => signal.notified().await,
+                        None => std::future::pending::<()>().await,
+                    }
+                };
+                tokio::pin!(shutdown_requested);
+                // Only a group kill reaches a shell loop's children. A reload
+                // keeps the command running so its work survives the restart,
+                // so the kill only happens for a user cancel.
+                let (status, interrupted) = tokio::select! {
+                    biased;
+                    _ = &mut shutdown_requested => {
+                        if crate::turn_cancel_registry::cancellation_stops_running_work(
+                            &work_session,
+                        ) {
+                            #[cfg(unix)]
+                            let signal = libc::SIGKILL;
+                            #[cfg(not(unix))]
+                            let signal = 0;
+                            if let Some(pid) = work_pid {
+                                let _ =
+                                    crate::platform::signal_detached_process_group(pid, signal);
+                            }
+                            (child.wait().await?, true)
+                        } else {
+                            (child.wait().await?, false)
+                        }
+                    }
+                    status = child.wait() => (status?, false),
+                };
 
                 let stdout = stdout_task.await.unwrap_or_default();
                 let stderr = stderr_task.await.unwrap_or_default();
@@ -1139,17 +1184,37 @@ impl BashTool {
                     }
                     output.push_str(&stderr);
                 }
+                if interrupted {
+                    let mut text = String::from(
+                        "Command interrupted by user; its process group was killed.",
+                    );
+                    if !output.trim().is_empty() {
+                        text.push_str("\n\n");
+                        text.push_str(&output);
+                    }
+                    return Ok(ToolOutput::new(text)
+                        .with_title(title_for_work)
+                        .with_metadata(json!({ "interrupted": true })));
+                }
                 let output = format_command_output(output, status.code());
                 Ok(ToolOutput::new(output).with_title(title_for_work))
             });
 
         match tokio::time::timeout(timeout_duration, &mut work_handle).await {
-            Ok(join_result) => match join_result {
-                Ok(Ok(output)) => Ok(output),
-                Ok(Err(e)) => Err(anyhow::anyhow!("Command failed: {}", e)),
-                Err(join_err) => Err(anyhow::anyhow!("Command task panicked: {}", join_err)),
-            },
+            Ok(join_result) => {
+                #[cfg(unix)]
+                process_group_guard.disarm();
+                match join_result {
+                    Ok(Ok(output)) => Ok(output),
+                    Ok(Err(e)) => Err(anyhow::anyhow!("Command failed: {}", e)),
+                    Err(join_err) => Err(anyhow::anyhow!("Command task panicked: {}", join_err)),
+                }
+            }
             Err(_) => {
+                // The command keeps running on purpose, so drop the kill guard
+                // with the work handle it no longer owns.
+                #[cfg(unix)]
+                process_group_guard.disarm();
                 // Timed out, but the command is still running. Instead of killing
                 // it, promote it to a background task so it keeps running, renders
                 // as a background-task card, and the agent is told where to find it.
@@ -1319,6 +1384,36 @@ impl BashTool {
                 .map(|signal| signal.is_set())
                 .unwrap_or(false)
             {
+                // A reload leaves the command running so its work survives the
+                // restart. A user cancel must not: Esc on a long `sleep`/poll
+                // loop has to stop it, or the turn ends while the command the
+                // user asked to stop keeps consuming the machine.
+                if crate::turn_cancel_registry::cancellation_stops_running_work(&ctx.session_id) {
+                    let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
+                    // The killed group exits immediately; wait reaps it so no
+                    // zombie is left behind for the rest of the session.
+                    let _ = child.wait();
+                    let output = tokio::fs::read_to_string(&info.output_file)
+                        .await
+                        .unwrap_or_default();
+                    let _ = tokio::fs::remove_file(&info.output_file).await;
+                    let _ = tokio::fs::remove_file(&info.status_file).await;
+                    let mut text = String::from(
+                        "Command interrupted by user; its process group was killed.",
+                    );
+                    if !output.trim().is_empty() {
+                        text.push_str("\n\n");
+                        text.push_str(&format_command_output(output, None));
+                    }
+                    return Ok(ToolOutput::new(text)
+                        .with_title(
+                            params
+                                .intent
+                                .clone()
+                                .unwrap_or_else(|| params.command.clone()),
+                        )
+                        .with_metadata(json!({ "interrupted": true, "pid": pid })));
+                }
                 manager
                     .register_detached_task(
                         &info,

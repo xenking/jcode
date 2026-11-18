@@ -23,6 +23,22 @@ pub(super) fn handoff_display_name(input: &serde_json::Value) -> Option<String> 
     (!intent.is_empty()).then(|| crate::util::truncate_str(&intent, 28).to_string())
 }
 
+/// How long a cancelled tool gets to unwind itself before its wait is abandoned.
+///
+/// Tools that honour the turn signal (bash kills its process group, a fetch
+/// drops its socket) return well inside this window and report what happened.
+/// The grace exists so a tool that ignores cancellation cannot hold the turn
+/// open: without a cancel branch in the wait, Esc left the session at
+/// "thinking" for as long as the tool chose to run.
+pub(super) const CANCEL_TOOL_GRACE: Duration = Duration::from_millis(750);
+
+fn interrupted_tool_output(name: &str) -> crate::tool::ToolOutput {
+    crate::tool::ToolOutput::new(format!(
+        "Tool '{name}' was interrupted by the user before it finished. It was stopped; do not assume its effects are complete."
+    ))
+    .with_metadata(serde_json::json!({ "interrupted": true }))
+}
+
 /// SDK callbacks and nonstreaming turns use the same policy as TUI turns.
 pub(in crate::agent) async fn execute_with_background(
     registry: Registry,
@@ -33,7 +49,7 @@ pub(in crate::agent) async fn execute_with_background(
     execute_with_background_budget(registry, name, input, ctx, foreground_budget()).await
 }
 
-async fn execute_with_background_budget(
+pub(crate) async fn execute_with_background_budget(
     registry: Registry,
     name: String,
     input: serde_json::Value,
@@ -44,12 +60,34 @@ async fn execute_with_background_budget(
     let session_id = ctx.session_id.clone();
     let tool_name = name.clone();
     let display_name = handoff_display_name(&input);
+    let mut shutdown = ctx.graceful_shutdown_signal.clone();
     let mut work = crate::runtime_activity::spawn_session(&session_id, async move {
         registry.execute(&tool_name, input, ctx).await
     })
     .ok_or_else(|| anyhow::anyhow!("Session transfer in progress; tool not accepted"))?;
+    let shutdown_requested = async {
+        match shutdown.as_mut() {
+            Some(signal) => signal.notified().await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(shutdown_requested);
     tokio::select! {
         biased;
+        _ = &mut shutdown_requested => {
+            // Give the tool a bounded chance to stop itself and report, then
+            // abandon the wait. Aborting the task drops the tool future, which
+            // runs its own cleanup (bash kills the process group).
+            match tokio::time::timeout(CANCEL_TOOL_GRACE, &mut work).await {
+                Ok(joined) => joined.map_err(|e| anyhow::anyhow!("Tool task panicked: {}", e))?,
+                Err(_) => {
+                    if crate::turn_cancel_registry::cancellation_stops_running_work(&session_id) {
+                        work.abort();
+                    }
+                    Ok(interrupted_tool_output(&name))
+                }
+            }
+        }
         result = &mut work => result.map_err(|e| anyhow::anyhow!("Tool task panicked: {}", e))?,
         _ = tokio::time::sleep(budget), if auto_background && !budget.is_zero() => {
             let info = crate::background::global()

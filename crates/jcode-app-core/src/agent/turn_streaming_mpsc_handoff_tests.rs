@@ -372,3 +372,75 @@ async fn cancel_ends_a_tool_that_ignores_the_shutdown_signal() {
         "the interrupted tool must say so, got: {output}"
     );
 }
+
+#[cfg(not(windows))]
+fn pid_is_alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// A bash call that was promoted to a background task still belongs to the
+/// turn: cancelling the turn must stop it, not leave the command running.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn cancel_stops_a_bash_call_promoted_to_background() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("pid");
+    let registry = Registry::empty();
+    registry
+        .register(
+            "bash".into(),
+            Arc::new(crate::tool::TestBashTool::new()),
+        )
+        .await;
+    let shutdown = InterruptSignal::new();
+    let ctx = ToolContext {
+        session_id: "promoted-bash-cancel".into(),
+        message_id: "message".into(),
+        tool_call_id: "promoted-bash".into(),
+        working_dir: Some(dir.path().into()),
+        stdin_request_tx: None,
+        graceful_shutdown_signal: Some(shutdown.clone()),
+        execution_mode: ToolExecutionMode::Direct,
+    };
+    crate::turn_cancel_registry::mark_interruption(
+        &ctx.session_id,
+        crate::turn_cancel_registry::TurnInterruptionReason::Cancel,
+    );
+
+    let command = format!(
+        "echo $$ > {}; while :; do sleep 0.1; done",
+        pid_file.display()
+    );
+    // A tiny budget promotes the call while the command is still running.
+    let promoted = execute_with_background_budget(
+        registry,
+        "bash".into(),
+        serde_json::json!({ "command": command }),
+        ctx,
+        Duration::from_millis(150),
+    )
+    .await
+    .expect("the promoted call reports instead of blocking");
+    assert!(
+        promoted.output.contains("moved to background"),
+        "expected a background handoff, got: {}",
+        promoted.output
+    );
+
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(pid_is_alive(pid), "the promoted command must be running");
+
+    shutdown.fire();
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while pid_is_alive(pid) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        !pid_is_alive(pid),
+        "cancelling the turn must kill a promoted bash command, pid {pid} is still alive"
+    );
+}
