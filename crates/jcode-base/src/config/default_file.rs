@@ -662,9 +662,11 @@ swarm_model_allowlist = []
 #
 # Hard worker allowlist. When non-empty, a spawned worker may only run on these
 # exact model/route strings: an agent asking for anything else is rejected with
-# the list, and worker failover never steps outside it. Omit the model on spawn
-# to use swarm_model. Leave empty to trust swarm_model and its fallbacks.
-# User-started sessions are never restricted by this list.
+# the list, and worker failover never steps outside it. Every worker turn checks
+# its current route too, so a worker that something moved outside the list
+# (account failover, an older session) stops with an error instead of spending.
+# Omit the model on spawn to use swarm_model. Leave empty to trust swarm_model
+# and its fallbacks. User-started sessions are never restricted by this list.
 spawn_allowed_models = []
 # Example: cheap primary, Claude fallbacks, never fable/astra or other routes.
 # spawn_allowed_models = ["opencode-go:deepseek-v4.1-flash", "claude:claude-sonnet-5-5", "claude:claude-opus-5-5"]

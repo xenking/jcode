@@ -2004,6 +2004,86 @@ mod tests {
             });
     }
 
+    /// A worker that something moved outside the allowlist (an account-router
+    /// failover to fable, an older session) must not send a single request
+    /// there, whatever path starts the turn.
+    #[test]
+    fn swarm_worker_never_sends_a_request_outside_the_spawn_allowlist() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(home) => crate::env::set_var("JCODE_HOME", home),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+                crate::config::Config::invalidate_cache();
+            }
+        }
+        let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[agents]\nspawn_allowed_models = [\"test:claude-sonnet-5-5\"]\n",
+        )
+        .unwrap();
+        crate::config::Config::invalidate_cache();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                for (id, model, worker, expect_call) in [
+                    (
+                        "session_guard_fable_worker",
+                        "claude-fable-5-2",
+                        true,
+                        false,
+                    ),
+                    (
+                        "session_guard_allowed_worker",
+                        "claude-sonnet-5-5",
+                        true,
+                        true,
+                    ),
+                    ("session_guard_fable_user", "claude-fable-5-2", false, true),
+                ] {
+                    let provider = RejectingPrimaryProvider {
+                        model: Arc::new(StdMutex::new(model.into())),
+                        calls: Arc::new(StdMutex::new(Vec::new())),
+                        quota_failure: false,
+                    };
+                    let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+                    let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+                    let mut session =
+                        crate::session::Session::create_with_id(id.into(), None, None);
+                    session.provider_key = Some("test".into());
+                    let mut agent = Agent::new_with_session(provider_dyn, registry, session, None);
+                    if worker {
+                        agent.mark_swarm_worker().unwrap();
+                    }
+                    let lease = agent.claim_server_turn().unwrap();
+                    let (tx, _rx) = mpsc::unbounded_channel();
+                    let result = process_reserved_locked_message_with_server_failover(
+                        &mut agent,
+                        &lease,
+                        "task",
+                        Vec::new(),
+                        None,
+                        tx,
+                    )
+                    .await;
+                    let calls = provider.calls.lock().unwrap().clone();
+                    assert_eq!(!calls.is_empty(), expect_call, "{id}: {calls:?} {result:?}");
+                    if !expect_call {
+                        let error = format!("{:#}", result.unwrap_err());
+                        assert!(error.contains("spawn_allowed_models"), "{id}: {error}");
+                    }
+                }
+            });
+    }
+
     /// A worker turn that does not come from spawn/assign (wake, reload resume,
     /// direct message) must still move to the configured fallback model.
     #[test]

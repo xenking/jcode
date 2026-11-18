@@ -22,6 +22,39 @@ fn worker_effort_cap<'a>(
     })
 }
 
+/// Whether a worker on `provider_key`/`model` is inside the allowlist. An entry
+/// `prefix:model` matches the exact model on that provider or one of its auth
+/// variants (`openai` covers `openai-oauth`). An empty list is unrestricted.
+pub(super) fn worker_route_allowed(allowed: &[String], provider_key: &str, model: &str) -> bool {
+    if allowed.is_empty() {
+        return true;
+    }
+    let model = model
+        .split_once('@')
+        .map_or(model, |(model, _)| model)
+        .trim();
+    let provider_key = provider_key.trim();
+    allowed
+        .iter()
+        .any(|entry| match entry.trim().split_once(':') {
+            Some((prefix, allowed_model)) => {
+                allowed_model == model
+                    && (provider_key == prefix
+                        || provider_key
+                            .strip_prefix(prefix)
+                            .is_some_and(|rest| rest.starts_with('-')))
+            }
+            None => entry.trim() == model,
+        })
+        || (provider_key.is_empty()
+            && allowed.iter().any(|entry| {
+                entry
+                    .trim()
+                    .split_once(':')
+                    .is_some_and(|(_, allowed_model)| allowed_model == model)
+            }))
+}
+
 fn capped_worker_effort(
     agents: &crate::config::AgentsConfig,
     provider_key: Option<&str>,
@@ -117,6 +150,26 @@ impl Agent {
             &self.provider_model(),
             requested,
             &self.provider.available_efforts(),
+        )
+    }
+
+    /// Refuse a swarm worker turn on a route outside `agents.spawn_allowed_models`.
+    /// Every switch path (spawn, account failover, model fallback, resume of an
+    /// older session) ends here before a request, so a worker can never spend
+    /// on a model the user did not allow, whatever moved it there.
+    pub(super) fn enforce_worker_model(&self) -> Result<()> {
+        if !self.session.is_swarm_worker {
+            return Ok(());
+        }
+        let allowed = &crate::config::config().agents.spawn_allowed_models;
+        let provider_key = self.session.provider_key.as_deref().unwrap_or_default();
+        let model = self.provider_model();
+        if worker_route_allowed(allowed, provider_key, &model) {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "Swarm worker refused to run on {provider_key}:{model}: not in agents.spawn_allowed_models ({})",
+            allowed.join(", ")
         )
     }
 
@@ -704,6 +757,45 @@ impl Agent {
 mod worker_effort_cap_tests {
     use super::*;
 
+    #[test]
+    fn worker_route_must_match_an_allowlist_entry_on_its_provider() {
+        let allowed = [
+            "opencode-go:deepseek-v4.1-flash".to_string(),
+            "openai:gpt-6.2-sol".to_string(),
+        ];
+        assert!(worker_route_allowed(
+            &allowed,
+            "opencode-go",
+            "deepseek-v4.1-flash"
+        ));
+        assert!(worker_route_allowed(
+            &allowed,
+            "openai-oauth",
+            "gpt-6.2-sol"
+        ));
+        assert!(worker_route_allowed(
+            &allowed,
+            "openai",
+            "gpt-6.2-sol@openai-otter"
+        ));
+        // The account router moved a worker here: never allowed.
+        assert!(!worker_route_allowed(
+            &allowed,
+            "claude-oauth",
+            "claude-fable-5-2"
+        ));
+        // Same model id on another provider is a different route.
+        assert!(!worker_route_allowed(&allowed, "openrouter", "gpt-6.2-sol"));
+        assert!(!worker_route_allowed(&allowed, "openaix", "gpt-6.2-sol"));
+        // A legacy worker with no recorded provider is judged by model alone.
+        assert!(worker_route_allowed(&allowed, "", "gpt-6.2-sol"));
+        assert!(!worker_route_allowed(&allowed, "", "claude-fable-5-2"));
+        assert!(worker_route_allowed(
+            &[],
+            "claude-oauth",
+            "claude-fable-5-2"
+        ));
+    }
     #[test]
     fn model_caps_choose_supported_rung_and_leave_other_routes_unrestricted() {
         let mut agents = crate::config::AgentsConfig::default();
