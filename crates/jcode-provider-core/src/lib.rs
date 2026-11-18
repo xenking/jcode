@@ -87,6 +87,9 @@ pub trait Provider: Send + Sync {
     /// Backends without session-affinity support can retain the default no-op.
     fn set_session_id(&self, _session_id: &str) {}
 
+    /// Signal the logical user turn before the first request or prewarm.
+    async fn begin_turn(&self, _turn_id: &str) {}
+
     /// Prepare provider-specific request state before the foreground completion.
     ///
     /// The default is intentionally a no-op. Implementations must not send user

@@ -146,6 +146,7 @@ impl PrewarmSlot {
         self: &Arc<Self>,
         credentials: Arc<RwLock<CodexCredentials>>,
         request: &Value,
+        turn_state: Arc<StdMutex<Option<String>>>,
     ) {
         let request = prewarm_request(request);
         let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -187,8 +188,15 @@ impl PrewarmSlot {
                     payload.get("service_tier").and_then(Value::as_str),
                 );
                 drop(creds);
-                let (socket, _) = connect_ws(handshake).await?;
-                warm_socket(socket, &payload, identity).await
+                let (socket, response) = connect_ws(handshake).await?;
+                capture_turn_state(
+                    &turn_state,
+                    response
+                        .headers()
+                        .get("x-codex-turn-state")
+                        .and_then(|value| value.to_str().ok()),
+                );
+                warm_socket(socket, &payload, identity, turn_state).await
             })
             .await;
             match result {
@@ -275,16 +283,26 @@ async fn warm_socket(
     mut socket: openai_ws_connect::OpenAIWs,
     request: &Value,
     identity: (String, Option<String>, String, Option<String>),
+    turn_state: Arc<StdMutex<Option<String>>>,
 ) -> Result<PersistentWsState> {
     let connected_at = Instant::now();
+    let mut request = request.clone();
+    if let Some(value) = turn_state
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+    {
+        request["client_metadata"]["x-codex-turn-state"] = Value::String(value.clone());
+    }
     socket
-        .send(WsMessage::Text(serde_json::to_string(request)?))
+        .send(WsMessage::Text(serde_json::to_string(&request)?))
         .await?;
     let mut created_id = None;
     while let Some(message) = socket.next().await {
         match message? {
             WsMessage::Text(text) => {
                 let event: Value = serde_json::from_str(&text)?;
+                observe_turn_state(&event, &turn_state);
                 match event.get("type").and_then(Value::as_str) {
                     Some("response.created") => {
                         created_id = event["response"]["id"].as_str().map(str::to_owned);
@@ -324,9 +342,11 @@ async fn warm_socket(
                             last_input_item_count: 0,
                             last_response_output: Vec::new(),
                             last_input_item_hashes: Vec::new(),
+                            last_request_options: None,
+                            turn_state,
                         });
                     }
-                    Some("response.in_progress") => {}
+                    Some("response.in_progress" | "response.metadata") => {}
                     _ => anyhow::bail!("unexpected warmup event"),
                 }
             }
@@ -483,7 +503,11 @@ mod tests {
         // Keep the task suspended before any network activity.
         let _credentials_guard = credentials.write().await;
         let slot = Arc::new(PrewarmSlot::default());
-        slot.start(Arc::clone(&credentials), &request);
+        slot.start(
+            Arc::clone(&credentials),
+            &request,
+            Arc::new(StdMutex::new(None)),
+        );
         tokio::task::yield_now().await;
         let (backing, abort) = {
             let guard = slot.0.lock().unwrap();
@@ -500,7 +524,11 @@ mod tests {
             expected_wire
         );
 
-        slot.start(Arc::clone(&credentials), &request);
+        slot.start(
+            Arc::clone(&credentials),
+            &request,
+            Arc::new(StdMutex::new(None)),
+        );
         assert!(
             Arc::ptr_eq(&slot.0.lock().unwrap().as_ref().unwrap().request, &backing),
             "equivalent settings must retain the original job"
@@ -514,7 +542,11 @@ mod tests {
         );
         assert_ne!(backing.as_ref(), &prewarm_request(&request));
 
-        slot.start(Arc::clone(&credentials), &request);
+        slot.start(
+            Arc::clone(&credentials),
+            &request,
+            Arc::new(StdMutex::new(None)),
+        );
         assert!(
             !Arc::ptr_eq(&slot.0.lock().unwrap().as_ref().unwrap().request, &backing),
             "changed settings must replace the job"
@@ -535,6 +567,7 @@ mod tests {
         slot.start(
             Arc::clone(&credentials),
             &serde_json::json!({"model":"gpt-5.6-sol"}),
+            Arc::new(StdMutex::new(None)),
         );
         tokio::task::yield_now().await;
         let mut job = slot.0.lock().unwrap().take().unwrap();

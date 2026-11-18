@@ -98,6 +98,20 @@ fn replay_identity(item: &Value) -> Value {
     }
 }
 
+pub(super) fn persistent_ws_output_prefix_matches(
+    input: &[Value],
+    start: usize,
+    output: &[Value],
+) -> bool {
+    input.get(start..).is_some_and(|remaining| {
+        remaining.len() >= output.len()
+            && output
+                .iter()
+                .zip(remaining)
+                .all(|(previous, current)| replay_identity(previous) == replay_identity(current))
+    })
+}
+
 /// Explain replay failures without logging tool names, arguments or content.
 pub(super) fn log_ws_replayed_calls(items: &[Value], previous_output: &[Value]) {
     for item in items
@@ -197,10 +211,6 @@ pub(super) fn persistent_ws_incremental_items(
             let identity = replay_identity(item);
             if let Some(index) = remaining.iter().position(|output| *output == identity) {
                 remaining.remove(index);
-                skipped_items += 1;
-                None
-            } else if item.get("type").and_then(Value::as_str) == Some("reasoning") {
-                // Reasoning store items are already owned by previous_response_id.
                 skipped_items += 1;
                 None
             } else {

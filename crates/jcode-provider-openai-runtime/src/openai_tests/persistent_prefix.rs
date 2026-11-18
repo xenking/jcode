@@ -171,6 +171,53 @@ async fn persistent_prefix_changed_output_case(had_real_output: bool) {
 }
 
 #[tokio::test]
+async fn persistent_changed_options_replay_full_input() {
+    let _lock = jcode_base::storage::lock_test_env();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _base = EnvVarGuard::set("JCODE_OPENAI_API_BASE", &format!("http://{addr}/v1"));
+    let _transport = EnvVarGuard::set("JCODE_OPENAI_TRANSPORT", "websocket");
+    let _prewarm = EnvVarGuard::set("JCODE_OPENAI_PREWARM", "0");
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut first = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let initial = prefix_test_request(&mut first).await;
+        assert_eq!(initial["instructions"], "first settings");
+        prefix_test_response(&mut first, "resp_old").await;
+        while let Some(frame) = first.next().await {
+            match frame {
+                Ok(WsMessage::Ping(data)) => first.send(WsMessage::Pong(data)).await.unwrap(),
+                Ok(WsMessage::Close(_)) | Err(_) => break,
+                other => panic!("changed request options reused old chain: {other:?}"),
+            }
+        }
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut second = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let fresh = prefix_test_request(&mut second).await;
+        assert!(fresh.get("previous_response_id").is_none());
+        assert_eq!(fresh["instructions"], "changed settings");
+        assert_eq!(fresh["input"].as_array().unwrap().len(), 2);
+        prefix_test_response(&mut second, "resp_new").await;
+    });
+    let provider = prefix_test_provider().await;
+    let mut messages = vec![ChatMessage::user("first")];
+    for (system, expected) in [("first settings", "resp_old"), ("changed settings", "resp_new")] {
+        let mut stream = provider.complete(&messages, &[], system, None).await.unwrap();
+        let mut text = String::new();
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                StreamEvent::TextDelta(delta) => text.push_str(&delta),
+                StreamEvent::Error { message, .. } => panic!("{message}"),
+                _ => {}
+            }
+        }
+        assert_eq!(text, expected);
+        messages.push(ChatMessage::user("next"));
+    }
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn persistent_prefix_late_tool_output_before_cursor_replays_full_input() {
     persistent_prefix_changed_output_case(false).await;
 }

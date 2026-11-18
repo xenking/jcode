@@ -90,6 +90,8 @@ pub(super) async fn test_persistent_ws_state() -> (PersistentWsState, tokio::tas
             message_count: 1,
             last_input_item_count: 1,
             last_response_output: Vec::new(),
+            last_request_options: None,
+            turn_state: Arc::new(StdMutex::new(None)),
             last_input_item_hashes: persistent_ws_input_item_hashes(&[
                 serde_json::json!({"role":"user","content":"previous"}),
             ]),
@@ -153,6 +155,8 @@ async fn test_persistent_ws_state_with_ping_notify() -> (
             message_count: 1,
             last_input_item_count: 1,
             last_response_output: Vec::new(),
+            last_request_options: None,
+            turn_state: Arc::new(StdMutex::new(None)),
             last_input_item_hashes: persistent_ws_input_item_hashes(&[
                 serde_json::json!({"role":"user","content":"previous"}),
             ]),

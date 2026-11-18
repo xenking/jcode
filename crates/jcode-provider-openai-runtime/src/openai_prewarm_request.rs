@@ -58,6 +58,10 @@ impl OpenAIProvider {
         {
             return;
         }
-        self.prewarm.start(Arc::clone(&self.credentials), &request);
+        self.prewarm.start(
+            Arc::clone(&self.credentials),
+            &request,
+            Arc::clone(&self.turn_state),
+        );
     }
 }

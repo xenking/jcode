@@ -177,6 +177,8 @@ mod tests {
             last_response_completed_at: Instant::now(),
             message_count: 2,
             last_input_item_count: 1,
+            last_request_options: None,
+            turn_state: Arc::new(StdMutex::new(None)),
             last_input_item_hashes: vec![42],
             last_response_output: vec![serde_json::json!({"type":"function_call"})],
         };

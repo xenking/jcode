@@ -150,6 +150,7 @@ pub(super) async fn recover_opaque_ws_rejection(
     credentials: Arc<RwLock<CodexCredentials>>,
     account_label: Option<String>,
     request: &Value,
+    turn_state: Arc<StdMutex<Option<String>>>,
     tx: &mpsc::Sender<Result<StreamEvent>>,
 ) {
     emit_status_detail(tx, "opaque websocket rejection: trying HTTPS once").await;
@@ -162,6 +163,7 @@ pub(super) async fn recover_opaque_ws_rejection(
         credentials,
         account_label,
         request,
+        turn_state,
         "https recovery: opaque websocket rejection".into(),
         recovery_tx,
     );
@@ -629,6 +631,25 @@ async fn continue_persistent_ws_locked(
         return PersistentWsResult::NotAvailable;
     }
 
+    let request_options = persistent_request_options(request);
+    if state.message_count > 0
+        && state
+            .last_request_options
+            .as_ref()
+            .is_some_and(|last| last != &request_options)
+    {
+        *guard = None;
+        log_openai_stream_lifecycle(
+            jcode_base::logging::LogLevel::Info,
+            "persistent_state_reset",
+            vec![
+                ("model", request_model.clone()),
+                ("reason", "request_options_changed".to_string()),
+            ],
+        );
+        return PersistentWsResult::NotAvailable;
+    }
+
     // Check connection age - reconnect before the 60-min server limit
     if state.connected_at.elapsed() >= Duration::from_secs(WEBSOCKET_PERSISTENT_MAX_AGE_SECS) {
         jcode_base::logging::info("Persistent WS connection too old; forcing reconnect");
@@ -742,6 +763,26 @@ async fn continue_persistent_ws_locked(
             ],
         );
         *guard = None;
+        return PersistentWsResult::NotAvailable;
+    }
+
+    if !full_replay
+        && state.message_count > 0
+        && !persistent_ws_output_prefix_matches(
+            input,
+            state.last_input_item_count,
+            &state.last_response_output,
+        )
+    {
+        *guard = None;
+        log_openai_stream_lifecycle(
+            jcode_base::logging::LogLevel::Info,
+            "persistent_state_reset",
+            vec![
+                ("model", request_model.clone()),
+                ("reason", "response_output_changed".to_string()),
+            ],
+        );
         return PersistentWsResult::NotAvailable;
     }
 
@@ -948,6 +989,16 @@ async fn continue_persistent_ws_locked(
         object.remove("previous_response_id");
         object.remove("stream");
         object.remove("background");
+    }
+
+    if let Some(turn_state) = state
+        .turn_state
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+    {
+        continuation_request["client_metadata"]["x-codex-turn-state"] =
+            Value::String(turn_state.clone());
     }
 
     let empty_tools = serde_json::json!([]);
@@ -1217,6 +1268,7 @@ async fn continue_persistent_ws_locked(
 
                 if let Some(value) = classification.value() {
                     observe_ws_response_output_event(value, &mut response_output);
+                    observe_turn_state(value, &state.turn_state);
                 }
 
                 // Extract response_id from response.created event
@@ -1375,6 +1427,7 @@ async fn continue_persistent_ws_locked(
         state.last_response_id = resp_id;
         state.last_input_item_count = input_item_count;
         state.last_input_item_hashes = input_item_hashes;
+        state.last_request_options = Some(request_options);
         state.last_response_output = response_output;
         state.message_count += 1;
         state.last_activity_at = Instant::now();
@@ -1428,6 +1481,7 @@ pub(super) async fn stream_response_websocket_persistent(
     request: Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
     persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
+    turn_state: Arc<StdMutex<Option<String>>>,
     input_item_count: usize,
 ) -> Result<(), OpenAIStreamFailure> {
     let request_credentials = Arc::clone(&credentials);
@@ -1440,6 +1494,7 @@ pub(super) async fn stream_response_websocket_persistent(
                 request,
                 tx.clone(),
                 persistent_ws,
+                turn_state,
                 input_item_count,
                 access_token,
                 account_label,
@@ -1450,11 +1505,13 @@ pub(super) async fn stream_response_websocket_persistent(
     result.unwrap_or(Ok(()))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn stream_response_websocket_authenticated(
     credentials: Arc<RwLock<CodexCredentials>>,
     request: Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
     persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
+    turn_state: Arc<StdMutex<Option<String>>>,
     input_item_count: usize,
     access_token: String,
     account_label: Option<String>,
@@ -1536,7 +1593,7 @@ async fn stream_response_websocket_authenticated(
         ))
     })?;
 
-    let (mut ws_stream, _response) = match connect_result {
+    let (mut ws_stream, response) = match connect_result {
         Ok((stream, response)) => {
             if is_chatgpt_mode {
                 jcode_base::usage::record_openai_response_limits(
@@ -1577,6 +1634,14 @@ async fn stream_response_websocket_authenticated(
         }
     };
 
+    capture_turn_state(
+        &turn_state,
+        response
+            .headers()
+            .get("x-codex-turn-state")
+            .and_then(|value| value.to_str().ok()),
+    );
+
     let _ = tx
         .send(Ok(StreamEvent::ConnectionType {
             connection: "websocket/persistent-fresh".to_string(),
@@ -1594,6 +1659,7 @@ async fn stream_response_websocket_authenticated(
         .get("prompt_cache_key")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    let request_options = persistent_request_options(&request);
     let mut request_event = request;
     if !request_event.is_object() {
         return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
@@ -1612,6 +1678,13 @@ async fn stream_response_websocket_authenticated(
         );
         obj.remove("stream");
         obj.remove("background");
+    }
+    if let Some(value) = turn_state
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+    {
+        request_event["client_metadata"]["x-codex-turn-state"] = Value::String(value.clone());
     }
 
     let request_input_stats = request_event
@@ -1742,6 +1815,7 @@ async fn stream_response_websocket_authenticated(
 
                     if let Some(value) = classification.value() {
                         observe_ws_response_output_event(value, &mut response_output);
+                        observe_turn_state(value, &turn_state);
                     }
 
                     // Extract response_id from response.created event
@@ -1941,6 +2015,8 @@ async fn stream_response_websocket_authenticated(
             message_count: 1,
             last_input_item_count: input_item_count,
             last_input_item_hashes: input_item_hashes,
+            last_request_options: Some(request_options),
+            turn_state,
             last_response_output: response_output,
         });
         drop(guard);

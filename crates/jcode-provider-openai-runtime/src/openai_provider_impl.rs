@@ -74,6 +74,22 @@ fn borrowed_request_fingerprint_fields_match_owned_fields() {
 
 #[async_trait]
 impl Provider for OpenAIProvider {
+    async fn begin_turn(&self, turn_id: &str) {
+        let changed = {
+            let mut current = self.turn_id.write().unwrap_or_else(|p| p.into_inner());
+            if current.as_deref() == Some(turn_id) {
+                false
+            } else {
+                *current = Some(turn_id.to_owned());
+                true
+            }
+        };
+        if changed {
+            self.prewarm.clear();
+            *self.turn_state.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        }
+    }
+
     fn set_session_id(&self, session_id: &str) {
         if session_id.is_empty() {
             return;
@@ -86,6 +102,8 @@ impl Provider for OpenAIProvider {
             *current = session_id.to_owned();
             drop(current);
             self.prewarm.clear();
+            *self.turn_id.write().unwrap_or_else(|p| p.into_inner()) = None;
+            *self.turn_state.lock().unwrap_or_else(|p| p.into_inner()) = None;
             self.clear_persistent_ws_try("OpenAI session changed");
         }
     }
@@ -231,6 +249,7 @@ impl Provider for OpenAIProvider {
         // Try to reuse an existing WebSocket connection with previous_response_id
         // to send only incremental input items instead of the full conversation.
         let persistent_ws = Arc::clone(&self.persistent_ws);
+        let turn_state = Arc::clone(&self.turn_state);
         let transport_mode_snapshot = self
             .transport_mode
             .try_read()
@@ -425,6 +444,7 @@ impl Provider for OpenAIProvider {
                                 Arc::clone(&credentials),
                                 account_label.clone(),
                                 &request,
+                                Arc::clone(&turn_state),
                                 &tx,
                             )
                             .await;
@@ -612,6 +632,7 @@ impl Provider for OpenAIProvider {
                             request.clone(),
                             attempt_tx,
                             Arc::clone(&persistent_ws),
+                            Arc::clone(&turn_state),
                             input_item_count,
                         )
                         .await
@@ -634,6 +655,7 @@ impl Provider for OpenAIProvider {
                             Arc::clone(&credentials),
                             account_label.clone(),
                             &request,
+                            Arc::clone(&turn_state),
                             if force_https_for_request {
                                 let reason = last_error
                                     .as_ref()
@@ -667,6 +689,7 @@ impl Provider for OpenAIProvider {
                                 Arc::clone(&credentials),
                                 account_label.clone(),
                                 &request,
+                                Arc::clone(&turn_state),
                                 &tx,
                             )
                             .await;
@@ -1233,6 +1256,8 @@ impl Provider for OpenAIProvider {
                     .unwrap_or_else(|p| p.into_inner())
                     .clone(),
             ),
+            turn_id: StdRwLock::new(None),
+            turn_state: Arc::new(StdMutex::new(None)),
             prompt_cache_retention: self.prompt_cache_retention.clone(),
             max_output_tokens: self.max_output_tokens,
             // Copy the raw stored effort (not the surfaced effective value) so

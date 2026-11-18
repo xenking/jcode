@@ -1,6 +1,24 @@
 // Synthetic two-turn wire regression: the saved cursor covers request input,
 // while previous_response_id also owns the response output appended after it.
 #[tokio::test]
+async fn persistent_turn_state_resets_only_for_new_user_turn() {
+    let provider = OpenAIProvider::new(prewarm_test_credentials());
+    let (mut state, server) = test_persistent_ws_state().await;
+    state.turn_state = Arc::clone(&provider.turn_state);
+    *provider.turn_state.lock().unwrap() = Some("first-token".into());
+    *provider.persistent_ws.lock().await = Some(state);
+    provider.begin_turn("turn-1").await;
+    assert!(provider.turn_state.lock().unwrap().is_none());
+    *provider.turn_state.lock().unwrap() = Some("second-token".into());
+    *provider.persistent_ws.lock().await = None;
+    provider.begin_turn("turn-1").await;
+    assert_eq!(provider.turn_state.lock().unwrap().as_deref(), Some("second-token"));
+    provider.begin_turn("turn-2").await;
+    assert!(provider.turn_state.lock().unwrap().is_none());
+    server.abort();
+}
+
+#[tokio::test]
 async fn persistent_delta_wire_excludes_saved_response_output() {
     assert_delta_wire_excludes_saved_response_output(false, false).await;
 }
@@ -58,6 +76,9 @@ async fn assert_delta_wire_excludes_saved_response_output(empty_completion: bool
                     },
                 );
             }
+            if oauth && turn == 1 {
+                assert_eq!(request["client_metadata"]["x-codex-turn-state"], "sticky-test");
+            }
             if turn == 1 {
                 assert_eq!(request["previous_response_id"], "resp_wire_0");
                 assert_eq!(request["input"], serde_json::json!(expected_delta));
@@ -69,6 +90,9 @@ async fn assert_delta_wire_excludes_saved_response_output(empty_completion: bool
             .await
             .unwrap();
             if turn == 0 {
+                if oauth {
+                    ws.send(WsMessage::Text(serde_json::json!({"type":"response.metadata", "headers":{"x-codex-turn-state":"sticky-test"}}).to_string())).await.unwrap();
+                }
                 for item in &output {
                     ws.send(WsMessage::Text(
                         serde_json::json!({"type":"response.output_item.done", "item":item})
@@ -99,7 +123,9 @@ async fn assert_delta_wire_excludes_saved_response_output(empty_completion: bool
         last_response_completed_at: Instant::now(),
         message_count: 1,
         last_input_item_count: 1,
-        last_input_item_hashes: persistent_ws_input_item_hashes(std::slice::from_ref(&user)),
+        last_request_options: None,
+            turn_state: Arc::new(StdMutex::new(None)),
+            last_input_item_hashes: persistent_ws_input_item_hashes(std::slice::from_ref(&user)),
         last_response_output: Vec::new(),
     })));
     let (tx, _rx) = mpsc::channel(100);
@@ -254,7 +280,9 @@ async fn persistent_terminal_public_case(
         message_count: 1,
         last_input_item_count: 1,
         last_response_output: Vec::new(),
-        last_input_item_hashes: persistent_ws_input_item_hashes(&full_input[..1]),
+        last_request_options: None,
+            turn_state: Arc::new(StdMutex::new(None)),
+            last_input_item_hashes: persistent_ws_input_item_hashes(&full_input[..1]),
     });
     let outcome = tokio::time::timeout(Duration::from_secs(2), async {
         let mut stream = provider
@@ -372,7 +400,9 @@ async fn persistent_terminal_failure_invalidates_before_mutex_handoff() {
         message_count: 1,
         last_input_item_count: 1,
         last_response_output: Vec::new(),
-        last_input_item_hashes: persistent_ws_input_item_hashes(&[
+        last_request_options: None,
+            turn_state: Arc::new(StdMutex::new(None)),
+            last_input_item_hashes: persistent_ws_input_item_hashes(&[
             serde_json::json!({"role":"user","content":"old"}),
         ]),
     })));

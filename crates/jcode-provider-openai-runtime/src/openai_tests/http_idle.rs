@@ -69,6 +69,7 @@ async fn http_transport_idle_case(heartbeats: bool, complete: bool) {
             creds,
             None,
             &serde_json::json!({"model":"fixture-model", "stream":true, "input":[]}),
+            Arc::new(StdMutex::new(None)),
             "fixture".into(),
             tx,
         ),

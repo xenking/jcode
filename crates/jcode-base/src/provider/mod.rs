@@ -1734,6 +1734,12 @@ impl Default for MultiProvider {
 
 #[async_trait]
 impl Provider for MultiProvider {
+    async fn begin_turn(&self, turn_id: &str) {
+        if let Some(provider) = self.openai_provider() {
+            provider.begin_turn(turn_id).await;
+        }
+    }
+
     fn set_session_id(&self, session_id: &str) {
         *self
             .session_id

@@ -31,7 +31,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
-use std::sync::{Arc, LazyLock, RwLock as StdRwLock, Weak};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex, RwLock as StdRwLock, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
@@ -304,8 +304,46 @@ struct PersistentWsState {
     /// rewrite earlier items (for example, when tool outputs are reordered).
     /// A count alone is not a safe continuation cursor in that case.
     last_input_item_hashes: Vec<u64>,
+    last_request_options: Option<Value>,
+    turn_state: Arc<StdMutex<Option<String>>>,
     /// Actual output of the previous response, used to remove only server-owned replay.
     last_response_output: Vec<Value>,
+}
+
+fn persistent_request_options(request: &Value) -> Value {
+    let mut options = request.clone();
+    if let Some(object) = options.as_object_mut() {
+        for key in [
+            "input",
+            "type",
+            "previous_response_id",
+            "client_metadata",
+            "stream",
+            "background",
+            "generate",
+        ] {
+            object.remove(key);
+        }
+    }
+    options
+}
+
+fn capture_turn_state(turn_state: &StdMutex<Option<String>>, value: Option<&str>) {
+    if let Some(value) = value.filter(|value| !value.is_empty()) {
+        let mut state = turn_state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.is_none() {
+            *state = Some(value.to_owned());
+        }
+    }
+}
+
+fn observe_turn_state(event: &Value, turn_state: &StdMutex<Option<String>>) {
+    if event.get("type").and_then(Value::as_str) == Some("response.metadata") {
+        let value = event
+            .pointer("/headers/x-codex-turn-state")
+            .and_then(Value::as_str);
+        capture_turn_state(turn_state, value);
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -693,6 +731,8 @@ pub struct OpenAIProvider {
     model: Arc<RwLock<String>>,
     prompt_cache_key: Option<String>,
     cache_session_id: StdRwLock<String>,
+    turn_id: StdRwLock<Option<String>>,
+    turn_state: Arc<StdMutex<Option<String>>>,
     prompt_cache_retention: Option<String>,
     max_output_tokens: Option<u32>,
     reasoning_effort: Arc<StdRwLock<Option<String>>>,
@@ -854,6 +894,8 @@ impl OpenAIProvider {
             model: Arc::new(RwLock::new(model)),
             prompt_cache_key,
             cache_session_id: StdRwLock::new(Self::new_cache_session_id()),
+            turn_id: StdRwLock::new(None),
+            turn_state: Arc::new(StdMutex::new(None)),
             prompt_cache_retention,
             max_output_tokens,
             reasoning_effort: Arc::new(StdRwLock::new(reasoning_effort)),

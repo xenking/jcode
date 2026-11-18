@@ -5,6 +5,7 @@ pub(crate) async fn stream_response(
     credentials: Arc<RwLock<CodexCredentials>>,
     account_label: Option<String>,
     request: &Value,
+    turn_state: Arc<StdMutex<Option<String>>>,
     initial_status_detail: String,
     tx: mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<(), OpenAIStreamFailure> {
@@ -53,7 +54,7 @@ pub(crate) async fn stream_response(
 
     let usage_generation = jcode_base::usage::openai_response_generation();
 
-    let builder = response_http_request(
+    let mut builder = response_http_request(
         &client,
         &url,
         &access_token,
@@ -63,6 +64,14 @@ pub(crate) async fn stream_response(
         request.get("model").and_then(Value::as_str),
         request.get("service_tier").and_then(Value::as_str),
     );
+    if is_chatgpt_mode
+        && let Some(value) = turn_state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+    {
+        builder = builder.header("x-codex-turn-state", value);
+    }
 
     emit_connection_phase(&tx, ConnectionPhase::SendingRequest).await;
     let connect_start = std::time::Instant::now();
@@ -86,6 +95,15 @@ pub(crate) async fn stream_response(
     let response = response
         .context("Failed to send request to OpenAI API")
         .map_err(OpenAIStreamFailure::Other)?;
+    if is_chatgpt_mode {
+        capture_turn_state(
+            &turn_state,
+            response
+                .headers()
+                .get("x-codex-turn-state")
+                .and_then(|value| value.to_str().ok()),
+        );
+    }
 
     if is_chatgpt_mode && (response.status().is_success() || response.status().as_u16() == 429) {
         jcode_base::usage::record_openai_response_limits(

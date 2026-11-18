@@ -17,6 +17,7 @@ impl Agent {
         self.ensure_session_lease()?;
         self.set_log_context();
         let usage_turn_id = self.model_usage_turn_id();
+        self.provider.begin_turn(&usage_turn_id).await;
         crate::session_metrics::record_turn(&self.session.id);
         // Mark this session as actively streaming for presence UIs (e.g. the
         // macOS menu bar indicator). Cleared automatically on every exit path.

@@ -173,6 +173,8 @@ async fn opaque_recovery_public_case(
             message_count: 1,
             last_input_item_count: 1,
             last_response_output: Vec::new(),
+            last_request_options: None,
+            turn_state: Arc::new(StdMutex::new(None)),
             last_input_item_hashes: persistent_ws_input_item_hashes(&input[..1]),
         });
     }
