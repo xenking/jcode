@@ -1298,3 +1298,81 @@ fn background_timeout_honors_values_above_the_foreground_cap() {
     assert_eq!(background_timeout_ms(Some(100)), Some(100));
     assert_eq!(background_timeout_ms(None), None);
 }
+
+#[cfg(not(windows))]
+fn process_is_alive(pid: i32) -> bool {
+    // Signal 0 only probes for existence; a reaped pid returns ESRCH.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Requirement: Esc (turn cancel) must actually stop a running bash command.
+/// The command runs in its own session, so a cancel has to kill the whole
+/// process group; returning "continued in background" leaves a `sleep`/poll
+/// loop running for the rest of the turn and beyond.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn turn_cancel_kills_the_foreground_command_process_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("pid");
+    let signal = jcode_agent_runtime::InterruptSignal::new();
+    let mut ctx = make_ctx(None);
+    ctx.session_id = "bash-cancel-process-group".into();
+    ctx.working_dir = Some(dir.path().into());
+    ctx.execution_mode = crate::tool::ToolExecutionMode::AgentTurn;
+    ctx.graceful_shutdown_signal = Some(signal.clone());
+    crate::turn_cancel_registry::mark_interruption(
+        &ctx.session_id,
+        crate::turn_cancel_registry::TurnInterruptionReason::Cancel,
+    );
+
+    let tool = BashTool::new();
+    let command = format!(
+        "echo $$ > {}; while :; do sleep 0.1; done",
+        pid_file.display()
+    );
+    let started = Instant::now();
+    let wait_for_pid = pid_file.clone();
+    let cancel = tokio::spawn(async move {
+        // Give bash time to write its pid and enter the loop.
+        for _ in 0..200 {
+            if wait_for_pid.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        signal.fire();
+    });
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        tool.execute(json!({"command": command}), ctx),
+    )
+    .await
+    .expect("a turn cancel must end the bash tool instead of waiting for the command");
+    cancel.await.unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "cancel must end the tool within ~2s, took {:?}",
+        started.elapsed()
+    );
+    let text = result.expect("an interrupted command is reported, not a hang").output;
+    assert!(
+        text.to_lowercase().contains("interrupt") || text.to_lowercase().contains("stopped"),
+        "the tool must report the interruption, got: {text}"
+    );
+
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while process_is_alive(pid) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        !process_is_alive(pid),
+        "cancel must kill the command's process group, pid {pid} is still alive"
+    );
+}

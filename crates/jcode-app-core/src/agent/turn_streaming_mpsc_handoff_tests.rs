@@ -282,3 +282,93 @@ async fn manual_background_and_shutdown_do_not_wait_for_budget() {
         assert_eq!(start.elapsed(), Duration::ZERO);
     }
 }
+
+/// A tool that ignores the turn's cancel signal must not hold the turn open.
+/// The incident behind this: a bash `sleep`/poll loop kept the turn at
+/// "thinking" for minutes because cancellation never reached the tool wait.
+struct IgnoresCancel {
+    started: Arc<tokio::sync::Notify>,
+}
+
+use crate::tool::ToolOutput;
+use async_trait::async_trait;
+
+#[async_trait]
+impl crate::tool::Tool for IgnoresCancel {
+    fn name(&self) -> &str {
+        "ignores_cancel"
+    }
+    fn description(&self) -> &str {
+        "Never finishes on its own during the test"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    async fn execute(
+        &self,
+        _: serde_json::Value,
+        _: ToolContext,
+    ) -> Result<ToolOutput> {
+        self.started.notify_waiters();
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        Ok(ToolOutput::new("never"))
+    }
+}
+
+#[tokio::test]
+async fn cancel_ends_a_tool_that_ignores_the_shutdown_signal() {
+    let registry = Registry::empty();
+    let started = Arc::new(tokio::sync::Notify::new());
+    registry
+        .register(
+            "ignores_cancel".into(),
+            Arc::new(IgnoresCancel {
+                started: Arc::clone(&started),
+            }),
+        )
+        .await;
+    let shutdown = InterruptSignal::new();
+    let ctx = ToolContext {
+        session_id: "cancel-ignored-tool".into(),
+        message_id: "message".into(),
+        tool_call_id: "cancel-probe".into(),
+        working_dir: None,
+        stdin_request_tx: None,
+        graceful_shutdown_signal: Some(shutdown.clone()),
+        execution_mode: ToolExecutionMode::AgentTurn,
+    };
+    crate::turn_cancel_registry::mark_interruption(
+        &ctx.session_id,
+        crate::turn_cancel_registry::TurnInterruptionReason::Cancel,
+    );
+
+    let started_at = std::time::Instant::now();
+    let fire = tokio::spawn(async move {
+        started.notified().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        shutdown.fire();
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        execute_with_background_budget(
+            registry,
+            "ignores_cancel".into(),
+            serde_json::json!({}),
+            ctx,
+            Duration::from_secs(60),
+        ),
+    )
+    .await
+    .expect("a cancel must end the tool wait instead of waiting for the tool");
+    fire.await.unwrap();
+    assert!(
+        started_at.elapsed() < Duration::from_secs(2),
+        "cancel must end the tool wait within ~2s, took {:?}",
+        started_at.elapsed()
+    );
+    let output = result.expect("an interrupted tool reports instead of hanging").output;
+    assert!(
+        output.to_lowercase().contains("interrupt") || output.to_lowercase().contains("stopped"),
+        "the interrupted tool must say so, got: {output}"
+    );
+}
