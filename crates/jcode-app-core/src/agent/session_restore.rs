@@ -82,7 +82,9 @@ impl Agent {
         self.provider.set_session_id(&self.session.id);
         let provider_ms = lap.elapsed().as_millis();
         let lap = Instant::now();
-        self.refresh_agents_md_snapshot();
+        if !self.adopt_recorded_prompt_inputs() {
+            self.refresh_agents_md_snapshot();
+        }
         let agents_md_ms = lap.elapsed().as_millis();
         let lap = Instant::now();
         self._tool_policy_registration = crate::tool::register_session_tool_policy(

@@ -41,6 +41,9 @@ mod mcp_remote_cache;
 #[path = "agent_tests/cold_cache.rs"]
 mod cold_cache;
 
+#[path = "agent_tests/prompt_inputs_reload.rs"]
+mod prompt_inputs_reload;
+
 struct DelayedProvider {
     open_delay: Duration,
     first_event_delay: Duration,

@@ -390,6 +390,9 @@ pub struct Agent {
     announced_skills: HashSet<String>,
     /// Transcript index already scanned for late-skill announcements.
     announced_skills_scan_index: usize,
+    /// Whether `agents_md_snapshot` and `prompt_skills_snapshot` are already
+    /// recorded on disk for this session, so a reload can resend them.
+    prompt_inputs_recorded: bool,
     /// Whether memory features are enabled for this session
     memory_enabled: bool,
     /// One-step undo snapshot captured before the most recent rewind.
@@ -444,6 +447,67 @@ impl Agent {
             .map(std::path::Path::new);
         self.agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
         self.refresh_prompt_skills_snapshot();
+        self.prompt_inputs_recorded = false;
+    }
+
+    /// Adopt the AGENTS.md text and skills list this session's previous
+    /// process sent. A daemon reload builds a new Agent, and re-reading files
+    /// that changed in between (a rollout usually edits AGENTS.md) rewrote the
+    /// cached system prefix, so the first request after the reload paid for
+    /// the whole conversation again. Returns false for a session that never
+    /// recorded inputs or that moved to another directory: those read the
+    /// files, like a new session.
+    fn adopt_recorded_prompt_inputs(&mut self) -> bool {
+        let Some(recorded) = crate::session::load_prompt_inputs(&self.session.id) else {
+            return false;
+        };
+        if recorded.working_dir != self.session.working_dir {
+            return false;
+        }
+        let info = crate::prompt::ContextInfo {
+            has_project_agents_md: recorded.has_project_agents_md,
+            project_agents_md_chars: recorded.project_agents_md_chars,
+            has_global_agents_md: recorded.has_global_agents_md,
+            global_agents_md_chars: recorded.global_agents_md_chars,
+            ..Default::default()
+        };
+        self.agents_md_snapshot = (recorded.agents_md, info);
+        self.prompt_skills_snapshot = recorded.skills;
+        // Skills installed since then are announced in the transcript, which
+        // leaves the cached system prefix untouched.
+        self.announced_skills = self
+            .prompt_skills_snapshot
+            .iter()
+            .map(|skill| skill.name.clone())
+            .collect();
+        self.announced_skills_scan_index = 0;
+        self.prompt_inputs_recorded = true;
+        true
+    }
+
+    /// Record the inputs of the system prompt about to be sent, once per
+    /// capture, so [`Self::adopt_recorded_prompt_inputs`] can restore them.
+    fn record_prompt_inputs(&mut self) {
+        if self.prompt_inputs_recorded || self.session.system_prompt.is_some() {
+            return;
+        }
+        let (agents_md, info) = &self.agents_md_snapshot;
+        let inputs = crate::session::PersistedPromptInputs {
+            working_dir: self.session.working_dir.clone(),
+            agents_md: agents_md.clone(),
+            has_project_agents_md: info.has_project_agents_md,
+            project_agents_md_chars: info.project_agents_md_chars,
+            has_global_agents_md: info.has_global_agents_md,
+            global_agents_md_chars: info.global_agents_md_chars,
+            skills: self.prompt_skills_snapshot.clone(),
+        };
+        match crate::session::save_prompt_inputs(&self.session.id, &inputs) {
+            Ok(()) => self.prompt_inputs_recorded = true,
+            Err(err) => logging::warn(&format!(
+                "Could not record prompt inputs for session {}: {err}",
+                self.session.id
+            )),
+        }
     }
 
     /// Re-capture the frozen skills list. Only called at session boundaries
@@ -537,6 +601,7 @@ impl Agent {
             prompt_skills_snapshot: Vec::new(),
             announced_skills: HashSet::new(),
             announced_skills_scan_index: 0,
+            prompt_inputs_recorded: false,
             memory_enabled: crate::config::config().features.memory,
             rewind_undo_snapshot: None,
             stdin_request_tx: None,
@@ -549,6 +614,8 @@ impl Agent {
         };
         let t = Instant::now();
         agent.refresh_prompt_skills_snapshot();
+        // An existing session keeps the inputs its prompt was built from.
+        agent.adopt_recorded_prompt_inputs();
         agent.restore_pinned_skill();
         logging::info(&format!(
             "[TIMING] agent build_base: skills={skills_ms}ms, agents_md={agents_md_ms}ms, prompt_skills={}ms",
@@ -1468,6 +1535,7 @@ impl Agent {
 
     fn record_client_cache_request(&mut self, messages: &[Message]) {
         self.note_provider_request_sent();
+        self.record_prompt_inputs();
         if !self.should_track_client_cache() {
             return;
         }

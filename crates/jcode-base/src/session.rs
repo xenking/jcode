@@ -28,6 +28,7 @@ mod parallel_messages;
 mod persistence;
 mod pinned_skill;
 pub mod prewarm;
+mod prompt_inputs;
 mod render;
 mod storage_paths;
 pub use crash::{
@@ -48,6 +49,7 @@ use memory_profile::{
 };
 use model::SESSION_CONTEXT_PREFIX;
 pub use model::{StoredReplayEvent, StoredReplayEventKind};
+pub use prompt_inputs::{PersistedPromptInputs, load_prompt_inputs, save_prompt_inputs};
 pub use render::{
     RenderedCompactedHistoryInfo, RenderedImage, RenderedImageAnchor, RenderedImageSource,
     RenderedMessage, compaction_divider_content, has_rendered_images, is_attached_image_label_text,

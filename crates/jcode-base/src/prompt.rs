@@ -197,7 +197,7 @@ impl SplitSystemPrompt {
 }
 
 /// Skill info for system prompt
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SkillInfo {
     pub name: String,
     pub description: String,
