@@ -2,6 +2,29 @@ use super::*;
 use anyhow::{Result, anyhow};
 
 #[test]
+fn session_loads_future_content_block() {
+    let mut session = Session::create_with_id("session_future_block".into(), None, None);
+    session.add_message(Role::User, vec![ContentBlock::Text {
+        text: "kept".into(), cache_control: None,
+    }]);
+    let mut json = serde_json::to_value(&session).unwrap();
+    json["messages"][0]["content"].as_array_mut().unwrap().push(serde_json::json!({
+        "type": "future_content", "payload": {"x": 1}
+    }));
+    let restored: Session = serde_json::from_value(json).unwrap();
+    assert_eq!(restored.messages[0].content_preview(), "kept");
+}
+
+#[test]
+fn session_loads_future_status() {
+    let session = Session::create_with_id("session_future_status".into(), None, None);
+    let mut json = serde_json::to_value(&session).unwrap();
+    json["status"] = serde_json::json!({"FutureStatus": {"detail": 42}});
+    let restored: Session = serde_json::from_value(json).unwrap();
+    assert_eq!(restored.id, session.id);
+}
+
+#[test]
 fn session_loads_unknown_replay_event_without_losing_messages() {
     let _env_lock = lock_env();
     let temp_home = tempfile::tempdir().unwrap();
