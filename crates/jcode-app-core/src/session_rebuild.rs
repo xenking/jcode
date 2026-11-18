@@ -60,10 +60,14 @@ fn run_release_tests(repo_dir: &Path) -> Result<()> {
 }
 
 fn run_cargo_release_step(repo_dir: &Path, args: &[&str]) -> Result<ExitStatus> {
-    Ok(ProcessCommand::new("cargo")
-        .args(args)
-        .current_dir(repo_dir)
-        .status()?)
+    let mut command = ProcessCommand::new("cargo");
+    command.args(args).current_dir(repo_dir);
+    // Cargo does not rerun the build-metadata script on a new commit, and the
+    // install step refuses a binary whose embedded hash is not HEAD.
+    if let Ok(hash) = build::current_git_hash(repo_dir) {
+        command.env("JCODE_BUILD_GIT_HASH", hash);
+    }
+    Ok(command.status()?)
 }
 
 fn install_local_release_with_warning(repo_dir: &Path) {

@@ -562,6 +562,56 @@ mod tests {
         assert_eq!(latest, "latest source");
     }
 
+    /// 2026-11-18 incident: auto-update pulled and built inside the checkout
+    /// the user was working in, then installed whatever `target/release` held.
+    #[test]
+    fn auto_update_target_is_read_from_upstream_without_touching_the_checkout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = ProcessCommand::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+                .args([
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                ])
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        let upstream = dir.path().join("upstream");
+        let checkout = dir.path().join("checkout");
+        std::fs::create_dir_all(&upstream).unwrap();
+        git(&upstream, &["init", "-q", "-b", "master"]);
+        git(&upstream, &["commit", "-q", "--allow-empty", "-m", "old"]);
+        git(dir.path(), &["clone", "-q", "upstream", "checkout"]);
+        let local_head = git(&checkout, &["rev-parse", "HEAD"]);
+        git(&upstream, &["commit", "-q", "--allow-empty", "-m", "new"]);
+        let upstream_head = git(&upstream, &["rev-parse", "HEAD"]);
+        git(&checkout, &["fetch", "-q"]);
+
+        let (remote, sha) = hot_exec::upstream_update_target(&checkout).expect("target");
+        assert_eq!(sha, upstream_head, "the update is the upstream commit");
+        assert_eq!(
+            std::fs::canonicalize(&remote).unwrap(),
+            std::fs::canonicalize(&upstream).unwrap()
+        );
+        assert_eq!(
+            git(&checkout, &["rev-parse", "HEAD"]),
+            local_head,
+            "the working checkout is not pulled"
+        );
+        assert!(!checkout.join("target").exists(), "nothing is built in it");
+    }
+
     #[test]
     fn source_update_check_real_git_upstream_states() {
         let repo = tempfile::tempdir().expect("temporary source checkout");

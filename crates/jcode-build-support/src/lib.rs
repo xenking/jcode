@@ -4,6 +4,7 @@ mod paths;
 mod platform_support;
 mod source_state;
 mod storage_helpers;
+mod update_install;
 mod version_gc;
 
 pub use paths::{
@@ -27,6 +28,10 @@ pub use storage_helpers::{
     read_shared_server_version, read_stable_version, save_migration_context,
     shared_server_binary_path, shared_server_version_file, stable_binary_path, stable_version_file,
     version_binary_path, write_build_progress,
+};
+pub use update_install::{
+    ChannelAdvance, advance_update_channels, install_verified_binary_at_version,
+    selfdev_hold_reason, verify_binary_built_from,
 };
 pub use version_gc::{
     DEFAULT_KEEP_RECENT_VERSIONS, KEEP_VERSIONS_ENV, VersionPruneReport, prune_old_versions,
@@ -927,9 +932,10 @@ pub fn install_local_release(repo_dir: &std::path::Path) -> Result<PathBuf> {
         anyhow::bail!("Binary not found at {:?}", source);
     }
 
-    let version = repo_build_version(repo_dir)?;
+    let source_state = current_source_state(repo_dir)?;
+    let version = source_state.version_label;
 
-    let versioned = install_binary_at_version(&source, &version)?;
+    let versioned = install_verified_binary_at_version(&source, &version, &source_state.full_hash)?;
     update_stable_symlink(&version)?;
     update_current_symlink(&version)?;
     update_shared_server_symlink(&version)?;

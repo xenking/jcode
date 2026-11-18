@@ -929,3 +929,151 @@ fn repair_never_downgrades_when_stable_is_older() {
         );
     });
 }
+
+#[cfg(unix)]
+fn write_fake_jcode(path: &std::path::Path, git_hash: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(path.parent().expect("binary parent")).expect("create binary dir");
+    std::fs::write(
+        path,
+        format!("#!/bin/sh\nprintf '%s\\n' '{{\"version\":\"v1\",\"git_hash\":\"{git_hash}\"}}'\n"),
+    )
+    .expect("write fake binary");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+}
+
+/// 2026-11-18 incident: `target/release/jcode` in the working checkout was
+/// built from an older commit than HEAD, and the update installed it under
+/// HEAD's version label and moved every channel onto it.
+#[cfg(unix)]
+#[test]
+fn install_local_release_refuses_binary_built_from_another_commit() {
+    with_temp_jcode_home(|| {
+        let repo = create_git_repo_fixture();
+        let head = current_git_hash(repo.path()).expect("head hash");
+        write_fake_jcode(&release_binary_path(repo.path()), "0000000ff");
+
+        let error = install_local_release(repo.path())
+            .expect_err("a binary built from another commit must not be installed");
+        assert!(
+            error.to_string().contains("0000000ff"),
+            "error names the embedded hash: {error}"
+        );
+        assert!(
+            !version_binary_path(&head).unwrap().exists(),
+            "the mismatched binary must not land in versions/"
+        );
+        assert_eq!(read_stable_version().unwrap(), None);
+        assert_eq!(read_current_version().unwrap(), None);
+        assert_eq!(read_shared_server_version().unwrap(), None);
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn install_local_release_installs_binary_built_from_head() {
+    with_temp_jcode_home(|| {
+        let repo = create_git_repo_fixture();
+        let head = current_git_hash(repo.path()).expect("head hash");
+        write_fake_jcode(&release_binary_path(repo.path()), &head);
+
+        // The untracked target/ directory makes the fixture a dirty checkout.
+        let version = repo_build_version(repo.path()).expect("version label");
+
+        install_local_release(repo.path()).expect("matching binary installs");
+        assert!(version_binary_path(&version).unwrap().exists());
+        assert_eq!(
+            read_current_version().unwrap().as_deref(),
+            Some(version.as_str())
+        );
+    });
+}
+
+#[test]
+fn update_leaves_channels_to_newer_selfdev_build() {
+    use std::time::{Duration, SystemTime};
+    with_temp_jcode_home(|| {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let selfdev = "262206c61";
+        let update = "main-19b60dff9";
+        write_versioned_binary(selfdev, base + Duration::from_secs(600));
+        write_versioned_binary(update, base + Duration::from_secs(900));
+        update_current_symlink(selfdev).expect("current");
+        update_shared_server_symlink(selfdev).expect("shared");
+
+        // The update target was committed before the self-dev build was made.
+        let outcome = advance_update_channels(update, Some(base)).expect("advance");
+        assert!(
+            matches!(outcome, ChannelAdvance::Held { .. }),
+            "self-dev wins: {outcome:?}"
+        );
+        assert_eq!(read_current_version().unwrap().as_deref(), Some(selfdev));
+        assert_eq!(
+            read_shared_server_version().unwrap().as_deref(),
+            Some(selfdev)
+        );
+        assert_eq!(read_stable_version().unwrap(), None);
+
+        // An unknown commit time cannot prove the update is newer.
+        let outcome = advance_update_channels(update, None).expect("advance");
+        assert!(matches!(outcome, ChannelAdvance::Held { .. }));
+    });
+}
+
+#[test]
+fn update_leaves_channels_to_pending_selfdev_activation() {
+    use std::time::{Duration, SystemTime};
+    with_temp_jcode_home(|| {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let update = "main-19b60dff9";
+        write_versioned_binary("0.17.0", base);
+        write_versioned_binary(update, base + Duration::from_secs(900));
+        update_stable_symlink("0.17.0").expect("stable");
+        update_current_symlink("0.17.0").expect("current");
+        BuildManifest::default()
+            .set_pending_activation(PendingActivation {
+                session_id: "session-a".to_string(),
+                new_version: "abc1234-dirty-0123456789ab".to_string(),
+                previous_current_version: Some("0.17.0".to_string()),
+                previous_shared_server_version: None,
+                source_fingerprint: None,
+                requested_at: Utc::now(),
+            })
+            .expect("set pending activation");
+
+        let outcome = advance_update_channels(update, Some(base + Duration::from_secs(900)))
+            .expect("advance");
+        assert!(
+            matches!(outcome, ChannelAdvance::Held { .. }),
+            "a pending activation holds the channels: {outcome:?}"
+        );
+        assert_eq!(read_current_version().unwrap().as_deref(), Some("0.17.0"));
+        assert_eq!(read_stable_version().unwrap().as_deref(), Some("0.17.0"));
+    });
+}
+
+#[test]
+fn update_advances_channels_past_release_and_older_selfdev_builds() {
+    use std::time::{Duration, SystemTime};
+    with_temp_jcode_home(|| {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let update = "main-19b60dff9";
+        write_versioned_binary("0.17.0", base);
+        write_versioned_binary("262206c61", base);
+        write_versioned_binary(update, base + Duration::from_secs(900));
+        update_stable_symlink("0.17.0").expect("stable");
+        update_current_symlink("262206c61").expect("current");
+        update_shared_server_symlink("0.17.0").expect("shared");
+
+        // The update target was committed after the self-dev build was made.
+        let outcome = advance_update_channels(update, Some(base + Duration::from_secs(600)))
+            .expect("advance");
+        assert_eq!(outcome, ChannelAdvance::Advanced);
+        assert_eq!(read_current_version().unwrap().as_deref(), Some(update));
+        assert_eq!(read_stable_version().unwrap().as_deref(), Some(update));
+        assert_eq!(
+            read_shared_server_version().unwrap().as_deref(),
+            Some(update)
+        );
+    });
+}

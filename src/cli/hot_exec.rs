@@ -330,42 +330,41 @@ pub fn local_commits_ahead_of_upstream() -> Option<bool> {
     Some(count > 0)
 }
 
+/// The commit and remote a source checkout's branch tracks, read without
+/// touching the checkout: no pull, no merge, no build.
+pub(super) fn upstream_update_target(repo_dir: &std::path::Path) -> Result<(String, String)> {
+    let branch = source_update_git(repo_dir, &["rev-parse", "--symbolic-full-name", "HEAD"])?;
+    let remote = source_update_git(
+        repo_dir,
+        &["for-each-ref", "--format=%(upstream:remotename)", &branch],
+    )?;
+    if remote.is_empty() {
+        anyhow::bail!("{branch} does not track a remote branch");
+    }
+    let url = source_update_git(repo_dir, &["remote", "get-url", &remote])?;
+    let sha = source_update_git(repo_dir, &["rev-parse", "@{u}^{commit}"])?;
+    Ok((url, sha))
+}
+
 pub fn run_auto_update() -> Result<()> {
     use crate::bus::{Bus, BusEvent, UpdateStatus};
 
     let repo_dir =
         get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
 
-    update::run_git_pull_ff_only(&repo_dir, true)?;
-
-    crate::logging::info("Building updated source version...");
-    let build_output = ProcessCommand::new("cargo")
-        .args(["build", "--release"])
-        .current_dir(&repo_dir)
-        .output()?;
-
-    if !build_output.status.success() {
-        let stderr = String::from_utf8_lossy(&build_output.stderr);
-        let stdout = String::from_utf8_lossy(&build_output.stdout);
-        if !stderr.trim().is_empty() {
-            crate::logging::error(&format!("auto-update cargo stderr:\n{}", stderr.trim()));
+    // The checkout is only asked which commit upstream is at. The update is
+    // built in the updater's own clone at that commit: building here installed
+    // a stale `target/release` binary under the new commit's name.
+    let (remote, sha) = upstream_update_target(&repo_dir)?;
+    crate::logging::info(&format!("Building source update {sha} in a clean clone..."));
+    let version = match update::install_source_update_from(&remote, &sha)? {
+        update::SourceUpdate::Installed { version, .. } => version,
+        update::SourceUpdate::Held { reason } => {
+            crate::logging::info(&format!("Auto-update skipped: {reason}"));
+            Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::UpToDate));
+            return Ok(());
         }
-        if !stdout.trim().is_empty() {
-            crate::logging::info(&format!("auto-update cargo stdout:\n{}", stdout.trim()));
-        }
-        anyhow::bail!("cargo build failed");
-    }
-
-    if let Err(e) = build::install_local_release(&repo_dir) {
-        crate::logging::warn(&format!("auto-update install failed: {}", e));
-    }
-
-    let hash = ProcessCommand::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(&repo_dir)
-        .output()?;
-    let hash = String::from_utf8_lossy(&hash.stdout);
-    let version = format!("main-{}", hash.trim());
+    };
     Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Installed {
         version: version.clone(),
     }));

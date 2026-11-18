@@ -26,3 +26,7 @@ pub use jcode_build_support::{
     version_matches_installed_channel, worktree_scope_key, write_build_progress,
     write_current_dev_binary_source_metadata, write_dev_binary_source_metadata,
 };
+pub use jcode_build_support::{
+    ChannelAdvance, advance_update_channels, install_verified_binary_at_version,
+    selfdev_hold_reason, verify_binary_built_from,
+};
