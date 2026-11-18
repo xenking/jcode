@@ -330,7 +330,13 @@ async fn reload_mid_stream_continues_without_a_user_message() {
         .expect("resume");
 
     let request = capture.requests()[0].clone();
-    let last = request.last().expect("assistant continuation");
+    let (nudge, rest) = request.split_last().expect("continuation nudge");
+    assert_eq!(nudge.role, Role::User);
+    assert!(
+        matches!(nudge.content.iter().last(), Some(ContentBlock::Text { text, .. }) if text.ends_with("Continue.")),
+        "providers never see a trailing assistant message: {nudge:?}"
+    );
+    let last = rest.last().expect("assistant continuation");
     assert_eq!(last.role, Role::Assistant);
     assert!(
         last.content
@@ -341,14 +347,42 @@ async fn reload_mid_stream_continues_without_a_user_message() {
         last.content
     );
     assert_eq!(
-        request
-            .iter()
+        rest.iter()
             .filter(|message| message.role == Role::User)
             .count(),
         1,
-        "the only user message is the original prompt: {request:#?}"
+        "the only user message before the nudge is the original prompt: {request:#?}"
     );
     assert!(!has_synthetic_user_prompt(&request));
+    let saved = crate::session::Session::load(&session_id).unwrap();
+    assert!(
+        !saved.messages.iter().any(|message| message.role == Role::User
+            && message.content.iter().any(|block| matches!(block, ContentBlock::Text { text, .. } if text.ends_with("Continue.")))),
+        "the nudge is request-only, never persisted"
+    );
+}
+
+#[test]
+fn paused_server_tool_turn_is_resent_without_a_nudge() {
+    let paused = Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ProviderNative {
+            provider: "anthropic".into(),
+            item: serde_json::json!({"type": "server_tool_use"}),
+        }]
+        .into(),
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    assert!(super::reload_resume::trailing_assistant_nudge(&[Message::user("q"), paused]).is_none());
+    assert!(super::reload_resume::trailing_assistant_nudge(&[Message::user("q")]).is_none());
+    assert!(
+        super::reload_resume::trailing_assistant_nudge(&[
+            Message::user("q"),
+            Message::assistant_text("partial")
+        ])
+        .is_some()
+    );
 }
 
 /// Queued prompts survive the reload and are still delivered.
@@ -380,6 +414,7 @@ async fn reload_preserves_queued_prompts() {
         system_reminder: None,
         active_skill: None,
         images: vec![],
+        attachments: Vec::new(),
         urgent: false,
         source: jcode_agent_runtime::SoftInterruptSource::User,
         mode: Default::default(),

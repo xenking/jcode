@@ -505,6 +505,7 @@ pub(super) async fn run_reserved_followups(
             agent,
             lease,
             result,
+            messages_before,
             None,
             event_tx.clone(),
             &allowed_models,

@@ -94,10 +94,25 @@ pub(crate) fn ends_with_reload_marker(session: &crate::session::Session) -> bool
         })
 }
 
+/// A resumed request can end on the assistant's own interrupted text. Some
+/// providers reject a trailing assistant message and others treat it as a
+/// prefill; an unsaved "Continue." user turn works on all of them and keeps the
+/// cached prefix. A turn paused mid server-tool use is resent as-is.
+pub(crate) fn trailing_assistant_nudge(messages: &[Message]) -> Option<Message> {
+    let last = messages.last()?;
+    (last.role == Role::Assistant
+        && !matches!(
+            last.content.iter().last(),
+            Some(ContentBlock::ProviderNative { .. })
+        ))
+    .then(|| Message::user("Continue."))
+}
+
 fn interrupted_tool_result_text(name: &str, background_note: &str) -> String {
     let mut text = format!(
         "Tool '{name}' was interrupted by a server restart before it returned, so it produced no result. \
-         Do not assume it succeeded or failed. Re-run it if it is still needed, then continue the task."
+         Do not assume it succeeded or failed: check whether it already took effect before re-running it, \
+         then continue the task."
     );
     let note = background_note.trim();
     if !note.is_empty() {
@@ -120,6 +135,12 @@ impl Agent {
         let Some(last) = self.session.messages.last() else {
             return ResumePlan::Nothing;
         };
+        // An unanswered ask owns the continuation even when other tools from
+        // the same reply are also pending: answering it must reach the model,
+        // and the turn's missing-output repair covers the rest afterwards.
+        if self.has_interrupted_ask() {
+            return ResumePlan::AwaitingAsk;
+        }
         let pending: Vec<_> = pending_tool_uses(&self.session)
             .into_iter()
             .filter(|pending| {
@@ -130,9 +151,6 @@ impl Agent {
             .collect();
         if !pending.is_empty() {
             return ResumePlan::ToolResults(pending);
-        }
-        if self.has_interrupted_ask() {
-            return ResumePlan::AwaitingAsk;
         }
         match last.role {
             Role::Assistant if durable_intent || ends_with_reload_marker(&self.session) => {
@@ -178,6 +196,7 @@ impl Agent {
                         timestamp: Some(chrono::Utc::now()),
                         tool_duration_ms: None,
                         token_usage: None,
+                        attachment_data: None,
                     },
                 );
                 self.tool_call_ids.insert(tool.id.clone());

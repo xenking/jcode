@@ -948,25 +948,16 @@ impl RecoveryOwner {
             fallback,
             &lease,
         );
-        super::update_member_status(
-            session_id,
-            "running",
-            Some("resuming after reload".into()),
-            &self.swarm.members,
-            &self.swarm.swarms_by_id,
-            Some(&self.history),
-            Some(&self.counter),
-            Some(&self.events),
-        )
-        .await;
         let wake = record.wake;
         if !wake {
             let plan = { agent.lock().await.reload_resume_plan(true) };
             match plan {
                 crate::agent::ResumePlan::Nothing => {
+                    // Consumed, not a tombstone: a later crash mid-turn must
+                    // still be recoverable for this session.
                     if let Err(error) = finish_pending(
                         session_id,
-                        ReloadRecoveryStatus::Blocked,
+                        ReloadRecoveryStatus::Started,
                         "nothing to resume in the restored transcript",
                     ) {
                         crate::logging::warn(&format!(
@@ -985,6 +976,17 @@ impl RecoveryOwner {
                 }
             }
         }
+        super::update_member_status(
+            session_id,
+            "running",
+            Some("resuming after reload".into()),
+            &self.swarm.members,
+            &self.swarm.swarms_by_id,
+            Some(&self.history),
+            Some(&self.counter),
+            Some(&self.events),
+        )
+        .await;
         let processing = async {
             if wake {
                 // An idle worker with an open todo lane has no interrupted
@@ -1028,7 +1030,7 @@ impl RecoveryOwner {
         if matches!(result, Ok(crate::agent::ResumeOutcome::NothingToResume))
             && let Err(error) = finish_pending(
                 session_id,
-                ReloadRecoveryStatus::Blocked,
+                ReloadRecoveryStatus::Started,
                 "nothing to resume in the restored transcript",
             )
         {

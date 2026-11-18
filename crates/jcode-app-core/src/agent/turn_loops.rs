@@ -153,6 +153,10 @@ impl Agent {
                 crate::subscription_notice::show_upgrade_card(&notice, &self.session.id);
                 messages_with_memory.push(Message::user(&Self::plan_limit_reminder(&notice)));
             }
+            if let Some(nudge) = super::reload_resume::trailing_assistant_nudge(&messages_with_memory)
+            {
+                messages_with_memory.push(nudge);
+            }
 
             logging::info(&format!(
                 "API call starting: {} messages, {} tools",

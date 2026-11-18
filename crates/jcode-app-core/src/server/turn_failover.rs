@@ -262,6 +262,7 @@ pub(super) async fn process_reserved_message_with_server_failover(
 ) -> anyhow::Result<()> {
     let reminder = system_reminder.clone();
     let mut guard = agent.lock().await;
+    let attempt_start = guard.message_count();
     let result = super::client_lifecycle::process_reserved_message_streaming_mpsc(
         &mut guard,
         lease,
@@ -283,6 +284,7 @@ pub(super) async fn process_reserved_message_with_server_failover(
             &mut guard,
             lease,
             result,
+            attempt_start,
             reminder.clone(),
             event_tx.clone(),
             &allowed,
@@ -295,6 +297,7 @@ pub(super) async fn process_reserved_message_with_server_failover(
         &mut guard,
         lease,
         result,
+        attempt_start,
         reminder.clone(),
         event_tx.clone(),
         &fallbacks,
@@ -314,6 +317,9 @@ pub(super) async fn process_reserved_resume_with_server_failover(
     event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> anyhow::Result<crate::agent::ResumeOutcome> {
     let mut guard = agent.lock().await;
+    // The interrupted assistant text already ends the transcript; only output
+    // produced by this attempt rules out a retry on another route.
+    let attempt_start = guard.message_count();
     let attempt = guard
         .resume_interrupted_turn_mpsc(lease, event_tx.clone(), true)
         .await;
@@ -331,6 +337,7 @@ pub(super) async fn process_reserved_resume_with_server_failover(
         &mut guard,
         lease,
         attempt.map(|_| ()),
+        attempt_start,
         None,
         event_tx.clone(),
         &allowed,
@@ -341,6 +348,7 @@ pub(super) async fn process_reserved_resume_with_server_failover(
         &mut guard,
         lease,
         result,
+        attempt_start,
         None,
         event_tx.clone(),
         &fallbacks,
@@ -416,6 +424,7 @@ pub(super) async fn process_reserved_locked_message_with_swarm_fallbacks(
 ) -> anyhow::Result<()> {
     agent.validate_server_turn(lease)?;
     let reminder = system_reminder.clone();
+    let attempt_start = agent.message_count();
     let result = super::client_lifecycle::process_reserved_message_streaming_mpsc(
         agent,
         lease,
@@ -431,6 +440,7 @@ pub(super) async fn process_reserved_locked_message_with_swarm_fallbacks(
         agent,
         lease,
         result,
+        attempt_start,
         reminder.clone(),
         event_tx.clone(),
         allowed_models,
@@ -440,6 +450,7 @@ pub(super) async fn process_reserved_locked_message_with_swarm_fallbacks(
         agent,
         lease,
         result,
+        attempt_start,
         reminder.clone(),
         event_tx.clone(),
         fallbacks,
@@ -546,6 +557,7 @@ async fn retry_turn_with_model_fallbacks(
     agent: &mut Agent,
     lease: &crate::agent::TurnLease,
     mut result: anyhow::Result<()>,
+    mut attempt_start: usize,
     reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
     fallbacks: &[String],
@@ -564,7 +576,7 @@ async fn retry_turn_with_model_fallbacks(
             break;
         };
         // Never re-ask after the model already produced a partial reply.
-        if agent.last_message_role() != Some(crate::message::Role::User) {
+        if attempt_produced_reply(agent, attempt_start) {
             break;
         }
         let candidate = FallbackTarget::parse(fallback);
@@ -607,6 +619,7 @@ async fn retry_turn_with_model_fallbacks(
         let _ = event_tx.send(ServerEvent::ConnectionPhase {
             phase: format!("retrying on fallback {fallback}"),
         });
+        attempt_start = agent.message_count();
         result = agent
             .continue_turn_after_failover(lease, reminder.clone(), event_tx.clone())
             .await;
@@ -632,6 +645,7 @@ pub(super) async fn process_reserved_locked_context_with_server_failover(
 ) -> anyhow::Result<()> {
     agent.validate_server_turn(lease)?;
     let reminder = system_reminder.clone();
+    let attempt_start = agent.message_count();
     let result = agent
         .run_reserved_streaming_mpsc(
             lease,
@@ -663,6 +677,7 @@ pub(super) async fn process_reserved_locked_context_with_server_failover(
         agent,
         lease,
         result,
+        attempt_start,
         reminder.clone(),
         event_tx.clone(),
         &allowed,
@@ -673,6 +688,7 @@ pub(super) async fn process_reserved_locked_context_with_server_failover(
         agent,
         lease,
         result,
+        attempt_start,
         reminder.clone(),
         event_tx.clone(),
         &fallbacks,
@@ -717,13 +733,23 @@ pub(super) async fn process_server_initiated_message(
     .await
 }
 
+/// Whether the failed attempt that began at `attempt_start` messages already
+/// persisted assistant output. A resumed turn may end on the interrupted
+/// assistant text from before the restart; that is not this attempt's reply.
+fn attempt_produced_reply(agent: &Agent, attempt_start: usize) -> bool {
+    agent.message_count() > attempt_start
+        && agent.last_message_role() != Some(crate::message::Role::User)
+}
+
 /// Given the result of a turn attempt, switch to the next pool-approved
 /// account and re-run the same turn while it keeps failing with a
-/// usage/rate-limit error.
+/// usage/rate-limit error. `attempt_start` is the message count before the
+/// failed attempt.
 pub(super) async fn retry_turn_with_server_failover(
     agent: &mut Agent,
     lease: &crate::agent::TurnLease,
     mut result: anyhow::Result<()>,
+    mut attempt_start: usize,
     reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
     allowed_models: &[String],
@@ -735,10 +761,9 @@ pub(super) async fn retry_turn_with_server_failover(
             break;
         }
         let message = crate::util::format_error_chain(error);
-        // Only retry a turn whose last persisted message is still the
-        // request (user prompt or tool results). Never re-ask after the
-        // model already produced a partial reply.
-        if agent.last_message_role() != Some(crate::message::Role::User) {
+        // Only retry a turn whose failed attempt produced no assistant output.
+        // Never re-ask after the model already produced a partial reply.
+        if attempt_produced_reply(agent, attempt_start) {
             break;
         }
         let Some(target) = pick_failover_target(agent, &message) else {
@@ -773,6 +798,7 @@ pub(super) async fn retry_turn_with_server_failover(
             let _ = event_tx.send(event);
         }
         attempts += 1;
+        attempt_start = agent.message_count();
         result = agent
             .continue_turn_after_failover(lease, reminder.clone(), event_tx.clone())
             .await;

@@ -158,6 +158,11 @@ impl Agent {
                 ephemeral_signature_messages.push(reminder.clone());
                 messages_with_memory.push(reminder);
             }
+            if let Some(nudge) = super::reload_resume::trailing_assistant_nudge(&messages_with_memory)
+            {
+                ephemeral_signature_messages.push(nudge.clone());
+                messages_with_memory.push(nudge);
+            }
 
             logging::info(&format!(
                 "API call starting: {} messages, {} tools",
