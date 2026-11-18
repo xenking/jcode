@@ -411,18 +411,9 @@ fn ensure_test_jcode_home_if_unset() {
     if std::env::var_os("JCODE_HOME").is_some() {
         return;
     }
-
-    // Serialize the unset -> set transition against tests that scope their
-    // own JCODE_HOME under `lock_test_env`. The mutex is not reentrant and
-    // several tests hold it while calling `create_test_app` (e.g. the
-    // pinned-todo-band test), so a blocking `lock_test_env()` here would
-    // self-deadlock whenever a preceding test removed JCODE_HOME on drop.
-    // `try_lock` keeps the serialization when the lock is free and degrades
-    // to the caller's own exclusion when this thread already holds it: if
-    // try_lock fails because *we* hold the lock, no other thread can race
-    // this read-modify-write anyway.
-    let _env_lock = crate::storage::test_env_lock().try_lock();
-
+    let Ok(_env_lock) = crate::storage::test_env_lock().try_lock() else {
+        return;
+    };
     if std::env::var_os("JCODE_HOME").is_some() {
         return;
     }

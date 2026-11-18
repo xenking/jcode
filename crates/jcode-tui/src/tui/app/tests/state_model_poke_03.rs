@@ -472,7 +472,6 @@ impl Provider for CountingModelRoutesProvider {
 fn test_subagent_model_large_catalog_uses_cached_searchable_picker() {
     // Shared env, config and catalog caches: run hermetically.
     with_temp_jcode_home(|| {
-        ensure_test_jcode_home_if_unset();
         clear_persisted_test_ui_state();
         crate::tui::ui::clear_test_render_state_for_tests();
 
@@ -539,7 +538,6 @@ fn test_model_picker_reuses_cached_entries_until_invalidated() {
     // The cache key includes account/config paths. Keep them stable while
     // account-selection regressions scope their own temporary homes.
     let _env_lock = crate::storage::lock_test_env();
-    ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
 
@@ -580,7 +578,6 @@ fn test_model_picker_reuses_cached_entries_until_invalidated() {
 
 #[test]
 fn test_shift_tab_model_favorite_hotkey_preserves_input_line() {
-    ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
 
@@ -609,7 +606,6 @@ fn test_shift_tab_model_favorite_hotkey_preserves_input_line() {
 
 #[test]
 fn test_new_local_session_does_not_run_post_login_model_refresh() {
-    ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
 
     let authed = StdArc::new(AtomicBool::new(false));
@@ -657,7 +653,6 @@ fn test_new_local_session_does_not_run_post_login_model_refresh() {
 
 #[test]
 fn test_tui_api_key_auth_refreshes_catalog_shows_diff_without_opening_picker() {
-    ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
 
@@ -753,7 +748,6 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
         "JCODE_ACTIVE_PROVIDER",
         "JCODE_INITIAL_PROVIDER_EXPLICIT",
     ]);
-    ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
 
@@ -1080,7 +1074,6 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
 fn test_tui_openai_compatible_empty_catalog_does_not_switch_to_profile_default() {
     // Shared env, config and catalog caches: run hermetically.
     with_temp_jcode_home(|| {
-        ensure_test_jcode_home_if_unset();
         clear_persisted_test_ui_state();
         crate::tui::ui::clear_test_render_state_for_tests();
 
@@ -1112,7 +1105,9 @@ fn test_tui_openai_compatible_empty_catalog_does_not_switch_to_profile_default()
                         panic!("empty catalog must not activate a provider model")
                     }
                     Ok(Ok(crate::bus::BusEvent::LoginCompleted(login))) => {
-                        panic!("empty local catalog must not publish final login failure: {login:?}")
+                        panic!(
+                            "empty local catalog must not publish final login failure: {login:?}"
+                        )
                     }
                     Ok(Ok(crate::bus::BusEvent::UiActivity(activity)))
                         if activity.message.contains("Model Discovery Still Updating") =>
@@ -1141,7 +1136,6 @@ fn test_tui_openai_compatible_empty_catalog_does_not_switch_to_profile_default()
 
 #[test]
 fn test_tui_openai_compatible_local_refresh_failure_is_pending_not_final_failure() {
-    ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
 
@@ -1210,7 +1204,6 @@ fn test_tui_openai_compatible_local_refresh_failure_is_pending_not_final_failure
 fn test_model_picker_opens_simplified_state_before_async_routes_complete() {
     // Shared env, config and catalog caches: run hermetically.
     with_temp_jcode_home(|| {
-        ensure_test_jcode_home_if_unset();
         clear_persisted_test_ui_state();
         crate::tui::ui::clear_test_render_state_for_tests();
 
@@ -1253,77 +1246,76 @@ fn test_model_picker_opens_simplified_state_before_async_routes_complete() {
 
 #[test]
 fn test_model_picker_state_space_preserves_provider_labels_after_route_hydration() {
-    ensure_test_jcode_home_if_unset();
-    clear_persisted_test_ui_state();
-    crate::tui::ui::clear_test_render_state_for_tests();
+    with_temp_jcode_home(|| {
+        crate::tui::ui::clear_test_render_state_for_tests();
 
-    let provider: Arc<dyn Provider> = Arc::new(MixedModelRoutesProvider {
-        model: StdArc::new(StdMutex::new("gpt-5.5".to_string())),
-    });
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
-    let mut app = App::new_for_test_harness(provider, registry);
-    app.queue_mode = false;
-    app.diff_mode = crate::config::DiffDisplayMode::Inline;
-    app.recent_authenticated_provider = Some(("chutes".to_string(), Instant::now()));
+        let provider: Arc<dyn Provider> = Arc::new(MixedModelRoutesProvider {
+            model: StdArc::new(StdMutex::new("gpt-5.5".to_string())),
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        let mut app = App::new_for_test_harness(provider, registry);
+        app.queue_mode = false;
+        app.diff_mode = crate::config::DiffDisplayMode::Inline;
+        app.recent_authenticated_provider = Some(("chutes".to_string(), Instant::now()));
 
-    app.open_model_picker();
-    wait_for_model_picker_load(&mut app);
+        app.open_model_picker();
+        wait_for_model_picker_load(&mut app);
 
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("hydrated mixed-provider model picker should be open");
-    let mut routes_by_model = std::collections::BTreeMap::new();
-    for entry in &picker.entries {
-        let route = entry
-            .active_option()
-            .expect("model picker entry should have an active route");
-        routes_by_model.insert(
-            entry.name.clone(),
-            (route.provider.clone(), route.api_method.clone()),
-        );
-    }
-
-    // A model is listed once, with the hydrated route of that row; the
-    // reasoning levels it accepts are the picker's second step.
-    assert_eq!(
-        routes_by_model.get("gpt-5.5"),
-        Some(&("OpenAI".to_string(), "openai-oauth".to_string()))
-    );
-    assert_eq!(
-        routes_by_model.get("claude-opus-4-6"),
-        Some(&("Anthropic".to_string(), "claude-oauth".to_string()))
-    );
-    assert_eq!(
-        routes_by_model.get("Qwen/Qwen3-Coder-480B-A35B-Instruct"),
-        Some(&("Chutes".to_string(), "openai-compatible:chutes".to_string()))
-    );
-    assert_eq!(
-        routes_by_model.get("deepseek/deepseek-v4-pro"),
-        Some(&("auto".to_string(), "openrouter".to_string()))
-    );
-
-    let chutes_rows = picker
-        .entries
-        .iter()
-        .filter(|entry| {
-            entry
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("hydrated mixed-provider model picker should be open");
+        let mut routes_by_model = std::collections::BTreeMap::new();
+        for entry in &picker.entries {
+            let route = entry
                 .active_option()
-                .map(|route| route.provider == "Chutes")
-                .unwrap_or(false)
-        })
-        .count();
-    assert_eq!(
-        chutes_rows, 1,
-        "opening the model list must not collapse every route to the recently authenticated direct provider: {:?}",
-        routes_by_model
-    );
+                .expect("model picker entry should have an active route");
+            routes_by_model.insert(
+                entry.name.clone(),
+                (route.provider.clone(), route.api_method.clone()),
+            );
+        }
+
+        // A model is listed once, with the hydrated route of that row; the
+        // reasoning levels it accepts are the picker's second step.
+        assert_eq!(
+            routes_by_model.get("gpt-5.5"),
+            Some(&("OpenAI".to_string(), "openai-oauth".to_string()))
+        );
+        assert_eq!(
+            routes_by_model.get("claude-opus-4-6"),
+            Some(&("Anthropic".to_string(), "claude-oauth".to_string()))
+        );
+        assert_eq!(
+            routes_by_model.get("Qwen/Qwen3-Coder-480B-A35B-Instruct"),
+            Some(&("Chutes".to_string(), "openai-compatible:chutes".to_string()))
+        );
+        assert_eq!(
+            routes_by_model.get("deepseek/deepseek-v4-pro"),
+            Some(&("auto".to_string(), "openrouter".to_string()))
+        );
+
+        let chutes_rows = picker
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry
+                    .active_option()
+                    .map(|route| route.provider == "Chutes")
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(
+            chutes_rows, 1,
+            "opening the model list must not collapse every route to the recently authenticated direct provider: {:?}",
+            routes_by_model
+        );
+    });
 }
 
 #[test]
 fn test_model_picker_does_not_cache_single_model_fallback() {
-    ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
 
@@ -1383,7 +1375,6 @@ fn test_local_model_picker_selection_failure_keeps_picker_open_and_shows_next_st
 
 #[test]
 fn test_login_completed_spawns_auth_refresh_when_runtime_is_available() {
-    ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
 
@@ -1427,7 +1418,6 @@ fn test_login_completed_spawns_auth_refresh_when_runtime_is_available() {
 
 #[test]
 fn test_model_picker_waits_for_async_post_login_catalog_activation() {
-    ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
 
@@ -1677,7 +1667,6 @@ fn test_azure_login_completion_switches_local_model_without_completion() {
     crate::env::set_var("AZURE_OPENAI_API_KEY", "test-key");
     crate::env::set_var("AZURE_OPENAI_USE_ENTRA", "0");
 
-    ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
 

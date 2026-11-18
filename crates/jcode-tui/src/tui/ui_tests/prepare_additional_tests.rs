@@ -29,9 +29,9 @@ fn streaming_hash_default_fallback_invalidates_same_length_frame() {
 }
 
 #[test]
-fn test_prepare_messages_places_live_swarm_card_beneath_matching_spawn_tool_call() {
+fn test_spawn_row_is_stable_across_live_worker_updates() {
     let session_id = "spawned-session-123";
-    let state = TestState {
+    let mut state = TestState {
         display_messages: vec![DisplayMessage {
             role: "tool".to_string(),
             content: format!("Spawned new agent: {session_id}"),
@@ -61,28 +61,26 @@ fn test_prepare_messages_places_live_swarm_card_beneath_matching_spawn_tool_call
         .iter()
         .map(extract_line_text)
         .collect::<Vec<_>>();
-    let tool_row = rendered
+    let rows: Vec<_> = rendered
         .iter()
-        .position(|line| line.contains("Spawn an authentication reviewer"))
-        .expect("missing swarm tool row");
-    let card_row = rendered
-        .iter()
-        .position(|line| line.contains("🐄 ● API reviewer"))
-        .expect("missing live member card");
-    let all = rendered.join("\n");
-
+        .filter(|line| line.contains("API reviewer"))
+        .collect();
     assert_eq!(
-        card_row,
-        tool_row + 1,
-        "card must directly follow tool: {all}"
+        rows,
+        vec!["  🐝 + → API reviewer · Review the authentication flow  ⊞"]
     );
-    // Transcript cards are deliberately stable one-liners: no elapsed time,
-    // todos, or tool progress (those live on the dedicated swarm page), so
-    // old chat rows do not move while the user is reading them.
-    assert!(
-        rendered[card_row].contains("🐄 ● API reviewer · Working"),
-        "stable card line missing: {all}"
+    state.swarm_members.clear();
+    let without_live = prepare::prepare_messages(&state, 110, 30);
+    assert_eq!(
+        without_live
+            .materialize_all_lines()
+            .iter()
+            .map(extract_line_text)
+            .collect::<Vec<_>>(),
+        rendered,
+        "retiring a worker must not change its historical spawn row"
     );
+    let all = rendered.join("\n");
     assert!(
         !all.contains("00:18"),
         "elapsed time must not render in transcript cards: {all}"

@@ -1073,9 +1073,6 @@ struct BodyCacheKey {
     /// expand-level geometry into the body, so a level change must rebuild the
     /// body exactly like an image-set change does.
     expanded_images_version: u64,
-    /// Live swarm-member data renders beneath the tool call that spawned each
-    /// member, so status/todo/tool-intent updates must invalidate the body.
-    swarm_members_signature: u64,
     latex_rendering: crate::config::LatexRenderingMode,
     show_link_urls: bool,
 }
@@ -1172,7 +1169,6 @@ impl BodyCacheState {
                     && entry.key.inline_images_visible == key.inline_images_visible
                     && entry.key.images_signature == key.images_signature
                     && entry.key.expanded_images_version == key.expanded_images_version
-                    && entry.key.swarm_members_signature == key.swarm_members_signature
                     && entry.key.latex_rendering == key.latex_rendering
                     && entry.key.show_link_urls == key.show_link_urls
             })
@@ -1196,7 +1192,6 @@ impl BodyCacheState {
                     && entry.key.inline_images_visible == key.inline_images_visible
                     && entry.key.images_signature == key.images_signature
                     && entry.key.expanded_images_version == key.expanded_images_version
-                    && entry.key.swarm_members_signature == key.swarm_members_signature
                     && entry.key.latex_rendering == key.latex_rendering
                     && entry.key.show_link_urls == key.show_link_urls
             })
@@ -1319,8 +1314,6 @@ struct FullPrepCacheKey {
     /// Per-image expand-level version; anchored image geometry is embedded in
     /// the prepared frame, so a level change must invalidate it.
     expanded_images_version: u64,
-    /// Signature of live swarm member cards embedded beneath spawn tool calls.
-    swarm_members_signature: u64,
     latex_rendering: crate::config::LatexRenderingMode,
     show_link_urls: bool,
 }

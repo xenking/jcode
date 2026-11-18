@@ -194,7 +194,7 @@ fn test_reload_handoff_active_when_socket_ready_marker_present() {
 }
 
 #[test]
-fn test_handle_server_event_history_with_interruption_queues_continuation() {
+fn test_handle_server_event_history_with_interruption_preserves_transcript() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -254,7 +254,11 @@ fn test_handle_server_event_history_with_interruption_queues_continuation() {
         &mut remote,
     );
 
-    assert!(app.display_messages().len() >= 2);
+    let [message] = app.display_messages() else {
+        panic!("reload must preserve only the original assistant row");
+    };
+    assert_eq!(message.role, "assistant");
+    assert_eq!(message.content, "I was working on something");
     assert_eq!(app.connection_type.as_deref(), Some("websocket"));
     assert!(
         app.status_notice

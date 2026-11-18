@@ -367,64 +367,6 @@ pub(super) fn active_batch_progress_hash(app: &dyn TuiState) -> u64 {
     hasher.finish()
 }
 
-fn spawned_member_for_tool<'a>(
-    msg: &DisplayMessage,
-    members: &'a [crate::protocol::SwarmMemberStatus],
-) -> Option<&'a crate::protocol::SwarmMemberStatus> {
-    let tool = msg.tool_data.as_ref()?;
-    if tools_ui::canonical_tool_name(&tool.name) != "swarm" {
-        return None;
-    }
-
-    // Live remote tool output is decorated as `[swarm] Spawned new agent: …`.
-    // The completed ToolCall can also lose its parsed input across a reload or
-    // event race, so the server-issued session ID is the authoritative signal.
-    let session_id = msg
-        .content
-        .lines()
-        .find_map(|line| line.split_once("Spawned new agent: ").map(|(_, id)| id))
-        .map(str::trim);
-    if let Some(member) = session_id.and_then(|session_id| {
-        members
-            .iter()
-            .find(|member| member.session_id == session_id)
-    }) {
-        return Some(member);
-    }
-
-    // The server may publish the member snapshot before or after the tool result,
-    // and older/reformatted tool results may not retain the exact session-id line.
-    // The spawn label is copied into `task_label`, so use a unique label match as
-    // a safe fallback. Requiring uniqueness prevents an old spawn row from
-    // adopting a newer worker when labels are reused.
-    if tool.input.get("action").and_then(|value| value.as_str()) != Some("spawn") {
-        return None;
-    }
-    let label = tool.input.get("label").and_then(|value| value.as_str())?;
-    let mut matching = members
-        .iter()
-        .filter(|member| member.task_label.as_deref() == Some(label));
-    let member = matching.next()?;
-    matching.next().is_none().then_some(member)
-}
-
-fn swarm_members_signature(members: &[crate::protocol::SwarmMemberStatus]) -> u64 {
-    // Chat only renders a stable one-line identity/status summary. Excluding
-    // elapsed time, age, output tails, todos, tool progress, and runtime details
-    // prevents high-frequency live swarm updates from invalidating the entire
-    // transcript preparation cache.
-    let mut ordered: Vec<_> = members.iter().collect();
-    ordered.sort_by(|a, b| a.session_id.cmp(&b.session_id));
-    let mut hasher = DefaultHasher::new();
-    for member in ordered {
-        member.session_id.hash(&mut hasher);
-        member.friendly_name.hash(&mut hasher);
-        member.status.hash(&mut hasher);
-        member.task_label.hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
 fn prepare_active_batch_progress(
     app: &dyn TuiState,
     width: u16,
@@ -594,7 +536,6 @@ pub(super) fn prepare_messages(
         },
         inline_images_visible: app.inline_images_visible(),
         expanded_images_version: app.expanded_images_version(),
-        swarm_members_signature: swarm_members_signature(&app.swarm_members_for_transcript()),
         latex_rendering: crate::config::config().display.latex_rendering,
         show_link_urls: crate::config::config().display.show_link_urls,
     };
@@ -1088,7 +1029,6 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
         inline_images_visible: app.inline_images_visible(),
         images_signature: app.side_pane_images_signature(),
         expanded_images_version: app.expanded_images_version(),
-        swarm_members_signature: swarm_members_signature(&app.swarm_members_for_transcript()),
         latex_rendering: crate::config::config().display.latex_rendering,
         show_link_urls: crate::config::config().display.show_link_urls,
     };
@@ -1273,7 +1213,6 @@ struct BodyRenderCtx<'a> {
     anchored_images: Arc<super::inline_image_ui::AnchoredInlineImages>,
     inline_images_visible: bool,
     messages: &'a [DisplayMessage],
-    swarm_members: Vec<crate::protocol::SwarmMemberStatus>,
 }
 
 /// Render saved history through the live dispatcher and wrapping pipeline.
@@ -1350,7 +1289,6 @@ fn prepare_history_preview_bounded(
             anchored_images: Arc::new(Default::default()),
             inline_images_visible: false,
             messages,
-            swarm_members: Vec::new(),
         };
         let mut acc = BodyAcc::default();
         for (idx, msg) in messages.iter().enumerate() {
@@ -1498,7 +1436,6 @@ pub(super) fn prepare_body_incremental(
         anchored_images,
         inline_images_visible: app.inline_images_visible(),
         messages,
-        swarm_members: app.swarm_members_for_transcript(),
     };
 
     let mut acc = BodyAcc {
@@ -1840,7 +1777,6 @@ pub(super) fn prepare_body_prepended(
         anchored_images: super::inline_image_ui::resolve_anchored_items_cached(app),
         inline_images_visible: app.inline_images_visible(),
         messages,
-        swarm_members: app.swarm_members_for_transcript(),
     };
 
     // The head sits at the very top of the transcript, so it starts with the
@@ -2219,7 +2155,6 @@ pub(super) fn prepare_body(
         anchored_images,
         inline_images_visible: app.inline_images_visible(),
         messages,
-        swarm_members: app.swarm_members_for_transcript(),
     };
     let ctx_ms = images_start.elapsed().as_millis() - images_ms;
 

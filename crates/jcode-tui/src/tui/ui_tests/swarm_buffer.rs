@@ -647,7 +647,11 @@ fn widgets_render_detail_layer_without_repeating_status_line_facts() {
         .rev()
         .find(|r| r.contains("~/jcode"))
         .expect("status line");
-    for owned in ["GPT-5.6 Sol", "74k/256k", "29%", "OAuth", "main"] {
+    for owned in ["GPT-5.6 Sol", "󰍛 29%", "◒", "main"] {
         assert!(line.contains(owned), "line owns {owned:?}: {line}");
     }
+    assert!(
+        !line.contains("74k/256k") && !line.contains("OAuth"),
+        "{line}"
+    );
 }

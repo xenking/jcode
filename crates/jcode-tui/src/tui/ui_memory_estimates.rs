@@ -515,7 +515,6 @@ mod diagnostic_tests {
             inline_images_visible: true,
             images_signature: (0, 0),
             expanded_images_version: 0,
-            swarm_members_signature: 0,
             latex_rendering: crate::config::LatexRenderingMode::Image,
             show_link_urls: false,
         };
@@ -535,7 +534,6 @@ mod diagnostic_tests {
             inline_images_signature: (0, 0),
             inline_images_visible: true,
             expanded_images_version: 0,
-            swarm_members_signature: 0,
             latex_rendering: crate::config::LatexRenderingMode::Image,
             show_link_urls: false,
         };

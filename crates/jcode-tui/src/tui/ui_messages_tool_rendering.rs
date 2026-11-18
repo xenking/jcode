@@ -13,7 +13,21 @@ fn render_swarm_tool(msg: &DisplayMessage, width: u16) -> Option<Vec<Line<'stati
             .and_then(|v| v.as_str())
             .filter(|s| !s.trim().is_empty())
     };
-    let action = get("action").unwrap_or("status");
+    let state = jcode_tui_messages::parse_collapsible_swarm_content(&msg.content);
+    let expanded = state.is_some_and(|state| state.expanded);
+    let output = state.map_or(msg.content.as_str(), |state| state.body);
+    let spawned_id = output.lines().find_map(|line| {
+        let line = line.trim();
+        let line = line.strip_prefix("[swarm] ").unwrap_or(line);
+        line.strip_prefix("Spawned new agent: ")
+            .map(str::trim)
+            .filter(|id| !id.is_empty() && !id.contains(char::is_whitespace))
+    });
+    let action = get("action").unwrap_or(if spawned_id.is_some() {
+        "spawn"
+    } else {
+        "status"
+    });
     let icon = match action {
         "message" | "dm" => "✉",
         "spawn" | "resume" => "+",
@@ -57,7 +71,10 @@ fn render_swarm_tool(msg: &DisplayMessage, width: u16) -> Option<Vec<Line<'stati
             .flatten(),
     );
     let target = if action == "spawn" {
-        get("label").unwrap_or("worker").to_owned()
+        get("label")
+            .or_else(|| spawned_id.map(friendly))
+            .unwrap_or("worker")
+            .to_owned()
     } else if ids.is_empty() {
         get("channel")
             .or_else(|| get("to_swarm"))
@@ -73,9 +90,6 @@ fn render_swarm_tool(msg: &DisplayMessage, width: u16) -> Option<Vec<Line<'stati
             .join(", ")
     };
     let text = get("message").or_else(|| get("prompt")).unwrap_or("");
-    let state = jcode_tui_messages::parse_collapsible_swarm_content(&msg.content);
-    let expanded = state.is_some_and(|state| state.expanded);
-    let output = state.map_or(msg.content.as_str(), |state| state.body);
     let failed = tools_ui::tool_output_looks_failed(output);
     let preview = if text.is_empty() {
         action.to_owned()

@@ -111,6 +111,12 @@ fn ensure_test_jcode_home_if_unset() {
     if std::env::var_os("JCODE_HOME").is_some() {
         return;
     }
+    let Ok(_env_lock) = crate::storage::test_env_lock().try_lock() else {
+        return;
+    };
+    if std::env::var_os("JCODE_HOME").is_some() {
+        return;
+    }
 
     let path = TEST_HOME.get_or_init(|| {
         let path = std::env::temp_dir().join(format!("jcode-test-home-{}", std::process::id()));

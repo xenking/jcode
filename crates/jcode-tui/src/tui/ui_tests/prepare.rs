@@ -175,13 +175,13 @@ fn test_prepare_messages_keeps_transcript_card_stable_with_nested_descendants() 
                 thought_signature: None,
             }),
         }],
-        transcript_swarm_members: Some(vec![
+        swarm_members: vec![
             chat_swarm_member(root_id),
             child_a,
             child_b,
             grandchild,
             unrelated,
-        ]),
+        ],
         ..Default::default()
     };
 
@@ -227,7 +227,6 @@ fn test_prepare_messages_uses_exact_spawn_member_outside_gallery_subtree() {
         // Simulate a stale/missing ownership edge excluding the member from the
         // persistent gallery while the authoritative spawn result still names it.
         swarm_members: Vec::new(),
-        transcript_swarm_members: Some(vec![chat_swarm_member(session_id)]),
         ..Default::default()
     };
 
@@ -272,7 +271,8 @@ fn test_prepare_messages_matches_real_prefixed_spawn_result_without_input_metada
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        !rendered.contains("🐄 ● API reviewer"),
+        rendered.contains("🐝 + → spawned-session-123 · spawn  ⊞")
+            && !rendered.contains("🐄 ● API reviewer"),
         "rendered={rendered}"
     );
 }

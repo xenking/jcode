@@ -767,7 +767,7 @@ mod tests {
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
             text.starts_with(&format!(
-                "{} resident-query-archive 1/2",
+                "{} panda · resident-query-archive 1/2  ●○ · Read",
                 crate::id::session_icon("panda")
             )),
             "unexpected completion preview: {text:?}"

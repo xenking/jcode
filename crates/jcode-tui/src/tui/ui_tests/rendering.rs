@@ -55,19 +55,30 @@ fn upstream_test_render_direct_message_as_compact_agent_row() {
 }
 
 #[test]
-fn upstream_test_render_swarm_await_wake_message_as_compact_rail_free_summary() {
-    crate::tui::markdown::set_center_code_blocks(false);
-    let msg = DisplayMessage::background_task(
-        "🐝 **Swarm await finished**\n\nAll members done. All 1 members are done: sabertooth\n\nMember statuses:\n  ✓ sabertooth (completed)\n\nRecent outputs:\n\n--- sabertooth (completed) ---\nAwait UI demo complete."
-            .to_string(),
-    );
-
+fn test_render_expanded_swarm_await_wake_preserves_worker_report() {
+    let report = "🐝 **Swarm await finished**\n\nAll members done. All 1 members are done: sabertooth\n\nMember statuses:\n  ✓ sabertooth (completed)\n\nRecent outputs:\n\n--- sabertooth (completed) ---\nAwait UI demo complete.";
+    let collapsed = jcode_tui_messages::encode_collapsible_swarm_content("Await report", report);
+    let expanded = jcode_tui_messages::toggle_collapsible_swarm_content(&collapsed).unwrap();
+    let msg = DisplayMessage::background_task(expanded);
     let lines = render_background_task_message(&msg, 80, crate::config::DiffDisplayMode::Off);
     let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
-
-    assert_eq!(rendered, vec!["🐝 Swarm await · 1/1 matched · 1 completed"]);
-    assert!(rendered.iter().all(|line| !line.contains('│')));
-    assert!(!rendered.join("\n").contains("sabertooth"));
+    assert!(
+        rendered[0]
+            .trim_start()
+            .starts_with("🐝 Swarm await · 1/1 matched · 1 completed"),
+        "{rendered:?}"
+    );
+    assert!(rendered[0].contains('⊟') && !rendered[0].contains('│'));
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("sabertooth (completed)"))
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("Await UI demo complete."))
+    );
 }
 
 #[test]
@@ -129,7 +140,7 @@ fn test_render_direct_message_as_compact_agent_row() {
 
     assert_eq!(rendered.len(), 1);
     assert!(
-        rendered[0].contains("🦊 fox · Can you take parser tests?") && rendered[0].contains('⊞'),
+        rendered[0] == "DM · 🦊 · 6 tok ⊞" && !rendered[0].contains("parser tests"),
         "{rendered:?}"
     );
     assert!(
@@ -281,7 +292,10 @@ fn test_render_swarm_await_wake_message_as_compact_rail_free_summary() {
     let lines = render_background_task_message(&msg, 80, crate::config::DiffDisplayMode::Off);
     let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
 
-    assert_eq!(rendered, vec!["🐝 ✓ 1/1  ⊞"]);
+    assert_eq!(
+        rendered,
+        vec!["🐝 Swarm await · 1/1 matched · 1 completed  ⊞"]
+    );
     assert!(rendered.iter().all(|line| !line.contains('│')));
     assert!(!rendered.join("\n").contains("sabertooth"));
 }

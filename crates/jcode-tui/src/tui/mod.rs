@@ -1047,14 +1047,6 @@ pub trait TuiState {
     fn has_inline_swarm_members(&self) -> bool {
         !self.inline_swarm_members().is_empty()
     }
-    /// Members available for cards embedded beneath swarm spawn tool calls.
-    ///
-    /// This may be broader than `inline_swarm_members`: the gallery is scoped by
-    /// the current ownership tree, while a transcript card can be matched safely
-    /// using the exact spawned session ID recorded in the tool result.
-    fn swarm_members_for_transcript(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
-        self.inline_swarm_members()
-    }
     /// Selected agent index in the inline swarm panel (display order).
     fn swarm_panel_selected(&self) -> usize {
         0

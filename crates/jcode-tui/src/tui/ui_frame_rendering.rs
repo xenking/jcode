@@ -26,7 +26,6 @@ impl BodyCacheState {
                     && entry.key.inline_images_visible == key.inline_images_visible
                     && entry.key.images_signature == key.images_signature
                     && entry.key.expanded_images_version == key.expanded_images_version
-                    && entry.key.swarm_members_signature == key.swarm_members_signature
                     && entry.key.latex_rendering == key.latex_rendering
                     && entry.key.show_link_urls == key.show_link_urls
             })
@@ -51,7 +50,6 @@ impl BodyCacheState {
                     && entry.key.inline_images_visible == key.inline_images_visible
                     && entry.key.images_signature == key.images_signature
                     && entry.key.expanded_images_version == key.expanded_images_version
-                    && entry.key.swarm_members_signature == key.swarm_members_signature
                     && entry.key.latex_rendering == key.latex_rendering
                     && entry.key.show_link_urls == key.show_link_urls
             })

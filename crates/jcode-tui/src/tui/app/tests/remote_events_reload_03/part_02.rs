@@ -190,7 +190,8 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
             session_id: "ses_fast_path".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
                 attachments: Vec::new(),
-                response_stats: None, timestamp_ms: None,
+                response_stats: None,
+                timestamp_ms: None,
                 role: "assistant".to_string(),
                 content: "server history replay".to_string(),
                 tool_calls: None,
@@ -386,9 +387,8 @@ fn test_compacted_history_event_applies_expanded_window() {
     app.remote_session_id = Some("session_lazy_history".to_string());
     app.push_display_message(DisplayMessage::assistant("existing tail"));
     app.scroll_offset = 12;
-    // Scrolling up to load older messages pauses tail-following. Background
-    // prompt-history backfills while following the tail preserve that mode.
-    app.auto_scroll_paused = true;
+    // This unsolicited page does not come from a scroll-up request.
+    app.auto_scroll_paused = false;
 
     let needs_redraw = app.handle_server_event(
         crate::protocol::ServerEvent::CompactedHistory {

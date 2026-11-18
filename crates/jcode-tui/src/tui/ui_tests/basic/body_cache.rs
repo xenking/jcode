@@ -12,7 +12,6 @@ fn test_body_cache_state_keeps_multiple_width_entries() {
         inline_images_visible: true,
         images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
     };
@@ -116,7 +115,6 @@ fn test_body_cache_state_does_not_reuse_a_different_mermaid_aspect_profile() {
         inline_images_visible: true,
         images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
     };
@@ -151,7 +149,6 @@ fn test_body_cache_state_evicts_oldest_entries() {
             inline_images_visible: true,
             images_signature: (0, 0),
             expanded_images_version: 0,
-            swarm_members_signature: 0,
             latex_rendering: crate::config::LatexRenderingMode::Image,
             show_link_urls: false,
         };
@@ -195,7 +192,6 @@ fn test_body_cache_state_accepts_large_single_entry_within_total_budget() {
         inline_images_visible: true,
         images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
     };
@@ -227,7 +223,6 @@ fn test_body_cache_state_retains_oversized_hot_entry() {
         inline_images_visible: true,
         images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
     };
@@ -260,7 +255,6 @@ fn test_body_cache_state_keeps_two_oversized_width_entries_hot() {
         inline_images_visible: true,
         images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
     };
@@ -300,7 +294,6 @@ fn test_body_cache_state_uses_oversized_hot_entry_as_incremental_base() {
         inline_images_visible: true,
         images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
     };
@@ -578,7 +571,6 @@ fn test_full_prep_cache_state_keeps_multiple_width_entries() {
         batch_progress_hash: 0,
         inline_images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
         inline_images_visible: true,
@@ -681,7 +673,6 @@ fn test_full_prep_cache_state_does_not_reuse_a_different_mermaid_aspect_profile(
         inline_images_signature: (0, 0),
         inline_images_visible: true,
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
     };
@@ -717,7 +708,6 @@ fn test_full_prep_cache_state_evicts_oldest_entries() {
             batch_progress_hash: 0,
             inline_images_signature: (0, 0),
             expanded_images_version: 0,
-            swarm_members_signature: 0,
             latex_rendering: crate::config::LatexRenderingMode::Image,
             show_link_urls: false,
             inline_images_visible: true,
@@ -765,7 +755,6 @@ fn test_full_prep_cache_state_accepts_large_single_entry_within_total_budget() {
         batch_progress_hash: 0,
         inline_images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
         inline_images_visible: true,
@@ -800,7 +789,6 @@ fn test_full_prep_cache_state_retains_oversized_hot_entry() {
         batch_progress_hash: 0,
         inline_images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
         inline_images_visible: true,
@@ -837,7 +825,6 @@ fn test_full_prep_cache_state_keeps_two_oversized_width_entries_hot() {
         batch_progress_hash: 0,
         inline_images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
         inline_images_visible: true,
@@ -1065,7 +1052,6 @@ fn test_full_prep_cache_drops_superseded_streaming_frames() {
         batch_progress_hash: 0,
         inline_images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
         inline_images_visible: true,
@@ -1113,7 +1099,6 @@ fn test_body_cache_drops_superseded_message_versions() {
         inline_images_visible: true,
         images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
     };

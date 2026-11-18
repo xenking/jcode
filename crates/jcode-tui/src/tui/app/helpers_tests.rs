@@ -150,10 +150,11 @@ fn swarm_effort_display_labels_default_to_low() {
 #[test]
 fn detected_resume_terminal_recognizes_handterm_term_program() {
     let _env_lock = crate::storage::lock_test_env();
-    // Running inside herdr (or Handterm) would otherwise win over TERM_PROGRAM.
+    // Higher-priority pane IDs would bypass the TERM_PROGRAM branch.
     let _cleared = [
         "HERDR_ENV",
         "HERDR_PANE_ID",
+        "REX_BLOCK",
         "HANDTERM_SESSION",
         "HANDTERM_PID",
     ]

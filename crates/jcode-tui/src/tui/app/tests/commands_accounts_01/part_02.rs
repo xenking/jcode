@@ -220,33 +220,30 @@ fn test_mask_email_censors_local_part() {
 
 #[test]
 fn test_subscription_command_shows_jcode_status_scaffold() {
-    let _guard = crate::storage::lock_test_env();
-    crate::subscription_catalog::clear_runtime_env();
-    crate::env::remove_var(crate::subscription_catalog::JCODE_API_KEY_ENV);
-    crate::env::remove_var(crate::subscription_catalog::JCODE_API_BASE_ENV);
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.input = "/subscription".to_string();
+        app.submit_input();
 
-    let mut app = create_test_app();
-    app.input = "/subscription".to_string();
-    app.submit_input();
-
-    let msg = app
-        .display_messages()
-        .last()
-        .expect("missing /subscription response");
-    assert_eq!(msg.role, "system");
-    assert!(msg.content.contains("Jcode Hosted Model Status"));
-    assert!(msg.content.contains("pay as you go, no subscription fee"));
-    assert!(msg.content.contains("monthly spending limit"));
-    assert!(msg.content.contains("progressively larger tranches"));
-    assert!(msg.content.contains("/login jcode"));
-    assert!(msg.content.contains("Claude Opus 5.5"));
-    assert!(msg.content.contains("Claude Sonnet 5.5"));
-    assert!(msg.content.contains("Claude Haiku 5.5"));
-    assert!(msg.content.contains("GPT-6.1 Sol"));
-    assert!(!msg.content.contains("$10/mo"));
-    assert!(!msg.content.contains("usable inference budget"));
-    assert!(!msg.content.contains("Claude Opus 4.8"));
-    assert!(!msg.content.contains("GPT-5.5"));
+        let msg = app
+            .display_messages()
+            .last()
+            .expect("missing /subscription response");
+        assert_eq!(msg.role, "system");
+        assert!(msg.content.contains("Jcode Hosted Model Status"));
+        assert!(msg.content.contains("pay as you go, no subscription fee"));
+        assert!(msg.content.contains("monthly spending limit"));
+        assert!(msg.content.contains("progressively larger tranches"));
+        assert!(msg.content.contains("/login jcode"));
+        assert!(msg.content.contains("Claude Opus 5.5"));
+        assert!(msg.content.contains("Claude Sonnet 5.5"));
+        assert!(msg.content.contains("Claude Haiku 5.5"));
+        assert!(msg.content.contains("GPT-6.1 Sol"));
+        assert!(!msg.content.contains("$10/mo"));
+        assert!(!msg.content.contains("usable inference budget"));
+        assert!(!msg.content.contains("Claude Opus 4.8"));
+        assert!(!msg.content.contains("GPT-5.5"));
+    });
 }
 
 #[test]
