@@ -383,7 +383,7 @@ impl Session {
         session.hidden = snapshot.hidden;
         session.saved = snapshot.saved;
         session.save_label = snapshot.save_label;
-        session.replay_events.clear();
+        session.replay_events = snapshot.replay_events;
         session.env_snapshots.clear();
         session.memory_injections.clear();
         session.mark_memory_profile_dirty();
@@ -1917,6 +1917,8 @@ struct RemoteStartupSessionSnapshot {
     updated_at: DateTime<Utc>,
     #[serde(default, deserialize_with = "parallel_messages::deserialize")]
     messages: Vec<StoredMessage>,
+    #[serde(default)]
+    replay_events: Vec<StoredReplayEvent>,
     #[serde(default)]
     compaction: Option<std::sync::Arc<StoredCompactionState>>,
     #[serde(default)]
