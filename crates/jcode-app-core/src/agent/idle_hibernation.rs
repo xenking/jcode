@@ -213,6 +213,7 @@ mod tests {
             source: SoftInterruptSource::User,
             mode: jcode_agent_runtime::QueuedMessageMode::Steer,
             client_id: None,
+            editing_by: None,
         });
         assert!(agent.hibernate_idle_caches().is_none());
         queue.lock().unwrap().clear();

@@ -214,6 +214,7 @@ impl Agent {
                 source,
                 mode: jcode_agent_runtime::QueuedMessageMode::Steer,
                 client_id,
+                editing_by: None,
             });
             logging::info(&format!(
                 "AGENT_SOFT_INTERRUPT_QUEUE_PUSH session={} source={:?} urgent={} content_bytes={} content_chars={} image_count={} pending_before={} pending_after={}",
@@ -465,7 +466,10 @@ impl Agent {
                     .sum::<usize>()
             ));
             let (steering, waiting): (Vec<_>, Vec<_>) = queue.drain(..).partition(|message| {
-                message.mode == jcode_agent_runtime::QueuedMessageMode::Steer
+                // A prompt held open for editing stays queued: delivering it
+                // while the client still edits it would send both versions.
+                message.editing_by.is_none()
+                    && message.mode == jcode_agent_runtime::QueuedMessageMode::Steer
                     && message
                         .active_skill
                         .as_ref()

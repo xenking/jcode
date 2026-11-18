@@ -874,6 +874,26 @@ fn handle_server_event_inner(
                     .iter()
                     .position(|prompt| prompt.client_id == id)
             });
+            app.sync_queued_prompt_edit_snapshot();
+            true
+        }
+        ServerEvent::QueuedPromptEdited {
+            id,
+            prompt_id,
+            outcome,
+        } => {
+            if let Some(index) = app
+                .pending_queue_requests
+                .iter()
+                .position(|(request_id, _)| *request_id == id)
+            {
+                app.pending_queue_requests.remove(index);
+            }
+            if outcome != crate::protocol::QueuedPromptEditOutcome::Edited {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Could not save queued prompt {prompt_id}: {outcome:?}"
+                )));
+            }
             true
         }
         ServerEvent::Ack { id } => {

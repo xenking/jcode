@@ -120,6 +120,12 @@ pub enum ApiEvent {
         prompt_id: String,
         outcome: crate::QueuedPromptRemovalOutcome,
     },
+    /// A queued prompt's content was replaced in place.
+    QueuedPromptEdited {
+        session_id: String,
+        prompt_id: String,
+        outcome: crate::QueuedPromptEditOutcome,
+    },
 
     /// Reply to `Ping`.
     Pong,

@@ -251,6 +251,32 @@ async fn queue_mutations_survive_daemon_restart_over_socket() {
     .await;
     until(&mut reader, |e| matches!(e, ServerEvent::Ack { id: 6 })).await;
     until(&mut peer_reader, |e| matches!(e, ServerEvent::QueuedPrompts { id: 0, prompts } if prompts.iter().map(|p| p.client_id.as_str()).collect::<Vec<_>>() == ["c", "a", "b"])).await;
+    // Hold and edit the middle prompt in place while the turn still runs. The
+    // held item keeps its slot and mode, and every attached client sees it.
+    send(
+        &mut writer,
+        json!({"type":"set_queued_prompt_editing","id":60,"client_id":"test","prompt_id":"a","editing":true}),
+    )
+    .await;
+    until(&mut reader, |e| matches!(e, ServerEvent::Ack { id: 60 })).await;
+    until(&mut peer_reader, |e| matches!(e, ServerEvent::QueuedPrompts { id: 0, prompts } if prompts.get(1).is_some_and(|p| p.client_id == "a" && p.editing))).await;
+    send(
+        &mut writer,
+        json!({"type":"edit_queued_prompt","id":61,"client_id":"test","prompt_id":"a","content":"a edited"}),
+    )
+    .await;
+    until(&mut reader, |e| {
+        matches!(
+            e,
+            ServerEvent::QueuedPromptEdited {
+                id: 61,
+                outcome: crate::protocol::QueuedPromptEditOutcome::Edited,
+                ..
+            }
+        )
+    })
+    .await;
+    until(&mut peer_reader, |e| matches!(e, ServerEvent::QueuedPrompts { id: 0, prompts } if prompts.get(1).is_some_and(|p| p.client_id == "a" && p.content == "a edited" && !p.editing && p.mode == crate::protocol::QueuedPromptMode::AfterYield))).await;
     send(
         &mut writer,
         json!({"type":"remove_queued_prompt","id":7,"client_id":"test","prompt_id":"a"}),

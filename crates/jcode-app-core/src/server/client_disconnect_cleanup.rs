@@ -16,6 +16,26 @@ use tokio::sync::{RwLock, broadcast, mpsc};
 use super::SessionAgents;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
+/// Drop every editing hold this connection owns, keeping the prompts queued.
+async fn release_editing_holds(
+    soft_interrupt_queues: &SessionInterruptQueues,
+    session_id: &str,
+    connection_id: &str,
+) {
+    let queue = soft_interrupt_queues.read().await.get(session_id).cloned();
+    let Some(queue) = queue else {
+        return;
+    };
+    let Ok(mut queue) = queue.lock() else {
+        return;
+    };
+    for item in queue.iter_mut() {
+        if item.editing_by.as_deref() == Some(connection_id) {
+            item.editing_by = None;
+        }
+    }
+}
+
 const RELOAD_DISCONNECT_MARKER_MAX_AGE: Duration = Duration::from_secs(30);
 pub(super) const IDLE_RECONNECT_GRACE: Duration = Duration::from_secs(30);
 
@@ -174,6 +194,15 @@ pub(super) async fn cleanup_client_connection(
         client_connections,
         client_debug_state,
         swarm_members,
+    )
+    .await;
+
+    // A connection that dropped while editing a queued prompt must not strand
+    // it: release the hold so the queue can deliver it again.
+    release_editing_holds(
+        soft_interrupt_queues,
+        client_session_id,
+        client_connection_id,
     )
     .await;
 

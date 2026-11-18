@@ -48,6 +48,16 @@ pub enum QueuedPromptRemovalOutcome {
     NotFound,
 }
 
+/// Result of replacing a still-queued prompt's content in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedPromptEditOutcome {
+    Edited,
+    InFlight,
+    AlreadyDelivered,
+    NotFound,
+}
+
 /// Why the daemon rejected a queued prompt before accepting it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,6 +76,10 @@ pub struct QueuedPrompt {
     /// Skill name resolved by the daemon when this item is delivered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_skill: Option<String>,
+    /// True while a client holds this prompt open for editing. Held prompts
+    /// stay in place (position and mode preserved) but are never delivered.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub editing: bool,
 }
 
 /// Client request to server
@@ -164,6 +178,30 @@ pub enum Request {
         id: u64,
         client_id: String,
         order: Vec<String>,
+    },
+
+    /// Hold a queued prompt open for editing so the drain skips it until it is
+    /// saved, cancelled, or the holding client disconnects. Requires the
+    /// `queued_prompt_editing` capability.
+    #[serde(rename = "set_queued_prompt_editing")]
+    SetQueuedPromptEditing {
+        id: u64,
+        client_id: String,
+        prompt_id: String,
+        editing: bool,
+    },
+
+    /// Replace a still-queued prompt's content and images in place, keeping its
+    /// queue position, delivery mode, and active skill. Requires the
+    /// `queued_prompt_editing` capability.
+    #[serde(rename = "edit_queued_prompt")]
+    EditQueuedPrompt {
+        id: u64,
+        client_id: String,
+        prompt_id: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<(String, String)>,
     },
 
     /// Soft interrupt: inject message at next safe point without cancelling

@@ -7,6 +7,7 @@ pub(super) enum SimpleKind {
     QueueControl,
     QueueSnapshot,
     QueueRemoval,
+    QueueEdit,
     RuntimeCommand,
     Detach,
     Tools,

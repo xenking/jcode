@@ -465,6 +465,8 @@ where
     let queued_prompt_mutations_supported = daemon_caps
         .iter()
         .any(|cap| cap == "queued_prompt_mutations_v1");
+    let queued_prompt_editing_supported =
+        daemon_caps.iter().any(|cap| cap == "queued_prompt_editing");
     let queued_prompt_active_skill_supported = daemon_caps
         .iter()
         .any(|cap| cap == "queued_prompt_active_skill");
@@ -511,6 +513,7 @@ where
             .chain(
                 queued_prompt_mutations_supported.then(|| "queued_prompt_mutations_v1".to_string()),
             )
+            .chain(queued_prompt_editing_supported.then(|| "queued_prompt_editing".to_string()))
             .chain(
                 queued_prompt_active_skill_supported
                     .then(|| "queued_prompt_active_skill".to_string()),
@@ -543,6 +546,7 @@ where
     state.queued_prompts_supported = queued_prompts_supported;
     state.queued_prompt_batch_interrupt_supported = queued_prompt_batch_interrupt_supported;
     state.queued_prompt_mutations_supported = queued_prompt_mutations_supported;
+    state.queued_prompt_editing_supported = queued_prompt_editing_supported;
     state.queued_prompt_active_skill_supported = queued_prompt_active_skill_supported;
     state.bounded_history_supported = bounded_history_supported;
 

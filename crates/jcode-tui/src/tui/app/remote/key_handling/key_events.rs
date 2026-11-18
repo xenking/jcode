@@ -770,7 +770,8 @@ pub(super) async fn handle_remote_key_internal(
                     );
                     return Ok(());
                 }
-                let had_pending = app.retrieve_pending_message_for_edit();
+                let had_pending =
+                    !app.queued_prompt_edit_active() && app.retrieve_pending_message_for_edit();
                 if had_pending && had_server_interrupts {
                     let cancellation = if let Some(ids) = legacy_ids {
                         remote.cancel_soft_interrupts_by_id(ids).await.map(|_| ())
@@ -794,6 +795,11 @@ pub(super) async fn handle_remote_key_internal(
             }
             _ => {}
         }
+    }
+
+    if input::is_alternate_enter(code, modifiers) && app.queued_prompt_edit_active() {
+        app.save_queued_prompt_edit(remote).await;
+        return Ok(());
     }
 
     if input::is_alternate_enter(code, modifiers) && input::try_queue_command(app) {
@@ -836,6 +842,36 @@ pub(super) async fn handle_remote_key_internal(
 
     if crate::tui::app::input::newline::enter_inserts_newline(app, code, modifiers) {
         return Ok(());
+    }
+
+    // A queued prompt open for editing owns Up/Down (walk the queue), Esc
+    // (cancel) and Enter (save in place). With an empty composer, Up recalls
+    // the newest queued prompt before falling back to prompt history.
+    if modifiers.is_empty() {
+        match code {
+            KeyCode::Up => {
+                if app.queued_prompt_edit_active() {
+                    if app.handle_queued_prompt_edit_nav(KeyCode::Up, remote).await {
+                        return Ok(());
+                    }
+                } else if app.recall_last_queued_prompt(remote).await {
+                    return Ok(());
+                }
+            }
+            KeyCode::Down if app.queued_prompt_edit_active() => {
+                if app
+                    .handle_queued_prompt_edit_nav(KeyCode::Down, remote)
+                    .await
+                {
+                    return Ok(());
+                }
+            }
+            KeyCode::Esc if app.queued_prompt_edit_active() => {
+                app.cancel_queued_prompt_edit(remote).await;
+                return Ok(());
+            }
+            _ => {}
+        }
     }
 
     if input::handle_multiline_input_navigation(app, code, modifiers)
@@ -921,7 +957,9 @@ pub(super) async fn handle_remote_key_internal(
             app.autocomplete();
         }
         KeyCode::Enter => {
-            submit_remote_enter_input(app, remote).await?;
+            if !app.save_queued_prompt_edit(remote).await {
+                submit_remote_enter_input(app, remote).await?;
+            }
         }
         KeyCode::Up | KeyCode::PageUp => {
             let inc = if code == KeyCode::PageUp { 10 } else { 1 };

@@ -107,6 +107,7 @@ mod onboarding_repair;
 mod onboarding_sim;
 mod productivity;
 mod prompt_history;
+mod queue_edit;
 mod remote;
 mod remote_header_hint;
 mod remote_notifications;
@@ -1801,6 +1802,9 @@ pub struct App {
     pending_soft_interrupts: Vec<String>,
     // Authoritative daemon-owned queue, displayed alongside legacy pending follow-ups.
     server_queued_prompts: Vec<crate::protocol::QueuedPrompt>,
+    // Daemon queued prompt loaded into the composer for in-place editing.
+    // Held on the daemon so the drain cannot deliver it meanwhile.
+    queued_prompt_edit: Option<queue_edit::QueuedPromptEdit>,
     selected_queued_prompt: Option<usize>,
     // Queue control errors are not conversation-turn errors. Keep unsent
     // payloads until the daemon confirms its durable mutation.

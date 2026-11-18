@@ -286,6 +286,7 @@ pub struct RemoteConnection {
     /// Pong, so an older server is never sent a request it would reject.
     server_accepts_focus: bool,
     server_accepts_queued_prompts: bool,
+    server_accepts_queue_editing: bool,
     server_accepts_force_stop: bool,
     last_keyboard_cancel: Option<Instant>,
     /// Last (focused, hidden) state reported to this server, if any.
@@ -483,6 +484,7 @@ impl RemoteConnection {
             has_loaded_history: false,
             server_accepts_focus: false,
             server_accepts_queued_prompts: false,
+            server_accepts_queue_editing: false,
             reported_focus: None,
             last_account_usage_poll: None,
             call_output_tokens_seen: 0,
@@ -890,6 +892,12 @@ impl RemoteConnection {
         }
         if capabilities
             .iter()
+            .any(|capability| capability == "queued_prompt_editing")
+        {
+            self.server_accepts_queue_editing = true;
+        }
+        if capabilities
+            .iter()
             .any(|capability| capability == crate::protocol::CLIENT_FOCUS_CAPABILITY)
         {
             self.server_accepts_focus = true;
@@ -898,6 +906,11 @@ impl RemoteConnection {
 
     pub fn supports_queued_prompts(&self) -> bool {
         self.server_accepts_queued_prompts
+    }
+
+    /// The daemon can hold a queued prompt open for in-place editing.
+    pub fn supports_queued_prompt_editing(&self) -> bool {
+        self.server_accepts_queue_editing
     }
 
     /// Tell the server whether this window has focus, and whether an
@@ -1409,6 +1422,45 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    /// Hold a queued prompt open for editing (or release the hold) so the
+    /// daemon cannot deliver it while the composer edits it.
+    pub async fn set_queued_prompt_editing(
+        &mut self,
+        prompt_id: String,
+        editing: bool,
+    ) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::SetQueuedPromptEditing {
+            id,
+            client_id: "jcode-tui".into(),
+            prompt_id,
+            editing,
+        })
+        .await?;
+        Ok(id)
+    }
+
+    /// Replace a still-queued prompt in place, keeping its position and mode.
+    pub async fn edit_queued_prompt(
+        &mut self,
+        prompt_id: String,
+        content: String,
+        images: Vec<(String, String)>,
+    ) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::EditQueuedPrompt {
+            id,
+            client_id: "jcode-tui".into(),
+            prompt_id,
+            content,
+            images,
+        })
+        .await?;
+        Ok(id)
+    }
+
     /// Cancel only the named soft interrupts. The server answers with
     /// `SoftInterruptsCancelled`, splitting the ids into still-queued (now
     /// removed) and not-queued (already injected or started as a turn).
@@ -1554,6 +1606,7 @@ impl RemoteConnection {
             has_loaded_history: false,
             server_accepts_focus: false,
             server_accepts_queued_prompts: false,
+            server_accepts_queue_editing: false,
             reported_focus: None,
             last_account_usage_poll: None,
             call_output_tokens_seen: 0,

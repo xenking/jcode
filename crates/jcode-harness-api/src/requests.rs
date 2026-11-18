@@ -43,6 +43,16 @@ pub enum QueuedPromptRemovalOutcome {
     NotFound,
 }
 
+/// Result of replacing a still-queued prompt's content in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedPromptEditOutcome {
+    Edited,
+    InFlight,
+    AlreadyDelivered,
+    NotFound,
+}
+
 /// A daemon-owned queued user prompt, including its optional active skill.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QueuedPrompt {
@@ -53,6 +63,9 @@ pub struct QueuedPrompt {
     pub mode: QueuedPromptMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_skill: Option<String>,
+    /// True while a client holds this prompt open for editing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub editing: bool,
 }
 
 /// Curated request surface. Internally-tagged on `"req"`.
@@ -239,6 +252,25 @@ pub enum ApiRequest {
         session_id: String,
         client_id: String,
         order: Vec<String>,
+    },
+    /// Requires queued_prompt_editing. Hold a queued prompt open for editing so
+    /// the daemon cannot deliver it until it is saved, cancelled, or the
+    /// holding connection drops.
+    SetQueuedPromptEditing {
+        session_id: String,
+        client_id: String,
+        prompt_id: String,
+        editing: bool,
+    },
+    /// Requires queued_prompt_editing. Replace a still-queued prompt in place,
+    /// preserving its queue position, mode, and active skill.
+    EditQueuedPrompt {
+        session_id: String,
+        client_id: String,
+        prompt_id: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<(String, String)>,
     },
 
     /// Fetch conversation history.

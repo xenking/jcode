@@ -720,6 +720,7 @@ async fn steering_recovery_filters_committed_ids_after_crash_window() {
         source: SoftInterruptSource::User,
         mode,
         client_id: Some(id.into()),
+        editing_by: None,
     })
     .collect();
     *queue.lock().unwrap() = initial.clone();
@@ -766,6 +767,7 @@ async fn steering_injection_preserves_after_yield_messages_in_order() {
             source: SoftInterruptSource::User,
             mode,
             client_id: None,
+            editing_by: None,
         });
     }
     let injected = agent.inject_soft_interrupts();

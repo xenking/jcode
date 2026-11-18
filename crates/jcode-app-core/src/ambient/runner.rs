@@ -191,6 +191,7 @@ impl AmbientRunnerHandle {
                 source: SoftInterruptSource::User,
                 mode: jcode_agent_runtime::QueuedMessageMode::Steer,
                 client_id: None,
+                editing_by: None,
             });
             logging::info(&format!(
                 "{} message injected into active ambient cycle: {}",

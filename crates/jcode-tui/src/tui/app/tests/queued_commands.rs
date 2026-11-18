@@ -13,6 +13,7 @@ fn assert_send_mode_uses_server_queue(queue_mode: bool, expected_mode: &str) {
         app.input = "follow up".into();
         app.cursor_pos = app.input.len();
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.note_server_capabilities(&["queued_prompts".into(), "queued_prompt_editing".into()]);
         let peer = remote.take_dummy_peer().unwrap();
         let (reader, _writer) = peer.into_split();
         app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote)
@@ -110,6 +111,7 @@ fn send_modes_reload_reconciles_unconfirmed_prompt_by_id() {
         images: vec![],
         active_skill: None,
         mode: crate::protocol::QueuedPromptMode::AfterYield,
+        editing: false,
     };
     let mut app = create_test_app();
     app.pending_queue_requests.push((41, Some(prompt.clone())));
@@ -148,6 +150,7 @@ fn send_modes_unconfirmed_missing_snapshot_restores_draft_without_resending() {
             images: vec![],
             active_skill: None,
             mode: crate::protocol::QueuedPromptMode::Steer,
+            editing: false,
         });
     app.queue_snapshot_request_id = Some(5);
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -182,6 +185,7 @@ fn send_modes_server_rejection_preserves_active_turn_and_draft() {
             images: vec![],
             active_skill: None,
             mode: crate::protocol::QueuedPromptMode::Steer,
+            editing: false,
         }),
     ));
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -247,6 +251,7 @@ fn send_modes_snapshot_does_not_duplicate_legacy_pending_rows() {
                 images: vec![],
                 active_skill: None,
                 mode: crate::protocol::QueuedPromptMode::Steer,
+                editing: false,
             }],
         },
         &mut remote,
@@ -477,4 +482,155 @@ fn test_remote_queued_commands_run_before_queued_prompts() {
         &["then do this"],
         "prompt waits its turn"
     );
+}
+
+// Up on an empty composer recalls daemon-queued prompts for in-place editing,
+// matching the omp/ChatGPT queue gesture. Enter saves into the same slot; Esc
+// restores the original untouched.
+
+fn queue_prompts(app: &mut App, entries: &[(&str, &str, bool)]) {
+    app.server_queued_prompts = entries
+        .iter()
+        .map(|(id, content, after_yield)| crate::protocol::QueuedPrompt {
+            client_id: (*id).into(),
+            content: (*content).into(),
+            images: vec![],
+            active_skill: None,
+            mode: if *after_yield {
+                crate::protocol::QueuedPromptMode::AfterYield
+            } else {
+                crate::protocol::QueuedPromptMode::Steer
+            },
+            editing: false,
+        })
+        .collect();
+}
+
+async fn read_sent_requests<R>(reader: &mut R) -> Vec<serde_json::Value>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    use tokio::io::AsyncBufReadExt;
+    let mut requests = Vec::new();
+    loop {
+        let mut line = String::new();
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            reader.read_line(&mut line),
+        )
+        .await
+        {
+            Ok(Ok(0)) | Err(_) => break,
+            Ok(Ok(_)) => {
+                if let Ok(value) = serde_json::from_str(&line) {
+                    requests.push(value);
+                }
+            }
+            Ok(Err(_)) => break,
+        }
+    }
+    requests
+}
+
+#[test]
+fn queued_edit_up_loads_newest_then_older_and_saves_in_place() {
+    use tokio::io::BufReader;
+    let mut app = create_test_app();
+    queue_prompts(
+        &mut app,
+        &[
+            ("p1", "first queued", false),
+            ("p2", "second queued", true),
+        ],
+    );
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.note_server_capabilities(&["queued_prompts".into(), "queued_prompt_editing".into()]);
+        let peer = remote.take_dummy_peer().unwrap();
+        let (reader, _writer) = peer.into_split();
+        let mut reader = BufReader::new(reader);
+        app.handle_remote_key(KeyCode::Up, KeyModifiers::empty(), &mut remote)
+            .await
+            .unwrap();
+        assert_eq!(app.input, "second queued");
+        assert_eq!(app.queued_prompt_edit.as_ref().map(|edit| edit.prompt_id.as_str()), Some("p2"));
+        app.handle_remote_key(KeyCode::Up, KeyModifiers::empty(), &mut remote)
+            .await
+            .unwrap();
+        assert_eq!(app.input, "first queued");
+        assert_eq!(app.queued_prompt_edit.as_ref().map(|edit| edit.prompt_id.as_str()), Some("p1"));
+        app.input = "first queued, edited".into();
+        app.cursor_pos = app.input.len();
+        app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote)
+            .await
+            .unwrap();
+        assert!(app.queued_prompt_edit.is_none());
+        assert_eq!(app.input, "");
+        let requests = read_sent_requests(&mut reader).await;
+        assert_eq!(
+            requests
+                .iter()
+                .find(|request| request["editing"] == true)
+                .map(|request| request["prompt_id"].as_str().unwrap().to_string()),
+            Some("p2".into()),
+            "Up holds the newest queued prompt: {requests:?}"
+        );
+        let saved = requests
+            .iter()
+            .find(|request| request["type"] == "edit_queued_prompt")
+            .unwrap_or_else(|| panic!("missing edit request: {requests:?}"));
+        assert_eq!(saved["prompt_id"], "p1");
+        assert_eq!(saved["content"], "first queued, edited");
+        assert!(
+            requests
+                .iter()
+                .all(|request| request["type"] != "queue_prompt"),
+            "saving must update in place, never append: {requests:?}"
+        );
+    });
+}
+
+#[test]
+fn queued_edit_esc_restores_draft_and_releases_hold() {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let mut app = create_test_app();
+    queue_prompts(&mut app, &[("p1", "queued text", false)]);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.note_server_capabilities(&["queued_prompts".into(), "queued_prompt_editing".into()]);
+        let peer = remote.take_dummy_peer().unwrap();
+        let (reader, _writer) = peer.into_split();
+        let mut reader = BufReader::new(reader);
+        app.handle_remote_key(KeyCode::Up, KeyModifiers::empty(), &mut remote)
+            .await
+            .unwrap();
+        assert_eq!(app.input, "queued text");
+        app.input = "changed".into();
+        app.handle_remote_key(KeyCode::Esc, KeyModifiers::empty(), &mut remote)
+            .await
+            .unwrap();
+        assert_eq!(app.input, "");
+        assert!(app.queued_prompt_edit.is_none());
+        let mut saw_release = false;
+        for _ in 0..4 {
+            let mut line = String::new();
+            let Ok(Ok(_)) = tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                reader.read_line(&mut line),
+            )
+            .await
+            else {
+                break;
+            };
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["type"], "set_queued_prompt_editing");
+            if request["editing"] == false {
+                saw_release = true;
+                assert_eq!(request["prompt_id"], "p1");
+            }
+        }
+        assert!(saw_release, "Esc must release the daemon hold");
+    });
 }

@@ -143,6 +143,7 @@ mod tests {
             source: SoftInterruptSource::User,
             mode: jcode_agent_runtime::QueuedMessageMode::Steer,
             client_id: None,
+            editing_by: None,
         }
     }
 

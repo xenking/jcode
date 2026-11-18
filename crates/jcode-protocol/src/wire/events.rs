@@ -457,6 +457,14 @@ pub enum ServerEvent {
         outcome: QueuedPromptRemovalOutcome,
     },
 
+    /// A queued prompt's content was replaced in place.
+    #[serde(rename = "queued_prompt_edited")]
+    QueuedPromptEdited {
+        id: u64,
+        prompt_id: String,
+        outcome: QueuedPromptEditOutcome,
+    },
+
     /// Soft interrupt message was injected at a safe point
     #[serde(rename = "soft_interrupt_injected")]
     SoftInterruptInjected {

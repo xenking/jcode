@@ -27,6 +27,7 @@ fn append_take_and_clear_round_trip() {
             source: SoftInterruptSource::System,
             mode: jcode_agent_runtime::QueuedMessageMode::Steer,
             client_id: None,
+            editing_by: None,
         },
     )
     .expect("append first interrupt");
@@ -41,6 +42,7 @@ fn append_take_and_clear_round_trip() {
             source: SoftInterruptSource::FileActivity,
             mode: jcode_agent_runtime::QueuedMessageMode::AfterYield,
             client_id: None,
+            editing_by: None,
         },
     )
     .expect("append second interrupt");
@@ -75,6 +77,7 @@ fn append_take_and_clear_round_trip() {
             source: SoftInterruptSource::User,
             mode: jcode_agent_runtime::QueuedMessageMode::Steer,
             client_id: None,
+            editing_by: None,
         },
     )
     .expect("append later interrupt");
@@ -93,6 +96,7 @@ fn append_take_and_clear_round_trip() {
                 source: SoftInterruptSource::User,
                 mode: jcode_agent_runtime::QueuedMessageMode::Steer,
                 client_id: client_id.map(str::to_string),
+                editing_by: None,
             },
         )
         .expect("append id-bearing interrupt");

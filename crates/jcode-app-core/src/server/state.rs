@@ -726,6 +726,7 @@ pub(super) fn enqueue_soft_interrupt_with_id(
             source,
             mode: jcode_agent_runtime::QueuedMessageMode::Steer,
             client_id,
+            editing_by: None,
         });
         crate::logging::info(&format!(
             "SOFT_INTERRUPT_QUEUE_PUSH source={:?} urgent={} content_bytes={} content_chars={} pending_before={} pending_after={}",
@@ -963,6 +964,7 @@ impl SessionControlHandle {
             source: SoftInterruptSource::User,
             mode,
             client_id: Some(client_id),
+            editing_by: None,
         });
         if let Err(error) = crate::soft_interrupt_store::overwrite(&self.session_id, &queue) {
             queue.pop();
@@ -998,6 +1000,7 @@ impl SessionControlHandle {
                     content: message.content.clone(),
                     images: message.images.clone(),
                     active_skill: message.active_skill.clone(),
+                    editing: message.editing_by.is_some(),
                     mode: match message.mode {
                         jcode_agent_runtime::QueuedMessageMode::Steer => {
                             crate::protocol::QueuedPromptMode::Steer
@@ -1010,6 +1013,106 @@ impl SessionControlHandle {
                 })
             })
             .collect())
+    }
+
+    /// Hold a queued prompt open for editing, or release the hold. A held
+    /// prompt keeps its position and mode but the drain never claims it, so an
+    /// edit racing turn completion can never deliver both versions.
+    pub(super) fn set_user_prompt_editing(
+        &self,
+        prompt_id: &str,
+        holder: &str,
+        editing: bool,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.queue_available,
+            "session queue unavailable while reconnecting"
+        );
+        let mut queue = self
+            .soft_interrupt_queue
+            .lock()
+            .map_err(|_| anyhow::anyhow!("queue lock poisoned"))?;
+        let item = queue
+            .iter_mut()
+            .find(|item| {
+                item.source == SoftInterruptSource::User
+                    && item.client_id.as_deref() == Some(prompt_id)
+            })
+            .ok_or_else(|| anyhow::anyhow!("queued prompt not found"))?;
+        anyhow::ensure!(
+            item.mode != jcode_agent_runtime::QueuedMessageMode::InFlight,
+            "queued prompt was already claimed for delivery"
+        );
+        if editing {
+            item.editing_by = Some(holder.to_owned());
+        } else if item
+            .editing_by
+            .as_deref()
+            .is_some_and(|owner| owner == holder)
+        {
+            item.editing_by = None;
+        }
+        // Editing holds are connection-scoped, never persisted.
+        drop(queue);
+        Ok(())
+    }
+
+    /// Replace a still-queued prompt's content and images in place, keeping its
+    /// queue position, delivery mode, and active skill. Runs under the same
+    /// lock the drain uses.
+    pub(super) fn edit_user_prompt(
+        &self,
+        prompt_id: &str,
+        content: String,
+        images: Vec<(String, String)>,
+    ) -> anyhow::Result<crate::protocol::QueuedPromptEditOutcome> {
+        use crate::protocol::QueuedPromptEditOutcome as Outcome;
+        anyhow::ensure!(
+            self.queue_available,
+            "session queue unavailable while reconnecting"
+        );
+        anyhow::ensure!(
+            !content.trim().is_empty() || !images.is_empty(),
+            "edited queued prompt must not be empty"
+        );
+        let mut queue = self
+            .soft_interrupt_queue
+            .lock()
+            .map_err(|_| anyhow::anyhow!("queue lock poisoned"))?;
+        let Some(index) = queue.iter().position(|item| {
+            item.source == SoftInterruptSource::User && item.client_id.as_deref() == Some(prompt_id)
+        }) else {
+            return Ok(if self.user_prompt_was_delivered(prompt_id)? {
+                Outcome::AlreadyDelivered
+            } else {
+                Outcome::NotFound
+            });
+        };
+        if queue[index].mode == jcode_agent_runtime::QueuedMessageMode::InFlight {
+            return Ok(Outcome::InFlight);
+        }
+        let previous_content = std::mem::replace(&mut queue[index].content, content);
+        let previous_images = std::mem::replace(&mut queue[index].images, images);
+        queue[index].editing_by = None;
+        if let Err(error) = crate::soft_interrupt_store::overwrite(&self.session_id, &queue) {
+            queue[index].content = previous_content;
+            queue[index].images = previous_images;
+            return Err(error);
+        }
+        Ok(Outcome::Edited)
+    }
+
+    /// Release every editing hold owned by a connection that went away, so a
+    /// dropped client can never strand a queued prompt.
+    pub(crate) fn release_user_prompt_edits(&self, holder: &str) {
+        let Ok(mut queue) = self.soft_interrupt_queue.lock() else {
+            return;
+        };
+        for item in queue.iter_mut() {
+            if item.editing_by.as_deref() == Some(holder) {
+                item.editing_by = None;
+            }
+        }
     }
 
     pub(super) fn remove_user_prompt(
@@ -1189,6 +1292,7 @@ impl SessionControlHandle {
         for item in queue.iter_mut() {
             if item.source == SoftInterruptSource::User
                 && item.client_id.is_some()
+                && item.editing_by.is_none()
                 && item.mode != jcode_agent_runtime::QueuedMessageMode::InFlight
                 && (!interrupted_only
                     || (item.mode == jcode_agent_runtime::QueuedMessageMode::AfterYield
@@ -1217,6 +1321,7 @@ impl SessionControlHandle {
         let Some(index) = queue.iter().position(|message| {
             message.source == SoftInterruptSource::User
                 && message.client_id.is_some()
+                && message.editing_by.is_none()
                 && message.mode != jcode_agent_runtime::QueuedMessageMode::InFlight
                 && (!interrupted_only
                     || (message.mode == jcode_agent_runtime::QueuedMessageMode::AfterYield
@@ -1594,6 +1699,7 @@ pub(super) async fn queue_soft_interrupt_with_images_for_session(
                 source,
                 mode: jcode_agent_runtime::QueuedMessageMode::Steer,
                 client_id: None,
+                editing_by: None,
             },
         )
         .map(|_| true)

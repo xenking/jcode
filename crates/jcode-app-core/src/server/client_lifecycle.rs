@@ -1096,11 +1096,12 @@ pub(super) async fn handle_client(
 
         // Queue controls are acknowledged after their durable mutation, not
         // by the generic pre-dispatch Ack below.
-        if matches!(&request, Request::QueuePrompt { .. } | Request::SetQueuedPromptMode { .. } | Request::InterruptQueuedPrompt { .. } | Request::InterruptQueuedPrompts { .. } | Request::GetQueuedPrompts { .. } | Request::RemoveQueuedPrompt { .. } | Request::ReorderQueuedPrompts { .. }) {
+        if matches!(&request, Request::QueuePrompt { .. } | Request::SetQueuedPromptMode { .. } | Request::InterruptQueuedPrompt { .. } | Request::InterruptQueuedPrompts { .. } | Request::GetQueuedPrompts { .. } | Request::RemoveQueuedPrompt { .. } | Request::ReorderQueuedPrompts { .. } | Request::SetQueuedPromptEditing { .. } | Request::EditQueuedPrompt { .. }) {
             let mut interrupt = false;
             let mut dispatch_if_idle = false;
             let mut already_delivered = None;
             let mut removal = None;
+            let mut edit_outcome = None;
             let (id, result) = match request {
                 Request::QueuePrompt { id, client_id, content, images, mode, system_reminder, active_skill } => {
                     if let Some(name) = active_skill.as_deref() {
@@ -1159,12 +1160,23 @@ pub(super) async fn handle_client(
                     (id, result)
                 }
                 Request::ReorderQueuedPrompts { id, client_id: _, order } => (id, session_control.reorder_user_prompts(&order)),
+                Request::SetQueuedPromptEditing { id, client_id: _, prompt_id, editing } => {
+                    (id, session_control.set_user_prompt_editing(&prompt_id, &client_connection_id, editing))
+                }
+                Request::EditQueuedPrompt { id, client_id: _, prompt_id, content, images } => {
+                    let result = session_control
+                        .edit_user_prompt(&prompt_id, content, images)
+                        .map(|outcome| edit_outcome = Some((prompt_id, outcome)));
+                    (id, result)
+                }
                 _ => unreachable!(),
             };
             match result {
                 Ok(()) => {
                     if let Some((prompt_id, outcome)) = removal {
                         send_client_event_best_effort(&client_event_tx, ServerEvent::QueuedPromptRemoved { id, prompt_id, outcome }, "client_lifecycle: QueuedPromptRemoved");
+                    } else if let Some((prompt_id, outcome)) = edit_outcome {
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::QueuedPromptEdited { id, prompt_id, outcome }, "client_lifecycle: QueuedPromptEdited");
                     } else {
                         send_client_event_best_effort(&client_event_tx, ServerEvent::Ack { id }, "client_lifecycle: Ack");
                     }
@@ -1285,7 +1297,7 @@ pub(super) async fn handle_client(
         }
         match request {
             Request::ForceStopTurn { .. } => unreachable!("force stop is dispatched before reconciliation"),
-            Request::QueuePrompt { .. } | Request::SetQueuedPromptMode { .. } | Request::InterruptQueuedPrompt { .. } | Request::InterruptQueuedPrompts { .. } | Request::GetQueuedPrompts { .. } | Request::RemoveQueuedPrompt { .. } | Request::ReorderQueuedPrompts { .. } => unreachable!("queue controls dispatched before acknowledgment"),
+            Request::QueuePrompt { .. } | Request::SetQueuedPromptMode { .. } | Request::InterruptQueuedPrompt { .. } | Request::InterruptQueuedPrompts { .. } | Request::GetQueuedPrompts { .. } | Request::RemoveQueuedPrompt { .. } | Request::ReorderQueuedPrompts { .. } | Request::SetQueuedPromptEditing { .. } | Request::EditQueuedPrompt { .. } => unreachable!("queue controls dispatched before acknowledgment"),
             Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. } => unreachable!("SDK controls dispatched before acknowledgment"),
             Request::Message {
                 id,

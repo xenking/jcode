@@ -1233,6 +1233,7 @@ mod tests {
                 source: jcode_agent_runtime::SoftInterruptSource::User,
                 mode: jcode_agent_runtime::QueuedMessageMode::Steer,
                 client_id: None,
+                editing_by: None,
             });
         let task = background::global()
             .spawn("test", sid, |_| async {

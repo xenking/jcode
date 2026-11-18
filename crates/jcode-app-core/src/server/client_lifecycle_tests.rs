@@ -104,6 +104,82 @@ fn queue_remove_and_reorder_are_atomic_against_claim() {
 }
 
 #[test]
+fn queued_edit_hold_survives_turn_end_and_saves_in_place_once() {
+    use crate::protocol::QueuedPromptEditOutcome;
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let control =
+        SessionControlHandle::cancel_only("queue_edit_test", queue, InterruptSignal::new());
+    for (id, mode) in [
+        ("a", jcode_agent_runtime::QueuedMessageMode::Steer),
+        ("b", jcode_agent_runtime::QueuedMessageMode::AfterYield),
+        ("c", jcode_agent_runtime::QueuedMessageMode::Steer),
+    ] {
+        control
+            .enqueue_user_prompt(id.into(), format!("text {id}"), vec![], mode, None)
+            .unwrap();
+    }
+    control
+        .set_user_prompt_editing("b", "conn-1", true)
+        .unwrap();
+    let prompts = control.queued_user_prompts().unwrap();
+    assert_eq!(
+        prompts
+            .iter()
+            .map(|prompt| prompt.client_id.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b", "c"]
+    );
+    assert!(prompts[1].editing, "the held item is marked editing");
+
+    // The turn ends while the edit is open: the held prompt stays queued.
+    let batch = control.take_user_prompt_batch(false).unwrap();
+    assert_eq!(
+        batch
+            .iter()
+            .filter_map(|prompt| prompt.client_id.as_deref())
+            .collect::<Vec<_>>(),
+        ["a", "c"],
+        "a held prompt must never be drained"
+    );
+    let remaining = control.queued_user_prompts().unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].client_id, "b");
+
+    // Another connection cannot release someone else's hold.
+    control.release_user_prompt_edits("conn-2");
+    assert!(control.queued_user_prompts().unwrap()[0].editing);
+
+    assert_eq!(
+        control
+            .edit_user_prompt("b", "text b edited".into(), vec![])
+            .unwrap(),
+        QueuedPromptEditOutcome::Edited
+    );
+    let prompts = control.queued_user_prompts().unwrap();
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0].content, "text b edited");
+    assert_eq!(
+        prompts[0].mode,
+        crate::protocol::QueuedPromptMode::AfterYield,
+        "saving an edit keeps the delivery mode"
+    );
+    assert!(!prompts[0].editing, "a saved edit releases the hold");
+
+    // The next turn start delivers the edited text exactly once.
+    let next = control.take_next_user_prompt(false).unwrap().unwrap();
+    assert_eq!(next.content, "text b edited");
+    assert!(control.take_next_user_prompt(false).unwrap().is_none());
+    assert_eq!(
+        control
+            .edit_user_prompt("b", "late".into(), vec![])
+            .unwrap(),
+        QueuedPromptEditOutcome::InFlight
+    );
+}
+
+#[test]
 fn remove_racing_turn_claim_has_exactly_one_winner() {
     let _lock = crate::storage::lock_test_env();
     let _env = IsolatedReloadRecoveryEnv::new();
@@ -423,6 +499,7 @@ async fn desktop_queued_skill_crosses_real_bridge_and_daemon_into_journal() {
                     images: vec![],
                     mode: jcode_sdk::api::QueuedPromptMode::AfterYield,
                     active_skill: Some("poteto-mode".into()),
+                    editing: false,
                 },
             )
             .unwrap();

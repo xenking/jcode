@@ -72,6 +72,71 @@ fn queued_prompt_mutations_wire_shape() {
 }
 
 #[test]
+fn queued_prompt_edit_wire_shape() {
+    let hold = ClientFrame::new(
+        9,
+        ApiRequest::SetQueuedPromptEditing {
+            session_id: "s".into(),
+            client_id: "ui".into(),
+            prompt_id: "p".into(),
+            editing: true,
+        },
+    );
+    assert_eq!(
+        serde_json::to_value(hold).unwrap(),
+        serde_json::json!({"v":1,"id":9,"req":"set_queued_prompt_editing","session_id":"s","client_id":"ui","prompt_id":"p","editing":true})
+    );
+    let edit = ClientFrame::new(
+        10,
+        ApiRequest::EditQueuedPrompt {
+            session_id: "s".into(),
+            client_id: "ui".into(),
+            prompt_id: "p".into(),
+            content: "new text".into(),
+            images: Vec::new(),
+        },
+    );
+    assert_eq!(
+        serde_json::to_value(edit).unwrap(),
+        serde_json::json!({"v":1,"id":10,"req":"edit_queued_prompt","session_id":"s","client_id":"ui","prompt_id":"p","content":"new text"})
+    );
+    for (outcome, wire) in [
+        (QueuedPromptEditOutcome::Edited, "edited"),
+        (QueuedPromptEditOutcome::InFlight, "in_flight"),
+        (
+            QueuedPromptEditOutcome::AlreadyDelivered,
+            "already_delivered",
+        ),
+        (QueuedPromptEditOutcome::NotFound, "not_found"),
+    ] {
+        let frame = ServerFrame::reply(
+            10,
+            ApiEvent::QueuedPromptEdited {
+                session_id: "s".into(),
+                prompt_id: "p".into(),
+                outcome,
+            },
+        );
+        let value = serde_json::to_value(&frame).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"v":1,"reply_to":10,"ev":"queued_prompt_edited","session_id":"s","prompt_id":"p","outcome":wire})
+        );
+        assert_eq!(serde_json::from_value::<ServerFrame>(value).unwrap(), frame);
+    }
+    // Queued prompt snapshots carry the editing hold only when held.
+    let prompt: QueuedPrompt = serde_json::from_value(serde_json::json!({
+        "client_id": "p", "content": "hello", "mode": "after_yield"
+    }))
+    .unwrap();
+    assert!(!prompt.editing);
+    assert_eq!(
+        serde_json::to_value(&prompt).unwrap(),
+        serde_json::json!({"client_id":"p","content":"hello","mode":"after_yield"})
+    );
+}
+
+#[test]
 fn create_session_system_prompt_roundtrip_and_legacy_default() {
     let legacy = serde_json::json!({"req": "create_session"});
     let decoded: ApiRequest = serde_json::from_value(legacy.clone()).unwrap();

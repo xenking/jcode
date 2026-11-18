@@ -1195,6 +1195,49 @@ impl JcodeClient {
         .map(drop)
     }
 
+    /// Hold a queued prompt open for editing (or release the hold) so the
+    /// daemon cannot deliver it while the user edits it.
+    pub fn set_queued_prompt_editing(
+        &self,
+        session_id: &str,
+        client_id: &str,
+        prompt_id: &str,
+        editing: bool,
+    ) -> Result<()> {
+        self.request_ok(ApiRequest::SetQueuedPromptEditing {
+            session_id: session_id.into(),
+            client_id: client_id.into(),
+            prompt_id: prompt_id.into(),
+            editing,
+        })
+        .map(drop)
+    }
+
+    /// Replace a still-queued prompt in place, preserving its position, mode,
+    /// and active skill.
+    pub fn edit_queued_prompt(
+        &self,
+        session_id: &str,
+        client_id: &str,
+        prompt_id: &str,
+        content: String,
+        images: Vec<(String, String)>,
+    ) -> Result<jcode_harness_api::QueuedPromptEditOutcome> {
+        match self
+            .request_ok(ApiRequest::EditQueuedPrompt {
+                session_id: session_id.into(),
+                client_id: client_id.into(),
+                prompt_id: prompt_id.into(),
+                content,
+                images,
+            })?
+            .event
+        {
+            ApiEvent::QueuedPromptEdited { outcome, .. } => Ok(outcome),
+            other => Err(unexpected("queued_prompt_edited", &other)),
+        }
+    }
+
     pub fn get_history(&self, session_id: &str) -> Result<Vec<HistoryMessage>> {
         self.get_history_with_images(session_id)
             .map(|(messages, _)| messages)

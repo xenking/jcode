@@ -73,6 +73,7 @@ fn queued_skills_require_capability_before_any_socket_write() {
             images: vec![],
             mode: QueuedPromptMode::Steer,
             active_skill: None,
+            editing: false,
         };
         if supported {
             client

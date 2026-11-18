@@ -36,6 +36,7 @@ pub(in crate::tui::app) async fn send_queued_prompt(
         images: images.clone(),
         active_skill: None,
         mode,
+        editing: false,
     };
     match remote.queue_prompt(prompt.clone()).await {
         Err(e) => {

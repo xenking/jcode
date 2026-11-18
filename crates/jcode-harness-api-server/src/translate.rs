@@ -150,6 +150,7 @@ pub struct BridgeState {
     pub queued_prompts_supported: bool,
     pub queued_prompt_batch_interrupt_supported: bool,
     pub queued_prompt_mutations_supported: bool,
+    pub queued_prompt_editing_supported: bool,
     pub queued_prompt_active_skill_supported: bool,
     pub bounded_history_supported: bool,
     pub soft_interrupt_ids_supported: bool,
@@ -774,7 +775,9 @@ impl BridgeState {
             | "interrupt_queued_prompts"
             | "get_queued_prompts"
             | "remove_queued_prompt"
-            | "reorder_queued_prompts" => {
+            | "reorder_queued_prompts"
+            | "set_queued_prompt_editing"
+            | "edit_queued_prompt" => {
                 if !self.queued_prompts_supported {
                     return vec![Outbound::Reply(ServerFrame::reply(
                         api_id,
@@ -817,11 +820,24 @@ impl BridgeState {
                         },
                     ))];
                 }
+                if matches!(req, "set_queued_prompt_editing" | "edit_queued_prompt")
+                    && !self.queued_prompt_editing_supported
+                {
+                    return vec![Outbound::Reply(ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: "daemon does not advertise queued_prompt_editing".into(),
+                        },
+                    ))];
+                }
                 let id = self.legacy_id();
                 let kind = if req == "get_queued_prompts" {
                     SimpleKind::QueueSnapshot
                 } else if req == "remove_queued_prompt" {
                     SimpleKind::QueueRemoval
+                } else if req == "edit_queued_prompt" {
+                    SimpleKind::QueueEdit
                 } else {
                     SimpleKind::QueueControl
                 };
@@ -3178,6 +3194,29 @@ impl BridgeState {
                 vec![ServerFrame::reply(
                     api_id,
                     ApiEvent::QueuedPromptRemoved {
+                        session_id: session(self),
+                        prompt_id: event["prompt_id"].as_str().unwrap_or("").to_string(),
+                        outcome,
+                    },
+                )]
+            }
+            "queued_prompt_edited" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let Some(api_id) = self.take_simple(id, SimpleKind::QueueEdit) else {
+                    return vec![];
+                };
+                let Ok(outcome) = serde_json::from_value(event["outcome"].clone()) else {
+                    return vec![ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: "invalid queued prompt edit outcome".into(),
+                        },
+                    )];
+                };
+                vec![ServerFrame::reply(
+                    api_id,
+                    ApiEvent::QueuedPromptEdited {
                         session_id: session(self),
                         prompt_id: event["prompt_id"].as_str().unwrap_or("").to_string(),
                         outcome,

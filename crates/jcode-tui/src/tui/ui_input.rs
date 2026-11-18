@@ -397,9 +397,13 @@ pub(super) fn pending_prompt_count(app: &dyn TuiState) -> usize {
 pub(super) fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
     let mut previews = Vec::new();
     for prompt in app.server_queued_prompts() {
-        let tag = match prompt.mode {
-            crate::protocol::QueuedPromptMode::Steer => "steer",
-            crate::protocol::QueuedPromptMode::AfterYield => "after",
+        let tag = if prompt.editing {
+            "editing"
+        } else {
+            match prompt.mode {
+                crate::protocol::QueuedPromptMode::Steer => "steer",
+                crate::protocol::QueuedPromptMode::AfterYield => "after",
+            }
         };
         let normalized = normalize_repaint_sensitive_notice_text(&prompt.content);
         previews.push(format!(
@@ -452,7 +456,11 @@ pub(super) fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, sta
     let mut items: Vec<(QueuedMsgType, &str)> = Vec::new();
     for (index, prompt) in app.server_queued_prompts().iter().enumerate() {
         items.push((
-            QueuedMsgType::Server(prompt.mode, app.selected_queued_prompt() == Some(index)),
+            QueuedMsgType::Server(
+                prompt.mode,
+                app.selected_queued_prompt() == Some(index),
+                prompt.editing,
+            ),
             &prompt.content,
         ));
     }
@@ -494,16 +502,22 @@ pub(super) fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, sta
             let distance = pending_count.saturating_sub(i);
             let num_color = rainbow_prompt_color(distance);
             let (indicator, indicator_color, msg_color, dim) = match msg_type {
-                QueuedMsgType::Server(crate::protocol::QueuedPromptMode::Steer, true) => {
+                QueuedMsgType::Server(_, true, true) => {
+                    ("> edit", queued_color(), queued_color(), false)
+                }
+                QueuedMsgType::Server(_, false, true) => {
+                    ("  edit", queued_color(), queued_color(), true)
+                }
+                QueuedMsgType::Server(crate::protocol::QueuedPromptMode::Steer, true, _) => {
                     ("> steer", pending_color(), pending_color(), false)
                 }
-                QueuedMsgType::Server(crate::protocol::QueuedPromptMode::Steer, false) => {
+                QueuedMsgType::Server(crate::protocol::QueuedPromptMode::Steer, false, _) => {
                     ("  steer", pending_color(), pending_color(), true)
                 }
-                QueuedMsgType::Server(crate::protocol::QueuedPromptMode::AfterYield, true) => {
+                QueuedMsgType::Server(crate::protocol::QueuedPromptMode::AfterYield, true, _) => {
                     ("> after", queued_color(), queued_color(), false)
                 }
-                QueuedMsgType::Server(crate::protocol::QueuedPromptMode::AfterYield, false) => {
+                QueuedMsgType::Server(crate::protocol::QueuedPromptMode::AfterYield, false, _) => {
                     ("  after", queued_color(), queued_color(), true)
                 }
                 QueuedMsgType::Pending => ("queued ⏎", pending_color(), pending_color(), true),
@@ -2431,7 +2445,7 @@ fn draw_send_mode_indicator(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
 
 #[derive(Clone, Copy)]
 enum QueuedMsgType {
-    Server(crate::protocol::QueuedPromptMode, bool),
+    Server(crate::protocol::QueuedPromptMode, bool, bool),
     Pending,
     Interleave,
     Queued,

@@ -416,8 +416,8 @@ pub use wire::{
     AccountUsageSnapshot, AccountUsageWindow, DaemonIdentity, Request, ServerEvent, TurnIdentity,
 };
 pub use wire::{
-    QueuedPrompt, QueuedPromptMode, QueuedPromptRejection, QueuedPromptRemovalOutcome,
-    SessionToolConfig, SessionToolDefinition,
+    QueuedPrompt, QueuedPromptEditOutcome, QueuedPromptMode, QueuedPromptRejection,
+    QueuedPromptRemovalOutcome, SessionToolConfig, SessionToolDefinition,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -884,6 +884,8 @@ impl Request {
             | Request::InterruptQueuedPrompts { id, .. }
             | Request::RemoveQueuedPrompt { id, .. }
             | Request::ReorderQueuedPrompts { id, .. }
+            | Request::SetQueuedPromptEditing { id, .. }
+            | Request::EditQueuedPrompt { id, .. }
             | Request::GetQueuedPrompts { id } => *id,
             Request::SoftInterrupt { id, .. } => *id,
             Request::CancelSoftInterrupts { id, .. } => *id,

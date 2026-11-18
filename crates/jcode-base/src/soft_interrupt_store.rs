@@ -81,6 +81,9 @@ impl From<PersistedSoftInterrupt> for SoftInterruptMessage {
             client_id: value.client_id,
             system_reminder: value.system_reminder,
             active_skill: value.active_skill,
+            // Editing holds are per-connection; a daemon restart drops them so
+            // a crash can never strand a queued prompt.
+            editing_by: None,
         }
     }
 }
