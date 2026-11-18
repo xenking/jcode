@@ -1499,6 +1499,7 @@ impl Agent {
                 attachments: msg.attachments,
                 response_stats: msg.response_stats,
                 timestamp_ms: msg.timestamp_ms,
+                tool_duration_ms: msg.tool_duration_ms,
                 role: msg.role,
                 content: msg.content,
                 tool_calls: if msg.tool_calls.is_empty() {
@@ -1527,6 +1528,7 @@ impl Agent {
                 attachments: msg.attachments,
                 response_stats: msg.response_stats,
                 timestamp_ms: msg.timestamp_ms,
+                tool_duration_ms: msg.tool_duration_ms,
                 role: msg.role,
                 content: msg.content,
                 tool_calls: if msg.tool_calls.is_empty() {
@@ -1559,6 +1561,7 @@ impl Agent {
                 attachments: msg.attachments,
                 response_stats: msg.response_stats,
                 timestamp_ms: msg.timestamp_ms,
+                tool_duration_ms: msg.tool_duration_ms,
                 role: msg.role,
                 content: msg.content,
                 tool_calls: if msg.tool_calls.is_empty() {

@@ -70,7 +70,12 @@ pub(super) fn records(session: &crate::session::Session) -> Result<Vec<String>, 
                 .iter()
                 .any(|prefix| text.starts_with(prefix)));
         let tool = if message.role == "tool" {
-            message.tool_data
+            message.tool_data.map(|tool| {
+                serde_json::json!({
+                    "id": tool.id, "name": tool.name, "input": tool.input,
+                    "duration_ms": message.tool_duration_ms,
+                })
+            })
         } else {
             None
         };

@@ -3,6 +3,7 @@ fn delta_test_messages() -> Vec<crate::protocol::HistoryMessage> {
         .into_iter()
         .enumerate()
         .map(|(index, content)| crate::protocol::HistoryMessage {
+            tool_duration_ms: None,
             attachments: Vec::new(),
             response_stats: None,
             timestamp_ms: None,
@@ -12,6 +13,24 @@ fn delta_test_messages() -> Vec<crate::protocol::HistoryMessage> {
             tool_data: None,
         })
         .collect()
+}
+
+#[test]
+fn rendered_tool_history_preserves_timing_on_wire() {
+    let row = crate::session::RenderedMessage {
+        timestamp_ms: Some(20_000),
+        tool_duration_ms: Some(7_000),
+        response_stats: None,
+        role: "tool".into(),
+        content: "ok".into(),
+        attachments: vec![],
+        tool_calls: vec![],
+        tool_data: None,
+        stored_index: Some(1),
+    };
+    let wire = serde_json::to_value(super::super::rendered_to_history_message(row)).unwrap();
+    assert_eq!(wire["timestamp_ms"], 20_000);
+    assert_eq!(wire["tool_duration_ms"], 7_000);
 }
 
 fn delta_test_base(
@@ -36,6 +55,7 @@ fn recent_history_counts_ask_answers_but_preserves_image_ordinals() {
     messages.insert(
         1,
         crate::protocol::HistoryMessage {
+            tool_duration_ms: None,
             attachments: Vec::new(),
             response_stats: None,
             timestamp_ms: None,
@@ -138,6 +158,7 @@ fn history_images_base_omits_only_matching_image_sets() {
 fn recent_history_bounds_seven_thousand_message_bootstrap() {
     let messages: Vec<_> = (0..7000)
         .map(|index| crate::protocol::HistoryMessage {
+            tool_duration_ms: None,
             attachments: Vec::new(),
             response_stats: None,
             timestamp_ms: None,
@@ -171,6 +192,7 @@ fn recent_history_bounds_seven_thousand_message_bootstrap() {
 fn recent_history_preserves_archive_prompt_offset_and_rebases_images() {
     let mut messages = delta_test_messages();
     messages.insert(0, crate::protocol::HistoryMessage {
+            tool_duration_ms: None,
         attachments: Vec::new(),
         response_stats: None, timestamp_ms: None, role: "system".to_owned(),
         content: "Earlier conversation compacted - 10 historical messages hidden from the UI. Scroll to the top to load older history. Hidden user prompts: 7.".to_owned(),

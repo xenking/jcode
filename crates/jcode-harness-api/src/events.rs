@@ -875,6 +875,8 @@ pub struct HistoryMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HistoryTool {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
     pub id: String,
     pub name: String,
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]

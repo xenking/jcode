@@ -3940,6 +3940,7 @@ fn history_response_stats_cross_real_render_protocol_and_sdk_boundary() {
             tool_data: row.tool_data,
             response_stats: row.response_stats,
             timestamp_ms: row.timestamp_ms,
+            tool_duration_ms: None,
         })
         .collect();
     let mut state = state_with_session();

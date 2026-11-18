@@ -1,5 +1,14 @@
 use super::*;
 
+#[test]
+fn history_tool_preserves_duration() {
+    let row = serde_json::json!({"role":"tool", "timestamp_ms": 20000,
+        "tool_duration_ms": 7000, "tool_data":{"id":"call", "name":"bash", "input":{}}});
+    let tool = BridgeState::history_tool(&row).unwrap();
+    let encoded = serde_json::to_value(tool).unwrap();
+    assert_eq!(encoded["duration_ms"], 7000);
+}
+
 impl BridgeState {
     pub(super) fn daemon_list<T: serde::de::DeserializeOwned>(
         event: &Value,
@@ -30,6 +39,7 @@ impl BridgeState {
         let data = &message["tool_data"];
         let id = data["id"].as_str().filter(|id| !id.is_empty())?;
         (message["role"] == "tool").then(|| jcode_harness_api::HistoryTool {
+            duration_ms: message["tool_duration_ms"].as_u64(),
             id: id.to_string(),
             name: data["name"].as_str().unwrap_or("").to_string(),
             input: data["input"].clone(),
