@@ -66,6 +66,8 @@ pub enum StoredReplayEventKind {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         idle: bool,
     },
+    #[serde(other)]
+    Unknown,
 }
 
 pub(super) const SESSION_CONTEXT_PREFIX: &str = "<system-reminder>\n# Session Context";

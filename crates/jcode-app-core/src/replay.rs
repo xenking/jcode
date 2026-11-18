@@ -324,6 +324,7 @@ pub fn export_timeline(session: &Session) -> Vec<TimelineEvent> {
             .num_milliseconds()
             .max(0) as u64;
         let kind = match &replay_event.kind {
+            StoredReplayEventKind::Unknown => continue,
             StoredReplayEventKind::DisplayMessage {
                 role,
                 title,

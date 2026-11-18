@@ -3,7 +3,10 @@ use anyhow::{Result, anyhow};
 
 #[test]
 fn session_loads_unknown_replay_event_without_losing_messages() {
-    let mut session = Session::create_with_id("future_event_test".into(), None, None);
+    let _env_lock = lock_env();
+    let temp_home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let mut session = Session::create_with_id("session_future_event_test".into(), None, None);
     for text in ["before", "after"] {
         session.add_message(
             Role::User,
@@ -19,7 +22,10 @@ fn session_loads_unknown_replay_event_without_losing_messages() {
         "event": "future_display_event",
         "new_payload": {"value": 42}
     }]);
-    let restored: Session = serde_json::from_value(json).unwrap();
+    let path = session_path(&session.id).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, serde_json::to_vec(&json).unwrap()).unwrap();
+    let restored = Session::load(&session.id).unwrap();
     assert_eq!(restored.messages.len(), 2);
     assert_eq!(restored.messages[0].content_preview(), "before");
     assert_eq!(restored.messages[1].content_preview(), "after");

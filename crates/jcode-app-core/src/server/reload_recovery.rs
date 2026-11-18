@@ -50,6 +50,8 @@ pub(super) enum ReloadRecoveryStatus {
     Blocked,
     Cancelled,
     Superseded,
+    #[serde(other)]
+    Unknown,
 }
 
 impl ReloadRecoveryStatus {
@@ -378,6 +380,7 @@ pub fn recovery_summary(reload_id: &str) -> Result<ReloadRecoverySummary> {
             ReloadRecoveryStatus::Blocked => summary.blocked += 1,
             ReloadRecoveryStatus::Cancelled => summary.cancelled += 1,
             ReloadRecoveryStatus::Superseded => summary.superseded += 1,
+            ReloadRecoveryStatus::Unknown => {}
         }
     }
     Ok(summary)

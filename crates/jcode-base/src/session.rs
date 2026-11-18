@@ -1345,6 +1345,7 @@ request in this new forked session, using the inherited conversation only as con
                         *summary = crate::message::redact_secrets(summary);
                     }
                 }
+                StoredReplayEventKind::Unknown => {}
             }
         }
         redacted

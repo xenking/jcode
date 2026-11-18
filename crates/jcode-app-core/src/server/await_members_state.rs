@@ -35,8 +35,11 @@ pub struct PersistedAwaitMembersResult {
 pub struct PersistedAwaitMembersState {
     pub key: String,
     pub session_id: String,
+    #[serde(default)]
     pub swarm_id: String,
+    #[serde(default)]
     pub target_status: Vec<String>,
+    #[serde(default)]
     pub requested_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
@@ -67,7 +70,7 @@ impl PersistedAwaitMembersState {
     }
 
     pub fn is_pending(&self) -> bool {
-        self.final_response.is_none()
+        self.final_response.is_none() && !self.swarm_id.is_empty()
     }
 
     pub fn remaining_timeout(&self) -> Duration {
