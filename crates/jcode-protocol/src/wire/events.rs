@@ -1231,6 +1231,39 @@ pub enum ServerEvent {
         tool_call_id: String,
     },
 
+    /// A swarm worker without an interactive client called `ask`. The question
+    /// is parked on the worker and forwarded to the swarm root coordinator,
+    /// which answers with `Request::CommAnswerEscalatedAsk` (or re-asks a human
+    /// with its own `ask`). This event is the structured form consumed by
+    /// clients and seats; the coordinator's model also receives it as a
+    /// wake-delivered notification.
+    #[serde(rename = "ask_escalated")]
+    AskEscalated {
+        /// Escalation id; pass it back to disambiguate concurrent asks.
+        request_id: String,
+        /// Worker that asked.
+        worker_session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_name: Option<String>,
+        /// Todo lane / task label the worker is running, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lane: Option<String>,
+        questions: Vec<AskQuestion>,
+        /// Seconds before the escalation auto-resolves with the recommended
+        /// options.
+        timeout_secs: u64,
+    },
+
+    /// A parked escalated `ask` was answered, declined, withdrawn, or timed
+    /// out. Clients can clear the escalation card on this event.
+    #[serde(rename = "ask_escalation_closed")]
+    AskEscalationClosed {
+        request_id: String,
+        worker_session_id: String,
+        /// "answered", "withdrawn" (worker stopped/cancelled), or "timed_out".
+        reason: String,
+    },
+
     /// A running command is waiting for stdin input from the user
     #[serde(rename = "stdin_request")]
     StdinRequest {

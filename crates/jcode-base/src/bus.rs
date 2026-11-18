@@ -315,6 +315,19 @@ pub struct SwarmWorkerReported {
     pub notification: String,
 }
 
+/// A headless swarm worker parked on `ask` and escalated the question to the
+/// swarm root coordinator. The coordinator must be woken so it can answer with
+/// `swarm action="answer"` (or re-ask a human with its own `ask`).
+#[derive(Clone, Debug)]
+pub struct SwarmAskEscalated {
+    /// Root coordinator session that must decide.
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub request_id: String,
+    /// Already-rendered notification body for the coordinator's model.
+    pub notification: String,
+}
+
 /// Result of a `/productivity` report generation run.
 ///
 /// Carries already-rendered outputs (markdown + PNG bytes) so the TUI layer can
@@ -451,6 +464,8 @@ pub enum BusEvent {
     SwarmAwaitCompleted(SwarmAwaitCompleted),
     /// A spawned worker finished and its owner needs to coordinate next steps.
     SwarmWorkerReported(SwarmWorkerReported),
+    /// A headless worker parked on `ask`; the root coordinator must decide.
+    SwarmAskEscalated(SwarmAskEscalated),
     /// Usage report fetched from providers
     UsageReport(Vec<jcode_usage_types::ProviderUsage>),
     /// Progressive usage report update while providers are still loading
@@ -547,6 +562,7 @@ impl BusEvent {
             Self::BackgroundTaskStalled(event) => Some(&event.session_id),
             Self::SwarmAwaitCompleted(event) => Some(&event.session_id),
             Self::SwarmWorkerReported(event) => Some(&event.session_id),
+            Self::SwarmAskEscalated(event) => Some(&event.session_id),
             Self::UiActivity(event) => event.session_id.as_deref(),
             Self::ToolUpdated(event) => Some(&event.session_id),
             Self::SubagentStatus(event) => Some(&event.session_id),

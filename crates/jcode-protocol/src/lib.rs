@@ -980,6 +980,7 @@ impl Request {
             Request::CommSubscribeChannel { id, .. } => *id,
             Request::CommUnsubscribeChannel { id, .. } => *id,
             Request::CommAwaitMembers { id, .. } => *id,
+            Request::CommAnswerEscalatedAsk { id, .. } => *id,
         }
     }
 
@@ -1029,6 +1030,7 @@ impl Request {
                 | Request::CommSubscribeChannel { .. }
                 | Request::CommUnsubscribeChannel { .. }
                 | Request::CommAwaitMembers { .. }
+                | Request::CommAnswerEscalatedAsk { .. }
         )
     }
 }
