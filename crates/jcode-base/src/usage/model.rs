@@ -289,6 +289,16 @@ impl OpenAIUsageData {
         if self.hard_limit_reached {
             return true;
         }
+        // OpenAI reports rounded 99-100% windows while still serving requests
+        // (e.g. from credits); its explicit allowed flag beats the heuristic.
+        if self
+            .openai_reset_credits
+            .as_ref()
+            .and_then(|credits| credits.ordinary_usage_allowed)
+            == Some(true)
+        {
+            return false;
+        }
 
         if !self.has_limits() {
             return false;

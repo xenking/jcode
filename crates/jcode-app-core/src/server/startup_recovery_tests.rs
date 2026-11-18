@@ -839,3 +839,111 @@ async fn startup_recovery_resumes_idle_worker_with_open_todo_lane() -> Result<()
     );
     Ok(())
 }
+
+/// The daemon can die during the very turn an earlier reload continuation
+/// started. That consumed record must not keep the worker crashed forever.
+#[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test intentionally serializes process-wide JCODE_HOME/env state across async recovery assertions"
+)]
+async fn startup_recovery_resumes_worker_whose_earlier_continuation_was_consumed() -> Result<()> {
+    let _storage_guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new()?;
+    let _env = configure_test_env(&temp);
+    let provider = Arc::new(StreamingMockProvider::default());
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("resumed after daemon crash".to_string()),
+        StreamEvent::MessageEnd { stop_reason: None },
+    ]);
+    let mut worker = crate::session::Session::create(None, Some("crashed worker".to_string()));
+    worker.add_message(
+        Role::User,
+        vec![crate::message::ContentBlock::ToolResult {
+            tool_use_id: "tool_bash".to_string(),
+            content: "[Tool 'bash' interrupted by server reload after 0.2s]".to_string(),
+            is_error: Some(true),
+        }],
+    );
+    worker.save()?;
+    super::super::reload_recovery::persist_intent(
+        "earlier-reload",
+        &worker.id,
+        super::super::reload_recovery::ReloadRecoveryRole::Headless,
+        crate::tool::selfdev::ReloadRecoveryDirective {
+            reconnect_notice: None,
+            continuation_message: "earlier continuation".into(),
+        },
+        "previous reload",
+    )?;
+    let mut consumed = super::super::reload_recovery::peek_for_session(&worker.id)?
+        .expect("persisted intent");
+    consumed.status = super::super::reload_recovery::ReloadRecoveryStatus::Started;
+    crate::storage::write_json(
+        &super::super::reload_recovery::path_for_session(&worker.id)?,
+        &consumed,
+    )?;
+    let swarm_id = "swarm-consumed-continuation";
+    persist_swarm_state_snapshot(
+        swarm_id,
+        None,
+        None,
+        &[persisted_headless_member(&worker.id, swarm_id, "running", "bash tool")],
+    );
+
+    let server = Server::new(provider);
+    server.recover_headless_sessions_on_startup().await;
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let agent = server.sessions.read().await.get(&worker.id).cloned();
+            if let Some(agent) = agent
+                && agent.lock().await.messages().iter().any(|message| {
+                    message.role == Role::Assistant
+                        && message
+                            .content_preview()
+                            .contains("resumed after daemon crash")
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("a worker interrupted after a consumed continuation must resume");
+    Ok(())
+}
+
+/// A reload can record intent for a session that was never saved. Recovery
+/// must close that record instead of failing on it every sweep.
+#[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test intentionally serializes process-wide JCODE_HOME/env state across async recovery assertions"
+)]
+async fn startup_recovery_blocks_intent_for_unsaved_session() -> Result<()> {
+    let _storage_guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new()?;
+    let _env = configure_test_env(&temp);
+    let session_id = "session_never_saved";
+    super::super::reload_recovery::persist_intent(
+        "reload",
+        session_id,
+        super::super::reload_recovery::ReloadRecoveryRole::Initiator,
+        crate::tool::selfdev::ReloadRecoveryDirective {
+            reconnect_notice: None,
+            continuation_message: "continue".into(),
+        },
+        "triggering session for reload",
+    )?;
+
+    let server = Server::new(Arc::new(StreamingMockProvider::default()));
+    server.recover_headless_sessions_on_startup().await;
+    let record = super::super::reload_recovery::peek_for_session(session_id)?.expect("record");
+    assert_eq!(
+        record.status,
+        super::super::reload_recovery::ReloadRecoveryStatus::Blocked
+    );
+    assert!(!record.status.needs_admission());
+    Ok(())
+}

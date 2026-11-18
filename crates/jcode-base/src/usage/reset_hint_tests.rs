@@ -121,6 +121,35 @@ fn reset_hint_without_allowed_flag_requires_full_ordinary_window_or_hard_limit()
 }
 
 #[test]
+fn allowed_flag_keeps_rounded_full_window_usable() {
+    let mut usage = reset_usage();
+    usage.seven_day = Some(OpenAIUsageWindow {
+        name: "7-day".into(),
+        usage_ratio: 0.99,
+        resets_at: None,
+    });
+    usage
+        .openai_reset_credits
+        .as_mut()
+        .unwrap()
+        .ordinary_usage_allowed = Some(true);
+    assert!(!usage.exhausted(), "OpenAI still serves this account");
+    usage
+        .openai_reset_credits
+        .as_mut()
+        .unwrap()
+        .ordinary_usage_allowed = None;
+    assert!(usage.exhausted(), "without the flag the window heuristic applies");
+    usage.hard_limit_reached = true;
+    usage
+        .openai_reset_credits
+        .as_mut()
+        .unwrap()
+        .ordinary_usage_allowed = Some(true);
+    assert!(usage.exhausted(), "an enforced hard limit always wins");
+}
+
+#[test]
 fn expired_window_never_suggests_reset_in_raw_or_display_snapshot() {
     let mut usage = reset_usage();
     usage.hard_limit_reached = true;

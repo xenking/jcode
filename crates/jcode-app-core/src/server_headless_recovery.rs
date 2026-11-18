@@ -37,10 +37,12 @@ impl Server {
             tokio::time::sleep(delay).await;
         }
         for session_id in candidates {
+            // Stop/superseded tombstones stay authoritative. A consumed continuation
+            // from an earlier reload does not cover a turn the daemon died in later.
             if reload_recovery::peek_for_session(&session_id)
                 .ok()
                 .flatten()
-                .is_some()
+                .is_some_and(|record| !record.status.is_consumed())
             {
                 continue;
             }

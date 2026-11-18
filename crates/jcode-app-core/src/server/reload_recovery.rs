@@ -67,6 +67,11 @@ impl ReloadRecoveryStatus {
     pub(super) fn needs_admission(&self) -> bool {
         matches!(self, Self::Pending | Self::Claimed)
     }
+
+    /// The continuation was admitted, so the record no longer guards that turn.
+    pub(super) fn is_consumed(&self) -> bool {
+        matches!(self, Self::Started | Self::Delivered)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -767,6 +772,18 @@ impl RecoveryOwner {
             return Ok(None);
         }
         let session_id = &record.session_id;
+        if !crate::session::session_exists(session_id)
+            && !self.sessions.read().await.contains_key(session_id)
+        {
+            // The session was never persisted, so there is nothing to resume and
+            // retrying would fail on every sweep forever.
+            finish_pending(
+                session_id,
+                ReloadRecoveryStatus::Blocked,
+                "session transcript missing",
+            )?;
+            return Ok(None);
+        }
         if crate::tool::interactive::sender(session_id).is_none()
             && crate::agent::Agent::interrupted_ask_tool_id(&crate::session::Session::load(
                 session_id,
