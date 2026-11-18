@@ -715,8 +715,8 @@ pub(super) async fn refresh_swarm_task_staleness(
     // them, and salvaging inside that window would double-assign their work.
     let salvage_grace = swarm_task_stale_after();
     let salvage_candidates: Vec<(String, String)> = {
-        let plans = swarm_plans.read().await;
         let members = swarm_members.read().await;
+        let plans = swarm_plans.read().await;
         let mut pairs = std::collections::BTreeSet::new();
         for (swarm_id, plan) in plans.iter() {
             for item in &plan.items {
@@ -1276,8 +1276,8 @@ pub(super) async fn remove_session_from_swarm(
     let mut elected_coordinator = None;
     if was_coordinator {
         let new_coordinator = {
-            let swarms = swarms_by_id.read().await;
             let members = swarm_members.read().await;
+            let swarms = swarms_by_id.read().await;
             swarms.get(swarm_id).and_then(|swarm| {
                 swarm
                     .iter()
@@ -1311,6 +1311,7 @@ pub(super) async fn remove_session_from_swarm(
             if let Some(vp) = plans.get_mut(swarm_id) {
                 vp.participants.insert(new_id.clone());
             }
+            drop(plans);
             let members = swarm_members.read().await;
             if let Some(member) = members.get(&new_id) {
                 let _ = member.event_tx.send(ServerEvent::Notification {

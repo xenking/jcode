@@ -17,6 +17,7 @@
 
 | Contract | Enforcement |
 | --- | --- |
+| Swarm registry locks follow the canonical order and never span unrelated awaits | `python3 scripts/check_lock_order.py` (zero-violation budget) |
 | Test helpers isolate persistent homes and machine hooks together, never in production builds | `python3 scripts/check_test_isolation.py` (Cargo feature graph) |
 | Header, status and info-widget measurements use display cells and shared truncation | `python3 scripts/check_tui_chrome.py` (zero scalar-width budget) |
 | Quota bar glyphs have one owner, distinct from task-progress glyphs | `python3 scripts/check_usage_bar_owner.py` (no copied builders) |

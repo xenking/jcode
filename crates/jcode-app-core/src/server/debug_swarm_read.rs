@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "debug_swarm_read_tests.rs"]
+mod regression;
+
 use super::swarm_channels::list_channels_for_swarm;
 use super::{
     FileTouchService, ServerIdentity, SharedContext, SwarmMember, SwarmState, VersionedPlan,
@@ -37,8 +41,8 @@ pub(super) async fn maybe_handle_swarm_read_command(
     };
 
     if cmd == "swarm" || cmd == "swarm_status" || cmd == "swarm:members" {
-        let members = swarm_members.read().await;
         let sessions_guard = sessions.read().await;
+        let members = swarm_members.read().await;
         let mut out: Vec<serde_json::Value> = Vec::new();
         for member in members.values() {
             let (provider, model) = if let Some(agent_arc) = sessions_guard.get(&member.session_id)
@@ -75,9 +79,9 @@ pub(super) async fn maybe_handle_swarm_read_command(
     }
 
     if cmd == "swarm:list" {
+        let members = swarm_members.read().await;
         let swarms = swarms_by_id.read().await;
         let coordinators = swarm_coordinators.read().await;
-        let members = swarm_members.read().await;
         let mut out: Vec<serde_json::Value> = Vec::new();
         for (swarm_id, session_ids) in swarms.iter() {
             // Issue #1650: the swarm index can lag the member records. A member
@@ -150,8 +154,8 @@ pub(super) async fn maybe_handle_swarm_read_command(
     }
 
     if cmd == "swarm:coordinators" {
-        let coordinators = swarm_coordinators.read().await;
         let members = swarm_members.read().await;
+        let coordinators = swarm_coordinators.read().await;
         let mut out: Vec<serde_json::Value> = Vec::new();
         for (swarm_id, session_id) in coordinators.iter() {
             let name = members
@@ -170,8 +174,8 @@ pub(super) async fn maybe_handle_swarm_read_command(
 
     if cmd.starts_with("swarm:coordinator:") {
         let swarm_id = cmd.strip_prefix("swarm:coordinator:").unwrap_or("").trim();
-        let coordinators = swarm_coordinators.read().await;
         let members = swarm_members.read().await;
+        let coordinators = swarm_coordinators.read().await;
         let output = if let Some(session_id) = coordinators.get(swarm_id) {
             let name = members
                 .get(session_id)
@@ -276,9 +280,9 @@ pub(super) async fn maybe_handle_swarm_read_command(
     }
 
     if cmd == "swarm:plans" {
-        let plans = swarm_plans.read().await;
+        let swarm_ids: Vec<_> = swarm_plans.read().await.keys().cloned().collect();
         let mut out: Vec<serde_json::Value> = Vec::new();
-        for swarm_id in plans.keys() {
+        for swarm_id in &swarm_ids {
             let runtime = swarm_state.load_runtime(swarm_id).await;
             let Some(vp) = runtime.plan.as_ref() else {
                 continue;
@@ -630,12 +634,12 @@ pub(super) async fn maybe_handle_swarm_read_command(
 
     if cmd.starts_with("swarm:info:") {
         let swarm_id = cmd.strip_prefix("swarm:info:").unwrap_or("").trim();
-        let swarms = swarms_by_id.read().await;
-        let coordinators = swarm_coordinators.read().await;
-        let members = swarm_members.read().await;
-        let plans = swarm_plans.read().await;
-        let ctx = shared_context.read().await;
         let touches = file_touch.snapshot().await;
+        let ctx = shared_context.read().await;
+        let members = swarm_members.read().await;
+        let swarms = swarms_by_id.read().await;
+        let plans = swarm_plans.read().await;
+        let coordinators = swarm_coordinators.read().await;
 
         let output = if let Some(session_ids) = swarms.get(swarm_id) {
             let coordinator = coordinators.get(swarm_id);

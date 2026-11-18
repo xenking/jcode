@@ -1867,12 +1867,13 @@ pub(super) async fn handle_resume_session(
                 )
                 .await;
                 lap("member_status");
-                if let Some(swarm_id) = {
+                let resumed_swarm_id = {
                     let members = swarm_members.read().await;
                     members
                         .get(&session_id)
                         .and_then(|member| member.swarm_id.clone())
-                } {
+                };
+                if let Some(swarm_id) = resumed_swarm_id {
                     rename_plan_participant(&swarm_id, &old_session_id, &session_id, swarm_plans)
                         .await;
                     reclaim_coordinator_slot_on_resume(

@@ -128,6 +128,11 @@ pub(super) fn latest_peer_touches(
 }
 
 /// Shared ownership of the core persisted swarm coordination state.
+///
+/// Lock order: client connections and sessions precede swarm registries, which
+/// must be acquired in this order: members, swarms_by_id, plans, coordinators.
+/// Never hold a registry guard across any other await. Snapshot before awaiting
+/// unrelated work, and release guards before calling async helpers.
 #[derive(Clone)]
 pub struct SwarmState {
     pub members: Arc<RwLock<HashMap<String, SwarmMember>>>,

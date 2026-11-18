@@ -1815,7 +1815,15 @@ impl Server {
                             "[file-activity] {} touched by peers before modification — sending alerts",
                             path.display()
                         ));
-                        let members = swarm_members.read().await;
+                        let members: HashMap<_, _> = {
+                            let members = swarm_members.read().await;
+                            std::iter::once(&session_id)
+                                .chain(previous_touches.iter().map(|touch| &touch.session_id))
+                                .filter_map(|id| {
+                                    members.get(id).map(|member| (id.clone(), member.clone()))
+                                })
+                                .collect()
+                        };
                         let current_member = members.get(&session_id);
                         let current_name = current_member.and_then(|m| m.friendly_name.clone());
                         // The editor only needs to hear about earlier peer

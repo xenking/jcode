@@ -981,6 +981,7 @@ pub(super) async fn handle_comm_assign_role(
         if let Some(member) = members.get_mut(&target_session) {
             member.role = role.clone();
         } else {
+            drop(members);
             finish_swarm_mutation_request(
                 swarm_mutation_runtime,
                 &mutation_state,
@@ -1491,6 +1492,7 @@ async fn handle_comm_assign_task_with_mode(
         }
     }
 
+    drop(members);
     finish_swarm_mutation_request(
         swarm_mutation_runtime,
         &mutation_state,

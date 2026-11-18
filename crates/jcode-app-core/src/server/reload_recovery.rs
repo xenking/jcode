@@ -1070,14 +1070,14 @@ impl RecoveryOwner {
             Some(&self.events),
         )
         .await;
-        if let Some(swarm_id) = self
+        let swarm_id = self
             .swarm
             .members
             .read()
             .await
             .get(session_id)
-            .and_then(|member| member.swarm_id.clone())
-        {
+            .and_then(|member| member.swarm_id.clone());
+        if let Some(swarm_id) = swarm_id {
             super::persist_swarm_state_for(&swarm_id, &self.swarm).await;
         }
         let terminal = match result {
