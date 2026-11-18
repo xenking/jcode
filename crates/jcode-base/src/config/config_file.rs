@@ -87,6 +87,7 @@ impl Config {
     pub fn load() -> Self {
         let mut config = Self::load_from_file().unwrap_or_default();
         config.apply_env_overrides();
+        config.agents.apply_swarm_pool();
         config
     }
 
@@ -97,6 +98,7 @@ impl Config {
     pub fn load_strict() -> anyhow::Result<Self> {
         let mut config = Self::load_from_file_strict()?.unwrap_or_default();
         config.apply_env_overrides();
+        config.agents.apply_swarm_pool();
         Ok(config)
     }
 

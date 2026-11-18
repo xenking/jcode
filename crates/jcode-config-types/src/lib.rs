@@ -748,6 +748,13 @@ pub struct AgentsConfig {
     pub swarm_effort: Option<String>,
     /// Maximum worker effort per exact provider:model route. Empty is unrestricted.
     pub swarm_effort_caps: std::collections::BTreeMap<String, String>,
+    /// Worker model pool, like omp's task pool: each exact `provider:model`
+    /// route lists the reasoning efforts a worker may use on it. A non-empty
+    /// pool is the worker allowlist (merged into `spawn_allowed_models` and
+    /// `swarm_model_allowlist`); an empty effort list allows every level.
+    /// A requested effort outside the list moves to the nearest allowed level,
+    /// preferring the next one up.
+    pub swarm_pool: std::collections::BTreeMap<String, Vec<String>>,
     /// Root reasoning effort in swarm mode. Unset or invalid means `low`.
     /// This does not change worker effort (`swarm_effort`).
     pub swarm_root_effort: Option<String>,

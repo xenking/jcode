@@ -63,6 +63,59 @@ fn capped_worker_effort(
     requested: &str,
     available: &[&str],
 ) -> Result<String> {
+    let capped = capped_worker_effort_by_cap(
+        agents,
+        provider_key,
+        provider_name,
+        model,
+        requested,
+        available,
+    )?;
+    let pool_key = provider_key
+        .filter(|key| !key.trim().is_empty())
+        .unwrap_or(provider_name)
+        .to_ascii_lowercase();
+    let Some(pool) = agents.swarm_pool_efforts(&pool_key, model) else {
+        return Ok(capped);
+    };
+    if jcode_provider_core::reasoning_effort_rank(&capped).is_none() {
+        return Ok(capped);
+    }
+    pool_effort(pool, &capped, available).ok_or_else(|| {
+        anyhow::anyhow!("No effort in agents.swarm_pool {pool:?} is supported by {model}")
+    })
+}
+
+/// Nearest effort the pool allows for `requested`: the request itself, else the
+/// closest allowed level above it, else the closest below. Levels the model does
+/// not support are skipped.
+fn pool_effort(pool: &[String], requested: &str, available: &[&str]) -> Option<String> {
+    let supported = |level: &str| {
+        available.is_empty() || available.iter().any(|a| a.eq_ignore_ascii_case(level))
+    };
+    let allowed: Vec<(u8, String)> = pool
+        .iter()
+        .map(|level| level.trim().to_ascii_lowercase())
+        .filter(|level| supported(level))
+        .filter_map(|level| jcode_provider_core::reasoning_effort_rank(&level).map(|r| (r, level)))
+        .collect();
+    let wanted = jcode_provider_core::reasoning_effort_rank(requested)?;
+    allowed
+        .iter()
+        .filter(|(rank, _)| *rank >= wanted)
+        .min_by_key(|(rank, _)| *rank)
+        .or_else(|| allowed.iter().max_by_key(|(rank, _)| *rank))
+        .map(|(_, level)| level.clone())
+}
+
+fn capped_worker_effort_by_cap(
+    agents: &crate::config::AgentsConfig,
+    provider_key: Option<&str>,
+    provider_name: &str,
+    model: &str,
+    requested: &str,
+    available: &[&str],
+) -> Result<String> {
     let cap = worker_effort_cap(agents, provider_key, provider_name, model);
     let Some(cap) = cap else {
         return Ok(requested.to_string());
@@ -129,14 +182,23 @@ impl Agent {
     }
 
     pub(crate) fn has_worker_effort_cap(&self) -> bool {
+        let agents = &crate::config::config().agents;
+        let provider_key = self
+            .session
+            .provider_key
+            .clone()
+            .unwrap_or_else(|| self.provider.name().to_ascii_lowercase());
         self.session.is_swarm_worker
-            && worker_effort_cap(
-                &crate::config::config().agents,
+            && (worker_effort_cap(
+                agents,
                 self.session.provider_key.as_deref(),
                 self.provider.name(),
                 &self.provider_model(),
             )
             .is_some()
+                || agents
+                    .swarm_pool_efforts(&provider_key, &self.provider_model())
+                    .is_some())
     }
 
     fn worker_effort(&self, requested: &str) -> Result<String> {
@@ -796,6 +858,61 @@ mod worker_effort_cap_tests {
             "claude-fable-5-2"
         ));
     }
+    #[test]
+    fn pool_effort_moves_to_the_nearest_allowed_level() {
+        let pool = |levels: &[&str]| levels.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+        let all = ["low", "medium", "high", "xhigh", "max"];
+        let sonnet = pool(&["high", "xhigh"]);
+        assert_eq!(pool_effort(&sonnet, "low", &all).as_deref(), Some("high"));
+        assert_eq!(
+            pool_effort(&sonnet, "xhigh", &all).as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(pool_effort(&sonnet, "max", &all).as_deref(), Some("xhigh"));
+        let opus = pool(&["medium", "high", "xhigh"]);
+        assert_eq!(pool_effort(&opus, "max", &all).as_deref(), Some("xhigh"));
+        assert_eq!(pool_effort(&opus, "low", &all).as_deref(), Some("medium"));
+        // A level the model cannot serve is skipped.
+        assert_eq!(
+            pool_effort(&sonnet, "low", &["low", "medium", "high"]).as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            pool_effort(&pool(&["xhigh"]), "low", &["low", "high"]),
+            None
+        );
+    }
+
+    #[test]
+    fn pool_applies_per_route_and_overrides_requested_effort() {
+        let mut agents = crate::config::AgentsConfig::default();
+        agents.swarm_pool.insert(
+            "claude:claude-sonnet-5-5".into(),
+            vec!["high".into(), "xhigh".into()],
+        );
+        agents
+            .swarm_pool
+            .insert("opencode-go:deepseek-v4.1-flash".into(), Vec::new());
+        let levels = ["low", "medium", "high", "xhigh", "max"];
+        let resolve = |key: &str, model: &str, request: &str| {
+            capped_worker_effort(&agents, Some(key), "Claude", model, request, &levels).unwrap()
+        };
+        assert_eq!(resolve("claude-oauth", "claude-sonnet-5-5", "low"), "high");
+        assert_eq!(resolve("claude", "claude-sonnet-5-5", "max"), "xhigh");
+        // Empty list: every level allowed.
+        assert_eq!(resolve("opencode-go", "deepseek-v4.1-flash", "low"), "low");
+        // Not in the pool: untouched here (the route guard refuses it).
+        assert_eq!(resolve("claude", "claude-opus-5-5", "low"), "low");
+        agents.apply_swarm_pool();
+        assert!(agents.worker_may_use_model("claude:claude-sonnet-5-5"));
+        assert!(!agents.worker_may_use_model("claude:claude-fable-5-2"));
+        assert!(
+            agents
+                .validate_swarm_model_request(Some("claude:claude-sonnet-5-5"))
+                .is_ok()
+        );
+    }
+
     #[test]
     fn model_caps_choose_supported_rung_and_leave_other_routes_unrestricted() {
         let mut agents = crate::config::AgentsConfig::default();

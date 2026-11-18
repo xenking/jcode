@@ -680,6 +680,18 @@ spawn_allowed_models = []
 swarm_effort_caps = {}
 # swarm_effort_caps = { "openai:gpt-6.1-sol" = "xhigh" }
 #
+# Worker pool, like omp's task pool: the models workers may use and, per
+# model, the reasoning efforts allowed on it. Keys are exact provider:model
+# routes. A non-empty pool becomes the worker allowlist (spawn_allowed_models
+# and swarm_model_allowlist). An empty list allows every effort. Any other
+# effort moves to the nearest allowed level, preferring the next one up, on
+# spawn, failover and /effort.
+swarm_pool = {}
+# [agents.swarm_pool]
+# "claude:claude-sonnet-5-5" = ["high", "xhigh"]
+# "claude:claude-opus-5-5" = ["medium", "high", "xhigh"]
+# "opencode-go:deepseek-v4.1-flash" = []
+#
 # Root model reasoning while /effort swarm is selected. Independent of worker
 # swarm_effort. Supported levels: none|minimal|low|medium|high|xhigh|max.
 # Unset/invalid = low. Providers map unsupported levels to their supported range.

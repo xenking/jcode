@@ -10,6 +10,7 @@ impl Default for AgentsConfig {
             swarm_model_fallbacks: Vec::new(),
             swarm_effort: None,
             swarm_effort_caps: std::collections::BTreeMap::new(),
+            swarm_pool: std::collections::BTreeMap::new(),
             swarm_root_effort: None,
             swarm_spawn_mode: SwarmSpawnMode::default(),
             swarm_gallery_max_pct: None,
@@ -38,6 +39,48 @@ impl Default for AgentsConfig {
 }
 
 impl AgentsConfig {
+    /// Fold `swarm_pool` into the worker allowlists, so every existing check
+    /// (spawn validation, tool schema, failover, per-turn guard) enforces it.
+    pub fn apply_swarm_pool(&mut self) {
+        if self.swarm_pool.is_empty() {
+            return;
+        }
+        for route in self.swarm_pool.keys() {
+            let route = route.trim().to_string();
+            if !self.spawn_allowed_models.contains(&route) {
+                self.spawn_allowed_models.push(route.clone());
+            }
+            if !self.swarm_model_allowlist.contains(&route) {
+                self.swarm_model_allowlist.push(route);
+            }
+        }
+        self.swarm_model_selection = true;
+    }
+
+    /// Efforts the pool allows for a worker on `provider_key`/`model`. `None`
+    /// when the route is not in the pool or its list is empty (unrestricted).
+    pub fn swarm_pool_efforts(&self, provider_key: &str, model: &str) -> Option<&[String]> {
+        let model = model
+            .split_once('@')
+            .map_or(model, |(model, _)| model)
+            .trim();
+        let provider_key = provider_key.trim();
+        self.swarm_pool
+            .iter()
+            .find(|(route, _)| match route.trim().split_once(':') {
+                Some((prefix, pool_model)) => {
+                    pool_model == model
+                        && (provider_key.is_empty()
+                            || provider_key == prefix
+                            || provider_key
+                                .strip_prefix(prefix)
+                                .is_some_and(|rest| rest.starts_with('-')))
+                }
+                None => route.trim() == model,
+            })
+            .map(|(_, efforts)| efforts.as_slice())
+            .filter(|efforts| !efforts.is_empty())
+    }
     /// Validate an agent-supplied worker model against the hard
     /// `spawn_allowed_models` allowlist. An empty allowlist leaves workers
     /// unrestricted (the configured default is trusted), while a non-empty one
