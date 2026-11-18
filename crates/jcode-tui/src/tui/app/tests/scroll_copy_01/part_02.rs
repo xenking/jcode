@@ -558,6 +558,44 @@ fn test_remote_ctrl_c_still_arms_quit_when_idle() {
     );
 }
 
+/// A runtime that never confirms a stop (a tool that ignores cancellation)
+/// must not trap the user: the first two Ctrl+C presses interrupt and force
+/// stop, and the third detaches the client without touching the daemon.
+#[test]
+fn test_remote_ctrl_c_always_closes_client_when_stop_never_confirms() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    for press in 1..=2 {
+        rt.block_on(app.handle_remote_key(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            &mut remote,
+        ))
+        .unwrap();
+        assert!(
+            !app.should_quit,
+            "interrupt press {press} must not close the client before the escape hatch"
+        );
+        assert!(app.is_processing);
+    }
+
+    rt.block_on(app.handle_remote_key(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+        &mut remote,
+    ))
+    .unwrap();
+    assert!(
+        app.should_quit,
+        "a third Ctrl+C must detach when the runtime never confirms the stop"
+    );
+}
+
 #[test]
 fn test_local_copy_badge_shortcut_accepts_alt_uppercase_encoding() {
     let _render_lock = scroll_render_test_lock();

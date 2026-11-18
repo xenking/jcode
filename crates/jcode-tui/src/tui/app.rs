@@ -1179,6 +1179,11 @@ pub struct App {
     cancel_requested: bool,
     // Quit confirmation: tracks when first Ctrl+C was pressed
     quit_pending: Option<Instant>,
+    // Ctrl+C/Ctrl+D presses sent as interrupts during the current turn.
+    // The runtime may never confirm a stop (a tool that ignores cancellation),
+    // so after a bounded number of presses the client detaches and exits
+    // instead of trapping the user in an unstoppable session.
+    processing_interrupt_presses: u8,
     // Debounce redraw storms while the terminal is being resized.
     last_resize_redraw: Option<Instant>,
     // A throttled resize still needs one trailing geometry reset and repaint at

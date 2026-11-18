@@ -369,6 +369,7 @@ impl App {
             rewind_undo_snapshot: None,
             cancel_requested: false,
             quit_pending: None,
+            processing_interrupt_presses: 0,
             last_resize_redraw: None,
             resize_redraw_pending: false,
             mcp_server_names: Vec::new(),
@@ -902,6 +903,7 @@ impl App {
             rewind_undo_snapshot: None,
             cancel_requested: false,
             quit_pending: None,
+            processing_interrupt_presses: 0,
             last_resize_redraw: None,
             resize_redraw_pending: false,
             mcp_server_names: Vec::new(), // Vec<(name, tool_count)>

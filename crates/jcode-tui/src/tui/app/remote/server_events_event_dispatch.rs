@@ -74,6 +74,7 @@ pub(in crate::tui::app) fn handle_server_event(
             return false;
         }
         ServerEvent::TurnStarted { identity } => {
+            app.reset_processing_interrupts();
             // A queued server turn can start before the prior turn's paced
             // output has drained. Settle that accepted terminal first, while
             // its identity is still current, instead of orphaning its local

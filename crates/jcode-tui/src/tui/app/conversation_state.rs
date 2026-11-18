@@ -600,6 +600,33 @@ impl App {
         false
     }
 
+    /// Exit the client without touching server-owned session state.
+    ///
+    /// Used when the runtime never confirms a stop: the turn may still be
+    /// running on the daemon, so the client detaches and leaves it alive.
+    pub(super) fn quit_client_now(&mut self) {
+        crate::telemetry::end_session_with_reason(
+            self.provider.name(),
+            &self.provider.model(),
+            crate::telemetry::SessionEndReason::NormalExit,
+        );
+        self.should_quit = true;
+    }
+
+    /// Count an interrupt press during a live turn.
+    pub(super) fn note_processing_interrupt(&mut self) {
+        self.processing_interrupt_presses = self.processing_interrupt_presses.saturating_add(1);
+    }
+
+    pub(super) fn processing_interrupt_presses(&self) -> u8 {
+        self.processing_interrupt_presses
+    }
+
+    /// A new turn resets the escape hatch: its interrupts belong to it.
+    pub(super) fn reset_processing_interrupts(&mut self) {
+        self.processing_interrupt_presses = 0;
+    }
+
     fn collect_missing_tool_outputs_since_last_scan(&mut self) -> Vec<(usize, Vec<String>)> {
         let message_len = self.local_transcript_message_count();
         if self.tool_output_scan_index > message_len {

@@ -670,6 +670,15 @@ pub(super) async fn handle_remote_key_internal(
             }
             KeyCode::Char('c') | KeyCode::Char('d') => {
                 if app.is_processing {
+                    // The runtime can fail to confirm a stop (a tool that
+                    // ignores cancellation), which used to trap the user in a
+                    // turn that could never be interrupted and a client that
+                    // could never be closed. A third press always detaches.
+                    app.note_processing_interrupt();
+                    if app.processing_interrupt_presses() >= 3 {
+                        app.quit_client_now();
+                        return Ok(());
+                    }
                     let forced = remote.keyboard_cancel("keyboard_ctrl_c_or_d").await?;
                     app.set_status_notice(if forced {
                         "Force stopping..."
@@ -677,6 +686,7 @@ pub(super) async fn handle_remote_key_internal(
                         "Interrupting..."
                     });
                 } else {
+                    app.reset_processing_interrupts();
                     app.handle_quit_request();
                 }
                 return Ok(());
