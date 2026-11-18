@@ -863,8 +863,7 @@ impl Tool for CommunicateTool {
                         "type": "object",
                         "properties": {
                             "selected": {"type": "array", "items": {"type": "string"}},
-                            "other": {"type": "string"},
-                            "comments": {"type": "object", "additionalProperties": {"type": "string"}}
+                            "other": {"type": "string"}
                         }
                     }
                 },

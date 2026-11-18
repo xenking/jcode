@@ -563,6 +563,10 @@ async fn retry_turn_with_model_fallbacks(
     fallbacks: &[String],
     allowed_models: &[String],
 ) -> anyhow::Result<()> {
+    // A worker with no configured fallbacks failed on its own route; the
+    // provider's own error is the whole story. Read before filtering: a list
+    // emptied by exclusions still means failover was considered and refused.
+    let had_fallbacks = !fallbacks.is_empty();
     // Defence in depth: the spawn path already filters the configured
     // fallbacks, but a config change mid-turn must not leak a model outside the
     // worker allowlist.
@@ -625,9 +629,13 @@ async fn retry_turn_with_model_fallbacks(
             .await;
     }
     result.map_err(|error| {
-        error.context(
-            "Automatic failover exhausted or excluded by provider.failover_excluded_models",
-        )
+        if had_fallbacks {
+            error.context(
+                "Automatic failover exhausted or excluded by provider.failover_excluded_models",
+            )
+        } else {
+            error
+        }
     })
 }
 
