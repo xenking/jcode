@@ -729,6 +729,109 @@ async fn handle_get_history_uses_live_snapshot_when_agent_is_available() {
 }
 
 #[tokio::test]
+async fn history_attach_replays_persisted_context_occupancy() {
+    let _env = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().unwrap();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+
+    let session_id = "session_history_context_occupancy";
+    let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
+    session.model = Some("mock-model".to_string());
+    session.add_message(
+        crate::message::Role::User,
+        vec![crate::message::ContentBlock::Text {
+            text: "how full is the context window?".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.add_message_ext(
+        crate::message::Role::Assistant,
+        vec![crate::message::ContentBlock::Text {
+            text: "the provider reported the prompt size".to_string(),
+            cache_control: None,
+        }],
+        None,
+        Some(crate::session::StoredTokenUsage {
+            prompt_tokens: Some(183_000),
+            input_tokens: 3_000,
+            output_tokens: 120,
+            cache_read_input_tokens: Some(180_000),
+            cache_creation_input_tokens: None,
+        }),
+    );
+    session.save().expect("save session");
+
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider(None));
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider.clone(),
+        Registry::empty(),
+        session,
+        None,
+    )));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.to_string(), Arc::clone(&agent))]),
+    ));
+    let connections = Arc::new(RwLock::new(HashMap::<String, ClientConnectionInfo>::new()));
+    let count = Arc::new(RwLock::new(1usize));
+    let (stream, mut peer) = crate::transport::stream_pair().unwrap();
+    let (_reader, write_half) = stream.into_split();
+    let writer = Arc::new(Mutex::new(write_half));
+
+    handle_get_history(
+        7,
+        session_id,
+        false,
+        &agent,
+        &provider,
+        &sessions,
+        &connections,
+        &count,
+        &writer,
+        "test-server",
+        "test",
+        None,
+        false,
+        false,
+        None,
+    )
+    .await
+    .expect("history should be written");
+    drop(writer);
+
+    let mut bytes = Vec::new();
+    peer.read_to_end(&mut bytes).await.unwrap();
+    let events: Vec<crate::protocol::ServerEvent> = std::io::Cursor::new(bytes)
+        .lines()
+        .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
+        .collect();
+    assert!(
+        matches!(
+            events.first(),
+            Some(crate::protocol::ServerEvent::History { .. })
+        ),
+        "history must lead the attach payload: {events:?}"
+    );
+    let replayed = events.iter().find_map(|event| match event {
+        crate::protocol::ServerEvent::ContextOccupancy { prompt_tokens, .. } => {
+            Some(*prompt_tokens)
+        }
+        _ => None,
+    });
+    assert_eq!(
+        replayed,
+        Some(183_000),
+        "attach must replay the persisted prompt occupancy instead of waiting for a new turn: {events:?}"
+    );
+
+    if let Some(home) = previous_home {
+        crate::env::set_var("JCODE_HOME", home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[tokio::test]
 async fn history_guard_survives_racing_turn_and_is_released_before_write() {
     assert_history_service_tier_and_pdf_capability(None, false, false, true).await;
 }

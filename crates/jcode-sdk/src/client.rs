@@ -2116,6 +2116,7 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | SidePanelState { session_id, .. }
         | TokenUsage { session_id, .. }
         | ContextCapChanged { session_id, .. }
+        | ContextOccupancy { session_id, .. }
         | KvCacheMiss { session_id, .. }
         | MemoryInjected { session_id, .. }
         | MemoryActivity { session_id, .. }

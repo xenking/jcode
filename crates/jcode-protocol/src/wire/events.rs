@@ -307,6 +307,23 @@ pub enum ServerEvent {
         effective_budget: Option<usize>,
     },
 
+    /// Prompt occupancy of the session's active context, replayed when a client
+    /// attaches so a resumed client can paint its context meter before the next
+    /// provider call reports usage.
+    ///
+    /// This is a persisted snapshot of a completed request, not a completed
+    /// call of the current turn: it must never contribute to turn stats, cost,
+    /// or the live activity projection.
+    ///
+    /// It names its session because it follows the attach history directly,
+    /// before a bridging client has learned which session the connection is
+    /// bound to from the correlated state reply.
+    #[serde(rename = "context_occupancy")]
+    ContextOccupancy {
+        session_id: String,
+        prompt_tokens: u64,
+    },
+
     /// Prompt-shape signature for the API request that will later report token
     /// usage. Remote clients use this to diagnose KV-cache misses.
     #[serde(rename = "kv_cache_request")]

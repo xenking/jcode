@@ -255,6 +255,17 @@ pub enum ApiEvent {
         effective_budget: usize,
     },
 
+    /// Prompt occupancy replayed when a client attaches, before the next
+    /// provider call reports usage.
+    ///
+    /// This is a persisted snapshot of an earlier completed request, so it
+    /// carries no turn or cost accounting: consumers only use it to paint the
+    /// context meter immediately after a restart or reconnect.
+    ContextOccupancy {
+        session_id: String,
+        prompt_tokens: u64,
+    },
+
     /// The provider request that just completed missed the KV (prompt) cache:
     /// a meaningful part of the previously cached prefix had to be resent.
     /// Follows the request's `TokenUsage`. `harness_caused` misses (the

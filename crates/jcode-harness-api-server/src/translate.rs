@@ -2351,6 +2351,25 @@ impl BridgeState {
                     .unwrap_or("KV cache miss")
                     .to_string(),
             })],
+            // Replayed straight after the attach history, which the daemon sends
+            // before the correlated `state` reply that binds this connection.
+            // The event therefore names its own session; an unattributable one
+            // is dropped rather than painted on whichever panel is listening.
+            "context_occupancy" => {
+                let session_id = event["session_id"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .or(self.session_id.as_deref());
+                match (session_id, event["prompt_tokens"].as_u64()) {
+                    (Some(session_id), Some(prompt_tokens)) => {
+                        vec![ServerFrame::event(ApiEvent::ContextOccupancy {
+                            session_id: session_id.to_string(),
+                            prompt_tokens,
+                        })]
+                    }
+                    _ => vec![],
+                }
+            }
             "done" => {
                 let id = event["id"].as_u64().unwrap_or(0);
                 if let Some(api_id) = self.take_simple(id, SimpleKind::OkOnDone) {

@@ -109,6 +109,139 @@ async fn journal_tail_pages_from_live_to_busy_with_snapshot_replay_events() {
     assert!(fragments[0]["text"].as_str().unwrap().contains("middle"));
 }
 
+#[tokio::test]
+async fn initial_history_page_replays_context_occupancy_but_scrollback_does_not() {
+    use super::*;
+    use crate::message::{ContentBlock, Role};
+    use crate::provider::Provider;
+    use crate::tool::Registry;
+    let _env = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let old_home = std::env::var_os("JCODE_HOME");
+    struct Restore(Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(value) = self.0.take() {
+                crate::env::set_var("JCODE_HOME", value);
+            } else {
+                crate::env::remove_var("JCODE_HOME");
+            }
+        }
+    }
+    let _restore = Restore(old_home);
+    crate::env::set_var("JCODE_HOME", home.path());
+    let id = "session_paging_context_occupancy";
+    let mut session = crate::session::Session::create_with_id(id.into(), None, None);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "how full is the context window?".into(),
+            cache_control: None,
+        }],
+    );
+    session.add_message_ext(
+        Role::Assistant,
+        vec![ContentBlock::Text {
+            text: "the provider reported the prompt size".into(),
+            cache_control: None,
+        }],
+        None,
+        Some(crate::session::StoredTokenUsage {
+            prompt_tokens: Some(91_000),
+            input_tokens: 1_000,
+            output_tokens: 20,
+            cache_read_input_tokens: Some(90_000),
+            cache_creation_input_tokens: None,
+        }),
+    );
+    session.save().unwrap();
+    struct TestProvider;
+    #[async_trait::async_trait]
+    impl Provider for TestProvider {
+        async fn complete(
+            &self,
+            _: &[crate::message::Message],
+            _: &[crate::message::ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<crate::provider::EventStream> {
+            anyhow::bail!("unexpected provider call")
+        }
+        fn name(&self) -> &str {
+            "test"
+        }
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self)
+        }
+    }
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        Arc::new(TestProvider) as Arc<dyn Provider>,
+        Registry::empty(),
+        session,
+        None,
+    )));
+    async fn request(
+        agent: &Arc<Mutex<Agent>>,
+        id: &str,
+        before: Option<String>,
+    ) -> Vec<crate::protocol::ServerEvent> {
+        let (stream, peer) = crate::transport::stream_pair().unwrap();
+        let (_, write) = stream.into_split();
+        let writer = Arc::new(Mutex::new(write));
+        handle_history_page(1, id, agent, &writer, before, 1)
+            .await
+            .unwrap();
+        drop(writer);
+        let mut reader = tokio::io::BufReader::new(peer);
+        let mut events = Vec::new();
+        loop {
+            let mut line = String::new();
+            if tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut line)
+                .await
+                .unwrap()
+                == 0
+            {
+                break;
+            }
+            events.push(serde_json::from_str(&line).unwrap());
+        }
+        events
+    }
+    let initial = request(&agent, id, None).await;
+    assert!(
+        matches!(
+            initial.first(),
+            Some(crate::protocol::ServerEvent::HistoryPage { .. })
+        ),
+        "the page leads the attach payload: {initial:?}"
+    );
+    assert!(
+        matches!(
+            initial.get(1),
+            Some(crate::protocol::ServerEvent::ContextOccupancy {
+                prompt_tokens: 91_000,
+                ..
+            })
+        ),
+        "the initial page must replay the persisted prompt occupancy: {initial:?}"
+    );
+    let Some(crate::protocol::ServerEvent::HistoryPage {
+        before: Some(cursor),
+        ..
+    }) = initial.first()
+    else {
+        panic!("missing first page cursor: {initial:?}")
+    };
+    let scrollback = request(&agent, id, Some(cursor.clone())).await;
+    assert!(
+        matches!(
+            scrollback.as_slice(),
+            [crate::protocol::ServerEvent::HistoryPage { .. }]
+        ),
+        "scrollback pages carry no attach state: {scrollback:?}"
+    );
+}
+
 #[test]
 fn generated_seventy_megabyte_history_is_bounded_and_lossless() {
     let entries: Vec<String> = (0..70).map(|i| serde_json::json!({"role":"user", "content":format!("{i}:{}", "\"\\\nЖ".repeat(170_000))}).to_string()).collect();

@@ -1385,6 +1385,41 @@ request in this new forked session, using the inherited conversation only as con
         totals
     }
 
+    /// Provider-reported prompt occupancy of the transcript the next request
+    /// will carry.
+    ///
+    /// A client that attaches after a daemon restart has no live usage report
+    /// yet, so the server replays this figure instead of leaving the context
+    /// meter blank until the next turn. Only a report recorded after the newest
+    /// compaction describes the active prompt: the messages a compaction keeps
+    /// verbatim still carry the usage of the pre-compaction prompt. When the
+    /// compaction is newer, its post-token estimate is the honest figure, and
+    /// it is the same one its transcript divider shows.
+    pub fn context_occupancy_tokens(&self) -> Option<u64> {
+        let newest_report = self.messages.iter().rev().find_map(|message| {
+            let prompt_tokens = message.token_usage.as_ref()?.prompt_tokens?;
+            Some((message.timestamp, prompt_tokens))
+        });
+        let newest_compaction = self.replay_events.iter().rev().find_map(|event| {
+            match &event.kind {
+                StoredReplayEventKind::Compaction { post_tokens, .. } => {
+                    Some((event.timestamp, *post_tokens))
+                }
+                _ => None,
+            }
+        });
+        match (newest_report, newest_compaction) {
+            (Some((reported_at, prompt_tokens)), Some((compacted_at, post_tokens)))
+                if !reported_at.is_some_and(|reported_at| reported_at > compacted_at) =>
+            {
+                post_tokens.or(Some(prompt_tokens))
+            }
+            (Some((_, prompt_tokens)), _) => Some(prompt_tokens),
+            (None, Some((_, post_tokens))) => post_tokens,
+            (None, None) => None,
+        }
+    }
+
     pub fn add_message(
         &mut self,
         role: Role,
@@ -2002,6 +2037,10 @@ mod tests;
 #[cfg(test)]
 #[path = "session_tests/shared_compaction.rs"]
 mod shared_compaction_tests;
+
+#[cfg(test)]
+#[path = "session_tests/context_occupancy.rs"]
+mod context_occupancy_tests;
 
 #[cfg(test)]
 #[path = "session_tests/shared_payload.rs"]

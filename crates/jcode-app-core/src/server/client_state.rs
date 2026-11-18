@@ -806,6 +806,7 @@ async fn send_history_from_persisted_session(
     };
     timing.stage("render");
     let token_usage_totals = session.token_usage_totals();
+    let context_occupancy = session.context_occupancy_tokens();
     let (rendered_messages, images) = crate::session::render_messages_and_images(&session);
     // Extract the small metadata fields we need, then drop the full Session
     // (including its message transcript) before building and serializing the
@@ -908,6 +909,8 @@ async fn send_history_from_persisted_session(
 
     timing.stage("encode");
     let json = encode_event(&history_event);
+    let occupancy_json =
+        context_occupancy_event(session_id, context_occupancy).map(|event| encode_event(&event));
     timing.stage("writer_lock");
     let mut writer_guard = writer.lock().await;
     timing.stage("write");
@@ -920,9 +923,29 @@ async fn send_history_from_persisted_session(
         }
         sent?;
     }
-    let result = writer_guard.write_all(json.as_bytes()).await;
+    let mut result = writer_guard.write_all(json.as_bytes()).await;
+    if result.is_ok()
+        && let Some(occupancy_json) = occupancy_json.as_ref()
+    {
+        result = writer_guard.write_all(occupancy_json.as_bytes()).await;
+    }
     timing.result(&result);
     result.map_err(Into::into)
+}
+
+/// Persisted occupancy notice for a freshly attached client.
+///
+/// It is a distinct event, not a `tokens` event: the figure belongs to a
+/// completed request from before this attachment, so it must not enter the
+/// current turn's stats, cost, or KV-cache accounting.
+pub(super) fn context_occupancy_event(
+    session_id: &str,
+    prompt_tokens: Option<u64>,
+) -> Option<ServerEvent> {
+    prompt_tokens.map(|prompt_tokens| ServerEvent::ContextOccupancy {
+        session_id: session_id.to_owned(),
+        prompt_tokens,
+    })
 }
 
 /// How long the bootstrap History payload may wait on the model-name catalog.
@@ -1084,6 +1107,9 @@ async fn send_history_with_guard(
     let inferred_interrupted = was_interrupted
         .is_none()
         .then(|| session_interrupted_by_reload(agent_guard.session_for_history()));
+    // A client attaching after a restart has no live usage report yet; replay
+    // the persisted occupancy so its context meter is meaningful immediately.
+    let context_occupancy = agent_guard.session_for_history().context_occupancy_tokens();
 
     // Only snapshot preparation needs the agent. Never hold it across session
     // metadata locks or socket backpressure.
@@ -1236,6 +1262,8 @@ async fn send_history_with_guard(
     // the payload stays resident across the awaited socket write.
     drop(history_event);
     let json_len = json.len();
+    let occupancy_json =
+        context_occupancy_event(session_id, context_occupancy).map(|event| encode_event(&event));
     let encode_ms = encode_start.elapsed().as_millis();
     timing.stage("writer_lock");
     let writer_lock_start = Instant::now();
@@ -1252,7 +1280,12 @@ async fn send_history_with_guard(
         }
         sent?;
     }
-    let result = writer_guard.write_all(json.as_bytes()).await;
+    let mut result = writer_guard.write_all(json.as_bytes()).await;
+    if result.is_ok()
+        && let Some(occupancy_json) = occupancy_json.as_ref()
+    {
+        result = writer_guard.write_all(occupancy_json.as_bytes()).await;
+    }
     timing.result(&result);
     drop(writer_guard);
     // Release the serialized payload before any further work (logging below

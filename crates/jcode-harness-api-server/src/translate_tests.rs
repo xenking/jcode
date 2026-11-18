@@ -441,6 +441,33 @@ fn token_usage_preserves_cache_creation_and_missing_counters() {
 }
 
 #[test]
+fn context_occupancy_is_forwarded_as_a_context_snapshot() {
+    // The daemon replays occupancy before the `state` reply binds the bridge
+    // to a session, so the event's own session id is what scopes it.
+    let mut state = BridgeState::default();
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "context_occupancy", "session_id": "s1", "prompt_tokens": 183_000
+    }));
+    assert_eq!(frames.len(), 1);
+    assert_eq!(
+        frames[0].event,
+        ApiEvent::ContextOccupancy {
+            session_id: "s1".into(),
+            prompt_tokens: 183_000,
+        }
+    );
+}
+
+#[test]
+fn unattributable_context_occupancy_is_dropped() {
+    let mut state = BridgeState::default();
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "context_occupancy", "prompt_tokens": 183_000
+    }));
+    assert!(frames.is_empty(), "{frames:?}");
+}
+
+#[test]
 fn kv_cache_miss_is_forwarded_with_session() {
     let mut state = BridgeState {
         session_id: Some("s1".into()),

@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 17;
+export const API_VERSION_MINOR = 18;
 
 export type RuntimeCommand = "mode" | "skills" | "context" | "info" | "cache" | "memory" | "swarm" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout" | "background_output";
 
@@ -461,6 +461,8 @@ export type ApiEvent =
       effective_budget?: number;
     }
   | { ev: "context_cap_changed"; session_id: string; max_context_tokens: number | null; effective_budget: number }
+  /** Persisted prompt occupancy replayed on attach, so a context meter is filled before the next turn reports usage. Not a turn's usage: no cost or turn stats. */
+  | { ev: "context_occupancy"; session_id: string; prompt_tokens: number }
   | {
       ev: "kv_cache_miss";
       session_id: string;
@@ -672,6 +674,7 @@ export const KNOWN_EVENT_KINDS = [
   "tool_done",
   "token_usage",
   "context_cap_changed",
+  "context_occupancy",
   "kv_cache_miss",
   "memory_injected",
   "memory_activity",

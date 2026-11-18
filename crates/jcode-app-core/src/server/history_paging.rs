@@ -15,13 +15,23 @@ pub(in crate::server) async fn handle_history_page(
     before: Option<String>,
     limit: usize,
 ) -> Result<()> {
-    let rows = if let Ok(guard) = agent.try_lock() {
-        bounded::records(guard.session_for_history())
+    let (rows, context_occupancy) = if let Ok(guard) = agent.try_lock() {
+        let session = guard.session_for_history();
+        (
+            bounded::records(session),
+            session.context_occupancy_tokens(),
+        )
     } else {
         crate::session::Session::load_for_remote_startup(session_id)
             .or_else(|_| crate::session::Session::load_startup_stub(session_id))
             .map_err(|e| e.to_string())
-            .and_then(|session| bounded::records(&session))
+            .map(|session| {
+                (
+                    bounded::records(&session),
+                    session.context_occupancy_tokens(),
+                )
+            })
+            .unwrap_or_else(|error| (Err(error), None))
     };
     let page = rows
         .and_then(|rows| bounded::page_records(&rows, before.as_deref(), limit))
@@ -47,7 +57,17 @@ pub(in crate::server) async fn handle_history_page(
             retry_after_secs: None,
         },
     };
-    super::super::client_writer::write_direct_event(writer, &event).await
+    let page_built = matches!(&event, ServerEvent::HistoryPage { .. });
+    let sent = super::super::client_writer::write_direct_event(writer, &event).await;
+    // The initial page answers an attach; scrollback pages carry no new state.
+    if page_built
+        && before.is_none()
+        && sent.is_ok()
+        && let Some(occupancy) = super::context_occupancy_event(session_id, context_occupancy)
+    {
+        return super::super::client_writer::write_direct_event(writer, &occupancy).await;
+    }
+    sent
 }
 
 pub(in crate::server) async fn handle_session_images(

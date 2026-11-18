@@ -939,6 +939,25 @@ fn turn_stopped_schema_and_future_reason_compatibility() {
 }
 
 #[test]
+fn context_occupancy_wire_shape() {
+    let frame = ServerFrame::event(ApiEvent::ContextOccupancy {
+        session_id: "s".into(),
+        prompt_tokens: 41_000,
+    });
+    let wire = serde_json::to_value(&frame).unwrap();
+    assert_eq!(
+        wire,
+        serde_json::json!({
+            "v": 1,
+            "ev": "context_occupancy",
+            "session_id": "s",
+            "prompt_tokens": 41_000
+        })
+    );
+    assert_eq!(serde_json::from_value::<ServerFrame>(wire).unwrap(), frame);
+}
+
+#[test]
 fn memory_events_wire_shape() {
     let injected = ServerFrame::event(ApiEvent::MemoryInjected {
         session_id: "s".into(),
