@@ -17,7 +17,10 @@ fn test_handle_server_event_service_tier_changed_mentions_next_request_when_stre
         &mut remote,
     );
 
-    assert!(redraw, "tier configuration acknowledgement must redraw immediately");
+    assert!(
+        redraw,
+        "tier configuration acknowledgement must redraw immediately"
+    );
     assert_eq!(app.remote_service_tier, Some("priority".to_string()));
     assert_eq!(
         app.status_notice(),
@@ -253,15 +256,11 @@ fn test_handle_server_event_history_with_interruption_queues_continuation() {
 
     assert!(app.display_messages().len() >= 2);
     assert_eq!(app.connection_type.as_deref(), Some("websocket"));
-    let system_msg = app
-        .display_messages()
-        .iter()
-        .find(|m| m.role == "system" && m.content.starts_with("Reload complete - continuing"))
-        .expect("should have a short reload continuation message");
     assert!(
-        system_msg
-            .content
-            .starts_with("Reload complete - continuing")
+        app.status_notice
+            .as_ref()
+            .is_some_and(|(text, _)| text.starts_with("Reload complete - continuing")),
+        "the reload continuation is a status line, not a transcript row"
     );
 
     assert!(app.queued_messages().is_empty());
@@ -270,7 +269,8 @@ fn test_handle_server_event_history_with_interruption_queues_continuation() {
     assert!(
         app.display_messages()
             .iter()
-            .any(|m| m.role == "system" && m.content.starts_with("Reload complete - continuing"))
+            .all(|m| !m.content.starts_with("Reload complete - continuing")),
+        "no synthetic reload row may appear in the transcript"
     );
 }
 
@@ -348,16 +348,19 @@ fn test_handle_server_event_history_uses_server_owned_reload_recovery_directive(
         1,
         "duplicate History payloads should not duplicate the visible reload notice"
     );
+    assert!(
+        app.status_notice
+            .as_ref()
+            .is_some_and(|(text, _)| text.contains("recovery directive was pending")),
+        "the continuation notice is a status line"
+    );
     assert_eq!(
-        app.display_messages()
+        app.scheduled_reload_recoveries
             .iter()
-            .filter(|message| {
-                message.role == "system"
-                    && message.content.contains("recovery directive was pending")
-            })
+            .filter(|(session, _)| session == "ses_server_owned_reload")
             .count(),
         1,
-        "duplicate History payloads should not duplicate the visible continuation notice"
+        "duplicate History payloads must not schedule a second continuation notice"
     );
 }
 
@@ -497,10 +500,9 @@ fn test_handle_server_event_history_after_reload_reports_no_continuation_needed(
 
     assert!(app.hidden_queued_system_messages.is_empty());
     assert!(app.pending_reload_reconnect_status.is_none());
-    assert!(app.display_messages().iter().any(|m| {
-        m.role == "system"
-            && m.content.contains("no continuation needed")
-            && m.content.contains("previous response had already finished")
+    assert!(app.status_notice.as_ref().is_some_and(|(text, _)| {
+        text.contains("no continuation needed")
+            && text.contains("previous response had already finished")
     }));
 }
 
@@ -619,7 +621,12 @@ fn test_finalize_reload_reconnect_mentions_persisted_background_task() {
     );
 
     assert!(app.hidden_queued_system_messages.is_empty());
-    assert!(crate::tool::selfdev::ReloadContext::peek_for_session(&session_id).unwrap().is_some(), "only the daemon may consume recovery context");
+    assert!(
+        crate::tool::selfdev::ReloadContext::peek_for_session(&session_id)
+            .unwrap()
+            .is_some(),
+        "only the daemon may consume recovery context"
+    );
 
     cleanup_background_task_files(&info.task_id);
     cleanup_reload_context_file(&session_id);

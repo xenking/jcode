@@ -35,7 +35,8 @@ fn compacted_prompt_marker_hydrates_remote_stub_and_composer_numbering() {
             content: message.content,
             tool_calls: None,
             tool_data: None,
-            response_stats: None, timestamp_ms: None,
+            response_stats: None,
+            timestamp_ms: None,
         })
         .collect();
         assert!(app.handle_server_event(
@@ -246,9 +247,9 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
     assert!(app.queued_messages().is_empty());
     assert!(app.hidden_queued_system_messages.is_empty());
     assert!(
-        app.display_messages()
-            .iter()
-            .any(|m| m.role == "system" && m.content.starts_with("Reload complete - continuing"))
+        app.status_notice
+            .as_ref()
+            .is_some_and(|(text, _)| text.starts_with("Reload complete - continuing"))
     );
 }
 

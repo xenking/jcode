@@ -39,7 +39,7 @@ pub const OAUTH_BILLING_HEADER: &str = "cc_version=2.1.280; cc_entrypoint=sdk-cl
 
 /// Minimal user turn appended when a formatted conversation would otherwise end
 /// on an assistant message, which Anthropic rejects on non-prefill models.
-pub(crate) const CONTINUATION_USER_TURN: &str = "Continue.";
+pub const CONTINUATION_USER_TURN: &str = "Continue.";
 
 pub fn format_messages(messages: &[Message], is_oauth: bool) -> Vec<ApiMessage> {
     format_messages_with_tools(messages, is_oauth, &[])
@@ -226,34 +226,11 @@ pub fn format_messages_with_native(
     rewrite_orphaned_tool_results(&mut merged);
     answer_unpaired_tool_uses(&mut merged);
 
-    // Anthropic rejects a request whose final message is an assistant turn on
-    // models that do not support assistant prefill ("This model does not support
-    // assistant message prefill. The conversation must end with a user message.").
-    // jcode never intends to prefill, so a trailing assistant turn here is always
-    // an upstream accident: the reload auto-resume path starts a turn with empty
-    // user content and delivers its continuation as a system reminder, leaving the
-    // transcript ending on the interrupted assistant turn. Repair the shape at the
-    // last formatting step. See issue #600.
-    //
-    // Exception: a turn that stopped with `pause_turn` mid server-tool use must
-    // be resent exactly as-is so the API can resume it. Those turns end on an
-    // assistant message carrying raw server tool blocks.
-    if merged
-        .last()
-        .is_some_and(|last| last.role == "assistant" && !is_paused_server_tool_turn(last))
-    {
-        jcode_logging::warn(
-            "[anthropic] Conversation ended with an assistant message; appending a \
-             continuation user turn to avoid a model prefill rejection (400)",
-        );
-        merged.push(ApiMessage {
-            role: "user".to_string(),
-            content: vec![ApiContentBlock::Text {
-                text: CONTINUATION_USER_TURN.to_string(),
-                cache_control: None,
-            }],
-        });
-    }
+    // A trailing assistant message is a prefill continuation: the model keeps
+    // generating from its own interrupted text with no user turn added. Models
+    // without prefill reject it with a 400, which the transport repairs with
+    // [`repair_trailing_assistant`] and retries. A turn that stopped with
+    // `pause_turn` mid server-tool use is resent exactly as-is.
 
     // Validate: check each assistant message with tool_use has matching tool_result in next user message
     for (i, msg) in merged.iter().enumerate() {
@@ -313,6 +290,34 @@ pub fn format_messages_with_native(
     }
 
     merged
+}
+
+/// True when a formatted conversation ends on an assistant turn that Anthropic
+/// will continue as a prefill instead of rejecting.
+pub fn ends_with_assistant_prefill(messages: &[ApiMessage]) -> bool {
+    messages
+        .last()
+        .is_some_and(|last| last.role == "assistant" && !is_paused_server_tool_turn(last))
+}
+
+/// Append the minimal continuation user turn for models that reject assistant
+/// prefill. Returns false when the conversation does not need it.
+pub fn repair_trailing_assistant(messages: &mut Vec<ApiMessage>) -> bool {
+    if !ends_with_assistant_prefill(messages) {
+        return false;
+    }
+    jcode_logging::warn(
+        "[anthropic] Model rejected assistant prefill; appending a continuation \
+         user turn and retrying",
+    );
+    messages.push(ApiMessage {
+        role: "user".to_string(),
+        content: vec![ApiContentBlock::Text {
+            text: CONTINUATION_USER_TURN.to_string(),
+            cache_control: None,
+        }],
+    });
+    true
 }
 
 /// True when Anthropic rejected replayed server tool payloads, e.g.

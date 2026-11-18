@@ -502,15 +502,15 @@ fn test_restore_session_adds_reload_message() {
     // Restore the session
     app.restore_session(&session_id);
 
-    // Should have the original message + reload success message in display
-    assert_eq!(app.display_messages().len(), 2);
+    // Only the original message is in the transcript; the reload notice is a
+    // transient status line, never a synthetic conversation row.
+    assert_eq!(app.display_messages().len(), 1);
     assert_eq!(app.display_messages()[0].role, "user");
     assert_eq!(app.display_messages()[0].content, "test message");
-    assert_eq!(app.display_messages()[1].role, "system");
     assert!(
-        app.display_messages()[1]
-            .content
-            .contains("Reload complete - continuing.")
+        app.status_notice
+            .as_ref()
+            .is_some_and(|(text, _)| text.contains("Reload complete - continuing."))
     );
 
     // Local restore keeps provider messages lazy until the next active turn.
@@ -528,7 +528,7 @@ fn test_restore_session_adds_reload_message() {
 }
 
 #[test]
-fn test_restore_session_with_selfdev_reload_tool_result_queues_continuation() {
+fn test_restore_session_with_selfdev_reload_tool_result_leaves_continuation_to_daemon() {
     use crate::session::Session;
 
     let mut app = create_test_app();
@@ -547,13 +547,15 @@ fn test_restore_session_with_selfdev_reload_tool_result_queues_continuation() {
 
     app.restore_session(&session_id);
 
+    // Recovery is daemon-owned. The client must never queue a synthetic prompt
+    // (it would be attributed to the user) nor start a turn of its own.
     assert!(
         app.hidden_queued_system_messages
             .iter()
-            .any(|message| message.contains("Continue exactly where you left off"))
+            .all(|message| !message.contains("Continue exactly where you left off"))
     );
-    assert!(app.pending_turn);
-    assert!(matches!(app.status, ProcessingStatus::Sending));
+    assert!(!app.pending_turn);
+    assert!(!matches!(app.status, ProcessingStatus::Sending));
 
     let _ = std::fs::remove_file(crate::session::session_path(&session_id).unwrap());
 }
@@ -1277,7 +1279,10 @@ fn corrupt_reload_queued_state_is_preserved_instead_of_consumed() {
             data[field] = serde_json::json!("invalid structured state");
             let encoded = data.to_string();
             std::fs::write(&path, &encoded).unwrap();
-            assert!(App::restore_input_for_reload(session_id).is_none(), "{field}");
+            assert!(
+                App::restore_input_for_reload(session_id).is_none(),
+                "{field}"
+            );
             assert_eq!(std::fs::read_to_string(&path).unwrap(), encoded);
         }
     });

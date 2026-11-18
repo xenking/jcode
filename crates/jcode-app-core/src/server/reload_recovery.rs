@@ -79,6 +79,11 @@ pub(super) struct ReloadRecoveryRecord {
     pub reload_id: String,
     pub session_id: String,
     pub role: ReloadRecoveryRole,
+    /// A system wake for an idle worker with an open todo lane, not an
+    /// interrupted turn. Wakes keep their hidden reminder; resumed turns never
+    /// inject a user message.
+    #[serde(default)]
+    pub wake: bool,
     pub status: ReloadRecoveryStatus,
     pub directive: ReloadRecoveryDirective,
     pub reason: String,
@@ -240,6 +245,30 @@ pub(super) fn persist_intent(
     directive: ReloadRecoveryDirective,
     reason: impl Into<String>,
 ) -> Result<()> {
+    persist_intent_with_mode(reload_id, session_id, role, directive, reason, false)
+}
+
+/// A system wake for an idle worker with unfinished work. Unlike a resume it
+/// has no interrupted assistant turn to continue, so its hidden reminder is
+/// delivered as the wake turn's prompt.
+pub(super) fn persist_wake_intent(
+    reload_id: &str,
+    session_id: &str,
+    role: ReloadRecoveryRole,
+    directive: ReloadRecoveryDirective,
+    reason: impl Into<String>,
+) -> Result<()> {
+    persist_intent_with_mode(reload_id, session_id, role, directive, reason, true)
+}
+
+fn persist_intent_with_mode(
+    reload_id: &str,
+    session_id: &str,
+    role: ReloadRecoveryRole,
+    directive: ReloadRecoveryDirective,
+    reason: impl Into<String>,
+    wake: bool,
+) -> Result<()> {
     let _guard = lock_store();
     let role_label = role.as_str();
     if peek_for_session(session_id)?.is_some_and(|record| record.reload_id == reload_id) {
@@ -249,6 +278,7 @@ pub(super) fn persist_intent(
         reload_id: reload_id.to_string(),
         session_id: session_id.to_string(),
         role,
+        wake,
         status: ReloadRecoveryStatus::Pending,
         directive,
         reason: reason.into(),
@@ -578,6 +608,30 @@ pub(crate) fn admit_input(
     Ok(true)
 }
 
+/// Admission for a resumed turn: the journal write is the receipt because the
+/// only transcript mutation is an idempotent interrupted tool result.
+pub(crate) fn admit_resume(
+    session_id: &str,
+    identity: &crate::protocol::TurnIdentity,
+) -> Result<bool> {
+    let _guard = lock_store();
+    let Some(mut record) = peek_for_session(session_id)? else {
+        return Ok(false);
+    };
+    if record.status != ReloadRecoveryStatus::Claimed || record.attempt.as_ref() != Some(identity) {
+        return Ok(false);
+    }
+    // A resumed turn appends only an interrupted tool result, which is
+    // idempotent, so the journal write is the admission receipt.
+    write_outcome(
+        &mut record,
+        ReloadRecoveryStatus::Started,
+        "resumed interrupted turn in place",
+    )?;
+    let _ = crate::tool::selfdev::ReloadContext::load_for_session(session_id);
+    Ok(true)
+}
+
 /// The original answered tool result is the receipt for an interrupted ask.
 /// Waiting for an attached client is not admission and never consumes intent.
 pub(crate) fn admit_ask_answer(
@@ -821,6 +875,11 @@ impl RecoveryOwner {
                 ));
                 {
                     let guard = agent.lock().await;
+                    // The recovery agent is built from the session snapshot, so
+                    // queued prompts only exist in the durable soft-interrupt
+                    // store. Restore them before the resumed turn can overwrite
+                    // that store with an empty queue.
+                    guard.restore_persisted_soft_interrupts();
                     super::register_session_interrupt_queue(
                         &self.queues,
                         session_id,
@@ -900,17 +959,62 @@ impl RecoveryOwner {
             Some(&self.events),
         )
         .await;
-        let processing = super::turn_failover::process_reserved_message_with_server_failover(
-            agent,
-            &lease,
-            "",
-            vec![],
-            Some(record.directive.continuation_message.clone()),
-            events.sender(),
-            true,
-            Some(vec![record.input_id()]),
-            None,
-        );
+        let wake = record.wake;
+        if !wake {
+            let plan = { agent.lock().await.reload_resume_plan(true) };
+            match plan {
+                crate::agent::ResumePlan::Nothing => {
+                    if let Err(error) = finish_pending(
+                        session_id,
+                        ReloadRecoveryStatus::Blocked,
+                        "nothing to resume in the restored transcript",
+                    ) {
+                        crate::logging::warn(&format!(
+                            "Cannot close empty recovery intent for {session_id}: {error}"
+                        ));
+                    }
+                    return;
+                }
+                // An unanswered ask keeps the record Claimed: the answer, not
+                // this resume, is its receipt.
+                crate::agent::ResumePlan::AwaitingAsk => {}
+                _ => {
+                    if !matches!(admit_resume(session_id, lease.identity()), Ok(true)) {
+                        return;
+                    }
+                }
+            }
+        }
+        let processing = async {
+            if wake {
+                // An idle worker with an open todo lane has no interrupted
+                // assistant turn to continue. Its hidden reminder is the wake
+                // turn's prompt, exactly as before.
+                super::turn_failover::process_reserved_message_with_server_failover(
+                    agent,
+                    &lease,
+                    "",
+                    vec![],
+                    Some(record.directive.continuation_message.clone()),
+                    events.sender(),
+                    true,
+                    Some(vec![record.input_id()]),
+                    None,
+                )
+                .await
+                .map(|_| crate::agent::ResumeOutcome::Continued)
+            } else {
+                // The continuation is part of the assistant turn: no user-role
+                // prompt is admitted, so the resumed request keeps the
+                // pre-restart prefix.
+                super::turn_failover::process_reserved_resume_with_server_failover(
+                    agent,
+                    &lease,
+                    events.sender(),
+                )
+                .await
+            }
+        };
         let result = tokio::select! {
             biased;
             _ = stop.cancelled() => Err(anyhow::anyhow!("Recovery cancelled or superseded")),
@@ -920,6 +1024,17 @@ impl RecoveryOwner {
             // Only admission is retried. Once its receipt exists, a model error
             // is the turn's result, not permission to submit another turn.
             crate::logging::warn(&format!("Recovery turn failed for {session_id}: {error}"));
+        }
+        if matches!(result, Ok(crate::agent::ResumeOutcome::NothingToResume))
+            && let Err(error) = finish_pending(
+                session_id,
+                ReloadRecoveryStatus::Blocked,
+                "nothing to resume in the restored transcript",
+            )
+        {
+            crate::logging::warn(&format!(
+                "Cannot close empty recovery intent for {session_id}: {error}"
+            ));
         }
         let status = if stop.is_cancelled() {
             "stopped"
@@ -953,7 +1068,7 @@ impl RecoveryOwner {
             super::persist_swarm_state_for(&swarm_id, &self.swarm).await;
         }
         let terminal = match result {
-            Ok(()) => crate::protocol::ServerEvent::Done { id: 0 },
+            Ok(_) => crate::protocol::ServerEvent::Done { id: 0 },
             Err(error) => crate::protocol::ServerEvent::Error {
                 id: 0,
                 message: crate::util::format_error_chain(&error),

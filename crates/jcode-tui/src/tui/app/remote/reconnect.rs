@@ -1000,6 +1000,8 @@ pub(super) fn load_reload_reconnect_hints(
 }
 
 /// Recovery is owned by the daemon. Reconnect only displays its notice.
+/// The notice is a transient status line, never a transcript row: the resumed
+/// turn continues in place, so there is no new message to show.
 pub(in crate::tui::app) fn show_reload_recovery_notice_once(
     app: &mut App,
     session_id: &str,
@@ -1015,7 +1017,7 @@ pub(in crate::tui::app) fn show_reload_recovery_notice_once(
     {
         return false;
     }
-    app.push_display_message(DisplayMessage::system(notice));
+    app.set_status_notice(notice);
     true
 }
 

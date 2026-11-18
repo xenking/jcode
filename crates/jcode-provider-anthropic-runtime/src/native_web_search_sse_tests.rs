@@ -216,23 +216,26 @@ fn paused_server_tool_turn_is_not_given_a_continuation_user_turn() {
     assert_eq!(last["content"][1]["type"], "web_search_tool_result");
 
     // Without native replay the text fallback is ordinary assistant text, so
-    // the usual prefill repair still applies.
+    // the turn is sent as an assistant prefill continuation.
     let formatted =
         jcode_provider_anthropic::format_messages_with_native(&messages, false, &[], false);
-    assert_eq!(formatted.last().unwrap().role, "user");
+    assert_eq!(formatted.last().unwrap().role, "assistant");
+    assert!(jcode_provider_anthropic::ends_with_assistant_prefill(
+        &formatted
+    ));
 }
 
 #[test]
-fn interrupted_turn_after_search_text_still_gets_continuation_user_turn() {
+fn interrupted_turn_after_search_text_is_sent_as_prefill() {
     // A turn that searched and then started answering (e.g. the user
     // interrupted it) ends on text, not a server block. It is not a paused
-    // server-tool turn, so the prefill repair must still append a user turn.
+    // server-tool turn, so it continues from its own assistant text.
     let mut messages = stored_search_turn();
     messages.pop();
     let formatted =
         jcode_provider_anthropic::format_messages_with_native(&messages, false, &[], true);
-    assert_eq!(formatted.last().unwrap().role, "user");
-    let assistant = serde_json::to_value(&formatted[formatted.len() - 2]).unwrap();
+    assert_eq!(formatted.last().unwrap().role, "assistant");
+    let assistant = serde_json::to_value(formatted.last().unwrap()).unwrap();
     assert_eq!(assistant["content"][0]["type"], "server_tool_use");
 }
 

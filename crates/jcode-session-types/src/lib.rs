@@ -393,6 +393,17 @@ pub struct StoredMemoryInjection {
     pub timestamp: DateTime<Utc>,
 }
 
+/// Appended to a partial assistant message when a server reload stops
+/// generation mid-stream. It is a durable interruption signal, never
+/// conversation content: it is stripped before a resumed request and before
+/// rendering, so neither the model nor the user sees it.
+pub const RELOAD_INTERRUPTED_MARKER: &str = "\n\n[generation interrupted - server reloading]";
+
+/// Remove the reload interruption marker from displayed or replayed text.
+pub fn strip_reload_interruption_marker(text: &str) -> &str {
+    text.strip_suffix(RELOAD_INTERRUPTED_MARKER).unwrap_or(text)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredMessage {
     pub id: String,

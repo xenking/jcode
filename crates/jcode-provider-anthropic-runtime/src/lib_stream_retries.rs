@@ -32,6 +32,10 @@ pub(super) async fn run_stream_with_retries(
     // displayed maximum grows only once one has actually been seen.
     let mut retry_max = MAX_RETRIES;
     let mut first_failure_at: Option<std::time::Instant> = None;
+    // A resumed turn intentionally ends on the assistant's own partial message
+    // so generation continues in place. Models without prefill reject that
+    // shape; repair it once and retry instead of surfacing a 400.
+    let mut prefill_repaired = false;
 
     for attempt in 0..TRANSPORT_MAX_RETRIES {
         if attempt > 0 {
@@ -100,6 +104,16 @@ pub(super) async fn run_stream_with_retries(
                 // a connection reset) lives deeper than "Failed to send request to
                 // Anthropic API", and the retry classifier needs to see it.
                 let error_str = format!("{e:#}").to_lowercase();
+
+                if !saw_output
+                    && !prefill_repaired
+                    && error_str.contains("does not support assistant message prefill")
+                    && jcode_provider_anthropic::repair_trailing_assistant(&mut request.messages)
+                {
+                    prefill_repaired = true;
+                    last_error = Some(e);
+                    continue;
+                }
 
                 // OAuth auth failures: force refresh and retry once immediately.
                 if is_oauth && is_oauth_auth_error(&error_str) && !attempted_forced_refresh {

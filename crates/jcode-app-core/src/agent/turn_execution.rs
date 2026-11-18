@@ -326,7 +326,16 @@ impl Agent {
             drop(queue);
             let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
                 content: user_message.to_string(),
-                display_role: None,
+                // System-role context (reload/swarm reminders) must stay a
+                // status line in clients, never a prompt attributed to the user.
+                display_role: display_role.map(|role| {
+                    match role {
+                        crate::session::StoredDisplayRole::FileActivity => "file_activity",
+                        crate::session::StoredDisplayRole::BackgroundTask => "background_task",
+                        crate::session::StoredDisplayRole::System => "system",
+                    }
+                    .to_string()
+                }),
                 point: "turn_start".into(),
                 tools_skipped: None,
                 client_ids,
@@ -610,7 +619,7 @@ impl Agent {
     /// is actively working during the otherwise-invisible window between prompt
     /// submission and the first tool call. No-op (without building the payload)
     /// when the hook is not configured.
-    fn fire_turn_start_hook(&self, source: &str) {
+    pub(super) fn fire_turn_start_hook(&self, source: &str) {
         if !crate::hooks::hook_configured("turn_start") {
             return;
         }
@@ -626,7 +635,7 @@ impl Agent {
 
     /// Fire the `turn_end` observer hook with turn outcome metadata.
     /// No-op (without building the payload) when the hook is not configured.
-    fn fire_turn_end_hook(
+    pub(super) fn fire_turn_end_hook(
         &self,
         result: &Result<()>,
         started_at: Instant,

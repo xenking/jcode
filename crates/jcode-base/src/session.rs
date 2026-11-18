@@ -35,8 +35,9 @@ pub use crash::{
     find_session_by_name_or_id, recover_crashed_sessions, recover_crashed_sessions_by_ids,
 };
 pub use jcode_session_types::{
-    EnvSnapshot, GitState, SessionImproveMode, SessionStatus, StoredCompactionState,
-    StoredDisplayRole, StoredMemoryInjection, StoredMessage, StoredTokenUsage,
+    EnvSnapshot, GitState, RELOAD_INTERRUPTED_MARKER, SessionImproveMode, SessionStatus,
+    StoredCompactionState, StoredDisplayRole, StoredMemoryInjection, StoredMessage,
+    StoredTokenUsage, strip_reload_interruption_marker,
 };
 use journal::{PersistVectorMode, SessionJournalMeta, SessionPersistState};
 pub use maintenance::prune_old_session_backups;

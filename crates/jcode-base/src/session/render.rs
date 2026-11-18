@@ -697,7 +697,7 @@ fn render_messages_and_images_internal(
                         }
                         continue;
                     }
-                    text.push_str(t);
+                    text.push_str(super::strip_reload_interruption_marker(t));
                 }
                 ContentBlock::ToolUse {
                     id,

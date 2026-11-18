@@ -1,0 +1,477 @@
+//! Seamless reload: a restart continues the interrupted assistant turn in
+//! place, with no user-role prompt and an unchanged request prefix.
+
+use super::*;
+use crate::message::{Message, StreamEvent, ToolDefinition};
+use crate::provider::{EventStream, Provider};
+use crate::tool::Registry;
+use async_trait::async_trait;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex as StdMutex};
+use tokio::sync::mpsc as tokio_mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+
+struct TestHome {
+    previous: Option<std::ffi::OsString>,
+    _home: tempfile::TempDir,
+}
+
+impl TestHome {
+    fn new() -> Self {
+        let previous = std::env::var_os("JCODE_HOME");
+        let home = tempfile::tempdir().unwrap();
+        crate::env::set_var("JCODE_HOME", home.path());
+        Self {
+            previous,
+            _home: home,
+        }
+    }
+}
+
+impl Drop for TestHome {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+}
+
+type Captured = Arc<StdMutex<Vec<Vec<Message>>>>;
+
+#[derive(Clone, Default)]
+struct ScriptedProvider {
+    requests: Captured,
+    replies: Arc<StdMutex<VecDeque<Vec<StreamEvent>>>>,
+}
+
+impl ScriptedProvider {
+    fn push_reply(&self, events: Vec<StreamEvent>) {
+        self.replies.lock().unwrap().push_back(events);
+    }
+
+    fn requests(&self) -> Vec<Vec<Message>> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+fn text_reply(text: &str) -> Vec<StreamEvent> {
+    vec![
+        StreamEvent::TextDelta(text.to_string()),
+        StreamEvent::MessageEnd {
+            stop_reason: Some("end_turn".to_string()),
+        },
+    ]
+}
+
+#[async_trait]
+impl Provider for ScriptedProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        self.requests.lock().unwrap().push(messages.to_vec());
+        let events = self
+            .replies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| text_reply("done"));
+        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(16);
+        tokio::spawn(async move {
+            for event in events {
+                let _ = tx.send(Ok(event)).await;
+            }
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    /// Record the neutral transcript. The default implementation prepends the
+    /// turn's dynamic system context, which changes every turn and would hide
+    /// exactly the prefix stability these tests assert.
+    async fn complete_split(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system_static: &str,
+        _system_dynamic: &str,
+        resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        self.complete(messages, tools, system_static, resume_session_id)
+            .await
+    }
+
+    fn name(&self) -> &str {
+        "scripted"
+    }
+
+    fn model(&self) -> String {
+        "scripted-1".to_string()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+fn has_synthetic_user_prompt(messages: &[Message]) -> bool {
+    messages.iter().any(|message| {
+        message.role == Role::User
+            && message.content.iter().any(|block| match block {
+                ContentBlock::Text { text, .. } => {
+                    text.starts_with("[auto]")
+                        || text.contains("Continue exactly where you left off")
+                        || text.contains("Your session was interrupted by a server reload")
+                }
+                _ => false,
+            })
+    })
+}
+
+fn summarize(messages: &[Message]) -> Vec<String> {
+    messages
+        .iter()
+        .map(|message| {
+            let text = message
+                .content
+                .iter()
+                .find_map(|block| match block {
+                    ContentBlock::Text { text, .. } => Some(text.as_str()),
+                    ContentBlock::ToolUse { name, .. } => Some(name.as_str()),
+                    ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            format!("{:?}[{}]={:.40}", message.role, message.content.len(), text)
+        })
+        .collect()
+}
+
+fn session_has_synthetic_user_prompt(session: &crate::session::Session) -> bool {
+    session.messages.iter().any(|message| {
+        message.role == Role::User
+            && message.content.iter().any(|block| match block {
+                ContentBlock::Text { text, .. } => {
+                    text.starts_with("[auto]")
+                        || text.contains("Continue exactly where you left off")
+                }
+                _ => false,
+            })
+    })
+}
+
+/// Reload mid-tool: the resumed request must be the pre-reload request plus the
+/// persisted assistant tool request and exactly one `tool_result`. Nothing may
+/// be injected in the user role, so the provider prompt cache still hits.
+#[tokio::test]
+async fn reload_mid_tool_resumes_with_only_a_tool_result() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = TestHome::new();
+    let mut session = crate::session::Session::create(None, None);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "run the command".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.save().unwrap();
+    let session_id = session.id.clone();
+
+    let capture = ScriptedProvider::default();
+    let provider: Arc<dyn Provider> = Arc::new(capture.clone());
+    let mut resumed = Agent::new_with_session(provider, Registry::empty(), session, None);
+    // The request that was in flight before the restart.
+    let (tx, _rx) = tokio_mpsc::unbounded_channel();
+    let batcher = crate::stream_batching::BatchingSender::new(tx.clone(), session_id.clone());
+    let (_, _, pre_reload) = resumed
+        .prepare_stream_request(&batcher)
+        .await
+        .expect("pre-reload request");
+    // The turn loop timestamps the request it actually sends.
+    let pre_reload = if crate::config::config().features.message_timestamps {
+        Message::with_timestamps(&pre_reload)
+    } else {
+        pre_reload
+    };
+
+    // The model's response carried a tool request alongside its text. The
+    // process died before the harness persisted any result for it.
+    resumed.session.add_message(
+        Role::Assistant,
+        vec![
+            ContentBlock::Text {
+                text: "Running the command.".to_string(),
+                cache_control: None,
+            },
+            ContentBlock::ToolUse {
+                id: "call-1".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({"command": "ls"}),
+                thought_signature: None,
+            },
+        ],
+    );
+    resumed.session.save().unwrap();
+
+    let plan = resumed.reload_resume_plan(true);
+    assert!(
+        matches!(plan, ResumePlan::ToolResults(_)),
+        "plan={plan:?} messages={:?}",
+        resumed
+            .messages()
+            .iter()
+            .map(|message| format!("{:?}[{}]", message.role, message.content.len()))
+            .collect::<Vec<_>>()
+    );
+    let lease = resumed.claim_server_turn().unwrap();
+    let outcome = resumed
+        .resume_interrupted_turn_mpsc(&lease, tx, true)
+        .await
+        .expect("resume");
+    assert_eq!(outcome, ResumeOutcome::Continued);
+
+    let post = capture.requests()[0].clone();
+    assert_eq!(
+        serde_json::to_value(&post[..pre_reload.len()]).unwrap(),
+        serde_json::to_value(&pre_reload).unwrap(),
+        "the resumed request must start with the exact pre-reload prefix"
+    );
+    assert_eq!(
+        post.len(),
+        pre_reload.len() + 2,
+        "pre={:?} post={:?}",
+        summarize(&pre_reload),
+        summarize(&post)
+    );
+    assert_eq!(post[pre_reload.len()].role, Role::Assistant);
+    assert!(matches!(
+        post[pre_reload.len()]
+            .content
+            .iter()
+            .find(|block| matches!(block, ContentBlock::ToolUse { .. })),
+        Some(ContentBlock::ToolUse { id, .. }) if id == "call-1"
+    ));
+    let last = post.last().expect("tool result");
+    assert_eq!(last.role, Role::User);
+    assert_eq!(last.content.len(), 1, "{:?}", last.content);
+    match &last.content[0] {
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => {
+            assert_eq!(tool_use_id, "call-1");
+            assert!(
+                content.contains("interrupted by a server restart"),
+                "{content}"
+            );
+            assert_eq!(*is_error, Some(true));
+        }
+        other => panic!("expected only a tool_result, got {other:?}"),
+    }
+    assert!(!has_synthetic_user_prompt(&post));
+
+    let persisted = crate::session::Session::load(&session_id).unwrap();
+    assert!(
+        !session_has_synthetic_user_prompt(&persisted),
+        "no synthetic user prompt may be persisted"
+    );
+    assert!(persisted.messages.iter().flat_map(|m| m.content.iter()).any(
+        |block| matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "call-1")
+    ));
+}
+
+/// Reload mid-stream: generation continues from the assistant's own partial
+/// text. No user message is added, and the display marker is removed.
+#[tokio::test]
+async fn reload_mid_stream_continues_without_a_user_message() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = TestHome::new();
+    let mut session = crate::session::Session::create(None, None);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "write a poem".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::Text {
+            text: format!(
+                "Roses are red{}",
+                super::reload_resume::RELOAD_INTERRUPTED_MARKER
+            ),
+            cache_control: None,
+        }],
+    );
+    session.save().unwrap();
+    let session_id = session.id.clone();
+
+    let capture = ScriptedProvider::default();
+    capture.push_reply(text_reply("violets are blue"));
+    let provider: Arc<dyn Provider> = Arc::new(capture.clone());
+    let mut agent = Agent::new_with_session(
+        provider,
+        Registry::empty(),
+        crate::session::Session::load(&session_id).unwrap(),
+        None,
+    );
+    assert_eq!(agent.reload_resume_plan(true), ResumePlan::AssistantText);
+    let lease = agent.claim_server_turn().unwrap();
+    let (tx, _rx) = tokio_mpsc::unbounded_channel();
+    agent
+        .resume_interrupted_turn_mpsc(&lease, tx, true)
+        .await
+        .expect("resume");
+
+    let request = capture.requests()[0].clone();
+    let last = request.last().expect("assistant continuation");
+    assert_eq!(last.role, Role::Assistant);
+    assert!(
+        last.content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Text { text, .. }
+            if text == "Roses are red")),
+        "the display marker must be stripped: {:?}",
+        last.content
+    );
+    assert_eq!(
+        request
+            .iter()
+            .filter(|message| message.role == Role::User)
+            .count(),
+        1,
+        "the only user message is the original prompt: {request:#?}"
+    );
+    assert!(!has_synthetic_user_prompt(&request));
+}
+
+/// Queued prompts survive the reload and are still delivered.
+#[tokio::test]
+async fn reload_preserves_queued_prompts() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = TestHome::new();
+    let mut session = crate::session::Session::create(None, None);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "start".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "call-9".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "sleep 30"}),
+            thought_signature: None,
+        }],
+    );
+    session.save().unwrap();
+    let session_id = session.id.clone();
+    let queued = jcode_agent_runtime::SoftInterruptMessage {
+        content: "also run the tests".to_string(),
+        system_reminder: None,
+        active_skill: None,
+        images: vec![],
+        urgent: false,
+        source: jcode_agent_runtime::SoftInterruptSource::User,
+        mode: Default::default(),
+        client_id: Some("queued-1".to_string()),
+        editing_by: None,
+    };
+    crate::soft_interrupt_store::overwrite(&session_id, &[queued]).unwrap();
+
+    let capture = ScriptedProvider::default();
+    capture.push_reply(text_reply("resuming"));
+    capture.push_reply(text_reply("tests running"));
+    let provider: Arc<dyn Provider> = Arc::new(capture.clone());
+    let mut agent = Agent::new_with_session(
+        provider,
+        Registry::empty(),
+        crate::session::Session::load(&session_id).unwrap(),
+        None,
+    );
+    // The recovery owner rebuilds its agent from the session snapshot, so the
+    // queue only exists on disk until it is restored.
+    assert_eq!(agent.restore_persisted_soft_interrupts(), 1);
+    let lease = agent.claim_server_turn().unwrap();
+    let (tx, _rx) = tokio_mpsc::unbounded_channel();
+    agent
+        .resume_interrupted_turn_mpsc(&lease, tx, true)
+        .await
+        .expect("resume");
+
+    let requests = capture.requests();
+    assert!(
+        requests.iter().any(|request| request.iter().any(|message| {
+            message.role == Role::User
+                && message.content.iter().any(|block| {
+                    matches!(block, ContentBlock::Text { text, .. }
+                    if text.contains("also run the tests"))
+                })
+        })),
+        "the queued prompt must be delivered: {:?}",
+        requests
+            .iter()
+            .map(|request| summarize(request))
+            .collect::<Vec<_>>()
+    );
+    assert!(!has_synthetic_user_prompt(&requests[0]));
+}
+
+/// Reload while idle: a finished turn is not re-prompted and no turn runs.
+#[tokio::test]
+async fn reload_while_idle_injects_nothing() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = TestHome::new();
+    let mut session = crate::session::Session::create(None, None);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::Text {
+            text: "hi".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.save().unwrap();
+    let session_id = session.id.clone();
+    let before = crate::session::Session::load(&session_id)
+        .unwrap()
+        .messages
+        .len();
+
+    let capture = ScriptedProvider::default();
+    let provider: Arc<dyn Provider> = Arc::new(capture.clone());
+    let mut agent = Agent::new_with_session(
+        provider,
+        Registry::empty(),
+        crate::session::Session::load(&session_id).unwrap(),
+        None,
+    );
+    // No durable obligation exists for a finished turn, so nothing is resumed.
+    assert_eq!(agent.reload_resume_plan(false), ResumePlan::Nothing);
+    let lease = agent.claim_server_turn().unwrap();
+    let (tx, _rx) = tokio_mpsc::unbounded_channel();
+    let outcome = agent
+        .resume_interrupted_turn_mpsc(&lease, tx, false)
+        .await
+        .expect("idle resume");
+    assert_eq!(outcome, ResumeOutcome::NothingToResume);
+    assert!(capture.requests().is_empty(), "no model turn may run");
+    let after = crate::session::Session::load(&session_id).unwrap();
+    assert_eq!(after.messages.len(), before);
+    assert!(!session_has_synthetic_user_prompt(&after));
+}

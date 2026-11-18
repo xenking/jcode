@@ -452,19 +452,14 @@ impl App {
                 .is_some();
             let message = format!("Reload complete - continuing.{}", stats);
 
-            // Add success message with stats (only if there's actual content or a reload happened)
+            // A status line, not a transcript row: the daemon resumes the turn
+            // in place, so no synthetic message belongs in the conversation.
             if total_turns > 0 || has_reload_ctx {
-                self.push_display_message(DisplayMessage {
-                    role: "system".to_string(),
-                    content: message,
-                    tool_calls: vec![],
-                    duration_secs: None,
-                    title: None,
-                    tool_data: None,
-                });
+                self.set_status_notice(message);
             }
 
-            // Queue an automatic message to notify the AI that reload completed
+            // Continuation is daemon-owned. Never queue a synthetic prompt
+            // from the client: it would be attributed to the user.
             let reload_ctx = ReloadContext::load_for_session(session_id).ok().flatten();
             let background_task_note = super::reload_persisted_background_tasks_note(session_id);
             let directive = ReloadContext::recovery_directive(
@@ -479,21 +474,11 @@ impl App {
                 } else {
                     "restored interrupted non-initiator session after reload"
                 };
-
+                ReloadContext::log_recovery_outcome("local_restore", session_id, "resumed", detail);
                 crate::logging::info(&format!(
-                    "Queuing reload continuation message ({} chars)",
+                    "Reload recovery is daemon-owned; client does not queue a continuation ({} chars in directive)",
                     directive.continuation_message.len()
                 ));
-                ReloadContext::log_recovery_outcome("local_restore", session_id, "resumed", detail);
-                self.hidden_queued_system_messages
-                    .push(directive.continuation_message);
-                // Trigger processing so the queued message gets sent to the LLM.
-                // Without this, the local event loop waits for user input since
-                // process_queued_messages only runs inside process_turn_with_input.
-                self.is_processing = true;
-                self.status = ProcessingStatus::Sending;
-                self.processing_started = Some(Instant::now());
-                self.pending_turn = true;
             } else {
                 ReloadContext::log_recovery_outcome(
                     "local_restore",

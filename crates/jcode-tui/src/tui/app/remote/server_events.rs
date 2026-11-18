@@ -2388,7 +2388,7 @@ fn handle_server_event_inner(
                     "History payload completed reload reconnect without continuation: session={} was_interrupted={:?}",
                     session_id, was_interrupted
                 ));
-                app.push_display_message(DisplayMessage::system(message.to_string()));
+                app.set_status_notice(message);
             }
 
             // History is the completion signal for a session attach/resume and

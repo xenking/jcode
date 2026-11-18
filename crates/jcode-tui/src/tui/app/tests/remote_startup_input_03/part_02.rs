@@ -277,9 +277,9 @@ fn test_initial_history_bootstrap_skips_resubmit_when_prompt_already_in_history(
         assert!(restored.input.is_empty());
         assert!(
             restored
-                .display_messages()
-                .iter()
-                .any(|message| message.content.starts_with("Reload complete - continuing")),
+                .status_notice
+                .as_ref()
+                .is_some_and(|(text, _)| text.starts_with("Reload complete - continuing")),
             "server interruption recovery should continue using the restored server-side prompt"
         );
     });
@@ -293,7 +293,10 @@ fn test_reload_progress_coalesces_into_single_message() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     app.handle_server_event(
-        crate::protocol::ServerEvent::Reloading { new_socket: None, reload_id: None },
+        crate::protocol::ServerEvent::Reloading {
+            new_socket: None,
+            reload_id: None,
+        },
         &mut remote,
     );
     app.handle_server_event(

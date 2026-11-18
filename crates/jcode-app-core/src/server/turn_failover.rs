@@ -278,6 +278,38 @@ pub(super) async fn process_reserved_message_with_server_failover(
 /// Server-initiated turn (swarm spawn/assign, wake, headless reload recovery)
 /// on an already locked agent. No client runs a countdown for these turns, so
 /// the server always applies the account router itself.
+pub(super) async fn process_reserved_resume_with_server_failover(
+    agent: Arc<Mutex<Agent>>,
+    lease: &crate::agent::TurnLease,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+) -> anyhow::Result<crate::agent::ResumeOutcome> {
+    let mut guard = agent.lock().await;
+    let attempt = guard
+        .resume_interrupted_turn_mpsc(lease, event_tx.clone(), true)
+        .await;
+    let outcome = attempt
+        .as_ref()
+        .copied()
+        .unwrap_or(crate::agent::ResumeOutcome::Continued);
+    if outcome == crate::agent::ResumeOutcome::NothingToResume {
+        return Ok(outcome);
+    }
+    // A failed attempt is retried on another route with the same continuation,
+    // never with a new prompt.
+    let result = retry_turn_with_server_failover(
+        &mut guard,
+        lease,
+        attempt.map(|_| ()),
+        None,
+        event_tx.clone(),
+        &[],
+    )
+    .await;
+    result?;
+    super::runtime_ssh_loops::run_reserved_followups(&mut guard, lease, event_tx, true).await?;
+    Ok(outcome)
+}
+
 #[cfg(test)]
 pub(super) async fn process_locked_message_with_server_failover(
     agent: &mut Agent,

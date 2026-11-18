@@ -102,16 +102,30 @@ impl Server {
                 } else {
                     reload_recovery::ReloadRecoveryRole::InterruptedPeer
                 };
-                if let Err(error) = reload_recovery::persist_intent(
-                    &reload_id,
-                    &session_id,
-                    role,
-                    crate::tool::selfdev::ReloadRecoveryDirective {
-                        continuation_message: reminder,
-                        reconnect_notice: Some("Resumed after reload".into()),
-                    },
-                    "migrated interrupted startup snapshot",
-                ) {
+                let directive = crate::tool::selfdev::ReloadRecoveryDirective {
+                    continuation_message: reminder,
+                    reconnect_notice: Some("Resumed after reload".into()),
+                };
+                // An idle worker with an open todo lane is a system wake, not
+                // an interrupted turn: it has no assistant turn to continue.
+                let persisted = if interrupted {
+                    reload_recovery::persist_intent(
+                        &reload_id,
+                        &session_id,
+                        role,
+                        directive,
+                        "migrated interrupted startup snapshot",
+                    )
+                } else {
+                    reload_recovery::persist_wake_intent(
+                        &reload_id,
+                        &session_id,
+                        role,
+                        directive,
+                        "migrated idle worker with an open todo lane",
+                    )
+                };
+                if let Err(error) = persisted {
                     crate::logging::warn(&format!(
                         "Cannot migrate recovery intent for {session_id}: {error}"
                     ));

@@ -628,7 +628,7 @@ impl Agent {
                             let marker = if turn_cancel_guard.interruption_reason()
                                 == Some(crate::turn_cancel_registry::TurnInterruptionReason::Reload)
                             {
-                                "\n\n[generation interrupted - server reloading]"
+                                super::reload_resume::RELOAD_INTERRUPTED_MARKER
                             } else {
                                 "\n\n[generation cancelled by the user]"
                             };

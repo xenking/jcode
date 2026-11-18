@@ -14,6 +14,9 @@ mod messages;
 mod model_usage_tests;
 mod prompting;
 mod provider;
+mod reload_resume;
+#[cfg(test)]
+mod reload_resume_tests;
 mod response_recovery;
 mod runtime_recovery;
 mod session_title;
@@ -25,6 +28,7 @@ mod tools;
 mod turn_execution;
 mod turn_loops;
 mod turn_ownership;
+pub(crate) use reload_resume::{ResumeOutcome, ResumePlan};
 pub(crate) use turn_ownership::{
     RuntimeMutationLease, TurnLease, TurnObserver, TurnPublicationPin,
 };
