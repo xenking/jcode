@@ -158,6 +158,20 @@ pub(super) fn effective_worker_allowed_models(agent: &Agent) -> Vec<String> {
     crate::config::config().agents.spawn_allowed_models.clone()
 }
 
+/// Configured model fallbacks for a swarm worker turn, inside its allowlist.
+/// Every server-run worker turn (assign, wake, reload resume, direct message)
+/// uses them; a user-started session never switches models on its own.
+pub(super) fn effective_worker_fallbacks(agent: &Agent) -> Vec<String> {
+    if !agent.is_swarm_worker() {
+        return Vec::new();
+    }
+    let config = crate::config::config();
+    super::comm_session::spawn_model_selection::worker_allowed_fallbacks(
+        &config.agents.spawn_allowed_models,
+        &config.agents.swarm_model_fallbacks,
+    )
+}
+
 /// Whether an account-router target is inside the worker model allowlist.
 /// A non-worker turn passes an empty list and is unrestricted.
 fn worker_target_allowed(target: &FailoverTarget, allowed_models: &[String]) -> bool {
@@ -259,16 +273,32 @@ pub(super) async fn process_reserved_message_with_server_failover(
         attachment_data,
     )
     .await;
-    if !enabled && result.is_err() {
+    let fallbacks = effective_worker_fallbacks(&guard);
+    if !enabled && result.is_err() && fallbacks.is_empty() {
         return result;
     }
-    retry_turn_with_server_failover(
+    let allowed = effective_worker_allowed_models(&guard);
+    let result = if enabled {
+        retry_turn_with_server_failover(
+            &mut guard,
+            lease,
+            result,
+            reminder.clone(),
+            event_tx.clone(),
+            &allowed,
+        )
+        .await
+    } else {
+        result
+    };
+    retry_turn_with_model_fallbacks(
         &mut guard,
         lease,
         result,
         reminder.clone(),
         event_tx.clone(),
-        &[],
+        &fallbacks,
+        &allowed,
     )
     .await?;
     let reload = is_reload_continuation(guard.session_id(), content, reminder.as_deref());
@@ -296,16 +326,27 @@ pub(super) async fn process_reserved_resume_with_server_failover(
     }
     // A failed attempt is retried on another route with the same continuation,
     // never with a new prompt.
+    let allowed = effective_worker_allowed_models(&guard);
     let result = retry_turn_with_server_failover(
         &mut guard,
         lease,
         attempt.map(|_| ()),
         None,
         event_tx.clone(),
-        &[],
+        &allowed,
     )
     .await;
-    result?;
+    let fallbacks = effective_worker_fallbacks(&guard);
+    retry_turn_with_model_fallbacks(
+        &mut guard,
+        lease,
+        result,
+        None,
+        event_tx.clone(),
+        &fallbacks,
+        &allowed,
+    )
+    .await?;
     super::runtime_ssh_loops::run_reserved_followups(&mut guard, lease, event_tx, true).await?;
     Ok(outcome)
 }
@@ -338,6 +379,8 @@ pub(super) async fn process_reserved_locked_message_with_server_failover(
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> anyhow::Result<()> {
+    let fallbacks = effective_worker_fallbacks(agent);
+    let allowed = effective_worker_allowed_models(agent);
     process_reserved_locked_message_with_swarm_fallbacks(
         agent,
         lease,
@@ -345,8 +388,8 @@ pub(super) async fn process_reserved_locked_message_with_server_failover(
         images,
         system_reminder,
         event_tx,
-        &[],
-        &[],
+        &fallbacks,
+        &allowed,
     )
     .await
 }
@@ -615,13 +658,25 @@ pub(super) async fn process_reserved_locked_context_with_server_failover(
             std::time::Duration::from_secs(30),
         );
     }
-    retry_turn_with_server_failover(
+    let allowed = effective_worker_allowed_models(agent);
+    let result = retry_turn_with_server_failover(
         agent,
         lease,
         result,
         reminder.clone(),
         event_tx.clone(),
-        &effective_worker_allowed_models(agent),
+        &allowed,
+    )
+    .await;
+    let fallbacks = effective_worker_fallbacks(agent);
+    retry_turn_with_model_fallbacks(
+        agent,
+        lease,
+        result,
+        reminder.clone(),
+        event_tx.clone(),
+        &fallbacks,
+        &allowed,
     )
     .await?;
     let reload = is_reload_continuation(agent.session_id(), content, reminder.as_deref());
@@ -1912,6 +1967,70 @@ mod tests {
                     user_allowed.is_empty(),
                     "a user-started session is never restricted: {user_allowed:?}"
                 );
+            });
+    }
+
+    /// A worker turn that does not come from spawn/assign (wake, reload resume,
+    /// direct message) must still move to the configured fallback model.
+    #[test]
+    fn worker_wake_turn_uses_configured_model_fallbacks() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(home) => crate::env::set_var("JCODE_HOME", home),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+                crate::config::Config::invalidate_cache();
+            }
+        }
+        let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[agents]\nswarm_model_fallbacks = [\"claude:claude-sonnet-5-5\"]\n",
+        )
+        .unwrap();
+        crate::config::Config::invalidate_cache();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                for (id, worker) in [("session_wake_worker", true), ("session_wake_user", false)] {
+                    let provider = RejectingPrimaryProvider {
+                        model: Arc::new(StdMutex::new("deepseek-v4.1-flash".into())),
+                        calls: Arc::new(StdMutex::new(Vec::new())),
+                        quota_failure: true,
+                    };
+                    let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+                    let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+                    let session = crate::session::Session::create_with_id(id.into(), None, None);
+                    let mut agent = Agent::new_with_session(provider_dyn, registry, session, None);
+                    if worker {
+                        agent.mark_swarm_worker().unwrap();
+                    }
+                    let lease = agent.claim_server_turn().unwrap();
+                    let (tx, _rx) = mpsc::unbounded_channel();
+                    let result = process_reserved_locked_message_with_server_failover(
+                        &mut agent,
+                        &lease,
+                        "wake up",
+                        Vec::new(),
+                        None,
+                        tx,
+                    )
+                    .await;
+                    assert_eq!(result.is_ok(), worker, "{id}: {result:?}");
+                    assert_eq!(
+                        provider.calls.lock().unwrap().last().map(String::as_str)
+                            == Some("claude-sonnet-5-5"),
+                        worker,
+                        "{id}: only a worker switches models on its own"
+                    );
+                }
             });
     }
 }
