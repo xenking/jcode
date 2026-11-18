@@ -701,6 +701,7 @@ impl Bus {
                 | BusEvent::BackgroundTaskStalled(_)
                 | BusEvent::SwarmAwaitCompleted(_)
                 | BusEvent::SwarmWorkerReported(_)
+                | BusEvent::SwarmAskEscalated(_)
                 | BusEvent::UiActivity(_)
                 | BusEvent::ToolUpdated(_)
                 | BusEvent::SubagentStatus(_)
@@ -847,6 +848,22 @@ mod tests {
         );
         drop(delivery);
         assert!(bus.runtime_delivery_checkpoint().is_some());
+    }
+
+    #[tokio::test]
+    async fn escalated_ask_uses_reliable_root_scoped_runtime_delivery() {
+        let bus = Bus::new_isolated_for_tests();
+        let mut receiver = bus.subscribe_runtime();
+        bus.publish(BusEvent::SwarmAskEscalated(super::SwarmAskEscalated {
+            session_id: "root".into(),
+            worker_session_id: "worker".into(),
+            request_id: "escalation-1".into(),
+            notification: "Which option?".into(),
+        }));
+        let delivery = receiver.try_recv().expect("runtime wake must be queued");
+        assert_eq!(delivery.event.runtime_session_id(), Some("root"));
+        assert!(matches!(delivery.event, BusEvent::SwarmAskEscalated(event)
+            if event.request_id == "escalation-1" && event.worker_session_id == "worker"));
     }
 
     #[tokio::test]
