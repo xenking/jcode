@@ -21,6 +21,12 @@ fn unknown_recovery_status_is_not_admitted() {
     assert!(!status.needs_admission());
 }
 
+#[test]
+fn unknown_recovery_role_is_readable() {
+    let role: ReloadRecoveryRole = serde_json::from_str("\"future_role\"").unwrap();
+    assert_eq!(role.as_str(), "unknown");
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum ReloadRecoveryRole {
