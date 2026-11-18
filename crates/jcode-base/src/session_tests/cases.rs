@@ -544,7 +544,9 @@ fn load_for_remote_startup_preserves_messages_and_replay_but_skips_heavy_vectors
     assert_eq!(loaded.model.as_deref(), Some("gpt-5.4"));
     assert_eq!(loaded.reasoning_effort.as_deref(), Some("medium"));
     assert_eq!(loaded.messages.len(), 1);
-    assert!(loaded.replay_events.is_empty());
+    assert_eq!(loaded.messages[0].content_preview(), "hello remote startup");
+    assert_eq!(loaded.replay_events.len(), 1);
+    assert_eq!(loaded.replay_events, session.replay_events);
     assert!(loaded.env_snapshots.is_empty());
     assert!(loaded.memory_injections.is_empty());
     Ok(())

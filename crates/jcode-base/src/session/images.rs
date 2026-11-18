@@ -42,6 +42,19 @@ pub fn image_id(session_id: &str, message_id: &str, image_ordinal: usize) -> Str
 }
 
 const ARCHIVE_PREFIX: &str = "[Older tool screenshot omitted from history; jcode-archive:";
+const IMAGE_ANNOTATION_PREFIX: &str = "Attached session images: ";
+
+pub(crate) fn is_image_annotation(text: &str) -> bool {
+    text.strip_prefix(IMAGE_ANNOTATION_PREFIX)
+        .is_some_and(|ids| {
+            ids.split(", ").all(|marker| {
+                marker
+                    .strip_prefix("[#img_")
+                    .and_then(|id| id.strip_suffix(']'))
+                    .is_some_and(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+            })
+        })
+}
 
 #[derive(Serialize, Deserialize)]
 struct ArchiveRef {
@@ -260,7 +273,8 @@ pub(super) fn annotate_message(session_id: &str, stored: &mut super::StoredMessa
                 .map(|id| format!("[#{id}]"))
                 .collect::<Vec<_>>();
             if !missing.is_empty() {
-                content.push_str("\n\nAttached session images: ");
+                content.push_str("\n\n");
+                content.push_str(IMAGE_ANNOTATION_PREFIX);
                 content.push_str(&missing.join(", "));
             }
             mapped.fill(true);
@@ -274,7 +288,7 @@ pub(super) fn annotate_message(session_id: &str, stored: &mut super::StoredMessa
         .collect::<Vec<_>>();
     if !remaining.is_empty() {
         stored.content.push(ContentBlock::Text {
-            text: format!("Attached session images: {}", remaining.join(", ")),
+            text: format!("{IMAGE_ANNOTATION_PREFIX}{}", remaining.join(", ")),
             cache_control: None,
         });
     }

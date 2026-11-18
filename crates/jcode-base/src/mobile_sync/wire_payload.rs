@@ -50,10 +50,7 @@ pub fn wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
                     continue;
                 }
                 let part = match block {
-                    ContentBlock::Text { text, .. }
-                        if !text.trim_start().is_empty()
-                            && !text.trim_start().starts_with("<system-reminder>") =>
-                    {
+                    ContentBlock::Text { text, .. } if visible_wire_prose(text) => {
                         std::borrow::Cow::Borrowed(text.as_str())
                     }
                     ContentBlock::ToolUse { name, input, .. } => {
@@ -65,7 +62,7 @@ pub fn wire_messages(session: &Session, start: usize) -> Vec<WireMessage> {
                         continue;
                     }
                     ContentBlock::ToolResult { content, .. } => {
-                        std::borrow::Cow::Owned(truncate(content, MAX_TOOL_RESULT_CHARS))
+                        std::borrow::Cow::Owned(wire_tool_result_text(content))
                     }
                     _ => continue,
                 };

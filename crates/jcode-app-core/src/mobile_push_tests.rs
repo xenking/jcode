@@ -456,14 +456,14 @@ fn mobile_push_opt_out_and_threshold() {
 
 #[test]
 fn mobile_push_ios_sessions_and_cancel_markers() {
-    let sid = "session_mobile_push_test_ios";
+    let sid = "session_mobile_push_upstream_test_ios";
     assert!(!should_push_turn_done(sid, Duration::from_secs(1)));
     note_client_attached(sid, "jcode-desktop/1.0");
     assert!(!should_push_turn_done(sid, Duration::from_secs(1)));
     note_client_attached(sid, "jcode-ios/0.3.0");
     assert!(should_push_turn_done(sid, Duration::ZERO));
 
-    let c = "session_mobile_push_test_cancel";
+    let c = "session_mobile_push_upstream_test_cancel";
     assert!(!take_cancelled(c));
     mark_cancelled(c);
     assert!(take_cancelled(c));

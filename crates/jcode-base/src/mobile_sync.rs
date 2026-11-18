@@ -70,7 +70,7 @@ const MAX_TOOL_ID_BYTES: usize = 256;
 const MAX_STRUCTURED_BYTES: usize = 240 * 1024;
 // Bump when existing cloud rows need replaying, even if snapshot bytes and
 // visible-message fingerprints are unchanged. Missing versions deserialize as 0.
-const WIRE_VERSION: u32 = 2;
+const WIRE_VERSION: u32 = 3;
 /// Only sessions touched within this window are synced on enable.
 const BACKFILL_WINDOW: Duration = Duration::from_secs(14 * 24 * 3600);
 const SYNC_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -604,6 +604,20 @@ mod byte_count_tests;
 #[path = "mobile_sync_direct_count_tests.rs"]
 mod direct_count_tests;
 
+fn visible_wire_prose(text: &str) -> bool {
+    !text.trim_start().is_empty()
+        && !text.trim_start().starts_with("<system-reminder>")
+        && !crate::session::is_image_annotation(text)
+}
+
+fn wire_tool_result_text(content: &str) -> String {
+    let visible = content
+        .rsplit_once("\n\n")
+        .filter(|(_, suffix)| crate::session::is_image_annotation(suffix))
+        .map_or(content, |(text, _)| text);
+    truncate(visible, MAX_TOOL_RESULT_CHARS)
+}
+
 fn structured_tools(
     blocks: &[ContentBlock],
 ) -> Option<(String, Vec<WireToolCall>, Vec<WireToolResult>)> {
@@ -621,10 +635,7 @@ fn structured_tools(
     let mut results = Vec::new();
     for block in blocks {
         match block {
-            ContentBlock::Text { text, .. }
-                if !text.trim_start().is_empty()
-                    && !text.trim_start().starts_with("<system-reminder>") =>
-            {
+            ContentBlock::Text { text, .. } if visible_wire_prose(text) => {
                 if has_prose {
                     prose.push("\n\n");
                 }
@@ -662,7 +673,7 @@ fn structured_tools(
                 }
                 results.push(WireToolResult {
                     tool_use_id: tool_use_id.clone(),
-                    content: truncate(content, MAX_TOOL_RESULT_CHARS),
+                    content: wire_tool_result_text(content),
                     is_error: is_error.unwrap_or(false),
                 });
             }

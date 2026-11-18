@@ -1987,6 +1987,7 @@ struct RemoteStartupSessionSnapshot {
 mod image_archive;
 #[path = "session/images.rs"]
 mod images;
+pub(crate) use images::is_image_annotation;
 pub use images::{SessionImage, SessionImageInfo, image_id};
 
 #[cfg(test)]

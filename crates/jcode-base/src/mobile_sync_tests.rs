@@ -136,8 +136,12 @@ fn visible_user_tool_and_image_only_attachments_survive_wire_serialization() {
         messages.iter().map(|m| m.role).collect::<Vec<_>>(),
         ["user", "user", "tool", "assistant"]
     );
+    assert_eq!(messages[0].text, "My screenshot");
     assert_eq!(messages[1].text, "");
+    assert_eq!(messages[2].text, "Loaded image");
     assert_eq!(messages[2].tool_results[0].tool_use_id, "read-photo");
+    assert_eq!(messages[2].tool_results[0].content, "Loaded image");
+    assert_eq!(messages[3].text, "");
     for (seq, message) in messages.iter().enumerate() {
         assert_eq!(message.seq, seq);
         assert_eq!(message.images.len(), 1);
@@ -152,6 +156,29 @@ fn visible_user_tool_and_image_only_attachments_survive_wire_serialization() {
         assert_eq!(json["images"][0]["media_type"], "image/jpeg");
     }
     assert_eq!(wire_messages(&session, 2).len(), 2);
+}
+
+#[test]
+fn mobile_prose_preserves_user_written_image_references() {
+    let mut session = Session::create_with_id("user-image-prose".into(), None, None);
+    let note = "Attached session images: a diagram and a screenshot";
+    session.add_message(
+        Role::User,
+        vec![attachment_block(), text_block(note.into())],
+    );
+    session.add_message(
+        Role::User,
+        vec![
+            attachment_block(),
+            text_block("Look here [#image 1]".into()),
+        ],
+    );
+    let messages = wire_messages(&session, 0);
+    assert_eq!(messages[0].text, note);
+    assert_eq!(
+        messages[1].text,
+        format!("Look here [#{}]", session.session_images()[1].image_id)
+    );
 }
 
 #[test]
