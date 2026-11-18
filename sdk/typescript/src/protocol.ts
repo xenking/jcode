@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 15;
+export const API_VERSION_MINOR = 17;
 
 export type RuntimeCommand = "mode" | "skills" | "context" | "info" | "cache" | "memory" | "swarm" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout" | "background_output";
 
@@ -200,6 +200,33 @@ export type StoredAttachment =
   | { type: "file"; name: string; mime: string; size: number; path?: string }
   | { type: "pasted_text"; text: string };
 
+export type MemoryState =
+  | "idle" | "embedding"
+  | { sidecar_checking: { count: number } }
+  | { found_relevant: { count: number } }
+  | { extracting: { reason: string } }
+  | { maintaining: { phase: string } }
+  | { tool_action: { action: string; detail: string } };
+
+type MemoryStepStatus = "pending" | "running" | "done" | "error" | "skipped";
+type MemoryStepResult = { summary: string; latency_ms: number };
+
+export interface MemoryActivitySnapshot {
+  state: MemoryState;
+  state_age_ms: number;
+  pipeline?: {
+    search: MemoryStepStatus;
+    search_result?: MemoryStepResult;
+    verify: MemoryStepStatus;
+    verify_result?: MemoryStepResult;
+    verify_progress?: [number, number];
+    inject: MemoryStepStatus;
+    inject_result?: MemoryStepResult;
+    maintain: MemoryStepStatus;
+    maintain_result?: MemoryStepResult;
+  };
+}
+
 /** Delivery point of a daemon-owned prompt. */
 export type QueuedPromptMode = "steer" | "after_yield";
 export type QueuedPromptRemovalOutcome = "removed" | "in_flight" | "already_delivered" | "not_found";
@@ -250,7 +277,7 @@ export type ApiRequest =
       no_reply?: boolean;
       system_reminder?: string;
     }
-  | { req: "send_skill_message"; session_id: string; content: string; active_skill: string; system_reminder?: string; images?: ImageAttachment[] }
+  | { req: "send_skill_message"; session_id: string; content: string; active_skill: string; system_reminder?: string; images?: ImageAttachment[]; attachments?: Attachment[] }
   | { req: "cancel"; session_id: string }
   | { req: "force_stop_turn"; session_id: string }
   | {
@@ -390,6 +417,8 @@ export type ApiEvent =
   | { ev: "attached"; session: SessionInfo }
   | { ev: "session_forked"; session: SessionInfo }
   | { ev: "history"; session_id: string; messages: HistoryMessage[]; images?: RenderedImage[] }
+  | { ev: "memory_injected"; session_id: string; count: number; content: string }
+  | { ev: "memory_activity"; session_id: string; activity: MemoryActivitySnapshot }
   | { ev: "compacted_history"; session_id: string; messages: HistoryMessage[]; images?: RenderedImage[]; compacted_total: number; compacted_visible: number; compacted_remaining: number; compacted_hidden_prompts?: number }
   | { ev: "history_page"; session_id: string; fragments: HistoryFragment[]; before: string | null }
   | { ev: "history_image_chunk"; session_id: string; key: string; offset: number; total: number; data: string }
@@ -644,6 +673,8 @@ export const KNOWN_EVENT_KINDS = [
   "token_usage",
   "context_cap_changed",
   "kv_cache_miss",
+  "memory_injected",
+  "memory_activity",
   "peer_user_message",
   "turn_done",
   "soft_interrupt_injected",

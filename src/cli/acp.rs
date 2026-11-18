@@ -1340,6 +1340,7 @@ impl AcpRuntime {
 
         let send_result = session
             .send(&Request::Message {
+                attachments: Vec::new(),
                 id: prompt_id,
                 content: text,
                 images,

@@ -3851,6 +3851,10 @@ pub(super) async fn process_locked_message_streaming_mpsc(
 }
 
 /// Execute only with this runtime's non-cloneable turn reservation.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Carry message payload and turn lease through the streaming boundary"
+)]
 pub(super) async fn process_reserved_message_streaming_mpsc(
     agent: &mut Agent,
     lease: &crate::agent::TurnLease,

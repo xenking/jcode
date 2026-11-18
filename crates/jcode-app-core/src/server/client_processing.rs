@@ -241,6 +241,10 @@ pub(super) async fn start_next_queued_prompt(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep request data and client state separate"
+)]
 pub(super) async fn append_context_message(
     id: u64,
     content: &str,

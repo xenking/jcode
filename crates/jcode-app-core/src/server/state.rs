@@ -915,6 +915,10 @@ impl SessionControlHandle {
         Ok(false)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep queue insertion aligned with the request payload"
+    )]
     pub(super) fn enqueue_user_prompt_with_skill(
         &self,
         client_id: String,
