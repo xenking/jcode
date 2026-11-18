@@ -911,6 +911,17 @@ mod worker_effort_cap_tests {
                 .validate_swarm_model_request(Some("claude:claude-sonnet-5-5"))
                 .is_ok()
         );
+
+        // The exact inline-table form written to the user's config.toml.
+        let parsed: crate::config::Config = toml::from_str(
+            "[agents]\nswarm_pool = { \"claude:claude-opus-5-5\" = [\"medium\", \"high\", \"xhigh\"], \"openai:gpt-6-luna\" = [\"high\", \"xhigh\"] }\n",
+        )
+        .unwrap();
+        let opus = parsed
+            .agents
+            .swarm_pool_efforts("claude-oauth", "claude-opus-5-5")
+            .unwrap();
+        assert_eq!(opus, ["medium", "high", "xhigh"]);
     }
 
     #[test]
