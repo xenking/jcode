@@ -33,6 +33,8 @@ pub(super) enum ReloadRecoveryRole {
     Initiator,
     InterruptedPeer,
     Headless,
+    #[serde(other)]
+    Unknown,
 }
 
 impl ReloadRecoveryRole {
@@ -41,6 +43,7 @@ impl ReloadRecoveryRole {
             Self::Initiator => "initiator",
             Self::InterruptedPeer => "interrupted_peer",
             Self::Headless => "headless",
+            Self::Unknown => "unknown",
         }
     }
 }
