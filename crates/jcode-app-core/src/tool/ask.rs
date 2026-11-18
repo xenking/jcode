@@ -202,6 +202,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "process-global test home is isolated for the whole test"
+    )]
     async fn worker_ask_returns_coordinator_answer_as_tool_result() {
         use crate::server::SwarmMember;
         use crate::server::ask_escalation;
