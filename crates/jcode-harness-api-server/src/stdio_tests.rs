@@ -139,6 +139,13 @@ async fn session_tools_negotiation_and_stream_translation() {
                 .contains(&json!("ask_response_images")),
             supported
         );
+        assert!(
+            hello["capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("memory_events")),
+            "memory events are a bridge feature, independent of daemon probes"
+        );
 
         let (daemon_read, mut daemon_write) = daemon.into_split();
         let mut daemon_read = BufReader::new(daemon_read);

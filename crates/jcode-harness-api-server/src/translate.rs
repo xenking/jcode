@@ -2870,6 +2870,41 @@ impl BridgeState {
             // the stored-session renderer uses, so the live row and the row that
             // comes back after a reload are identical. This bridge deliberately
             // links no application foundation, so it must not re-derive the text.
+            "memory_injected" => {
+                // Same contract as the compaction divider: the label and the
+                // detail are composed by one shared formatter, and the daemon
+                // stores the identical row, so a reload cannot disagree with
+                // what this live event said was recalled.
+                let count = event["count"].as_u64().unwrap_or(0) as usize;
+                let display = event["display_prompt"].as_str().map(str::to_string);
+                let display = display.unwrap_or_else(|| {
+                    let prompt = event["prompt"].as_str().unwrap_or("");
+                    if prompt.trim().is_empty() {
+                        // The daemon stores this placeholder for an empty
+                        // payload; use it so the live row matches the reloaded
+                        // one even when nothing was recalled.
+                        "# Memory\n\n## Notes\n1. (empty injection payload)".to_string()
+                    } else {
+                        prompt.to_string()
+                    }
+                });
+                vec![ServerFrame::event(ApiEvent::MemoryInjected {
+                    session_id: session(self),
+                    count,
+                    content: jcode_session_types::memory_injection_content(count, &display),
+                })]
+            }
+            "memory_activity" => {
+                // A snapshot the client missed is not worth reporting as a
+                // protocol failure: activity is display-only.
+                let Ok(activity) = serde_json::from_value(event["activity"].clone()) else {
+                    return vec![];
+                };
+                vec![ServerFrame::event(ApiEvent::MemoryActivity {
+                    session_id: session(self),
+                    activity,
+                })]
+            }
             "compaction" => {
                 let content = event["divider"]
                     .as_str()

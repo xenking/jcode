@@ -497,6 +497,7 @@ where
                 "session_fork",
                 "session_search",
                 "todo_state",
+                "memory_events",
             ]
             .into_iter()
             .map(str::to_string)

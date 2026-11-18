@@ -2056,6 +2056,8 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | TokenUsage { session_id, .. }
         | ContextCapChanged { session_id, .. }
         | KvCacheMiss { session_id, .. }
+        | MemoryInjected { session_id, .. }
+        | MemoryActivity { session_id, .. }
         | TurnDone { session_id, .. }
         | SoftInterruptInjected { session_id, .. }
         | TurnStopped { session_id, .. }
