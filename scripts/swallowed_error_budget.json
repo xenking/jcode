@@ -1,7 +1,7 @@
 {
-  "total": 4064,
+  "total": 4065,
   "totals_by_pattern": {
-    "dot_ok": 1613,
+    "dot_ok": 1614,
     "let_underscore": 1463,
     "unwrap_or_default": 988
   },
@@ -1147,7 +1147,7 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-base/src/process_memory.rs": {
-      "dot_ok": 30,
+      "dot_ok": 31,
       "let_underscore": 6,
       "unwrap_or_default": 0
     },
