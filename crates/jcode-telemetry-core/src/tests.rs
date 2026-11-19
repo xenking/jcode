@@ -546,17 +546,6 @@ fn test_record_token_usage_aggregates_session_and_turn() {
 }
 
 #[test]
-fn usage_report_rejections_do_not_trip_the_process_breaker() {
-    assert!(payload_is_breaker_exempt(
-        &serde_json::json!({"event": "usage_report"})
-    ));
-    assert!(!payload_is_breaker_exempt(
-        &serde_json::json!({"event": "session_end"})
-    ));
-    assert!(!payload_is_breaker_exempt(&serde_json::json!({})));
-}
-
-#[test]
 fn usage_report_is_attributed_to_caller_session_not_global_slot() {
     let _guard = lock_telemetry_test_state();
     if let Ok(mut session) = SESSION_STATE.lock() {

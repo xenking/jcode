@@ -504,9 +504,8 @@ fn onboarding_golden_walks_failure_and_async_states() {
     }
 }
 
-/// Golden render of the "Telemetry settings" sub-page reached from the import
-/// summary. A preselected Continue button on top, then one checkbox per
-/// telemetry category with dim captions, prompts and transcripts first.
+/// Golden render of the "Telemetry" sub-page reached from the import summary:
+/// informational only, since telemetry is removed in this build.
 #[test]
 fn onboarding_golden_telemetry_settings_page() {
     use crate::external_auth::ExternalAuthReviewCandidate;
@@ -522,24 +521,9 @@ fn onboarding_golden_telemetry_settings_page() {
         import: Some(review),
     });
     let text = render_onboarding_text(&app, 80, 34);
-    dump("Telemetry settings page", &text);
-    assert!(text.contains("Telemetry settings"), "title: {text}");
-    let continue_at = text.find("Continue").expect("Continue button");
-    let content_at = text
-        .find("Prompts and transcripts")
-        .expect("content row");
-    assert!(continue_at < content_at, "Continue sits above the checkboxes: {text}");
-    for label in [
-        "Basic usage stats",
-        "Crash reports",
-        "Feature usage",
-        "Token and cost usage",
-        "Connected accounts",
-    ] {
-        assert!(text.contains(label), "{label}: {text}");
-    }
-    assert!(text.contains("○") && text.contains("●"), "dots: {text}");
-    assert!(text.contains("/telemetry"), "later-change hint: {text}");
+    dump("Telemetry page", &text);
+    assert!(text.contains("Telemetry is disabled in this build"), "{text}");
+    assert!(text.contains("Continue"), "Continue button: {text}");
     // The import summary is hidden while the sub-page is open.
     assert!(
         !text.contains("We found 1 existing login"),

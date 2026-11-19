@@ -556,46 +556,19 @@ impl App {
         // `finished` means the user committed the import (so we kick it off
         // outside the borrow).
         let mut finished = false;
-        // Set when the user committed a telemetry level, so we persist it
-        // outside the review borrow.
-        let mut telemetry_choice = None;
         {
             let Some(review) = self.onboarding_import_review_mut() else {
                 return false;
             };
-            if let Some(settings) = review.telemetry.as_mut() {
-                // Telemetry settings sub-page: Continue button on top
-                // (focused), then one checkbox per category. Up/Down move,
-                // Space/Enter toggle a row, Enter on Continue saves and
-                // returns, a/n set all on/off, Esc returns unchanged.
+            if review.telemetry.is_some() {
+                // Telemetry sub-page: informational only (telemetry is removed
+                // in this build). Esc/Enter/Space return to the summary.
                 match code {
-                    KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => settings.step(false),
-                    KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => settings.step(true),
-                    KeyCode::Char('a') | KeyCode::Char('A') => settings.set_all(true),
-                    KeyCode::Char('n') | KeyCode::Char('N') => settings.set_all(false),
-                    // Left = Yes, Right = No on a category row, like the
-                    // "Import less" page.
-                    KeyCode::Left
-                    | KeyCode::Char('h')
-                    | KeyCode::Char('y')
-                    | KeyCode::Char('Y')
-                        if settings.cursor > 0 =>
-                    {
-                        settings.checked[settings.cursor - 1] = true
-                    }
-                    KeyCode::Right | KeyCode::Char('l') if settings.cursor > 0 => {
-                        settings.checked[settings.cursor - 1] = false
-                    }
                     KeyCode::Esc => review.close_telemetry(),
                     KeyCode::Enter | KeyCode::Char(' ') => {
-                        if !settings.toggle() {
-                            telemetry_choice = Some(*settings);
-                            review.close_telemetry();
-                            // Saving returns focus to Continue so the next
-                            // Enter moves onboarding forward.
-                            review.summary_pill = SummaryPill::Continue;
-                            review.continue_focused = true;
-                        }
+                        review.close_telemetry();
+                        review.summary_pill = SummaryPill::Continue;
+                        review.continue_focused = true;
                     }
                     _ => return false,
                 }
@@ -615,7 +588,7 @@ impl App {
                     | KeyCode::Char('l') => review.summary_step(true),
                     // c is a direct shortcut into choose mode.
                     KeyCode::Char('c') | KeyCode::Char('C') => review.enter_choose_mode(),
-                    // t jumps straight to the telemetry settings page.
+                    // t jumps straight to the telemetry page.
                     KeyCode::Char('t') | KeyCode::Char('T') => review.open_telemetry(),
                     // y = "yes, import everything" regardless of pill focus, so
                     // the timeout is never a forced wait.
@@ -651,17 +624,6 @@ impl App {
                     _ => return false,
                 }
             }
-        }
-        if let Some(level) = telemetry_choice {
-            self.onboarding_telemetry_choice_made = true;
-            if self.onboarding_sim_active() {
-                // A rehearsal must leave this machine's real settings alone.
-                self.set_status_notice(format!("{} (rehearsal, not saved)", level.status_label()));
-            } else {
-                level.persist();
-                self.set_status_notice(level.status_label());
-            }
-            return true;
         }
         if finished {
             self.onboarding_finish_import_review();
@@ -815,7 +777,7 @@ impl App {
             let secs = review.seconds_remaining();
             let notice = if !review.choosing {
                 if review.telemetry.is_some() {
-                    "Telemetry settings - arrows move, Space toggles, Enter on Continue saves, Esc goes back".to_string()
+                    "Telemetry is disabled in this build - Enter or Esc goes back".to_string()
                 } else {
                     format!(
                         "Found {total} login{} - Enter imports all (auto in {secs}s), or pick \"Import less\"",

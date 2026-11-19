@@ -96,7 +96,6 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     let mut needs_redraw = reset_redraw
         | crate::tui::periodic_redraw_required(app)
         | crate::tui::terminal_events::theme_redraw_pending();
-    needs_redraw |= app.poll_oauth_account_telemetry();
     needs_redraw |= app.retire_expired_status_notice();
     needs_redraw |= app.flush_pending_resize_redraw();
     app.maybe_capture_runtime_memory_heartbeat();

@@ -3668,81 +3668,17 @@ pub(super) fn handle_feedback_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
-/// `/telemetry [all|none|<category> on|off]` - show or change the same
-/// per-category telemetry choices offered by the onboarding "Telemetry settings"
-/// page, so the promise made there ("change this later with /telemetry") holds.
+/// `/telemetry` - this build has telemetry removed; there is nothing to configure.
 pub(super) fn handle_telemetry_command(app: &mut App, trimmed: &str) -> bool {
     let Some(rest) = trimmed.strip_prefix("/telemetry") else {
         return false;
     };
-    if !rest.is_empty()
-        && !rest
-            .chars()
-            .next()
-            .map(|c| c.is_whitespace())
-            .unwrap_or(false)
-    {
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
         return false;
     }
-
-    use crate::telemetry::TelemetryCategory;
-    use crate::tui::app::onboarding_flow::status_label_for;
-    let args: Vec<String> = rest
-        .split_whitespace()
-        .map(|a| a.to_ascii_lowercase())
-        .collect();
-    let mut checked = crate::telemetry::category_settings();
-    let parse_on = |v: &str| match v {
-        "on" | "yes" | "true" | "1" => Some(true),
-        "off" | "no" | "false" | "0" => Some(false),
-        _ => None,
-    };
-    let usage = "Usage: /telemetry [all|none] or /telemetry <category> on|off. Categories: content, usage, crashes, features, cost, accounts.";
-    match args.as_slice() {
-        [] => {
-            let mut text = String::from("Telemetry settings:\n");
-            for (i, category) in TelemetryCategory::ALL.into_iter().enumerate() {
-                text.push_str(&format!(
-                    "  [{}] {} ({}): {}\n",
-                    if checked[i] { "x" } else { " " },
-                    category.label(),
-                    category.key(),
-                    category.caption()
-                ));
-            }
-            if crate::telemetry::opt_out_forced_by_env() {
-                text.push_str("Your environment disables all telemetry (JCODE_NO_TELEMETRY / DO_NOT_TRACK).\n");
-            }
-            text.push_str(usage);
-            app.push_display_message(DisplayMessage::system(text));
-            app.set_status_notice(status_label_for(checked));
-            return true;
-        }
-        [all] if matches!(all.as_str(), "all" | "everything" | "on") => checked = [true; 6],
-        [none] if matches!(none.as_str(), "none" | "nothing" | "off") => checked = [false; 6],
-        [all, value] if all == "all" && parse_on(value).is_some() => {
-            checked = [parse_on(value).unwrap_or(false); 6]
-        }
-        [key, value] => match (TelemetryCategory::from_key(key), parse_on(value)) {
-            (Some(category), Some(on)) => {
-                if let Some(i) = TelemetryCategory::ALL.iter().position(|c| *c == category) {
-                    checked[i] = on;
-                }
-            }
-            _ => {
-                app.push_display_message(DisplayMessage::error(usage.to_string()));
-                return true;
-            }
-        },
-        _ => {
-            app.push_display_message(DisplayMessage::error(usage.to_string()));
-            return true;
-        }
-    }
-    crate::telemetry::set_category_settings(checked);
-    let label = status_label_for(checked);
-    app.push_display_message(DisplayMessage::system(label.clone()));
-    app.set_status_notice(label);
+    app.push_display_message(DisplayMessage::system(
+        "Telemetry is disabled in this build. Nothing is collected or sent, and there are no settings to change.",
+    ));
     true
 }
 

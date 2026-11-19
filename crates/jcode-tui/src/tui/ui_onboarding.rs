@@ -149,25 +149,24 @@ fn import_summary_pills_line(
     ));
     spans.push(Span::raw("   "));
     spans.extend(lozenge_pill_spans(
-        "Telemetry settings",
+        "Telemetry",
         focused == Pill::Telemetry,
     ));
     Line::from(spans).alignment(align)
 }
 
-/// The telemetry settings sub-page: a preselected "Continue" pill on top, then
-/// one checkbox per telemetry category with a dim caption. Reached from the
-/// "Telemetry settings" pill on the import summary; Esc returns unchanged.
+/// The telemetry sub-page: this build has telemetry removed, so it only states
+/// that and offers "Continue". Reached from the "Telemetry" pill on the import
+/// summary; Esc returns.
 fn telemetry_settings_lines(
     page: crate::tui::TelemetryPage,
-    env_forced_off: bool,
+    _env_forced_off: bool,
     align: Alignment,
 ) -> Vec<Line<'static>> {
-    use crate::telemetry::TelemetryCategory;
     let dim = Style::default().fg(dim_color());
-    let mut lines: Vec<Line<'static>> = vec![
+    vec![
         Line::from(Span::styled(
-            "Telemetry settings",
+            "Telemetry",
             Style::default()
                 .fg(welcome_accent())
                 .add_modifier(Modifier::BOLD),
@@ -176,106 +175,14 @@ fn telemetry_settings_lines(
         Line::from(""),
         Line::from(lozenge_pill_spans("Continue", page.cursor == 0)).alignment(align),
         Line::from(""),
-    ];
-
-    // Same Yes/No two-column layout as the "Import less" page: a header row,
-    // then one row per category with a filled dot under the chosen column and
-    // a dim caption beneath. Every row is padded to one block width so the
-    // centered block stays left-aligned internally.
-    use unicode_width::UnicodeWidthStr;
-    const COL_W: usize = 5;
-    const GAP: &str = "  ";
-    let center_cell = |s: &str| {
-        let total = COL_W.saturating_sub(s.width());
-        let left = total / 2;
-        format!("{}{}{}", " ".repeat(left), s, " ".repeat(total - left))
-    };
-    let left_width = TelemetryCategory::ALL
-        .iter()
-        .map(|c| c.label().width())
-        .max()
-        .unwrap_or(0);
-    // Layout: "> " gutter, Yes column, gap, No column, gap, label.
-    let row_width = 2 + COL_W * 2 + GAP.len() * 2 + left_width;
-    let block_width = row_width;
-    let pad = |used: usize| " ".repeat(block_width.saturating_sub(used));
-
-    let filled = Style::default()
-        .fg(rgb(126, 211, 159))
-        .add_modifier(Modifier::BOLD);
-    let empty = dim;
-    let header_style = dim.add_modifier(Modifier::BOLD);
-    lines.push(
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled(center_cell("Yes"), header_style),
-            Span::raw(GAP),
-            Span::styled(center_cell("No"), header_style),
-            Span::raw(pad(2 + COL_W * 2 + GAP.len())),
-        ])
-        .alignment(align),
-    );
-    for (i, category) in TelemetryCategory::ALL.into_iter().enumerate() {
-        let focused = page.cursor == i + 1;
-        let checked = page.checked[i];
-        let label_style = if checked {
-            Style::default().fg(rgb(210, 210, 210))
-        } else {
-            dim
-        };
-        let (yes_glyph, yes_style, no_glyph, no_style) = if checked {
-            ("●", filled, "○", empty)
-        } else {
-            ("○", empty, "●", filled)
-        };
-        lines.push(
-            Line::from(vec![
-                Span::styled(
-                    if focused { "> " } else { "  " },
-                    Style::default().fg(welcome_accent()),
-                ),
-                Span::styled(center_cell(yes_glyph), yes_style),
-                Span::raw(GAP),
-                Span::styled(center_cell(no_glyph), no_style),
-                Span::raw(GAP),
-                Span::styled(category.label(), label_style),
-                Span::raw(pad(2
-                    + COL_W * 2
-                    + GAP.len() * 2
-                    + category.label().width())),
-            ])
-            .alignment(align),
-        );
-    }
-    // Describe only the focused category, in one dim line under the list, so
-    // the rows stay compact. Always reserve the line so nothing jumps.
-    lines.push(Line::from(""));
-    let description = page
-        .cursor
-        .checked_sub(1)
-        .and_then(|i| TelemetryCategory::ALL.get(i))
-        .map(|c| c.caption())
-        .unwrap_or("");
-    lines.push(Line::from(Span::styled(description, dim)).alignment(align));
-    lines.push(Line::from(""));
-
-    if env_forced_off {
-        lines.push(
-            Line::from(Span::styled(
-                "Your environment already disables telemetry (JCODE_NO_TELEMETRY).",
-                dim,
-            ))
-            .alignment(align),
-        );
-    }
-    lines.push(
         Line::from(Span::styled(
-            "Left/Right pick Yes/No. Esc goes back. Change later with /telemetry.",
+            "Telemetry is disabled in this build. Nothing is collected or sent.",
             dim,
         ))
         .alignment(align),
-    );
-    lines
+        Line::from(""),
+        Line::from(Span::styled("Esc goes back.", dim)).alignment(align),
+    ]
 }
 
 /// Render the read-only detected-login list for the import summary screen: one
@@ -704,7 +611,7 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
 /// Vertical structure (top to bottom):
 ///   title, keyboard hint, gap, phase body.
 ///
-/// Telemetry is not explained up front: the "Telemetry settings" pill on the
+/// Telemetry is not explained up front: the "Telemetry" pill on the
 /// import summary owns that, which keeps the first page clean.
 pub(super) fn draw_onboarding_welcome(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     if area.width < 4 || area.height < 6 {

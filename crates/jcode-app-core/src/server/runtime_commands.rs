@@ -367,50 +367,7 @@ pub(super) async fn execute(
             json!({"service_tier": provider.service_tier(), "provider": provider.display_name()})
         }
         RuntimeCommand::Telemetry => {
-            use crate::telemetry::TelemetryCategory;
-            let usage = "Usage: /telemetry [all|none] or /telemetry <content|usage|crashes|features|cost|accounts> on|off";
-            let parse_on = |v: &str| match v {
-                "on" | "yes" | "true" | "1" => Some(true),
-                "off" | "no" | "false" | "0" => Some(false),
-                _ => None,
-            };
-            let mut checked = crate::telemetry::category_settings();
-            let changed = match args {
-                [] => false,
-                [arg] if matches!(arg.as_str(), "show" | "status") => false,
-                [arg] if matches!(arg.as_str(), "everything" | "all" | "on") => {
-                    checked = [true; 6];
-                    true
-                }
-                [arg] if matches!(arg.as_str(), "nothing" | "none" | "off") => {
-                    checked = [false; 6];
-                    true
-                }
-                [key, value] => {
-                    let (Some(category), Some(on)) =
-                        (TelemetryCategory::from_key(key), parse_on(value))
-                    else {
-                        bail!("{usage}");
-                    };
-                    if let Some(i) = TelemetryCategory::ALL.iter().position(|c| *c == category) {
-                        checked[i] = on;
-                    }
-                    true
-                }
-                _ => bail!("{usage}"),
-            };
-            if changed {
-                if checked.iter().any(|on| *on) && crate::telemetry::opt_out_forced_by_env() {
-                    bail!("Telemetry is forced off by the runtime environment");
-                }
-                crate::telemetry::set_category_settings(checked);
-            }
-            let status = crate::telemetry::status();
-            let categories: serde_json::Map<String, serde_json::Value> = TelemetryCategory::ALL
-                .into_iter()
-                .map(|c| (c.key().to_string(), json!(c.enabled())))
-                .collect();
-            json!({"enabled": status.enabled, "content_sharing_enabled": status.content_sharing_enabled, "categories": categories, "opt_out_source": status.opt_out_source.map(|source| source.as_str())})
+            json!({"enabled": false, "message": "Telemetry is disabled in this build. Nothing is collected or sent."})
         }
         RuntimeCommand::Subscription => {
             status_only(args)?;

@@ -1,5 +1,7 @@
 # Account Flows: Observability, Privacy, and Support Diagnostics
 
+> **xenking fork:** telemetry is disabled entirely and the OAuth email upload has been removed (see `TELEMETRY.md`). The telemetry sections below describe upstream behavior only.
+
 Security logging, audit events, metrics, traces, alerting, redaction,
 retention, and support diagnostics for the six subscription account flows:
 (1) device login, (2) browser approval/denial, (3) account state (`/v1/me`),

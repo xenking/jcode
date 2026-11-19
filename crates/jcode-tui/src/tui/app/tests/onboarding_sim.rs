@@ -114,30 +114,6 @@ fn rehearsal_keys_drive_the_real_import_summary() {
 }
 
 #[test]
-fn rehearsal_telemetry_choice_is_not_saved() {
-    with_temp_jcode_home(|| {
-        write_fake_gemini_cli_login();
-        let mut app = create_test_app();
-        app.start_onboarding_simulator();
-        let before = crate::telemetry::category_settings();
-
-        // Open telemetry settings, uncheck everything, Continue.
-        app.handle_key(KeyCode::Char('t'), KeyModifiers::NONE)
-            .unwrap();
-        app.handle_key(KeyCode::Char('n'), KeyModifiers::NONE).unwrap();
-        app.handle_key(KeyCode::Enter, KeyModifiers::NONE).unwrap();
-
-        assert_eq!(
-            crate::telemetry::category_settings(),
-            before
-        );
-        let marker = std::path::Path::new(&std::env::var_os("JCODE_HOME").unwrap())
-            .join("no_telemetry");
-        assert!(!marker.exists(), "rehearsal must not write telemetry markers");
-    });
-}
-
-#[test]
 fn alt_5_restarts_the_rehearsal_from_a_pristine_first_screen() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();

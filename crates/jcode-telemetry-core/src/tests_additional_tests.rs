@@ -1,51 +1,6 @@
 use super::*;
 
 #[test]
-fn permanent_telemetry_statuses_trip_the_process_breaker() {
-    assert!(telemetry_status_is_permanent(400));
-    assert!(telemetry_status_is_permanent(401));
-    assert!(telemetry_status_is_permanent(404));
-    assert!(!telemetry_status_is_permanent(408));
-    assert!(!telemetry_status_is_permanent(425));
-    assert!(!telemetry_status_is_permanent(429));
-    assert!(!telemetry_status_is_permanent(500));
-}
-
-#[test]
-fn background_delivery_queue_is_bounded() {
-    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
-    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
-    let sender = spawn_background_worker(1, move |_| {
-        let _ = started_tx.send(());
-        let _ = release_rx.recv();
-    })
-    .expect("start test telemetry worker");
-
-    sender
-        .send(serde_json::json!({"event": "first"}))
-        .expect("enqueue first payload");
-    started_rx.recv().expect("worker started first payload");
-    sender
-        .try_send(serde_json::json!({"event": "second"}))
-        .expect("bounded queue accepts one waiting payload");
-    assert!(matches!(
-        sender.try_send(serde_json::json!({"event": "third"})),
-        Err(std::sync::mpsc::TrySendError::Full(_))
-    ));
-
-    release_tx.send(()).expect("release telemetry worker");
-}
-
-#[test]
-fn telemetry_endpoint_uses_production_custom_domain() {
-    assert_eq!(TELEMETRY_ENDPOINT, "https://telemetry.jcode.sh/v1/event");
-    assert_eq!(
-        TRANSCRIPT_ENDPOINT,
-        "https://telemetry.jcode.sh/v1/transcript"
-    );
-}
-
-#[test]
 fn transcript_upload_requires_separate_content_consent() {
     let _guard = lock_test_env();
     TEST_EMITTED_PAYLOADS.lock().unwrap().clear();

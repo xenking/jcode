@@ -101,7 +101,6 @@ mod misc_ui;
 mod model_context;
 mod model_picker_stage;
 mod navigation;
-pub(crate) mod oauth_telemetry;
 mod observe;
 pub(crate) mod onboarding_flow;
 mod onboarding_flow_control;
@@ -1374,7 +1373,6 @@ pub struct App {
     remote_provider_oauth_email: Option<crate::protocol::ProviderOAuthEmail>,
     /// Daemon-selected saved account identity, independent of telemetry/email sharing.
     remote_provider_oauth_account_label: Option<String>,
-    oauth_notice_displayed_at: Option<Instant>,
     /// Remote model/provider/context/effort/credential were seeded from the
     /// last launch's `remote_header_hint` and have not yet been confirmed by
     /// the server. Cleared (and re-derived) when History arrives.

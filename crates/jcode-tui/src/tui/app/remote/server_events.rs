@@ -1748,12 +1748,6 @@ fn handle_server_event_inner(
             let prev_session_id = app.remote_session_id.clone();
             app.remote_provider_oauth_email = provider_oauth_email.clone();
             app.remote_provider_oauth_account_label = provider_oauth_account_label;
-            if resolved_credential == Some(jcode_provider_core::ResolvedCredential::Oauth)
-                && let Some(email) = provider_oauth_email
-                && let Some(provider) = provider_name.as_deref()
-            {
-                crate::telemetry::enqueue_oauth_account(provider, email.as_str());
-            }
             let history_message_count = messages.len();
             let history_mcp_count = mcp_servers.len();
             let history_model = provider_model.clone();

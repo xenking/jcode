@@ -4721,7 +4721,6 @@ dependencies = [
  "jcode-selfdev-types",
  "jcode-storage",
  "jcode-usage-types",
- "reqwest 0.12.28",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",

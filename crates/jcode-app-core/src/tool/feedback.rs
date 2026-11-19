@@ -126,7 +126,7 @@ impl Tool for MaintainerFeedbackTool {
         let text = payload(serde_json::from_value(input)?)?;
         if !crate::telemetry::is_enabled() {
             return Ok(ToolOutput::new(
-                "Feedback was not sent because telemetry is disabled. The user can use /telemetry to change that setting.",
+                "Feedback was not sent because telemetry is disabled in this build. Telemetry is removed in this build.",
             ));
         }
         crate::telemetry::record_feedback(&text);

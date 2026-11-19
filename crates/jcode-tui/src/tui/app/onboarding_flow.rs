@@ -49,68 +49,20 @@ impl ExternalCli {
     }
 }
 
-/// State of the "Telemetry settings" page: a "Continue" button on top
-/// (focused by default) followed by one checkbox per telemetry category.
+/// State of the informational "Telemetry" page (telemetry is removed in this
+/// build): just the focused "Continue" button.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TelemetrySettings {
-    /// 0 = the Continue button, 1.. = category rows in
-    /// [`crate::telemetry::TelemetryCategory::ALL`] order.
     pub(crate) cursor: usize,
     pub(crate) checked: [bool; 6],
 }
 
 impl TelemetrySettings {
-    pub(crate) const ROWS: usize = 1 + 6;
-
-    /// Open with the persisted choices, Continue focused.
     pub(crate) fn current() -> Self {
         Self {
             cursor: 0,
-            checked: crate::telemetry::category_settings(),
+            checked: [false; 6],
         }
-    }
-
-    pub(crate) fn step(&mut self, forward: bool) {
-        self.cursor = if forward {
-            (self.cursor + 1) % Self::ROWS
-        } else {
-            (self.cursor + Self::ROWS - 1) % Self::ROWS
-        };
-    }
-
-    /// Toggle the focused checkbox. Returns false on the Continue row.
-    pub(crate) fn toggle(&mut self) -> bool {
-        match self.cursor.checked_sub(1) {
-            Some(i) => {
-                self.checked[i] = !self.checked[i];
-                true
-            }
-            None => false,
-        }
-    }
-
-    pub(crate) fn set_all(&mut self, on: bool) {
-        self.checked = [on; 6];
-    }
-
-    pub(crate) fn persist(&self) {
-        crate::telemetry::set_category_settings(self.checked);
-    }
-
-    pub(crate) fn status_label(&self) -> String {
-        status_label_for(self.checked)
-    }
-}
-
-/// Short status-line summary of a set of category choices.
-pub(crate) fn status_label_for(checked: [bool; 6]) -> String {
-    let on = checked.iter().filter(|c| **c).count();
-    if on == 0 {
-        "Telemetry: off".to_string()
-    } else if on == checked.len() {
-        "Telemetry: sharing everything, thank you".to_string()
-    } else {
-        format!("Telemetry: {on} of {} categories on", checked.len())
     }
 }
 
