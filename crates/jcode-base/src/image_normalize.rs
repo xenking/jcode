@@ -119,6 +119,144 @@ pub fn normalize_image_bytes(data: Vec<u8>) -> Result<ProviderImage, String> {
     }
 }
 
+/// Longest edge of an image a tool hands to the model.
+///
+/// A Retina screenshot is 3456x2234 and 2-11 MB as PNG. Every later request of
+/// the session carries it again, so 25 of them filled the 24 MiB request image
+/// budget, the oldest were cut, and the provider rebuilt a 465K-token prompt
+/// cache (2026-11-19). The model reads an image of this size just as well.
+pub const MODEL_IMAGE_MAX_EDGE: u32 = 1568;
+/// Encoded size an image handed to the model is brought under.
+pub const MODEL_IMAGE_MAX_BYTES: usize = 500 * 1024;
+
+/// An image sized for the model, and what it was scaled from if it changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FittedImage {
+    pub image: ProviderImage,
+    /// `(original, sent)` pixel sizes when the image was scaled down.
+    pub scaled: Option<((u32, u32), (u32, u32))>,
+}
+
+/// Bring `image` within [`MODEL_IMAGE_MAX_EDGE`] and [`MODEL_IMAGE_MAX_BYTES`].
+///
+/// An image already inside both bounds is returned byte for byte. Otherwise it
+/// is scaled down and stored as PNG or JPEG, whichever is smaller. Animated
+/// GIFs and anything that fails to decode are left alone: the outbound clamp
+/// still enforces the provider's hard limits on those.
+pub fn fit_image_for_model(image: ProviderImage) -> FittedImage {
+    let untouched = |image| FittedImage {
+        image,
+        scaled: None,
+    };
+    if image.media_type == "image/gif" {
+        return untouched(image);
+    }
+    let Ok(reader) =
+        image::ImageReader::new(std::io::Cursor::new(&image.data)).with_guessed_format()
+    else {
+        return untouched(image);
+    };
+    let Ok((width, height)) = reader.into_dimensions() else {
+        return untouched(image);
+    };
+    let over_edge = width.max(height) > MODEL_IMAGE_MAX_EDGE;
+    if !over_edge && image.data.len() <= MODEL_IMAGE_MAX_BYTES {
+        return untouched(image);
+    }
+    let Ok(decoded) = image::load_from_memory(&image.data) else {
+        return untouched(image);
+    };
+    let mut scale = (MODEL_IMAGE_MAX_EDGE as f64 / width.max(height) as f64).min(1.0);
+    let mut best: Option<(Vec<u8>, &'static str, (u32, u32))> = None;
+    for _ in 0..5 {
+        let target = (
+            ((width as f64 * scale).round() as u32).max(1),
+            ((height as f64 * scale).round() as u32).max(1),
+        );
+        let resized = if target == (width, height) {
+            decoded.clone()
+        } else {
+            decoded.resize_exact(target.0, target.1, image::imageops::FilterType::CatmullRom)
+        };
+        let Some((data, media_type)) = encode_smallest(&resized) else {
+            break;
+        };
+        let len = data.len();
+        best = Some((data, media_type, target));
+        if len <= MODEL_IMAGE_MAX_BYTES || target == (1, 1) {
+            break;
+        }
+        // Encoded size follows pixel area, so shrink each edge by the root of
+        // the overshoot.
+        scale *= (MODEL_IMAGE_MAX_BYTES as f64 / len as f64)
+            .sqrt()
+            .clamp(0.5, 0.9);
+    }
+    match best {
+        Some((data, media_type, size)) if over_edge || data.len() < image.data.len() => {
+            FittedImage {
+                image: ProviderImage {
+                    media_type,
+                    data,
+                    converted_from: image.converted_from,
+                },
+                scaled: (size != (width, height)).then_some(((width, height), size)),
+            }
+        }
+        _ => untouched(image),
+    }
+}
+
+/// [`fit_image_for_model`] for an image already held as base64, as tool
+/// results are. Anything that is not a decodable image comes back unchanged.
+pub fn fit_base64_image_for_model(media_type: String, data: String) -> (String, String) {
+    use base64::Engine as _;
+    let engine = &base64::engine::general_purpose::STANDARD;
+    // 4 base64 chars carry 3 bytes: skip the decode when the image is small
+    // enough that only its pixel size could still be over.
+    if data.len() / 4 * 3 <= MODEL_IMAGE_MAX_BYTES / 8 {
+        return (media_type, data);
+    }
+    let Ok(bytes) = engine.decode(data.trim()) else {
+        return (media_type, data);
+    };
+    let Ok(image) = normalize_image_bytes(bytes) else {
+        return (media_type, data);
+    };
+    let converted = image.converted_from.is_some();
+    let fitted = fit_image_for_model(image);
+    if fitted.scaled.is_none() && !converted && fitted.image.media_type == media_type {
+        return (media_type, data);
+    }
+    (
+        fitted.image.media_type.to_string(),
+        engine.encode(&fitted.image.data),
+    )
+}
+
+/// PNG or JPEG, whichever is smaller. JPEG cannot hold transparency, so an
+/// image with any is kept as PNG.
+fn encode_smallest(img: &image::DynamicImage) -> Option<(Vec<u8>, &'static str)> {
+    let mut png = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut png, image::ImageFormat::Png).ok()?;
+    let png = png.into_inner();
+    let transparent =
+        img.color().has_alpha() && img.to_rgba8().pixels().any(|pixel| pixel.0[3] != 255);
+    if transparent {
+        return Some((png, "image/png"));
+    }
+    let mut jpeg = Vec::new();
+    let rgb = img.to_rgb8();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 80)
+        .encode_image(&rgb)
+        .ok()?;
+    Some(if png.len() <= jpeg.len() {
+        (png, "image/png")
+    } else {
+        (jpeg, "image/jpeg")
+    })
+}
+
 fn reencode_png(data: &[u8]) -> Option<Vec<u8>> {
     let img = image::load_from_memory(data).ok()?;
     let mut out = std::io::Cursor::new(Vec::new());
@@ -129,6 +267,87 @@ fn reencode_png(data: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Retina-sized screenshot: flat panels, a gradient and fine detail.
+    fn screenshot_png(width: u32, height: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_fn(width, height, |x, y| {
+            let fine = if (x / 3 + y / 7) % 11 == 0 { 255 } else { 20 };
+            image::Rgba([(x * 255 / width) as u8, fine, ((x ^ y) & 0xff) as u8, 255])
+        });
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn a_retina_screenshot_is_scaled_to_the_model_bounds() {
+        let png = screenshot_png(3456, 2234);
+        assert!(
+            png.len() > MODEL_IMAGE_MAX_BYTES,
+            "fixture is a large image"
+        );
+        let fitted = fit_image_for_model(normalize_image_bytes(png).unwrap());
+        let decoded = image::load_from_memory(&fitted.image.data).expect("fitted image decodes");
+        assert!(decoded.width().max(decoded.height()) <= MODEL_IMAGE_MAX_EDGE);
+        assert!(fitted.image.data.len() <= MODEL_IMAGE_MAX_BYTES);
+        assert_eq!(
+            sniff_provider_media_type(&fitted.image.data),
+            Some(fitted.image.media_type),
+            "the media type matches the bytes"
+        );
+        let (from, to) = fitted.scaled.expect("the scaling is reported");
+        assert_eq!(from, (3456, 2234));
+        assert_eq!(to, (decoded.width(), decoded.height()));
+    }
+
+    #[test]
+    fn an_image_within_the_model_bounds_is_not_reencoded() {
+        let png = screenshot_png(400, 300);
+        let fitted = fit_image_for_model(normalize_image_bytes(png.clone()).unwrap());
+        assert_eq!(fitted.image.data, png);
+        assert_eq!(fitted.scaled, None);
+    }
+
+    /// Not committed evidence, a measurement: `JCODE_FIT_SAMPLE=<image> cargo
+    /// test fit_sample -- --ignored --nocapture` prints what a real file becomes.
+    #[test]
+    #[ignore = "needs JCODE_FIT_SAMPLE"]
+    fn fit_sample() {
+        let path = std::env::var("JCODE_FIT_SAMPLE").expect("JCODE_FIT_SAMPLE");
+        let bytes = std::fs::read(&path).unwrap();
+        let before = bytes.len();
+        let fitted = fit_image_for_model(normalize_image_bytes(bytes).unwrap());
+        println!(
+            "{path}: {before} -> {} bytes, {} {:?}",
+            fitted.image.data.len(),
+            fitted.image.media_type,
+            fitted.scaled
+        );
+    }
+
+    #[test]
+    fn transparency_survives_scaling() {
+        let img = image::RgbaImage::from_fn(2400, 1200, |x, y| {
+            image::Rgba([
+                x as u8,
+                y as u8,
+                (x ^ y) as u8,
+                if x < 1200 { 0 } else { 255 },
+            ])
+        });
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        let fitted = fit_image_for_model(normalize_image_bytes(out.into_inner()).unwrap());
+        assert_eq!(fitted.image.media_type, "image/png");
+        let decoded = image::load_from_memory(&fitted.image.data)
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(decoded.get_pixel(10, 10).0[3], 0);
+    }
 
     fn tiny_bmp() -> Vec<u8> {
         // 2x2 24-bit BMP, rows padded to 4 bytes.

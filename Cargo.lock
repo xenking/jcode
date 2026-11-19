@@ -3758,6 +3758,7 @@ dependencies = [
  "flate2",
  "futures",
  "global-hotkey",
+ "image",
  "jcode-agent-runtime",
  "jcode-ambient-types",
  "jcode-applet-types",

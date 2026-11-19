@@ -388,11 +388,21 @@ fn handle_image_file(path: &Path, file_path: &str) -> Result<ToolOutput> {
                     .converted_from
                     .map(|format| format!("Converted from {format} to PNG. "))
                     .unwrap_or_default();
+                // The session resends this image on every later request, so it
+                // is stored at the size the model reads, not the file's.
+                let fitted = crate::image_normalize::fit_image_for_model(image);
+                let scaled_note = fitted
+                    .scaled
+                    .map(|(_, (width, height))| {
+                        format!("Scaled to {width}x{height} for the model; the file is unchanged. ")
+                    })
+                    .unwrap_or_default();
+                let image = fitted.image;
                 let b64 =
                     base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &image.data);
                 ToolOutput::new(format!(
-                    "Image: {} ({})\nDimensions: {}\n{}Image sent to model for vision analysis.",
-                    file_path, size_str, dim_str, converted_note
+                    "Image: {} ({})\nDimensions: {}\n{}{}Image sent to model for vision analysis.",
+                    file_path, size_str, dim_str, converted_note, scaled_note
                 ))
                 .with_labeled_image(image.media_type, b64, file_path.to_string())
             }

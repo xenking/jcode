@@ -50,25 +50,61 @@ fn capture_to_temp(extra_args: &[&str]) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// A capture at the size the model reads, with the pixel size actually sent.
+///
+/// The session resends every screenshot on each later request, so a Retina
+/// capture is scaled down here, where the coordinate hint can still be written
+/// for the image the model sees.
+struct SentCapture {
+    media_type: &'static str,
+    data: Vec<u8>,
+    size: Option<(u32, u32)>,
+}
+
+fn fit_capture(bytes: Vec<u8>) -> SentCapture {
+    let captured = png_dimensions(&bytes);
+    match crate::image_normalize::normalize_image_bytes(bytes.clone()) {
+        Ok(image) => {
+            let fitted = crate::image_normalize::fit_image_for_model(image);
+            SentCapture {
+                media_type: fitted.image.media_type,
+                size: fitted.scaled.map(|(_, sent)| sent).or(captured),
+                data: fitted.image.data,
+            }
+        }
+        Err(_) => SentCapture {
+            media_type: "image/png",
+            data: bytes,
+            size: captured,
+        },
+    }
+}
+
+/// Image pixels per screen point for a capture `sent_w` pixels wide.
+fn pixels_per_point(sent_w: u32, point_w: f64) -> f64 {
+    if point_w > 0.0 && sent_w > 0 {
+        sent_w as f64 / point_w
+    } else {
+        1.0
+    }
+}
+
 pub fn screenshot() -> Result<ToolOutput> {
     let bytes = capture_to_temp(&[])?;
     let bounds = CGDisplay::main().bounds();
     let point_w = bounds.size.width;
     let point_h = bounds.size.height;
-    let (pixel_w, pixel_h) = png_dimensions(&bytes).unwrap_or((point_w as u32, point_h as u32));
-    let scale = if point_w > 0.0 {
-        pixel_w as f64 / point_w
-    } else {
-        1.0
-    };
+    let sent = fit_capture(bytes);
+    let (pixel_w, pixel_h) = sent.size.unwrap_or((point_w as u32, point_h as u32));
+    let scale = pixels_per_point(pixel_w, point_w);
     let summary = format!(
         "Captured main display: {pixel_w}x{pixel_h} pixels = {point_w:.0}x{point_h:.0} points \
-         (scale {scale:.2}x). Click/move coordinates are in POINTS: for a feature at image pixel \
-         (px, py), use x = px / {scale:.2}, y = py / {scale:.2}.",
+         (scale {scale:.4}x). Click/move coordinates are in POINTS: for a feature at image pixel \
+         (px, py), use x = px / {scale:.4}, y = py / {scale:.4}.",
     );
     Ok(ToolOutput::new(summary)
         .with_title("screenshot")
-        .with_labeled_image("image/png", STANDARD.encode(&bytes), "screen")
+        .with_labeled_image(sent.media_type, STANDARD.encode(&sent.data), "screen")
         .with_metadata(json!({
             "width_points": point_w, "height_points": point_h,
             "width_pixels": pixel_w, "height_pixels": pixel_h, "scale": scale,
@@ -77,13 +113,13 @@ pub fn screenshot() -> Result<ToolOutput> {
 
 /// Screenshot a single window by its CoreGraphics window id, even if occluded.
 pub fn window_screenshot(window_id: i64) -> Result<ToolOutput> {
-    let bytes = capture_to_temp(&["-o", "-l", &window_id.to_string()])?;
-    let (pixel_w, pixel_h) = png_dimensions(&bytes).unwrap_or((0, 0));
+    let sent = fit_capture(capture_to_temp(&["-o", "-l", &window_id.to_string()])?);
+    let (pixel_w, pixel_h) = sent.size.unwrap_or((0, 0));
     Ok(ToolOutput::new(format!(
         "Captured window {window_id}: {pixel_w}x{pixel_h} pixels."
     ))
     .with_title("window screenshot")
-    .with_labeled_image("image/png", STANDARD.encode(&bytes), "window")
+    .with_labeled_image(sent.media_type, STANDARD.encode(&sent.data), "window")
     .with_metadata(
         json!({ "window_id": window_id, "width_pixels": pixel_w, "height_pixels": pixel_h }),
     ))
