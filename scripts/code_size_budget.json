@@ -1,7 +1,7 @@
 {
   "threshold_loc": 1200,
   "tracked_files": {
-    "crates/jcode-app-core/src/agent.rs": 1964,
+    "crates/jcode-app-core/src/agent.rs": 1966,
     "crates/jcode-app-core/src/agent/turn_execution.rs": 1903,
     "crates/jcode-app-core/src/agent/turn_loops.rs": 1383,
     "crates/jcode-app-core/src/agent/turn_streaming_mpsc.rs": 1977,
