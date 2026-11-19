@@ -104,18 +104,6 @@ fn resolve_windows_hotkeys() -> Vec<WindowsHotkey> {
         .collect()
 }
 
-pub(super) fn primary_hotkey_display() -> Option<(String, String)> {
-    resolve_windows_hotkeys()
-        .into_iter()
-        .find(|entry| !entry.self_dev && windows_hotkeys::hotkey_to_win32(entry).is_some())
-        .map(|entry| {
-            (
-                entry.chord.canonical(),
-                windows_hotkeys::display_windows_hotkey(&entry),
-            )
-        })
-}
-
 fn default_windows_launch_entries() -> Vec<LaunchHotkeyEntry> {
     let mut entries = crate::launch_hotkeys::default_launch_entries();
     entries.push(LaunchHotkeyEntry {
@@ -618,22 +606,6 @@ pub(super) fn windows_launch_hotkeys_notice(state: &SetupHintsState) -> Option<S
     ))
 }
 
-/// Reinstall the Windows hotkey listener after the `[launch_hotkeys]` config
-/// changed. No-op unless the user already configured the hotkey (we never
-/// install behind someone who opted out). Best-effort.
-pub(super) fn reinstall_windows_launch_hotkeys() {
-    let state = SetupHintsState::load();
-    if !state.hotkey_configured {
-        return;
-    }
-    match refresh_windows_launch_hotkeys() {
-        Ok(()) => jcode_logging::info("Reinstalled Windows launch hotkeys after config change"),
-        Err(err) => jcode_logging::warn(&format!(
-            "failed to reinstall Windows launch hotkeys: {err}"
-        )),
-    }
-}
-
 pub(super) fn refresh_windows_launch_hotkeys() -> Result<()> {
     let use_alacritty = detect_terminal() == "alacritty" || is_alacritty_installed();
     create_hotkey_shortcut(use_alacritty)
@@ -1052,7 +1024,6 @@ pub(super) fn run_setup_hotkey_windows() -> Result<()> {
                 }
             }
             eprintln!();
-            super::install_cli_launch_hints_notice();
             prompt_try_it_out(installed_alacritty);
         }
         Err(e) => {

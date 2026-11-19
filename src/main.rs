@@ -106,13 +106,13 @@ fn run_main() -> Result<()> {
     configure_system_allocator();
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    // SessionStart hooks should be effectively invisible to Claude Code and
-    // Codex. Handle this tiny callback before the Tokio runtime and normal Jcode
-    // startup path so it does not initialize providers, start cleanup threads,
-    // check for updates, or emit first-run telemetry disclosure text into the
-    // parent CLI's hook output.
-    if let Some(source) = cli_launch_hint_source_invocation() {
-        return jcode::setup_hints::run_setup_hotkey(false, false, false, Some(&source));
+    // Stale SessionStart hooks written by older versions still call
+    // `setup-hotkey --notify-cli-launch <cli>`. Answer before the Tokio runtime
+    // and normal startup so they stay instant and silent: remove the hook and
+    // exit 0.
+    if is_legacy_cli_hook_invocation(std::env::args().skip(1)) {
+        jcode::setup_hints::remove_legacy_cli_launch_hooks();
+        return Ok(());
     }
 
     // The macOS global-hotkey listener must run on the real main thread with a
@@ -159,23 +159,16 @@ fn args_are_macos_hotkey_listener(args: impl IntoIterator<Item = String>) -> boo
         && args.iter().any(|a| a == "--listen-macos-hotkey")
 }
 
-fn cli_launch_hint_source_invocation() -> Option<String> {
-    cli_launch_hint_source(std::env::args().skip(1))
-}
-
-fn cli_launch_hint_source(args: impl IntoIterator<Item = String>) -> Option<String> {
+fn is_legacy_cli_hook_invocation(args: impl IntoIterator<Item = String>) -> bool {
     let args: Vec<String> = args.into_iter().collect();
-    if args.first().map(String::as_str) != Some("setup-hotkey") {
-        return None;
-    }
-    let index = args.iter().position(|arg| arg == "--notify-cli-launch")?;
-    args.get(index + 1).cloned()
+    args.first().map(String::as_str) == Some("setup-hotkey")
+        && args.iter().any(|a| a == "--notify-cli-launch")
 }
 
 #[cfg(test)]
 mod tests {
     use super::args_are_macos_hotkey_listener;
-    use super::cli_launch_hint_source;
+    use super::is_legacy_cli_hook_invocation;
     use super::parse_alloc_tuning;
 
     #[test]
@@ -224,22 +217,17 @@ mod tests {
     }
 
     #[test]
-    fn detects_cli_launch_hint_callback() {
-        assert_eq!(
-            cli_launch_hint_source(argv(&["setup-hotkey", "--notify-cli-launch", "claude"])),
-            Some("claude".to_string())
-        );
-    }
-
-    #[test]
-    fn ignores_launch_hint_flag_on_other_commands_or_without_value() {
-        assert_eq!(
-            cli_launch_hint_source(argv(&["serve", "--notify-cli-launch", "codex"])),
-            None
-        );
-        assert_eq!(
-            cli_launch_hint_source(argv(&["setup-hotkey", "--notify-cli-launch"])),
-            None
-        );
+    fn detects_legacy_cli_hook_callback_only_for_setup_hotkey() {
+        assert!(is_legacy_cli_hook_invocation(argv(&[
+            "setup-hotkey",
+            "--notify-cli-launch",
+            "claude"
+        ])));
+        assert!(!is_legacy_cli_hook_invocation(argv(&[
+            "serve",
+            "--notify-cli-launch",
+            "codex"
+        ])));
+        assert!(!is_legacy_cli_hook_invocation(argv(&["setup-hotkey"])));
     }
 }

@@ -494,7 +494,8 @@ pub(crate) enum Command {
         #[arg(long, hide = true)]
         listen_macos_hotkey: bool,
 
-        /// Internal: show a rate-limited shortcut reminder from a CLI SessionStart hook.
+        /// Internal: accepted as a no-op so stale SessionStart hooks written by older
+        /// versions keep exiting 0; the hook is removed on first run.
         #[arg(long, hide = true, value_name = "CLI")]
         notify_cli_launch: Option<String>,
 

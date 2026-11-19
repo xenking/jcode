@@ -105,7 +105,8 @@ bash "$repo_dir/scripts/install.sh" >/dev/null
 test "$(cat "$tmp/home/.jcode/install_conversion_id")" = "$conversion_id"
 grep -q '"stage":"installer_start".*"outcome":"success"' "$telemetry_log"
 grep -q '"stage":"installer_finish".*"outcome":"success"' "$telemetry_log"
-test "$(cat "$hotkey_setup_log")" = "setup-hotkey"
+# The installer must never configure global hotkeys on its own.
+test ! -e "$hotkey_setup_log"
 
 # If GitHub's release page is blocked, the static jcode.sh version endpoint
 # must keep the complete install path working.
