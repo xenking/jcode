@@ -635,8 +635,15 @@ pub(super) async fn handle_set_reasoning_effort(
             .and_then(|requested| provider.set_reasoning_effort(&requested))
             .map(|()| provider.reasoning_effort());
         if let Ok(current) = &result {
-            // Applied now, so an older choice still waiting must not undo it.
-            crate::session_effort::clear_pending_effort(session_id);
+            // The provider already uses it, but the session file is only written
+            // once the turn frees the agent, and a reload before that would
+            // restore the old effort. The durable pending slot carries it: the
+            // next request boundary or a restored agent saves it. This also
+            // replaces any older unapplied choice.
+            match current.as_deref() {
+                Some(current) => crate::session_effort::queue_pending_effort(session_id, current),
+                None => crate::session_effort::clear_pending_effort(session_id),
+            }
             crate::session_effort::record_session_effort(session_id, current.as_deref());
             let agent = Arc::clone(agent);
             crate::runtime_activity::spawn(async move {
@@ -646,7 +653,10 @@ pub(super) async fn handle_set_reasoning_effort(
                 } else {
                     Ok(())
                 }
-                .and_then(|()| agent.persist_current_reasoning_effort());
+                .and_then(|()| {
+                    agent.apply_pending_reasoning_effort();
+                    agent.persist_current_reasoning_effort()
+                });
                 if let Err(error) = result {
                     crate::logging::warn(&format!("Could not persist reasoning effort: {error}"));
                 }
