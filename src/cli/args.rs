@@ -81,8 +81,8 @@ pub(crate) struct Args {
     #[arg(long, global = true)]
     pub(crate) no_update: bool,
 
-    /// Auto-update when new version is available (default: true for release builds)
-    #[arg(long, global = true, default_value = "true")]
+    /// Opt in to installing updates automatically when one is found (default: notify only; run `jcode update` to install)
+    #[arg(long, global = true)]
     pub(crate) auto_update: bool,
 
     /// Log tool inputs/outputs and token usage to stderr
@@ -476,7 +476,7 @@ pub(crate) enum Command {
         #[arg(long)]
         no_lid: bool,
 
-        /// Do not auto-update the browser bridge
+        /// Do not auto-update the browser bridge (already off unless `[companion] browser_updates = true`)
         #[arg(long)]
         no_browser_updates: bool,
     },

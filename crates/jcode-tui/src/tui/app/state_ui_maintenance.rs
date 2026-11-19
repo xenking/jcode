@@ -172,7 +172,7 @@ impl App {
                         action,
                         format!("{} → {} available", current, latest),
                         format!(
-                            "Current: `{}`\nLatest: `{}`\n\nRun `/update` to install, or wait while auto-update continues if enabled.",
+                            "Current: `{}`\nLatest: `{}`\n\nRun `/update` (or `jcode update`) to install.",
                             current, latest
                         ),
                     ),

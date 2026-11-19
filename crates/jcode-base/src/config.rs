@@ -1032,7 +1032,7 @@ pub struct CompanionConfig {
     pub spawn_terminal: bool,
     /// Lid-close override while agents work (macOS/Windows).
     pub lid: bool,
-    /// Hourly browser bridge auto-update.
+    /// Browser bridge auto-update (opt-in; off by default).
     pub browser_updates: bool,
 }
 
@@ -1050,7 +1050,7 @@ impl Default for CompanionConfig {
             open: true,
             spawn_terminal: true,
             lid: true,
-            browser_updates: true,
+            browser_updates: false,
         }
     }
 }

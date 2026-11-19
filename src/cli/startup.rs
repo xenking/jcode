@@ -368,7 +368,9 @@ fn remote_working_dir_is_absolute(path: &str) -> bool {
 }
 
 fn spawn_background_update_check(args: &Args) {
-    let check_updates = should_spawn_background_update_check(args);
+    // JCODE_NO_AUTO_UPDATE disables the whole background check (release and source builds).
+    let check_updates = should_spawn_background_update_check(args)
+        && std::env::var_os("JCODE_NO_AUTO_UPDATE").is_none();
     let auto_update = should_auto_install_update(args);
 
     if !check_updates {
@@ -382,7 +384,10 @@ fn spawn_background_update_check(args: &Args) {
                 update::UpdateCheckResult::UpdateAvailable {
                     current, latest, ..
                 } => {
-                    logging::info(&format!("Update available: {} -> {}", current, latest));
+                    logging::info(&format!(
+                        "Update available: {} -> {}. Run `jcode update` to install it.",
+                        current, latest
+                    ));
                 }
                 update::UpdateCheckResult::UpdateInstalled { version, path } => {
                     // When an interactive TUI session is running, hand the switch
@@ -458,9 +463,7 @@ fn spawn_background_update_check(args: &Args) {
                             ));
                         }
                     } else {
-                        logging::info(
-                            "Update available! Run `jcode update` or `/reload` to update.",
-                        );
+                        logging::info("Update available! Run `jcode update` to install it.");
                     }
                 }
             } else {
@@ -780,22 +783,11 @@ mod tests {
     }
 
     #[test]
-    fn auto_install_allowed_without_live_terminal() {
+    fn auto_install_is_off_by_default_and_opt_in_via_flag() {
         let args = parse_args(&["jcode", "login"]);
-        assert!(should_auto_install_update(&args));
-    }
-
-    #[test]
-    fn auto_install_allowed_with_live_terminal_attached() {
-        let args = parse_args(&["jcode", "login"]);
-        assert!(should_auto_install_update(&args));
-    }
-
-    #[test]
-    fn auto_install_respects_explicit_disable_even_without_terminal() {
-        let mut args = parse_args(&["jcode", "login"]);
-        args.auto_update = false;
         assert!(!should_auto_install_update(&args));
+        let args = parse_args(&["jcode", "--auto-update", "login"]);
+        assert!(should_auto_install_update(&args));
     }
 
     #[test]
@@ -817,7 +809,7 @@ mod tests {
         let args = parse_args(&["jcode", "update"]);
         assert!(matches!(args.command, Some(Command::Update { .. })));
         assert!(!should_spawn_background_update_check(&args));
-        assert!(should_auto_install_update(&args));
+        assert!(!should_auto_install_update(&args));
     }
 
     #[test]

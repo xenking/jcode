@@ -1188,3 +1188,13 @@ fn api_stdio_accepts_alias_and_daemon_socket_but_not_api_socket() {
 
 #[path = "tests_additional_tests.rs"]
 mod additional_cloud_lifecycle_commands_parse_their_contracts;
+
+#[test]
+fn auto_update_is_opt_in_flag() {
+    assert!(!Args::try_parse_from(["jcode"]).unwrap().auto_update);
+    assert!(
+        Args::try_parse_from(["jcode", "--auto-update"])
+            .unwrap()
+            .auto_update
+    );
+}

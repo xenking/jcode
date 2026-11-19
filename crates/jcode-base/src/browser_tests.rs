@@ -842,3 +842,20 @@ fn a_bridge_answered_by_another_browser_is_not_the_requested_one() {
         "same Chromium family"
     );
 }
+
+#[test]
+fn bridge_auto_update_is_opt_in_with_env_override() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_BROWSER_AUTO_UPDATE");
+    crate::env::remove_var("JCODE_BROWSER_AUTO_UPDATE");
+    assert!(!crate::config::config().companion.browser_updates);
+    assert!(browser_update::auto_update_disabled());
+    crate::env::set_var("JCODE_BROWSER_AUTO_UPDATE", "1");
+    assert!(!browser_update::auto_update_disabled());
+    crate::env::set_var("JCODE_BROWSER_AUTO_UPDATE", "0");
+    assert!(browser_update::auto_update_disabled());
+    match prev {
+        Some(v) => crate::env::set_var("JCODE_BROWSER_AUTO_UPDATE", v),
+        None => crate::env::remove_var("JCODE_BROWSER_AUTO_UPDATE"),
+    }
+}

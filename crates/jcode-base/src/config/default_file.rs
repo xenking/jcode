@@ -381,8 +381,10 @@ prompt_entry_animation = true
 # selection_bg = "#3c3c50"
 
 [features]
-# Check for and install updates during startup. Set to false for the persistent
-# equivalent of passing --no-update on every invocation.
+# Check for new releases during startup and show an "update available" notice.
+# Nothing is downloaded or installed until you run `jcode update` (or opt in
+# with --auto-update). Set to false for the persistent equivalent of passing
+# --no-update on every invocation.
 check_updates = true
 # Memory: retrieval + extraction sidecar features
 memory = true
@@ -997,8 +999,8 @@ open = true
 spawn_terminal = true
 # Lid-close override while agents work (macOS/Windows, see [power]).
 lid = true
-# Hourly browser bridge auto-update.
-browser_updates = true
+# Automatically update the browser bridge (opt-in). Off: only `jcode browser setup` updates it.
+browser_updates = false
 
 [menubar]
 # macOS only: show the jcode session count in the menu bar. Set to false to

@@ -86,7 +86,7 @@ impl Default for CompanionOptions {
         Self {
             socket: socket_path(),
             voice: true,
-            browser_updates: true,
+            browser_updates: false,
             voice_waveform: true,
             voice_notifications: true,
             jarvis_fn_key: false,
