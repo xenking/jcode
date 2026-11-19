@@ -846,24 +846,6 @@ impl Drop for Warm {
         }
     }
 }
-#[cfg(test)]
-async fn transcribe(
-    key: String,
-    samples: Vec<i16>,
-    cancel: Arc<AtomicBool>,
-) -> Result<String, VoiceError> {
-    let session = NariSession::connect(&key, cancel.clone()).await?;
-    let (tx, rx) = crate::nari_pcm_channel();
-    let send = async move {
-        for chunk in samples.chunks(crate::NARI_PCM_CHUNK_SAMPLES) {
-            if tx.send(chunk.to_vec()).await.is_err() {
-                break;
-            }
-        }
-    };
-    let (_, result) = tokio::join!(send, session.run(rx, |_| {}));
-    result
-}
 async fn run(
     cancel: Arc<AtomicBool>,
     suppressed: Arc<AtomicBool>,
@@ -1536,8 +1518,11 @@ mod tests {
     fn live_latency_profile() {
         let pcm = std::fs::read(std::env::var("JCODE_TEST_CONTINUOUS_PCM").unwrap()).unwrap();
         let samples: Vec<i16> = pcm
-            .chunks_exact(2)
-            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .copied()
+            .map(i16::from_le_bytes)
             .collect();
         let key = crate::nari_api_key().unwrap();
         let gate = jcode_base::jev::JevClient::for_voice().unwrap();
@@ -1582,8 +1567,11 @@ mod tests {
     fn live_nari_idle_probe() {
         let pcm = std::fs::read(std::env::var("JCODE_TEST_CONTINUOUS_PCM").unwrap()).unwrap();
         let samples: Vec<i16> = pcm
-            .chunks_exact(2)
-            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .copied()
+            .map(i16::from_le_bytes)
             .collect();
         let key = crate::nari_api_key().unwrap();
         let idle: Vec<u64> = std::env::var("JCODE_TEST_NARI_IDLE")

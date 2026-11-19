@@ -198,6 +198,7 @@ pub(crate) fn thread_cpu_ns() -> u64 {
     time.sec as u64 * 1_000_000_000 + time.nsec as u64
 }
 
+#[cfg(target_os = "linux")]
 fn old_pipeline(input: Vec<Value>) -> Value {
     original(
         "gpt-5.4",

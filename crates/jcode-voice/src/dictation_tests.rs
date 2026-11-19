@@ -4,6 +4,7 @@ use super::{
     ClientCandidate, extract_session_short_name_from_window_title, normalize_session_short_name,
     parse_ppid, read_resumed_session_id, run_command, select_candidate,
 };
+#[cfg(feature = "desktop-test-support")]
 use jcode_base::client_focus::{last_focused_session, remember_last_focused_session};
 #[cfg(target_os = "linux")]
 use std::ffi::OsString;

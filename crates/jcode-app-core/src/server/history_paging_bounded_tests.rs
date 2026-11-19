@@ -110,6 +110,10 @@ async fn journal_tail_pages_from_live_to_busy_with_snapshot_replay_events() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "This test must keep its process-global home isolated across async operations"
+)]
 async fn initial_history_page_replays_context_occupancy_but_scrollback_does_not() {
     use super::*;
     use crate::message::{ContentBlock, Role};

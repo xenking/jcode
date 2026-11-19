@@ -255,6 +255,10 @@ async fn memory_payload(sessions: &SessionAgents) -> serde_json::Value {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "This test must keep its process-global home isolated across async operations"
+)]
 async fn server_memory_preserves_session_output_and_skips_busy_agents() {
     let _env = crate::storage::lock_test_env();
     let _home = PrivateHome::new();

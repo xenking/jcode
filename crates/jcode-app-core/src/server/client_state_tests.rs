@@ -729,6 +729,10 @@ async fn handle_get_history_uses_live_snapshot_when_agent_is_available() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "This test must keep its process-global home isolated across async operations"
+)]
 async fn history_attach_replays_persisted_context_occupancy() {
     let _env = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().unwrap();
