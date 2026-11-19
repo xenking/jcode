@@ -527,6 +527,7 @@ fn test_usage_data_from_provider_report_maps_limits_and_extra_usage() {
             "enabled".to_string(),
         )],
         hard_limit_reached: false,
+        openai_credit_overage: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
         anthropic_banked_resets: None,
@@ -1404,3 +1405,77 @@ mod model_scoped;
 
 #[path = "tests_additional_tests.rs"]
 mod additional_test_usage_data_default;
+
+/// A Pro account whose weekly plan window is spent keeps serving requests from
+/// its paid credit balance (Codex CLI and omp both keep using it). The live
+/// 2026-11-19 payload: `limit_reached` with `credits.has_credits`. Treating it as
+/// exhausted parked a working account and failed every worker on it.
+fn credit_funded_payload(credits: serde_json::Value, spend_reached: bool) -> serde_json::Value {
+    serde_json::json!({
+        "plan_type": "pro",
+        "rate_limit": {
+            "allowed": false,
+            "limit_reached": true,
+            "primary_window": {
+                "used_percent": 100,
+                "limit_window_seconds": 604_800,
+                "reset_after_seconds": 286_358,
+                "reset_at": 1_795_350_757
+            },
+            "secondary_window": null
+        },
+        "credits": credits,
+        "spend_control": { "reached": spend_reached, "individual_limit": null },
+        "rate_limit_reset_credits": { "available_count": 2, "applicable_available_count": 2 }
+    })
+}
+
+fn usage_from_payload(json: &serde_json::Value) -> OpenAIUsageData {
+    let parsed = openai_helpers::parse_openai_usage_payload(json);
+    openai_usage_data_from_provider_report(&ProviderUsage {
+        provider_name: "OpenAI (ChatGPT)".to_string(),
+        limits: parsed.limits,
+        hard_limit_reached: parsed.hard_limit_reached,
+        openai_credit_overage: parsed.credit_overage,
+        ..Default::default()
+    })
+}
+
+#[test]
+fn test_openai_credit_balance_keeps_a_spent_plan_usable() {
+    let funded = credit_funded_payload(
+        serde_json::json!({
+            "has_credits": true,
+            "unlimited": false,
+            "overage_limit_reached": false,
+            "balance": "53549.1587925000"
+        }),
+        false,
+    );
+    let usage = usage_from_payload(&funded);
+    assert!(
+        !usage.exhausted(),
+        "credits fund overage past the spent plan window"
+    );
+    // The plan verdict itself is still shown truthfully.
+    assert!(usage.hard_limit_reached);
+
+    for (credits, spend_reached) in [
+        (
+            serde_json::json!({ "has_credits": false, "unlimited": false }),
+            false,
+        ),
+        (
+            serde_json::json!({ "has_credits": true, "overage_limit_reached": true }),
+            false,
+        ),
+        (serde_json::json!({ "has_credits": true }), true),
+        (serde_json::Value::Null, false),
+    ] {
+        let usage = usage_from_payload(&credit_funded_payload(credits.clone(), spend_reached));
+        assert!(
+            usage.exhausted(),
+            "no usable credits ({credits}, spend_reached={spend_reached}) must stay exhausted"
+        );
+    }
+}

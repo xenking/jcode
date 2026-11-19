@@ -240,6 +240,8 @@ pub struct OpenAIUsageData {
     pub seven_day: Option<OpenAIUsageWindow>,
     pub spark: Option<OpenAIUsageWindow>,
     pub hard_limit_reached: bool,
+    /// Paid credits keep serving after the plan window is spent.
+    pub credit_overage: bool,
     pub openai_reset_credits: Option<jcode_usage_types::OpenAiResetCredits>,
     pub fetched_at: Option<Instant>,
     pub last_error: Option<String>,
@@ -286,6 +288,12 @@ impl OpenAIUsageData {
     }
 
     pub fn exhausted(&self) -> bool {
+        // A spent plan window funded by paid credits still serves requests
+        // (Codex CLI and omp keep using it). Live usage_limit_reached errors
+        // stay authoritative for blocking.
+        if self.credit_overage {
+            return false;
+        }
         if self.hard_limit_reached {
             return true;
         }

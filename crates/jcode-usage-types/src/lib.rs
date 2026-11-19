@@ -44,6 +44,9 @@ pub struct ProviderUsage {
     pub limits: Vec<UsageLimit>,
     pub extra_info: Vec<(String, String)>,
     pub hard_limit_reached: bool,
+    /// OpenAI: paid credits fund requests past the spent plan window, so a
+    /// reached plan limit does not make the account unusable.
+    pub openai_credit_overage: bool,
     pub openai_reset_credits: Option<OpenAiResetCredits>,
     pub anthropic_limit_reset: Option<AnthropicLimitResetOffer>,
     pub anthropic_banked_resets: Option<AnthropicBankedResets>,

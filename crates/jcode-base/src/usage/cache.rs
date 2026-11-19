@@ -168,8 +168,10 @@ fn openai_known_exhausted(data: &OpenAIUsageData) -> bool {
         return true;
     }
     // OpenAI can round to 100% while still serving, so a stale sample only
-    // counts when the provider also enforced the limit.
+    // counts when the provider also enforced the limit and no credit balance
+    // was funding the overage.
     data.hard_limit_reached
+        && !data.credit_overage
         && [data.five_hour.as_ref(), data.seven_day.as_ref()]
             .into_iter()
             .flatten()
@@ -726,6 +728,7 @@ pub(super) fn provider_report_from_usage_data(
         limits,
         extra_info,
         hard_limit_reached: false,
+        openai_credit_overage: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
         anthropic_banked_resets: None,
@@ -807,6 +810,7 @@ pub(super) fn usage_data_from_provider_report(report: &ProviderUsage) -> UsageDa
 pub(super) fn openai_usage_data_from_provider_report(report: &ProviderUsage) -> OpenAIUsageData {
     let mut data = classify_openai_limits(&report.limits);
     data.hard_limit_reached = report.hard_limit_reached;
+    data.credit_overage = report.openai_credit_overage;
     data.openai_reset_credits = if report.error.is_none() {
         report.openai_reset_credits.clone()
     } else {
@@ -857,6 +861,7 @@ pub(super) fn provider_report_from_openai_usage_data(
         limits,
         extra_info: Vec::new(),
         hard_limit_reached: data.hard_limit_reached,
+        openai_credit_overage: data.credit_overage,
         openai_reset_credits: data.openai_reset_credits.clone(),
         anthropic_limit_reset: None,
         anthropic_banked_resets: None,
