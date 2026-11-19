@@ -46,7 +46,9 @@ pub fn prompt_to_trust_external_auth(
         path.display()
     );
     eprintln!("jcode will only read that source in place after you approve it.");
-    eprintln!("It will not move, delete, or rewrite the original auth there.");
+    eprintln!(
+        "It will not move or delete the original auth there; refreshed tokens may be written back to it."
+    );
     eprint!("Trust this auth source for future jcode sessions? [y/N]: ");
     io::stdout().flush()?;
 
@@ -67,6 +69,8 @@ enum ExternalAuthReviewAction {
     /// `CLAUDE_CODE_OAUTH_TOKEN` env var), which have no stable on-disk path.
     ClaudeCodeNative,
     GeminiCli,
+    /// Grok CLI `auth.json`: trusting it lets jcode read AND refresh that file.
+    GrokBuild,
     Copilot(auth::copilot::ExternalCopilotAuthSource),
     Cursor(auth::cursor::ExternalCursorAuthSource),
 }
@@ -135,6 +139,7 @@ impl ExternalAuthReviewCandidate {
             ExternalAuthReviewAction::ClaudeCode => vec![("claude", METHOD)],
             ExternalAuthReviewAction::ClaudeCodeNative => vec![("claude", METHOD)],
             ExternalAuthReviewAction::GeminiCli => vec![("gemini", METHOD)],
+            ExternalAuthReviewAction::GrokBuild => Vec::new(),
             ExternalAuthReviewAction::Copilot(_) => vec![("copilot", METHOD)],
             ExternalAuthReviewAction::Cursor(_) => vec![("cursor", METHOD)],
             ExternalAuthReviewAction::SharedExternal(source) => {
@@ -162,6 +167,7 @@ fn provider_id_for_label(label: &str) -> Option<&'static str> {
         "OpenAI/Codex" => Some("openai"),
         "Claude" => Some("claude"),
         "Gemini" => Some("gemini"),
+        "Grok Build" => Some("grok-build"),
         "Antigravity" => Some("antigravity"),
         "GitHub Copilot" => Some("copilot"),
         "OpenRouter/API-key providers" => Some("openrouter"),
@@ -330,6 +336,18 @@ pub fn detected_external_auth_review_candidates() -> Result<Vec<ExternalAuthRevi
         });
     }
 
+    // Existence only: the file is not opened until the user trusts it.
+    if let Some(path) = auth::grok_build::auth_json_path()
+        && path.exists()
+    {
+        candidates.push(ExternalAuthReviewCandidate {
+            provider_summary: "Grok Build".to_string(),
+            source_name: "Grok CLI".to_string(),
+            path,
+            action: ExternalAuthReviewAction::GrokBuild,
+        });
+    }
+
     if let Some(source) = auth::copilot::preferred_external_auth_source()
         && !matches!(
             source,
@@ -444,6 +462,10 @@ fn external_auth_review_candidate_trusted(candidate: &ExternalAuthReviewCandidat
             auth::gemini::GEMINI_CLI_AUTH_SOURCE_ID,
             &candidate.path,
         ),
+        ExternalAuthReviewAction::GrokBuild => Config::external_auth_source_allowed_for_path(
+            auth::grok_build::GROK_CLI_AUTH_SOURCE_ID,
+            &candidate.path,
+        ),
         ExternalAuthReviewAction::Copilot(source) => {
             Config::external_auth_source_allowed_for_path(source.source_id(), &candidate.path)
         }
@@ -483,6 +505,7 @@ fn approve_external_auth_review_candidate(
             }
         }
         ExternalAuthReviewAction::GeminiCli => auth::gemini::trust_cli_auth_for_future_use()?,
+        ExternalAuthReviewAction::GrokBuild => auth::grok_build::trust_cli_auth_for_future_use()?,
         ExternalAuthReviewAction::Copilot(source) => {
             auth::copilot::trust_external_auth_source(source)?
         }
@@ -521,6 +544,12 @@ fn revoke_external_auth_review_candidate(candidate: &ExternalAuthReviewCandidate
         ExternalAuthReviewAction::GeminiCli => {
             crate::config::Config::revoke_external_auth_source_for_path(
                 auth::gemini::GEMINI_CLI_AUTH_SOURCE_ID,
+                &candidate.path,
+            )?
+        }
+        ExternalAuthReviewAction::GrokBuild => {
+            crate::config::Config::revoke_external_auth_source_for_path(
+                auth::grok_build::GROK_CLI_AUTH_SOURCE_ID,
                 &candidate.path,
             )?
         }
@@ -596,6 +625,14 @@ async fn validate_gemini_import() -> Result<String> {
     ))
 }
 
+async fn validate_grok_build_import() -> Result<String> {
+    if auth::grok_build::load_credential().is_some() {
+        Ok("Loaded Grok Build credentials.".to_string())
+    } else {
+        anyhow::bail!("Grok CLI auth.json has no usable Grok Build login.")
+    }
+}
+
 async fn validate_antigravity_import() -> Result<String> {
     let tokens = auth::antigravity::load_tokens()?;
     Ok(format!(
@@ -666,6 +703,7 @@ async fn validate_external_auth_review_candidate(
         ExternalAuthReviewAction::ClaudeCode => validate_claude_import().await,
         ExternalAuthReviewAction::ClaudeCodeNative => validate_claude_import().await,
         ExternalAuthReviewAction::GeminiCli => validate_gemini_import().await,
+        ExternalAuthReviewAction::GrokBuild => validate_grok_build_import().await,
         ExternalAuthReviewAction::Copilot(_) => validate_copilot_import().await,
         ExternalAuthReviewAction::Cursor(_) => validate_cursor_import().await,
     }
@@ -765,6 +803,7 @@ pub fn provider_connected_in_jcode(status: &auth::AuthStatus, provider_id: &str)
         "antigravity" => status.antigravity == Available,
         "copilot" => status.copilot == Available,
         "cursor" => status.cursor == Available,
+        "grok-build" => status.grok_build == Available,
         "openrouter" => status.openrouter == Available,
         _ => false,
     }

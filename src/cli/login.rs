@@ -498,8 +498,8 @@ pub async fn run_login_provider(
 }
 
 /// Native xAI OAuth device flow with the Grok CLI client id. Tokens are stored
-/// in the Grok CLI credential store (`$GROK_HOME/auth.json`), so an existing
-/// `grok login` is reused and this login is visible to the Grok CLI too.
+/// in `~/.jcode/grok_build_auth.json`, or in the Grok CLI's `$GROK_HOME/auth.json`
+/// only when the user already trusted that file.
 async fn login_grok_build_flow(no_browser: bool) -> Result<()> {
     let client = crate::provider::shared_http_client();
     let authorization = crate::auth::grok_build::initiate_device_login(&client).await?;

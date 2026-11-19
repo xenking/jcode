@@ -10,7 +10,7 @@ assert.ok(binary, "Set JCODE_SDK_TEST_BINARY to the freshly built jcode binary")
 const root = await fs.mkdtemp(path.join(process.env.JCODE_SCRATCH_DIR ?? os.tmpdir(), "sdk-tools-live-"));
 const client = await JcodeClient.launch({
   binary, jcodeHome: path.join(root, "home"), workingDir: root,
-  startupTimeoutMs: 60_000, requestTimeoutMs: 30_000,
+  startupTimeoutMs: 60_000, requestTimeoutMs: 30_000, inheritLogins: true,
   env: { JCODE_DISABLE_TELEMETRY: "1" },
 });
 const deadline = setTimeout(() => { console.error("live tool test timed out"); void client.close(); }, 180_000);

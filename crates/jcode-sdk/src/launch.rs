@@ -78,7 +78,8 @@ pub struct LaunchOptions {
     pub jcode_home: Option<PathBuf>,
     /// Working directory inherited by sessions created in the instance.
     pub working_dir: Option<PathBuf>,
-    /// Share the user's provider login files. Enabled by default.
+    /// Share the user's provider login files (symlinked, so token refreshes
+    /// write through to them). Disabled by default; opt in explicitly.
     pub inherit_logins: bool,
     /// jcode executable. Defaults to `jcode` on `$PATH`.
     pub binary: Option<PathBuf>,
@@ -118,7 +119,7 @@ impl Default for LaunchOptions {
         Self {
             jcode_home: None,
             working_dir: None,
-            inherit_logins: true,
+            inherit_logins: false,
             binary: None,
             env: HashMap::new(),
             swarm_model: None,
@@ -1041,6 +1042,11 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
+    #[test]
+    fn logins_are_not_inherited_unless_requested() {
+        assert!(!LaunchOptions::default().inherit_logins);
+    }
+
     #[test]
     fn swarm_model_reaches_runtime_and_overrides_generic_environment() {
         use std::os::unix::fs::PermissionsExt;

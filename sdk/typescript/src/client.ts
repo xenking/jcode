@@ -293,9 +293,8 @@ export class JcodeClient extends EventEmitter {
    * sockets, so it cannot see or disturb the jcode the user runs
    * interactively. `close()` shuts it down.
    *
-   * Provider logins are inherited from the user by default, because an
-   * instance without credentials cannot reach a model at all. Pass
-   * `inheritLogins: false` to start empty.
+   * Provider logins are NOT inherited from the user by default. Pass
+   * `inheritLogins: true` to link them, or supply credentials yourself.
    */
   static async launch(options: LaunchOptions & ConnectOptions = {}): Promise<JcodeClient> {
     const instance = await launchInstance(options);

@@ -2,8 +2,8 @@
 //!
 //! Requests go straight to the Grok CLI chat proxy
 //! (`https://cli-chat-proxy.grok.com/v1`, OpenAI-compatible chat completions)
-//! using the Grok CLI OIDC session from `$GROK_HOME/auth.json` /
-//! `~/.grok/auth.json`, presenting the official Grok CLI client identity (see
+//! using a Grok CLI OIDC session from `~/.jcode/grok_build_auth.json` or, if the
+//! user trusted it, `$GROK_HOME/auth.json` / `~/.grok/auth.json`, presenting the official Grok CLI client identity (see
 //! `jcode_base::auth::grok_build`). No `grok` subprocess is ever launched.
 //!
 //! Streaming, request building, and SSE parsing reuse the OpenAI-compatible

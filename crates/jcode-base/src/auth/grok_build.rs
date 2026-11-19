@@ -4,9 +4,11 @@
 //! directly over HTTPS. It never launches the `grok` binary. Authentication is
 //! the xAI OIDC session that the official Grok CLI stores in
 //! `$GROK_HOME/auth.json` (default `~/.grok/auth.json`), keyed by
-//! `<issuer>::<client_id>`. Jcode can create that entry itself with the native
-//! OAuth device flow against `auth.x.ai` using the Grok CLI's public client id,
-//! so the two tools share one login.
+//! `<issuer>::<client_id>`. Jcode only reads or refreshes that foreign file
+//! after the user trusts it (see [`GROK_CLI_AUTH_SOURCE_ID`]). Otherwise it
+//! keeps its own login in `~/.jcode/grok_build_auth.json`, created with the
+//! native OAuth device flow against `auth.x.ai` using the Grok CLI's public
+//! client id.
 //!
 //! The proxy only accepts requests that identify as the official CLI (it
 //! answers `426 Upgrade Required` with version `(none)` otherwise), so every
@@ -189,7 +191,9 @@ pub async fn complete_device_login(
         if status.is_success() {
             let tokens: TokenResponse =
                 serde_json::from_slice(&body).context("invalid xAI token response")?;
-            let path = auth_json_path().context("No home directory for Grok credentials")?;
+            let path = credential_path()
+                .or_else(jcode_auth_path)
+                .context("No home directory for Grok credentials")?;
             return store_tokens(&path, tokens, None);
         }
         let error: TokenError = serde_json::from_slice(&body)
@@ -317,7 +321,40 @@ fn grok_home(
         })
 }
 
-/// `$GROK_HOME/auth.json`, falling back to `~/.grok/auth.json`.
+/// Config id under which the user trusts the Grok CLI's shared `auth.json`.
+pub const GROK_CLI_AUTH_SOURCE_ID: &str = "grok_cli_auth_json";
+
+/// Jcode-owned credential file; always usable without consent.
+fn jcode_auth_path() -> Option<PathBuf> {
+    crate::storage::jcode_dir()
+        .ok()
+        .map(|dir| dir.join("grok_build_auth.json"))
+}
+
+fn cli_auth_trusted(path: &Path) -> bool {
+    crate::config::Config::external_auth_source_allowed_for_path(GROK_CLI_AUTH_SOURCE_ID, path)
+}
+
+pub fn trust_cli_auth_for_future_use() -> Result<()> {
+    let path = auth_json_path().context("No home directory for Grok credentials")?;
+    crate::config::Config::allow_external_auth_source_for_path(GROK_CLI_AUTH_SOURCE_ID, &path)?;
+    super::AuthStatus::invalidate_cache();
+    Ok(())
+}
+
+/// File the active login is read from and refreshed into: the jcode-owned file
+/// when present, else the Grok CLI file if the user trusted it. Nothing else is
+/// ever read or written.
+fn credential_path() -> Option<PathBuf> {
+    jcode_auth_path().filter(|path| path.exists()).or_else(|| {
+        auth_json_path()
+            .filter(|path| cli_auth_trusted(path))
+            .and_then(|path| crate::storage::validate_external_auth_file(&path).ok())
+    })
+}
+
+/// `$GROK_HOME/auth.json`, falling back to `~/.grok/auth.json`. Foreign file:
+/// callers must check [`cli_auth_trusted`] before touching it.
 pub fn auth_json_path() -> Option<PathBuf> {
     grok_home(
         std::env::var_os("GROK_HOME"),
@@ -389,7 +426,7 @@ pub fn parse_credential(bytes: &[u8]) -> Option<GrokCredential> {
 }
 
 pub fn load_credential() -> Option<GrokCredential> {
-    parse_credential(&std::fs::read(auth_json_path()?).ok()?)
+    parse_credential(&std::fs::read(credential_path()?).ok()?)
 }
 
 fn deployment_key() -> Option<String> {
@@ -411,7 +448,9 @@ pub async fn bearer_token(force_refresh: bool) -> Result<String> {
     if let Some(key) = deployment_key() {
         return Ok(key);
     }
-    let path = auth_json_path().context("No home directory for Grok credentials")?;
+    let path = credential_path().context(
+        "No Grok Build login found. Run `jcode login --provider grok-build` (or trust ~/.grok/auth.json when prompted)",
+    )?;
     let credential = std::fs::read(&path)
         .ok()
         .and_then(|bytes| parse_credential(&bytes))
@@ -647,6 +686,45 @@ mod tests {
         let credential = parse_credential(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(credential.access_token, "new-access");
         assert_eq!(credential.refresh_token.as_deref(), Some("r-new"));
+    }
+
+    #[test]
+    fn cli_auth_json_is_ignored_until_trusted_then_read() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().unwrap();
+        let prev_jcode = std::env::var_os("JCODE_HOME");
+        let prev_grok = std::env::var_os("GROK_HOME");
+        let grok_dir = temp.path().join("grok");
+        std::fs::create_dir_all(&grok_dir).unwrap();
+        crate::env::set_var("JCODE_HOME", temp.path().join("jcode"));
+        crate::env::set_var("GROK_HOME", &grok_dir);
+        let cli_file = grok_dir.join("auth.json");
+        std::fs::write(
+            &cli_file,
+            scoped(r#"{"key":"cli-token","auth_mode":"oidc"}"#),
+        )
+        .unwrap();
+
+        assert!(
+            load_credential().is_none(),
+            "unconsented file must not be read"
+        );
+        trust_cli_auth_for_future_use().unwrap();
+        assert_eq!(load_credential().unwrap().access_token, "cli-token");
+
+        // A jcode-owned login takes precedence and is where new logins land.
+        let own = jcode_auth_path().unwrap();
+        std::fs::create_dir_all(own.parent().unwrap()).unwrap();
+        std::fs::write(&own, scoped(r#"{"key":"own-token"}"#)).unwrap();
+        assert_eq!(load_credential().unwrap().access_token, "own-token");
+        assert_eq!(credential_path().unwrap(), own);
+
+        for (key, prev) in [("JCODE_HOME", prev_jcode), ("GROK_HOME", prev_grok)] {
+            match prev {
+                Some(value) => crate::env::set_var(key, value),
+                None => crate::env::remove_var(key),
+            }
+        }
     }
 
     #[test]

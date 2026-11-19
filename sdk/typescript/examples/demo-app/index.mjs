@@ -4,6 +4,7 @@ const prompt = process.argv.slice(2).join(" ") || "Describe this directory in on
 
 const client = await JcodeClient.launch({
   workingDir: process.cwd(),
+  inheritLogins: true, // the demo needs a model, so link the user's logins
   binary: process.env.JCODE_BINARY,
 });
 

@@ -62,15 +62,15 @@ user runs in their terminal, and `close()` shuts it down. This is the default
 for applications. Private instances never auto-update: they run the jcode binary that launched them.
 
 ```ts
-const client = await JcodeClient.launch({ workingDir: process.cwd() });
+const client = await JcodeClient.launch({ workingDir: process.cwd(), inheritLogins: true });
 const session = await client.createSession();
 console.log((await client.run(session.session_id, "hello")).text);
 await client.close();  // stops the instance
 ```
 
-Provider logins are inherited from the user by default, since an instance with
-no credentials cannot reach a model. Pass `inheritLogins: false` to start empty
-and supply your own. Pass `jcodeHome` to keep sessions across runs instead of
+An instance with no credentials cannot reach a model. Provider logins are not
+inherited from the user by default: pass `inheritLogins: true` to link them, or
+supply your own. Pass `jcodeHome` to keep sessions across runs instead of
 using a temporary directory.
 
 Inheritance shares only recognized credential **files**, never whole config or
@@ -78,8 +78,8 @@ tool directories. This keeps rotating OAuth tokens coherent without exposing
 unrelated transcripts and state, and instance cleanup cannot recurse into the
 user's credential directories. Temporary homes are owner-only and cleanup is
 restricted to SDK-created temp paths. The launched process still runs as the
-current OS user and can spend those accounts' quota, so disable inheritance
-when running untrusted application code (`inheritLogins: false`).
+current OS user and can spend those accounts' quota, so leave inheritance off
+(the default) when running untrusted application code.
 
 **Automate the user's own jcode** (`connect`). Attaches to the jcode already
 running on the machine, sharing its live sessions. This is what an editor
@@ -97,7 +97,7 @@ A complete runnable application is available in
 ```ts
 import { JcodeClient } from "@1jehuang/jcode-sdk";
 
-const client = await JcodeClient.launch({ workingDir: process.cwd() });
+const client = await JcodeClient.launch({ workingDir: process.cwd(), inheritLogins: true });
 
 const session = await client.createSession(process.cwd());
 const turn = await client.run(session.session_id, "What files are in src/?", {
@@ -516,7 +516,7 @@ up for you:
 | --- | --- |
 | `workingDir` | Working directory for sessions. Defaults to `process.cwd()`. |
 | `jcodeHome` | Keep state at a fixed path across runs. Defaults to a temporary directory that is removed on `close()`. See the note below. |
-| `inheritLogins` | Inherit the user's provider logins. Defaults to `true`. |
+| `inheritLogins` | Inherit the user's provider logins. Defaults to `false`. |
 | `binary` | Path to the jcode binary. Defaults to `jcode` on `PATH`. |
 | `env` | Extra environment variables for the instance. |
 | `swarmModel` | Operator-enforced model for all swarm workers. Use `inherit` to keep the coordinator model and auth route. Takes precedence over `env.JCODE_SWARM_MODEL`. |
