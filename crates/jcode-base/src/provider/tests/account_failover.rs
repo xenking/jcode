@@ -641,13 +641,17 @@ fn auto_subscription_failure_is_pinned_before_any_api_spending() {
 
 #[test]
 fn auto_initial_account_skips_known_quota_before_sending_in_both_modes() {
+    if crate::usage::run_remote_account_test_in_subprocess(
+        "provider::tests::auto_initial_account_skips_known_quota_before_sending_in_both_modes",
+    ) {
+        return;
+    }
     with_clean_provider_test_env(|| {
         enter_test_runtime().block_on(async {
             for split in [false, true] {
                 let (provider, attempts, _cleanup) = account_routing_fixture(&[]);
                 bind_fixture_account(&provider, &attempts, "unbound", &[]);
                 provider.openai_provider().unwrap().set_credential_mode(CredentialMode::Auto).unwrap();
-                let _quota_cleanup = RemoteQuotaCleanup;
                 crate::usage::set_remote_account_usage(vec![], vec![
                     exhausted_account_snapshot("openai-otter"),
                     exhausted_account_snapshot("openai-fox"),
@@ -674,6 +678,11 @@ fn auto_initial_account_skips_known_quota_before_sending_in_both_modes() {
 
 #[test]
 fn auto_initial_anthropic_account_skips_weekly_quota_without_cooldown() {
+    if crate::usage::run_remote_account_test_in_subprocess(
+        "provider::tests::auto_initial_anthropic_account_skips_weekly_quota_without_cooldown",
+    ) {
+        return;
+    }
     with_clean_provider_test_env(|| {
         let runtime = enter_test_runtime();
         let _guard = runtime.enter();
@@ -705,7 +714,6 @@ fn auto_initial_anthropic_account_skips_weekly_quota_without_cooldown() {
             mode: Mutex::new(CredentialMode::Auto),
         });
         *provider.anthropic.write().unwrap() = Some(original.clone());
-        let _quota_cleanup = RemoteQuotaCleanup;
         crate::usage::set_remote_account_usage(
             vec![serde_json::from_value(serde_json::json!({
                 "label": "claude-otter", "exhausted": false,
@@ -735,6 +743,11 @@ fn auto_initial_anthropic_account_skips_weekly_quota_without_cooldown() {
 
 #[test]
 fn auto_initial_quota_routing_preserves_pins_disabled_failover_and_pool_boundaries() {
+    if crate::usage::run_remote_account_test_in_subprocess(
+        "provider::tests::auto_initial_quota_routing_preserves_pins_disabled_failover_and_pool_boundaries",
+    ) {
+        return;
+    }
     with_clean_provider_test_env(|| {
         let runtime = enter_test_runtime();
         let _guard = runtime.enter();
@@ -753,7 +766,6 @@ fn auto_initial_quota_routing_preserves_pins_disabled_failover_and_pool_boundari
                     _ => CredentialMode::Auto,
                 })
                 .unwrap();
-            let _quota_cleanup = RemoteQuotaCleanup;
             let mut snapshots = vec![exhausted_account_snapshot("openai-otter")];
             if case == "no-ready" {
                 snapshots.extend([

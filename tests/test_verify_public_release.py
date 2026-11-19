@@ -87,6 +87,7 @@ class PublicReleaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 verifier.verify_metadata(data, TAG, allow_draft=True)
 
+    @unittest.skipUnless((ROOT / ".github/workflows/release.yml").is_file(), "upstream release workflow not installed")
     def test_workflow_verifies_before_announcements_and_package_updates(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         publish = workflow.index("      - name: Publish completed release")

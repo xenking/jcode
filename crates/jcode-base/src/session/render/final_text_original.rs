@@ -74,6 +74,8 @@ pub fn render_messages_and_images_with_compacted_history(
             tool_calls: Vec::new(),
             tool_data: None,
             stored_index: None,
+            timestamp_ms: None,
+            attachments: Vec::new(),
         });
     }
 
@@ -110,6 +112,8 @@ pub fn render_messages_and_images_with_compacted_history(
         tool_calls: Vec::new(),
         tool_data: None,
         stored_index: None,
+        timestamp_ms: None,
+        attachments: Vec::new(),
     };
     for (stored_index, msg) in session.messages.iter().enumerate().skip(render_start_idx) {
         while errors
@@ -147,6 +151,8 @@ pub fn render_messages_and_images_with_compacted_history(
                 tool_calls: Vec::new(),
                 tool_data: None,
                 stored_index: Some(stored_index),
+                timestamp_ms: msg.timestamp.map(|at| at.timestamp_millis()),
+                attachments: Vec::new(),
             });
             continue;
         }
@@ -225,6 +231,8 @@ pub fn render_messages_and_images_with_compacted_history(
                             tool_calls: tool_calls.clone(),
                             tool_data: None,
                             stored_index: Some(stored_index),
+                            timestamp_ms: msg.timestamp.map(|at| at.timestamp_millis()),
+                            attachments: Vec::new(),
                         });
                     }
 
@@ -247,6 +255,8 @@ pub fn render_messages_and_images_with_compacted_history(
                         tool_calls: Vec::new(),
                         tool_data,
                         stored_index: Some(stored_index),
+                        timestamp_ms: msg.timestamp.map(|at| at.timestamp_millis()),
+                        attachments: Vec::new(),
                     });
                 }
                 ContentBlock::Reasoning { text: t } | ContentBlock::ReasoningTrace { text: t } => {
@@ -304,6 +314,8 @@ pub fn render_messages_and_images_with_compacted_history(
                             tool_calls: std::mem::take(&mut tool_calls),
                             tool_data: None,
                             stored_index: Some(stored_index),
+                            timestamp_ms: msg.timestamp.map(|at| at.timestamp_millis()),
+                            attachments: Vec::new(),
                         });
                     }
                     let tool_data = tool_map.get(&display.id).cloned().unwrap_or_else(|| {
@@ -324,6 +336,8 @@ pub fn render_messages_and_images_with_compacted_history(
                         tool_calls: Vec::new(),
                         tool_data: Some(tool_data),
                         stored_index: Some(stored_index),
+                        timestamp_ms: msg.timestamp.map(|at| at.timestamp_millis()),
+                        attachments: Vec::new(),
                     });
                 }
                 ContentBlock::OpenAICompaction { .. } | ContentBlock::ToolReference { .. } => {}
@@ -343,6 +357,8 @@ pub fn render_messages_and_images_with_compacted_history(
                 tool_calls,
                 tool_data: None,
                 stored_index: Some(stored_index),
+                timestamp_ms: msg.timestamp.map(|at| at.timestamp_millis()),
+                attachments: Vec::new(),
             });
         } else if !pending_prompt_image_indices.is_empty() {
             // The message carried images but produced no rendered user prompt;

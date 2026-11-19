@@ -935,7 +935,7 @@ async fn continue_persistent_ws_locked(
         ],
     );
 
-    let continuation_request = if full_replay {
+    let mut continuation_request = if full_replay {
         // A drained cancelled response may contain unseen tool calls. Reuse
         // only its transport, never its server-side conversation context.
         let Some(replay) = persistent_ws_full_replay_request(request, input) else {

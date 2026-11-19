@@ -94,7 +94,10 @@ fn sums_list_asset(
 fn fetch_recent_releases_blocking(
     client: &reqwest::blocking::Client,
 ) -> Result<Vec<ListedRelease>> {
-    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=30");
+    let url = format!(
+        "https://api.github.com/repos/{}/releases?per_page=30",
+        github_repo()
+    );
     let response = github_api_request(client, &url)
         .send()
         .context("Failed to fetch releases")?;
