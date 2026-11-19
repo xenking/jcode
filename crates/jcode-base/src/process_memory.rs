@@ -30,6 +30,7 @@ struct JemallocProfilingMibs {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ProcessMemorySnapshot {
+    /// Resident set size. On macOS this is `resident_size`, not `phys_footprint`.
     pub rss_bytes: Option<u64>,
     pub peak_rss_bytes: Option<u64>,
     /// Total virtual address space size, when available. Not private commit.
@@ -48,6 +49,12 @@ pub struct ProcessMemorySnapshot {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct OsProcessMemoryInfo {
+    /// macOS memory charged to the process (`TASK_VM_INFO.phys_footprint`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phys_footprint_bytes: Option<u64>,
+    /// macOS peak physical footprint, not peak resident set size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peak_phys_footprint_bytes: Option<u64>,
     /// Windows private committed memory (`PROCESS_MEMORY_COUNTERS_EX.PrivateUsage`).
     /// Includes nonresident memory and is not virtual address space size or RSS.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -228,11 +235,79 @@ fn windows_memory_snapshot(rss: u64, peak_rss: u64, private_commit: u64) -> Proc
     }
 }
 
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(target_os = "macos")]
+pub fn snapshot_with_source(source: impl Into<String>) -> ProcessMemorySnapshot {
+    use std::mem::{offset_of, size_of};
+
+    // libc exposes task_info, but not the TASK_VM_INFO flavor or its layout.
+    // Mirror the rev3 prefix of <mach/task_info.h>, which uses four-byte packing.
+    const TASK_VM_INFO: libc::task_flavor_t = 22;
+    #[repr(C, packed(4))]
+    #[derive(Default)]
+    struct TaskVmInfo {
+        virtual_size: u64,
+        region_count: libc::integer_t,
+        page_size: libc::integer_t,
+        resident_size: u64,
+        resident_size_peak: u64,
+        device_through_compressed_lifetime: [u64; 14],
+        phys_footprint: u64,
+        min_address: u64,
+        max_address: u64,
+        ledger_phys_footprint_peak: i64,
+        remaining_rev3_ledgers: [i64; 20],
+    }
+
+    // Mach counts 32-bit natural_t words and may return an older revision.
+    const WORD_BYTES: usize = size_of::<libc::natural_t>();
+    const REV0_COUNT: usize = offset_of!(TaskVmInfo, phys_footprint) / WORD_BYTES;
+    const REV1_COUNT: usize = offset_of!(TaskVmInfo, min_address) / WORD_BYTES;
+    const REV3_COUNT: usize = size_of::<TaskVmInfo>() / WORD_BYTES;
+
+    let source = source.into();
+    let mut info = TaskVmInfo::default();
+    let mut count = REV3_COUNT as libc::mach_msg_type_number_t;
+    // SAFETY: The self-task port is borrowed. The writable buffer matches the Mach
+    // layout and count, and is initialized even if the kernel writes fewer words.
+    #[allow(deprecated)] // libc::mach_task_self is the same borrowed port as mach2's.
+    let result = unsafe {
+        libc::task_info(
+            libc::mach_task_self(),
+            TASK_VM_INFO,
+            (&mut info as *mut TaskVmInfo).cast(),
+            &mut count,
+        )
+    };
+    let count = count as usize;
+    let snapshot = if result == libc::KERN_SUCCESS && count >= REV0_COUNT {
+        ProcessMemorySnapshot {
+            rss_bytes: Some(info.resident_size),
+            peak_rss_bytes: Some(info.resident_size_peak),
+            virtual_bytes: Some(info.virtual_size),
+            os: (count >= REV1_COUNT).then(|| OsProcessMemoryInfo {
+                phys_footprint_bytes: Some(info.phys_footprint),
+                peak_phys_footprint_bytes: (count >= REV3_COUNT)
+                    .then(|| u64::try_from(info.ledger_phys_footprint_peak).ok())
+                    .flatten(),
+                ..OsProcessMemoryInfo::default()
+            }),
+            ..ProcessMemorySnapshot::default()
+        }
+    } else {
+        logging::warn(&format!(
+            "process memory snapshot source={source} TASK_VM_INFO failed: status={result}, words={count}"
+        ));
+        ProcessMemorySnapshot::default()
+    };
+    record_snapshot(source, snapshot.clone());
+    snapshot
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub fn snapshot_with_source(source: impl Into<String>) -> ProcessMemorySnapshot {
     let source = source.into();
     logging::debug(&format!(
-        "process memory snapshot source={source} using default non-linux implementation"
+        "process memory snapshot source={source} using default implementation"
     ));
     let snapshot = ProcessMemorySnapshot::default();
     record_snapshot(source, snapshot.clone());
@@ -744,7 +819,6 @@ fn record_snapshot(source: String, snapshot: ProcessMemorySnapshot) {
 fn read_linux_memory_info(status: &str) -> Option<OsProcessMemoryInfo> {
     let smaps = std::fs::read_to_string("/proc/self/smaps_rollup").ok();
     let info = OsProcessMemoryInfo {
-        private_commit_bytes: None,
         pss_bytes: smaps
             .as_deref()
             .and_then(|text| parse_proc_value_bytes(text, "Pss:")),
@@ -780,6 +854,7 @@ fn read_linux_memory_info(status: &str) -> Option<OsProcessMemoryInfo> {
                 .as_deref()
                 .and_then(|text| parse_proc_value_bytes(text, "Swap:"))
         }),
+        ..OsProcessMemoryInfo::default()
     };
 
     if info.pss_bytes.is_none()
