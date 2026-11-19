@@ -86,6 +86,7 @@ impl Agent {
                     repaired
                 ));
             }
+            self.apply_pending_reasoning_effort();
             let (tools, split_prompt, messages) = self.prepare_stream_request(&event_tx).await?;
 
             let messages: std::sync::Arc<[Message]> = messages.into();

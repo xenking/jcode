@@ -624,6 +624,26 @@ impl Agent {
     }
 
     pub fn restore_reasoning_effort_from_session(&mut self) {
+        // A choice made while the previous daemon's turn held the agent was
+        // never applied there. It is newer than the saved effort.
+        if let Some(pending) = crate::session_effort::take_pending_effort(&self.session.id) {
+            crate::logging::info(&format!(
+                "Adopting reasoning effort '{pending}' chosen before the restart for {}",
+                self.session.id
+            ));
+            self.session.reasoning_effort = Some(pending);
+            self.restore_saved_reasoning_effort();
+            if let Err(error) = self.session.save_prepared() {
+                crate::logging::warn(&format!(
+                    "Could not persist adopted reasoning effort: {error}"
+                ));
+            }
+            return;
+        }
+        self.restore_saved_reasoning_effort();
+    }
+
+    fn restore_saved_reasoning_effort(&mut self) {
         if let Some(effort) = self.session.reasoning_effort.clone() {
             match self
                 .worker_effort(&effort)
@@ -657,6 +677,8 @@ impl Agent {
     pub fn set_reasoning_effort(&mut self, effort: &str) -> Result<Option<String>> {
         let effort = self.worker_effort(effort)?;
         self.provider.set_reasoning_effort(&effort)?;
+        // This choice supersedes any older one still waiting for a busy turn.
+        crate::session_effort::clear_pending_effort(&self.session.id);
         let current = self.provider.reasoning_effort();
         self.session.reasoning_effort = current.clone();
         // Keep the side-table in sync (see `restore_reasoning_effort_from_session`).
@@ -668,6 +690,24 @@ impl Agent {
         // turn (the deferred busy-turn path has no other way to persist it).
         self.session.save_prepared()?;
         Ok(current)
+    }
+
+    /// Apply an effort a client chose while this turn held the agent, so it
+    /// governs the next provider request instead of waiting for the turn to
+    /// end. Called at each request boundary.
+    pub(crate) fn apply_pending_reasoning_effort(&mut self) {
+        let Some(effort) = crate::session_effort::take_pending_effort(&self.session.id) else {
+            return;
+        };
+        match self.set_reasoning_effort(&effort) {
+            Ok(current) => crate::logging::info(&format!(
+                "Applied reasoning effort '{}' chosen during the turn",
+                current.as_deref().unwrap_or(&effort)
+            )),
+            Err(error) => crate::logging::warn(&format!(
+                "Could not apply reasoning effort '{effort}' chosen during the turn: {error}"
+            )),
+        }
     }
 
     /// Persist a setting already applied through the live provider handle.
