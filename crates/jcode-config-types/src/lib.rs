@@ -1748,9 +1748,9 @@ pub struct LaunchHotkeyEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct LaunchHotkeysConfig {
-    /// Whether the global launch hotkeys are installed at all. `None` means
-    /// "not decided yet" (fall back to the legacy auto-install gating); `Some`
-    /// is an explicit user/import choice.
+    /// Whether launch hotkeys may stay installed. Hotkeys are only ever
+    /// installed by an explicit `jcode setup-hotkey`; `Some(false)` also
+    /// removes an existing macOS LaunchAgent at startup.
     pub enabled: Option<bool>,
     /// Explicit chord -> directory mapping. Empty = use built-in defaults.
     pub entries: Vec<LaunchHotkeyEntry>,
