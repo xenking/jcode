@@ -300,8 +300,10 @@ pub(super) async fn process_reserved_message_with_server_failover(
         attempt_start,
         reminder.clone(),
         event_tx.clone(),
-        &fallbacks,
-        &allowed,
+        WorkerFallbackPolicy {
+            fallbacks: &fallbacks,
+            allowed_models: &allowed,
+        },
     )
     .await?;
     let reload = is_reload_continuation(guard.session_id(), content, reminder.as_deref());
@@ -351,8 +353,10 @@ pub(super) async fn process_reserved_resume_with_server_failover(
         attempt_start,
         None,
         event_tx.clone(),
-        &fallbacks,
-        &allowed,
+        WorkerFallbackPolicy {
+            fallbacks: &fallbacks,
+            allowed_models: &allowed,
+        },
     )
     .await?;
     super::runtime_ssh_loops::run_reserved_followups(&mut guard, lease, event_tx, true).await?;
@@ -453,8 +457,10 @@ pub(super) async fn process_reserved_locked_message_with_swarm_fallbacks(
         attempt_start,
         reminder.clone(),
         event_tx.clone(),
-        fallbacks,
-        allowed_models,
+        WorkerFallbackPolicy {
+            fallbacks,
+            allowed_models,
+        },
     )
     .await?;
     let reload = is_reload_continuation(agent.session_id(), content, reminder.as_deref());
@@ -551,6 +557,11 @@ fn current_target(agent: &Agent) -> FallbackTarget {
     target
 }
 
+struct WorkerFallbackPolicy<'a> {
+    fallbacks: &'a [String],
+    allowed_models: &'a [String],
+}
+
 /// While the turn keeps failing, switch to each configured fallback model in
 /// order (skipping the model already in use) and retry the same turn.
 async fn retry_turn_with_model_fallbacks(
@@ -560,8 +571,10 @@ async fn retry_turn_with_model_fallbacks(
     mut attempt_start: usize,
     reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
-    fallbacks: &[String],
-    allowed_models: &[String],
+    WorkerFallbackPolicy {
+        fallbacks,
+        allowed_models,
+    }: WorkerFallbackPolicy<'_>,
 ) -> anyhow::Result<()> {
     // A worker with no configured fallbacks failed on its own route; the
     // provider's own error is the whole story. Read before filtering: a list
@@ -699,8 +712,10 @@ pub(super) async fn process_reserved_locked_context_with_server_failover(
         attempt_start,
         reminder.clone(),
         event_tx.clone(),
-        &fallbacks,
-        &allowed,
+        WorkerFallbackPolicy {
+            fallbacks: &fallbacks,
+            allowed_models: &allowed,
+        },
     )
     .await?;
     let reload = is_reload_continuation(agent.session_id(), content, reminder.as_deref());

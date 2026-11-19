@@ -45,13 +45,15 @@ fn active_turns() -> MutexGuard<'static, HashMap<String, SessionTurnSignals>> {
     })
 }
 
+type ForceStopRegistrations = HashMap<String, Vec<(u64, futures::future::AbortHandle)>>;
+
 /// A session can own more than one abortable supervisor: the client-processing
 /// turn and a server-initiated `spawn_tracked_live_turn` (swarm wake, recovery)
 /// can both be live for the same id. Keeping one entry per session meant the
 /// later registration silently replaced the earlier one, so a force stop
 /// aborted a supervisor that had already finished and the turn the user was
 /// staring at kept running.
-static FORCE_STOPS: LazyLock<Mutex<HashMap<String, Vec<(u64, futures::future::AbortHandle)>>>> =
+static FORCE_STOPS: LazyLock<Mutex<ForceStopRegistrations>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// The supervisor owns this registration until the turn and its cleanup finish.

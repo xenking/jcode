@@ -145,7 +145,8 @@ run_checks() {
       run justrust test -p jcode-app-core --lib server::socket
       run justrust test -p jcode-storage --test runtime_dir
       run justrust test -p jcode-terminal-launch rex
-      run justrust test -p jcode --lib acp
+      # Parsing the full Clap command tree can exhaust a 2 MiB debug test thread.
+      RUST_MIN_STACK=${RUST_MIN_STACK:-8388608} run justrust test -p jcode --lib acp
       run justrust clippy -p jcode-app-core -p jcode-codemode -p jcode-voice --all-targets -- -D warnings
       ! $fail
     ) || die 4 "jcode: checks failed in $WT/jcode. Fix, commit, then rerun with --continue."
