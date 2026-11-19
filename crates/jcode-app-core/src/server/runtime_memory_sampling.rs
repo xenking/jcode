@@ -162,6 +162,7 @@ pub(super) async fn capture_runtime_memory_attribution_sample(
 
     sample.sessions = Some(ServerRuntimeMemorySessions {
         live_count,
+        idle_eviction_count: sessions.idle_eviction_count(),
         sampled_count,
         contended_count,
         memory_enabled_session_count,

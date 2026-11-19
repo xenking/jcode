@@ -406,13 +406,11 @@ pub struct Agent {
     stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::tool::StdinInputRequest>>,
     /// Canonical reducer-backed view of runtime provider/model selection.
     provider_runtime_state: ProviderRuntimeState,
-    /// When true, this session is an inline swarm worker: stream a throttled
-    /// output tail to the global bus so the coordinator's inline gallery can
-    /// render a live viewport. Off for normal sessions to avoid bus traffic.
+    /// Inline workers publish a throttled output tail to the coordinator gallery.
     inline_output_tap: bool,
-    /// Rolling activity tail (text + tool markers) for the inline output tap.
-    /// Persists across turns so the coordinator's viewport never blanks at
-    /// turn boundaries or freezes during long tool calls.
+    /// A daemon wake may drive a runtime restored after idle unload without a client.
+    pub(crate) restored_from_idle_unload: bool,
+    /// Rolling activity tail across turns, including long tool calls.
     inline_tail: inline_tail::InlineTailBuffer,
     /// Prevent duplicate content uploads when shutdown/finalization is invoked
     /// more than once for the same in-memory agent.
@@ -612,6 +610,7 @@ impl Agent {
             stdin_request_tx: None,
             provider_runtime_state: ProviderRuntimeState::observed(initial_provider_model),
             inline_output_tap: false,
+            restored_from_idle_unload: false,
             inline_tail: inline_tail::InlineTailBuffer::default(),
             transcript_telemetry_sent: false,
             telemetry_session_deferred: false,

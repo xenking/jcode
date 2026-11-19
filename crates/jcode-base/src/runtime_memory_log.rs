@@ -210,6 +210,7 @@ pub struct ServerRuntimeMemoryEmbeddings {
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ServerRuntimeMemorySessions {
     pub live_count: usize,
+    pub idle_eviction_count: u64,
     pub sampled_count: usize,
     pub contended_count: usize,
     pub memory_enabled_session_count: usize,

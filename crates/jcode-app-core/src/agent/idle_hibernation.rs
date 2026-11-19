@@ -10,11 +10,7 @@ pub(crate) struct IdleCacheRelease {
 }
 
 impl Agent {
-    /// Caller must hold the idle Agent reservation. Never checkpoint here:
-    /// save_prepared can succeed without writing under a migration lease.
-    /// Keeping the source history means waking is simply lazy cache rebuilding,
-    /// with no disk dependency, lifecycle hooks or environment resnapshotting.
-    pub(crate) fn hibernate_idle_caches(&mut self) -> Option<IdleCacheRelease> {
+    fn idle_memory_eligible(&self) -> Option<()> {
         if crate::turn_activity::global()
             .snapshot()
             .session(self.session_id())
@@ -44,6 +40,33 @@ impl Agent {
             return None;
         }
 
+        Some(())
+    }
+
+    pub(crate) fn checkpoint_for_idle_unload(&mut self) -> Result<bool> {
+        if self.rewind_undo_snapshot.is_some() || self.idle_memory_eligible().is_none() {
+            return Ok(false);
+        }
+        self.session.save_for_idle_unload()?;
+        Ok(true)
+    }
+
+    pub(crate) fn unload_queue_is_unowned(&self, registered: Option<&SoftInterruptQueue>) -> bool {
+        let registrations = match registered {
+            Some(queue) if Arc::ptr_eq(queue, &self.soft_interrupt_queue) => 1,
+            Some(_) => return false,
+            None => 0,
+        };
+        Arc::strong_count(&self.soft_interrupt_queue) == 1 + registrations
+            && self
+                .soft_interrupt_queue
+                .try_lock()
+                .is_ok_and(|queue| queue.is_empty())
+    }
+
+    /// Keep the transcript live. Waking only rebuilds disposable caches.
+    pub(crate) fn hibernate_idle_caches(&mut self) -> Option<IdleCacheRelease> {
+        self.idle_memory_eligible()?;
         let released = IdleCacheRelease {
             provider_cache_bytes: self
                 .session

@@ -50,16 +50,34 @@ impl IdleState {
     }
 }
 
-pub(super) fn spawn(sessions: SessionAgents, members: Arc<RwLock<HashMap<String, SwarmMember>>>) {
+pub(super) fn spawn(unload: super::idle_unload::IdleUnload) {
     tokio::spawn(async move {
         let mut idle = HashMap::new();
+        let mut detached_since = HashMap::new();
         let mut interval = tokio::time::interval(CHECK_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            let threshold =
-                Duration::from_secs(crate::config::config().session.hibernation_idle_secs);
-            reclaim_idle_caches(&sessions, &members, &mut idle, threshold).await;
+            let config = &crate::config::config().session;
+            let evicted = unload.sweep(
+                &mut detached_since,
+                Duration::from_secs(config.unload_idle_secs),
+            );
+            if evicted > 0 {
+                crate::process_memory::release_retained_heap("server_idle_unload");
+                crate::logging::info(&format!(
+                    "Server idle unload: evicted={evicted} idle_eviction_count={}",
+                    unload.sessions.idle_eviction_count(),
+                ));
+            }
+            let threshold = Duration::from_secs(config.hibernation_idle_secs);
+            reclaim_idle_caches(
+                &unload.sessions,
+                &unload.swarm.members,
+                &mut idle,
+                threshold,
+            )
+            .await;
         }
     });
 }

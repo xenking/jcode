@@ -48,18 +48,17 @@ pub(super) async fn resolve_debug_session(
     session_id: &Arc<RwLock<String>>,
     requested: Option<String>,
 ) -> Result<(String, Arc<Mutex<Agent>>)> {
-    let sessions_guard = sessions.read().await;
     if let Some(id) = requested.filter(|id| !id.trim().is_empty()) {
-        let agent = sessions_guard.get(&id).cloned().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Unknown session_id '{}'. Live sessions: {}",
-                id,
-                describe_live_session_ids(&sessions_guard)
-            )
-        })?;
-        return Ok((id, agent));
+        if let Some(agent) = super::worker_revive::live_or_revived_agent(&id, sessions).await {
+            return Ok((id, agent));
+        }
+        let sessions_guard = sessions.read().await;
+        anyhow::bail!(
+            "Unknown session_id '{}'. Live sessions: {}",
+            id,
+            describe_live_session_ids(&sessions_guard)
+        );
     }
-    drop(sessions_guard);
 
     let id = default_debug_session_id(sessions, session_id).await?;
     let sessions_guard = sessions.read().await;

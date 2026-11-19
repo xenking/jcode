@@ -217,8 +217,8 @@ const METADATA_SNAPSHOT_MAX_BYTES: u64 = 1024 * 1024;
 fn apply_latest_journal_meta(
     session: &mut Session,
     journal_path: &Path,
-    mut dedupe: JournalReplayDedupe,
-) -> Result<()> {
+    dedupe: &mut JournalReplayDedupe,
+) -> Result<JournalReplayStats> {
     #[derive(serde::Deserialize)]
     struct MetaOnly {
         meta: super::journal::SessionJournalMeta,
@@ -237,9 +237,11 @@ fn apply_latest_journal_meta(
         }
         // Compatibility fields can retain an earlier entry's value, so
         // applying only the last metadata record loses that state.
+        dedupe
+            .seen_message_ids
+            .extend(entry.append_messages.into_iter().map(|message| message.id));
         session.apply_journal_meta(entry.meta);
-    })?;
-    Ok(())
+    })
 }
 
 fn replay_journal_lines<T: DeserializeOwned>(
@@ -556,7 +558,7 @@ impl Session {
         // multi-MB sessions, and resume reads this on the first-frame path.
         let bytes = std::fs::read(&path)?;
         let mut stub: SessionStartupStub = serde_json::from_slice(&bytes)?;
-        let dedupe = JournalReplayDedupe::with_ids(
+        let mut dedupe = JournalReplayDedupe::with_ids(
             stub.updated_at,
             std::mem::take(&mut stub.messages)
                 .into_iter()
@@ -568,7 +570,7 @@ impl Session {
         apply_latest_journal_meta(
             &mut session,
             &session_journal_path_from_snapshot(&path),
-            dedupe,
+            &mut dedupe,
         )?;
         session.reset_persist_state(true);
         session.refresh_agent_model_overrides()?;
@@ -665,6 +667,54 @@ impl Session {
     /// state such as model, provider, or effort must survive until attach.
     pub fn save_prepared(&mut self) -> Result<()> {
         self.save_inner(true)
+    }
+
+    /// Commit the current session before dropping its only in-memory owner.
+    /// Unlike routine turn saves, an unload requires synchronous durability
+    /// and rejects the migration lease's successful no-write result.
+    pub fn save_for_idle_unload(&mut self) -> Result<()> {
+        if self.persist_state.transcript_stripped || self.migration_lease_block().is_some() {
+            bail!("Session {} cannot be checkpointed for idle unload", self.id);
+        }
+        self.save_prepared()?;
+        let path = session_path(&self.id)?;
+        let journal = session_journal_path_from_snapshot(&path);
+        let mut open = std::fs::OpenOptions::new();
+        open.read(true).write(true);
+        let snapshot = open.open(&path)?;
+        snapshot.sync_all()?;
+        match open.open(&journal) {
+            Ok(file) => file.sync_all()?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        #[cfg(unix)]
+        std::fs::File::open(path.parent().expect("session directory"))?.sync_all()?;
+        // Verify the replay boundary without reconstructing a second transcript
+        // or buffering the entire snapshot in memory.
+        let stub: SessionStartupStub = serde_json::from_reader(BufReader::new(snapshot))?;
+        let mut dedupe = JournalReplayDedupe::with_ids(
+            stub.updated_at,
+            stub.messages.iter().map(|message| message.id.clone()),
+        );
+        let mut persisted = Self::session_from_startup_stub(stub);
+        let replay = apply_latest_journal_meta(&mut persisted, &journal, &mut dedupe)?;
+        if persisted.id != self.id
+            || persisted.updated_at != self.updated_at
+            || replay.is_corrupt()
+            || dedupe.seen_message_ids.len() != self.messages.len()
+            || self
+                .messages
+                .iter()
+                .any(|message| !dedupe.seen_message_ids.contains(&message.id))
+            || self.migration_lease_block().is_some()
+        {
+            bail!(
+                "Session {} failed idle unload checkpoint verification",
+                self.id
+            );
+        }
+        Ok(())
     }
 
     fn save_inner(&mut self, force: bool) -> Result<()> {

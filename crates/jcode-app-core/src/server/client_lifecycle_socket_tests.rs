@@ -2,6 +2,10 @@ use super::*;
 use crate::message::Role;
 
 #[cfg(unix)]
+#[path = "client_idle_unload_tests.rs"]
+mod idle_unload_tests;
+
+#[cfg(unix)]
 #[tokio::test]
 async fn interrupt_queued_batch_delivers_one_turn_promptly() {
     use crate::server::runtime::ServerRuntime;
@@ -251,8 +255,7 @@ async fn queue_mutations_survive_daemon_restart_over_socket() {
     .await;
     until(&mut reader, |e| matches!(e, ServerEvent::Ack { id: 6 })).await;
     until(&mut peer_reader, |e| matches!(e, ServerEvent::QueuedPrompts { id: 0, prompts } if prompts.iter().map(|p| p.client_id.as_str()).collect::<Vec<_>>() == ["c", "a", "b"])).await;
-    // Hold and edit the middle prompt in place while the turn still runs. The
-    // held item keeps its slot and mode, and every attached client sees it.
+    // Hold and edit the middle prompt in place, preserving its slot and mode.
     send(
         &mut writer,
         json!({"type":"set_queued_prompt_editing","id":60,"client_id":"test","prompt_id":"a","editing":true}),
@@ -672,8 +675,7 @@ async fn daemon_restart_restores_and_delivers_pending_prompt_once() {
         .await
         .unwrap();
     handle.await.unwrap();
-    // A real process exit destroys its turn tasks. Both runtimes share this
-    // test process, so retire the old detached task without consuming its queue.
+    // Simulate process exit by dropping the old turn without consuming its queue.
     for signal in crate::turn_cancel_registry::active_turn_signals(&session_id) {
         signal.fire();
     }
@@ -1264,8 +1266,7 @@ impl Provider for TerminalSocketProvider {
     }
 
     async fn refresh_model_catalog(&self) -> Result<crate::provider::ModelCatalogRefreshSummary> {
-        // This fixture starts with a fresh, cached fallback. Only explicit
-        // refresh discovers the future model, as a live provider would.
+        // Only explicit refresh may bypass the fresh cached fallback.
         self.catalog_revision.fetch_add(1, Ordering::SeqCst);
         Ok(crate::provider::ModelCatalogRefreshSummary::default())
     }
@@ -1587,8 +1588,7 @@ async fn sdk_socket_cancel_workflow(
         "bootstrap must be negotiated"
     );
     {
-        // A stored todo change reaches the attached client without a
-        // `get_todos` request, and tells it that polling is unnecessary.
+        // A stored todo change pushes to the attached client without polling.
         let session_id = sessions.read().await.keys().next().unwrap().clone();
         let todos: Vec<crate::todo::TodoItem> = serde_json::from_value(json!([
             {"id":"pushed","content":"Pushed without a poll","priority":"high","status":"in_progress"}

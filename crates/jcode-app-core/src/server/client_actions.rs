@@ -2,8 +2,8 @@
 
 use super::client_lifecycle::process_reserved_message_streaming_mpsc;
 use super::{
-    ClientConnectionInfo, SessionInterruptQueues, SwarmEvent, SwarmMember, SwarmState,
-    VersionedPlan, broadcast_swarm_status, fanout_session_event, persist_swarm_state_for,
+    SessionInterruptQueues, SwarmEvent, SwarmMember, SwarmState, VersionedPlan,
+    broadcast_swarm_status, fanout_session_event, persist_swarm_state_for,
     queue_soft_interrupt_for_session, remove_session_channel_subscriptions,
     remove_session_from_swarm, swarm_id_for_session, truncate_detail, update_member_status,
 };
@@ -39,7 +39,6 @@ use input_shell_output::{build_input_shell_command, combine_input_shell_output};
 pub(super) struct NotifySessionContext<'a> {
     pub sessions: &'a SessionAgents,
     pub soft_interrupt_queues: &'a SessionInterruptQueues,
-    pub client_connections: &'a Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     pub swarm_members: &'a Arc<RwLock<HashMap<String, SwarmMember>>>,
     pub swarms_by_id: &'a Arc<RwLock<HashMap<String, HashSet<String>>>>,
     pub event_history: &'a Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
@@ -54,30 +53,19 @@ pub(super) async fn handle_notify_session(
     message: String,
     ctx: NotifySessionContext<'_>,
 ) {
-    let target_has_client = {
-        let connections = ctx.client_connections.read().await;
-        connections
-            .values()
-            .any(|connection| connection.session_id == session_id)
-    };
-
-    let ran_immediately = if target_has_client {
-        super::live_turn::run_live_system_turn_if_idle(
-            &session_id,
-            &message,
-            ctx.sessions,
-            super::live_turn::LiveTurnSwarmContext::new(
-                ctx.swarm_members,
-                ctx.swarms_by_id,
-                ctx.event_history,
-                ctx.event_counter,
-                ctx.swarm_event_tx,
-            ),
-        )
-        .await
-    } else {
-        false
-    };
+    let ran_immediately = super::live_turn::run_live_system_turn_if_idle(
+        &session_id,
+        &message,
+        ctx.sessions,
+        super::live_turn::LiveTurnSwarmContext::new(
+            ctx.swarm_members,
+            ctx.swarms_by_id,
+            ctx.event_history,
+            ctx.event_counter,
+            ctx.swarm_event_tx,
+        ),
+    )
+    .await;
 
     let notified = if ran_immediately {
         false

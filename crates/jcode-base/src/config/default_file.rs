@@ -937,16 +937,16 @@ port = 7643
 bind_addr = "0.0.0.0"
 
 [session]
-# Release reloadable session memory after 30 minutes idle. Active work is never
-# interrupted. Type in the terminal to wake. Set to 0 to disable hibernation.
+# Hibernate idle caches without interrupting active work. Set to 0 to disable.
 # Environment override: JCODE_HIBERNATION_IDLE_SECS
 hibernation_idle_secs = 1800
+# Unload detached sessions (finished workers: at most 60s). Zero disables.
+unload_idle_secs = 1800
 # What an idle terminal client releases when it hibernates:
 #   "caches"     - render caches only. Instant, lossless wake. (default)
 #   "transcript" - also drop the transcript and reload it from the server on
 #                  wake. Loses local-only notices and the exact scroll spot.
-#   "exit"       - exit the client, leaving a tiny waiter that resumes the
-#                  session on the next key press. Largest savings, ~1s wake.
+#   "exit"       - exit and resume on the next keystroke (~1s wake).
 # Environment override: JCODE_HIBERNATION_MODE
 hibernation_mode = "caches"
 

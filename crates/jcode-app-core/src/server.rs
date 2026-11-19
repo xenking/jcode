@@ -47,6 +47,7 @@ mod headless;
 pub use group_transfer::{GroupTransferBundle, GroupTransferSelection, GroupTransferSession};
 pub use swarm_persistence::{PersistedSwarmMember, PersistedSwarmState, PersistedVersionedPlan};
 mod idle_hibernation;
+mod idle_unload;
 mod jade_relay;
 mod lane_dispatch;
 mod lifecycle;
@@ -197,6 +198,7 @@ pub(super) async fn remove_session_entry(
     session_id: &str,
 ) -> Option<Arc<Mutex<Agent>>> {
     let removed = sessions.remove(session_id).await;
+    sessions.forget_idle_unloaded(session_id);
     if removed.is_some() {
         crate::storage::unregister_active_pid(session_id);
         crate::session_env::remove_session_env(session_id);
@@ -242,6 +244,10 @@ async fn prune_expired_terminal_swarm_members(
     let live_sessions: HashSet<String> = sessions.read().await.keys().cloned().collect();
     let mut pruned = 0usize;
     for session_id in candidates {
+        // Do not race a lazy restore or eviction of this member.
+        let Some(_slot) = sessions.try_reserve(&session_id) else {
+            continue;
+        };
         // A session can be resumed between candidate collection and removal.
         // Never collect a member that currently has a live agent runtime.
         if live_sessions.contains(&session_id) || sessions.read().await.contains_key(&session_id) {
@@ -264,6 +270,7 @@ async fn prune_expired_terminal_swarm_members(
         let Some(swarm_id) = removed_swarm_id else {
             continue;
         };
+        sessions.forget_idle_unloaded(&session_id);
 
         remove_session_from_swarm(
             &session_id,
@@ -321,6 +328,9 @@ async fn reap_idle_spawned_workers(
 
     let mut reaped = 0usize;
     for session_id in candidates {
+        let Some(_slot) = sessions.try_reserve(&session_id) else {
+            continue;
+        };
         // Re-validate under the current map: status may have changed between
         // candidate collection and removal (a resumed/reassigned worker).
         let still_reapable = {
@@ -333,7 +343,7 @@ async fn reap_idle_spawned_workers(
                     && member.last_status_change.elapsed() >= idle_after
             })
         };
-        if !still_reapable {
+        if !still_reapable || sessions.is_idle_unloaded(&session_id) {
             continue;
         }
 
@@ -818,13 +828,15 @@ impl Server {
         tokio::task::JoinHandle<()>,
     ) {
         self.spawn_registry_prewarm();
-        worker_revive::register_context(worker_revive::WorkerReviveContext {
-            provider: Arc::clone(&self.provider),
-            sessions: Arc::clone(&self.sessions),
-            mcp_pool: Arc::clone(&self.mcp_pool),
-            shutdown_signals: Arc::clone(&self.shutdown_signals),
-            soft_interrupt_queues: Arc::clone(&self.soft_interrupt_queues),
-        });
+        self.sessions
+            .revive
+            .get_or_init(|| worker_revive::WorkerReviveContext {
+                provider: Arc::clone(&self.provider),
+                members: Arc::clone(&self.swarm_state.members),
+                mcp_pool: Arc::clone(&self.mcp_pool),
+                shutdown_signals: Arc::clone(&self.shutdown_signals),
+                soft_interrupt_queues: Arc::clone(&self.soft_interrupt_queues),
+            });
         lane_dispatch::register_context(lane_dispatch::LaneDispatchContext {
             provider: Arc::clone(&self.provider),
             sessions: Arc::clone(&self.sessions),
@@ -1093,13 +1105,13 @@ impl Server {
         // "N streaming" and toggles a best-effort OS power inhibitor accordingly.
         Self::spawn_power_inhibitor(Arc::clone(&self.swarm_state.members));
 
-        // Unlike the no-client shutdown timer this also reclaims derived
-        // transcript allocations while a connected TUI is idle. It never
-        // suspends the scheduler or replaces the live Agent/session.
-        idle_hibernation::spawn(
-            Arc::clone(&self.sessions),
-            Arc::clone(&self.swarm_state.members),
-        );
+        idle_hibernation::spawn(idle_unload::IdleUnload {
+            sessions: Arc::clone(&self.sessions),
+            swarm: self.swarm_state.clone(),
+            connections: Arc::clone(&self.client_connections),
+            queues: Arc::clone(&self.soft_interrupt_queues),
+            shutdown: Arc::clone(&self.shutdown_signals),
+        });
 
         // Upload transcripts for the iOS app when the user enabled mobile sync.
         crate::mobile_sync::spawn_background_sync();

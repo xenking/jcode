@@ -1023,6 +1023,7 @@ async fn build_server_memory_payload(
         },
         "sessions": {
             "live_count": locked_session_count + contended_session_count,
+            "idle_eviction_count": sessions.idle_eviction_count(),
             "locked_count": locked_session_count,
             "contended_count": contended_session_count,
             "total_message_count": session_message_count,

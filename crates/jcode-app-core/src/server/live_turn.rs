@@ -70,8 +70,7 @@ pub(super) async fn idle_live_agent(
     sessions: &SessionAgents,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) -> Option<OwnedMutexGuard<Agent>> {
-    let agent =
-        super::worker_revive::live_or_revived_agent(session_id, sessions, swarm_members).await?;
+    let agent = super::worker_revive::live_or_revived_agent(session_id, sessions).await?;
 
     // Headless workers never have a client attachment by design, and members
     // restored from disk after a server restart carry a closed placeholder
@@ -87,11 +86,10 @@ pub(super) async fn idle_live_agent(
             })
             .unwrap_or(false)
     };
-    if !can_drive {
+    let agent = agent.try_lock_owned().ok()?;
+    if !can_drive && !agent.restored_from_idle_unload {
         return None;
     }
-
-    let agent = agent.try_lock_owned().ok()?;
     // A session that moved to another machine (or a stale copy) cannot run
     // turns here. Starting one only produces a lease error per wake, so leave
     // the wake queued for whichever copy is runnable.

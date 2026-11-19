@@ -8,6 +8,8 @@ pub struct SessionConfig {
     /// Release reloadable session memory after this many seconds without work
     /// or interaction. Zero disables hibernation. Default: 30 minutes.
     pub hibernation_idle_secs: u64,
+    /// Unload durable, detached daemon sessions after this many idle seconds. Zero disables it.
+    pub unload_idle_secs: u64,
     /// How much an idle terminal client releases when it hibernates.
     pub hibernation_mode: HibernationMode,
 }
@@ -42,6 +44,7 @@ impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             hibernation_idle_secs: 30 * 60,
+            unload_idle_secs: 30 * 60,
             hibernation_mode: HibernationMode::Caches,
         }
     }
@@ -55,6 +58,7 @@ mod tests {
     fn missing_setting_defaults_to_thirty_minutes() {
         let config: SessionConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(config.hibernation_idle_secs, 1800);
+        assert_eq!(config.unload_idle_secs, 1800);
         assert_eq!(config.hibernation_mode, HibernationMode::Caches);
     }
 
@@ -62,12 +66,14 @@ mod tests {
     fn zero_disables_hibernation_and_roundtrips() {
         let config = SessionConfig {
             hibernation_idle_secs: 0,
+            unload_idle_secs: 0,
             hibernation_mode: HibernationMode::Exit,
         };
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("\"exit\""));
         let restored: SessionConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.hibernation_idle_secs, 0);
+        assert_eq!(restored.unload_idle_secs, 0);
         assert_eq!(restored.hibernation_mode, HibernationMode::Exit);
     }
 

@@ -374,7 +374,6 @@ pub(super) async fn handle_lightweight_control_request(
                 NotifySessionContext {
                     sessions,
                     soft_interrupt_queues,
-                    client_connections,
                     swarm_members,
                     swarms_by_id,
                     event_history,
@@ -403,7 +402,6 @@ pub(super) async fn handle_lightweight_control_request(
                 NotifySessionContext {
                     sessions,
                     soft_interrupt_queues,
-                    client_connections,
                     swarm_members,
                     swarms_by_id,
                     event_history,

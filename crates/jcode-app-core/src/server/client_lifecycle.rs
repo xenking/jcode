@@ -2873,7 +2873,6 @@ pub(super) async fn handle_client(
                     NotifySessionContext {
                         sessions: &sessions,
                         soft_interrupt_queues: &soft_interrupt_queues,
-                        client_connections: &client_connections,
                         swarm_members: &swarm_members,
                         swarms_by_id: &swarms_by_id,
                         event_history: &event_history,
@@ -2903,7 +2902,6 @@ pub(super) async fn handle_client(
                     NotifySessionContext {
                         sessions: &sessions,
                         soft_interrupt_queues: &soft_interrupt_queues,
-                        client_connections: &client_connections,
                         swarm_members: &swarm_members,
                         swarms_by_id: &swarms_by_id,
                         event_history: &event_history,

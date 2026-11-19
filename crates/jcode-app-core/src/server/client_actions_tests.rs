@@ -9,7 +9,7 @@ use crate::agent::Agent;
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use crate::protocol::{FeatureToggle, ServerEvent};
 use crate::provider::{EventStream, Provider};
-use crate::server::{ClientConnectionInfo, SwarmMember};
+use crate::server::SwarmMember;
 use crate::tool::Registry;
 use anyhow::Result;
 use async_stream::stream;
@@ -675,21 +675,6 @@ async fn notify_session_runs_scheduled_task_immediately_for_idle_live_session() 
         HashMap::<String, Arc<Mutex<Agent>>>::from([(session_id.clone(), agent.clone())]),
     ));
     let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));
-    let client_connections = Arc::new(RwLock::new(HashMap::from([(
-        "client-1".to_string(),
-        ClientConnectionInfo {
-            client_id: "client-1".to_string(),
-            session_id: session_id.clone(),
-            client_instance_id: None,
-            debug_client_id: Some("debug-1".to_string()),
-            connected_at: Instant::now(),
-            last_seen: Instant::now(),
-            is_processing: false,
-            current_tool_name: None,
-            terminal_env: Vec::new(),
-            disconnect_tx: mpsc::unbounded_channel().0,
-        },
-    )])));
     let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel();
     let swarm_members = Arc::new(RwLock::new(HashMap::from([(
         session_id.clone(),
@@ -726,7 +711,6 @@ async fn notify_session_runs_scheduled_task_immediately_for_idle_live_session() 
         NotifySessionContext {
             sessions: &sessions,
             soft_interrupt_queues: &soft_interrupt_queues,
-            client_connections: &client_connections,
             swarm_members: &swarm_members,
             swarms_by_id: &swarms_by_id,
             event_history: &event_history,
@@ -794,21 +778,6 @@ async fn notify_session_queues_soft_interrupt_when_live_session_is_busy() {
         session_id.clone(),
         queue.clone(),
     )])));
-    let client_connections = Arc::new(RwLock::new(HashMap::from([(
-        "client-1".to_string(),
-        ClientConnectionInfo {
-            client_id: "client-1".to_string(),
-            session_id: session_id.clone(),
-            client_instance_id: None,
-            debug_client_id: Some("debug-1".to_string()),
-            connected_at: Instant::now(),
-            last_seen: Instant::now(),
-            is_processing: false,
-            current_tool_name: None,
-            terminal_env: Vec::new(),
-            disconnect_tx: mpsc::unbounded_channel().0,
-        },
-    )])));
     let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel();
     let swarm_members = Arc::new(RwLock::new(HashMap::from([(
         session_id.clone(),
@@ -847,7 +816,6 @@ async fn notify_session_queues_soft_interrupt_when_live_session_is_busy() {
         NotifySessionContext {
             sessions: &sessions,
             soft_interrupt_queues: &soft_interrupt_queues,
-            client_connections: &client_connections,
             swarm_members: &swarm_members,
             swarms_by_id: &swarms_by_id,
             event_history: &event_history,
