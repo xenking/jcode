@@ -21,7 +21,7 @@ PowerShell 5.1 or later is required by the installer. The x64 build is the defau
 Open PowerShell and run:
 
 ```powershell
-irm https://jcode.sh/install.ps1 | iex
+irm https://raw.githubusercontent.com/xenking/jcode/master/scripts/install.ps1 | iex
 ```
 
 The installer:
@@ -35,7 +35,7 @@ The installer:
 Alacritty installation and the global launch hotkey are optional and are no longer installed automatically. To request both explicitly:
 
 ```powershell
-$script = [scriptblock]::Create((irm https://jcode.sh/install.ps1))
+$script = [scriptblock]::Create((irm https://raw.githubusercontent.com/xenking/jcode/master/scripts/install.ps1))
 & $script -ConfigureAlacritty -ConfigureHotkey
 ```
 
@@ -46,7 +46,7 @@ fails with an actionable message rather than silently starting a long build.
 To explicitly allow a source build:
 
 ```powershell
-$script = [scriptblock]::Create((irm https://jcode.sh/install.ps1))
+$script = [scriptblock]::Create((irm https://raw.githubusercontent.com/xenking/jcode/master/scripts/install.ps1))
 & $script -BuildFromSource
 ```
 
@@ -68,7 +68,7 @@ Get-Command jcode
 Get-FileHash (Get-Command jcode).Source -Algorithm SHA256
 ```
 
-Compare the hash with `SHA256SUMS` on the matching [GitHub release](https://github.com/1jehuang/jcode/releases/latest).
+Compare the hash with `SHA256SUMS` on the matching [GitHub release](https://github.com/xenking/jcode/releases/latest).
 
 After Authenticode signing is enabled, this must report `Valid`:
 

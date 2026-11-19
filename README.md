@@ -48,7 +48,7 @@
 
 ```bash
 # macOS & Linux
-curl -fsSL https://jcode.sh/install | bash
+curl -fsSL https://raw.githubusercontent.com/xenking/jcode/master/scripts/install.sh | bash
 ```
 
 <div align="center">

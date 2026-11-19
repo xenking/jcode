@@ -158,7 +158,7 @@ try {
         Assert-Equal $false (Test-JcodeReleaseTag 'latest') 'unversioned release labels should not validate'
         $scriptText = Get-Content -LiteralPath $installScript -Raw
         Assert-NotContains $scriptText 'api.github.com/repos/$Repo/releases/latest' 'installer should not use the rate-limited unauthenticated GitHub API'
-        Assert-Contains $scriptText 'jcode.sh/releases' 'installer should include independent static release metadata'
+        Assert-NotContains $scriptText 'jcode.sh/releases' 'installer must not mix in upstream release metadata'
 
         $script:releaseLookupRequests = @()
         function Invoke-WebRequest {
@@ -169,22 +169,16 @@ try {
                 [string]$OutFile
             )
             $script:releaseLookupRequests += $Uri
-            if ($Uri -eq 'https://jcode.sh/releases/latest/version') {
-                return [pscustomobject]@{ Content = "v1.2.3`n" }
-            }
-            if ($Uri -eq 'https://jcode.sh/releases/v1.2.3/download-bases') {
-                return [pscustomobject]@{ Content = "https://mirror.example/releases/v1.2.3`n" }
-            }
-            if ($Uri -eq 'https://github.com/1jehuang/jcode/releases/latest') {
-                throw 'simulated GitHub block'
+            if ($Uri -eq 'https://github.com/xenking/jcode/releases/latest') {
+                return [pscustomobject]@{ BaseResponse = [pscustomobject]@{ ResponseUri = 'https://github.com/xenking/jcode/releases/tag/v1.2.3' } }
             }
             throw "unexpected URI: $Uri"
         }
         try {
-            Assert-Equal 'v1.2.3' (Get-LatestJcodeReleaseTag) 'static metadata should cover a blocked GitHub release lookup'
+            Assert-Equal 'v1.2.3' (Get-LatestJcodeReleaseTag) 'release redirect should resolve the fork tag'
             $bases = @(Get-JcodeReleaseDownloadBases 'v1.2.3')
-            Assert-Equal 'https://mirror.example/releases/v1.2.3' $bases[0] 'configured mirror should be preferred'
-            Assert-Equal 'https://github.com/1jehuang/jcode/releases/download/v1.2.3' $bases[1] 'GitHub should remain the final fallback'
+            Assert-Equal 1 $bases.Count 'only the fork GitHub release is a download source'
+            Assert-Equal 'https://github.com/xenking/jcode/releases/download/v1.2.3' $bases[0] 'downloads come from the fork release'
         } finally {
             Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
         }

@@ -1,0 +1,150 @@
+name: Release
+
+# Fork release pipeline: a `vMAJOR.MINOR.PATCH` tag builds macOS arm64, Linux
+# x86_64 and Windows x86_64, then publishes them with SHA256SUMS as the latest
+# xenking/jcode release. Asset names match upstream so install.sh/install.ps1
+# and `jcode update` resolve them unchanged. No signing, Homebrew, AUR, website
+# deploy or announcements.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
+      dry_run:
+        description: Build and package without creating the release
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+  JCODE_CI: "1"
+  # CI builds without the local parallel-frontend rustc wrapper from .cargo/config.toml.
+  CARGO_BUILD_RUSTC_WRAPPER: ""
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_RELEASE_OPT_LEVEL: "3"
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    if: github.repository == 'xenking/jcode'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: jcode-macos-aarch64
+          # shortcut: built against the runner's glibc (2.35); older distros need a zig/2.17 baseline build.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact: jcode-linux-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: jcode-windows-x86_64
+    steps:
+      - name: Validate tag
+        shell: bash
+        run: '[[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid release tag: $RELEASE_TAG" >&2; exit 1; }'
+
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build release binary
+        shell: bash
+        run: cargo build --locked --release --target ${{ matrix.target }} -p jcode --bin jcode
+        env:
+          JCODE_RELEASE_BUILD: "1"
+          JCODE_CI_BUILD: "1"
+          JCODE_BUILD_SEMVER: ${{ env.RELEASE_TAG }}
+
+      - name: Verify binary reports the release version
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/jcode"
+          [ "$RUNNER_OS" = Windows ] && bin="$bin.exe"
+          version="$("$bin" --version)"
+          echo "$version"
+          grep -q "${RELEASE_TAG} " <<<"$version"
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/jcode" "dist/${{ matrix.artifact }}"
+          chmod +x "dist/${{ matrix.artifact }}"
+          if [ "$RUNNER_OS" = macOS ]; then
+            # Stable ad-hoc identity so macOS keeps per-app settings across updates.
+            codesign --force --sign - --identifier com.jcode.cli "dist/${{ matrix.artifact }}"
+          fi
+          tar czf "dist/${{ matrix.artifact }}.tar.gz" -C dist "${{ matrix.artifact }}"
+          rm "dist/${{ matrix.artifact }}"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/jcode.exe" "dist/${{ matrix.artifact }}.exe"
+          tar czf "dist/${{ matrix.artifact }}.tar.gz" -C dist "${{ matrix.artifact }}.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Write SHA256SUMS
+        run: |
+          cd dist
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create release
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          prev="$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // ""')"
+          notes=(--generate-notes)
+          [ -n "$prev" ] && notes+=(--notes-start-tag "$prev")
+          gh release create "$RELEASE_TAG" dist/* --verify-tag --latest --title "jcode $RELEASE_TAG" "${notes[@]}"

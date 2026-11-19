@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="1jehuang/jcode"
-RELEASE_METADATA_BASE="${JCODE_RELEASE_METADATA_BASE:-https://jcode.sh/releases}"
+REPO="xenking/jcode"
 IS_WINDOWS=false
 IS_TERMUX=false
 INSTALL_STAGE="startup"
@@ -100,27 +99,15 @@ else
   INSTALL_DIR="${JCODE_INSTALL_DIR:-$HOME/.local/bin}"
 fi
 
-# Prefer GitHub's stable redirect when it is reachable so publication changes
-# are visible immediately. jcode.sh keeps a static copy of the latest published
-# tag as an independent fallback for GitHub outages, blocks, and shared-network
-# throttling. Neither path uses the rate-limited unauthenticated GitHub API.
+# GitHub's stable redirect avoids the rate-limited unauthenticated API.
 INSTALL_STAGE="release_lookup"
 VERSION="${JCODE_VERSION:-}"
 if [ -z "$VERSION" ]; then
-  METADATA_VERSION=$(curl -fsSL --retry 2 --connect-timeout 10 \
-    "$RELEASE_METADATA_BASE/latest/version" 2>/dev/null | tr -d '\r\n' || true)
   LATEST_RELEASE_URL=$(curl -fsSIL --retry 2 --connect-timeout 10 \
     -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" 2>/dev/null || true)
   case "$LATEST_RELEASE_URL" in
-    */releases/tag/*) GITHUB_VERSION="${LATEST_RELEASE_URL##*/}" ;;
-    *) GITHUB_VERSION="" ;;
+    */releases/tag/*) VERSION="${LATEST_RELEASE_URL##*/}" ;;
   esac
-  if valid_release_tag "$GITHUB_VERSION"; then
-    VERSION="$GITHUB_VERSION"
-  elif valid_release_tag "$METADATA_VERSION"; then
-    VERSION="$METADATA_VERSION"
-    info "GitHub release lookup unavailable; using cached jcode.sh metadata ($VERSION)."
-  fi
 fi
 valid_release_tag "$VERSION" || err "Failed to determine latest version"
 
@@ -207,10 +194,7 @@ tmpdir=$(mktemp -d)
 INSTALL_STAGE="artifact_download"
 download_mode=""
 downloaded_asset=""
-DOWNLOAD_BASES=$(curl -fsSL --retry 2 --connect-timeout 10 \
-  "$RELEASE_METADATA_BASE/$VERSION/download-bases" 2>/dev/null || true)
-DOWNLOAD_BASES=$(printf '%s\n%s\n' "$DOWNLOAD_BASES" "$GITHUB_RELEASE_BASE" |
-  awk '/^https:\/\/[^[:space:]]+$/ && !seen[$0]++')
+DOWNLOAD_BASES="$GITHUB_RELEASE_BASE"
 
 for candidate in "$ARTIFACT.tar.gz" "$ARTIFACT$EXE"; do
   while IFS= read -r base; do
@@ -232,9 +216,7 @@ done
 if [ -n "$download_mode" ]; then
   INSTALL_STAGE="artifact_verification"
   EXPECTED_SHA256=""
-  for checksum_url in \
-    "$RELEASE_METADATA_BASE/$VERSION/SHA256SUMS" \
-    "$GITHUB_RELEASE_BASE/SHA256SUMS"; do
+  for checksum_url in "$GITHUB_RELEASE_BASE/SHA256SUMS"; do
     CHECKSUMS=$(curl -fsSL --retry 2 --connect-timeout 10 \
       "$checksum_url" 2>/dev/null || true)
     EXPECTED_SHA256=$(printf '%s\n' "$CHECKSUMS" |
