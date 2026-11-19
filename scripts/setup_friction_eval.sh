@@ -289,6 +289,11 @@ echo "-- Section D: Windows PATH parity (static audit) --"
 sh_text=$(cat "$install_sh")
 ps1_text=$(cat "$install_ps1")
 
+# Global hotkeys are explicit-only: installers may suggest `jcode setup-hotkey`, never run it.
+! grep -nE 'setup-hotkey' "$install_sh" "$repo_dir/scripts/install_release.sh" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(#|info )' >/dev/null
+check "installers never run setup-hotkey on their own" \
+  "only tips/comments mention setup-hotkey" "an installer invokes setup-hotkey" "$?"
+
 printf '%s' "$sh_text" | grep -q 'SetEnvironmentVariable.*"User"'
 check "install.sh (Git Bash) persists the Windows user PATH" \
   "SetEnvironmentVariable(...,'User') present" "no user-PATH persistence found" "$?"
