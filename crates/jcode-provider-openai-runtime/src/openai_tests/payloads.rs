@@ -728,3 +728,37 @@ fn configured_swarm_root_effort_reads_real_config() {
         assert_eq!(provider.reasoning_effort().as_deref(), Some(mode));
     }
 }
+
+#[test]
+fn reasoning_effort_change_keeps_the_cacheable_prefix() {
+    // OpenAI keys its prompt cache on the prefix and `prompt_cache_key`. An
+    // effort change may only touch the `reasoning` field, never the routing
+    // key, instructions, tools or input that make up the cached prefix.
+    let input = [
+        serde_json::json!({"role": "user", "content": "hello"}),
+        serde_json::json!({"role": "assistant", "content": "hi"}),
+    ];
+    let tools = [serde_json::json!({"type": "function", "name": "bash"})];
+    let build = |effort| {
+        OpenAIProvider::build_response_request(
+            "gpt-5.4",
+            "system".to_string(),
+            &input[..],
+            &tools,
+            false,
+            Some(DEFAULT_MAX_OUTPUT_TOKENS),
+            Some(effort),
+            None,
+            Some("session-a"),
+            None,
+            None,
+        )
+    };
+    let mut low = build("low");
+    let mut high = build("high");
+    assert_ne!(low["reasoning"], high["reasoning"], "effort must be sent");
+    low.as_object_mut().unwrap().remove("reasoning");
+    high.as_object_mut().unwrap().remove("reasoning");
+    assert_eq!(low, high, "only `reasoning` may differ between efforts");
+    assert_eq!(high["prompt_cache_key"], "session-a");
+}
