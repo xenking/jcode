@@ -153,6 +153,7 @@ impl Agent {
             model: model.to_string(),
             upstream_provider: self.last_upstream_provider.clone(),
             account: self.kv_cache_account_identity(),
+            reasoning_effort: self.provider.reasoning_effort(),
         };
         let signature = crate::kv_cache_monitor::RequestSignature {
             system_static_hash: *system_static_hash,

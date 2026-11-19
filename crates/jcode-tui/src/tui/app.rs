@@ -293,6 +293,7 @@ enum KvCacheMissReason {
     AccountSwitch,
     ModelSwitch,
     UpstreamSwitch,
+    EffortChange,
     Expired,
     DailyRollover,
     HarnessSystemChanged,
@@ -311,6 +312,7 @@ impl KvCacheMissReason {
             Self::AccountSwitch => "account switch",
             Self::ModelSwitch => "model switch",
             Self::UpstreamSwitch => "upstream switch",
+            Self::EffortChange => "effort change",
             Self::Expired => "expired",
             Self::DailyRollover => "daily rollover",
             Self::HarnessSystemChanged => "harness: system changed",
@@ -2567,6 +2569,7 @@ impl App {
             KvCacheMissReason::AccountSwitch => M::AccountSwitch,
             KvCacheMissReason::ModelSwitch => M::ModelSwitch,
             KvCacheMissReason::UpstreamSwitch => M::UpstreamSwitch,
+            KvCacheMissReason::EffortChange => M::EffortChange,
             KvCacheMissReason::Expired => M::Expired,
             KvCacheMissReason::DailyRollover => M::DailyRollover,
             KvCacheMissReason::HarnessSystemChanged => M::SystemChanged,
@@ -2596,6 +2599,8 @@ impl App {
                 new_account: request.account.as_deref(),
                 old_upstream: baseline.and_then(|b| b.upstream_provider.as_deref()),
                 new_upstream: request.upstream_provider.as_deref(),
+                old_effort: None,
+                new_effort: None,
                 idle_secs: request
                     .started_at
                     .and_then(|start| start.checked_duration_since(baseline_completed_at))

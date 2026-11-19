@@ -577,6 +577,7 @@ fn http_retry_decision_with_policy(
                     temperature: None,
                     service_tier: None,
                     stream: true,
+                    effort_record: None,
                 },
                 tx,
                 Arc::new(RwLock::new(None)),

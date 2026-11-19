@@ -242,6 +242,7 @@ mod tests {
                     temperature: None,
                     service_tier: None,
                     stream: true,
+                    effort_record: None,
                 };
                 let original_request = serde_json::to_value(&request).unwrap();
                 let result = stream_response(

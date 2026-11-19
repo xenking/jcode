@@ -86,6 +86,7 @@ pub(super) fn handle_kv_cache_miss(
             "account_switch" => KvCacheMissReason::AccountSwitch,
             "model_switch" => KvCacheMissReason::ModelSwitch,
             "upstream_switch" => KvCacheMissReason::UpstreamSwitch,
+            "effort_change" => KvCacheMissReason::EffortChange,
             "expired" => KvCacheMissReason::Expired,
             "daily_rollover" => KvCacheMissReason::DailyRollover,
             "system_changed" => KvCacheMissReason::HarnessSystemChanged,

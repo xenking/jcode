@@ -1971,6 +1971,7 @@ fn opus_55_request_json_supports_api_and_oauth_without_forced_tools() {
                         temperature,
                         service_tier: None,
                         stream: true,
+                        effort_record: None,
                     };
                     let value = serde_json::to_value(&request).unwrap();
                     assert_eq!(value["thinking"]["type"], "adaptive");

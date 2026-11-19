@@ -10,6 +10,8 @@ use serde_json::json;
 mod history_repair;
 use history_repair::*;
 
+pub mod effort_controls;
+
 /// Claude Code billing attribution text observed in the official CLI's system
 /// prompt blocks.
 ///
@@ -137,6 +139,10 @@ pub fn format_messages_with_native(
     let mut result: Vec<ApiMessage> = Vec::new();
 
     for msg in messages {
+        if let Some(effort) = effort_controls::control_slot_effort(msg) {
+            result.push(ApiMessage::effort_control(effort));
+            continue;
+        }
         let role = match msg.role {
             Role::User => "user",
             Role::Assistant => "assistant",
@@ -577,6 +583,11 @@ pub struct ApiRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
     pub stream: bool,
+    /// Hidden record of the effort this request runs at, emitted with its
+    /// response so later requests can replay the change as a control. Not
+    /// part of the wire payload.
+    #[serde(skip)]
+    pub effort_record: Option<Value>,
 }
 
 #[derive(Serialize, Clone)]
@@ -809,10 +820,62 @@ pub fn add_message_cache_breakpoint(messages: &mut [ApiMessage], cache_ttl_1h: b
     }
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Clone)]
 pub struct ApiMessage {
     pub role: String,
     pub content: Vec<ApiContentBlock>,
+}
+
+impl ApiMessage {
+    /// A mid-conversation effort control: `{"role": "system", "content": [],
+    /// "output_config": {"effort": ...}}`.
+    pub fn effort_control(effort: &str) -> Self {
+        Self {
+            role: "system".to_string(),
+            content: vec![ApiContentBlock::EffortControl(effort.to_string())],
+        }
+    }
+
+    /// The effort this message sets, when it is an effort control.
+    pub fn control_effort(&self) -> Option<&str> {
+        if self.role != "system" || self.content.is_empty() {
+            return None;
+        }
+        let mut effort = None;
+        for block in &self.content {
+            let ApiContentBlock::EffortControl(value) = block else {
+                return None;
+            };
+            effort = Some(value.as_str());
+        }
+        effort
+    }
+
+    pub fn is_effort_control(&self) -> bool {
+        self.control_effort().is_some()
+    }
+}
+
+impl Serialize for ApiMessage {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        if let Some(effort) = self.control_effort() {
+            let mut state = serializer.serialize_struct("ApiMessage", 3)?;
+            state.serialize_field("role", "system")?;
+            state.serialize_field("content", &[] as &[ApiContentBlock])?;
+            state.serialize_field(
+                "output_config",
+                &ApiOutputConfig {
+                    effort: effort.to_string(),
+                },
+            )?;
+            return state.end();
+        }
+        let mut state = serializer.serialize_struct("ApiMessage", 2)?;
+        state.serialize_field("role", &self.role)?;
+        state.serialize_field("content", &self.content)?;
+        state.end()
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -843,6 +906,11 @@ pub enum ApiContentBlock {
     Thinking { thinking: String, signature: String },
     #[serde(rename = "image")]
     Image { source: ApiImageSource },
+    /// Effort carried by a mid-conversation control message. Only valid as the
+    /// content of an [`ApiMessage::effort_control`], which serializes it as
+    /// the message's `output_config` instead of a content block.
+    #[serde(skip)]
+    EffortControl(String),
     /// Provider-native block sent back exactly as the API produced it
     /// (`server_tool_use`, `web_search_tool_result`). Its own `type` field is
     /// kept, and its encrypted payloads must not be touched.

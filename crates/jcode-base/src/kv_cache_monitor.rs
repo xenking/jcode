@@ -117,6 +117,9 @@ pub struct RequestRoute {
     pub cache_ttl_secs: Option<u64>,
     /// Whether `cache_ttl_secs` is only an estimate (never treat as hard expiry).
     pub ttl_is_estimate: bool,
+    /// Reasoning effort the request was sent with, when the provider has one.
+    /// Some providers key their prompt cache on it.
+    pub reasoning_effort: Option<String>,
 }
 
 /// Why a request missed the cache.
@@ -126,6 +129,7 @@ pub enum MissReason {
     AccountSwitch,
     ModelSwitch,
     UpstreamSwitch,
+    EffortChange,
     Expired,
     DailyRollover,
     SystemChanged,
@@ -144,6 +148,7 @@ impl MissReason {
             Self::AccountSwitch => "account_switch",
             Self::ModelSwitch => "model_switch",
             Self::UpstreamSwitch => "upstream_switch",
+            Self::EffortChange => "effort_change",
             Self::Expired => "expired",
             Self::DailyRollover => "daily_rollover",
             Self::SystemChanged => "system_changed",
@@ -162,6 +167,7 @@ impl MissReason {
             Self::AccountSwitch => "account changed; prompt caches are per account",
             Self::ModelSwitch => "model changed",
             Self::UpstreamSwitch => "upstream provider changed",
+            Self::EffortChange => "reasoning effort changed",
             Self::Expired => "cache expired",
             Self::DailyRollover => {
                 "provider resets its prompt cache at 00:00 UTC; not avoidable by the harness"
@@ -301,6 +307,8 @@ pub struct MissContext<'a> {
     pub new_account: Option<&'a str>,
     pub old_upstream: Option<&'a str>,
     pub new_upstream: Option<&'a str>,
+    pub old_effort: Option<&'a str>,
+    pub new_effort: Option<&'a str>,
     /// Seconds between the previous request completing and this one starting.
     pub idle_secs: Option<u64>,
     pub ttl_secs: Option<u64>,
@@ -359,6 +367,11 @@ pub fn describe_miss(reason: MissReason, ctx: &MissContext<'_>) -> String {
             "upstream route switched {} -> {}; cache lives on the previous upstream",
             or_unknown(ctx.old_upstream),
             or_unknown(ctx.new_upstream)
+        ),
+        MissReason::EffortChange => format!(
+            "reasoning effort changed {} -> {}; this provider keys its prompt cache on the effort",
+            or_unknown(ctx.old_effort),
+            or_unknown(ctx.new_effort)
         ),
         MissReason::Expired => match (ctx.idle_secs, ctx.ttl_secs) {
             (Some(idle), Some(ttl)) => format!(
@@ -568,6 +581,8 @@ fn classify(
             new_account: new.account.as_deref(),
             old_upstream: old.upstream_provider.as_deref(),
             new_upstream: new.upstream_provider.as_deref(),
+            old_effort: old.reasoning_effort.as_deref(),
+            new_effort: new.reasoning_effort.as_deref(),
             idle_secs: Some(
                 pending
                     .started_at
@@ -617,6 +632,12 @@ fn reason(baseline: &Baseline, pending: &Pending, read: u64) -> Option<MissReaso
     {
         return Some(MissReason::UpstreamSwitch);
     }
+    if old.reasoning_effort.is_some()
+        && new.reasoning_effort.is_some()
+        && old.reasoning_effort != new.reasoning_effort
+    {
+        return Some(MissReason::EffortChange);
+    }
     if let Some(ttl) = old.cache_ttl_secs
         && !old.ttl_is_estimate
         && baseline.completed_at.elapsed() >= Duration::from_secs(ttl)
@@ -663,6 +684,7 @@ mod tests {
             account: None,
             cache_ttl_secs: Some(300),
             ttl_is_estimate: false,
+            reasoning_effort: None,
         }
     }
 
@@ -684,6 +706,37 @@ mod tests {
             None,
             "no baseline yet"
         );
+    }
+
+    #[test]
+    fn effort_change_is_attributed_with_from_to_detail() {
+        let mut monitor = KvCacheMonitor::new();
+        let mut medium = route();
+        medium.reasoning_effort = Some("medium".into());
+        monitor.begin_request(medium, sig(&[10, 11]));
+        monitor.finish_request(111_000, Some(110_000));
+        let mut high = route();
+        high.reasoning_effort = Some("high".into());
+        monitor.begin_request(high, sig(&[10, 11, 12]));
+        let miss = monitor.finish_request(112_000, Some(29_200)).expect("miss");
+        assert_eq!(miss.reason, MissReason::EffortChange);
+        assert!(!miss.reason.harness_caused());
+        assert!(
+            miss.message().contains("effort_change"),
+            "{}",
+            miss.message()
+        );
+        assert!(miss.detail.contains("medium -> high"), "{}", miss.detail);
+
+        // An unchanged or unknown effort never claims to be the cause.
+        let mut monitor = KvCacheMonitor::new();
+        let mut known = route();
+        known.reasoning_effort = Some("high".into());
+        monitor.begin_request(known, sig(&[10, 11]));
+        monitor.finish_request(111_000, Some(110_000));
+        monitor.begin_request(route(), sig(&[10, 11, 12]));
+        let miss = monitor.finish_request(112_000, Some(29_200)).expect("miss");
+        assert_eq!(miss.reason, MissReason::LowRead);
     }
 
     #[test]
@@ -823,6 +876,7 @@ mod tests {
             account: None,
             cache_ttl_secs: Some(1800),
             ttl_is_estimate: true,
+            reasoning_effort: None,
         }
     }
 

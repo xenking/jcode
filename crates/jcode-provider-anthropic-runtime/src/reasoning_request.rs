@@ -63,6 +63,11 @@ impl RetrySettings {
     }
 
     pub(super) fn reshape(&self, request: &mut ApiRequest, model: &str, is_oauth: bool) {
+        // Controls and the top-level effort they pin belong to the original
+        // model's cache. The fallback model starts its own cache at the
+        // caller's effort, and may not accept per-message effort at all.
+        jcode_provider_anthropic::effort_controls::strip_effort_controls(&mut request.messages);
+        request.effort_record = None;
         request.model = super::strip_1m_suffix(model).to_string();
         request.max_tokens = self
             .max_tokens_override
@@ -97,15 +102,19 @@ pub(super) fn recover_rejected_reasoning(
     model: &str,
     is_oauth: bool,
 ) -> bool {
+    // A rejected effort or thinking shape also rules out per-message effort.
+    let had_controls =
+        jcode_provider_anthropic::effort_controls::strip_effort_controls(&mut request.messages);
+    request.effort_record = None;
     if anthropic_thinking_always_on(model) {
         if request.output_config.take().is_none() {
-            return false;
+            return had_controls;
         }
         request.thinking = Some(adaptive_thinking(model));
         request.temperature = None;
     } else {
         if request.thinking.is_none() && request.output_config.is_none() {
-            return false;
+            return had_controls;
         }
         request.thinking = None;
         request.output_config = None;
@@ -132,6 +141,7 @@ mod tests {
             temperature: None,
             service_tier: None,
             stream: true,
+            effort_record: None,
         }
     }
 

@@ -42,7 +42,7 @@ async fn until(
 }
 
 #[test]
-fn claude_oauth_socket_effort_changes_the_next_http_request() {
+fn claude_oauth_socket_effort_change_keeps_cached_prefix_and_sends_control() {
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
     let account =
@@ -115,10 +115,19 @@ fn claude_oauth_socket_effort_changes_the_next_http_request() {
                             "not the OAuth transport: {headers}"
                         );
                         assert!(!headers.to_ascii_lowercase().contains("x-api-key:"));
-                        requests.push(
+                        let beta = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("anthropic-beta")
+                                    .then(|| value.trim().to_string())
+                            })
+                            .unwrap_or_default();
+                        let mut body =
                             serde_json::from_slice::<Value>(&request[end + 4..end + 4 + length])
-                                .unwrap(),
-                        );
+                                .unwrap();
+                        body["__anthropic_beta"] = Value::String(beta);
+                        requests.push(body);
                         break;
                     }
                 }
@@ -185,9 +194,59 @@ fn claude_oauth_socket_effort_changes_the_next_http_request() {
         assert_eq!(request["model"], "claude-opus-5-5");
         assert_eq!(request["thinking"]["type"], "adaptive");
     }
+    const BETA: &str = "mid-conversation-output-config-2026-07-01";
     assert_eq!(requests[0]["output_config"]["effort"], "high");
-    assert_eq!(
-        requests[medium_request]["output_config"]["effort"],
-        "medium"
+    // The top-level effort is part of Anthropic's prompt-cache key: it must stay
+    // byte-identical after a mid-session effort change.
+    let after = &requests[medium_request];
+    assert_eq!(after["output_config"], requests[0]["output_config"]);
+    assert_eq!(after["thinking"], requests[0]["thinking"]);
+    // The change is replayed as a mid-conversation control just before the
+    // user turn of the request that made it.
+    let messages = after["messages"].as_array().unwrap();
+    let controls: Vec<(usize, &Value)> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message["role"] == "system")
+        .collect();
+    assert_eq!(controls.len(), 1, "{messages:#?}");
+    let (index, control) = controls[0];
+    assert_eq!(control["content"], json!([]));
+    assert_eq!(control["output_config"], json!({"effort": "medium"}));
+    assert_eq!(messages[index + 1]["role"], "user");
+    assert_eq!(messages.last().unwrap()["role"], "user");
+    // Everything before the control is the previous request's prefix.
+    let before = requests[medium_request - 1]["messages"].as_array().unwrap();
+    for (sent, replayed) in before.iter().zip(messages) {
+        let strip = |value: &Value| {
+            let mut value = value.clone();
+            for block in value["content"].as_array_mut().into_iter().flatten() {
+                if let Some(block) = block.as_object_mut() {
+                    block.remove("cache_control");
+                }
+            }
+            value
+        };
+        if replayed["role"] == "system" {
+            break;
+        }
+        assert_eq!(strip(sent), strip(replayed));
+    }
+    assert!(
+        after["__anthropic_beta"]
+            .as_str()
+            .unwrap()
+            .split(',')
+            .any(|beta| beta == BETA),
+        "{}",
+        after["__anthropic_beta"]
+    );
+    assert!(
+        requests[0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| message["role"] != "system"),
+        "no control before any effort change"
     );
 }

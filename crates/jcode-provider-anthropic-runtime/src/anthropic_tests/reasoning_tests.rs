@@ -405,6 +405,7 @@ fn test_anthropic_opus_48_fast_mode_service_tier_serializes_priority() {
         temperature: None,
         service_tier: provider.current_service_tier_for_model(&provider.model()),
         stream: true,
+        effort_record: None,
     };
     let value = serde_json::to_value(&request).unwrap();
 

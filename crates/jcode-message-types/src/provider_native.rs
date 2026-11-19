@@ -62,6 +62,19 @@ pub fn is_anthropic_server_tool_block(block_type: &str) -> bool {
     ANTHROPIC_SERVER_TOOL_BLOCK_TYPES.contains(&block_type)
 }
 
+/// `type` of the hidden Anthropic item that records the reasoning effort a
+/// request ran at. The Anthropic provider replays it as a mid-conversation
+/// effort control so the top-level `output_config` (part of the prompt-cache
+/// key) never changes mid-session. It has no display form, so transcripts,
+/// compaction summaries and other providers drop it.
+pub const ANTHROPIC_EFFORT_CONTROL_TYPE: &str = "jcode_effort_control";
+
+/// True for provider-native items that only carry request bookkeeping and are
+/// never shown or replayed as content.
+pub fn is_hidden_control_item(item: &Value) -> bool {
+    str_field(item, "type") == Some(ANTHROPIC_EFFORT_CONTROL_TYPE)
+}
+
 /// True when a tool call id belongs to a provider-executed tool (Anthropic
 /// `srvtoolu_*`, OpenAI `ws_*`). Such rows are streamed mid-response, so a
 /// retry rollback must discard them along with the attempt's text.
@@ -363,6 +376,19 @@ impl ProviderNativeItems {
     /// skipped. With no items this is just the single text block (if any).
     pub fn interleave(&self, text: &str) -> Vec<crate::ContentBlock> {
         let mut blocks = Vec::new();
+        // Hidden bookkeeping items have no position in the response. Keep
+        // them first so checks on the last block (a paused server tool turn)
+        // still see the real response tail.
+        for (_, provider, item) in self
+            .items
+            .iter()
+            .filter(|(_, _, item)| is_hidden_control_item(item))
+        {
+            blocks.push(crate::ContentBlock::ProviderNative {
+                provider: provider.clone(),
+                item: item.clone(),
+            });
+        }
         let mut cursor = 0usize;
         let push_text = |blocks: &mut Vec<crate::ContentBlock>, segment: &str| {
             if !segment.trim().is_empty() {
@@ -373,6 +399,9 @@ impl ProviderNativeItems {
             }
         };
         for (offset, provider, item) in &self.items {
+            if is_hidden_control_item(item) {
+                continue;
+            }
             let mut at = (*offset).clamp(cursor, text.len());
             while !text.is_char_boundary(at) {
                 at += 1;

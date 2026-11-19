@@ -966,6 +966,55 @@ impl AnthropicProvider {
         (thinking, output_config, temperature)
     }
 
+    /// Keep the top-level effort byte-stable across the conversation and replay
+    /// each effort change as a mid-conversation control (see
+    /// [`jcode_provider_anthropic::effort_controls`]). Only on Anthropic's own
+    /// API for models that accept per-message effort, and only with thinking
+    /// on: Anthropic rejects a per-message effort with thinking disabled.
+    /// Everything else keeps the plain top-level effort.
+    fn plan_effort_controls<'a>(
+        &self,
+        messages: &'a [Message],
+        model: &str,
+        is_oauth: bool,
+        thinking: &Option<ApiThinking>,
+        output_config: Option<ApiOutputConfig>,
+    ) -> (
+        std::borrow::Cow<'a, [Message]>,
+        Option<ApiOutputConfig>,
+        Option<Value>,
+    ) {
+        let supported = (is_oauth || self.first_party_api())
+            && thinking.is_some()
+            && jcode_provider_core::anthropic_per_message_effort(model);
+        let plan = supported
+            .then(|| {
+                jcode_provider_anthropic::effort_controls::plan_effort_controls(
+                    messages,
+                    strip_1m_suffix(model),
+                    output_config.as_ref().map(|config| config.effort.as_str()),
+                )
+            })
+            .flatten();
+        let Some(plan) = plan else {
+            return (std::borrow::Cow::Borrowed(messages), output_config, None);
+        };
+        if !plan.inserts.is_empty() {
+            jcode_base::logging::info(&format!(
+                "Anthropic effort controls: top_level={} effort={} controls={}",
+                plan.top_level,
+                plan.effort,
+                plan.inserts.len()
+            ));
+        }
+        let messages =
+            jcode_provider_anthropic::effort_controls::insert_effort_controls(messages, &plan);
+        let output_config = Some(ApiOutputConfig {
+            effort: plan.top_level,
+        });
+        (messages, output_config, Some(plan.record))
+    }
+
     /// Get the access token from credentials
     /// Supports both OAuth tokens and direct API keys
     /// Automatically refreshes OAuth tokens when expired
@@ -1333,6 +1382,7 @@ mod canonical_input_tests {
                 temperature: Some(0.5),
                 service_tier: None,
                 stream: true,
+                effort_record: None,
             };
             let messages = serde_json::to_value(&request.messages).unwrap();
             let system = request
@@ -1404,10 +1454,12 @@ impl Provider for AnthropicProvider {
         );
         let tools = native_web_search::without_local_websearch(tools, &server_tools);
         let api_tools = self.format_tools(&tools, is_oauth);
-        let api_messages =
-            self.format_messages_native(messages, is_oauth, &api_tools, !server_tools.is_empty());
         let (thinking, output_config, temperature) =
             self.build_reasoning_request_parts(&model, is_oauth);
+        let (messages, output_config, effort_record) =
+            self.plan_effort_controls(messages, &model, is_oauth, &thinking, output_config);
+        let api_messages =
+            self.format_messages_native(&messages, is_oauth, &api_tools, !server_tools.is_empty());
 
         let request = ApiRequest {
             model: api_model,
@@ -1425,6 +1477,7 @@ impl Provider for AnthropicProvider {
             temperature,
             service_tier: self.current_service_tier_for_model(&model),
             stream: true,
+            effort_record,
         };
 
         log_anthropic_canonical_input(&model, "anthropic_messages", &request, is_oauth, false);
@@ -1850,10 +1903,12 @@ impl Provider for AnthropicProvider {
         );
         let tools = native_web_search::without_local_websearch(tools, &server_tools);
         let api_tools = self.format_tools(&tools, is_oauth);
-        let api_messages =
-            self.format_messages_native(messages, is_oauth, &api_tools, !server_tools.is_empty());
         let (thinking, output_config, temperature) =
             self.build_reasoning_request_parts(&model, is_oauth);
+        let (messages, output_config, effort_record) =
+            self.plan_effort_controls(messages, &model, is_oauth, &thinking, output_config);
+        let api_messages =
+            self.format_messages_native(&messages, is_oauth, &api_tools, !server_tools.is_empty());
 
         let request = ApiRequest {
             model: api_model,
@@ -1871,6 +1926,7 @@ impl Provider for AnthropicProvider {
             temperature,
             service_tier: self.current_service_tier_for_model(&model),
             stream: true,
+            effort_record,
         };
 
         log_anthropic_canonical_input(&model, "anthropic_messages_split", &request, is_oauth, true);
@@ -2055,6 +2111,10 @@ async fn stream_response(
             request.thinking.is_some(),
         );
         let beta_header = reasoning_request::with_binding_beta(&beta_header, &request.thinking);
+        let beta_header = jcode_provider_anthropic::effort_controls::with_effort_control_beta(
+            &beta_header,
+            &request.messages,
+        );
         req = apply_oauth_attribution_headers(
             req.header("Authorization", format!("Bearer {}", token))
                 .header("User-Agent", CLAUDE_CLI_USER_AGENT)
@@ -2072,6 +2132,10 @@ async fn stream_response(
         let beta_header =
             anthropic_beta_header_with_thinking(beta_header, request.thinking.is_some());
         let beta_header = reasoning_request::with_binding_beta(&beta_header, &request.thinking);
+        let beta_header = jcode_provider_anthropic::effort_controls::with_effort_control_beta(
+            &beta_header,
+            &request.messages,
+        );
         req = match direct_transport.auth_mode.as_str() {
             "none" => req,
             "bearer" => req.header("Authorization", format!("Bearer {token}")),
@@ -2173,6 +2237,21 @@ async fn stream_response(
         while let Some(event) = parse_sse_event(&mut buffer) {
             let events = process_sse_event(&event, &mut sse_state, is_oauth);
             if event.event_type == "message_stop" {
+                // Record the effort this request ran at with its response, so
+                // later requests replay a change at this exact position.
+                if let Some(record) = request.effort_record.clone()
+                    && tx
+                        .send(Ok(StreamEvent::ProviderNative {
+                            provider:
+                                jcode_message_types::provider_native::PROVIDER_NATIVE_ANTHROPIC
+                                    .to_string(),
+                            item: record,
+                        }))
+                        .await
+                        .is_err()
+                {
+                    return Ok(());
+                }
                 usage_recording::record(usage_label, &request.model, &sse_state).await;
                 usage_recording::send_final_usage(&tx, &sse_state).await;
                 return Ok(());
