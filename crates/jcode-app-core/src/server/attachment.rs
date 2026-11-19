@@ -8,6 +8,10 @@ use std::{
 
 const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_TOTAL_BYTES: usize = 20 * 1024 * 1024;
+/// Text above this size reaches the model as a saved-file reference, which it
+/// reads in slices with its tools. Inlining is only for content small enough
+/// to be worth spending context on unread: 64 KiB is roughly 16k tokens.
+const MAX_INLINE_TEXT_BYTES: usize = 64 * 1024;
 
 pub(crate) struct PreparedAttachments {
     pub text: String,
@@ -197,7 +201,17 @@ pub(crate) fn prepare(dir: &Path, attachments: Vec<Attachment>) -> Result<Prepar
     for (name, mime, bytes, pasted) in decoded {
         if pasted {
             let text = String::from_utf8(bytes)?;
-            result.text.push_str(&format!("\n\n[Pasted text]\n{text}"));
+            if text.len() > MAX_INLINE_TEXT_BYTES {
+                let path = save(dir, text.as_bytes())?;
+                result.text.push_str(&format!(
+                    "\n\n[Pasted text: {} bytes, {} lines, saved at {}. Too large to inline: read the parts you need from that file.]",
+                    text.len(),
+                    text.lines().count(),
+                    path.display()
+                ));
+            } else {
+                result.text.push_str(&format!("\n\n[Pasted text]\n{text}"));
+            }
             result.items.push(StoredAttachment::PastedText { text });
             continue;
         }
@@ -217,6 +231,7 @@ pub(crate) fn prepare(dir: &Path, attachments: Vec<Attachment>) -> Result<Prepar
                     | "application/x-yaml"
             )
             || is_code_filename(&name))
+            && bytes.len() <= MAX_INLINE_TEXT_BYTES
             && std::str::from_utf8(&bytes).is_ok()
         {
             result.text.push_str(&format!(
@@ -225,25 +240,15 @@ pub(crate) fn prepare(dir: &Path, attachments: Vec<Attachment>) -> Result<Prepar
                 std::str::from_utf8(&bytes)?
             ));
         } else {
-            let mut builder = std::fs::DirBuilder::new();
-            builder.recursive(true);
-            #[cfg(unix)]
+            let path = save(dir, &bytes)?;
+            let hint = if bytes.len() > MAX_INLINE_TEXT_BYTES && std::str::from_utf8(&bytes).is_ok()
             {
-                use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
-            builder.create(dir)?;
-            let path = dir.join(uuid::Uuid::new_v4().to_string());
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            options.open(&path)?.write_all(&bytes)?;
+                ". Too large to inline: read the parts you need from that file."
+            } else {
+                ""
+            };
             result.text.push_str(&format!(
-                "\n\n[Attachment: {name} ({mime}, {} bytes), saved at {}]",
+                "\n\n[Attachment: {name} ({mime}, {} bytes), saved at {}{hint}]",
                 bytes.len(),
                 path.display()
             ));
@@ -257,6 +262,28 @@ pub(crate) fn prepare(dir: &Path, attachments: Vec<Attachment>) -> Result<Prepar
         });
     }
     Ok(result)
+}
+
+/// Write attachment bytes to a private file under the session's attachment dir.
+fn save(dir: &Path, bytes: &[u8]) -> Result<std::path::PathBuf> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)?;
+    let path = dir.join(uuid::Uuid::new_v4().to_string());
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(&path)?.write_all(bytes)?;
+    Ok(path)
 }
 
 fn is_code_filename(name: &str) -> bool {
