@@ -178,7 +178,7 @@ impl OpenAiEmbeddingBackend {
         let vectors = std::thread::scope(|scope| {
             scope
                 .spawn(move || -> Result<Vec<Vec<f32>>> {
-                    let client = reqwest::blocking::Client::builder()
+                    let client = jcode_provider_core::reqwest_blocking_builder()
                         .timeout(std::time::Duration::from_secs(60))
                         .build()?;
                     let request = {

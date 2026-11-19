@@ -253,7 +253,7 @@ pub struct SyncedSession {
 
 /// Bounded account inventory read for UI background workers.
 pub async fn discover_cloud_sessions() -> Result<Vec<SyncedSession>> {
-    let client = reqwest::Client::new();
+    let client = jcode_provider_core::reqwest_builder().build()?;
     tokio::time::timeout(Duration::from_secs(8), list_cloud_sessions(&client))
         .await
         .context("mobile session discovery timed out")?
@@ -1168,7 +1168,9 @@ pub fn spawn_background_sync() {
 }
 
 async fn background_sync() {
-    let client = reqwest::Client::new();
+    let client = jcode_provider_core::reqwest_builder()
+        .build()
+        .expect("mobile sync HTTP client should build");
     let mut ticks = tokio::time::interval(SYNC_INTERVAL);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {

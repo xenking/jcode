@@ -898,7 +898,10 @@ pub const JCODE_USER_AGENT: &str = concat!("jcode/", env!("CARGO_PKG_VERSION"));
 mod http_client;
 pub use http_client::fresh_transport_client;
 pub use http_client::http_error_body;
+#[cfg(feature = "blocking-http")]
+pub use http_client::reqwest_blocking_builder;
 pub use http_client::shared_http_client;
+pub use http_client::{reqwest_builder, reqwest_http1_builder, websocket_tls_config};
 
 #[derive(Debug, Clone)]
 pub struct NativeCompactionResult {

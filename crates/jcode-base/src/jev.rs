@@ -511,7 +511,7 @@ fn client_builder() -> reqwest::ClientBuilder {
 }
 
 fn client_builder_for(bypass_proxy: bool) -> reqwest::ClientBuilder {
-    let builder = Client::builder()
+    let builder = jcode_provider_core::reqwest_builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(25))
         .redirect(reqwest::redirect::Policy::none());
