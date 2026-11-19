@@ -6,10 +6,7 @@ use super::streaming::StreamUsageRecorder;
 #[path = "tool_handoff.rs"]
 mod tool_handoff;
 pub(super) use tool_handoff::execute_with_background;
-use tool_handoff::{
-    auto_background_allowed, incomplete_turn_stop, reload_interrupted_tool_result,
-    wait_for_tool_handoff,
-};
+use tool_handoff::{incomplete_turn_stop, reload_interrupted_tool_result, wait_for_tool_handoff};
 
 struct ForegroundToolAbortGuard(Option<tokio::task::AbortHandle>);
 

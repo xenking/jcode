@@ -151,6 +151,7 @@ fn populated_agent(index: usize) -> Agent {
         covers_up_to_turn: 2,
         original_turn_count: 8,
         compacted_count: 2,
+        snapcompact: None,
     }));
     Agent::new_with_session(
         Arc::new(NoRequests),

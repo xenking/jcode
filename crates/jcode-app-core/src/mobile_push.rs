@@ -1159,6 +1159,7 @@ mod tests {
             origin: Some("XPS 14".to_string()),
             repo: Some("jcode-mobile".to_string()),
             elapsed: Some(Duration::from_secs(252)),
+            todos: None,
         };
         let p = build_payload_with(
             PushKind::TurnDone,

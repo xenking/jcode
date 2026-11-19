@@ -139,7 +139,7 @@ run_checks() {
       run justrust check -p jcode --bins
       # Fork-only features (AGENTS.md "Fork notes") and the stack fixes they rely on.
       run justrust test -p jcode-codemode
-      run justrust test -p jcode-voice --lib
+      run justrust test -p jcode-voice --lib --features desktop-test-support
       run justrust test -p jcode-base --lib mcp
       run justrust test -p jcode-app-core --lib tool::ask
       run justrust test -p jcode-app-core --lib server::socket

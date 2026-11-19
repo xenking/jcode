@@ -10,6 +10,7 @@ pub(super) fn message(blocks: Vec<ContentBlock>) -> StoredMessage {
         timestamp: None,
         tool_duration_ms: None,
         token_usage: None,
+        attachment_data: None,
     }
 }
 pub(super) fn text(text: &str) -> ContentBlock {

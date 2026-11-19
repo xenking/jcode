@@ -155,6 +155,7 @@ fn normalize_session_short_name_strips_wrapping_punctuation() {
     );
 }
 
+#[cfg(feature = "desktop-test-support")]
 #[test]
 fn remember_and_read_last_focused_session() {
     let _guard = jcode_base::storage::lock_test_env();

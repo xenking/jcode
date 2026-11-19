@@ -342,7 +342,9 @@ pub fn render_messages_and_images_with_compacted_history(
                         attachments: Vec::new(),
                     });
                 }
-                ContentBlock::OpenAICompaction { .. } | ContentBlock::ToolReference { .. } => {}
+                ContentBlock::OpenAICompaction { .. }
+                | ContentBlock::ToolReference { .. }
+                | ContentBlock::Unknown => {}
             }
         }
 
