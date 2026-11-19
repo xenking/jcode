@@ -761,11 +761,25 @@ pub(super) async fn handle_client(
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         // A catalog update may also have been lost.
                         model_catalog_retry.queue();
+                        // So may a turn release: dispatch anything now due.
+                        if !client_is_processing && !crate::turn_cancel_registry::has_active_turn(&client_session_id) {
+                            dispatch_queued_prompt!(!super::state::turn_stop_log::last_turn_yielded(&client_session_id));
+                        }
                         let event = super::client_writer::todos_snapshot_event(&client_session_id);
                         let key = todos_event_key(&event);
                         if key != last_pushed_todos {
                             last_pushed_todos = key;
                             send_client_event_best_effort(&client_event_tx, event, "client_lifecycle: forwarded event");
+                        }
+                    }
+                    Ok(BusEvent::TurnReleased(session_id)) => {
+                        // Turns the daemon starts itself (swarm reports,
+                        // background completions) have no processing task on
+                        // this connection, so their end is only seen here.
+                        // Without this, held after-yield prompts waited until
+                        // an unrelated request swept them into the wrong turn.
+                        if session_id == client_session_id && !client_is_processing {
+                            dispatch_queued_prompt!(!super::state::turn_stop_log::last_turn_yielded(&client_session_id));
                         }
                     }
                     Ok(BusEvent::BatchProgress(progress)) => {
@@ -1289,7 +1303,9 @@ pub(super) async fn handle_client(
                         ).await;
                         dispatch_queued_prompt!(true);
                     } else if dispatch_if_idle {
-                        dispatch_queued_prompt!(false);
+                        // After a Stop or failure the queue stays held: only
+                        // prompts the user explicitly sends now may start.
+                        dispatch_queued_prompt!(!super::state::turn_stop_log::last_turn_yielded(&client_session_id));
                     }
                 }
                 Err(error) => { send_client_event_best_effort(&client_event_tx, ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None }, "client_lifecycle: Error"); }

@@ -588,7 +588,7 @@ pub(super) async fn fanout_peer_client_event(
 }
 
 #[path = "turn_stop_log.rs"]
-mod turn_stop_log;
+pub(super) mod turn_stop_log;
 
 /// Owns one turn's event queue. Closing or aborting the producer drains all
 /// accepted events before releasing the runtime's publication reservation.
@@ -612,6 +612,7 @@ impl TurnEventChannel {
         let task = tokio::spawn(async move {
             let _publication = publication;
             let mut stop_log = turn_stop_log::StopLog::default();
+            turn_stop_log::begin_turn(&session_id);
             // A hard process termination cannot emit TURN_STOP. This paired
             // marker lets investigators detect a turn with no terminal record.
             crate::logging::event_info(

@@ -65,22 +65,32 @@ impl Default for TurnOwnership {
 }
 
 struct Reservation {
-    _activity: crate::turn_activity::AdmissionGuard,
-    _guard: OwnedMutexGuard<()>,
+    activity: Option<crate::turn_activity::AdmissionGuard>,
+    guard: Option<OwnedMutexGuard<()>>,
     observer: TurnObserver,
     identity: TurnIdentity,
+    session_id: String,
 }
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        let mut state = self
-            .observer
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.active.as_ref() == Some(&self.identity) {
-            state.active = None;
+        {
+            let mut state = self
+                .observer
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.active.as_ref() == Some(&self.identity) {
+                state.active = None;
+            }
         }
+        // Open the gate before announcing it: a listener that reacts by
+        // claiming the next turn must not find this one still holding it.
+        drop(self.guard.take());
+        drop(self.activity.take());
+        crate::bus::Bus::global().publish(crate::bus::BusEvent::TurnReleased(std::mem::take(
+            &mut self.session_id,
+        )));
     }
 }
 
@@ -154,20 +164,22 @@ impl TurnOwnership {
         state.active = Some(identity.clone());
         Ok(TurnLease {
             reservation: Arc::new(Reservation {
-                _activity: activity,
-                _guard: guard,
+                activity: Some(activity),
+                guard: Some(guard),
                 observer: self.observer.clone(),
                 identity,
+                session_id: session_id.to_owned(),
             }),
         })
     }
 
     pub(super) fn validate(&self, lease: &TurnLease) -> anyhow::Result<()> {
         anyhow::ensure!(
-            Arc::ptr_eq(
-                &self.gate,
-                OwnedMutexGuard::mutex(&lease.reservation._guard)
-            ),
+            lease
+                .reservation
+                .guard
+                .as_ref()
+                .is_some_and(|guard| Arc::ptr_eq(&self.gate, OwnedMutexGuard::mutex(guard))),
             "Turn reservation belongs to another runtime"
         );
         Ok(())

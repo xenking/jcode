@@ -488,6 +488,10 @@ pub enum BusEvent {
     UpdateStatus(UpdateStatus),
     /// Interactive client update status for a specific session
     SessionUpdateStatus(SessionUpdateStatus),
+    /// A session's turn reservation was released. Carries the session id.
+    /// Queued after-yield prompts wait for exactly this, whichever owner
+    /// (client, swarm wake, background completion) ran the turn.
+    TurnReleased(String),
     /// External dictation command completed with transcript text
     DictationCompleted {
         dictation_id: String,

@@ -6,6 +6,32 @@ pub(super) struct StopLog {
     reason: Option<&'static str>,
     provider: Option<&'static str>,
     emitted: bool,
+    final_reason: Option<&'static str>,
+}
+
+/// Outcome of the most recent finished turn per session. Read when the turn's
+/// reservation is released, to decide whether held after-yield prompts run.
+static LAST_OUTCOME: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, &'static str>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Whether the last finished turn of `session` ended in a way that lets
+/// after-yield prompts follow. A cancel, failure or crash keeps them queued
+/// for the user; any turn with no recorded outcome counts as a yield.
+pub(crate) fn last_turn_yielded(session: &str) -> bool {
+    let outcomes = LAST_OUTCOME.lock().unwrap_or_else(|e| e.into_inner());
+    !matches!(
+        outcomes.get(session).copied(),
+        Some("interrupted" | "failure" | "crash")
+    )
+}
+
+/// A new turn supersedes the previous outcome until it records its own.
+pub(super) fn begin_turn(session: &str) {
+    LAST_OUTCOME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(session);
 }
 
 impl StopLog {
@@ -69,6 +95,7 @@ impl StopLog {
                     }
                 });
                 self.emitted = true;
+                self.final_reason = Some(reason);
                 return Some((*id, reason));
             }
             _ => {}
@@ -117,7 +144,14 @@ impl StopLog {
         if !self.emitted {
             // A missing terminal event is not evidence of a crash.
             self.log(session, identity, None, self.reason.unwrap_or("unknown"));
+            self.final_reason = Some(self.reason.unwrap_or("unknown"));
             self.emitted = true;
+        }
+        if let Some(reason) = self.final_reason {
+            LAST_OUTCOME
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(session.to_owned(), reason);
         }
     }
 }

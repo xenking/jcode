@@ -446,6 +446,137 @@ async fn daemon_accepts_queue_immediately_after_turn_done() {
     handle.await.unwrap();
 }
 
+/// A server-owned turn (swarm wake, background completion) has no client
+/// processing task. When it ends, after-yield prompts the user queued during it
+/// must run as their own turn, and a later interrupt of one new prompt must
+/// never carry the older after-yield prompts along with it.
+#[cfg(unix)]
+#[tokio::test]
+async fn after_yield_queue_runs_when_a_server_owned_turn_yields() {
+    use crate::server::runtime::ServerRuntime;
+    use serde_json::json;
+    let _lock = crate::storage::lock_test_env();
+    let home = IsolatedReloadRecoveryEnv::new();
+    let provider = TerminalSocketProvider::default();
+    let socket = home._runtime.path().join("wake-yield.sock");
+    let server = crate::server::Server::new_with_paths(
+        Arc::new(provider.clone()),
+        socket.clone(),
+        home._runtime.path().join("wake-yield-debug.sock"),
+    );
+    let runtime = ServerRuntime::from_server(&server);
+    let handle = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
+    let (reader, mut writer) = crate::transport::Stream::connect(&socket)
+        .await
+        .unwrap()
+        .into_split();
+    let mut reader = BufReader::new(reader);
+    async fn send(writer: &mut crate::transport::WriteHalf, value: serde_json::Value) {
+        writer
+            .write_all(format!("{value}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+    async fn until(
+        reader: &mut BufReader<crate::transport::ReadHalf>,
+        predicate: impl Fn(&ServerEvent) -> bool,
+    ) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                let event: ServerEvent = serde_json::from_str(&line).unwrap();
+                if predicate(&event) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("daemon event timeout");
+    }
+    send(
+        &mut writer,
+        json!({"type":"subscribe","id":1,"working_dir":home._home.path()}),
+    )
+    .await;
+    until(&mut reader, |e| matches!(e, ServerEvent::Done { id: 1 })).await;
+    let session_id = server.sessions.read().await.keys().next().unwrap().clone();
+
+    // A wake turn the daemon starts on its own, like a swarm report.
+    let swarm = crate::server::live_turn::LiveTurnSwarmContext::new(
+        &server.swarm_state.members,
+        &server.swarm_state.swarms_by_id,
+        &server.event_history,
+        &server.event_counter,
+        &server.swarm_event_tx,
+    );
+    assert!(
+        crate::server::live_turn::run_live_turn_if_idle(
+            &session_id,
+            "worker reported",
+            None,
+            &server.sessions,
+            swarm,
+        )
+        .await
+    );
+    tokio::time::timeout(Duration::from_secs(5), provider.first_started.notified())
+        .await
+        .unwrap();
+    for (id, client_id, content) in [(3, "q1", "held one"), (4, "q2", "held two")] {
+        send(&mut writer, json!({"type":"queue_prompt","id":id,"client_id":client_id,"content":content,"mode":"after_yield"})).await;
+        until(
+            &mut reader,
+            |e| matches!(e, ServerEvent::Ack { id: n } if *n == id),
+        )
+        .await;
+    }
+    provider.finish_first.notify_one();
+
+    // The wake turn yields: the held prompts run as the next turn, alone.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while provider.calls.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("after-yield prompts were not delivered when the wake turn yielded");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while crate::turn_cancel_registry::has_active_turn(&session_id) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    // A brand-new prompt sent now must run without the old ones.
+    send(&mut writer, json!({"type":"queue_prompt","id":5,"client_id":"fresh","content":"fresh prompt","mode":"after_yield"})).await;
+    send(
+        &mut writer,
+        json!({"type":"interrupt_queued_prompts","id":6,"ids":["fresh"]}),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while provider.calls.load(Ordering::SeqCst) < 3 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("fresh prompt was not delivered");
+    let messages = provider.messages.lock().unwrap().clone();
+    let count = |call: &[String], needle: &str| call.iter().filter(|t| t.contains(needle)).count();
+    assert_eq!(count(&messages[1], "held one"), 1, "{messages:?}");
+    assert_eq!(count(&messages[1], "held two"), 1, "{messages:?}");
+    assert_eq!(count(&messages[1], "fresh prompt"), 0, "{messages:?}");
+    // The third request repeats history, so the held prompts appear once each.
+    assert_eq!(count(&messages[2], "held one"), 1, "{messages:?}");
+    assert_eq!(count(&messages[2], "fresh prompt"), 1, "{messages:?}");
+    drop(writer);
+    drop(reader);
+    runtime.shutdown().await;
+    handle.await.unwrap();
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn daemon_delivers_switched_steer_before_ordered_followups() {
