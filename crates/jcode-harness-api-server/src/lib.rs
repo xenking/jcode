@@ -347,8 +347,7 @@ async fn handle_api_client(
 /// while SSH still holds stdin open. This entrypoint is for a CLI process only.
 #[cfg(unix)]
 pub async fn run_bridge_stdio(legacy_socket: PathBuf) -> Result<()> {
-    capture_bridge_identity()
-        .context("capture stdio bridge generation before accepting input")?;
+    capture_bridge_identity().context("capture stdio bridge generation before accepting input")?;
     drop(search_index::warm_on_start());
     let (input, mut writer) = std::os::unix::net::UnixStream::pair()?;
     input.set_nonblocking(true)?;

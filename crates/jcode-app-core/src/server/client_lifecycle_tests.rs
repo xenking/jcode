@@ -338,6 +338,8 @@ fn identity_transport_negotiation_preserves_legacy_payload_shape() {
         .is_none()
     );
 }
+#[path = "client_lifecycle_daemon_continuation_socket_tests.rs"]
+mod daemon_continuation_socket_tests;
 
 fn turn_payload(event: ServerEvent) -> ServerEvent {
     match event {

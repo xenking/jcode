@@ -277,10 +277,7 @@ mod tests {
         ];
         let mut rows = vec![row(1)];
         attach(&messages, &mut rows);
-        assert_eq!(
-            rows[0].response_stats.as_ref().unwrap().prompt_tokens,
-            None
-        );
+        assert_eq!(rows[0].response_stats.as_ref().unwrap().prompt_tokens, None);
     }
 
     #[test]

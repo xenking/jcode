@@ -328,7 +328,10 @@ fn reason_and_tags(status: &SessionStatus) -> (String, Vec<String>) {
             vec!["failed".to_string(), "error".to_string()],
         ),
         SessionStatus::Active => ("Still active.".to_string(), vec!["active".to_string()]),
-        SessionStatus::Unknown => ("Status is unknown.".to_string(), vec!["unknown".to_string()]),
+        SessionStatus::Unknown => (
+            "Status is unknown.".to_string(),
+            vec!["unknown".to_string()],
+        ),
     }
 }
 

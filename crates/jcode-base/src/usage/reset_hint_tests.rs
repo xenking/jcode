@@ -139,7 +139,10 @@ fn allowed_flag_keeps_rounded_full_window_usable() {
         .as_mut()
         .unwrap()
         .ordinary_usage_allowed = None;
-    assert!(usage.exhausted(), "without the flag the window heuristic applies");
+    assert!(
+        usage.exhausted(),
+        "without the flag the window heuristic applies"
+    );
     usage.hard_limit_reached = true;
     usage
         .openai_reset_credits

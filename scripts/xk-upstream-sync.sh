@@ -189,7 +189,7 @@ cleanup() {
 names=()
 case "$repo" in jcode) names=(jcode) ;; desktop) names=(desktop) ;; all) names=(jcode desktop) ;; esac
 
-for n in jcode desktop; do check_remotes "$n"; done
+for n in "${names[@]}"; do check_remotes "$n"; done
 if $dry; then
   for n in "${names[@]}"; do
     read -r src branch _up < <(fork_info "$n")

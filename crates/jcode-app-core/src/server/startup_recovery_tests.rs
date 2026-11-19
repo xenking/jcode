@@ -876,8 +876,8 @@ async fn startup_recovery_resumes_worker_whose_earlier_continuation_was_consumed
         },
         "previous reload",
     )?;
-    let mut consumed = super::super::reload_recovery::peek_for_session(&worker.id)?
-        .expect("persisted intent");
+    let mut consumed =
+        super::super::reload_recovery::peek_for_session(&worker.id)?.expect("persisted intent");
     consumed.status = super::super::reload_recovery::ReloadRecoveryStatus::Started;
     crate::storage::write_json(
         &super::super::reload_recovery::path_for_session(&worker.id)?,
@@ -888,7 +888,12 @@ async fn startup_recovery_resumes_worker_whose_earlier_continuation_was_consumed
         swarm_id,
         None,
         None,
-        &[persisted_headless_member(&worker.id, swarm_id, "running", "bash tool")],
+        &[persisted_headless_member(
+            &worker.id,
+            swarm_id,
+            "running",
+            "bash tool",
+        )],
     );
 
     let server = Server::new(provider);

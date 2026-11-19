@@ -576,5 +576,8 @@ async fn disconnect_keeps_server_owned_turn_published() {
     assert!(fixture.connections.read().await.is_empty());
     let members = fixture.members.read().await;
     let member = members.get(&fixture.id).expect("session stays a member");
-    assert!(member.event_txs.is_empty(), "only the transport is released");
+    assert!(
+        member.event_txs.is_empty(),
+        "only the transport is released"
+    );
 }

@@ -5,6 +5,8 @@
 //!
 //! Also provides debug socket events for exposing full TUI state.
 
+#[path = "backend_screen.rs"]
+mod screen;
 mod ssh_sessions;
 
 use crate::message::ToolCall;
@@ -259,6 +261,9 @@ pub struct RemoteConnection {
     _dummy_peer: Option<Stream>,
     session_id: Option<String>,
     cloud_authority: Option<std::sync::Weak<std::sync::atomic::AtomicBool>>,
+    screen_feed: Option<screen::ScreenFeed>,
+    pub(crate) jarvis_tools_configured: bool,
+    pub(crate) local_tools_request: Option<u64>,
     cloud_callbacks: Vec<tokio::task::AbortHandle>,
     client_instance_id: Option<String>,
     next_request_id: u64,
@@ -349,6 +354,9 @@ fn remote_protocol_frame_exceeds_limit(buffered: usize, incoming: usize) -> bool
 }
 
 pub(crate) trait RemoteEventState {
+    fn finish_local_tools_request(&mut self, _id: u64, _accepted: bool) -> bool {
+        false
+    }
     /// Replay has no outstanding control requests. Live connections track IDs.
     fn finish_runtime_command(&mut self, _id: u64) -> bool {
         false
@@ -470,6 +478,9 @@ impl RemoteConnection {
             server_accepts_force_stop: false,
             last_keyboard_cancel: None,
             cloud_authority: None,
+            screen_feed: None,
+            jarvis_tools_configured: false,
+            local_tools_request: None,
             cloud_callbacks: Vec::new(),
             client_instance_id: client_instance_id.map(str::to_string),
             // Keep reattached turn Done distinct from bootstrap acknowledgments.
@@ -751,10 +762,12 @@ impl RemoteConnection {
 
     /// Clear the server-side conversation and replace it with a fresh session.
     pub async fn clear(&mut self) -> Result<u64> {
-        let had_cloud_authority = self.cloud_authority.is_some();
+        let had_cloud_authority = self.cloud_authority.is_some()
+            || self.jarvis_tools_configured
+            || self.local_tools_request.is_some();
         self.revoke_cloud_authority();
         if had_cloud_authority {
-            self.configure_cloud_tools(Default::default()).await?;
+            self.clear_local_tools().await?;
         }
         let id = self.next_request_id;
         self.next_request_id += 1;
@@ -1009,10 +1022,12 @@ impl RemoteConnection {
     /// Resume a specific session by ID
     pub async fn resume_session(&mut self, session_id: &str) -> Result<()> {
         if self.session_id.as_deref() != Some(session_id) {
-            let had_cloud_authority = self.cloud_authority.is_some();
+            let had_cloud_authority = self.cloud_authority.is_some()
+                || self.jarvis_tools_configured
+                || self.local_tools_request.is_some();
             self.revoke_cloud_authority();
             if had_cloud_authority {
-                self.configure_cloud_tools(Default::default()).await?;
+                self.clear_local_tools().await?;
             }
         }
         let request = Request::ResumeSession {
@@ -1626,6 +1641,9 @@ impl RemoteConnection {
             server_accepts_force_stop: false,
             last_keyboard_cancel: None,
             cloud_authority: None,
+            screen_feed: None,
+            jarvis_tools_configured: false,
+            local_tools_request: None,
             cloud_callbacks: Vec::new(),
             client_instance_id: None,
             next_request_id: 1,
@@ -1660,6 +1678,11 @@ impl RemoteConnection {
 
     /// Set session ID
     pub fn set_session_id(&mut self, id: String) {
+        if self.session_id.as_deref() != Some(id.as_str()) {
+            self.stop_screen_context();
+            self.jarvis_tools_configured = false;
+            self.local_tools_request = None;
+        }
         self.session_id = Some(id);
     }
 

@@ -1007,6 +1007,10 @@ impl crate::tui::TuiState for App {
         self.remote_client_count
     }
 
+    fn jarvis_transcript(&self) -> Option<&std::collections::VecDeque<crate::tui::JarvisCaption>> {
+        Some(self.jarvis_listener.captions())
+    }
+
     fn voice_input_status(&self) -> Option<(bool, String)> {
         self.voice_input_status_line()
     }
@@ -2193,16 +2197,15 @@ impl crate::tui::TuiState for App {
     }
 }
 
-/// The three Alt+N swarm views. Repeated presses cycle in declaration order.
+/// The two Alt+N swarm views.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SwarmPanelView {
     Chat,
-    Controls,
     FullPage,
 }
 
 impl App {
-    /// Cycle chat → inline controls → full live swarm page → chat.
+    /// Cycle chat → full live swarm page → chat.
     pub(crate) fn cycle_swarm_panel_view(&mut self) -> SwarmPanelView {
         if !self.inline_swarm_gallery_active() {
             self.swarm_panel_focused = false;
@@ -2210,18 +2213,14 @@ impl App {
             return SwarmPanelView::Chat;
         }
 
-        let next = match (self.swarm_panel_focused, self.swarm_panel_full_page) {
-            (false, _) => SwarmPanelView::Controls,
-            (true, false) => SwarmPanelView::FullPage,
-            (true, true) => SwarmPanelView::Chat,
+        let next = if self.swarm_panel_full_page {
+            SwarmPanelView::Chat
+        } else {
+            SwarmPanelView::FullPage
         };
         match next {
             SwarmPanelView::Chat => {
                 self.swarm_panel_focused = false;
-                self.swarm_panel_full_page = false;
-            }
-            SwarmPanelView::Controls => {
-                self.swarm_panel_focused = true;
                 self.swarm_panel_full_page = false;
             }
             SwarmPanelView::FullPage => {
@@ -2655,35 +2654,8 @@ fn has_inline_swarm_descendants(
     })
 }
 
-impl App {
-    fn inline_swarm_members_unticked(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
-        if self.debug_force_inline_gallery {
-            return self.remote_swarm_members.clone();
-        }
-        if !self.swarm_enabled {
-            return Vec::new();
-        }
-        // Scope the inline gallery to the subtree this session actually spawned.
-        // Other sessions can share the same swarm (e.g. same repo) without this
-        // session having spawned them; showing those would be noise. The spawn
-        // tree is reconstructed from each member's `report_back_to_session_id`
-        // parent edge.
-        let self_id = if self.is_remote {
-            self.remote_session_id.as_deref()
-        } else {
-            Some(self.session.id.as_str())
-        };
-        match self_id {
-            Some(self_id) => filter_inline_swarm_subtree(&self.remote_swarm_members, self_id),
-            // Session identity is not known yet (e.g. right after connect,
-            // before the History event sets `remote_session_id`). Showing all
-            // swarm members here caused the inline strip to flash on startup
-            // and then disappear once the subtree filter kicked in. Hide the
-            // strip until we know who we are.
-            None => Vec::new(),
-        }
-    }
-}
+#[path = "tui_state_inline_swarm.rs"]
+mod inline_swarm;
 
 #[cfg(test)]
 #[path = "tui_state_context_cache_tests.rs"]

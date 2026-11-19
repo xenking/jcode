@@ -326,8 +326,7 @@ mod tests {
         assert!(DisplayConfig::default().debug_socket);
         let missing: DisplayConfig = serde_json::from_str("{}").unwrap();
         assert!(missing.debug_socket);
-        let disabled: DisplayConfig =
-            serde_json::from_str(r#"{"debug_socket":false}"#).unwrap();
+        let disabled: DisplayConfig = serde_json::from_str(r#"{"debug_socket":false}"#).unwrap();
         assert!(!disabled.debug_socket);
     }
 

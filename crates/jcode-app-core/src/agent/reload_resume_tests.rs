@@ -374,7 +374,9 @@ fn paused_server_tool_turn_is_resent_without_a_nudge() {
         timestamp: None,
         tool_duration_ms: None,
     };
-    assert!(super::reload_resume::trailing_assistant_nudge(&[Message::user("q"), paused]).is_none());
+    assert!(
+        super::reload_resume::trailing_assistant_nudge(&[Message::user("q"), paused]).is_none()
+    );
     assert!(super::reload_resume::trailing_assistant_nudge(&[Message::user("q")]).is_none());
     assert!(
         super::reload_resume::trailing_assistant_nudge(&[

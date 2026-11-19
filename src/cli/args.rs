@@ -41,6 +41,18 @@ pub(crate) enum ProviderAuthArg {
 #[command(version = jcode_build_meta::version())]
 #[command(about = "J-Code: A coding agent using Claude Max or ChatGPT Pro subscriptions")]
 pub(crate) struct Args {
+    /// Experimental voice conversation mode with local spoken replies
+    #[arg(long, global = true)]
+    pub(crate) jarvis: bool,
+
+    /// Experimental continuous microphone capture with actionable-speech gating
+    #[arg(long, global = true)]
+    pub(crate) jarvis_always_on: bool,
+
+    /// Opt in to passive local window metadata in Jarvis mode (no screenshots)
+    #[arg(long, global = true)]
+    pub(crate) jarvis_screen: bool,
+
     /// Initial provider to use (jcode, claude, openai, openai-api, openrouter, azure, opencode, opencode-go, zai, 302ai, baseten, conifer, cortecs, comtegra, deepseek, fpt, firmware, huggingface, moonshotai, nebius, scaleway, stackit, groq, mistral, perplexity, togetherai, deepinfra, xai, grok-build, nvidia-nim, lmstudio, ollama, chutes, cerebras, alibaba-coding-plan, openai-compatible, cursor, copilot, gemini, antigravity, google, or auto-detect). Interactive sessions can switch providers with /model.
     #[arg(short, long, default_value = "auto", global = true)]
     pub(crate) provider: ProviderChoice,
@@ -443,6 +455,14 @@ pub(crate) enum Command {
         /// Do not show desktop notifications for push-to-talk
         #[arg(long)]
         no_voice_notifications: bool,
+
+        /// Do not use the Fn key as push-to-talk for always-on Jarvis
+        #[arg(long)]
+        no_jarvis_fn_key: bool,
+
+        /// Do not open an always-on Jarvis when Fn is held and none is running
+        #[arg(long)]
+        no_jarvis_fn_launch: bool,
 
         /// Do not handle open/reveal requests (clients open locally)
         #[arg(long)]

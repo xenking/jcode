@@ -44,6 +44,7 @@ fn finish_response_test_turn(app: &mut App, remote: &mut crate::tui::backend::Re
 }
 
 #[test]
+#[ignore = "obsolete since ec15b58d9: daemon sessions own remote continuation (see daemon_poke tests)"]
 fn final_response_followup_does_not_repeat_answer_across_compaction() {
     use crate::protocol::ServerEvent;
     with_temp_jcode_home(|| {
@@ -101,6 +102,7 @@ fn final_response_followup_does_not_repeat_answer_across_compaction() {
 }
 
 #[test]
+#[ignore = "obsolete since ec15b58d9: daemon sessions own remote continuation (see daemon_poke tests)"]
 fn final_response_followup_still_requests_missing_or_incomplete_answer() {
     use crate::protocol::ServerEvent;
     with_temp_jcode_home(|| {
@@ -174,6 +176,7 @@ fn final_response_followup_still_requests_missing_or_incomplete_answer() {
 }
 
 #[test]
+#[ignore = "obsolete since ec15b58d9: daemon sessions own remote continuation (see daemon_poke tests)"]
 fn final_response_followup_tracks_the_last_request_not_earlier_commentary() {
     use crate::protocol::ServerEvent;
     with_temp_jcode_home(|| {
@@ -223,6 +226,7 @@ fn final_response_followup_tracks_the_last_request_not_earlier_commentary() {
 }
 
 #[test]
+#[ignore = "obsolete since ec15b58d9: daemon sessions own remote continuation (see daemon_poke tests)"]
 fn final_response_followup_preserves_incomplete_and_validation_gates() {
     use crate::protocol::ServerEvent;
     with_temp_jcode_home(|| {

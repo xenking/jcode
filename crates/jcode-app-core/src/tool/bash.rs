@@ -1185,9 +1185,8 @@ impl BashTool {
                     output.push_str(&stderr);
                 }
                 if interrupted {
-                    let mut text = String::from(
-                        "Command interrupted by user; its process group was killed.",
-                    );
+                    let mut text =
+                        String::from("Command interrupted by user; its process group was killed.");
                     if !output.trim().is_empty() {
                         text.push_str("\n\n");
                         text.push_str(&output);
@@ -1398,9 +1397,8 @@ impl BashTool {
                         .unwrap_or_default();
                     let _ = tokio::fs::remove_file(&info.output_file).await;
                     let _ = tokio::fs::remove_file(&info.status_file).await;
-                    let mut text = String::from(
-                        "Command interrupted by user; its process group was killed.",
-                    );
+                    let mut text =
+                        String::from("Command interrupted by user; its process group was killed.");
                     if !output.trim().is_empty() {
                         text.push_str("\n\n");
                         text.push_str(&format_command_output(output, None));

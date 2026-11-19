@@ -1,6 +1,10 @@
 use super::*;
 
-pub(super) fn build_spawn_command(term: &str, command: &TerminalCommand, cwd: &Path) -> Option<Command> {
+pub(super) fn build_spawn_command(
+    term: &str,
+    command: &TerminalCommand,
+    cwd: &Path,
+) -> Option<Command> {
     let title = command.title.as_deref().unwrap_or("jcode");
     let mut cmd = Command::new(term);
     cmd.current_dir(cwd)

@@ -18,6 +18,8 @@ use std::{fmt, time::Duration};
 
 mod backend;
 #[cfg(feature = "desktop-config")]
+pub mod continuous;
+#[cfg(feature = "desktop-config")]
 pub mod dictation;
 #[cfg(feature = "desktop-config")]
 pub mod global;
@@ -28,6 +30,7 @@ pub use backend::StreamingBackend;
 pub use backend::configured_backend;
 #[cfg(feature = "desktop-config")]
 pub use jcode_base::config::DictationBackend;
+pub mod speech;
 pub mod timing;
 pub use nari::{
     NARI_PCM_CHUNK_SAMPLES, NARI_USD_PER_AUDIO_HOUR, NariEvent, NariSession, correct_transcript,

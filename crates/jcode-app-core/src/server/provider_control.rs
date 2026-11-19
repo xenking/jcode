@@ -665,19 +665,21 @@ pub(super) async fn handle_set_reasoning_effort(
             id,
             Arc::clone(agent),
             client_event_tx.clone(),
-            move |agent_guard, _| {
-                match apply_reasoning_effort(agent_guard, &deferred_effort, is_swarm_worker) {
-                    Ok(current) => {
-                        crate::logging::info(&format!(
-                            "Applied queued reasoning effort '{}' after the turn released the agent",
-                            current.as_deref().unwrap_or(&deferred_effort)
-                        ));
-                    }
-                    Err(error) => crate::logging::warn(&format!(
-                        "Could not apply queued reasoning effort '{}': {error}",
-                        deferred_effort
-                    )),
+            move |agent_guard, _| match apply_reasoning_effort(
+                agent_guard,
+                &deferred_effort,
+                is_swarm_worker,
+            ) {
+                Ok(current) => {
+                    crate::logging::info(&format!(
+                        "Applied queued reasoning effort '{}' after the turn released the agent",
+                        current.as_deref().unwrap_or(&deferred_effort)
+                    ));
                 }
+                Err(error) => crate::logging::warn(&format!(
+                    "Could not apply queued reasoning effort '{}': {error}",
+                    deferred_effort
+                )),
             },
         );
         send_reasoning_effort_result(id, Ok(Some(effort)), client_event_tx);

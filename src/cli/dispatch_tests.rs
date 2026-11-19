@@ -36,10 +36,8 @@ fn cli_invocation_ignores_inherited_runtime_target() {
         );
     }
     // The path every rollout intent and unknown-generation warning reads.
-    let identity = crate::build::runtime_generation::serving_identity(
-        jcode_build_meta::git_hash(),
-    )
-    .expect("a foreign inherited target must not make this CLI unidentifiable");
+    let identity = crate::build::runtime_generation::serving_identity(jcode_build_meta::git_hash())
+        .expect("a foreign inherited target must not make this CLI unidentifiable");
     let executing = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
     assert_eq!(identity.binary_path, executing);
 

@@ -346,11 +346,7 @@ pub(super) async fn handle_client(
 
     let mut swarm_enabled = crate::config::config().features.swarm;
     let mut last_available_models_snapshot: Option<Arc<str>> = None;
-    // A running turn holds the agent lock. Keep a refresh pending until the
-    // catalog can be captured rather than silently dropping the bus event.
-    let mut catalog_update_pending = false;
-    let mut catalog_retry_tick = tokio::time::interval(std::time::Duration::from_millis(250));
-    catalog_retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut model_catalog_retry = ModelCatalogRetry::default();
 
     // Create a new session for this client
     let t0 = std::time::Instant::now();
@@ -687,10 +683,19 @@ pub(super) async fn handle_client(
                 }
                 continue;
             }
-            _ = catalog_retry_tick.tick(), if client_subscribed && catalog_update_pending => {
-                catalog_update_pending = !publish_available_models_for_client(
+            _ = async {
+                match model_catalog_retry.deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            }, if client_subscribed => {
+                if publish_available_models_for_client(
                     &agent, &client_event_tx, &mut last_available_models_snapshot, &client_connection_id,
-                ).await;
+                ).await {
+                    model_catalog_retry.complete();
+                } else {
+                    model_catalog_retry.busy();
+                }
                 continue;
             }
             // Forward bus events to this client
@@ -702,9 +707,9 @@ pub(super) async fn handle_client(
                         }
                     }
                     Ok(BusEvent::ModelsUpdated) => {
-                        catalog_update_pending = !publish_available_models_for_client(
-                            &agent, &client_event_tx, &mut last_available_models_snapshot, &client_connection_id,
-                        ).await;
+                        // One pending refresh per connection. Repeated events must
+                        // not reset the busy backoff or allocate waiting tasks.
+                        model_catalog_retry.queue();
                     }
                     // Push the todo card to windows showing this session, so
                     // they do not each poll for it. One todo-tool call writes
@@ -723,6 +728,8 @@ pub(super) async fn handle_client(
                     // Missed bus events may include a todo write. The client no
                     // longer polls, so resend the snapshot rather than guess.
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // A catalog update may also have been lost.
+                        model_catalog_retry.queue();
                         let event = super::client_writer::todos_snapshot_event(&client_session_id);
                         let key = todos_event_key(&event);
                         if key != last_pushed_todos {
@@ -1058,6 +1065,26 @@ pub(super) async fn handle_client(
             continue;
         }
 
+        // Passive screen controls must not acquire the Agent mutex or enter
+        // ordinary dispatch: idle observations never start a provider turn.
+        if let Request::ScreenContext { id, session_id, action } = request {
+            let result = if session_id != client_session_id {
+                Err(anyhow::anyhow!("Screen update belongs to a different session attachment"))
+            } else if matches!(action, crate::protocol::ScreenContextAction::Disable)
+                || crate::tool::sdk::owns_jarvis(&client_session_id, &client_connection_id)
+            {
+                crate::screen_context::apply(&client_session_id, &client_connection_id, action)
+            } else {
+                Err(anyhow::anyhow!("Screen context requires the live Jarvis client owner"))
+            };
+            let event = match result {
+                Ok(()) => ServerEvent::Ack { id },
+                Err(error) => ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None },
+            };
+            let _ = client_event_tx.send(event);
+            continue;
+        }
+
         // SDK controls reply only after validation. Callback results must never
         // wait for the Agent mutex held by the turn awaiting that callback.
         if matches!(&request, Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. }) {
@@ -1069,17 +1096,25 @@ pub(super) async fn handle_client(
                 }
                 Request::ConfigureTools { tools, .. } => {
                     if client_is_processing || crate::turn_cancel_registry::has_active_turn(&client_session_id) { Err(anyhow::anyhow!("Session is busy")) }
-                    else if let Ok(mut locked) = agent.try_lock() {
-                        let result = crate::tool::sdk::configure(locked.session_id(), &client_connection_id, tools, client_event_tx.clone());
-                        if result.is_ok() {
-                            locked.invalidate_sdk_tools();
-                            // Queue the acknowledgment before releasing the session lock,
-                            // so a second client cannot start a new-policy call first.
-                            send_client_event_best_effort(&client_event_tx, ServerEvent::Ack { id }, "client_lifecycle: Ack");
-                            continue;
+                    else {
+                        // Startup/catalog prewarming briefly owns this mutex too.
+                        // That is not an active turn and must not reject client
+                        // capabilities before the first user message.
+                        let mut locked = agent.lock().await;
+                        if crate::turn_cancel_registry::has_active_turn(&client_session_id) {
+                            Err(anyhow::anyhow!("Session is busy"))
+                        } else {
+                            let result = crate::tool::sdk::configure(locked.session_id(), &client_connection_id, tools, client_event_tx.clone());
+                            if result.is_ok() {
+                                locked.invalidate_sdk_tools();
+                                // Queue the acknowledgment before releasing the session lock,
+                                // so a second client cannot start a new-policy call first.
+                                let _ = client_event_tx.send(ServerEvent::Ack { id });
+                                continue;
+                            }
+                            result.map(|()| ServerEvent::Ack { id })
                         }
-                        result.map(|()| ServerEvent::Ack { id })
-                    } else { Err(anyhow::anyhow!("Session is busy")) }
+                    }
                 }
                 Request::ListTools { .. } => {
                     if let Ok(locked) = agent.try_lock() {
@@ -1316,6 +1351,7 @@ pub(super) async fn handle_client(
         match request {
             Request::ForceStopTurn { .. } => unreachable!("force stop is dispatched before reconciliation"),
             Request::QueuePrompt { .. } | Request::SetQueuedPromptMode { .. } | Request::InterruptQueuedPrompt { .. } | Request::InterruptQueuedPrompts { .. } | Request::GetQueuedPrompts { .. } | Request::RemoveQueuedPrompt { .. } | Request::ReorderQueuedPrompts { .. } | Request::SetQueuedPromptEditing { .. } | Request::EditQueuedPrompt { .. } => unreachable!("queue controls dispatched before acknowledgment"),
+            Request::ScreenContext { .. } => unreachable!("Passive screen control dispatched before acknowledgment"),
             Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. } => unreachable!("SDK controls dispatched before acknowledgment"),
             Request::Message {
                 id,
@@ -3819,6 +3855,127 @@ pub(super) async fn handle_client(
     )
     .await?;
     connection_result
+}
+
+/// A single coalesced refresh, with bounded polling while a turn holds the agent.
+/// Keep retrying until idle rather than losing the last catalog update of a turn.
+#[derive(Default)]
+struct ModelCatalogRetry {
+    deadline: Option<tokio::time::Instant>,
+    attempts: u32,
+}
+
+impl ModelCatalogRetry {
+    fn queue(&mut self) {
+        self.deadline.get_or_insert_with(tokio::time::Instant::now);
+    }
+
+    fn busy(&mut self) {
+        let millis = 100u64 << self.attempts.min(4);
+        self.attempts = self.attempts.saturating_add(1);
+        self.deadline = Some(tokio::time::Instant::now() + Duration::from_millis(millis));
+    }
+
+    fn complete(&mut self) {
+        *self = Self::default();
+    }
+}
+
+#[cfg(test)]
+mod model_catalog_retry_tests {
+    use super::*;
+
+    struct TestProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for TestProvider {
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            anyhow::bail!("catalog test must not call complete")
+        }
+
+        fn name(&self) -> &str {
+            "catalog-retry-test"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self)
+        }
+    }
+
+    #[tokio::test]
+    #[expect(clippy::await_holding_lock, reason = "isolated test home")]
+    async fn queued_catalog_retry_recovers_after_agent_unlocks() {
+        let _env = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => crate::env::set_var("JCODE_HOME", value),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+            }
+        }
+        let _restore = RestoreHome(previous_home);
+        crate::env::set_var("JCODE_HOME", home.path());
+        let agent = Arc::new(Mutex::new(Agent::new(
+            Arc::new(TestProvider),
+            Registry::empty(),
+        )));
+        let busy = agent.lock().await;
+        let mut retry = ModelCatalogRetry::default();
+        retry.queue();
+        assert!(
+            try_available_models_catalog_offloaded(&agent)
+                .await
+                .is_none()
+        );
+        retry.busy();
+        let deadline = retry.deadline.unwrap();
+        retry.queue();
+        assert_eq!(retry.deadline, Some(deadline));
+        drop(busy);
+        tokio::time::sleep_until(deadline).await;
+        let catalog = try_available_models_catalog_offloaded(&agent)
+            .await
+            .unwrap();
+        assert!(catalog.live_event().is_some());
+        retry.complete();
+        assert!(retry.deadline.is_none());
+    }
+
+    #[tokio::test]
+    async fn busy_model_catalog_updates_coalesce_and_retry_until_idle() {
+        let mut retry = ModelCatalogRetry::default();
+        assert!(retry.deadline.is_none());
+        retry.queue();
+        for _ in 0..32 {
+            retry.busy();
+            let deadline = retry.deadline.unwrap();
+            for _ in 0..100 {
+                retry.queue();
+            }
+            assert_eq!(retry.deadline, Some(deadline));
+            let delay = deadline.saturating_duration_since(tokio::time::Instant::now());
+            assert!(delay <= Duration::from_millis(1600));
+            assert!(delay > Duration::ZERO);
+        }
+        // No new bus event is needed when the busy turn ends.
+        assert!(retry.deadline.is_some());
+        retry.complete();
+        assert!(retry.deadline.is_none());
+        assert_eq!(retry.attempts, 0);
+        retry.queue();
+        retry.busy();
+        assert_eq!(retry.attempts, 1);
+    }
 }
 
 #[path = "client_processing.rs"]

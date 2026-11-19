@@ -1402,14 +1402,16 @@ request in this new forked session, using the inherited conversation only as con
             let prompt_tokens = message.token_usage.as_ref()?.prompt_tokens?;
             Some((message.timestamp, prompt_tokens))
         });
-        let newest_compaction = self.replay_events.iter().rev().find_map(|event| {
-            match &event.kind {
-                StoredReplayEventKind::Compaction { post_tokens, .. } => {
-                    Some((event.timestamp, *post_tokens))
-                }
-                _ => None,
-            }
-        });
+        let newest_compaction =
+            self.replay_events
+                .iter()
+                .rev()
+                .find_map(|event| match &event.kind {
+                    StoredReplayEventKind::Compaction { post_tokens, .. } => {
+                        Some((event.timestamp, *post_tokens))
+                    }
+                    _ => None,
+                });
         match (newest_report, newest_compaction) {
             (Some((reported_at, prompt_tokens)), Some((compacted_at, post_tokens)))
                 if !reported_at.is_some_and(|reported_at| reported_at > compacted_at) =>

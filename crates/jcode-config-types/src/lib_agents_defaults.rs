@@ -13,8 +13,6 @@ impl Default for AgentsConfig {
             swarm_pool: std::collections::BTreeMap::new(),
             swarm_root_effort: None,
             swarm_spawn_mode: SwarmSpawnMode::default(),
-            swarm_gallery_max_pct: None,
-            swarm_strip_layout: SwarmStripLayout::default(),
             memory_jev_provider: default_memory_jev_provider(),
             memory_auto_recall: false,
             memory_jev_model: None,

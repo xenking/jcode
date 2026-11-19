@@ -1367,7 +1367,9 @@ async fn turn_cancel_kills_the_foreground_command_process_group() {
         "cancel must end the tool within ~2s, took {:?}",
         started.elapsed()
     );
-    let text = result.expect("an interrupted command is reported, not a hang").output;
+    let text = result
+        .expect("an interrupted command is reported, not a hang")
+        .output;
     assert!(
         text.to_lowercase().contains("interrupt") || text.to_lowercase().contains("stopped"),
         "the tool must report the interruption, got: {text}"
