@@ -23,6 +23,9 @@ mod worker_tool_capture;
 #[path = "agent_tests/tool_streaming.rs"]
 mod tool_streaming;
 
+#[path = "agent_tests/pending_effort.rs"]
+mod pending_effort;
+
 #[path = "agent_tests/concurrency.rs"]
 mod concurrency;
 

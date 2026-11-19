@@ -635,6 +635,15 @@ pub(super) async fn handle_set_reasoning_effort(
             .and_then(|requested| provider.set_reasoning_effort(&requested))
             .map(|()| provider.reasoning_effort());
         if let Ok(current) = &result {
+            // The provider already uses it, but the session file is only written
+            // once the turn frees the agent, and a reload before that would
+            // restore the old effort. The durable pending slot carries it: the
+            // next request boundary or a restored agent saves it. This also
+            // replaces any older unapplied choice.
+            match current.as_deref() {
+                Some(current) => crate::session_effort::queue_pending_effort(session_id, current),
+                None => crate::session_effort::clear_pending_effort(session_id),
+            }
             crate::session_effort::record_session_effort(session_id, current.as_deref());
             let agent = Arc::clone(agent);
             crate::runtime_activity::spawn(async move {
@@ -644,7 +653,10 @@ pub(super) async fn handle_set_reasoning_effort(
                 } else {
                     Ok(())
                 }
-                .and_then(|()| agent.persist_current_reasoning_effort());
+                .and_then(|()| {
+                    agent.apply_pending_reasoning_effort();
+                    agent.persist_current_reasoning_effort()
+                });
                 if let Err(error) = result {
                     crate::logging::warn(&format!("Could not persist reasoning effort: {error}"));
                 }
@@ -655,31 +667,23 @@ pub(super) async fn handle_set_reasoning_effort(
     } else {
         // The running turn holds the agent lock, and the out-of-band provider
         // registration can be a stale weak reference that no longer upgrades.
-        // Failing here made a normal busy turn look broken. Record the choice
-        // now and apply it through the agent as soon as the turn releases the
-        // lock, so it governs the next provider request.
+        // A long agentic turn can hold the lock for many requests, and a daemon
+        // reload can end the process first, so the choice goes to the durable
+        // pending slot: the turn applies it before its next provider request,
+        // and a restored agent adopts it. The lock-waiting task below covers an
+        // idle-after-turn agent; whichever runs first takes the slot.
         crate::session_effort::record_session_effort(session_id, Some(&effort));
-        let deferred_effort = effort.clone();
+        crate::session_effort::queue_pending_effort(session_id, &effort);
         spawn_deferred_agent_mutation(
             "set_reasoning_effort",
             id,
             Arc::clone(agent),
             client_event_tx.clone(),
-            move |agent_guard, _| match apply_reasoning_effort(
-                agent_guard,
-                &deferred_effort,
-                is_swarm_worker,
-            ) {
-                Ok(current) => {
-                    crate::logging::info(&format!(
-                        "Applied queued reasoning effort '{}' after the turn released the agent",
-                        current.as_deref().unwrap_or(&deferred_effort)
-                    ));
+            move |agent_guard, _| {
+                if is_swarm_worker && let Err(error) = agent_guard.mark_swarm_worker() {
+                    crate::logging::warn(&format!("Could not mark swarm worker: {error}"));
                 }
-                Err(error) => crate::logging::warn(&format!(
-                    "Could not apply queued reasoning effort '{}': {error}",
-                    deferred_effort
-                )),
+                agent_guard.apply_pending_reasoning_effort();
             },
         );
         send_reasoning_effort_result(id, Ok(Some(effort)), client_event_tx);

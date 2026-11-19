@@ -1207,9 +1207,12 @@ impl Agent {
 
     /// Shake hook: before LLM compaction or on the first request after the
     /// provider prompt cache expired. Never while the cache is warm.
+    /// `fold_instead` skips the cold-cache shake because the cold fold will
+    /// reduce this request alone (see `cold_shake_reaches_request_target`).
     fn maybe_shake_before_request(
         &mut self,
         manager: &mut crate::compaction::CompactionManager,
+        fold_instead: bool,
     ) -> Option<(String, Option<CompactionEvent>)> {
         let now = std::time::SystemTime::now();
         let started = Instant::now();
@@ -1226,6 +1229,9 @@ impl Agent {
             snapcompact_preferred,
         );
         let (reason, cfg) = plan?;
+        if fold_instead && reason == crate::compaction::ShakeReason::CacheExpiry {
+            return None;
+        }
         let start = manager.active_start(self.session.provider_messages());
         let tokens_before = manager.effective_token_count_with(self.session.provider_messages());
         let outcome = self.session.shake_stored_messages(start, &cfg);
@@ -1357,7 +1363,29 @@ impl Agent {
                         std::time::SystemTime::now(),
                         ttl,
                     );
-                    if let Some((detail, event)) = self.maybe_shake_before_request(&mut manager) {
+                    // One cold cache, one reduction: when the shake alone cannot
+                    // reach the target and the fold will run, fold instead of
+                    // shaking first and then folding the shaken prefix again.
+                    let fold_instead = target.is_some_and(|target| {
+                        manager.plan_cache_expiry_compaction(
+                            self.session.provider_messages(),
+                            std::time::SystemTime::now(),
+                            ttl,
+                        ) && !manager.cold_shake_reaches_request_target(
+                            self.session.provider_messages(),
+                            target,
+                        )
+                    });
+                    if fold_instead {
+                        logging::info(&format!(
+                            "[compaction] cold cache: shake alone cannot reach ~{}K from ~{}K, folding instead",
+                            target.unwrap_or(0) / 1000,
+                            cold_tokens_before / 1000,
+                        ));
+                    }
+                    if let Some((detail, event)) =
+                        self.maybe_shake_before_request(&mut manager, fold_instead)
+                    {
                         logging::info(&detail);
                         if let Some(tx) = event_tx {
                             let _ = tx.send(ServerEvent::StatusDetail { detail });

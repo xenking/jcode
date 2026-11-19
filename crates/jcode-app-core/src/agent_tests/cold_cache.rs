@@ -140,6 +140,15 @@ reactive_threshold_tokens = 900000
 
 /// Triggers of the shake dividers persisted in the session replay log.
 fn shake_dividers(agent: &Agent) -> Vec<String> {
+    compaction_dividers(agent)
+        .into_iter()
+        .filter(|trigger| trigger.starts_with("shake_"))
+        .collect()
+}
+
+/// Triggers of every compaction divider persisted in the session replay log,
+/// one per chat notice.
+fn compaction_dividers(agent: &Agent) -> Vec<String> {
     agent
         .session
         .replay_events
@@ -148,7 +157,7 @@ fn shake_dividers(agent: &Agent) -> Vec<String> {
             crate::session::StoredReplayEventKind::Compaction {
                 trigger: Some(trigger),
                 ..
-            } if trigger.starts_with("shake_") => Some(trigger.clone()),
+            } => Some(trigger.clone()),
             _ => None,
         })
         .collect()
@@ -170,17 +179,44 @@ async fn cold_request(configured_ttl: u64) {
         after < 200_000,
         "cold request escaped before compaction: {before} -> {after}"
     );
-    let mut shake_recorded = false;
+    let mut reduced = false;
     while let Ok(event) = rx.try_recv() {
         if let ServerEvent::StatusDetail { detail } = event {
-            shake_recorded |= detail.contains("shake_cache_expiry");
+            reduced |= detail.contains("reduced");
         }
     }
     assert!(
-        shake_recorded,
-        "daemon must record the cold-cache shake before sending"
+        reduced,
+        "daemon must report the cold-cache reduction before sending"
+    );
+    assert_eq!(
+        compaction_dividers(&agent),
+        vec![crate::compaction::CACHE_EXPIRY_COMPACTION_TRIGGER.to_string()],
+        "shake cannot reach the target here, so the fold runs alone"
     );
     eprintln!("cold-cache outgoing tokens: {before} -> {after}, configured_ttl={configured_ttl}");
+}
+
+/// 2026-11-19 13:26: one cold cache produced two chat notices, `compacted ·
+/// shake · 423k→283k` and then `compacted · snapcompact · 284k→78k`. The
+/// shake could not reach the 200K cold target, so the fold ran after it
+/// anyway. One cold cache must pick one method and show one notice.
+#[tokio::test]
+async fn one_cold_cache_runs_one_compaction() {
+    let _guard = crate::storage::lock_test_env();
+    let (_home, mut agent, before) = fixture(0, 250_000, 9_000).await;
+    let (outgoing, _) = agent.messages_for_provider(None).await.unwrap();
+    let after = outgoing
+        .iter()
+        .map(crate::compaction::message_char_count)
+        .sum::<usize>()
+        / crate::compaction::CHARS_PER_TOKEN;
+    assert!(before > 400_000 && after < 200_000, "{before} -> {after}");
+    assert_eq!(
+        compaction_dividers(&agent),
+        vec![crate::compaction::CACHE_EXPIRY_COMPACTION_TRIGGER.to_string()],
+        "exactly one compaction notice for one cold cache"
+    );
 }
 
 #[tokio::test]

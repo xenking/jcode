@@ -404,6 +404,69 @@ async fn set_reasoning_effort_does_not_wait_for_busy_agent_lock() {
     }
 }
 
+/// 2026-11-19: the live provider took "high" at once, but the session file
+/// still said "xhigh" because the busy turn never released the agent before
+/// the daemon reloaded, and the restored session went back to xhigh.
+#[tokio::test]
+async fn effort_applied_to_a_busy_turn_survives_a_restart_before_it_ends() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    let _runtime = IsolatedRuntimeDir::new();
+    let session_id = "session_busy_effort_restart";
+
+    let (provider, agent, client_event_tx, _rx) = test_agent(session_id).await;
+    {
+        let mut agent = agent.lock().await;
+        agent.set_reasoning_effort("xhigh").unwrap();
+    }
+    let busy_agent_lock = agent.lock().await;
+    handle_set_reasoning_effort(
+        11,
+        "high".to_string(),
+        false,
+        &agent,
+        session_id,
+        Some(provider.clone()),
+        &client_event_tx,
+    )
+    .await;
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("high"));
+
+    // The daemon dies while the turn still holds the agent.
+    std::mem::forget(busy_agent_lock);
+    crate::session_effort::forget_pending_efforts_in_memory();
+    let restored_provider = Arc::new(TestEffortProvider::default());
+    let dyn_provider: Arc<dyn Provider> = restored_provider.clone();
+    let registry = crate::tool::Registry::new(dyn_provider.clone()).await;
+    let restored = Agent::new_with_session(
+        dyn_provider,
+        registry,
+        crate::session::Session::load(session_id).unwrap(),
+        None,
+    );
+
+    assert_eq!(
+        restored_provider.reasoning_effort().as_deref(),
+        Some("high")
+    );
+    drop(restored);
+    assert_eq!(
+        crate::session::Session::load(session_id)
+            .unwrap()
+            .reasoning_effort
+            .as_deref(),
+        Some("high"),
+        "the restored session must store the effort the turn was using"
+    );
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
 /// The live provider registration is a weak reference that can fail to
 /// upgrade while a turn owns the agent. That must queue the change for the
 /// next turn, not reject it as "live provider unavailable".

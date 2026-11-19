@@ -663,14 +663,18 @@ fn render_messages_and_images_internal(
                             image_ids.push(id.clone());
                             let current_tool =
                                 current_tool.and_then(|index| rendered[index].tool_data.as_ref());
-                            let anchor = image_anchor_for_message(role, current_tool, user_prompt_count);
+                            let anchor =
+                                image_anchor_for_message(role, current_tool, user_prompt_count);
                             let is_pending_prompt_anchor = current_tool.is_none() && role == "user";
                             images.push(RenderedImage {
                                 history_message_index: current_tool.map(|_| rendered.len()),
                                 media_type,
                                 data: format!("jcode-lazy:{id}"),
                                 label: current_tool.and_then(fallback_image_label_for_tool),
-                                source: image_source_for_message(message_role.clone(), current_tool),
+                                source: image_source_for_message(
+                                    message_role.clone(),
+                                    current_tool,
+                                ),
                                 anchor,
                             });
                             last_image_idx = Some(images.len() - 1);

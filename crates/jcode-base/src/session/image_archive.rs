@@ -87,7 +87,8 @@ pub(super) fn archive_and_decay(session: &mut Session) -> usize {
     let mut archived = Vec::new();
     for (message_index, block_index, ordinal, length) in candidates.into_iter().rev() {
         if !kept_any
-            || kept_chars.saturating_add(length) <= jcode_compaction_core::TOOL_IMAGE_DECAY_KEEP_CHARS
+            || kept_chars.saturating_add(length)
+                <= jcode_compaction_core::TOOL_IMAGE_DECAY_KEEP_CHARS
         {
             kept_any = true;
             kept_chars = kept_chars.saturating_add(length);
