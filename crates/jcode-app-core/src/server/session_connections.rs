@@ -19,19 +19,23 @@ fn connected_user_ids(
 
 /// Snapshot connections without taking any agent lock, including during a turn.
 /// Bare loaded agents and headless swarm workers do not imply an open user client.
-pub(super) async fn connection_presence_pong(
+pub(super) fn connection_presence_pong(
     id: u64,
     connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) -> ServerEvent {
-    // Resume and disconnect also use these registries. Never hold both locks.
-    let connected = connections
-        .read()
-        .await
-        .values()
-        .map(|info| info.session_id.clone())
-        .collect::<Vec<_>>();
-    let user_connected_session_ids = connected_user_ids(connected, &*members.read().await);
+    // Presence is optional. A liveness probe must not wait behind attachment
+    // or recovery, and must not report an empty snapshot when none was taken.
+    let user_connected_session_ids = (|| {
+        let connected = connections
+            .try_read()
+            .ok()?
+            .values()
+            .map(|info| info.session_id.clone())
+            .collect::<Vec<_>>();
+        let members = members.try_read().ok()?;
+        Some(connected_user_ids(connected, &members))
+    })();
     ServerEvent::Pong {
         id,
         native_ssh_protocol: Some(1),
@@ -51,7 +55,7 @@ pub(super) async fn connection_presence_pong(
             "session_connections".into(),
             crate::protocol::CLIENT_FOCUS_CAPABILITY.into(),
         ],
-        user_connected_session_ids: Some(user_connected_session_ids),
+        user_connected_session_ids,
         daemon_identity: jcode_build_support::runtime_generation::serving_identity(
             jcode_build_meta::git_hash(),
         )

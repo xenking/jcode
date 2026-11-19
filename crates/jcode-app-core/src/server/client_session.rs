@@ -1309,6 +1309,7 @@ async fn claim_live_target_agent(
 pub(super) async fn handle_resume_session(
     id: u64,
     session_id: String,
+    resume_slot: Option<super::session_manager::SessionReservation<'_>>,
     working_dir_override: Option<&str>,
     client_instance_id: Option<&str>,
     client_has_local_history: bool,
@@ -1370,7 +1371,10 @@ pub(super) async fn handle_resume_session(
     // Serialize the check as well as restoration: a waiter must re-check the
     // published target instead of restoring a second runtime into its source.
     // Never hold a sessions/connections/agent guard while acquiring this gate.
-    let resume_guard = sessions.reserve(&session_id).await;
+    let resume_guard = match resume_slot {
+        Some(slot) => slot,
+        None => sessions.reserve(&session_id).await,
+    };
     // Migration may replace the transcript on disk, but not runtime ownership.
     // Refresh the canonical idle owner in place instead of restoring a second
     // Agent into this connection's temporary placeholder.

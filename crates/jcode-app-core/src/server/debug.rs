@@ -411,8 +411,7 @@ pub(super) async fn handle_debug_client(
                     id,
                     &client_connections,
                     &swarm_members,
-                )
-                .await;
+                );
                 let json = encode_event(&event);
                 writer.write_all(json.as_bytes()).await?;
             }

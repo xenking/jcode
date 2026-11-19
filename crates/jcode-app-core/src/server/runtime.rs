@@ -444,6 +444,8 @@ impl ServerRuntime {
 #[cfg(test)]
 mod tests {
     use super::RuntimeTaskScope;
+    #[cfg(unix)]
+    use crate::server::tests::ScopedEnvVar;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -483,5 +485,142 @@ mod tests {
                 .spawn(|_| async { panic!("task spawned after shutdown") })
                 .await
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn disconnected_first_subscribe_does_not_wait_for_target_reservation() {
+        stalled_first_subscribe(false).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pipelined_first_subscribe_has_bounded_target_reservation_wait() {
+        stalled_first_subscribe(true).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn presence_ping_stays_responsive_while_swarm_members_are_locked() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let _env = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let (_home, _runtime, runtime) = isolated_runtime(home.path());
+        let members = runtime.swarm_state.members.write().await;
+        let baseline = *runtime.client_count.read().await;
+        let (mut peer, mut handler) = counted_client_pair(&runtime).await;
+        peer.write_all(b"{\"type\":\"ping\",\"id\":1}\n")
+            .await
+            .unwrap();
+        let mut line = String::new();
+        let reply = tokio::time::timeout(
+            Duration::from_millis(500),
+            BufReader::new(&mut peer).read_line(&mut line),
+        )
+        .await;
+        drop(peer);
+        let disconnected = tokio::time::timeout(Duration::from_secs(2), &mut handler).await;
+        let count = *runtime.client_count.read().await;
+        drop(members);
+        if disconnected.is_err() {
+            handler.abort();
+            let _ = handler.await;
+        }
+        disconnected
+            .expect("closed presence probe must not retain a client")
+            .unwrap();
+        reply
+            .expect("presence metadata must not block Pong")
+            .unwrap();
+        let pong: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(pong["type"], "pong");
+        assert_eq!(pong["id"], 1);
+        assert!(pong["user_connected_session_ids"].is_null());
+        assert_eq!(count, baseline);
+    }
+
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    async fn stalled_first_subscribe(pipelined: bool) {
+        use tokio::io::AsyncWriteExt;
+
+        let _env = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let (_home, _runtime, runtime) = isolated_runtime(home.path());
+        let mut session = crate::session::Session::create(None, None);
+        session.working_dir = Some(home.path().to_string_lossy().into_owned());
+        session.save_prepared().unwrap();
+        let target = runtime.sessions.reserve(&session.id).await;
+        let baseline = *runtime.client_count.read().await;
+        let (mut peer, mut handler) = counted_client_pair(&runtime).await;
+        let request = serde_json::json!({
+            "type": "subscribe", "id": 1, "target_session_id": session.id,
+            "working_dir": session.working_dir,
+        });
+        let mut requests = format!("{request}\n");
+        if pipelined {
+            requests.push_str("{\"type\":\"get_history\",\"id\":2}\n");
+        }
+        peer.write_all(requests.as_bytes()).await.unwrap();
+        // The peer is still present: the pending Subscribe must not end the handler.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut handler)
+                .await
+                .is_err()
+        );
+        drop(peer);
+        let bound = if pipelined {
+            // Buffered request bytes hide EOF until the bounded wait expires.
+            tokio::time::pause();
+            Duration::from_secs(31)
+        } else {
+            Duration::from_secs(2)
+        };
+        let disconnected = tokio::time::timeout(bound, &mut handler).await;
+        let count = *runtime.client_count.read().await;
+        drop(target);
+        if disconnected.is_err() {
+            handler.abort();
+            let _ = handler.await;
+        }
+        disconnected
+            .expect("the waiting Subscribe must finish within its bound")
+            .unwrap();
+        assert_eq!(count, baseline);
+        assert!(runtime.client_connections.read().await.is_empty());
+        assert!(runtime.sessions.read().await.is_empty());
+    }
+
+    #[cfg(unix)]
+    fn isolated_runtime(
+        home: &std::path::Path,
+    ) -> (ScopedEnvVar, ScopedEnvVar, super::ServerRuntime) {
+        use crate::server::tests::StreamingMockProvider;
+
+        let home_guard = ScopedEnvVar::set("JCODE_HOME", home);
+        let runtime_guard = ScopedEnvVar::set("JCODE_RUNTIME_DIR", home.join("runtime"));
+        let server = crate::server::Server::new(Arc::new(StreamingMockProvider::default()));
+        (
+            home_guard,
+            runtime_guard,
+            super::ServerRuntime::from_server(&server),
+        )
+    }
+
+    #[cfg(unix)]
+    async fn counted_client_pair(
+        runtime: &super::ServerRuntime,
+    ) -> (tokio::net::UnixStream, tokio::task::JoinHandle<()>) {
+        let (peer, stream) = tokio::net::UnixStream::pair().unwrap();
+        runtime.increment_client_count().await;
+        let handler = tokio::spawn(runtime.clone().run_client_stream(
+            stream,
+            "test client error",
+            false,
+            super::CancellationToken::new(),
+        ));
+        (peer, handler)
     }
 }

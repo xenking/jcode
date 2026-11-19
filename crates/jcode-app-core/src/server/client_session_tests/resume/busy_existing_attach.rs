@@ -109,6 +109,7 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
         target_session_id.to_string(),
         None,
         None,
+        None,
         false,
         None,
         false,

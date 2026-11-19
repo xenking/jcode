@@ -286,8 +286,7 @@ pub(super) async fn handle_lightweight_control_request(
             id,
             client_connections,
             swarm_members,
-        )
-        .await;
+        );
         write_direct_event(&writer, &event).await?;
         return Ok(());
     }

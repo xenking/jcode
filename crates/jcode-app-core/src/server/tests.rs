@@ -37,7 +37,7 @@ struct EnvGuard {
     prev_socket: Option<OsString>,
 }
 
-struct ScopedEnvVar {
+pub(super) struct ScopedEnvVar {
     key: &'static str,
     prev: Option<OsString>,
 }
@@ -213,7 +213,7 @@ impl Drop for EnvGuard {
 }
 
 impl ScopedEnvVar {
-    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+    pub(super) fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
         let prev = std::env::var_os(key);
         crate::env::set_var(key, value);
         // Config is cached with a recheck interval; config-backed env vars
@@ -253,7 +253,7 @@ fn configure_test_env(root: &tempfile::TempDir) -> EnvGuard {
 }
 
 #[derive(Default, Clone)]
-struct StreamingMockProvider {
+pub(super) struct StreamingMockProvider {
     responses: Arc<StdMutex<Vec<Vec<StreamEvent>>>>,
 }
 

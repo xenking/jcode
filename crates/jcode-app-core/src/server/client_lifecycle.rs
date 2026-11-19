@@ -83,6 +83,7 @@ use super::SessionAgents;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 const RELOAD_STARTING_GUARD_MAX_AGE: Duration = Duration::from_secs(30);
 const REQUEST_HANDLER_STALL_THRESHOLDS_MS: [u64; 3] = [2_000, 10_000, 60_000];
+const FIRST_SUBSCRIBE_RESERVATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[path = "client_subscribe_context.rs"]
 mod subscribe_context;
@@ -299,6 +300,34 @@ pub(super) async fn handle_client(
                 return Ok(());
             }
         };
+    // Wait before publishing a provisional client or agent. Cancellation here
+    // only drops a reservation waiter, never a partially attached session.
+    let first_resume_slot = match &initial_request {
+        Request::Subscribe {
+            target_session_id: Some(target),
+            ..
+        } => {
+            let reserve = tokio::time::timeout(
+                FIRST_SUBSCRIBE_RESERVATION_TIMEOUT,
+                sessions.reserve(target),
+            );
+            tokio::pin!(reserve);
+            let slot = tokio::select! {
+                biased;
+                next = reader.fill_buf() => {
+                    if next?.is_empty() {
+                        return Ok(());
+                    }
+                    // Preserve pipelined input. With unread bytes, EOF is not
+                    // observable here, so the reservation deadline bounds the wait.
+                    reserve.await
+                }
+                slot = &mut reserve => slot,
+            };
+            Some(slot.map_err(|_| anyhow::anyhow!("Timed out waiting to subscribe to {target}"))?)
+        }
+        _ => None,
+    };
     let mut active_terminal_env = initial_subscribe_terminal_env(&initial_request);
 
     // Per-client state
@@ -587,7 +616,7 @@ pub(super) async fn handle_client(
     // Session and payload of the last todo snapshot sent on this connection.
     let mut last_pushed_todos: Option<(String, String)> = None;
     let mut provisional_session = true;
-    let mut pending_request = Some(initial_request);
+    let mut pending_request = Some((initial_request, first_resume_slot));
 
     macro_rules! dispatch_queued_prompt {
         ($interrupted_only:expr) => {
@@ -622,7 +651,9 @@ pub(super) async fn handle_client(
 
     let connection_result: Result<()> = async {
     loop {
-        let mut request = if let Some(request) = pending_request.take() {
+        let mut resume_slot = None;
+        let mut request = if let Some((request, slot)) = pending_request.take() {
+            resume_slot = slot;
             request
         } else {
             line.clear();
@@ -1813,7 +1844,7 @@ pub(super) async fn handle_client(
             }
 
             Request::Ping { id } => {
-                let event = super::session_connections::connection_presence_pong(id, &client_connections, &swarm_members).await;
+                let event = super::session_connections::connection_presence_pong(id, &client_connections, &swarm_members);
                 let json = encode_event(&event);
                 let mut w = writer.lock().await;
                 if w.write_all(json.as_bytes()).await.is_err() {
@@ -1928,6 +1959,7 @@ pub(super) async fn handle_client(
                             handle_resume_session(
                                 id,
                                 target_session_id.clone(),
+                                resume_slot,
                                 subscribe_working_dir.as_deref(),
                                 client_instance_id.as_deref(),
                                 client_has_local_history,
@@ -2021,6 +2053,7 @@ pub(super) async fn handle_client(
                             break;
                         }
                     } else {
+                        drop(resume_slot);
                         if provisional_session {
                             agent.lock().await.activate_concurrency_tracking();
                         }
@@ -2235,6 +2268,7 @@ pub(super) async fn handle_client(
                     handle_resume_session(
                         id,
                         session_id,
+                        None,
                         resume_working_dir.as_deref(),
                         client_instance_id.as_deref(),
                         client_has_local_history,
