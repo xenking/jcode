@@ -1440,6 +1440,33 @@ impl CompactionManager {
         self.active_messages(all_messages).len() > RECENT_TURNS_TO_KEEP
     }
 
+    /// Whether the cold-cache shake alone brings `all_messages` under the
+    /// cold-cache request target, judged before anything is rewritten.
+    ///
+    /// One cold cache gets one reduction and one chat notice. When the cheap
+    /// local shake reaches the target, the fold is not needed. When it cannot,
+    /// the fold runs instead of after it: shaking first rewrote the prefix,
+    /// posted its own notice, and then the fold rewrote it again (2026-11-19:
+    /// `shake 423k→283k` followed by `snapcompact 284k→78k`). omp likewise
+    /// picks a single method per pass from `methodOrder`.
+    pub fn cold_shake_reaches_request_target(
+        &self,
+        all_messages: &[Message],
+        target: usize,
+    ) -> bool {
+        let Some(cfg) = self.shake_config() else {
+            return false;
+        };
+        let active = self.active_messages(all_messages);
+        let saved = jcode_compaction_core::shake::shake_savings(active, &cfg);
+        if saved < cfg.min_savings_tokens {
+            return false;
+        }
+        self.effective_token_count_with(all_messages)
+            .saturating_sub(saved)
+            < target
+    }
+
     /// A cold request must reach this target before it can leave the daemon.
     /// Unlike the background-task planner this remains armed while work runs.
     pub fn cache_expiry_request_target(
