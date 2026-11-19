@@ -44,8 +44,8 @@ pub use jcode_compaction_core::{
     emergency_truncate_large_payloads, estimate_compaction_tokens, is_image_rejection_error,
     is_request_payload_too_large_error, mean_embedding, message_char_count,
     reusable_cache_tokens_from_usage, safe_compaction_cutoff, semantic_cache_key,
-    semantic_goal_text, semantic_message_text, strip_large_images_in_contents,
-    summary_payload_char_count,
+    OUTBOUND_IMAGE_TRIM_STEP_CHARS, semantic_goal_text, semantic_message_text,
+    strip_large_images_in_contents, strip_oldest_images_in_steps, summary_payload_char_count,
 };
 
 /// Models with measured poor dense-page recall use the text index even if they

@@ -889,6 +889,47 @@ pub fn strip_large_images_in_contents<C: AsRef<[ContentBlock]> + AsMut<[ContentB
     stripped
 }
 
+/// How much image payload one outbound trim removes beyond what the budget
+/// strictly needs. See [`strip_oldest_images_in_steps`].
+pub const OUTBOUND_IMAGE_TRIM_STEP_CHARS: usize = 8 * 1024 * 1024;
+
+/// Trim the oldest inline images of one outbound request to `budget_chars`,
+/// in steps of `step_chars`, so consecutive requests trim the same images.
+///
+/// [`strip_large_images_in_contents`] removes exactly enough to fit. Run on
+/// every request of a growing transcript, that moves the cut one image further
+/// each time a screenshot is added, so every request rewrites a message the
+/// previous one sent and the provider prompt cache is rebuilt from the first
+/// image on. Measured 2026-11-19: one extra screenshot at the budget re-sent a
+/// 465K-token prefix.
+///
+/// Here the amount to remove is rounded up to a multiple of `step_chars`. The
+/// trimmed set then stays identical until another `step_chars` of images has
+/// accumulated, so the cache is rebuilt once per step instead of per request.
+///
+/// Returns the number of images replaced with text markers.
+pub fn strip_oldest_images_in_steps<C: AsRef<[ContentBlock]> + AsMut<[ContentBlock]>>(
+    contents: &mut [&mut C],
+    budget_chars: usize,
+    step_chars: usize,
+) -> usize {
+    let total: usize = contents
+        .iter()
+        .flat_map(|content| content.as_ref().iter())
+        .filter_map(|block| match block {
+            ContentBlock::Image { data, .. } => Some(data.len()),
+            _ => None,
+        })
+        .sum();
+    if total <= budget_chars {
+        return 0;
+    }
+    let step = step_chars.max(1);
+    let over = total - budget_chars;
+    let remove = over.div_ceil(step).saturating_mul(step);
+    strip_large_images_in_contents(contents, total.saturating_sub(remove))
+}
+
 /// Trigger on actual byte pressure, not image count, to preserve cached history.
 pub const TOOL_IMAGE_DECAY_TRIGGER_CHARS: usize = 48 * 1024 * 1024;
 

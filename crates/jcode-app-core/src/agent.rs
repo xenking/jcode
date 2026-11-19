@@ -1555,7 +1555,13 @@ impl Agent {
             .iter_mut()
             .map(|message| &mut message.content)
             .collect();
-        let stripped = crate::compaction::strip_large_images_in_contents(&mut contents, budget);
+        // Trim in steps: a cut that follows every new screenshot rewrites an
+        // already-sent message on each request and rebuilds the prompt cache.
+        let stripped = crate::compaction::strip_oldest_images_in_steps(
+            &mut contents,
+            budget,
+            crate::compaction::OUTBOUND_IMAGE_TRIM_STEP_CHARS,
+        );
         drop(contents);
         if stripped > 0 {
             logging::warn(&format!(

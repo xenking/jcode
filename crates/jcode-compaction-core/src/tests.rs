@@ -702,3 +702,33 @@ fn strip_large_images_strips_all_when_single_image_exceeds_budget() {
     assert_eq!(stripped, 1);
     assert!(matches!(messages[0].content[0], ContentBlock::Text { .. }));
 }
+
+/// A screenshot-heavy turn sends one more image per request. Trimming the
+/// request to its budget must not move the cut on every request: each move
+/// rewrites a message the provider already cached.
+#[test]
+fn outbound_image_trim_keeps_the_sent_prefix_stable_between_steps() {
+    const IMAGE: usize = 1000;
+    const BUDGET: usize = 24 * IMAGE;
+    const STEP: usize = 8 * IMAGE;
+    let mut transcript: Vec<Message> = Vec::new();
+    let mut previous: Vec<bool> = Vec::new();
+    let mut rewrites = 0;
+    for _ in 0..64 {
+        transcript.push(tool_image_msg(IMAGE));
+        let mut request = transcript.clone();
+        let mut contents: Vec<_> = request.iter_mut().map(|m| &mut m.content).collect();
+        strip_oldest_images_in_steps(&mut contents, BUDGET, STEP);
+        let sent: Vec<bool> = request.iter().map(is_image).collect();
+        let payload = sent.iter().filter(|kept| **kept).count() * IMAGE;
+        assert!(payload <= BUDGET, "request stays within its budget");
+        assert!(*sent.last().unwrap(), "the newest screenshot is always sent");
+        if sent[..previous.len()] != previous[..] {
+            rewrites += 1;
+        }
+        previous = sent;
+    }
+    // 40 images arrive past the budget; a cut that follows each one rewrites
+    // the sent prefix 40 times.
+    assert_eq!(rewrites, 5, "the sent prefix changes once per step");
+}
