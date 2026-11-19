@@ -954,14 +954,24 @@ impl Server {
             .await;
         });
 
-        // On SIGTERM: log, unregister, let in-flight session saves finish, exit.
+        // On SIGTERM: record running turns as durable recovery intents, unregister,
+        // let in-flight session saves finish, exit. The next daemon resumes the
+        // recorded turns without waiting for a client to attach.
         #[cfg(unix)]
         {
             let sigterm_server_name = self.identity.name.clone();
+            let sigterm_swarm_members = Arc::clone(&self.swarm_state.members);
             tokio::spawn(async move {
                 use tokio::signal::unix::{SignalKind, signal};
                 if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
                     sigterm.recv().await;
+                    // Bounded: a wedged registry must not keep a terminated
+                    // daemon alive. Restore still recovers what this misses.
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        reload::persist_shutdown_recovery_intents(&sigterm_swarm_members),
+                    )
+                    .await;
                     let _ = crate::registry::unregister_server(&sigterm_server_name).await;
                     lifecycle::drain_session_saves_before_exit().await;
                     std::process::exit(0);

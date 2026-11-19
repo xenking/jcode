@@ -1,6 +1,6 @@
 use super::{
     checkpoint_active_sessions, persist_reload_recovery_intents_from_snapshot,
-    receive_reload_signal,
+    persist_shutdown_recovery_intents, receive_reload_signal,
 };
 use crate::server::{ReloadSignal, SwarmMember};
 use crate::turn_activity::{ActivityRegistry, TurnPhase};
@@ -304,5 +304,32 @@ fn ask_checkpoint_acknowledgement_does_not_wait_for_roster_ready_or_user() {
             .is_empty()
         );
         task.await.unwrap();
+    });
+}
+
+/// A terminated daemon must leave the same durable recovery a reload leaves,
+/// so the next daemon resumes the turn even when no client ever reattaches.
+/// The 2026-11-19 SIGTERM stranded a coordinator's turn because it wrote none.
+#[test]
+fn shutdown_capture_records_running_turns_without_a_client() {
+    isolated(async {
+        let _tool = crate::turn_activity::global().in_tool("shutdown-busy", "bash");
+        let roster = Arc::new(RwLock::new(HashMap::from([(
+            "shutdown-idle".into(),
+            member("shutdown-idle", "ready"),
+        )])));
+        persist_shutdown_recovery_intents(&roster).await;
+        assert!(
+            crate::server::reload_recovery::pending_directive_for_session("shutdown-busy")
+                .unwrap()
+                .is_some(),
+            "a turn running at shutdown must be recoverable"
+        );
+        assert!(
+            crate::server::reload_recovery::pending_directive_for_session("shutdown-idle")
+                .unwrap()
+                .is_none(),
+            "an idle session has nothing to resume"
+        );
     });
 }

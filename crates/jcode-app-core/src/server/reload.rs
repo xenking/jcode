@@ -361,6 +361,16 @@ async fn persist_reload_recovery_intents(
     .await;
 }
 
+/// A terminated daemon (SIGTERM from a stop, logout, or a killed parent) owes
+/// its running turns the same durable recovery a reload gives them. The next
+/// daemon admits these intents at startup without any client attaching.
+pub(super) async fn persist_shutdown_recovery_intents(
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) {
+    let shutdown_id = format!("shutdown-{}", uuid::Uuid::new_v4());
+    persist_reload_recovery_intents(&shutdown_id, swarm_members, None).await;
+}
+
 async fn persist_reload_recovery_intents_from_snapshot(
     reload_id: &str,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
