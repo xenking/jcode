@@ -26,7 +26,8 @@ fn default_wait_return_on_progress() -> bool {
 }
 
 const DEFAULT_WAIT_SECONDS: u64 = 60;
-const MAX_WAIT_SECONDS: u64 = 60 * 60;
+/// A wait never holds a turn past the blocking ceiling (15 minutes).
+const MAX_WAIT_SECONDS: u64 = crate::agent::MAX_BLOCKING_TOOL_WAIT_SECS;
 const DEFAULT_TAIL_LINES: usize = 80;
 const DEFAULT_WAIT_PREVIEW_LINES: usize = 40;
 const MAX_OUTPUT_BYTES: usize = 50_000;
@@ -78,7 +79,7 @@ struct BgInput {
     /// this many seconds with no new output or progress (resets on activity)
     #[serde(default)]
     stall_wake_seconds: Option<u64>,
-    /// Max seconds to block when using wait (default: 60, capped at 3600)
+    /// Max seconds to block when using wait (default: 60, capped at 900)
     #[serde(default)]
     max_wait_seconds: Option<u64>,
     /// Whether wait should return on progress/checkpoint events (default: true)
@@ -664,7 +665,7 @@ impl Tool for BgTool {
                 "notify": { "type": "boolean", "description": "delivery: default true." },
                 "wake": { "type": "boolean", "description": "delivery: default true." },
                 "stall_wake_seconds": { "type": "integer", "description": "delivery: also wake after N seconds without output (min 30)." },
-                "max_wait_seconds": { "type": "integer", "description": "wait: default 60, cap 3600, 0 checks without blocking." },
+                "max_wait_seconds": { "type": "integer", "description": "wait: default 60, cap 900, 0 checks without blocking." },
                 "return_on_progress": { "type": "boolean", "description": "wait: also return on first progress event. Default true." },
                 "wait_mode": { "type": "string", "enum": ["any", "all", "first_failure"], "description": "Multi-task wait. Default any." },
                 "tail_lines": { "type": "integer", "description": "Last N lines for output/tail/wait preview." },

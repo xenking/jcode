@@ -158,7 +158,8 @@ impl Agent {
                 ephemeral_signature_messages.push(reminder.clone());
                 messages_with_memory.push(reminder);
             }
-            if let Some(nudge) = super::reload_resume::trailing_assistant_nudge(&messages_with_memory)
+            if let Some(nudge) =
+                super::reload_resume::trailing_assistant_nudge(&messages_with_memory)
             {
                 ephemeral_signature_messages.push(nudge.clone());
                 messages_with_memory.push(nudge);
@@ -1639,6 +1640,7 @@ impl Agent {
                 let bg_signal = self.background_tool_signal.clone();
                 let shutdown_signal = self.graceful_shutdown.clone();
                 let foreground_budget = tool_handoff::foreground_budget();
+                let handoff = tool_handoff::handoff_budget(&tc.name, &tc.input, foreground_budget);
                 let allow_reload_handoff = tc.name == "bash";
                 let tool_result;
                 let mut automatic_background = false;
@@ -1655,7 +1657,7 @@ impl Agent {
                             Err(e) => Err(anyhow::anyhow!("Tool task panicked: {}", e)),
                         });
                     }
-                    automatic = wait_for_tool_handoff(&bg_signal, &shutdown_signal, auto_background_allowed(&tc.name, &tc.input), foreground_budget) => {
+                    automatic = wait_for_tool_handoff(&bg_signal, &shutdown_signal, handoff.is_some(), handoff.unwrap_or_default()) => {
                         automatic_background = automatic;
                         if turn_cancel_guard.interruption_reason() == Some(crate::turn_cancel_registry::TurnInterruptionReason::Reload) && allow_reload_handoff {
                             tool_result = match tokio::time::timeout(

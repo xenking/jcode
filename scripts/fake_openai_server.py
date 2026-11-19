@@ -78,6 +78,14 @@ class H(BaseHTTPRequestHandler):
                     "todos": [{"id": "acceptance-open", "content": "Continue on cloud",
                                "status": "in_progress", "priority": "high", "confidence": "plausible"}],
                 })}}]
+        elif CONTROL and "[e2e:longtool]" in prompt and not has_tool_result:
+            # A tool still running when the daemon dies: the turn must be
+            # resumed by the next daemon, with no client sending anything.
+            tool_calls = [{"id": "call_verification_longtool", "type": "function", "function": {
+                "name": "bash", "arguments": json.dumps({
+                    "intent": "Run a long command the daemon will not outlive",
+                    "command": "sleep 600",
+                })}}]
         elif CONTROL and "[e2e:spawn]" in prompt and not has_tool_result:
             # Real swarm spawn through the tool executor; the child's provider
             # requests land in the same FAKE_LOG.

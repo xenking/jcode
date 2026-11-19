@@ -118,6 +118,50 @@ pub(super) fn restored_session_was_interrupted(
 mod session_reload_signals;
 use session_reload_signals::*;
 
+/// A restore found a turn the previous daemon never finished (it was killed,
+/// crashed, or its host slept away). Clients only observe recovery and the
+/// daemon only admits persisted intents, so without one the turn waits for a
+/// human forever. Record the obligation; the recovery owner resumes it.
+///
+/// A live record is authoritative: pending/claimed means recovery is already
+/// scheduled, and a user Stop or newer input tombstone must stay respected
+/// for the turn it was written for. A consumed record belongs to an earlier
+/// recovery and does not cover this turn.
+fn schedule_recovery_for_interrupted_restore(session_id: &str) {
+    let existing = match super::reload_recovery::peek_for_session(session_id) {
+        Ok(existing) => existing,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Cannot read recovery intent for interrupted restore {session_id}: {error}"
+            ));
+            return;
+        }
+    };
+    if existing.is_some_and(|record| !record.status.is_consumed()) {
+        return;
+    }
+    let reload_id = format!("restore-{}", uuid::Uuid::new_v4());
+    let directive = crate::tool::selfdev::ReloadRecoveryDirective {
+        continuation_message:
+            crate::tool::selfdev::ReloadContext::interrupted_session_continuation_message(),
+        reconnect_notice: Some("Resumed after the daemon restarted".into()),
+    };
+    match super::reload_recovery::persist_intent(
+        &reload_id,
+        session_id,
+        super::reload_recovery::ReloadRecoveryRole::InterruptedPeer,
+        directive,
+        "restored session had an unfinished turn",
+    ) {
+        Ok(()) => crate::logging::info(&format!(
+            "Scheduled recovery for {session_id}: restore found an unfinished turn"
+        )),
+        Err(error) => crate::logging::warn(&format!(
+            "Cannot schedule recovery for interrupted restore {session_id}: {error}"
+        )),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_clear_session(
     id: u64,
@@ -1715,6 +1759,9 @@ pub(super) async fn handle_resume_session(
         }
         Err(_) => false,
     };
+    if was_interrupted {
+        schedule_recovery_for_interrupted_restore(&session_id);
+    }
 
     if result.is_ok() && is_canary {
         *client_selfdev = true;

@@ -35,6 +35,11 @@ pub(crate) use turn_ownership::{
 mod turn_streaming_mpsc;
 mod utils;
 
+/// No tool call may hold a turn longer than this many seconds. Model-requested
+/// waits are capped to it, and work still running at the ceiling moves to the
+/// background so the turn continues. Only a human decision (`ask`) is exempt.
+pub(crate) const MAX_BLOCKING_TOOL_WAIT_SECS: u64 = 15 * 60;
+
 use self::streaming::{send_stream_keepalive_mpsc, stream_keepalive_ticker};
 use self::tools::{
     cap_sdk_tool_content_for_history, cap_tool_output_for_history, label_session_images,

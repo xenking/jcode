@@ -8,6 +8,34 @@ pub(super) fn automatic_handoff_reason(budget: Duration) -> String {
     format!("automatically after {} seconds", budget.as_secs_f64())
 }
 
+/// No tool call may hold a turn longer than this. Waits the model asks for are
+/// capped below it, and anything still running at the ceiling moves to the
+/// background so the turn continues. Only a human decision (`ask`) is exempt:
+/// it waits for the person, not for work.
+pub(crate) const MAX_BLOCKING_TOOL_WAIT: Duration =
+    Duration::from_secs(crate::agent::MAX_BLOCKING_TOOL_WAIT_SECS);
+
+fn is_human_decision(name: &str) -> bool {
+    matches!(name, "ask" | "ask_user")
+}
+
+/// How long a call may run in the foreground before it moves to the
+/// background. `None` only for a human decision. A disabled or oversized
+/// foreground budget still ends at [`MAX_BLOCKING_TOOL_WAIT`].
+pub(super) fn handoff_budget(
+    name: &str,
+    input: &serde_json::Value,
+    foreground: Duration,
+) -> Option<Duration> {
+    if is_human_decision(name) {
+        return None;
+    }
+    if auto_background_allowed(name, input) && !foreground.is_zero() {
+        return Some(foreground.min(MAX_BLOCKING_TOOL_WAIT));
+    }
+    Some(MAX_BLOCKING_TOOL_WAIT)
+}
+
 pub(super) fn auto_background_allowed(name: &str, input: &serde_json::Value) -> bool {
     // Human decisions belong to the live turn that owns the response channel.
     // `ask` is the registered tool name; `ask_user` is the legacy spelling.
@@ -56,7 +84,7 @@ pub(crate) async fn execute_with_background_budget(
     ctx: ToolContext,
     budget: Duration,
 ) -> Result<crate::tool::ToolOutput> {
-    let auto_background = auto_background_allowed(&name, &input);
+    let handoff = handoff_budget(&name, &input, budget);
     let session_id = ctx.session_id.clone();
     let tool_name = name.clone();
     let display_name = handoff_display_name(&input);
@@ -89,13 +117,13 @@ pub(crate) async fn execute_with_background_budget(
             }
         }
         result = &mut work => result.map_err(|e| anyhow::anyhow!("Tool task panicked: {}", e))?,
-        _ = tokio::time::sleep(budget), if auto_background && !budget.is_zero() => {
+        _ = tokio::time::sleep(handoff.unwrap_or_default()), if handoff.is_some() => {
             let info = crate::background::global()
                 .adopt_with_options(&name, display_name, &session_id, true, false, work)
                 .await;
             Ok(crate::tool::ToolOutput::new(format!(
                 "Tool '{}' was moved to background {} (task_id: {}).\n\n{}",
-                name, automatic_handoff_reason(budget), info.task_id, crate::tool::BACKGROUND_WAIT_GUIDANCE
+                name, automatic_handoff_reason(handoff.unwrap_or_default()), info.task_id, crate::tool::BACKGROUND_WAIT_GUIDANCE
             )))
         }
     }

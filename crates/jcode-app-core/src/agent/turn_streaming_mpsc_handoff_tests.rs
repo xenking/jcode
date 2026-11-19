@@ -304,11 +304,7 @@ impl crate::tool::Tool for IgnoresCancel {
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object"})
     }
-    async fn execute(
-        &self,
-        _: serde_json::Value,
-        _: ToolContext,
-    ) -> Result<ToolOutput> {
+    async fn execute(&self, _: serde_json::Value, _: ToolContext) -> Result<ToolOutput> {
         self.started.notify_waiters();
         tokio::time::sleep(Duration::from_secs(30)).await;
         Ok(ToolOutput::new("never"))
@@ -366,7 +362,9 @@ async fn cancel_ends_a_tool_that_ignores_the_shutdown_signal() {
         "cancel must end the tool wait within ~2s, took {:?}",
         started_at.elapsed()
     );
-    let output = result.expect("an interrupted tool reports instead of hanging").output;
+    let output = result
+        .expect("an interrupted tool reports instead of hanging")
+        .output;
     assert!(
         output.to_lowercase().contains("interrupt") || output.to_lowercase().contains("stopped"),
         "the interrupted tool must say so, got: {output}"
@@ -387,10 +385,7 @@ async fn cancel_stops_a_bash_call_promoted_to_background() {
     let pid_file = dir.path().join("pid");
     let registry = Registry::empty();
     registry
-        .register(
-            "bash".into(),
-            Arc::new(crate::tool::TestBashTool::new()),
-        )
+        .register("bash".into(), Arc::new(crate::tool::TestBashTool::new()))
         .await;
     let shutdown = InterruptSignal::new();
     let ctx = ToolContext {
@@ -442,5 +437,91 @@ async fn cancel_stops_a_bash_call_promoted_to_background() {
     assert!(
         !pid_is_alive(pid),
         "cancelling the turn must kill a promoted bash command, pid {pid} is still alive"
+    );
+}
+
+/// 2026-11-18: a `bg wait` held the coordinator's turn while the daemon died;
+/// nothing ever returned control. No tool call may block a turn past the
+/// 15-minute ceiling, including waits that are never auto-backgrounded and a
+/// configuration that disables the handoff. A human decision is the only
+/// exemption.
+#[test]
+fn every_non_human_call_has_a_fifteen_minute_ceiling() {
+    let ceiling = Duration::from_secs(15 * 60);
+    let wait = serde_json::json!({"action": "wait", "task_id": "t"});
+    let status = serde_json::json!({"action": "status"});
+    assert_eq!(MAX_BLOCKING_TOOL_WAIT, ceiling);
+    assert_eq!(
+        tool_handoff::handoff_budget("bg", &wait, Duration::from_secs(3)),
+        Some(ceiling),
+        "a bg wait must still end at the ceiling"
+    );
+    assert_eq!(
+        tool_handoff::handoff_budget("bash", &status, Duration::ZERO),
+        Some(ceiling),
+        "a disabled foreground budget must not mean an unbounded wait"
+    );
+    assert_eq!(
+        tool_handoff::handoff_budget("bash", &status, Duration::from_secs(3600)),
+        Some(ceiling),
+        "an oversized foreground budget is clamped"
+    );
+    assert_eq!(
+        tool_handoff::handoff_budget("bash", &status, Duration::from_secs(3)),
+        Some(Duration::from_secs(3))
+    );
+    assert_eq!(
+        tool_handoff::handoff_budget("ask", &serde_json::json!({}), Duration::from_secs(3)),
+        None
+    );
+}
+
+/// A call that is never auto-backgrounded still returns control at the
+/// ceiling: the work keeps running in the background and the turn goes on.
+#[tokio::test(start_paused = true)]
+async fn a_never_backgrounded_wait_releases_the_turn_at_the_ceiling() {
+    struct Forever;
+    #[async_trait]
+    impl crate::tool::Tool for Forever {
+        fn name(&self) -> &str {
+            "bg"
+        }
+        fn description(&self) -> &str {
+            "waits far longer than any turn may block"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(&self, _: serde_json::Value, _: ToolContext) -> Result<ToolOutput> {
+            tokio::time::sleep(Duration::from_secs(10 * 3600)).await;
+            Ok(ToolOutput::new("never"))
+        }
+    }
+    let registry = Registry::empty();
+    registry.register("bg".into(), Arc::new(Forever)).await;
+    let ctx = ToolContext {
+        session_id: "ceiling-probe".into(),
+        message_id: "message".into(),
+        tool_call_id: "ceiling".into(),
+        working_dir: None,
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: ToolExecutionMode::Direct,
+    };
+    let start = tokio::time::Instant::now();
+    let result = execute_with_background_budget(
+        registry,
+        "bg".into(),
+        serde_json::json!({"action": "wait", "task_id": "t"}),
+        ctx,
+        Duration::from_secs(3),
+    )
+    .await
+    .unwrap();
+    assert_eq!(start.elapsed(), Duration::from_secs(15 * 60));
+    assert!(
+        result.output.contains("moved to background"),
+        "{}",
+        result.output
     );
 }
