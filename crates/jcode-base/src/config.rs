@@ -12,8 +12,8 @@ pub use jcode_config_types::{
     LaunchHotkeysConfig, MarkdownSpacingMode, MenubarConfig, NamedProviderAuth,
     NamedProviderConfig, NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig,
     NotificationsConfig, PowerConfig, ProviderConfig, ReasoningDisplayMode, ResumeOpenElsewhere,
-    ResumeTimeMode, SafetyConfig, SessionConfig, SessionPickerResumeAction, SponsorsConfig,
-    SwarmSpawnMode, TerminalConfig, UpdateChannel, WebSearchConfig, WebSearchEngine,
+    ResumeTimeMode, SafetyConfig, SessionConfig, SessionPickerResumeAction, SwarmSpawnMode,
+    TerminalConfig, UpdateChannel, WebSearchConfig, WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -458,7 +458,7 @@ pub fn config() -> &'static Config {
     if let Some(reason) = reload_reason {
         crate::logging::info(&format!("CONFIG_RELOAD {}", reason));
         // A config reload can change config-derived system prompt sections
-        // (feature toggles, sponsors, ...), which legitimately invalidates the
+        // (feature toggles, ...), which legitimately invalidates the
         // KV cache prefix of warm sessions. Document it so a subsequent
         // harness-attributed cache miss is surfaced with this cause instead of
         // as an unexplained prompt mutation.
@@ -739,12 +739,6 @@ pub struct Config {
 
     /// Auto-judge configuration
     pub autojudge: AutoJudgeConfig,
-
-    /// Partner discovery configuration. Skipped when it matches the shipped
-    /// default so saving config never bakes today's default into the file (see
-    /// [`sponsors_is_default`]).
-    #[serde(skip_serializing_if = "sponsors_is_default")]
-    pub sponsors: SponsorsConfig,
 
     /// Global "launch a new jcode" hotkeys (macOS). Baked once by auto-import.
     pub launch_hotkeys: LaunchHotkeysConfig,
@@ -1199,12 +1193,3 @@ mod tests;
 #[cfg(test)]
 #[path = "config_color_tests.rs"]
 mod color_tests;
-
-/// Whether integration discovery settings carry no information beyond the shipped
-/// default, so `[sponsors]` can be left out of written config files.
-///
-/// Explicit opt-ins must be serialized so unrelated preference saves cannot
-/// silently disable discovery on the next load.
-fn sponsors_is_default(sponsors: &SponsorsConfig) -> bool {
-    !sponsors.enabled && sponsors.endpoint == SponsorsConfig::default().endpoint
-}

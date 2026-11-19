@@ -1053,17 +1053,6 @@ desktop_notifications = true
 # jade_relay_reply_enabled = false   # Deliver cloud prompts to one configured live session.
 # jade_relay_launch_enabled = false  # Allow cloud device commands to open headed local sessions.
 # jade_relay_launch_working_dir = "" # Optional default cwd for launched sessions.
-
-# [sponsors] # Legacy config section name retained for compatibility.
-# Integration discovery (disabled by default; set enabled = true to opt in).
-# When enabled, the agent gains an `integration_tools` tool listing third-party
-# developer tools from Jcode's hosted integration directory. These providers
-# have integrated with the agent to make setup and use seamless. Some providers
-# may share revenue with Jcode when a referred user becomes a customer, but
-# commercial relationships never influence recommendations.
-# See https://jcode.sh/discovery-tools
-# enabled = false
-# endpoint = "https://api.jcode.sh/v1/discovery"
 	"##;
 
         // Substitute platform-specific defaults from the keybinding registry.

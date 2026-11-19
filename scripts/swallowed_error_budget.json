@@ -606,16 +606,6 @@
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-app-core/src/tool/discover.rs": {
-      "dot_ok": 3,
-      "let_underscore": 0,
-      "unwrap_or_default": 6
-    },
-    "crates/jcode-app-core/src/tool/discover_secrets.rs": {
-      "dot_ok": 0,
-      "let_underscore": 0,
-      "unwrap_or_default": 1
-    },
     "crates/jcode-app-core/src/tool/gmail.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
@@ -1359,11 +1349,6 @@
     "crates/jcode-base/src/soft_interrupt_store.rs": {
       "dot_ok": 0,
       "let_underscore": 2,
-      "unwrap_or_default": 0
-    },
-    "crates/jcode-base/src/sponsors/provenance.rs": {
-      "dot_ok": 0,
-      "let_underscore": 1,
       "unwrap_or_default": 0
     },
     "crates/jcode-base/src/subscription_api.rs": {

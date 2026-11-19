@@ -468,52 +468,11 @@ pub struct FeedbackEvent {
     pub ran_from_cargo: bool,
 }
 
-/// One completed sponsored-discovery attempt. Free-text query and reason
-/// content are deliberately excluded. Only coarse presence flags and bounded
-/// service-controlled labels are emitted.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DiscoveryEvent {
-    pub event_id: String,
-    pub id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    pub event: &'static str,
-    pub version: String,
-    pub os: &'static str,
-    pub arch: &'static str,
-    pub request_id: String,
-    pub phase: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub category: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub selected_tool: Option<String>,
-    pub outcome: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub failure_reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub http_status: Option<u16>,
-    pub latency_ms: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_bytes: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result_count: Option<u32>,
-    pub query_present: bool,
-    pub reason_present: bool,
-    #[serde(default)]
-    pub benchmark_run: bool,
-    pub custom_endpoint: bool,
-    pub schema_version: u32,
-    pub build_channel: String,
-    pub is_git_checkout: bool,
-    pub is_ci: bool,
-    pub ran_from_cargo: bool,
-}
-
 /// Privacy-safe todo progress for one runtime session.
 ///
 /// `id` is deliberately the same fresh, session-scoped UUID as
 /// `correlation_id`, not the install's persistent telemetry ID. This lets the
-/// receiving telemetry worker join the aggregate to discovery API requests
+/// receiving telemetry worker join the aggregate to other session-scoped events
 /// without linking either side to an install or account. Todo, goal, plan, and
 /// feedback-loop text are intentionally not representable in this type.
 #[derive(Debug, Clone, Serialize, Deserialize)]

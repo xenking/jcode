@@ -15,7 +15,7 @@ pub enum TelemetryCategory {
     Usage,
     /// Crash reports.
     Crashes,
-    /// Feature usage: onboarding steps, discovery, todo stats, feedback.
+    /// Feature usage: onboarding steps, todo stats, feedback.
     Features,
     /// Token and cost usage reports.
     Cost,
@@ -135,7 +135,7 @@ impl TelemetryCategory {
             "session_crash" => TelemetryCategory::Crashes,
             "usage_report" => TelemetryCategory::Cost,
             "auth_success" | "oauth_account" => TelemetryCategory::Accounts,
-            "onboarding_step" | "onboarding_trace" | "discovery" | "todo_session" | "feedback" => {
+            "onboarding_step" | "onboarding_trace" | "todo_session" | "feedback" => {
                 TelemetryCategory::Features
             }
             _ => TelemetryCategory::Usage,

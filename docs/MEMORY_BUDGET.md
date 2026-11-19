@@ -117,52 +117,6 @@ coverage includes empty fields, Unicode, escaping, and control characters.
 Polling cadence, endpoints, timeouts, and error handling are unchanged. No real
 OAuth requests were sent by the new tests, and no RSS saving is inferred.
 
-### Report request ownership acceptance (2026-11-16)
-
-Sponsor usage flushing moves its reports into a typed serialization view instead
-of constructing a second nested JSON tree, then drops the source reports before
-network response waits. Exact sorted legacy keys, report order, timeout, and
-best-effort delivery policy are unchanged. All 5 scoped hosted tests passed,
-including a source-drop marker checked before any send. No telemetry was sent.
-
-Mobile command completion serializes borrowed session IDs or a short-lived
-formatted error directly, without an intermediate owned JSON map. Exact legacy
-success/error bytes, authorization, endpoint, and timeout remain unchanged. All
-12 hosted mobile runner tests passed, including Unicode, escaping, empty IDs,
-and chained-error wire coverage. No real commands were dispatched. These gains
-are structural reductions in duplicate allocation and source lifetime only.
-
-Mobile claim polling also borrows hostname metadata into direct serialization,
-dropping the converted environment value before network waits. Empty and
-Unicode/escaped hostnames preserve exact legacy bytes, endpoint, authorization,
-and timeout. The hosted mobile runner group passed 46 tests with 1 ignored.
-These include overlapping completion/local-runner coverage, not 46 additional
-independent tests to add to earlier counts. No claim was sent to production.
-
-Subscription device-token polling, email-code start, and email-code verification
-serialize borrowed fields rather than allocating intermediate JSON maps. Exact
-legacy bytes preserve which fields are trimmed and which are not, including
-Unicode whitespace, empty strings, escaping, and control characters. All 14
-hosted serial subscription API tests passed for this followup, including the
-earlier device-metadata tests. No real login or email was initiated.
-
-Scalar account request metadata now serializes stack-owned numeric fields
-directly instead of constructing JSON maps. Exact bytes for zero, one, and
-`u64::MAX` are checked using builders only. All 15 hosted subscription API tests
-passed after this followup. No financial API was invoked, and validation,
-authorization, endpoint, timeout, response handling, and billing policy did not
-change. These tests overlap the earlier 14-test group.
-
-Claude weekly/earned reset request metadata uses typed serialization instead of
-temporary JSON maps and copied grant/request IDs. Pure builder tests verify exact
-legacy bytes after input release. The existing local-fixture safety suites also
-passed: 9 weekly-reset tests and 8 earned-reset tests. Confirmation, eligibility,
-locking, durable pending markers, journal writes, idempotency, invalidation, and
-non-refundable operation sequencing are untouched. No real reset request was
-made and no grant was consumed. This is source-allocation reduction only.
-
-### Catalog persistence ownership acceptance (2026-11-16)
-
 Antigravity, Gemini, Copilot, Cursor, and Bedrock persistence serialize borrowed
 catalog views instead of cloning model strings and collections solely to write
 JSON. Antigravity's project request also borrows its optional project string.

@@ -462,9 +462,6 @@ pub(crate) fn render_tool_message(
     if let Some(draft_lines) = render_gmail_draft_card(tc, &msg.content, is_error, row_width) {
         lines.extend(draft_lines);
     }
-    if let Some(discovery_lines) = render_discovery_card(tc, &msg.content, is_error, row_width) {
-        lines.extend(discovery_lines);
-    }
 
     // Optionally render the full agentgrep search output inline in the
     // transcript. Gated behind `display.show_agentgrep_output` (default false)
@@ -596,20 +593,6 @@ pub(crate) fn render_tool_message(
                     line.spans.insert(0, Span::raw("    "));
                 }
                 lines.extend(draft_lines);
-            }
-
-            if let Some(result) = sub_result
-                && let Some(mut discovery_lines) = render_discovery_card(
-                    &sub_tc,
-                    &result.content,
-                    sub_errored,
-                    row_width.saturating_sub(4),
-                )
-            {
-                for line in &mut discovery_lines {
-                    line.spans.insert(0, Span::raw("    "));
-                }
-                lines.extend(discovery_lines);
             }
 
             if tools_ui::canonical_tool_name(&sub_tc.name) == "todo"

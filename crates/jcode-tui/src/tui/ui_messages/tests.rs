@@ -3563,9 +3563,6 @@ fn render_batch_tool_message_shows_flat_and_nested_subcall_intents() {
     crate::tui::ui::tools_ui::tests_tool_call_details_override::set(false);
 }
 
-#[path = "discovery_tests.rs"]
-mod discovery_cards;
-
 #[path = "tool_render_tests.rs"]
 mod tool_render;
 

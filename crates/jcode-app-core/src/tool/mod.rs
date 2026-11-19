@@ -24,8 +24,6 @@ mod conversation_search;
 mod debug_socket;
 mod desktop;
 mod desktop_selfdev;
-mod discover;
-mod discover_secrets;
 mod edit;
 mod edit_stats;
 mod feedback;
@@ -670,16 +668,6 @@ impl Registry {
                 &mut tools_map,
                 "codemode",
                 codemode::CodemodeTool::new(registry.downgrade()),
-            );
-        }
-        // Integration discovery is opt-in via `[sponsors] enabled = true`; when disabled the
-        // tool is never registered and no discovery endpoint is ever
-        // contacted.
-        if crate::config::config().sponsors.enabled {
-            Self::insert_tool(
-                &mut tools_map,
-                "integration_tools",
-                discover::DiscoverToolsTool::new(),
             );
         }
         let session_tools_ms = session_tools_start.elapsed().as_millis();

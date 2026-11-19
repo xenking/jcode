@@ -99,7 +99,6 @@ pub mod side_panel;
 pub mod sidecar;
 pub mod skill;
 pub mod soft_interrupt_store;
-pub mod sponsors;
 pub mod stdin_detect;
 pub mod storage;
 pub mod subscription_api;

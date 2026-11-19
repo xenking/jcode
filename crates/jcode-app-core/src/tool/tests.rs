@@ -169,22 +169,6 @@ fn test_resolve_skill_aliases_to_skill_manage() {
 }
 
 #[tokio::test]
-async fn test_discover_tools_not_registered_when_sponsors_disabled() {
-    // sponsors.enabled is the legacy config key; when false, integration discovery must not exist.
-    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
-    let registry = Registry::new(provider).await;
-    let names = registry.tool_names().await;
-    if crate::config::config().sponsors.enabled {
-        assert!(names.iter().any(|n| n == "integration_tools"));
-    } else {
-        assert!(
-            !names.iter().any(|n| n == "integration_tools"),
-            "integration_tools must not be registered when sponsors are disabled"
-        );
-    }
-}
-
-#[tokio::test]
 async fn directory_listings_use_bash_instead_of_a_dedicated_tool() {
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
@@ -614,8 +598,6 @@ async fn print_tool_definition_token_report() {
 #[tokio::test]
 async fn tool_descriptions_stay_under_token_cap() {
     const DESCRIPTION_TOKEN_CAP: usize = 20;
-    // integration_tools keeps a deliberate second sentence explaining that catalog
-    // entries integrate directly with the agent.
     // swarm appends the user-tunable swarm-prompt.md by design.
     // batch carries a deliberate parallel-call example (2f4abae33, pinned by
     // batch_tests::description_includes_parallel_tool_call_example).
@@ -635,7 +617,6 @@ async fn tool_descriptions_stay_under_token_cap() {
     // the user's cursor and focus: run in the background and act only on the
     // requested task. Its action vocabulary is behind action='discover'.
     const EXEMPT: &[&str] = &[
-        "integration_tools",
         "swarm",
         "batch",
         "browser",
