@@ -471,7 +471,7 @@ pub(super) async fn start(
         fallback_to_sse: AtomicBool::new(false),
         // Even custom headers (not just Authorization) can contain credentials.
         // Never follow a redirect with them to a server-selected destination.
-        client: reqwest::Client::builder()
+        client: jcode_provider_core::reqwest_builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(10))
             .build()

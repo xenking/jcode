@@ -14,7 +14,7 @@ chrono = { version = "0.4", features = ["serde"] }
 jcode-build-meta = { path = "../jcode-build-meta" }
 jcode-core = { path = "../jcode-core" }
 jcode-logging = { path = "../jcode-logging" }
-jcode-provider-core = { path = "../jcode-provider-core" }
+jcode-provider-core = { path = "../jcode-provider-core", features = ["blocking-http"] }
 jcode-selfdev-types = { path = "../jcode-selfdev-types" }
 jcode-storage = { path = "../jcode-storage" }
 jcode-usage-types = { path = "../jcode-usage-types" }

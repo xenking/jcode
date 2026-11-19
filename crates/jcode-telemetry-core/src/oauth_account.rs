@@ -131,7 +131,7 @@ fn send(command: Command) -> bool {
             let worker = std::thread::Builder::new()
                 .name("oauth-telemetry".into())
                 .spawn(move || {
-                    let Ok(client) = reqwest::blocking::Client::builder()
+                    let Ok(client) = jcode_provider_core::reqwest_blocking_builder()
                         .timeout(Duration::from_secs(5))
                         .redirect(reqwest::redirect::Policy::none())
                         .build()

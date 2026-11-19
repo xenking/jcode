@@ -602,7 +602,7 @@ fn http_for(endpoint: &url::Url) -> Result<reqwest::Client> {
     if let Some(client) = REMOTE_HTTP.get() {
         return Ok(client.clone());
     }
-    let client = reqwest::Client::builder()
+    let client = jcode_provider_core::reqwest_builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(DISCOVERY_TIMEOUT)
         .build()
@@ -615,7 +615,7 @@ fn http() -> Result<reqwest::Client> {
     if let Some(client) = HTTP.get() {
         return Ok(client.clone());
     }
-    let client = reqwest::Client::builder()
+    let client = jcode_provider_core::reqwest_builder()
         .redirect(reqwest::redirect::Policy::none())
         // Never proxy plaintext loopback credentials via environment proxies.
         .no_proxy()

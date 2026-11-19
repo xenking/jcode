@@ -806,10 +806,9 @@ fn gemini_http_client() -> reqwest::Client {
         "x-goog-api-client",
         reqwest::header::HeaderValue::from_static("gl-node/26.4.0"),
     );
-    reqwest::Client::builder()
+    jcode_provider_core::reqwest_http1_builder()
         .user_agent(gemini_user_agent())
         .default_headers(headers)
-        .http1_only()
         .connect_timeout(Duration::from_secs(20))
         .timeout(Duration::from_secs(90))
         .pool_max_idle_per_host(0)

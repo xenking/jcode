@@ -612,7 +612,9 @@ pub fn spawn_cloud_runner() {
     }
     ensure_sync_enabled();
     tokio::spawn(async move {
-        let client = reqwest::Client::new();
+        let client = jcode_provider_core::reqwest_builder()
+            .build()
+            .expect("mobile runner HTTP client should build");
         poll_commands_with_wait(|| run_one(&client), events::spawn()).await;
     });
 }

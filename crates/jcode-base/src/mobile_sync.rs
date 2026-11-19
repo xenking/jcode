@@ -253,7 +253,7 @@ pub struct SyncedSession {
 
 /// Bounded account inventory read for UI background workers.
 pub async fn discover_cloud_sessions() -> Result<Vec<SyncedSession>> {
-    let client = reqwest::Client::new();
+    let client = jcode_provider_core::reqwest_builder().build()?;
     tokio::time::timeout(Duration::from_secs(8), list_cloud_sessions(&client))
         .await
         .context("mobile session discovery timed out")?
@@ -1167,13 +1167,41 @@ pub fn spawn_background_sync() {
     tokio::spawn(background_sync());
 }
 
-/// The two daemon mobile loops use exactly reqwest's default configuration.
-/// Share their TLS configuration and connection pool, not request credentials.
+/// The daemon mobile loops share a TLS-configured client and connection pool.
 /// Initialization stays eager at loop startup even when mobile sync is disabled.
-/// Do not substitute the provider client: its defaults are intentionally different.
+/// Do not use the generic provider client, which changes other HTTP defaults.
 pub(crate) fn daemon_http_client() -> reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new).clone()
+    CLIENT
+        .get_or_init(|| {
+            jcode_provider_core::reqwest_builder()
+                .build()
+                .expect("mobile daemon HTTP client should build")
+        })
+        .clone()
+}
+
+async fn background_sync() {
+    let client = daemon_http_client();
+    let mut ticks = tokio::time::interval(SYNC_INTERVAL);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let reconcile = tokio::select! {
+            _ = ticks.tick() => true,
+            _ = PERSISTED.notified() => {
+                // A bounded coalescing window, not a trailing debounce:
+                // continuous token saves cannot postpone sync forever.
+                let mut debounce = SyncTiming::new("debounce_wait");
+                tokio::time::sleep(SYNC_DEBOUNCE).await;
+                debounce.outcome = "success";
+                false
+            }
+        };
+        // sync_pass records failures and disabled skips without error text.
+        if sync_pass(&client, reconcile).await.is_err() {
+            crate::logging::debug("mobile sync pass failed (see stage timing)");
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1171,7 +1171,7 @@ fn post_payload(payload: serde_json::Value, timeout: Duration) -> bool {
     // Newer event types can reach an older worker that rejects them as unknown.
     // That must only drop the one payload, never disable all telemetry.
     let client = TELEMETRY_HTTP_CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
+        jcode_provider_core::reqwest_blocking_builder()
             .user_agent(jcode_provider_core::JCODE_USER_AGENT)
             .build()
             .expect("telemetry HTTP client should build")
@@ -1233,7 +1233,7 @@ fn post_payload_with_retry(payload: serde_json::Value, timeout: Duration) -> boo
 #[cfg(not(test))]
 fn post_transcript_payload(payload: serde_json::Value, timeout: Duration) -> bool {
     let client = TELEMETRY_HTTP_CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
+        jcode_provider_core::reqwest_blocking_builder()
             .user_agent(jcode_provider_core::JCODE_USER_AGENT)
             .build()
             .expect("telemetry HTTP client should build")

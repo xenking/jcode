@@ -2,6 +2,10 @@
 //! Run: justrust run --release -p jcode-app-core --example tool_projection_probe
 use jcode_message_types::ContentBlock;
 use jcode_session_types::StoredMessage;
+#[allow(
+    dead_code,
+    reason = "This probe shares only the message constructor from the search fixtures"
+)]
 #[path = "../src/tool/session_search/searchable_text_fixtures.rs"]
 mod fixtures;
 #[path = "../src/tool/session_search/searchable_text.rs"]
