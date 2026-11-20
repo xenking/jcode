@@ -63,7 +63,8 @@ fn remove_from_file(path: &Path) -> Result<bool> {
     }
     let mut out = serde_json::to_vec_pretty(&root)?;
     out.push(b'\n');
-    jcode_storage::write_bytes(path, &out).with_context(|| format!("writing {}", path.display()))?;
+    jcode_storage::write_bytes(path, &out)
+        .with_context(|| format!("writing {}", path.display()))?;
     Ok(true)
 }
 
@@ -80,10 +81,7 @@ fn remove_handlers(root: &mut Value) -> bool {
     let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) else {
         return false;
     };
-    let Some(groups) = hooks
-        .get_mut("SessionStart")
-        .and_then(Value::as_array_mut)
-    else {
+    let Some(groups) = hooks.get_mut("SessionStart").and_then(Value::as_array_mut) else {
         return false;
     };
 
@@ -104,10 +102,10 @@ fn remove_handlers(root: &mut Value) -> bool {
     if groups.is_empty() {
         hooks.remove("SessionStart");
     }
-    if hooks.is_empty() {
-        if let Some(obj) = root.as_object_mut() {
-            obj.remove("hooks");
-        }
+    if hooks.is_empty()
+        && let Some(obj) = root.as_object_mut()
+    {
+        obj.remove("hooks");
     }
     true
 }
@@ -135,7 +133,10 @@ mod tests {
     fn preserves_neighbouring_hooks() {
         let mine = json!({"type": "command", "command": "echo hi"});
         let mut shared = ours();
-        shared["hooks"].as_array_mut().unwrap().insert(0, mine.clone());
+        shared["hooks"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, mine.clone());
         let other = json!({"hooks": [{"type": "command", "command": "other --notify-cli-launch"}]});
         let stop = json!([{"hooks": [{"type": "command", "command": "bye"}]}]);
         let mut root = json!({"hooks": {
@@ -156,13 +157,20 @@ mod tests {
         let path = dir.path().join("settings.json");
         assert!(!remove_from_file(&path).unwrap(), "missing file is fine");
 
-        std::fs::write(&path, json!({"hooks": {"SessionStart": [ours()]}}).to_string()).unwrap();
+        std::fs::write(
+            &path,
+            json!({"hooks": {"SessionStart": [ours()]}}).to_string(),
+        )
+        .unwrap();
         assert!(remove_from_file(&path).unwrap());
         let after: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(after, json!({}));
         assert!(!remove_from_file(&path).unwrap(), "second run is a no-op");
 
         std::fs::write(&path, "not json").unwrap();
-        assert!(!remove_from_file(&path).unwrap(), "unrelated file untouched");
+        assert!(
+            !remove_from_file(&path).unwrap(),
+            "unrelated file untouched"
+        );
     }
 }

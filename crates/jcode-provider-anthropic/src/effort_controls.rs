@@ -144,14 +144,11 @@ pub fn plan_effort_controls(
     // A control equal to the level already in force at its slot is a no-op,
     // which the merge above can leave behind; drop it.
     let mut in_force = top_level.clone();
-    inserts = inserts
-        .into_iter()
-        .filter(|(_, value)| {
-            let keep = *value != in_force;
-            in_force.clone_from(value);
-            keep
-        })
-        .collect();
+    inserts.retain(|(_, value)| {
+        let keep = *value != in_force;
+        in_force.clone_from(value);
+        keep
+    });
     let record = json!({
         "type": ANTHROPIC_EFFORT_CONTROL_TYPE,
         "model": model,
