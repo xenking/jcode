@@ -1611,9 +1611,31 @@ impl BackgroundTaskManager {
     /// is to let it finish on this process image. Durable process jobs are
     /// not registered in `tasks` and never block an exec.
     pub async fn drain_opaque_tasks_for_reload(&self) {
+        let started = Instant::now();
+        let mut interval = Duration::from_secs(10);
+        let mut next_report = interval;
         loop {
-            if self.tasks.read().await.is_empty() {
-                return;
+            let blocking: Vec<String> = {
+                let tasks = self.tasks.read().await;
+                if tasks.is_empty() {
+                    return;
+                }
+                tasks
+                    .values()
+                    .map(|task| format!("{} ({})", task.task_id, task.tool_name))
+                    .collect()
+            };
+            // A reload that never happens must be explainable from the log:
+            // name what it is waiting for instead of stalling silently.
+            if started.elapsed() >= next_report {
+                crate::logging::warn(&format!(
+                    "Server: reload has waited {}s for {} in-process background task(s) to finish: {}",
+                    started.elapsed().as_secs(),
+                    blocking.len(),
+                    blocking.join(", ")
+                ));
+                interval = (interval * 2).min(Duration::from_secs(300));
+                next_report = started.elapsed() + interval;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
