@@ -211,7 +211,20 @@ async fn idle_cache_expiry_shakes_at_ttl_before_the_next_user_turn() {
             .1
             .is_none()
     );
-    agent.messages_for_provider(None).await.unwrap();
+    // Token growth due solely to a new prompt is not another cache expiry.
+    let large_prompt = "new prompt ".repeat(80_000);
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: large_prompt.clone(),
+            cache_control: None,
+        }],
+    );
+    let (outgoing, event) = agent.messages_for_provider(None).await.unwrap();
+    assert!(event.is_none());
+    assert!(outgoing.last().unwrap().content.iter().any(|block| {
+        matches!(block, ContentBlock::Text { text, .. } if text == &large_prompt)
+    }));
     assert_eq!(compaction_dividers(&agent), ["shake_cache_expiry"]);
 }
 

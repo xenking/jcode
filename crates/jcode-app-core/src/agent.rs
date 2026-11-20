@@ -1476,11 +1476,16 @@ impl Agent {
                 let mut manager = compaction.write().await;
                 let discarded_oversized_native =
                     manager.discard_oversized_openai_native_compaction();
-                if self.provider.uses_jcode_compaction() {
-                    let ttl = self.cache_expiry_ttl_secs(&manager);
+                let now = std::time::SystemTime::now();
+                let ttl = self.cache_expiry_ttl_secs(&manager);
+                // A completed cold reduction covers the old prefix. A large
+                // new user message is handled by the normal context cap, not
+                // by paying for a second reduction of the same cold cache.
+                if self.provider.uses_jcode_compaction()
+                    && !self.cache_expiry_already_compacted(&manager, now, ttl)
+                {
                     let cold_tokens_before =
                         manager.effective_token_count_with(self.session.provider_messages());
-                    let now = std::time::SystemTime::now();
                     let target = manager.cache_expiry_request_target(
                         self.session.provider_messages(),
                         now,
