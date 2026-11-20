@@ -138,15 +138,12 @@ fn persisted_swarm_state_round_trips_and_marks_running_stale() {
 }
 
 #[test]
-fn ready_headless_member_with_report_stops_without_losing_report() {
-    // A headless worker that finished its task has no process after restart.
-    // Preserve its report, but do not eagerly reconstruct the full Agent just
-    // to keep an idle worker reusable indefinitely.
+fn ready_headless_member_with_live_owner_preserves_report_across_reloads() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let _env = test_env(&dir);
 
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
-    let members = vec![SwarmMember {
+    let worker = SwarmMember {
         session_id: "session-ready".to_string(),
         event_tx,
         event_txs: HashMap::new(),
@@ -166,22 +163,48 @@ fn ready_headless_member_with_report_stops_without_losing_report() {
         todo_progress: None,
         todo_items: Vec::new(),
         runtime: crate::protocol::SwarmMemberRuntime::default(),
-        task_label: None,
-    }];
-
-    persist_swarm_state("swarm-gamma", None, None, &members);
-    let loaded = load_runtime_state();
-
-    let recovered = loaded.members.get("session-ready").expect("member");
-    assert_eq!(recovered.status, "stopped");
-    assert_eq!(
-        recovered.detail.as_deref(),
-        Some("idle worker not restored after server restart")
-    );
-    assert_eq!(
-        recovered.latest_completion_report.as_deref(),
-        Some("Done. Built the worker; all tests pass.")
-    );
+        task_label: Some("original lane".into()),
+    };
+    let owner = SwarmMember {
+        session_id: "session-coordinator".into(),
+        report_back_to_session_id: None,
+        is_headless: false,
+        ..worker.clone()
+    };
+    let orphan = SwarmMember {
+        session_id: "session-orphan".into(),
+        report_back_to_session_id: Some("historical-owner".into()),
+        ..worker.clone()
+    };
+    let mut members = vec![worker, owner.clone(), orphan];
+    for _ in 0..3 {
+        persist_swarm_state("swarm-gamma", None, Some(&owner.session_id), &members);
+        let loaded = load_runtime_state();
+        let recovered = &loaded.members["session-ready"];
+        assert_eq!(recovered.status, "ready");
+        assert_eq!(recovered.detail, None);
+        assert_eq!(recovered.task_label.as_deref(), Some("original lane"));
+        assert_eq!(
+            recovered.latest_completion_report.as_deref(),
+            Some("Done. Built the worker; all tests pass.")
+        );
+        assert_eq!(loaded.members["session-orphan"].status, "stopped");
+        assert_eq!(loaded.members[&owner.session_id].status, "stopped");
+        assert_eq!(
+            loaded
+                .members
+                .values()
+                .filter(|m| m.status == "ready")
+                .count(),
+            1
+        );
+        members = loaded.members.into_values().collect();
+        // Simulate the live coordinator reattaching before the next reload.
+        *members
+            .iter_mut()
+            .find(|m| m.session_id == owner.session_id)
+            .unwrap() = owner.clone();
+    }
 }
 
 #[test]

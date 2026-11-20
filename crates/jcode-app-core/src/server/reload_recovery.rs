@@ -718,6 +718,35 @@ impl RecoveryOwner {
         }
     }
 
+    pub(super) async fn finish_unstarted_headless(
+        &self,
+        session_id: &str,
+        status: &str,
+        detail: Option<String>,
+    ) {
+        let report = {
+            let members = self.swarm.members.read().await;
+            let Some(member) = members.get(session_id).filter(|member| {
+                member.is_headless && member.status == "running" && member.event_tx.is_closed()
+            }) else {
+                return;
+            };
+            member.latest_completion_report.clone()
+        };
+        super::update_member_status_with_report(
+            session_id,
+            status,
+            detail,
+            report,
+            &self.swarm.members,
+            &self.swarm.swarms_by_id,
+            Some(&self.history),
+            Some(&self.counter),
+            Some(&self.events),
+        )
+        .await;
+    }
+
     pub(super) fn spawn(
         self,
         cancellation: tokio_util::sync::CancellationToken,
@@ -823,6 +852,12 @@ impl RecoveryOwner {
                 ReloadRecoveryStatus::Blocked,
                 "empty recovery directive",
             )?;
+            self.finish_unstarted_headless(
+                &record.session_id,
+                "crashed",
+                Some("Empty recovery directive".into()),
+            )
+            .await;
             return Ok(None);
         }
         let session_id = &record.session_id;
@@ -836,6 +871,12 @@ impl RecoveryOwner {
                 ReloadRecoveryStatus::Blocked,
                 "session transcript missing",
             )?;
+            self.finish_unstarted_headless(
+                session_id,
+                "crashed",
+                Some("Worker transcript missing".into()),
+            )
+            .await;
             return Ok(None);
         }
         if self
@@ -975,6 +1016,8 @@ impl RecoveryOwner {
                             "Cannot close empty recovery intent for {session_id}: {error}"
                         ));
                     }
+                    self.finish_unstarted_headless(session_id, "ready", None)
+                        .await;
                     return;
                 }
                 // An unanswered ask keeps the record Claimed: the answer, not
@@ -998,13 +1041,14 @@ impl RecoveryOwner {
             Some(&self.events),
         )
         .await;
+        let start_message_index = agent.lock().await.message_count();
         let processing = async {
             if wake {
                 // An idle worker with an open todo lane has no interrupted
                 // assistant turn to continue. Its hidden reminder is the wake
                 // turn's prompt, exactly as before.
                 super::turn_failover::process_reserved_message_with_server_failover(
-                    agent,
+                    Arc::clone(&agent),
                     &lease,
                     "",
                     vec![],
@@ -1021,7 +1065,7 @@ impl RecoveryOwner {
                 // prompt is admitted, so the resumed request keeps the
                 // pre-restart prefix.
                 super::turn_failover::process_reserved_resume_with_server_failover(
-                    agent,
+                    Arc::clone(&agent),
                     &lease,
                     events.sender(),
                 )
@@ -1056,13 +1100,18 @@ impl RecoveryOwner {
         } else {
             "failed"
         };
-        super::update_member_status(
+        let completion_report = agent
+            .lock()
+            .await
+            .recent_assistant_output_tail_after(start_message_index);
+        super::update_member_status_with_report(
             session_id,
             status,
             result
                 .as_ref()
                 .err()
                 .map(|error| super::truncate_detail(&error.to_string(), 120)),
+            completion_report,
             &self.swarm.members,
             &self.swarm.swarms_by_id,
             Some(&self.history),
