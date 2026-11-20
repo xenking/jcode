@@ -6,6 +6,7 @@ transcripts, daemons, SSH transport and TUI. Optional file gates let a test
 hold a real streamed turn while submitting /cloud, without timing sleeps.
 """
 import json
+import shlex
 import os
 from pathlib import Path
 import re
@@ -82,6 +83,36 @@ class H(BaseHTTPRequestHandler):
                     "todos": [{"id": "acceptance-open", "content": "Continue on cloud",
                                "status": "in_progress", "priority": "high", "confidence": "plausible"}],
                 })}}]
+        elif CONTROL and not has_tool_result and (match := re.search(r"\[e2e:reload-bg:([a-z0-9_]+)\]", prompt)):
+            prefix = CONTROL / match.group(1)
+            child, progress, release = [shlex.quote(str(prefix.with_suffix(suffix)))
+                                        for suffix in (".child", ".progress", ".release")]
+            command = (
+                f"printf '%s\\n' \"$$\" > {child}; "
+                f"while [ ! -f {progress} ]; do sleep 0.1; done; "
+                "echo 'JCODE_PROGRESS {\"message\":\"post-exec progress\",\"percent\":50}'; "
+                f"while [ ! -f {release} ]; do sleep 0.1; done; "
+                "echo 'completed by original shell'; exit 23"
+            )
+            tool_calls = [{"id": "call_reload_background", "type": "function", "function": {
+                "name": "bash", "arguments": json.dumps({"intent": "Verify background exec reload",
+                    "command": command, "run_in_background": True, "notify": True,
+                    "wake": "verify-no-bg-wake" not in prompt, "timeout": 60000})}}]
+        elif CONTROL and not has_tool_result and "[e2e:reload-wait-latest]" in prompt:
+            tool_calls = [{"id": "call_reload_wait", "type": "function", "function": {
+                "name": "bg", "arguments": json.dumps({"action": "wait", "latest": True,
+                    "intent": "Verify original wait survives daemon exec", "max_wait_seconds": 30,
+                    "return_on_progress": False})}}]
+        elif CONTROL and not has_tool_result and (match := re.search(r"\[e2e:reload-selfdev:(build|test)\]", prompt)):
+            action = match.group(1)
+            arguments = {"action": action, "reason": f"verify queued selfdev {action}",
+                         "notify": True, "wake": False}
+            if action == "build":
+                arguments.update(target="tui", release_notes="Verification fixture only.")
+            else:
+                arguments["command"] = "printf 'verify test fixture\\n'"
+            tool_calls = [{"id": f"call_reload_selfdev_{action}", "type": "function", "function": {
+                "name": "selfdev", "arguments": json.dumps(arguments)}}]
         elif CONTROL and "[e2e:longtool]" in prompt and not has_tool_result:
             # A tool still running when the daemon dies: the turn must be
             # resumed by the next daemon, with no client sending anything.

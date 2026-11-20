@@ -603,6 +603,7 @@ fn running_status_fixture(task_id: &str, session_id: &str) -> TaskStatusFile {
         owner_pid: None,
         owner_instance: None,
         detached: false,
+        completion_delivered: None,
         notify: false,
         wake: false,
         progress: None,
@@ -825,7 +826,7 @@ async fn abort_live_tasks_for_reload_finalizes_running_tasks() -> Result<()> {
         .status(&info.task_id)
         .await
         .ok_or_else(|| anyhow!("status should exist"))?;
-    assert_eq!(status.status, BackgroundTaskStatus::Failed);
+    assert_eq!(serde_json::to_value(&status.status)?, "interrupted");
     let error = status.error.unwrap_or_default();
     assert!(
         error.contains("Interrupted by server reload"),
@@ -835,6 +836,42 @@ async fn abort_live_tasks_for_reload_finalizes_running_tasks() -> Result<()> {
 
     // Idempotent: a second sweep finds nothing.
     assert_eq!(manager.abort_live_tasks_for_reload().await, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn reload_drains_an_opaque_future_without_cancelling_or_repeating_it() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().into());
+    let (release, gate) = tokio::sync::oneshot::channel();
+    let task = manager
+        .spawn("opaque", "session-drain", |output| async move {
+            gate.await?;
+            tokio::fs::write(output, "single opaque operation completed").await?;
+            Ok(TaskResult::completed(Some(0)))
+        })
+        .await;
+    let drain = manager.drain_opaque_tasks_for_reload();
+    tokio::pin!(drain);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(75), &mut drain)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        manager.status(&task.task_id).await.unwrap().status,
+        BackgroundTaskStatus::Running
+    );
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), drain).await?;
+    assert_eq!(
+        manager.status(&task.task_id).await.unwrap().status,
+        BackgroundTaskStatus::Completed
+    );
+    assert_eq!(
+        tokio::fs::read_to_string(task.output_file).await?,
+        "single opaque operation completed"
+    );
     Ok(())
 }
 

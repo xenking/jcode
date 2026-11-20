@@ -53,6 +53,7 @@ fn write_completed_task(task_id: &str, session: &str) {
         owner_pid: None,
         owner_instance: None,
         detached: false,
+        completion_delivered: None,
         notify: false,
         wake: false,
         progress: None,

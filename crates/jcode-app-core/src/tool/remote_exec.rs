@@ -58,6 +58,8 @@ enum Frame {
         message_id: String,
         tool_call_id: String,
         working_dir: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        supervised_bash: bool,
     },
     Cancel {
         id: u64,
@@ -306,6 +308,27 @@ async fn execute_background(mut input: Value, ctx: &ToolContext) -> Result<ToolO
     let display_name =
         crate::util::truncate_str(text("intent").or(text("command")).unwrap_or("bash"), 28)
             .to_string();
+    #[cfg(unix)]
+    if super::background_worker::available() {
+        if let Some(fields) = input.as_object_mut() {
+            fields.insert("run_in_background".into(), Value::Bool(false));
+        }
+        let info = crate::background::global().reserve_task_info();
+        super::background_worker::start(
+            &info,
+            "bash",
+            display_name.clone(),
+            &ctx.session_id,
+            notify,
+            wake,
+            super::background_worker::Job::RemoteBash {
+                params: input,
+                context: ctx.into(),
+            },
+        )
+        .await?;
+        return Ok(background_output(&info, &display_name, notify, wake));
+    }
     if let Some(fields) = input.as_object_mut() {
         fields.insert("run_in_background".into(), Value::Bool(false));
         fields.insert("timeout".into(), BACKGROUND_COMMAND_TIMEOUT_MS.into());
@@ -322,6 +345,15 @@ async fn execute_background(mut input: Value, ctx: &ToolContext) -> Result<ToolO
             handle,
         )
         .await;
+    Ok(background_output(&info, &display_name, notify, wake))
+}
+
+fn background_output(
+    info: &crate::background::BackgroundTaskInfo,
+    display_name: &str,
+    notify: bool,
+    wake: bool,
+) -> ToolOutput {
     let delivery = if wake {
         "The agent will be woken when the task completes."
     } else if notify {
@@ -329,16 +361,30 @@ async fn execute_background(mut input: Value, ctx: &ToolContext) -> Result<ToolO
     } else {
         "Notifications disabled."
     };
-    Ok(ToolOutput::new(format!(
+    ToolOutput::new(format!(
         "Command started in background as requested.\n\nTask ID: {}\nName: {}\n\n{}\n\n{}",
         info.task_id,
         display_name,
         delivery,
         super::BACKGROUND_WAIT_GUIDANCE
-    )))
+    ))
+    .with_metadata(serde_json::json!({"background": true, "task_id": info.task_id}))
 }
 
 async fn call(name: &str, input: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+    call_transport(name, input, ctx, false).await
+}
+
+pub(super) async fn call_supervised_bash(input: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+    call_transport("bash", input, ctx, true).await
+}
+
+async fn call_transport(
+    name: &str,
+    input: Value,
+    ctx: &ToolContext,
+    supervised_bash: bool,
+) -> Result<ToolOutput> {
     let client = client().await?;
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = oneshot::channel();
@@ -365,6 +411,7 @@ async fn call(name: &str, input: Value, ctx: &ToolContext) -> Result<ToolOutput>
             message_id: ctx.message_id.clone(),
             tool_call_id: ctx.tool_call_id.clone(),
             working_dir,
+            supervised_bash,
         })
         .map_err(|_| anyhow::anyhow!("execution worker disconnected"))?;
     let result = rx
@@ -442,6 +489,7 @@ where
                 message_id,
                 tool_call_id,
                 working_dir,
+                supervised_bash,
             }) => {
                 let results = results.clone();
                 let registry = registry.clone();
@@ -456,7 +504,18 @@ where
                             graceful_shutdown_signal: None,
                             execution_mode: ToolExecutionMode::AgentTurn,
                         };
-                        registry.execute_local(&name, input, ctx).await
+                        let work = registry.execute_local(&name, input, ctx);
+                        #[cfg(unix)]
+                        if supervised_bash && name == "bash" {
+                            super::BASH_SUPERVISED.scope((), work).await
+                        } else {
+                            work.await
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            let _ = supervised_bash;
+                            work.await
+                        }
                     } else {
                         Err(anyhow::anyhow!(
                             "tool `{name}` does not run in the execution environment"
@@ -568,6 +627,7 @@ mod tests {
             message_id: "m".into(),
             tool_call_id: format!("call-{id}"),
             working_dir: Some(dir.to_path_buf()),
+            supervised_bash: false,
         };
         let line = serde_json::to_string(&frame).unwrap() + "\n";
         to_worker.write_all(line.as_bytes()).await.unwrap();
@@ -590,6 +650,7 @@ mod tests {
             message_id: "m".into(),
             tool_call_id: "call".into(),
             working_dir: None,
+            supervised_bash: false,
         };
         to_worker
             .write_all((serde_json::to_string(&frame).unwrap() + "\n").as_bytes())

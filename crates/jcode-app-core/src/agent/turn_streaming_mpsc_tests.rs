@@ -27,17 +27,17 @@ fn tool_call(name: &str, input: serde_json::Value) -> ToolCall {
 }
 
 #[test]
-fn reload_interrupted_bg_wait_is_non_error_and_resumable() {
+fn waits_are_replayed_but_mutating_tools_are_not() {
     let tc = tool_call(
         "bg",
         json!({"action": "wait", "task_id": "bg-123", "max_wait_seconds": 300}),
     );
 
-    let (message, is_error) = reload_interrupted_tool_result(&tc, 1.2);
-
-    assert!(!is_error);
-    assert!(message.contains("Resume the wait"));
-    assert!(message.contains("\"task_id\":\"bg-123\""));
+    assert!(tool_handoff::is_reload_replayable_wait(&tc.name, &tc.input));
+    assert!(!tool_handoff::is_reload_replayable_wait(
+        "bg",
+        &json!({"action":"cancel"})
+    ));
 }
 
 #[test]

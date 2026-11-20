@@ -40,8 +40,10 @@ impl BackgroundTaskManager {
                 let mut associated_status = None;
                 if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
                     associated_status = self.read_status_file(&path).await;
-                } else if path.extension().and_then(|ext| ext.to_str()) == Some("output")
-                    && let Some(task_id) = path.file_stem().and_then(|stem| stem.to_str())
+                } else if matches!(
+                    path.extension().and_then(|ext| ext.to_str()),
+                    Some("output" | "exit")
+                ) && let Some(task_id) = path.file_stem().and_then(|stem| stem.to_str())
                 {
                     associated_status = self.status(task_id).await;
                 }
@@ -55,6 +57,7 @@ impl BackgroundTaskManager {
                         BackgroundTaskStatus::Running => "running",
                         BackgroundTaskStatus::Completed => "completed",
                         BackgroundTaskStatus::Superseded => "superseded",
+                        BackgroundTaskStatus::Interrupted => "interrupted",
                         BackgroundTaskStatus::Failed => "failed",
                     };
                     if !status_filter.is_empty() && !status_filter.contains(status_label) {

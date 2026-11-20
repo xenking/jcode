@@ -71,6 +71,8 @@ async fn foreground_budget_returns_fast_search_result_directly() {
         std::time::Duration::from_secs(1),
         "fast search".to_string(),
         "agentgrep-fast-test".to_string(),
+        #[cfg(unix)]
+        None,
     )
     .await
     .expect("fast search should complete in foreground");
@@ -90,6 +92,8 @@ async fn foreground_budget_promotes_slow_search_without_cancelling_it() {
         std::time::Duration::from_millis(1),
         "slow search".to_string(),
         "agentgrep-slow-test".to_string(),
+        #[cfg(unix)]
+        None,
     )
     .await
     .expect("slow search should be promoted");
@@ -163,6 +167,8 @@ async fn search_cancellation_foreground_future_stops_linked_search() {
         std::time::Duration::from_secs(60),
         "cancel foreground".into(),
         "agentgrep-cancel-foreground".into(),
+        #[cfg(unix)]
+        None,
     ));
     tokio::time::timeout(std::time::Duration::from_secs(5), started)
         .await
@@ -201,6 +207,8 @@ async fn search_cancellation_promoted_search_lives_until_background_cancel() {
         std::time::Duration::from_millis(1),
         "promoted cancellation".into(),
         "agentgrep-promoted-cancel".into(),
+        #[cfg(unix)]
+        None,
     )
     .await
     .unwrap();

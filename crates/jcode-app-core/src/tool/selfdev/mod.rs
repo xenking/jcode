@@ -26,6 +26,8 @@ mod logs;
 mod reload;
 mod setup;
 mod status;
+#[cfg(unix)]
+pub(crate) use build_queue::QueueJob;
 #[cfg(test)]
 mod tests;
 
@@ -465,7 +467,7 @@ impl BuildRequest {
                 self.save()?;
                 Ok(false)
             }
-            BackgroundTaskStatus::Failed => {
+            BackgroundTaskStatus::Failed | BackgroundTaskStatus::Interrupted => {
                 self.state = BuildRequestState::Failed;
                 self.completed_at = task_status
                     .completed_at
@@ -700,11 +702,13 @@ impl Tool for SelfDevTool {
                     #[cfg(unix)]
                     {
                         match crate::tool::bridge_reload::cli_bridge_launch() {
-                            Ok(launch) => Ok(crate::tool::bridge_reload::spawn_bridge_reload(
-                                &ctx.session_id,
-                                launch,
-                            )
-                            .await),
+                            Ok(launch) => {
+                                crate::tool::bridge_reload::spawn_bridge_reload(
+                                    &ctx.session_id,
+                                    launch,
+                                )
+                                .await
+                            }
                             Err(error) => Err(error),
                         }
                     }

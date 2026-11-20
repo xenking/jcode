@@ -26,7 +26,7 @@ const BRIDGE_START_TIMEOUT: Duration = Duration::from_secs(10);
 const BRIDGE_STOP_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// How a running bridge was launched, so it can be relaunched on rollback.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct BridgeLaunch {
     pub program: PathBuf,
     pub args: Vec<String>,
@@ -363,29 +363,55 @@ async fn restart_bridge(
     }
 }
 
-/// Queue the restart as a daemon-owned background task and return at once.
-pub(crate) async fn spawn_bridge_reload(session_id: &str, new_launch: BridgeLaunch) -> ToolOutput {
+pub(super) async fn run_reload(new_launch: BridgeLaunch, output: PathBuf) -> Result<TaskResult> {
+    let log = crate::storage::jcode_dir()
+        .map(|dir| dir.join("logs").join("api-bridge.log"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("jcode-api-bridge.log"));
+    restart_bridge(
+        new_launch,
+        jcode_harness_api::api_socket_path(),
+        log,
+        output,
+    )
+    .await
+}
+
+/// Queue the restart independently of the calling connection and daemon image.
+pub(crate) async fn spawn_bridge_reload(
+    session_id: &str,
+    new_launch: BridgeLaunch,
+) -> Result<ToolOutput> {
     let program = new_launch.display();
-    let info = background::global()
+    let manager = background::global();
+    #[cfg(unix)]
+    if super::background_worker::available() {
+        let info = manager.reserve_task_info();
+        super::background_worker::start(
+            &info,
+            "reload-bridge",
+            "reload harness API bridge".into(),
+            session_id,
+            true,
+            true,
+            super::background_worker::Job::BridgeReload(new_launch),
+        )
+        .await?;
+        return Ok(bridge_reload_output(&program, &info));
+    }
+    let info = manager
         .spawn_with_notify(
             "reload-bridge",
             Some("reload harness API bridge".to_string()),
             session_id,
             true,
             true,
-            move |output| {
-                let log = crate::storage::jcode_dir()
-                    .map(|dir| dir.join("logs").join("api-bridge.log"))
-                    .unwrap_or_else(|_| std::env::temp_dir().join("jcode-api-bridge.log"));
-                restart_bridge(
-                    new_launch,
-                    jcode_harness_api::api_socket_path(),
-                    log,
-                    output,
-                )
-            },
+            move |output| run_reload(new_launch, output),
         )
         .await;
+    Ok(bridge_reload_output(&program, &info))
+}
+
+fn bridge_reload_output(program: &str, info: &background::BackgroundTaskInfo) -> ToolOutput {
     ToolOutput::new(format!(
         "Restarting the harness API bridge onto `{program}` as daemon background task {}. \
          It runs independently of this turn, so it completes even if this connection drops. \

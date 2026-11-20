@@ -9,6 +9,7 @@ pub enum BackgroundTaskStatus {
     Completed,
     Superseded,
     Failed,
+    Interrupted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

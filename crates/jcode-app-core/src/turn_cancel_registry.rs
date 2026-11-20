@@ -182,6 +182,23 @@ pub fn cancellation_stops_running_work(session_id: &str) -> bool {
     current_interruption_reason(session_id) != Some(TurnInterruptionReason::Reload)
 }
 
+/// Keep the originating turn's reason after its guard has left the registry.
+/// A promoted command must not mistake a reload for Escape during teardown.
+#[cfg(unix)]
+pub(crate) fn capture_running_work_cancel(session_id: &str) -> impl Fn() -> bool + use<> {
+    let reason = active_turns().get(session_id).and_then(|entries| {
+        entries
+            .iter()
+            .max_by_key(|(token, _, _)| *token)
+            .map(|(_, _, reason)| Arc::clone(reason))
+    });
+    move || {
+        reason.as_ref().is_none_or(|reason| {
+            reason.load(Ordering::Acquire) != TurnInterruptionReason::Reload as u8
+        })
+    }
+}
+
 /// Register `signal` as the cancel signal for a turn running in `session_id`.
 /// Call at turn start; keep the guard alive for the duration of the turn.
 pub fn register_active_turn(session_id: &str, signal: InterruptSignal) -> ActiveTurnGuard {

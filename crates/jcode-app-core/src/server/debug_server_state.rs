@@ -112,6 +112,22 @@ pub(super) async fn maybe_handle_server_state_command(
     shutdown_signals: &Arc<RwLock<HashMap<String, jcode_agent_runtime::InterruptSignal>>>,
     soft_interrupt_queues: &SessionInterruptQueues,
 ) -> Result<Option<String>> {
+    if cmd == "reload:verify-exec" {
+        let binary = super::reload::private_verify_exec_binary().ok_or_else(|| {
+            anyhow::anyhow!("Exec verification requires a private verify-jcode daemon")
+        })?;
+        let mut target = jcode_build_support::runtime_generation::pin_path(&binary)?;
+        target.git_hash = Some(server_identity.git_hash.clone());
+        let request_id = super::reload_state::send_reload_signal_target(
+            server_identity.git_hash.clone(),
+            None,
+            false,
+            target,
+        )?;
+        return Ok(Some(
+            serde_json::json!({ "request_id": request_id }).to_string(),
+        ));
+    }
     if cmd == "sessions" {
         let (connected_agents, members) =
             connected_session_snapshot(sessions, client_connections, swarm_members).await;

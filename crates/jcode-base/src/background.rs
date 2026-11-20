@@ -36,6 +36,7 @@ use model::{
 };
 
 /// Manages background task execution
+#[derive(Clone)]
 pub struct BackgroundTaskManager {
     tasks: Arc<RwLock<HashMap<String, RunningTask>>>,
     /// Serializes status updates, including completion and delivery flag capture,
@@ -146,12 +147,37 @@ impl BackgroundTaskManager {
     }
 
     async fn write_status_file(&self, path: &std::path::Path, status: &TaskStatusFile) {
+        if status.detached {
+            if let Err(error) = Self::save_detached_status(path, status).await {
+                crate::logging::warn(&format!(
+                    "Could not save background task {}: {error:#}",
+                    status.task_id
+                ));
+            }
+            return;
+        }
         if let Ok(json) = serde_json::to_string_pretty(status) {
             let _ = fs::write(path, json).await;
         }
     }
 
     async fn finalize_detached_status_if_needed(
+        &self,
+        mut status: TaskStatusFile,
+        status_path: &std::path::Path,
+    ) -> TaskStatusFile {
+        if status.status != BackgroundTaskStatus::Running || !status.detached {
+            return status;
+        }
+        let _guard = self.progress_updates.lock().await;
+        if let Some(current) = self.read_status_file(status_path).await {
+            status = current;
+        }
+        self.finalize_detached_status_locked(status, status_path)
+            .await
+    }
+
+    async fn finalize_detached_status_locked(
         &self,
         mut status: TaskStatusFile,
         status_path: &std::path::Path,
@@ -171,20 +197,48 @@ impl BackgroundTaskManager {
         }
 
         let output_path = self.output_path_for(&status.task_id);
-        let output = fs::read_to_string(&output_path).await.unwrap_or_default();
-        let exit_code = reaped_exit.or_else(|| Self::parse_exit_code_from_output(&output));
+        let output = self.output(&status.task_id).await.unwrap_or_default();
+        let receipt_path = output_path.with_extension("exit");
+        let receipt = fs::read_to_string(&receipt_path).await.ok();
+        let reported_result = receipt
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<TaskResult>(text).ok());
+        let timeout_error = receipt
+            .as_deref()
+            .and_then(|text| text.strip_prefix("timeout:"));
+        let exit_code = if let Some(result) = &reported_result {
+            result.exit_code
+        } else if timeout_error.is_some() {
+            Some(124)
+        } else {
+            receipt
+                .as_deref()
+                .and_then(|text| text.trim().parse().ok())
+                .or(reaped_exit)
+                .or_else(|| Self::parse_exit_code_from_output(&output))
+        };
         let completed_at = Utc::now();
         let duration_secs = Self::status_duration_secs(&status.started_at, completed_at);
-        let final_status = if matches!(exit_code, Some(0)) {
-            BackgroundTaskStatus::Completed
-        } else {
-            BackgroundTaskStatus::Failed
-        };
-        let final_error = if matches!(final_status, BackgroundTaskStatus::Failed) {
-            Some(match exit_code {
-                Some(code) => format!("Command exited with code {}", code),
-                None => "Detached command exited without a readable exit code".to_string(),
-            })
+        let final_status = reported_result
+            .as_ref()
+            .and_then(|result| result.status.clone())
+            .filter(|status| *status != BackgroundTaskStatus::Running)
+            .unwrap_or(if matches!(exit_code, Some(0)) {
+                BackgroundTaskStatus::Completed
+            } else {
+                BackgroundTaskStatus::Failed
+            });
+        let final_error = if let Some(result) = reported_result {
+            result.error
+        } else if matches!(final_status, BackgroundTaskStatus::Failed) {
+            Some(
+                timeout_error
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| match exit_code {
+                        Some(code) => format!("Command exited with code {}", code),
+                        None => "Detached command exited without a readable exit code".to_string(),
+                    }),
+            )
         } else {
             None
         };
@@ -195,13 +249,25 @@ impl BackgroundTaskManager {
         status.completed_at = Some(completed_at.to_rfc3339());
         status.duration_secs = duration_secs;
         status.pid = Some(pid);
+        status.completion_delivered = Some(false);
         push_task_event(
             &mut status,
             terminal_event_record(final_status.clone(), exit_code, final_error.as_deref()),
         );
 
-        self.write_status_file(status_path, &status).await;
+        if let Err(error) = Self::save_detached_status(status_path, &status).await {
+            crate::logging::warn(&format!(
+                "Could not save detached task {}: {error:#}",
+                status.task_id
+            ));
+            return self.read_status_file(status_path).await.unwrap_or(status);
+        }
 
+        self.publish_detached_completion(&status, output);
+        status
+    }
+
+    fn publish_detached_completion(&self, status: &TaskStatusFile, output: String) {
         let output_preview = if output.len() > 500 {
             format!("{}...", crate::util::truncate_str(&output, 500))
         } else {
@@ -212,16 +278,50 @@ impl BackgroundTaskManager {
             tool_name: status.tool_name.clone(),
             display_name: status.display_name.clone(),
             session_id: status.session_id.clone(),
-            status: final_status,
-            exit_code,
+            status: status.status.clone(),
+            exit_code: status.exit_code,
             output_preview,
-            output_file: output_path,
-            duration_secs: duration_secs.unwrap_or_default(),
+            output_file: self.output_path_for(&status.task_id),
+            duration_secs: status.duration_secs.unwrap_or_default(),
             notify: status.notify,
             wake: status.wake,
         }));
+    }
 
-        status
+    pub async fn detached_completion_delivered(&self, task_id: &str) -> Option<bool> {
+        self.read_status_file(&self.status_path_for(task_id))
+            .await?
+            .completion_delivered
+    }
+
+    pub async fn mark_detached_completion_delivered(&self, task_id: &str) {
+        let _guard = self.progress_updates.lock().await;
+        let path = self.status_path_for(task_id);
+        if let Some(mut status) = self.read_status_file(&path).await
+            && status.completion_delivered == Some(false)
+        {
+            status.completion_delivered = Some(true);
+            self.write_status_file(&path, &status).await;
+        }
+    }
+
+    /// An owner can attach after the supervisor completed, including during
+    /// exec. Re-submit only its unacknowledged completions to the normal bus.
+    pub async fn replay_detached_completions_for(&self, session_id: &str) {
+        let Ok(mut entries) = fs::read_dir(&self.output_dir).await else {
+            return;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "json")
+                && let Some(status) = self.read_status_file(&path).await
+                && status.session_id == session_id
+                && status.completion_delivered == Some(false)
+            {
+                let output = self.output(&status.task_id).await.unwrap_or_default();
+                self.publish_detached_completion(&status, output);
+            }
+        }
     }
 
     /// True when a non-detached `Running` status file provably belongs to a
@@ -379,7 +479,7 @@ impl BackgroundTaskManager {
         started_at: &str,
         notify: bool,
         wake: bool,
-    ) {
+    ) -> Result<()> {
         let (notify, wake) = normalize_delivery(notify, wake);
         let status = TaskStatusFile {
             task_id: info.task_id.clone(),
@@ -398,13 +498,14 @@ impl BackgroundTaskManager {
             owner_pid: None,
             owner_instance: None,
             detached: true,
+            completion_delivered: None,
             notify,
             wake,
             progress: None,
             event_history: Vec::new(),
             stall_wake_seconds: None,
         };
-        self.write_status_file(&info.status_file, &status).await;
+        Self::save_detached_status(&info.status_file, &status).await?;
         self.arm_elapsed_review(tool_name, &info.task_id);
         Self::publish_task_started_activity(
             &info.task_id,
@@ -413,6 +514,41 @@ impl BackgroundTaskManager {
             session_id,
             notify,
         );
+        Ok(())
+    }
+
+    /// Find detached jobs with unconsumed completion/progress on daemon startup.
+    /// Unlike `list`, this does not finalize a command that finished during exec.
+    pub async fn detached_tasks_for_monitoring(&self) -> Vec<TaskStatusFile> {
+        let mut tasks = Vec::new();
+        let Ok(mut entries) = fs::read_dir(&self.output_dir).await else {
+            return tasks;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "json")
+                && let Some(status) = self.read_status_file(&path).await
+                && status.status == BackgroundTaskStatus::Running
+                && status.detached
+            {
+                tasks.push(status);
+            }
+        }
+        tasks
+    }
+
+    async fn save_detached_status(path: &std::path::Path, status: &TaskStatusFile) -> Result<()> {
+        let temporary = path.with_extension(format!(
+            "tmp.{}.{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        fs::write(&temporary, serde_json::to_vec(status)?).await?;
+        if let Err(error) = fs::rename(&temporary, path).await {
+            let _ = fs::remove_file(&temporary).await;
+            return Err(error.into());
+        }
+        Ok(())
     }
 
     /// Spawn a background task
@@ -472,6 +608,7 @@ impl BackgroundTaskManager {
             owner_pid: Some(std::process::id()),
             owner_instance: Some(model::process_instance_token().to_string()),
             detached: false,
+            completion_delivered: None,
             notify,
             wake,
             progress: None,
@@ -550,6 +687,7 @@ impl BackgroundTaskManager {
                 owner_pid: Some(std::process::id()),
                 owner_instance: Some(model::process_instance_token().to_string()),
                 detached: false,
+                completion_delivered: None,
                 notify: notify_flag,
                 wake: wake_flag,
                 progress: prior_progress,
@@ -695,6 +833,7 @@ impl BackgroundTaskManager {
             owner_pid: Some(std::process::id()),
             owner_instance: Some(model::process_instance_token().to_string()),
             detached: false,
+            completion_delivered: None,
             notify,
             wake,
             progress: None,
@@ -781,6 +920,7 @@ impl BackgroundTaskManager {
                 owner_pid: Some(std::process::id()),
                 owner_instance: Some(model::process_instance_token().to_string()),
                 detached: false,
+                completion_delivered: None,
                 notify: notify_flag,
                 wake: wake_flag,
                 progress: prior_progress,
@@ -981,7 +1121,26 @@ impl BackgroundTaskManager {
     /// Get full output of a task
     pub async fn output(&self, task_id: &str) -> Option<String> {
         let output_path = self.output_path_for(task_id);
-        fs::read_to_string(&output_path).await.ok()
+        let output = fs::read(&output_path).await.ok()?;
+        let text = String::from_utf8_lossy(&output);
+        let status = self.read_status_file(&self.status_path_for(task_id)).await;
+        if status.is_some_and(|status| status.detached && status.tool_name == "bash") {
+            Some(
+                text.split_inclusive('\n')
+                    .filter(|line| {
+                        !["JCODE_PROGRESS ", "JCODE_CHECKPOINT "]
+                            .iter()
+                            .any(|prefix| {
+                                line.trim().strip_prefix(prefix).is_some_and(|rest| {
+                                    serde_json::from_str::<serde_json::Value>(rest).is_ok()
+                                })
+                            })
+                    })
+                    .collect(),
+            )
+        } else {
+            Some(text.into_owned())
+        }
     }
 
     /// Wait for a task to finish, emit progress, or reach the caller's maximum wait.
@@ -1304,6 +1463,7 @@ impl BackgroundTaskManager {
                 owner_pid: Some(std::process::id()),
                 owner_instance: Some(model::process_instance_token().to_string()),
                 detached: false,
+                completion_delivered: None,
                 notify: notify_flag,
                 wake: wake_flag,
                 progress: None,
@@ -1330,7 +1490,7 @@ impl BackgroundTaskManager {
                 return Ok(false);
             };
             status = self
-                .finalize_detached_status_if_needed(status, &status_path)
+                .finalize_detached_status_locked(status, &status_path)
                 .await;
             if status.status != BackgroundTaskStatus::Running || !status.detached {
                 return Ok(false);
@@ -1344,9 +1504,8 @@ impl BackgroundTaskManager {
             {
                 let _ = crate::platform::signal_detached_process_group(pid, libc::SIGTERM);
                 tokio::time::sleep(_graceful_timeout).await;
-                if crate::platform::is_process_running(pid) {
-                    let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
-                }
+                // The leader can exit on TERM while a descendant ignores it.
+                let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
             }
             #[cfg(windows)]
             {
@@ -1375,11 +1534,11 @@ impl BackgroundTaskManager {
     ///
     /// `exec` replaces the process image without running destructors, so
     /// without this the spawned task futures simply vanish: their
-    /// `kill_on_drop` children (e.g. cargo builds) are never killed and keep
+    /// `kill_on_drop` children are never killed and may keep
     /// running orphaned, and their status files stay `Running` until the next
     /// process's reconcile sweep happens to notice. Aborting the handles here
     /// drops the futures (killing children) and persisting a terminal
-    /// `Failed` status makes the interruption deterministic and immediately
+    /// `Interrupted` status makes the interruption deterministic and immediately
     /// visible to `bg wait`/`bg status` and self-dev queue reconciliation.
     ///
     /// Returns the number of tasks finalized.
@@ -1415,7 +1574,7 @@ impl BackgroundTaskManager {
                     .and_then(|status| status.display_name.clone())
                     .or(task.display_name),
                 session_id: task.session_id,
-                status: BackgroundTaskStatus::Failed,
+                status: BackgroundTaskStatus::Interrupted,
                 exit_code: None,
                 error: Some(error.clone()),
                 started_at: task.started_at_rfc3339,
@@ -1425,6 +1584,7 @@ impl BackgroundTaskManager {
                 owner_pid: Some(std::process::id()),
                 owner_instance: Some(model::process_instance_token().to_string()),
                 detached: false,
+                completion_delivered: None,
                 notify: notify_flag,
                 wake: wake_flag,
                 progress: prior_status
@@ -1437,7 +1597,7 @@ impl BackgroundTaskManager {
             };
             push_task_event(
                 &mut final_status,
-                terminal_event_record(BackgroundTaskStatus::Failed, None, Some(&error)),
+                terminal_event_record(BackgroundTaskStatus::Interrupted, None, Some(&error)),
             );
             self.write_status_file(&task.status_path, &final_status)
                 .await;
@@ -1445,6 +1605,18 @@ impl BackgroundTaskManager {
         }
 
         finalized
+    }
+
+    /// The only safe handoff for an opaque future with unknown side effects
+    /// is to let it finish on this process image. Durable process jobs are
+    /// not registered in `tasks` and never block an exec.
+    pub async fn drain_opaque_tasks_for_reload(&self) {
+        loop {
+            if self.tasks.read().await.is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     /// Best-effort synchronous snapshot of currently running tasks.

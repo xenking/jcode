@@ -411,6 +411,81 @@ async fn reload_mid_tool_resumes_with_only_a_tool_result() {
     ));
 }
 
+#[tokio::test]
+async fn reload_replays_pending_wait_before_contacting_the_provider() {
+    struct WaitProbe(&'static str);
+
+    #[async_trait::async_trait]
+    impl crate::tool::Tool for WaitProbe {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            "Wait probe"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+        async fn execute(
+            &self,
+            input: serde_json::Value,
+            ctx: ToolContext,
+        ) -> Result<crate::tool::ToolOutput> {
+            assert_eq!(ctx.tool_call_id, "call-wait");
+            assert_eq!(input["intent"], "same wait");
+            assert_eq!(
+                input["max_wait_seconds"],
+                if self.0 == "bg" { 0 } else { 45 }
+            );
+            Ok(crate::tool::ToolOutput::new("the original wait finished"))
+        }
+    }
+
+    let _lock = crate::storage::lock_test_env();
+    let _home = TestHome::new();
+    for (name, action) in [("bg", "wait"), ("swarm", "await_members")] {
+        let mut session = crate::session::Session::create(None, None);
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "wait for the existing work".into(),
+                cache_control: None,
+            }],
+        );
+        session.add_message(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "call-wait".into(),
+                name: name.into(),
+                input: serde_json::json!({"action": action, "intent": "same wait", "max_wait_seconds": 45}),
+                thought_signature: None,
+            }],
+        );
+        session.messages.last_mut().unwrap().timestamp =
+            Some(chrono::Utc::now() - chrono::Duration::seconds(50));
+        session.save().unwrap();
+        let capture = ScriptedProvider::default();
+        let registry = Registry::empty();
+        registry
+            .register(name.into(), Arc::new(WaitProbe(name)))
+            .await;
+        let mut resumed =
+            Agent::new_with_session(Arc::new(capture.clone()), registry, session, None);
+        let (tx, _rx) = tokio_mpsc::unbounded_channel();
+        let lease = resumed.claim_server_turn().unwrap();
+        resumed
+            .resume_interrupted_turn_mpsc(&lease, tx, true)
+            .await
+            .unwrap();
+        let requests = capture.requests();
+        assert!(requests[0].iter().flat_map(|m| &m.content).any(|block| matches!(block,
+            ContentBlock::ToolResult { tool_use_id, content, is_error, .. }
+            if tool_use_id == "call-wait" && content.ends_with("the original wait finished") && *is_error != Some(true)
+        )), "did not finish the original {name} wait before continuing: {:?}", requests[0]);
+        assert!(!has_synthetic_user_prompt(&requests[0]));
+    }
+}
+
 /// Reload mid-stream: generation continues from the assistant's own partial
 /// text. No user message is added, and the display marker is removed.
 #[tokio::test]

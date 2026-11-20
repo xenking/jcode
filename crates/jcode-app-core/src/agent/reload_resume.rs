@@ -252,6 +252,61 @@ impl Agent {
         Ok(changed)
     }
 
+    async fn replay_pending_wait(
+        &mut self,
+        tool: &PendingToolUse,
+        message_id: String,
+        input: serde_json::Value,
+        event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    ) -> Result<bool> {
+        self.validate_tool_allowed(&tool.name)?;
+        let shutdown = self.graceful_shutdown.clone();
+        let ctx = ToolContext {
+            session_id: self.session.id.clone(),
+            message_id,
+            tool_call_id: tool.id.clone(),
+            working_dir: self.working_dir().map(std::path::PathBuf::from),
+            stdin_request_tx: self.stdin_request_tx.clone(),
+            graceful_shutdown_signal: Some(shutdown.clone()),
+            execution_mode: ToolExecutionMode::AgentTurn,
+        };
+        let _running =
+            crate::running_tool_registry::register(&self.session.id, &tool.id, &tool.name);
+        let started = Instant::now();
+        let result = tokio::select! {
+            biased;
+            _ = shutdown.notified() => return Ok(false),
+            result = self.registry.execute(&tool.name, input, ctx) => result,
+        };
+        let (content, error) = match result {
+            Ok(output) => (
+                super::tools::cap_tool_output_for_history(&tool.name, output).output,
+                None,
+            ),
+            Err(error) => {
+                let error = format!("Error: {error}");
+                (error.clone(), Some(error))
+            }
+        };
+        self.add_message_with_duration(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: tool.id.clone(),
+                content: content.clone(),
+                is_error: error.as_ref().map(|_| true),
+            }],
+            Some(started.elapsed().as_millis() as u64),
+        );
+        self.persist_session_now()?;
+        let _ = event_tx.send(ServerEvent::ToolDone {
+            id: tool.id.clone(),
+            name: tool.name.clone(),
+            output: content,
+            error,
+        });
+        Ok(true)
+    }
+
     /// Continue the interrupted turn inside the assistant turn.
     ///
     /// Never appends a user text message. The only transcript mutation is the
@@ -271,7 +326,37 @@ impl Agent {
         match &plan {
             ResumePlan::Nothing => return Ok(ResumeOutcome::NothingToResume),
             ResumePlan::ToolResults(pending) => {
-                for (id, name, content) in self.append_interrupted_tool_results(pending)? {
+                let mut interrupted = Vec::new();
+                for tool in pending {
+                    let message = &self.session.messages[tool.message_index];
+                    let wait = message.content.iter().find_map(|block| match block {
+                        ContentBlock::ToolUse { id, input, .. }
+                            if *id == tool.id
+                                && super::turn_streaming_mpsc::tool_handoff::is_reload_replayable_wait(
+                                    &tool.name, input,
+                                ) =>
+                        {
+                            Some(input.clone())
+                        }
+                        _ => None,
+                    });
+                    if let Some(input) = wait {
+                        let input = if tool.name == "bg" {
+                            crate::tool::replay_bg_wait_input(input, message.timestamp)
+                        } else {
+                            input
+                        };
+                        if !self
+                            .replay_pending_wait(tool, message.id.clone(), input, &event_tx)
+                            .await?
+                        {
+                            return Ok(ResumeOutcome::Continued);
+                        }
+                    } else {
+                        interrupted.push(tool.clone());
+                    }
+                }
+                for (id, name, content) in self.append_interrupted_tool_results(&interrupted)? {
                     let _ = event_tx.send(ServerEvent::ToolDone {
                         id,
                         name,

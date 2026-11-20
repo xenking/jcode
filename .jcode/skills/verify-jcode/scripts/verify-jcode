@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Drive the real Jcode CLI/TUI with a loopback-only deterministic provider."""
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -218,9 +219,10 @@ class Harness:
         require(command in {"state", "history", "side-panel:stats"}, "Not an observation")
         return self.debug("client:" + command)
 
-    def debug(self, command):
+    def debug(self, command, private_exec=False):
         require(command in {"server:info", "clients:map", "swarm:members", "client:state", "client:history",
-                            "client:frame", "client:side-panel:stats"},
+                            "client:frame", "client:side-panel:stats"}
+                or private_exec and command == "reload:verify-exec",
                 "Not a read-only server command")
         with socket.socket(socket.AF_UNIX) as connection:
             connection.settimeout(10)
@@ -482,6 +484,195 @@ class Harness:
         dump(self.evidence / "doctor.json", report)
         return report
 
+    def reload_background(self, token, start, label, finish_before_attach=False, wait_in_turn=False):
+        routed = bool(self.env.get("JCODE_EXEC_WORKER"))
+        gate = self.root / "control" / token.replace("-", "_")
+        sid = self.observe("state")["remote_session_id"]
+        status_dir = self.root / "jcode-bg-tasks"
+        before = {p.name for p in status_dir.glob("*.status.json")}
+        flags = " verify-no-bg-wake" if wait_in_turn else ""
+        self.send(f"{token} [e2e:reload-bg:{gate.name}]{flags}")
+        self.request_after(token, start)
+        self.idle()
+
+        def load_status(path):
+            try:
+                return json.loads(path.read_text())
+            except (OSError, ValueError):
+                return {}
+
+        def new_task():
+            for path in status_dir.glob("*.status.json"):
+                task = load_status(path)
+                if path.name not in before and task.get("session_id") == sid and task.get("tool_name") == "bash":
+                    return path
+
+        path = wait_for(new_task, "original background task registration")
+        task = load_status(path)
+        os_pid = wait_for(lambda: int(gate.with_suffix(".child").read_text())
+                          if gate.with_suffix(".child").exists() else None, "original command PID")
+        require(task.get("status") == "running" and task.get("notify") and task.get("wake") == (not wait_in_turn),
+                f"Expected running task with the requested delivery flags: {task}")
+        require(alive(os_pid) and alive(task["pid"]), "Original shell or supervisor is not alive")
+        daemon_pid = self.state["processes"]["server"]["pid"]
+        old_server = self.debug("server:info")["id"]
+        if wait_in_turn:
+            wait_prompt = f"{token}_wait [e2e:reload-wait-latest]"
+            self.send(wait_prompt)
+            self.request_after(wait_prompt, start)
+            wait_for(lambda: "Verify original wait survives daemon exec" in self.pane()
+                     and self.observe("state")["processing"], "the original bg wait is in flight")
+            # Add a newer terminal task after the wait resolved its selector.
+            # This status represents another tool submitting work before exec.
+            time.sleep(0.25)
+            distractor = ("z" if task["task_id"][0] != "z" else "y") + task["task_id"][1:]
+            dump(status_dir / f"{distractor}.status.json", dict(task, task_id=distractor,
+                 started_at="2099-01-01T00:00:00+00:00", status="completed", exit_code=0,
+                 pid=None, detached=False, notify=False))
+        self.event(action="private-exec", daemon_pid=daemon_pid, shell_pid=os_pid)
+        tui_closed = False
+        try:
+            if finish_before_attach:
+                self.frame(label + "-running")
+                self.tmux("kill-session", "-t", "verify")
+                tui_closed = True
+            reload_id = self.debug("reload:verify-exec", private_exec=True)["request_id"]
+
+            def new_server():
+                try:
+                    server = self.debug("server:info")
+                    return server if server["id"] != old_server else None
+                except (OSError, RuntimeError, ValueError):
+                    return None
+
+            successor = wait_for(new_server, "replacement process image", 25)
+            trace = self.root / "data/reload-traces" / (reload_id + ".jsonl")
+            shutil.copy2(trace, self.evidence / f"{label}-exec.jsonl")
+            require(any(event.get("phase") == "exec_start" and event.get("pid") == daemon_pid
+                        and Path(event.get("binary", "")).resolve() == self.binary.resolve()
+                        for event in map(json.loads, trace.read_text().splitlines())),
+                    "No exec trace for the original daemon PID and staged binary")
+            require(alive(daemon_pid), "Exec did not preserve daemon PID")
+            if not finish_before_attach:
+                wait_for(lambda: any(client["session_id"] == sid for client in self.debug("clients:map")["clients"]),
+                         "TUI reattached to its original session", 25)
+            require(alive(os_pid) and alive(task["pid"]) and load_status(path).get("pid") == task["pid"]
+                    and load_status(path).get("status") == "running", "Exec lost the original running task")
+            gate.with_suffix(".progress").touch()
+            if not routed:
+                wait_for(lambda: (load_status(path).get("progress") or {}).get("message") == "post-exec progress",
+                         "progress recorded by replacement daemon")
+            if finish_before_attach:
+                gate.with_suffix(".release").touch()
+                wait_for(lambda: load_status(path).get("exit_code") == 23, "completion while owner is offline")
+                require(not any(client["session_id"] == sid for client in self.debug("clients:map")["clients"]),
+                        "Owner had already reattached before completion")
+            else:
+                self.frame(label + "-running")
+        finally:
+            gate.with_suffix(".progress").touch()
+            gate.with_suffix(".release").touch()
+        if tui_closed:
+            self.start_tui(resume=sid)
+        wait_for(lambda: load_status(path).get("exit_code") == 23, "original code 23 recorded")
+        finished = load_status(path)
+        output = status_dir / (task["task_id"] + ".output")
+        require(finished.get("status") == "failed" and "completed by original shell" in output.read_text(),
+                f"Missing original output or exit status: {finished}")
+        if not wait_in_turn:
+            wait_for(lambda: "exit 23" in self.pane(), "visible TUI background completion")
+            # The fixture text in the assistant's command is not a wake.
+            wait_for(lambda: any(m.get("role") == "user"
+                                 and f"**Background task** `{task['task_id']}`" in json.dumps(m.get("content"))
+                                 and "completed by original shell" in json.dumps(m.get("content"))
+                                 for entry in self.records()[start:] if entry.get("agent")
+                                 for m in entry["messages"][-2:]), "provider request from task wake")
+        wait_for(lambda: load_status(path).get("completion_delivered") is True,
+                 "durable completion acknowledgement")
+        self.idle()
+        if wait_in_turn:
+            requests = [entry for entry in self.records()[start:] if entry.get("agent")
+                        and any(wait_prompt in json.dumps(m.get("content")) for m in entry["messages"])]
+            require(len(requests) >= 2, "No provider continuation for the original wait")
+            first_continuation = requests[1]["messages"]
+            require(any(m.get("role") == "tool" and m.get("tool_call_id") == "call_reload_wait"
+                        and "Exit code: 23" in json.dumps(m.get("content"))
+                        and "completed by original shell" in json.dumps(m.get("content"))
+                        for m in first_continuation), "The first continued provider request lacks the original wait result")
+        dump(self.evidence / f"{label}-task.json", load_status(path))
+        return {"task_id": task["task_id"], "daemon_pid": daemon_pid, "shell_pid": os_pid,
+                "previous_server_id": old_server, "server_id": successor["id"],
+                "session_id": sid, "exit_code": finished["exit_code"], "reload_id": reload_id}
+
+    def reload_selfdev(self, token, label):
+        workspace = self.root / "workspace"
+        (workspace / ".git").mkdir(exist_ok=True)
+        (workspace / "Cargo.toml").write_text('[package]\nname = "jcode"\n')
+        locks = self.root / "data/selfdev-build-locks"
+        locks.mkdir(exist_ok=True)
+        status_dir = self.root / "jcode-bg-tasks"
+        sid = self.observe("state")["remote_session_id"]
+        before = {path.name for path in status_dir.glob("*.status.json")}
+
+        def read_status(path):
+            try:
+                return json.loads(path.read_text())
+            except (OSError, ValueError):
+                return {}
+
+        def registered_job(action):
+            for path in status_dir.glob("*.status.json"):
+                status = read_status(path)
+                if (path.name not in before and status.get("session_id") == sid
+                        and status.get("tool_name") == f"selfdev-{action}"):
+                    return path, status
+
+        with (locks / "test-worktree-scope.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            jobs = []
+            for action in ("build", "test"):
+                start = len(self.records())
+                self.send(f"{token}_{action} [e2e:reload-selfdev:{action}]")
+                self.request_after(f"{token}_{action}", start)
+                self.idle()
+                path, task = wait_for(lambda: registered_job(action), f"selfdev {action} registration")
+                require(task.get("detached") and task.get("status") == "running" and alive(task["pid"]),
+                        f"Expected detached selfdev {action} worker blocked on private lock: {task}")
+                jobs.append((action, path, task))
+
+            old_server = self.debug("server:info")["id"]
+            daemon_pid = self.state["processes"]["server"]["pid"]
+            reload_id = self.debug("reload:verify-exec", private_exec=True)["request_id"]
+
+            def new_server():
+                try:
+                    server = self.debug("server:info")
+                    return server if server["id"] != old_server else None
+                except (OSError, RuntimeError, ValueError):
+                    return None
+
+            successor = wait_for(new_server, "replacement process image", 25)
+            require(alive(daemon_pid), "Exec did not preserve daemon PID")
+            wait_for(lambda: any(c["session_id"] == sid for c in self.debug("clients:map")["clients"]),
+                     "TUI reattached to its original session", 25)
+            for action, path, task in jobs:
+                successor_task = read_status(path)
+                require(successor_task.get("status") == "running" and successor_task.get("pid") == task["pid"]
+                        and alive(task["pid"]), f"Reload lost original selfdev {action} PID {task['pid']}")
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+        results = {}
+        for action, path, task in jobs:
+            wait_for(lambda: read_status(path).get("status") == "completed", f"selfdev {action} completion")
+            status = read_status(path)
+            output = (status_dir / (task["task_id"] + ".output")).read_text()
+            require(status.get("exit_code") == 0 and f"Simulated selfdev {action}" in output,
+                    f"Missing real queue-fixture result for {action}: {status}")
+            dump(self.evidence / f"{label}-{action}.json", status)
+            results[action] = {"task_id": task["task_id"], "pid": task["pid"], "exit_code": 0}
+        return {"jobs": results, "daemon_pid": daemon_pid, "reload_id": reload_id,
+                "previous_server_id": old_server, "server_id": successor["id"], "session_id": sid}
+
     def drive(self, feature, mode, text=None, keys=None, expect=None):
         self.doctor()
         self.state["drive_sequence"] = self.state.get("drive_sequence", 0) + 1
@@ -590,6 +781,11 @@ class Harness:
                 dump(self.evidence / f"{label}-session.json", self.persisted(sid, token + "_continued"))
             elif feature == "worker-reload":
                 result.update(self.worker_reload(label, token, start))
+            elif feature in {"reload-bg", "reload-bg-before-attach", "reload-bg-wait"}:
+                result.update(self.reload_background(token, start, label,
+                    finish_before_attach=feature == "reload-bg-before-attach", wait_in_turn=feature == "reload-bg-wait"))
+            elif feature == "reload-selfdev":
+                result.update(self.reload_selfdev(token, label))
             elif feature in {"resume", "restart", "mode-set"}:
                 if feature == "mode-set":
                     self.send("/mode toggle verify-probe")
@@ -819,7 +1015,7 @@ def launch(args):
     evidence = Path(args.evidence).resolve()
     evidence.mkdir(mode=0o700, parents=True, exist_ok=False)
     os.chmod(evidence, 0o700)
-    root = Path(tempfile.mkdtemp(prefix="jv-", dir="/tmp"))
+    root = Path(tempfile.mkdtemp(prefix="jv-", dir="/tmp")).resolve()
     owner = uuid.uuid4().hex
     (root / "owner").write_text(owner)
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(root / "home"),
@@ -827,6 +1023,7 @@ def launch(args):
            "JCODE_HOME": str(root / "data"), "JCODE_RUNTIME_DIR": str(root),
            "XDG_CONFIG_HOME": str(root / "home/.config"), "XDG_CACHE_HOME": str(root / "home/.cache"),
            "JCODE_TEST_SESSION": "1", "JCODE_DEBUG_CONTROL": "1", "JCODE_NO_MENUBAR": "1",
+           "JCODE_VERIFY_EXEC_RELOAD": "1",
            "JCODE_NO_TELEMETRY": "1", "JCODE_TELEMETRY": "off",
            "JCODE_NO_AUTO_UPDATE": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
            "GIT_TERMINAL_PROMPT": "0", "OPENAI_COMPAT_API_KEY": "synthetic-verification-key",
@@ -845,6 +1042,8 @@ def launch(args):
         for name in ("home", "data", "workspace", "control"):
             (root / name).mkdir()
         shutil.copy2(binary, root / "jcode")
+        if args.loopback_exec_worker:
+            env["JCODE_EXEC_WORKER"] = shlex.join([str(root / "jcode"), "server", "exec-worker"])
         skill = root / "workspace/.jcode/skills/verify-probe"
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text(
@@ -890,11 +1089,13 @@ def main():
     start.add_argument("--evidence", required=True, help="New evidence directory, survives cleanup")
     start.add_argument("--cols", type=int, default=160)
     start.add_argument("--rows", type=int, default=48)
+    start.add_argument("--loopback-exec-worker", action="store_true",
+                       help="Route Bash through the staged executable's execution worker, with no SSH")
     for name in ("doctor", "drive", "frame", "cleanup"):
         command = sub.add_parser(name)
         command.add_argument("--evidence", required=True)
         if name == "drive":
-            command.add_argument("feature", choices=["cli", "tui", "slash", "resume", "restart", "cancel",
+            command.add_argument("feature", choices=["cli", "tui", "slash", "resume", "restart", "reload-bg", "reload-bg-before-attach", "reload-bg-wait", "reload-selfdev", "cancel",
                                                      "side-panel", "mode", "mode-set", "draft-models", "worker-reload", "input", "keys"])
             command.add_argument("--mode", choices=["plain", "json", "ndjson"], default="json")
             command.add_argument("--text", help="Text for exploratory input drive")

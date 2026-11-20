@@ -12,6 +12,39 @@ use super::SessionAgents;
 
 const RELOAD_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Verification may exec only its staged binary, on its own socket and home.
+pub(super) fn private_verify_exec_binary() -> Option<std::path::PathBuf> {
+    #[cfg(not(unix))]
+    return None;
+    #[cfg(unix)]
+    {
+        for key in [
+            "JCODE_TEST_SESSION",
+            "JCODE_DEBUG_CONTROL",
+            "JCODE_VERIFY_EXEC_RELOAD",
+        ] {
+            if std::env::var(key).as_deref() != Ok("1") {
+                return None;
+            }
+        }
+        let runtime = std::path::PathBuf::from(std::env::var_os("JCODE_RUNTIME_DIR")?)
+            .canonicalize()
+            .ok()?;
+        let binary = std::env::current_exe().ok()?.canonicalize().ok()?;
+        let home = crate::storage::jcode_dir().ok()?.canonicalize().ok()?;
+        let socket = super::socket_path();
+        if binary != runtime.join("jcode")
+            || home != runtime.join("data")
+            || socket.parent()?.canonicalize().ok()? != runtime
+            || socket.file_name()? != "app.sock"
+            || !runtime.join("owner").is_file()
+        {
+            return None;
+        }
+        Some(binary)
+    }
+}
+
 fn prepare_server_exec(cmd: &mut std::process::Command, socket_path: &std::path::Path) {
     // The replacement daemon must own the published socket paths. Unlink them
     // before exec so we never inherit a stale on-disk endpoint through reload.
@@ -136,6 +169,9 @@ pub(super) async fn await_reload_signal(
         .as_ref()
         .map(|signal| signal.request_id.clone());
 
+    #[cfg(unix)]
+    tokio::spawn(crate::tool::restore_detached_task_monitoring());
+
     loop {
         let signal = match receive_reload_signal(&mut rx, &mut last_request_id).await {
             Some(signal) => signal,
@@ -164,12 +200,19 @@ pub(super) async fn await_reload_signal(
         );
         super::acknowledge_reload_signal(&signal);
 
-        if std::env::var("JCODE_TEST_SESSION")
-            .map(|value| {
-                let trimmed = value.trim();
-                !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
-            })
-            .unwrap_or(false)
+        let verify_exec = private_verify_exec_binary().is_some_and(|binary| {
+            signal
+                .target
+                .as_ref()
+                .is_some_and(|target| target.binary_path == binary)
+        });
+        if !verify_exec
+            && std::env::var("JCODE_TEST_SESSION")
+                .map(|value| {
+                    let trimmed = value.trim();
+                    !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+                })
+                .unwrap_or(false)
         {
             crate::logging::info(
                 "Server: JCODE_TEST_SESSION set, skipping process exec for reload test",
@@ -195,6 +238,13 @@ pub(super) async fn await_reload_signal(
             );
             continue;
         }
+
+        // Ordinary tools may carry an external action or callback that cannot
+        // be replayed safely. Leave admission open while existing opaque work
+        // drains. Do not disturb detached commands.
+        crate::background::global()
+            .drain_opaque_tasks_for_reload()
+            .await;
 
         // Close admission before capturing recovery. A turn admitted after an
         // earlier observation is included, and later requests get a retryable
@@ -249,26 +299,17 @@ pub(super) async fn await_reload_signal(
             }),
         );
 
-        // Finalize in-process background tasks (selfdev builds/tests, bash
-        // tasks, run_plan drivers) before exec replaces this process image.
-        // exec runs no destructors, so without this the task futures vanish:
-        // kill_on_drop build children leak, and their status files read
-        // Running until the next process's orphan sweep. Aborting here kills
-        // the children and persists a deterministic Failed(interrupted by
-        // reload) status the agent sees immediately after reload.
-        let aborted = crate::background::global()
-            .abort_live_tasks_for_reload()
+        // Replaying a partially executed tool could duplicate its side
+        // effects. Let opaque, already-promoted futures finish here rather
+        // than killing them or guessing whether they're safe to repeat.
+        // Detached jobs are not part of this drain.
+        crate::background::global()
+            .drain_opaque_tasks_for_reload()
             .await;
-        if aborted > 0 {
-            crate::logging::info(&format!(
-                "Server: finalized {} in-process background task(s) before reload exec",
-                aborted
-            ));
-        }
         super::reload_trace::record_value(
             &signal.request_id,
-            "background_tasks_finalized",
-            serde_json::json!({ "count": aborted }),
+            "opaque_background_tasks_drained",
+            serde_json::json!({}),
         );
 
         let binary = &target.binary_path;
@@ -296,6 +337,9 @@ pub(super) async fn await_reload_signal(
                 );
                 let mut cmd = ProcessCommand::new(binary);
                 cmd.args(inherited_serve_flags(std::env::args()));
+                if verify_exec {
+                    cmd.args(["--no-update", "--no-selfdev", "--debug-socket"]);
+                }
                 cmd.arg("serve").arg("--socket").arg(socket.as_os_str());
                 // Auto provider detection is dominated by credential-file probes.
                 // The replacement process is the same trusted daemon with the same
