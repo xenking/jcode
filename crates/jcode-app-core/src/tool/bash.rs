@@ -188,7 +188,13 @@ fn summarize_background_command(description: Option<&str>, command: &str) -> Str
         .map(str::trim)
         .filter(|description| !description.is_empty())
     {
-        return truncate_str(description, 28).to_string();
+        let title = description.split_whitespace().collect::<Vec<_>>().join(" ");
+        const MAX_TITLE_BYTES: usize = 240;
+        return if title.len() > MAX_TITLE_BYTES {
+            format!("{}…", truncate_str(&title, MAX_TITLE_BYTES - "…".len()))
+        } else {
+            title
+        };
     }
 
     let trimmed = command.trim();
@@ -293,7 +299,7 @@ fn progress_message_from_line(line: &str, matched_fragment: &str) -> Option<Stri
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case(matched_fragment.trim()) {
         None
     } else {
-        Some(trimmed.to_string())
+        Some(trimmed.split_whitespace().collect::<Vec<_>>().join(" "))
     }
 }
 
@@ -330,6 +336,16 @@ pub(super) fn parse_heuristic_progress(line: &str) -> Result<Option<BackgroundTa
         return Ok(None);
     }
 
+    let ratio = progress_ratio_regex()?.captures(trimmed);
+    // A leading [N/M] can number static output (for example a dry-run plan).
+    // It is not a progress signal, even if the row describes a percent or ratio.
+    if let Some(counter) = ratio.as_ref().and_then(|captures| captures.get(0))
+        && trimmed[..counter.start()].trim_end() == "["
+        && trimmed[counter.end()..].trim_start().starts_with(']')
+    {
+        return Ok(None);
+    }
+
     if let Some(captures) = progress_byte_ratio_regex()?.captures(trimmed) {
         let current = captures
             .name("current")
@@ -360,7 +376,7 @@ pub(super) fn parse_heuristic_progress(line: &str) -> Result<Option<BackgroundTa
         }
     }
 
-    if let Some(captures) = progress_ratio_regex()?.captures(trimmed) {
+    if let Some(captures) = ratio {
         let current = captures
             .name("current")
             .and_then(|m| m.as_str().parse::<u64>().ok());
@@ -442,7 +458,7 @@ pub(super) fn parse_heuristic_progress(line: &str) -> Result<Option<BackgroundTa
             BackgroundTaskProgress {
                 kind: BackgroundTaskProgressKind::Indeterminate,
                 percent: None,
-                message: Some(trimmed.to_string()),
+                message: progress_message_from_line(trimmed, ""),
                 current: None,
                 total: None,
                 unit: None,

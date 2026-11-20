@@ -77,3 +77,28 @@ fn test_parse_heuristic_progress_handles_byte_ratio_output() {
     assert_eq!(progress.unit.as_deref(), Some("gib"));
     assert_eq!(progress.source, BackgroundTaskProgressSource::ParsedOutput);
 }
+
+#[test]
+fn rollout_plan_rows_are_not_progress() {
+    for line in [
+        "  [8/8] verify          plan  daemon + current + bundle report the pair",
+        "  [2/8] inspect         plan  verify 5/8 files and 100% coverage",
+    ] {
+        assert!(parse_progress_line(line).unwrap().is_none(), "{line}");
+    }
+}
+
+#[test]
+fn cargo_progress_summary_compacts_whitespace() {
+    let progress = parse_heuristic_progress(
+        "    Building   [==============>          ]  42/75: jcode-app-core  (lib)",
+    )
+    .unwrap()
+    .expect("cargo progress must still be recognized");
+    assert_eq!(progress.current, Some(42));
+    assert_eq!(progress.total, Some(75));
+    assert_eq!(
+        progress.message.as_deref(),
+        Some("Building [==============> ] 42/75: jcode-app-core (lib)")
+    );
+}
