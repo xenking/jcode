@@ -2137,6 +2137,7 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | SoftInterruptInjected { session_id, .. }
         | TurnStopped { session_id, .. }
         | BackgroundProgress { session_id, .. }
+        | BackgroundTasks { session_id, .. }
         | PeerUserMessage { session_id, .. }
         | MessageAccepted { session_id, .. }
         | AskRequest { session_id, .. }

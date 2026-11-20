@@ -214,6 +214,22 @@ pub(super) async fn handle_client(
 
         match decode_request(&line) {
             Ok(request) => {
+                if let Request::BackgroundTasks {
+                    id,
+                    session_id,
+                    task_id,
+                    cancel,
+                } = request
+                {
+                    let reply = super::background_task_inspection::handle(
+                        id,
+                        &session_id,
+                        task_id.as_deref(),
+                        cancel,
+                    )
+                    .await;
+                    return write_direct_event(&writer, &reply).await;
+                }
                 if !request.is_lightweight_control_request() {
                     crate::logging::info(&format!(
                         "[TIMING] handle_client initial request read: bytes={}, handler_to_read={}ms",
@@ -1681,6 +1697,14 @@ pub(super) async fn handle_client(
                 }
             },
 
+            Request::BackgroundTasks { id, .. } => {
+                let reply = ServerEvent::Error {
+                    id,
+                    message: "Background task inspection requires a separate connection".into(),
+                    retry_after_secs: None,
+                };
+                send_client_event_best_effort(&client_event_tx, reply, "background tasks");
+            }
             Request::BackgroundTool { id } => {
                 move_tool_to_background(id, &session_control, &client_event_tx);
             }

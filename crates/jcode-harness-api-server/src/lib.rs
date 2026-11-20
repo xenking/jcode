@@ -32,7 +32,10 @@ mod session_presence_tests;
 mod stdio_tests;
 
 use anyhow::{Context, Result};
-use jcode_harness_api::{API_VERSION_MAJOR, ApiEvent, ErrorCode, ServerFrame};
+use jcode_harness_api::{
+    API_VERSION_MAJOR, ApiEvent, BACKGROUND_TASKS_CAPABILITY, BackgroundTasksSnapshot, ErrorCode,
+    ServerFrame,
+};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -94,6 +97,70 @@ async fn daemon_capabilities(socket: &std::path::Path) -> Option<Vec<String>> {
         .await
         .ok()
         .flatten()
+}
+
+async fn daemon_background_tasks(
+    socket: &std::path::Path,
+    session_id: &str,
+    task_id: Option<&str>,
+    cancel: bool,
+) -> Result<Value> {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut stream = Stream::connect(socket).await?;
+        write_json_line(
+            &mut stream,
+            &serde_json::json!({
+                "type": "background_tasks", "id": 1, "session_id": session_id,
+                "task_id": task_id, "cancel": cancel,
+            }),
+        )
+        .await?;
+        let mut line = String::new();
+        read_frame(&mut BufReader::new(stream), &mut line).await?;
+        let reply: Value = serde_json::from_str(&line)?;
+        match reply["type"].as_str() {
+            Some("background_tasks") if !cancel => Ok(reply),
+            Some("done") if cancel => Ok(reply),
+            Some("error") => anyhow::bail!(
+                "{}",
+                reply["message"]
+                    .as_str()
+                    .unwrap_or("Native task inspection failed")
+            ),
+            _ => anyhow::bail!("Unexpected response to background task inspection"),
+        }
+    })
+    .await?
+}
+
+#[derive(Default)]
+struct TaskWatch {
+    session_id: String,
+    task_id: Option<String>,
+    last: Option<BackgroundTasksSnapshot>,
+}
+
+impl TaskWatch {
+    async fn fetch(
+        socket: &std::path::Path,
+        session_id: &str,
+        task_id: Option<&str>,
+    ) -> Result<BackgroundTasksSnapshot> {
+        Ok(serde_json::from_value(
+            daemon_background_tasks(socket, session_id, task_id, false).await?,
+        )?)
+    }
+
+    fn accept(&mut self, snapshot: BackgroundTasksSnapshot, force: bool) -> Option<ApiEvent> {
+        if !force && self.last.as_ref() == Some(&snapshot) {
+            return None;
+        }
+        self.last = Some(snapshot.clone());
+        Some(ApiEvent::BackgroundTasks {
+            session_id: self.session_id.clone(),
+            snapshot,
+        })
+    }
 }
 
 async fn daemon_draft_models(socket: &std::path::Path) -> ApiEvent {
@@ -533,6 +600,9 @@ where
         .any(|cap| cap == "queued_prompt_active_skill");
     let bounded_history_supported = daemon_caps.iter().any(|cap| cap == "bounded_history_v1");
     let ask_response_images_supported = daemon_caps.iter().any(|cap| cap == "ask_response_images");
+    let background_tasks_supported = daemon_caps
+        .iter()
+        .any(|cap| cap == BACKGROUND_TASKS_CAPABILITY);
     let hello_ok = ServerFrame::reply(
         reply_to,
         ApiEvent::HelloOk {
@@ -588,6 +658,7 @@ where
             )
             .chain(bounded_history_supported.then(|| "bounded_history_v1".to_string()))
             .chain(ask_response_images_supported.then(|| "ask_response_images".to_string()))
+            .chain(background_tasks_supported.then(|| BACKGROUND_TASKS_CAPABILITY.to_string()))
             .chain(
                 ["soft_interrupt_ids", "background_tool_result"]
                     .into_iter()
@@ -623,6 +694,10 @@ where
     //    single-threaded.
     let mut api_frame = Vec::new();
     let mut legacy_frame = Vec::new();
+    let mut task_watch: Option<TaskWatch> = None;
+    let mut task_poll = None;
+    let mut task_tick = tokio::time::interval(std::time::Duration::from_secs(2));
+    task_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             // A busy daemon can keep the legacy socket continuously readable.
@@ -698,6 +773,43 @@ where
                     write_json_line(&mut write_half, &ServerFrame::reply(id, event)).await?;
                     continue;
                 }
+                if matches!(request["req"].as_str(), Some("watch_background_tasks" | "cancel_background_task")) {
+                    use jcode_harness_api::{ApiRequest, ClientFrame};
+                    let id = request["id"].as_u64().unwrap_or(0);
+                    let event = if background_tasks_supported {
+                        match serde_json::from_value::<ClientFrame>(request).map(|frame| frame.request) {
+                            Ok(ApiRequest::WatchBackgroundTasks { session_id, task_id }) if
+                                state.session_id.as_ref().is_none_or(|attached| attached == &session_id) => {
+                                task_poll = None;
+                                let mut watch = TaskWatch { session_id, task_id, last: None };
+                                let event = TaskWatch::fetch(&legacy_socket, &watch.session_id, watch.task_id.as_deref()).await
+                                    .map(|snapshot| watch.accept(snapshot, true).expect("forced snapshot"));
+                                task_watch = Some(watch);
+                                task_tick.reset();
+                                match event {
+                                    Ok(event) => event,
+                                    Err(error) => ApiEvent::Error { code: ErrorCode::Internal, message: error.to_string() },
+                                }
+                            }
+                            Ok(ApiRequest::CancelBackgroundTask { session_id, task_id }) if
+                                state.session_id.as_ref().is_none_or(|attached| attached == &session_id) => {
+                                match daemon_background_tasks(&legacy_socket, &session_id, Some(&task_id), true).await {
+                                    Ok(_) => ApiEvent::Ok,
+                                    Err(error) => ApiEvent::Error { code: ErrorCode::Internal, message: error.to_string() },
+                                }
+                            }
+                            _ => ApiEvent::Error { code: ErrorCode::InvalidRequest, message: "Invalid background task request for this connection".into() },
+                        }
+                    } else {
+                        ApiEvent::Error { code: ErrorCode::UnknownRequest, message: "The native daemon does not support background task inspection".into() }
+                    };
+                    write_json_line(&mut write_half, &ServerFrame::reply(id, event)).await?;
+                    continue;
+                }
+                if matches!(request["req"].as_str(), Some("attach_session" | "create_session" | "detach_session")) {
+                    task_watch = None;
+                    task_poll = None;
+                }
                 // Translation may inspect persisted session/archive files. Tell
                 // Tokio before entering that synchronous region so it can keep
                 // the accept loop and fresh-client handshakes scheduled.
@@ -727,6 +839,25 @@ where
                 }
                 if heavy {
                     allocator::trim();
+                }
+            }
+            _ = task_tick.tick(), if task_watch.is_some() && task_poll.is_none() => {
+                if let Some(watch) = &task_watch {
+                    let socket = legacy_socket.clone();
+                    let session_id = watch.session_id.clone();
+                    let task_id = watch.task_id.clone();
+                    task_poll = Some(Box::pin(async move {
+                        TaskWatch::fetch(&socket, &session_id, task_id.as_deref()).await
+                    }));
+                }
+            }
+            snapshot = async { task_poll.as_mut().expect("pending task poll").await }, if task_poll.is_some() => {
+                task_poll = None;
+                if let Some(watch) = &mut task_watch
+                    && let Ok(snapshot) = snapshot
+                    && let Some(event) = watch.accept(snapshot, false)
+                {
+                    write_json_line(&mut write_half, &ServerFrame::event(event)).await?;
                 }
             }
             n = read_frame_bytes(&mut legacy_reader, &mut legacy_frame) => {

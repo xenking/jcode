@@ -143,6 +143,16 @@ pub enum Request {
     #[serde(rename = "background_tool")]
     BackgroundTool { id: u64 },
 
+    #[serde(rename = "background_tasks")]
+    BackgroundTasks {
+        id: u64,
+        session_id: String,
+        #[serde(default)]
+        task_id: Option<String>,
+        #[serde(default)]
+        cancel: bool,
+    },
+
     /// Queue a user prompt with a stable caller id. Acknowledged only after
     /// the queue has accepted and persisted it.
     #[serde(rename = "queue_prompt")]

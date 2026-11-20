@@ -41,6 +41,7 @@ pub(super) fn connection_presence_pong(
         native_ssh_protocol: Some(1),
         capabilities: vec![
             "session_tools".into(),
+            jcode_background_types::BACKGROUND_TASKS_CAPABILITY.into(),
             "force_stop_turn_v1".into(),
             "soft_interrupt_ids".into(),
             "queued_prompts".into(),

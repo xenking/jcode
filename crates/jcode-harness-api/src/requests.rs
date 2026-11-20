@@ -558,6 +558,20 @@ pub enum ApiRequest {
         session_id: String,
     },
 
+    /// Subscribe on this connection and return the current session snapshot.
+    /// A second call changes the one task whose bounded output tail is included.
+    WatchBackgroundTasks {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
+    },
+
+    /// Cancel an owned task if its snapshot indicates that cancellation is available.
+    CancelBackgroundTask {
+        session_id: String,
+        task_id: String,
+    },
+
     /// Search every stored session's transcript and titles.
     ///
     /// Answers from the daemon's own full-text index, so a client can offer

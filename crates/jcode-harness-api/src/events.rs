@@ -451,6 +451,12 @@ pub enum ApiEvent {
         done: bool,
     },
 
+    /// Replaces the previous background task snapshot for this session.
+    BackgroundTasks {
+        session_id: String,
+        snapshot: crate::BackgroundTasksSnapshot,
+    },
+
     /// A prompt submitted by another client attached to this session.
     PeerUserMessage { session_id: String, content: String },
 

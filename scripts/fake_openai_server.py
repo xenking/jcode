@@ -92,7 +92,8 @@ class H(BaseHTTPRequestHandler):
                 f"while [ ! -f {progress} ]; do sleep 0.1; done; "
                 "echo 'JCODE_PROGRESS {\"message\":\"post-exec progress\",\"percent\":50}'; "
                 f"while [ ! -f {release} ]; do sleep 0.1; done; "
-                "echo 'completed by original shell'; exit 23"
+                "echo 'completed by original shell'; exit "
+                + ("0" if "verify-bg-success" in prompt else "23")
             )
             tool_calls = [{"id": "call_reload_background", "type": "function", "function": {
                 "name": "bash", "arguments": json.dumps({"intent": "Verify background exec reload",

@@ -3762,6 +3762,7 @@ dependencies = [
  "jcode-agent-runtime",
  "jcode-ambient-types",
  "jcode-applet-types",
+ "jcode-background-types",
  "jcode-base",
  "jcode-build-meta",
  "jcode-build-support",
@@ -4077,6 +4078,7 @@ name = "jcode-harness-api"
 version = "0.1.0"
 dependencies = [
  "jcode-applet-types",
+ "jcode-background-types",
  "jcode-selfdev-types",
  "jcode-session-types",
  "jcode-side-panel-types",
@@ -4210,6 +4212,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "jcode-applet-types",
+ "jcode-background-types",
  "jcode-batch-types",
  "jcode-config-types",
  "jcode-message-types",

@@ -885,6 +885,7 @@ impl Request {
             Request::Cancel { id } => *id,
             Request::ForceStopTurn { id, .. } => *id,
             Request::BackgroundTool { id } => *id,
+            Request::BackgroundTasks { id, .. } => *id,
             Request::QueuePrompt { id, .. }
             | Request::SetQueuedPromptMode { id, .. }
             | Request::InterruptQueuedPrompt { id, .. }

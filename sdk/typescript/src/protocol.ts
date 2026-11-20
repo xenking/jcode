@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 19;
+export const API_VERSION_MINOR = 20;
 
 export type RuntimeCommand = "mode" | "skills" | "context" | "info" | "cache" | "memory" | "swarm" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout" | "background_output";
 
@@ -256,8 +256,40 @@ export interface ToolConfiguration {
   custom?: SessionToolDefinition[];
 }
 
+export interface BackgroundTaskProgress {
+  kind: "determinate" | "indeterminate";
+  percent: number | null;
+  message: string | null;
+  current: number | null;
+  total: number | null;
+  unit: string | null;
+  eta_seconds: number | null;
+  updated_at: string;
+  source: "reported" | "parsed_output" | "heuristic";
+}
+
+export interface BackgroundTaskSummary {
+  task_id: string;
+  label: string;
+  status: "running" | "completed" | "superseded" | "failed" | "interrupted";
+  started_at: string;
+  duration_secs?: number;
+  stalled: boolean;
+  can_cancel: boolean;
+  progress?: BackgroundTaskProgress;
+  error?: string;
+}
+
+export interface BackgroundTaskOutput {
+  task_id: string;
+  tail: string;
+  truncated: boolean;
+}
+
 export type ApiRequest =
   | { req: "list_draft_models" }
+  | { req: "watch_background_tasks"; session_id: string; task_id?: string }
+  | { req: "cancel_background_task"; session_id: string; task_id: string }
   | { req: "hello"; min_version: number; max_version: number; client: string; supports_user_response?: boolean }
   | { req: "list_sessions"; include_archived?: boolean; limit?: number }
   | { req: "archive_session"; session_id: string }
@@ -518,6 +550,7 @@ export type ApiEvent =
       detail?: string;
       done?: boolean;
     }
+  | { ev: "background_tasks"; session_id: string; snapshot: { tasks: BackgroundTaskSummary[]; output?: BackgroundTaskOutput } }
   | { ev: "message_accepted"; session_id: string }
   | {
       ev: "ask_request";
@@ -692,6 +725,7 @@ export const KNOWN_EVENT_KINDS = [
   "wake_requested",
   "focus_requested",
   "background_progress",
+  "background_tasks",
   "message_accepted",
   "ask_request",
   "permission_request",
@@ -718,6 +752,8 @@ export const KNOWN_REQUEST_KINDS = [
   "runtime_command",
   "hello",
   "list_draft_models",
+  "watch_background_tasks",
+  "cancel_background_task",
   "list_sessions",
   "archive_session",
   "restore_session",

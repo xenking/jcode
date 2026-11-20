@@ -70,7 +70,12 @@ mod capability_coverage_tests;
 /// Protocol major version. Breaking changes only.
 pub const API_VERSION_MAJOR: u32 = 1;
 /// Protocol minor version. Additive changes.
-pub const API_VERSION_MINOR: u32 = 19;
+pub const API_VERSION_MINOR: u32 = 20;
+
+pub use jcode_background_types::{
+    BACKGROUND_TASKS_CAPABILITY, BackgroundTaskOutput, BackgroundTaskStatus, BackgroundTaskSummary,
+    BackgroundTasksSnapshot, format_progress_summary,
+};
 
 /// Envelope wrapping every client-to-server frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

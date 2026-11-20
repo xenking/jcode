@@ -157,6 +157,12 @@ pub enum ServerEvent {
         data: serde_json::Value,
         message: String,
     },
+    #[serde(rename = "background_tasks")]
+    BackgroundTasks {
+        id: u64,
+        #[serde(flatten)]
+        snapshot: jcode_background_types::BackgroundTasksSnapshot,
+    },
     #[serde(rename = "tools")]
     Tools {
         id: u64,

@@ -4,6 +4,74 @@ use jcode_harness_api::{ApiRequest, ClientFrame};
 use tokio::io::{AsyncWriteExt, BufReader};
 
 #[tokio::test(flavor = "multi_thread")]
+async fn background_task_watch_reopens_with_authoritative_state() {
+    use serde_json::json;
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("daemon.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    for state in ["running", "completed"] {
+        let (client, bridge) = tokio::io::duplex(8192);
+        let (bridge_read, bridge_write) = tokio::io::split(bridge);
+        let task = tokio::spawn(run_bridge_stream(bridge_read, bridge_write, socket.clone()));
+        let (read, mut write) = tokio::io::split(client);
+        let mut read = BufReader::new(read);
+        write_json_line(
+            &mut write,
+            &json!({"v":1,"id":1,"req":"hello","min_version":1,"max_version":1}),
+        )
+        .await
+        .unwrap();
+        let (daemon, _) = listener.accept().await.unwrap();
+        let (mut probe, _) = listener.accept().await.unwrap();
+        write_json_line(
+            &mut probe,
+            &json!({"type":"pong","id":0,"capabilities":["background_tasks_v1"]}),
+        )
+        .await
+        .unwrap();
+        let mut line = String::new();
+        read_frame(&mut read, &mut line).await.unwrap();
+        let hello: Value = serde_json::from_str(&line).unwrap();
+        assert!(
+            hello["capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("background_tasks_v1"))
+        );
+        write_json_line(&mut write, &json!({"v":1,"id":2,"req":"watch_background_tasks","session_id":"session-owner","task_id":"task123"})).await.unwrap();
+        let (native, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+        let mut native = BufReader::new(native);
+        read_frame(&mut native, &mut line).await.unwrap();
+        let request: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["type"], "background_tasks");
+        assert_eq!(request["session_id"], "session-owner");
+        assert_eq!(request["task_id"], "task123");
+        write_json_line(native.get_mut(), &json!({"type":"background_tasks","id":request["id"],"tasks":[{
+            "task_id":"task123","label":"Compile","status": state,"started_at":"2026-11-20T13:00:00Z","stalled":false,"can_cancel":false
+        }],"output":{"task_id":"task123","tail":"line two","truncated":false}})).await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            read_frame(&mut read, &mut line),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(frame["reply_to"], 2);
+        assert_eq!(frame["ev"], "background_tasks");
+        assert_eq!(frame["snapshot"]["tasks"][0]["status"], state);
+        assert_eq!(frame["snapshot"]["output"]["tail"], "line two");
+        write.shutdown().await.unwrap();
+        task.await.unwrap().unwrap();
+        drop(daemon);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn stdio_stream_handshake_ping_and_eof_release_daemon_connection() {
     let root = std::env::temp_dir().join(format!(
         "jcode-stdio-test-{}-{}",
