@@ -4,7 +4,7 @@ use crate::message::{Message, ToolDefinition};
 
 pub(super) enum StaticPromptState {
     Bootstrap(crate::prompt::StaticPromptSources),
-    Frozen(crate::session::PersistedStaticPrompt),
+    Frozen(crate::prompt::StaticPromptSnapshot),
 }
 
 impl StaticPromptState {
@@ -14,6 +14,75 @@ impl StaticPromptState {
 }
 
 impl Agent {
+    /// Adopt the exact bytes this session sent, and its AGENTS.md and skill
+    /// inputs. Legacy snapshots have only the latter and upgrade on next send.
+    /// An explicit move to another directory keeps the existing recapture rule.
+    pub(super) fn adopt_recorded_prompt_inputs(&mut self) -> bool {
+        let Some(recorded) = crate::session::load_prompt_inputs(&self.session.id) else {
+            return false;
+        };
+        if recorded.working_dir != self.session.working_dir {
+            return false;
+        }
+        let info = crate::prompt::ContextInfo {
+            has_project_agents_md: recorded.has_project_agents_md,
+            project_agents_md_chars: recorded.project_agents_md_chars,
+            has_global_agents_md: recorded.has_global_agents_md,
+            global_agents_md_chars: recorded.global_agents_md_chars,
+            ..Default::default()
+        };
+        self.agents_md_snapshot = (recorded.agents_md, info);
+        self.prompt_skills_snapshot = recorded.skills;
+        self.prompt_inputs_recorded = recorded.static_prompt.is_some();
+        self.static_prompt = match recorded.static_prompt {
+            Some(snapshot) => StaticPromptState::Frozen(snapshot),
+            None => StaticPromptState::bootstrap(
+                self.session
+                    .working_dir
+                    .as_deref()
+                    .map(std::path::Path::new),
+            ),
+        };
+        // Skills installed since then are announced in the transcript, which
+        // leaves the cached system prefix untouched.
+        self.announced_skills = self
+            .prompt_skills_snapshot
+            .iter()
+            .map(|skill| skill.name.clone())
+            .collect();
+        self.announced_skills_scan_index = 0;
+        true
+    }
+
+    /// Record the inputs of the system prompt about to be sent, once per
+    /// capture, so [`Self::adopt_recorded_prompt_inputs`] can restore them.
+    pub(super) fn record_prompt_inputs(&mut self) {
+        if self.prompt_inputs_recorded {
+            return;
+        }
+        let StaticPromptState::Frozen(snapshot) = &self.static_prompt else {
+            return;
+        };
+        let (agents_md, info) = &self.agents_md_snapshot;
+        let inputs = crate::session::PersistedPromptInputs {
+            working_dir: self.session.working_dir.clone(),
+            agents_md: agents_md.clone(),
+            has_project_agents_md: info.has_project_agents_md,
+            project_agents_md_chars: info.project_agents_md_chars,
+            has_global_agents_md: info.has_global_agents_md,
+            global_agents_md_chars: info.global_agents_md_chars,
+            skills: self.prompt_skills_snapshot.clone(),
+            static_prompt: Some(snapshot.clone()),
+        };
+        match crate::session::save_prompt_inputs(&self.session.id, &inputs) {
+            Ok(()) => self.prompt_inputs_recorded = true,
+            Err(err) => logging::warn(&format!(
+                "Could not record prompt inputs for session {}: {err}",
+                self.session.id
+            )),
+        }
+    }
+
     pub(crate) fn runtime_skills_snapshot(&self) -> serde_json::Value {
         let registry = self.current_skills_snapshot();
         let mut loaded = registry.list();
@@ -155,10 +224,9 @@ impl Agent {
                 self.session.system_prompt.is_some(),
             ),
         };
-        let mut dynamic_part = if custom_prompt {
-            String::new()
-        } else {
-            memory_prompt.unwrap_or_default().to_string()
+        let mut dynamic_part = match (custom_prompt, memory_prompt) {
+            (false, Some(memory)) => memory.to_owned(),
+            _ => String::new(),
         };
         dynamic_part.push_str(&crate::screen_context::dynamic_prompt(self.session_id()));
         crate::prompt::SplitSystemPrompt {
@@ -193,7 +261,7 @@ impl Agent {
     /// commit the prefix.
     pub(super) fn freeze_static_prompt(&mut self) {
         if let StaticPromptState::Bootstrap(sources) = &self.static_prompt {
-            self.static_prompt = StaticPromptState::Frozen(crate::session::PersistedStaticPrompt {
+            self.static_prompt = StaticPromptState::Frozen(crate::prompt::StaticPromptSnapshot {
                 text: self.render_static_prompt(sources),
                 file_versions: self
                     .session

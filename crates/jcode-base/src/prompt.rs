@@ -96,6 +96,14 @@ fn base_system_prompt_parts(capabilities: PromptCapabilities, base: String) -> V
 /// prompt version. `None` means the corresponding file section is absent.
 pub type PromptFileVersions = [Option<String>; 3];
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StaticPromptSnapshot {
+    pub text: String,
+    /// Latest versions reflected either in the frozen text or in the transcript.
+    /// `None` when a custom system prompt replaces the normal instructions.
+    pub file_versions: Option<PromptFileVersions>,
+}
+
 pub struct PromptFiles {
     base_override: Option<String>,
     overlay: (Option<String>, usize),

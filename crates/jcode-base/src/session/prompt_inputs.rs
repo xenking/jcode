@@ -1,6 +1,6 @@
 //! Per-session copy of the static system prompt and its bootstrap inputs.
 
-use crate::prompt::{PromptFileVersions, SkillInfo};
+use crate::prompt::{SkillInfo, StaticPromptSnapshot};
 use crate::storage;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -25,15 +25,7 @@ pub struct PersistedPromptInputs {
     pub skills: Vec<SkillInfo>,
     // Absent in snapshots written before the full static prompt was frozen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub static_prompt: Option<PersistedStaticPrompt>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PersistedStaticPrompt {
-    pub text: String,
-    /// Latest versions reflected either in the frozen text or in the transcript.
-    /// `None` when a custom system prompt replaces the normal instructions.
-    pub file_versions: Option<PromptFileVersions>,
+    pub static_prompt: Option<StaticPromptSnapshot>,
 }
 
 pub(super) fn prompt_inputs_dir() -> Result<PathBuf> {

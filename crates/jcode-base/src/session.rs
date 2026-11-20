@@ -49,9 +49,7 @@ use memory_profile::{
 };
 use model::SESSION_CONTEXT_PREFIX;
 pub use model::{StoredReplayEvent, StoredReplayEventKind};
-pub use prompt_inputs::{
-    PersistedPromptInputs, PersistedStaticPrompt, load_prompt_inputs, save_prompt_inputs,
-};
+pub use prompt_inputs::{PersistedPromptInputs, load_prompt_inputs, save_prompt_inputs};
 pub use render::{
     CACHE_COLD_DIVIDER_METHOD, RenderedCompactedHistoryInfo, RenderedImage, RenderedImageAnchor,
     RenderedImageSource, RenderedMessage, compaction_divider_content, has_rendered_images,
