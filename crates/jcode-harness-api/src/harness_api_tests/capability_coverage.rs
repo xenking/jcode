@@ -86,6 +86,14 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("RunSubagent", ClientInternal),
     // The same typed runtime-command gateway is exposed by ApiRequest.
     ("RuntimeCommand", Covered),
+    (
+        "ScreenContext",
+        Gap(
+            "clients cannot lease the session's passive screen-metadata feed, so a \
+             third-party desktop shell cannot tell the agent which window the user \
+             is looking at the way the TUI's opted-in Niri feed does",
+        ),
+    ),
     ("SetAgentModel", Covered),
     ("SetCompactionMode", ClientInternal),
     ("SetFeature", ClientInternal),
