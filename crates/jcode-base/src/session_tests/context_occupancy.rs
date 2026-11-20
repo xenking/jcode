@@ -80,6 +80,7 @@ fn session_with(messages: Vec<StoredMessage>, replay: Vec<StoredReplayEvent>) ->
 fn compacted_state(count: usize) -> StoredCompactionState {
     StoredCompactionState {
         summary_text: "summary".to_string(),
+        plan_context: None,
         openai_encrypted_content: None,
         snapcompact: None,
         covers_up_to_turn: count,

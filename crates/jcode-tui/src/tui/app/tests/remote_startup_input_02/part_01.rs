@@ -1357,6 +1357,7 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
         });
         let transfer_compaction = crate::session::StoredCompactionState {
             summary_text: "Compacted handoff summary".to_string(),
+            plan_context: None,
             openai_encrypted_content: None,
             snapcompact: None,
             covers_up_to_turn: 1,

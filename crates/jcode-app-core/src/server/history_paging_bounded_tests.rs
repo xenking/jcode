@@ -480,6 +480,7 @@ fn generate_large_runtime_fixture() {
     }
     session.compaction = Some(std::sync::Arc::new(StoredCompactionState {
         summary_text: "synthetic summary".into(),
+        plan_context: None,
         openai_encrypted_content: None,
         snapcompact: None,
         covers_up_to_turn: 80,

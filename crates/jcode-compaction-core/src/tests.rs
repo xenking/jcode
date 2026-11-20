@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn compaction_prompt_keeps_meaningful_tool_output_with_a_total_budget() {
+    let result = |content: String| Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "tool".into(),
+            content,
+            is_error: None,
+        }]
+        .into(),
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let mut messages = vec![result(format!(
+        "{} exact build error follows",
+        "x".repeat(1500)
+    ))];
+    messages.extend((0..40).map(|_| result("x".repeat(8_000))));
+    let text = build_compaction_conversation_text(&messages, None);
+    assert!(text.contains("exact build error follows"));
+    assert!(
+        text.len() < 70_000,
+        "tool bodies must share one capped budget"
+    );
+}
+
+#[test]
 fn emergency_truncation_noops_keep_shared_bodies_at_exact_limits() {
     let canonical = vec![Message::user("unchanged"), tool_image_msg(4096)];
     let mut request = canonical.clone();
@@ -722,7 +748,10 @@ fn outbound_image_trim_keeps_the_sent_prefix_stable_between_steps() {
         let sent: Vec<bool> = request.iter().map(is_image).collect();
         let payload = sent.iter().filter(|kept| **kept).count() * IMAGE;
         assert!(payload <= BUDGET, "request stays within its budget");
-        assert!(*sent.last().unwrap(), "the newest screenshot is always sent");
+        assert!(
+            *sent.last().unwrap(),
+            "the newest screenshot is always sent"
+        );
         if sent[..previous.len()] != previous[..] {
             rewrites += 1;
         }

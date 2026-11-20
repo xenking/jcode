@@ -15,11 +15,34 @@
 //! - **Semantic**: compact based on embedding-detected topic shifts and
 //!   relevance scoring. Falls back to proactive if embeddings are unavailable.
 
+mod replay;
 mod snap_decisions;
 mod snap_index;
+pub use replay::{format_compaction_plan, native_compaction_transcript_summary};
 use snap_index::build_snapcompact_index;
 
 use crate::message::{ContentBlock, Message, Role};
+
+pub const MISSING_NATIVE_SUMMARY: &str = "This provider cannot read the OpenAI compaction checkpoint, and no readable summary or original compacted history was available. Earlier context may be incomplete.";
+
+pub struct CompactionReplay {
+    pub messages: Vec<Message>,
+    pub checkpoint_changed: bool,
+    pub warn_missing_native_summary: bool,
+}
+
+pub fn openai_native_replay_route(provider: &str, model: &str) -> bool {
+    provider.eq_ignore_ascii_case("openai")
+        && model.trim() != jcode_provider_core::CHATGPT_WEB_MODEL
+}
+
+pub fn oversized_native_summary(encrypted_content_len: usize, readable: Option<String>) -> String {
+    let warning = openai_encrypted_content_fallback_summary(encrypted_content_len);
+    match readable {
+        Some(text) => format!("{warning}\n\n{text}"),
+        None => warning,
+    }
+}
 use crate::provider::Provider;
 use crate::provider::openai_request::{
     openai_encrypted_content_fallback_summary, openai_encrypted_content_is_sendable,
@@ -177,6 +200,8 @@ pub struct CompactionManager {
 
     /// Active summary (if we've compacted before)
     active_summary: Option<Summary>,
+    plan_context: Option<String>,
+    warned_missing_native_summary: bool,
 
     /// Rolling char estimate for the active (non-compacted) message suffix.
     ///
@@ -422,6 +447,8 @@ impl CompactionManager {
         Self {
             compacted_count: 0,
             active_summary: None,
+            plan_context: None,
+            warned_missing_native_summary: false,
             active_chars: ActiveCharEstimate::default(),
             pending_task: None,
             pending_decisions: Vec::new(),
@@ -658,6 +685,8 @@ impl CompactionManager {
             covers_up_to_turn: state.covers_up_to_turn,
             original_turn_count: state.original_turn_count,
         });
+        self.plan_context.clone_from(&state.plan_context);
+        self.warned_missing_native_summary = false;
         self.suppress_compaction_until_new_message = total_messages > 0;
     }
 
@@ -702,6 +731,7 @@ impl CompactionManager {
             (None, None) => true,
             (Some(summary), Some(state)) => {
                 summary.text == state.summary_text
+                    && self.plan_context == state.plan_context
                     && summary.openai_encrypted_content == state.openai_encrypted_content
                     && summary.covers_up_to_turn == state.covers_up_to_turn
                     && summary.original_turn_count == state.original_turn_count
@@ -717,6 +747,7 @@ impl CompactionManager {
             .as_ref()
             .map(|summary| crate::session::StoredCompactionState {
                 summary_text: summary.text.clone(),
+                plan_context: self.plan_context.clone(),
                 openai_encrypted_content: summary.openai_encrypted_content.clone(),
                 snapcompact: summary.snapcompact.clone(),
                 covers_up_to_turn: summary.covers_up_to_turn,
@@ -1152,17 +1183,7 @@ impl CompactionManager {
         })
     }
 
-    /// Decide whether shake may rewrite history before this request.
-    ///
-    /// Shake invalidates the prompt cache from the first elided message, so it
-    /// only runs when the prefix is cold or about to be rewritten. LLM
-    /// compaction is exactly the rewriting case: it replaces the same prefix in
-    /// the same request, so the cheap local reducer must run first. The
-    /// warm-cache guard therefore applies only to the cache-expiry reason, never
-    /// to pre-compaction. Guarding pre-compaction on a cold cache made shake
-    /// unreachable in practice: with a TTL provider (Anthropic's 1h cache) every
-    /// turn that read any cached tokens suppressed shake, so compaction always
-    /// paid for a full LLM summary first.
+    /// Plan a shake. Only `CacheExpiry` allows a journal rewrite.
     pub fn plan_shake(
         &self,
         all_messages: &[Message],
@@ -1177,10 +1198,9 @@ impl CompactionManager {
     /// (omp orders `snapcompact` before `shake`), so no pre-compaction shake is
     /// planned.
     ///
-    /// The warm-cache guard below applies to the cache-expiry reason only. It
-    /// must never suppress [`ShakeReason::PreCompact`]: LLM compaction rewrites
-    /// the prefix anyway, so gating on a warm cache made pre-compaction shake
-    /// unreachable for every provider with a TTL (Anthropic's 1h default).
+    /// `PreCompact` is valid while the cache is warm because it is only a
+    /// summarizer projection. The foreground history stays untouched until
+    /// the replacement checkpoint is ready.
     pub fn plan_shake_with(
         &self,
         all_messages: &[Message],
@@ -2116,6 +2136,8 @@ impl CompactionManager {
                     self.compacted_count = self.compacted_count.min(all_messages.len());
                 }
                 self.active_chars.set_exact(remaining_chars);
+                self.plan_context = None;
+                self.warned_missing_native_summary = false;
 
                 // Store summary
                 if let (Some(previous), Some(next)) = (
@@ -2233,7 +2255,132 @@ impl CompactionManager {
     ) -> Vec<Message> {
         self.check_and_apply_compaction_with(all_messages);
         self.discard_oversized_openai_native_compaction();
+        let accepts_native = self.active_route.0.as_deref().is_none_or(|provider| {
+            openai_native_replay_route(provider, self.active_route.1.as_deref().unwrap_or_default())
+        });
+        self.recover_native_text(all_messages, accepts_native);
+        self.project_messages(
+            all_messages,
+            supports_image_input,
+            accepts_native,
+            Vec::new(),
+        )
+    }
 
+    /// Restore text from legacy checkpoints before another provider starts a
+    /// fold, or the next summary would be based only on the active tail.
+    pub fn recover_native_text(&mut self, all_messages: &[Message], accepts_native: bool) -> bool {
+        let cutoff = self.active_start(all_messages);
+        let Some(summary) = self.active_summary.as_mut() else {
+            return false;
+        };
+        if accepts_native
+            || summary.openai_encrypted_content.is_none()
+            || !summary.text.trim().is_empty()
+        {
+            return false;
+        }
+        let Some(text) = native_compaction_transcript_summary(&all_messages[..cutoff]) else {
+            return false;
+        };
+        summary.text = text;
+        true
+    }
+
+    pub fn messages_for_api_session(
+        &mut self,
+        session: &mut crate::session::Session,
+        supports_image_input: bool,
+        accepts_native: bool,
+    ) -> CompactionReplay {
+        let session_id = session.id.clone();
+        let (checkpoint_changed, warn_missing_native_summary) =
+            self.prepare_checkpoint(&session_id, session.provider_messages(), accepts_native);
+        let retained =
+            replay::retained_checkpoint_messages(&session.messages, self.compacted_count);
+        let messages = self.project_messages(
+            session.provider_messages(),
+            supports_image_input,
+            accepts_native,
+            retained,
+        );
+        CompactionReplay {
+            messages,
+            checkpoint_changed,
+            warn_missing_native_summary,
+        }
+    }
+
+    /// Use the caller's materialized suffix when it owns a separate history.
+    pub fn messages_for_api_session_with(
+        &mut self,
+        session: &crate::session::Session,
+        all_messages: &[Message],
+        supports_image_input: bool,
+        accepts_native: bool,
+    ) -> CompactionReplay {
+        let (checkpoint_changed, warn_missing_native_summary) =
+            self.prepare_checkpoint(&session.id, all_messages, accepts_native);
+        let retained = if all_messages.len() == session.messages.len() {
+            replay::retained_checkpoint_messages(&session.messages, self.compacted_count)
+        } else {
+            Vec::new()
+        };
+        let messages =
+            self.project_messages(all_messages, supports_image_input, accepts_native, retained);
+        CompactionReplay {
+            messages,
+            checkpoint_changed,
+            warn_missing_native_summary,
+        }
+    }
+
+    fn prepare_checkpoint(
+        &mut self,
+        session_id: &str,
+        all_messages: &[Message],
+        accepts_native: bool,
+    ) -> (bool, bool) {
+        self.check_and_apply_compaction_with(all_messages);
+        let discarded = self.discard_oversized_openai_native_compaction();
+        let mut checkpoint_changed = self.recover_native_text(all_messages, accepts_native);
+        checkpoint_changed |= discarded;
+        if self.active_summary.is_some() && self.plan_context.is_none() {
+            match format_compaction_plan(session_id) {
+                Ok(plan) => {
+                    self.plan_context = Some(plan);
+                    checkpoint_changed = true;
+                }
+                Err(error) => {
+                    crate::logging::warn(&format!(
+                        "[compaction] Could not load plan for {session_id}: {error}"
+                    ));
+                    // Avoid rewriting the same checkpoint if the store later
+                    // becomes readable. The next compaction can retry.
+                    self.plan_context = Some(String::new());
+                    checkpoint_changed = true;
+                }
+            }
+        }
+        let warn_missing_native_summary = self.take_missing_native_summary_warning(accepts_native);
+        (checkpoint_changed, warn_missing_native_summary)
+    }
+
+    pub fn take_missing_native_summary_warning(&mut self, accepts_native: bool) -> bool {
+        !accepts_native
+            && self.active_summary.as_ref().is_some_and(|summary| {
+                summary.openai_encrypted_content.is_some() && summary.text.trim().is_empty()
+            })
+            && !std::mem::replace(&mut self.warned_missing_native_summary, true)
+    }
+
+    fn project_messages(
+        &self,
+        all_messages: &[Message],
+        supports_image_input: bool,
+        accepts_native: bool,
+        retained: Vec<Message>,
+    ) -> Vec<Message> {
         let active = self.active_messages(all_messages);
 
         match &self.active_summary {
@@ -2241,11 +2388,20 @@ impl CompactionManager {
                 let summary_block = summary
                     .openai_encrypted_content
                     .as_ref()
+                    .filter(|_| accepts_native)
                     .map(|encrypted_content| ContentBlock::OpenAICompaction {
                         encrypted_content: encrypted_content.to_string(),
                     })
                     .unwrap_or_else(|| ContentBlock::Text {
-                        text: compacted_summary_text_block(&summary.text),
+                        text: compacted_summary_text_block(
+                            if summary.text.trim().is_empty()
+                                && summary.openai_encrypted_content.is_some()
+                            {
+                                MISSING_NATIVE_SUMMARY
+                            } else {
+                                &summary.text
+                            },
+                        ),
                         cache_control: None,
                     });
 
@@ -2327,7 +2483,7 @@ impl CompactionManager {
                         }
                     }
                 }
-                let mut result = Vec::with_capacity(active.len() + 1);
+                let mut result = Vec::with_capacity(active.len() + retained.len() + 2);
 
                 result.push(Message {
                     role: Role::User,
@@ -2336,7 +2492,10 @@ impl CompactionManager {
                     tool_duration_ms: None,
                 });
 
-                // Clone only the active (non-compacted) messages
+                result.extend(retained);
+                if let Some(plan) = self.plan_context.as_deref().filter(|plan| !plan.is_empty()) {
+                    result.push(Message::user(plan));
+                }
                 result.extend(active.iter().cloned());
 
                 result
@@ -2555,6 +2714,8 @@ impl CompactionManager {
             .min(all_messages.len());
         self.active_chars.set_exact(remaining_suffix_chars[cutoff]);
         self.active_summary = Some(summary);
+        self.plan_context = None;
+        self.warned_missing_native_summary = false;
         self.observed_input_tokens = None;
         self.observed_estimate_tokens = None;
         let post_tokens = self.effective_token_count_with(all_messages) as u64;

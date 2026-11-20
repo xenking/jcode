@@ -866,6 +866,7 @@ fn compacted_history_app_with_remaining(turns: usize) -> App {
     app.session.compaction = Some(
         crate::session::StoredCompactionState {
             summary_text: "older turns".to_string(),
+            plan_context: None,
             openai_encrypted_content: None,
             snapcompact: None,
             covers_up_to_turn: turns,

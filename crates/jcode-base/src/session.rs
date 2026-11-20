@@ -47,7 +47,7 @@ use memory_profile::{
     ContentBlockMemoryStats, SessionMemoryProfileCache, stored_message_json_bytes,
     summarize_blocks, summarize_message_content,
 };
-use model::SESSION_CONTEXT_PREFIX;
+pub(crate) use model::SESSION_CONTEXT_PREFIX;
 pub use model::{StoredReplayEvent, StoredReplayEventKind};
 pub use prompt_inputs::{PersistedPromptInputs, load_prompt_inputs, save_prompt_inputs};
 pub use render::{
@@ -67,7 +67,7 @@ pub use {jcode_session_types::prompt_title, persistence::drain_saves_for_shutdow
 
 #[path = "session/message_helpers.rs"]
 mod message_helpers;
-use message_helpers::is_visible_conversation_message;
+pub(crate) use message_helpers::is_visible_conversation_message;
 pub use message_helpers::{derive_session_provider_key, is_scheduled_task_message};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {

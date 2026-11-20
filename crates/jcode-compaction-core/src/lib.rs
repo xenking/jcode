@@ -122,6 +122,7 @@ Write in natural language with these sections:
 - **Context:** What we're working on and why (1-2 sentences)
 - **What we did:** Key actions taken, files changed, problems solved
 - **Current state:** What works, what's broken, what's next
+- **Approved plan:** Carry forward every original approved step verbatim with its current status. Keep unfinished steps and don't promote suggestions into approved work.
 - **User preferences:** Specific requirements or decisions they made
 
 Be concise but preserve important details. You can search the full conversation later if you need exact error messages or code snippets."#;
@@ -202,6 +203,35 @@ pub fn build_compaction_conversation_text(
     messages: &[Message],
     existing_summary: Option<&Summary>,
 ) -> String {
+    const MAX_RESULT_BYTES: usize = 4_096;
+    const MAX_TOTAL_RESULT_BYTES: usize = 64 * 1_024;
+    let mut result_budget = MAX_TOTAL_RESULT_BYTES;
+    let mut results_left = messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter(|block| {
+            matches!(
+                block,
+                ContentBlock::ToolResult { .. } | ContentBlock::ProviderNative { .. }
+            )
+        })
+        .count();
+    let mut append_result = |conversation: &mut String, text: &str| {
+        const WRAPPER_BYTES: usize = "[Result: ... (truncated)]\n".len();
+        let share = result_budget / results_left.max(1);
+        results_left = results_left.saturating_sub(1);
+        if share <= WRAPPER_BYTES {
+            return;
+        }
+        let excerpt = truncate_str_boundary(text, (share - WRAPPER_BYTES).min(MAX_RESULT_BYTES));
+        result_budget -= excerpt.len() + WRAPPER_BYTES;
+        conversation.push_str("[Result: ");
+        conversation.push_str(excerpt);
+        if excerpt.len() < text.len() {
+            conversation.push_str("... (truncated)");
+        }
+        conversation.push_str("]\n");
+    };
     let mut conversation_text = String::new();
     if let Some(summary) = existing_summary {
         conversation_text.push_str("## Previous Summary\n\n");
@@ -237,12 +267,7 @@ pub fn build_compaction_conversation_text(
                         item,
                         native_call_inputs.get(&display.id),
                     ) {
-                        let truncated = if text.len() > 500 {
-                            format!("{}... (truncated)", truncate_str_boundary(&text, 500))
-                        } else {
-                            text
-                        };
-                        conversation_text.push_str(&format!("[Result: {}]\n", truncated));
+                        append_result(&mut conversation_text, &text);
                     }
                 }
                 ContentBlock::Text { text, .. } => {
@@ -253,12 +278,7 @@ pub fn build_compaction_conversation_text(
                     conversation_text.push_str(&format!("[Tool: {} - {}]\n", name, input));
                 }
                 ContentBlock::ToolResult { content, .. } => {
-                    let truncated = if content.len() > 500 {
-                        format!("{}... (truncated)", truncate_str_boundary(content, 500))
-                    } else {
-                        content.clone()
-                    };
-                    conversation_text.push_str(&format!("[Result: {}]\n", truncated));
+                    append_result(&mut conversation_text, content);
                 }
                 ContentBlock::Reasoning { .. }
                 | ContentBlock::ReasoningTrace { .. }

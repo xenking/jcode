@@ -231,11 +231,16 @@ pub(super) async fn generate_compaction_artifact_indexed(
                 encrypted_content.len(),
             ));
         } else if native.openai_encrypted_content.is_some() || native.summary_text.is_some() {
+            let summary_text = native
+                .summary_text
+                .filter(|text| !text.trim().is_empty())
+                .or_else(|| native_compaction_transcript_summary(&archive_history))
+                .unwrap_or_default();
             return Ok(CompactionResult {
                 completed_at: Instant::now(),
                 decisions_job: None,
                 pending_decisions: None,
-                summary_text: native.summary_text.unwrap_or_default(),
+                summary_text,
                 openai_encrypted_content: native.openai_encrypted_content,
                 snapcompact: None,
                 covers_up_to_turn: messages.len(),
@@ -248,6 +253,7 @@ pub(super) async fn generate_compaction_artifact_indexed(
     let mut snapcompact = None;
     let mut snapcompact_summary = None;
     let mut decisions_job = None;
+    let mut snapcompact_failed = false;
     if can_archive {
         let input = messages.clone();
         let message_offset = archive_history.len().saturating_sub(input.len());
@@ -372,26 +378,10 @@ pub(super) async fn generate_compaction_artifact_indexed(
                 });
             }
             Ok(Err(error)) => {
+                snapcompact_failed = true;
                 crate::logging::warn(&format!(
                     "[compaction] Snapcompact failed; falling back to LLM: {error}"
                 ));
-                // omp advances to its `shake` method after snapcompact fails, so
-                // the text summarizer at least sees a mechanically reduced
-                // prompt instead of the raw full history. The configured shake
-                // settings decide: `[compaction] shake = false` (or
-                // `JCODE_COMPACTION_SHAKE=0`) means the user disabled shake, and
-                // the thresholds are the configured ones, not the defaults. The
-                // warm-cache guard does not apply — snapcompact already gave up
-                // on this prefix.
-                if let Some(shake) = shake_config {
-                    let outcome = jcode_compaction_core::shake::shake(&mut messages, &shake);
-                    if outcome != jcode_compaction_core::shake::ShakeOutcome::NoChange {
-                        crate::logging::info(&format!(
-                            "[compaction] post-snapcompact shake saved ~{} tokens",
-                            outcome.tokens_saved()
-                        ));
-                    }
-                }
             }
             Err(error) => crate::logging::warn(&format!(
                 "[compaction] Snapcompact worker failed; falling back to LLM: {error}"
@@ -461,6 +451,19 @@ pub(super) async fn generate_compaction_artifact_indexed(
             .replace(['\u{e}', '\u{f}'], "");
     }
 
+    // This projection is owned by the summarizer. The journal and foreground
+    // request keep their prefix intact until the completed fold is applied.
+    if (!prefer_local || snapcompact_failed)
+        && let Some(shake) = shake_config
+    {
+        let outcome = jcode_compaction_core::shake::shake(&mut messages, &shake);
+        if outcome != jcode_compaction_core::shake::ShakeOutcome::NoChange {
+            crate::logging::info(&format!(
+                "[compaction] summarizer projection shake saved ~{} tokens",
+                outcome.tokens_saved()
+            ));
+        }
+    }
     let max_prompt_chars = provider.context_window().saturating_sub(4000) * CHARS_PER_TOKEN;
     let prompt = build_compaction_prompt(&messages, existing_summary.as_ref(), max_prompt_chars);
 

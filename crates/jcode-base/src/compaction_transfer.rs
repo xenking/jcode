@@ -37,6 +37,7 @@ pub async fn build_transfer_compaction_state(
 
     Ok(Some(crate::session::StoredCompactionState {
         summary_text: result.summary_text,
+        plan_context: None,
         openai_encrypted_content: result.openai_encrypted_content.map(Into::into),
         snapcompact: None,
         covers_up_to_turn: total_turns,

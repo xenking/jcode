@@ -53,6 +53,7 @@ mod cached_size_tests {
     fn compaction() -> Arc<super::super::StoredCompactionState> {
         Arc::new(super::super::StoredCompactionState {
             summary_text: "escaped\n\"界🦀".repeat(1024),
+            plan_context: None,
             openai_encrypted_content: Some("encrypted\\\"\n".repeat(128 * 1024).into()),
             covers_up_to_turn: 3,
             original_turn_count: 7,

@@ -546,6 +546,7 @@ async fn enter_creates_selfdev_session_in_test_mode() {
     parent.compaction = Some(
         session::StoredCompactionState {
             summary_text: "summary".to_string(),
+            plan_context: None,
             openai_encrypted_content: None,
             snapcompact: None,
             covers_up_to_turn: 1,

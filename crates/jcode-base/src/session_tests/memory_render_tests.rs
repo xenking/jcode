@@ -73,6 +73,7 @@ fn injections_hidden_behind_the_compacted_window_are_not_resurrected() {
     session.compaction = Some(
         StoredCompactionState {
             summary_text: "older turns".to_string(),
+            plan_context: None,
             openai_encrypted_content: None,
             snapcompact: None,
             covers_up_to_turn: 1,

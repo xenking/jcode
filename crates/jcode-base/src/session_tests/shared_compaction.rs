@@ -6,6 +6,7 @@ use std::sync::Arc;
 fn large_state(tag: &str) -> StoredCompactionState {
     StoredCompactionState {
         summary_text: format!("summary {tag}"),
+        plan_context: None,
         openai_encrypted_content: Some(
             format!("{tag}{}", "encrypted-body-".repeat(32 * 1024)).into(),
         ),

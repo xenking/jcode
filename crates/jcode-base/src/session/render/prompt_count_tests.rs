@@ -26,6 +26,7 @@ fn compacted_tool_session(turns: usize) -> Session {
     session.compaction = Some(
         StoredCompactionState {
             summary_text: "summary".into(),
+            plan_context: None,
             openai_encrypted_content: None,
             snapcompact: None,
             covers_up_to_turn: turns,
