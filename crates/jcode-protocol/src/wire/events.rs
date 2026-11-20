@@ -313,6 +313,21 @@ pub enum ServerEvent {
         effective_budget: Option<usize>,
     },
 
+    /// Final counters for one completed provider request, not a stream snapshot.
+    #[serde(rename = "request_usage")]
+    RequestUsage {
+        session_id: String,
+        request_id: String,
+        provider: String,
+        model: String,
+        input: Option<u64>,
+        output: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_read_input: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_creation_input: Option<u64>,
+    },
+
     /// Prompt occupancy of the session's active context, replayed when a client
     /// attaches so a resumed client can paint its context meter before the next
     /// provider call reports usage.

@@ -9,6 +9,103 @@ struct CompactionCacheProvider {
     discard_compaction: bool,
 }
 
+#[derive(Clone)]
+struct RequestUsageProvider;
+
+#[async_trait]
+impl Provider for RequestUsageProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        let usage = |input, output, read, write| {
+            Ok(StreamEvent::TokenUsage {
+                input_tokens: Some(input),
+                output_tokens: Some(output),
+                cache_read_input_tokens: read,
+                cache_creation_input_tokens: write,
+            })
+        };
+        Ok(Box::pin(futures::stream::iter([
+            usage(900, 2, Some(800), Some(5)),
+            Ok(StreamEvent::RetryRollback { attempt: 1, max: 2 }),
+            usage(100, 0, Some(0), None),
+            usage(100, 3, Some(0), None),
+            usage(100, 5, Some(0), None),
+            Ok(StreamEvent::ResolvedModel {
+                model: "served-model".into(),
+            }),
+            Ok(StreamEvent::TextDelta("answer".into())),
+            Ok(StreamEvent::MessageEnd {
+                stop_reason: Some("end_turn".into()),
+            }),
+        ])))
+    }
+
+    fn name(&self) -> &str {
+        "openai"
+    }
+
+    fn model(&self) -> String {
+        "configured-model".into()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[tokio::test]
+async fn request_usage_counts_completed_calls_not_stream_snapshots() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let provider: Arc<dyn Provider> = Arc::new(RequestUsageProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    for text in ["first", "second"] {
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: text.into(),
+                cache_control: None,
+            }],
+        );
+        agent.run_turn_streaming_mpsc(tx.clone()).await.unwrap();
+    }
+    let mut ids = Vec::new();
+    let mut snapshots = 0;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            ServerEvent::TokenUsage { .. } => snapshots += 1,
+            ServerEvent::RequestUsage {
+                session_id,
+                request_id,
+                provider,
+                model,
+                input,
+                output,
+                cache_read_input,
+                cache_creation_input,
+            } => {
+                assert_eq!(session_id, agent.session.id);
+                assert!(!request_id.is_empty());
+                assert_eq!(provider, "openai");
+                assert_eq!(model, "served-model");
+                assert_eq!((input, output), (Some(100), Some(5)));
+                assert_eq!((cache_read_input, cache_creation_input), (Some(0), None));
+                ids.push(request_id);
+            }
+            _ => {}
+        }
+    }
+    assert!(snapshots > 2, "legacy consumers still receive snapshots");
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1], "equal counters are not duplicate requests");
+}
+
 #[async_trait]
 impl Provider for CompactionCacheProvider {
     async fn complete(

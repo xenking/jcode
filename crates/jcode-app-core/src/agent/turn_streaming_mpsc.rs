@@ -206,6 +206,7 @@ impl Agent {
                     split_prompt.static_part, split_prompt.dynamic_part
                 ))
             };
+            let request_id = uuid::Uuid::new_v4().to_string();
             let kv_request = kv_cache_request_event(
                 &send_messages[..durable_message_count],
                 &tools,
@@ -324,6 +325,7 @@ impl Agent {
             let mut saw_message_end = false;
             let mut openai_ws_delta = false;
             let mut stop_reason: Option<String> = None;
+            let mut reported_model = None;
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
             let provider_name = self.provider.name().to_string();
@@ -865,6 +867,7 @@ impl Agent {
                         let _ = event_tx.send(ServerEvent::ServiceTierReported { requested, tier });
                     }
                     StreamEvent::ResolvedModel { model } => {
+                        reported_model = Some(model.clone());
                         usage_recorder.resolve_model(model);
                     }
                     StreamEvent::RetryRollback { attempt, max } => {
@@ -878,6 +881,7 @@ impl Agent {
                         usage_output = None;
                         usage_cache_read = None;
                         usage_cache_creation = None;
+                        reported_model = None;
                         // A transient transport fault hit mid-stream after partial
                         // output was already emitted; the provider is replaying the
                         // request from the top. Discard everything accumulated for
@@ -1144,6 +1148,19 @@ impl Agent {
                     ("cache_write", usage_cache_creation.unwrap_or(0).to_string()),
                 ],
             );
+
+            if saw_message_end {
+                let _ = event_tx.send(ServerEvent::RequestUsage {
+                    session_id: self.session.id.clone(),
+                    request_id,
+                    provider: provider.name().into(),
+                    model: reported_model.unwrap_or_else(|| provider.model()),
+                    input: usage_input,
+                    output: usage_output,
+                    cache_read_input: usage_cache_read,
+                    cache_creation_input: usage_cache_creation,
+                });
+            }
 
             if usage_input.is_some()
                 || usage_output.is_some()

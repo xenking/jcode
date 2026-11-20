@@ -236,7 +236,8 @@ pub enum ApiEvent {
         snapshot: jcode_applet_types::AgentApplets,
     },
 
-    /// Usage for the latest provider call, not cumulative session or turn totals.
+    /// Usage snapshot for the latest provider call, not cumulative session or
+    /// turn totals. Multiple snapshots can describe one request.
     /// Input/cache accounting is provider-specific: Anthropic reports cache
     /// reads and writes separately, while OpenAI includes cache reads in input.
     TokenUsage {
@@ -250,6 +251,22 @@ pub enum ApiEvent {
         /// Authoritative effective context budget, when supplied by the daemon.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effective_budget: Option<usize>,
+    },
+
+    /// Final usage for one completed provider request. The request ID identifies
+    /// the same completion across subscribers. Counters not reported by the
+    /// provider are distinct from zero; this event is not replayed with history.
+    RequestUsage {
+        session_id: String,
+        request_id: String,
+        provider: String,
+        model: String,
+        input: Option<u64>,
+        output: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_read_input: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_creation_input: Option<u64>,
     },
 
     /// A session context override changed, including its resolved budget.

@@ -496,6 +496,18 @@ export type ApiEvent =
       cache_creation_input?: number;
       effective_budget?: number;
     }
+  | {
+      /** Final counters for one completed provider request. Not replayed with history. */
+      ev: "request_usage";
+      session_id: string;
+      request_id: string;
+      provider: string;
+      model: string;
+      input: number | null;
+      output: number | null;
+      cache_read_input?: number;
+      cache_creation_input?: number;
+    }
   | { ev: "context_cap_changed"; session_id: string; max_context_tokens: number | null; effective_budget: number }
   /** Persisted prompt occupancy replayed on attach, so a context meter is filled before the next turn reports usage. Not a turn's usage: no cost or turn stats. */
   | { ev: "context_occupancy"; session_id: string; prompt_tokens: number }
@@ -711,6 +723,7 @@ export const KNOWN_EVENT_KINDS = [
   "tool_exec",
   "tool_done",
   "token_usage",
+  "request_usage",
   "context_cap_changed",
   "context_occupancy",
   "kv_cache_miss",

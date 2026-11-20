@@ -490,6 +490,25 @@ fn kv_cache_miss_is_forwarded_with_session() {
     );
 }
 
+#[test]
+fn request_usage_preserves_identity_and_absent_counters() {
+    let mut state = BridgeState::default();
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "request_usage", "session_id": "s1", "request_id": "call-2",
+        "provider": "openai", "model": "served-model", "input": 100,
+        "output": null, "cache_read_input": 0
+    }));
+    assert_eq!(frames.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&frames[0].event).unwrap(),
+        json!({
+            "ev": "request_usage", "session_id": "s1", "request_id": "call-2",
+            "provider": "openai", "model": "served-model", "input": 100,
+            "output": null, "cache_read_input": 0
+        })
+    );
+}
+
 fn jcode_protocol_like_kv_miss() -> Value {
     json!({
         "type": "kv_cache_miss", "reason": "prefix_changed", "harness_caused": true,

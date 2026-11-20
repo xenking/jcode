@@ -215,6 +215,27 @@ fn token_usage_preserves_cache_creation_and_accepts_legacy_frames() {
 }
 
 #[test]
+fn completed_request_usage_keeps_zero_separate_from_unreported() {
+    let wire = serde_json::json!({
+        "v": 1, "ev": "request_usage", "session_id": "s1", "request_id": "r1",
+        "provider": "openai", "model": "served-model", "input": 100, "output": null,
+        "cache_read_input": 0
+    });
+    let decoded: ServerFrame = serde_json::from_value(wire.clone()).unwrap();
+    assert!(matches!(
+        decoded.event,
+        ApiEvent::RequestUsage {
+            input: Some(100),
+            output: None,
+            cache_read_input: Some(0),
+            cache_creation_input: None,
+            ..
+        }
+    ));
+    assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+}
+
+#[test]
 fn send_message_preserves_attachments() {
     let input = serde_json::json!({"v":1,"id":1,"req":"send_message","session_id":"s1","content":"hello","attachments":[
         {"type":"file","name":"a.txt","mime":"text/plain","size":3,"data":"YWJj"},

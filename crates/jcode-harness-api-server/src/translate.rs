@@ -2344,6 +2344,29 @@ impl BridgeState {
                     .as_u64()
                     .and_then(|n| usize::try_from(n).ok()),
             })],
+            "request_usage" => {
+                let Some((session_id, request_id, provider, model)) = event["session_id"]
+                    .as_str()
+                    .zip(event["request_id"].as_str())
+                    .zip(event["provider"].as_str())
+                    .zip(event["model"].as_str())
+                    .map(|(((session_id, request_id), provider), model)| {
+                        (session_id, request_id, provider, model)
+                    })
+                else {
+                    return vec![];
+                };
+                vec![ServerFrame::event(ApiEvent::RequestUsage {
+                    session_id: session_id.into(),
+                    request_id: request_id.into(),
+                    provider: provider.into(),
+                    model: model.into(),
+                    input: event["input"].as_u64(),
+                    output: event["output"].as_u64(),
+                    cache_read_input: event["cache_read_input"].as_u64(),
+                    cache_creation_input: event["cache_creation_input"].as_u64(),
+                })]
+            }
             "kv_cache_miss" => vec![ServerFrame::event(ApiEvent::KvCacheMiss {
                 session_id: session(self),
                 reason: event["reason"].as_str().unwrap_or("unknown").to_string(),

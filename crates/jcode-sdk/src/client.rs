@@ -2128,6 +2128,7 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | Tools { session_id, .. }
         | SidePanelState { session_id, .. }
         | TokenUsage { session_id, .. }
+        | RequestUsage { session_id, .. }
         | ContextCapChanged { session_id, .. }
         | ContextOccupancy { session_id, .. }
         | KvCacheMiss { session_id, .. }
@@ -2185,7 +2186,7 @@ fn request_name(request: &ApiRequest) -> String {
 }
 
 #[cfg(test)]
-mod peer_message_tests {
+mod event_session_tests {
     use super::*;
 
     #[test]
@@ -2195,5 +2196,20 @@ mod peer_message_tests {
             content: "hello".into(),
         };
         assert_eq!(event_session(&event), Some("session-a"));
+    }
+
+    #[test]
+    fn request_usage_is_scoped_to_its_session() {
+        let event = ApiEvent::RequestUsage {
+            session_id: "session-b".into(),
+            request_id: "request-1".into(),
+            provider: "anthropic".into(),
+            model: "model".into(),
+            input: Some(1),
+            output: Some(2),
+            cache_read_input: Some(0),
+            cache_creation_input: None,
+        };
+        assert_eq!(event_session(&event), Some("session-b"));
     }
 }
