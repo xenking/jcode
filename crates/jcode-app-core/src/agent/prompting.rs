@@ -210,7 +210,8 @@ impl Agent {
     }
 
     /// Build split system prompt for better caching
-    /// Returns static (cacheable) and dynamic (not cached) parts separately
+    /// Keep live screen context separate so provider adapters can attach it
+    /// without changing the stable instructions. Anthropic sends it at the tail.
     pub(super) fn build_system_prompt_split(
         &self,
         memory_prompt: Option<&str>,

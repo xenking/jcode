@@ -139,10 +139,11 @@ impl Agent {
                 let (memory_msg, persisted) = self.prepare_memory_injection_message(memory);
                 if !persisted {
                     ephemeral_signature_messages.push(memory_msg.clone());
+                    messages_with_memory.push(memory_msg.into_request_only());
                 } else {
                     cache_signature_messages.push(memory_msg.clone());
+                    messages_with_memory.push(memory_msg);
                 }
-                messages_with_memory.push(memory_msg);
             }
             // Surface background plan-limit hits once so the user sees the
             // upgrade prompt in the reply (see turn_loops for rationale).
@@ -154,13 +155,13 @@ impl Agent {
                 crate::subscription_notice::show_upgrade_card(&notice, &self.session.id);
                 let reminder = Message::user(&Self::plan_limit_reminder(&notice));
                 ephemeral_signature_messages.push(reminder.clone());
-                messages_with_memory.push(reminder);
+                messages_with_memory.push(reminder.into_request_only());
             }
             if let Some(nudge) =
                 super::reload_resume::trailing_assistant_nudge(&messages_with_memory)
             {
                 ephemeral_signature_messages.push(nudge.clone());
-                messages_with_memory.push(nudge);
+                messages_with_memory.push(nudge.into_request_only());
             }
 
             logging::info(&format!(
@@ -191,11 +192,16 @@ impl Agent {
                 crate::server::provider_oauth_email(provider.as_ref());
             let resume_session_id = self.provider_session_id.clone();
             self.last_status_detail = None;
-            // Hash the whole system prompt, not only the static block.
-            // Providers place the dynamic block ahead of the transcript (in
-            // the system param or right after the latest user prompt), so a
-            // change there is a harness-caused miss and must be attributed.
-            let system_signature_text = if split_prompt.dynamic_part.is_empty() {
+            let dynamic_is_tail = matches!(
+                jcode_provider_core::parse_provider_hint(provider.name()),
+                Some(jcode_provider_core::ActiveProvider::Claude)
+            );
+            if dynamic_is_tail && !split_prompt.dynamic_part.is_empty() {
+                let mut dynamic = Message::user(&split_prompt.dynamic_part);
+                dynamic.timestamp = None;
+                ephemeral_signature_messages.push(dynamic);
+            }
+            let system_signature_text = if dynamic_is_tail || split_prompt.dynamic_part.is_empty() {
                 std::borrow::Cow::Borrowed(split_prompt.static_part.as_str())
             } else {
                 std::borrow::Cow::Owned(format!(

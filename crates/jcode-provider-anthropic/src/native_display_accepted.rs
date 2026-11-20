@@ -115,6 +115,7 @@ pub(super) fn accepted_format_content_blocks_with_native(
                     tool_use_id: sanitize_tool_id(tool_use_id),
                     content: ToolResultContent::Text(content.clone()),
                     is_error: is_error.unwrap_or(false),
+                    cache_control: None,
                 });
             }
             ContentBlock::Image { media_type, data } => {
@@ -144,6 +145,7 @@ pub(super) fn accepted_format_content_blocks_with_native(
                             media_type: media_type.clone(),
                             data: data.clone(),
                         },
+                        cache_control: None,
                     });
                 }
             }

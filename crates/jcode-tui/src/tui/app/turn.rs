@@ -128,10 +128,13 @@ impl App {
             let provider = self.provider.clone();
             let cache_signature_len = provider_messages.len();
             if let Some(pending) = &memory_pending {
-                provider_messages.push(Message::user(&format!(
-                    "<system-reminder>\n{}\n</system-reminder>",
-                    pending.prompt
-                )));
+                provider_messages.push(
+                    Message::user(&format!(
+                        "<system-reminder>\n{}\n</system-reminder>",
+                        pending.prompt
+                    ))
+                    .into_request_only(),
+                );
             }
             let request_messages = if crate::config::config().features.message_timestamps {
                 Message::with_timestamps(&provider_messages)

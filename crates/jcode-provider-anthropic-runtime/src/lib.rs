@@ -40,10 +40,10 @@ use jcode_base::provider::anthropic::{OAUTH_BETA_HEADERS, effectively_1m};
 use jcode_message_types::{ContentBlock, Role};
 use jcode_message_types::{Message, StreamEvent, ToolDefinition};
 #[cfg(test)]
-use jcode_provider_anthropic::{ApiContentBlock, ToolResultContent, ToolResultContentBlock};
 use jcode_provider_anthropic::{
-    ApiMessage, ApiMetadata, ApiOutputConfig, ApiRequest, ApiSystem, ApiThinking, ApiTool,
+    ApiContentBlock, ApiMessage, ApiSystem, ApiTool, ToolResultContent, ToolResultContentBlock,
 };
+use jcode_provider_anthropic::{ApiMetadata, ApiOutputConfig, ApiRequest, ApiThinking};
 use jcode_provider_core::{
     anthropic_is_1m_model as is_1m_model,
     anthropic_map_tool_name_from_oauth as map_tool_name_from_oauth,
@@ -1256,23 +1256,6 @@ impl AnthropicProvider {
         jcode_provider_anthropic::format_messages_with_tools(messages, is_oauth, api_tools)
     }
 
-    /// Format messages, replaying stored server tool blocks verbatim when the
-    /// matching server tool is attached to this request (`native_replay`).
-    fn format_messages_native(
-        &self,
-        messages: &[Message],
-        is_oauth: bool,
-        api_tools: &[ApiTool],
-        native_replay: bool,
-    ) -> Vec<ApiMessage> {
-        jcode_provider_anthropic::format_messages_with_native(
-            messages,
-            is_oauth,
-            api_tools,
-            native_replay,
-        )
-    }
-
     /// True when requests go to Anthropic's own Messages API rather than a
     /// custom gateway, which may not implement server tools.
     fn first_party_api(&self) -> bool {
@@ -1287,12 +1270,6 @@ impl AnthropicProvider {
         is_oauth: bool,
     ) -> Vec<ApiContentBlock> {
         jcode_provider_anthropic::format_content_blocks(blocks, is_oauth)
-    }
-
-    /// Convert tool definitions to Anthropic API format
-    /// Adds cache_control to the last tool for prompt caching
-    fn format_tools(&self, tools: &[ToolDefinition], is_oauth: bool) -> Vec<ApiTool> {
-        jcode_provider_anthropic::format_tools(tools, is_oauth, is_cache_ttl_1h())
     }
 }
 
@@ -1453,19 +1430,26 @@ impl Provider for AnthropicProvider {
             tools,
         );
         let tools = native_web_search::without_local_websearch(tools, &server_tools);
-        let api_tools = self.format_tools(&tools, is_oauth);
+        let cache_ttl_1h = is_cache_ttl_1h();
+        let api_tools = jcode_provider_anthropic::format_tools(&tools, is_oauth, cache_ttl_1h);
         let (thinking, output_config, temperature) =
             self.build_reasoning_request_parts(&model, is_oauth);
         let (messages, output_config, effort_record) =
             self.plan_effort_controls(messages, &model, is_oauth, &thinking, output_config);
-        let api_messages =
-            self.format_messages_native(&messages, is_oauth, &api_tools, !server_tools.is_empty());
+        let api_messages = jcode_provider_anthropic::format_messages_for_request(
+            &messages,
+            is_oauth,
+            &api_tools,
+            !server_tools.is_empty(),
+            "",
+            cache_ttl_1h,
+        );
 
         let request = ApiRequest {
             model: api_model,
             max_tokens: self.max_tokens_for(&model),
-            system: build_system_param(system, is_oauth),
-            messages: format_messages_with_identity(api_messages, is_oauth),
+            system: jcode_provider_anthropic::build_system_param(system, is_oauth, cache_ttl_1h),
+            messages: api_messages,
             tools: jcode_provider_anthropic::request_tools(api_tools, server_tools),
             metadata: if is_oauth {
                 Some(oauth_request_metadata(&self.oauth_session_id))
@@ -1902,19 +1886,30 @@ impl Provider for AnthropicProvider {
             tools,
         );
         let tools = native_web_search::without_local_websearch(tools, &server_tools);
-        let api_tools = self.format_tools(&tools, is_oauth);
+        let cache_ttl_1h = is_cache_ttl_1h();
+        let api_tools = jcode_provider_anthropic::format_tools(&tools, is_oauth, cache_ttl_1h);
         let (thinking, output_config, temperature) =
             self.build_reasoning_request_parts(&model, is_oauth);
         let (messages, output_config, effort_record) =
             self.plan_effort_controls(messages, &model, is_oauth, &thinking, output_config);
-        let api_messages =
-            self.format_messages_native(&messages, is_oauth, &api_tools, !server_tools.is_empty());
+        let api_messages = jcode_provider_anthropic::format_messages_for_request(
+            &messages,
+            is_oauth,
+            &api_tools,
+            !server_tools.is_empty(),
+            system_dynamic,
+            cache_ttl_1h,
+        );
 
         let request = ApiRequest {
             model: api_model,
             max_tokens: self.max_tokens_for(&model),
-            system: build_system_param_split(system_static, system_dynamic, is_oauth),
-            messages: format_messages_with_identity(api_messages, is_oauth),
+            system: jcode_provider_anthropic::build_system_param(
+                system_static,
+                is_oauth,
+                cache_ttl_1h,
+            ),
+            messages: api_messages,
             tools: jcode_provider_anthropic::request_tools(api_tools, server_tools),
             metadata: if is_oauth {
                 Some(oauth_request_metadata(&self.oauth_session_id))
@@ -2548,25 +2543,9 @@ fn process_sse_event(
 // API Types
 // ============================================================================
 
+#[cfg(test)]
 fn build_system_param(system: &str, is_oauth: bool) -> Option<ApiSystem> {
     jcode_provider_anthropic::build_system_param(system, is_oauth, is_cache_ttl_1h())
-}
-
-fn build_system_param_split(
-    static_part: &str,
-    dynamic_part: &str,
-    is_oauth: bool,
-) -> Option<ApiSystem> {
-    jcode_provider_anthropic::build_system_param_split(
-        static_part,
-        dynamic_part,
-        is_oauth,
-        is_cache_ttl_1h(),
-    )
-}
-
-fn format_messages_with_identity(messages: Vec<ApiMessage>, is_oauth: bool) -> Vec<ApiMessage> {
-    jcode_provider_anthropic::format_messages_with_identity(messages, is_oauth, is_cache_ttl_1h())
 }
 
 #[cfg(test)]

@@ -250,6 +250,17 @@ pub enum ContentBlock {
 }
 
 impl Message {
+    /// Mark a request-snapshot suffix message that will not be replayed.
+    /// This provenance is not serialized and does not change its content.
+    pub fn into_request_only(mut self) -> Self {
+        self.content.mark_request_only();
+        self
+    }
+
+    pub fn is_request_only(&self) -> bool {
+        self.content.is_request_only()
+    }
+
     pub fn user(text: &str) -> Self {
         Self {
             role: Role::User,
