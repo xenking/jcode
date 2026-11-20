@@ -641,8 +641,9 @@ fn dynamic_system_context_message(system_dynamic: &str) -> Option<Message> {
     )))
 }
 
-/// Insert dynamic system context after the latest user turn or compaction boundary
-/// without disturbing the stable cached history prefix or moving on tool rounds.
+/// Insert dynamic system context after a stable user turn boundary. When the
+/// operator prompt was compacted away, a wake immediately after compaction
+/// can open the turn. Reminders arriving during tool rounds must not move it.
 pub fn messages_with_dynamic_system_context(
     messages: &[Message],
     system_dynamic: &str,
@@ -651,18 +652,31 @@ pub fn messages_with_dynamic_system_context(
         return messages.to_vec();
     };
 
-    let mut out = messages.to_vec();
-    let insert_at = out
+    let is_compaction = |message: &Message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::OpenAICompaction { .. }))
+    };
+    let insert_at = match messages
         .iter()
-        .rposition(|message| {
-            is_fresh_user_text_message(message)
-                || message
-                    .content
-                    .iter()
-                    .any(|block| matches!(block, ContentBlock::OpenAICompaction { .. }))
-        })
-        .map(|idx| idx + 1)
-        .unwrap_or(0);
+        .rposition(|message| is_fresh_user_text_message(message) || is_compaction(message))
+    {
+        Some(idx)
+            if is_compaction(&messages[idx])
+                && messages
+                    .get(idx + 1)
+                    .is_some_and(Message::is_internal_system_reminder) =>
+        {
+            idx + 2
+        }
+        Some(idx) => idx + 1,
+        None => messages
+            .iter()
+            .position(Message::is_internal_system_reminder)
+            .map_or(0, |idx| idx + 1),
+    };
+    let mut out = messages.to_vec();
     out.insert(insert_at, dynamic_message);
     out
 }
@@ -1040,7 +1054,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_context_prepends_when_no_turn_boundary_exists() {
+    fn dynamic_context_follows_internal_reminder_without_a_fresh_prompt() {
         let messages = vec![
             Message::assistant_text("assistant"),
             Message::user("<system-reminder>\ninternal\n</system-reminder>"),
@@ -1049,13 +1063,13 @@ mod tests {
         let out = messages_with_dynamic_system_context(&messages, "Time: 10:00:00 UTC");
 
         assert_eq!(out.len(), 3);
-        assert!(text_of(&out[0]).contains("Time: 10:00:00 UTC"));
-        assert_role_text(&out[1], Role::Assistant, "assistant");
+        assert_role_text(&out[0], Role::Assistant, "assistant");
         assert_role_text(
-            &out[2],
+            &out[1],
             Role::User,
             "<system-reminder>\ninternal\n</system-reminder>",
         );
+        assert!(text_of(&out[2]).contains("Time: 10:00:00 UTC"));
     }
 
     #[test]

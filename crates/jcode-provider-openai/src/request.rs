@@ -720,6 +720,62 @@ mod tests {
         }
     }
 
+    fn assert_responses_rounds_keep_dynamic_prefix(mut history: Vec<ChatMessage>) {
+        use jcode_message_types::messages_with_dynamic_system_context;
+
+        let input = |history: &[ChatMessage]| {
+            build_responses_input(&messages_with_dynamic_system_context(
+                history,
+                "stable screen context",
+            ))
+        };
+        let boundary = history.len();
+        let mut previous = input(&history);
+        assert!(
+            previous[boundary]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("stable screen context"))
+        );
+        for call_id in ["first", "second", "third"] {
+            history.push(tool_call(call_id));
+            history.push(ChatMessage::tool_result(call_id, "ok", false));
+            let next = input(&history);
+            assert_eq!(next.len(), previous.len() + 2);
+            assert_eq!(
+                serde_json::to_vec(&next[..previous.len()]).unwrap(),
+                serde_json::to_vec(&previous).unwrap(),
+            );
+            previous = next;
+        }
+    }
+
+    fn compacted_history() -> Vec<ChatMessage> {
+        vec![ChatMessage {
+            role: Role::User,
+            content: vec![ContentBlock::OpenAICompaction {
+                encrypted_content: "opaque".into(),
+            }]
+            .into(),
+            timestamp: None,
+            tool_duration_ms: None,
+        }]
+    }
+
+    #[test]
+    fn responses_dynamic_context_after_native_compaction() {
+        assert_responses_rounds_keep_dynamic_prefix(compacted_history());
+    }
+
+    #[test]
+    fn responses_dynamic_context_after_background_wake() {
+        for mut history in [compacted_history(), Vec::new()] {
+            history.push(ChatMessage::user(
+                "<system-reminder>Background task finished.</system-reminder>",
+            ));
+            assert_responses_rounds_keep_dynamic_prefix(history);
+        }
+    }
+
     #[test]
     fn relocated_outputs_are_not_logged_as_duplicates() {
         for messages in [
