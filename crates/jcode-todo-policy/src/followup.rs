@@ -102,6 +102,10 @@ pub struct TodoSnapshot {
     /// or terminal task IDs must not suppress actionable work.
     #[serde(default)]
     pub running_background_tasks: Vec<String>,
+    /// Whether the runtime has a live, wake-enabled swarm await for this session.
+    /// Unknown when read from disk alone or from an older harness bridge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_swarm_await: Option<bool>,
     /// The session these todos belong to. A todo assigned to any other session
     /// is that session's work and is never actionable here.
     #[serde(default)]

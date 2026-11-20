@@ -139,6 +139,8 @@ export interface TodoSnapshot {
   long_session_review_due: boolean;
   /** Session-scoped background task IDs still running. Absent on older servers. */
   running_background_tasks?: string[];
+  /** A wake-enabled swarm await is pending; absent on older bridges. */
+  pending_swarm_await?: boolean;
 }
 
 /** Persistent effects of a follow-up decision. */

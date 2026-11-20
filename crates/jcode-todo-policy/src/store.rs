@@ -185,6 +185,7 @@ fn load_snapshot_with_background_dir(
         gate_observations: read_or_default(&path(TodoFile::GateObservations)),
         long_session_review_due: review.is_some_and(|state| state.is_due(chrono::Utc::now())),
         running_background_tasks,
+        pending_swarm_await: None,
         session_id: session_id.to_string(),
         running_swarm_members: Vec::new(),
     }

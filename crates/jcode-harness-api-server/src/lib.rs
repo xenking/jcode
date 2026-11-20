@@ -508,6 +508,7 @@ where
                 "session_fork",
                 "session_search",
                 "todo_state",
+                "todo_state_pending_swarm_await_v1",
                 "memory_events",
             ]
             .into_iter()

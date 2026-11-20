@@ -1317,13 +1317,19 @@ impl BridgeState {
             "get_todo_state" => {
                 let session_id = request["session_id"].as_str().unwrap_or("");
                 match Self::todo_home(session_id) {
-                    Ok(home) => vec![Outbound::Reply(ServerFrame::reply(
-                        api_id,
-                        ApiEvent::TodoState {
-                            session_id: session_id.to_string(),
-                            state: jcode_todo_policy::store::load_snapshot(&home, session_id),
-                        },
-                    ))],
+                    Ok(home) => {
+                        let mut state = jcode_todo_policy::store::load_snapshot(&home, session_id);
+                        state.pending_swarm_await = Some(
+                            !jcode_harness_api::pending_awaits_for_session(session_id).is_empty(),
+                        );
+                        vec![Outbound::Reply(ServerFrame::reply(
+                            api_id,
+                            ApiEvent::TodoState {
+                                session_id: session_id.to_string(),
+                                state,
+                            },
+                        ))]
+                    }
                     Err((code, message)) => Self::error_reply(api_id, code, &message),
                 }
             }

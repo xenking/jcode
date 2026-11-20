@@ -4642,6 +4642,30 @@ fn todo_state_is_served_from_the_session_home_and_acked() {
     };
     assert_eq!(snapshot.todos.len(), 1);
     assert_eq!(snapshot.gate_observations.len(), 1);
+    let previous_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+    let runtime = home.join("runtime");
+    let awaits = runtime.join("jcode-await-members");
+    std::fs::create_dir_all(&awaits).unwrap();
+    std::fs::write(
+        awaits.join("a.json"),
+        json!({
+            "session_id": "s1", "requested_ids": ["worker"], "background": true,
+            "wake": true, "deadline_unix_ms": u64::MAX
+        })
+        .to_string(),
+    )
+    .unwrap();
+    unsafe { std::env::set_var("JCODE_RUNTIME_DIR", &runtime) };
+    let snapshot = || json!({"req": "get_todo_state", "id": 93, "session_id": "s1"});
+    let pending =
+        serde_json::to_value(only_reply_event(state.api_request_to_legacy(&snapshot()))).unwrap();
+    std::fs::remove_file(awaits.join("a.json")).unwrap();
+    let settled =
+        serde_json::to_value(only_reply_event(state.api_request_to_legacy(&snapshot()))).unwrap();
+    match previous_runtime {
+        Some(value) => unsafe { std::env::set_var("JCODE_RUNTIME_DIR", value) },
+        None => unsafe { std::env::remove_var("JCODE_RUNTIME_DIR") },
+    }
 
     let event = only_reply_event(state.api_request_to_legacy(&json!({
         "req": "ack_todo_follow_up", "id": 91, "session_id": "s1",
@@ -4666,6 +4690,8 @@ fn todo_state_is_served_from_the_session_home_and_acked() {
         None => unsafe { std::env::remove_var("JCODE_HOME") },
     }
     let _ = std::fs::remove_dir_all(&home);
+    assert_eq!(pending["state"]["pending_swarm_await"], true);
+    assert_ne!(settled["state"]["pending_swarm_await"], true);
 }
 #[test]
 fn context_cap_requests_reply_broadcast_and_validate() {

@@ -3,6 +3,27 @@
 use crate::*;
 
 #[test]
+fn todo_state_pending_swarm_await_is_optional_for_older_bridges() {
+    let legacy = serde_json::to_value(ApiEvent::TodoState {
+        session_id: "s".into(),
+        state: Default::default(),
+    })
+    .unwrap();
+    assert!(legacy["state"].get("pending_swarm_await").is_none());
+    for value in [None, Some(false), Some(true)] {
+        let mut wire = legacy.clone();
+        if let Some(value) = value {
+            wire["state"]["pending_swarm_await"] = serde_json::json!(value);
+        }
+        let event: ApiEvent = serde_json::from_value(wire.clone()).unwrap();
+        assert!(
+            matches!(&event, ApiEvent::TodoState { state, .. } if state.pending_swarm_await == value)
+        );
+        assert_eq!(serde_json::to_value(event).unwrap(), wire);
+    }
+}
+
+#[test]
 fn queued_skill_wire_is_optional_and_round_trips() {
     let legacy = serde_json::json!({"req":"queue_prompt", "session_id":"s", "client_id":"p", "content":"hello", "mode":"after_yield"});
     let parsed: ApiRequest = serde_json::from_value(legacy.clone()).unwrap();
