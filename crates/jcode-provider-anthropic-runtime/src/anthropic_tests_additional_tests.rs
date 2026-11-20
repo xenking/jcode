@@ -64,6 +64,9 @@ async fn consecutive_split_requests_cache_tool_result_before_screen_reminder() {
     let _lock = jcode_base::storage::lock_test_env();
     let _home = tempfile::TempDir::new().unwrap();
     let _home_guard = EnvVarGuard::set("JCODE_HOME", _home.path());
+    // A caller that already runs under a Claude OAuth session would otherwise
+    // steer this provider away from the fake API key.
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "claude-api");
     let (endpoint, server) = capture_anthropic_requests::<2>();
     let _endpoint = EnvVarGuard::set("JCODE_ANTHROPIC_API_BASE", endpoint);
     let _auth = EnvVarGuard::set("JCODE_ANTHROPIC_AUTH", "header");
