@@ -317,6 +317,7 @@ pub(crate) fn rewrite_orphaned_tool_results(messages: &mut [ApiMessage]) {
                     tool_use_id,
                     content,
                     is_error,
+                    ..
                 } if !expected.contains(&tool_use_id) => {
                     rewritten += 1;
                     let label = if is_error {
@@ -343,7 +344,10 @@ pub(crate) fn rewrite_orphaned_tool_results(messages: &mut [ApiMessage]) {
                                         }
                                     }
                                     ToolResultContentBlock::Image { source } => {
-                                        ApiContentBlock::Image { source }
+                                        ApiContentBlock::Image {
+                                            source,
+                                            cache_control: None,
+                                        }
                                     }
                                     // A tool_reference is only valid inside a
                                     // paired tool_result, so keep just the name.
@@ -376,7 +380,7 @@ pub(crate) fn rewrite_orphaned_tool_results(messages: &mut [ApiMessage]) {
 
 /// Text of the synthetic tool_result injected for a tool_use whose real result
 /// exists but is not in the message right after the call.
-const DISPLACED_TOOL_RESULT_TEXT: &str =
+pub(super) const DISPLACED_TOOL_RESULT_TEXT: &str =
     "[Tool output was recorded later in the conversation and is included there as text]";
 
 /// Guarantee every `tool_use` is answered by a `tool_result` in the
@@ -430,6 +434,7 @@ pub(crate) fn answer_unpaired_tool_uses(messages: &mut Vec<ApiMessage>) {
                 tool_use_id: id,
                 content: ToolResultContent::Text(DISPLACED_TOOL_RESULT_TEXT.to_string()),
                 is_error: true,
+                cache_control: None,
             })
             .collect();
         if !synthetic.is_empty() {

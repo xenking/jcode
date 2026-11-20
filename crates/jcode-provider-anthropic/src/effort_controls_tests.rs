@@ -1,5 +1,5 @@
 use super::*;
-use crate::{ApiContentBlock, ApiMessage, format_messages, format_messages_with_identity};
+use crate::{ApiContentBlock, ApiMessage, format_messages, format_messages_for_request};
 use jcode_message_types::provider_native;
 
 const MODEL: &str = "claude-opus-5-5";
@@ -68,7 +68,7 @@ fn tool_result(id: &str) -> Message {
 fn request(history: &[Message], effort: &str) -> (EffortPlan, Value) {
     let plan = plan_effort_controls(history, MODEL, Some(effort)).unwrap();
     let messages = insert_effort_controls(history, &plan);
-    let wire = format_messages_with_identity(format_messages(&messages, true), true, false);
+    let wire = format_messages_for_request(&messages, true, &[], false, "", false);
     (plan, serde_json::to_value(wire).unwrap())
 }
 

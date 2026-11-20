@@ -120,14 +120,18 @@ impl Agent {
                     "Memory injected as message ({} chars)",
                     memory.prompt.len()
                 ));
-                let (memory_msg, _persisted) = self.prepare_memory_injection_message(memory);
-                messages_with_memory.push(memory_msg);
+                let (memory_msg, persisted) = self.prepare_memory_injection_message(memory);
+                messages_with_memory.push(if persisted {
+                    memory_msg
+                } else {
+                    memory_msg.into_request_only()
+                });
             }
             if Self::should_inject_batch_nudge(
                 batch_nudge_pending,
                 tools.iter().any(|tool| tool.name == "batch"),
             ) {
-                messages_with_memory.push(Message::user(Self::BATCH_NUDGE));
+                messages_with_memory.push(Message::user(Self::BATCH_NUDGE).into_request_only());
                 batch_nudge_pending = false;
                 sequential_single_tool_rounds = 0;
             }
@@ -138,7 +142,7 @@ impl Agent {
                     .map(|t| t.is_empty())
                     .unwrap_or(false)
             {
-                messages_with_memory.push(Message::user(Self::TODO_NUDGE));
+                messages_with_memory.push(Message::user(Self::TODO_NUDGE).into_request_only());
                 todo_nudge_sent = true;
             }
             // Background features (memory recall) can hit a plan limit with no
@@ -152,12 +156,13 @@ impl Agent {
                 .flatten()
             {
                 crate::subscription_notice::show_upgrade_card(&notice, &self.session.id);
-                messages_with_memory.push(Message::user(&Self::plan_limit_reminder(&notice)));
+                messages_with_memory
+                    .push(Message::user(&Self::plan_limit_reminder(&notice)).into_request_only());
             }
             if let Some(nudge) =
                 super::reload_resume::trailing_assistant_nudge(&messages_with_memory)
             {
-                messages_with_memory.push(nudge);
+                messages_with_memory.push(nudge.into_request_only());
             }
 
             logging::info(&format!(

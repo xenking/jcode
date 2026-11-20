@@ -175,8 +175,7 @@ fn render_prompt(snapshot: &ScreenSnapshot, owner: &str) -> String {
         "workspace": window.workspace_id, "visible": window.visible,
     })).collect();
     // Lease checks in Store::latest enforce freshness. Transport counters and
-    // wall times belong to the on-demand snapshot, not the provider prompt:
-    // an otherwise identical desktop heartbeat must not rewrite its prefix.
+    // wall times belong to the on-demand snapshot, not the provider prompt.
     let mut observation = serde_json::json!({
         "source":"niri", "source_client":short(owner, 64),
         "interaction":"unknown", "focused_window":snapshot.focused_window,

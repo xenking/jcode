@@ -171,6 +171,7 @@ pub fn format_messages_with_native(
                             "[Session interrupted before tool execution completed]".to_string(),
                         ),
                         is_error: true,
+                        cache_control: None,
                     });
                 }
             }
@@ -521,6 +522,7 @@ pub fn format_content_blocks_with_native(
                     tool_use_id: sanitize_tool_id(tool_use_id),
                     content: ToolResultContent::Text(content.clone()),
                     is_error: is_error.unwrap_or(false),
+                    cache_control: None,
                 });
             }
             ContentBlock::Image { media_type, data } => {
@@ -550,6 +552,7 @@ pub fn format_content_blocks_with_native(
                             media_type: media_type.clone(),
                             data: data.clone(),
                         },
+                        cache_control: None,
                     });
                 }
             }
@@ -666,18 +669,8 @@ pub struct ApiSystemBlock {
 }
 
 pub fn build_system_param(system: &str, is_oauth: bool, cache_ttl_1h: bool) -> Option<ApiSystem> {
-    build_system_param_split(system, "", is_oauth, cache_ttl_1h)
-}
-
-/// Build system param with split static/dynamic content for better caching
-pub fn build_system_param_split(
-    static_part: &str,
-    dynamic_part: &str,
-    is_oauth: bool,
-    cache_ttl_1h: bool,
-) -> Option<ApiSystem> {
+    let mut blocks = Vec::new();
     if is_oauth {
-        let mut blocks = Vec::new();
         // Billing attribution block. Required for OAuth acceptance on larger
         // models. Intentionally no identity sentence, see OAUTH_BILLING_HEADER.
         blocks.push(ApiSystemBlock {
@@ -685,137 +678,105 @@ pub fn build_system_param_split(
             text: format!("x-anthropic-billing-header: {}", OAUTH_BILLING_HEADER),
             cache_control: None,
         });
-        // Static content - CACHED (instruction files, base prompt, skills)
-        if !static_part.is_empty() {
-            blocks.push(ApiSystemBlock {
-                block_type: "text",
-                text: static_part.to_string(),
-                cache_control: Some(CacheControlParam::ephemeral(cache_ttl_1h)),
-            });
-        }
-        // Dynamic content - NOT cached (date, git status, memory)
-        if !dynamic_part.is_empty() {
-            blocks.push(ApiSystemBlock {
-                block_type: "text",
-                text: dynamic_part.to_string(),
-                cache_control: None,
-            });
-        }
-        return Some(ApiSystem::Blocks(blocks));
     }
-
-    // Non-OAuth: use block format with cache control for static part only
-    let has_static = !static_part.is_empty();
-    let has_dynamic = !dynamic_part.is_empty();
-
-    if !has_static && !has_dynamic {
-        None
-    } else {
-        let mut blocks = Vec::new();
-        if has_static {
-            blocks.push(ApiSystemBlock {
-                block_type: "text",
-                text: static_part.to_string(),
-                cache_control: Some(CacheControlParam::ephemeral(cache_ttl_1h)),
-            });
-        }
-        if has_dynamic {
-            blocks.push(ApiSystemBlock {
-                block_type: "text",
-                text: dynamic_part.to_string(),
-                cache_control: None,
-            });
-        }
-        Some(ApiSystem::Blocks(blocks))
+    if !system.is_empty() {
+        blocks.push(ApiSystemBlock {
+            block_type: "text",
+            text: system.to_string(),
+            cache_control: Some(CacheControlParam::ephemeral(cache_ttl_1h)),
+        });
     }
+    (!blocks.is_empty()).then_some(ApiSystem::Blocks(blocks))
 }
 
-pub fn format_messages_with_identity(
-    messages: Vec<ApiMessage>,
-    _is_oauth: bool,
+pub fn format_messages_for_request(
+    messages: &[Message],
+    is_oauth: bool,
+    api_tools: &[ApiTool],
+    native_replay: bool,
+    dynamic_context: &str,
     cache_ttl_1h: bool,
 ) -> Vec<ApiMessage> {
-    let mut out = messages;
-
-    // Add cache breakpoints for both OAuth and non-OAuth paths
+    let stable_end = messages
+        .iter()
+        .position(Message::is_request_only)
+        .unwrap_or(messages.len());
+    let (history, suffix) = messages.split_at(stable_end);
+    let mut out = format_messages_with_native(history, is_oauth, api_tools, native_replay);
     add_message_cache_breakpoint(&mut out, cache_ttl_1h);
 
+    for message in format_messages_with_native(suffix, is_oauth, api_tools, native_replay) {
+        append_request_message(&mut out, message);
+    }
+    // A native pause_turn must be continued with the assistant message last.
+    if !dynamic_context.trim().is_empty() && !out.last().is_some_and(is_paused_server_tool_turn) {
+        append_request_message(
+            &mut out,
+            ApiMessage {
+                role: "user".to_string(),
+                content: vec![ApiContentBlock::Text {
+                    text: format!(
+                        "<system-reminder>\n{}\n</system-reminder>",
+                        dynamic_context.trim()
+                    ),
+                    cache_control: None,
+                }],
+            },
+        );
+    }
     out
 }
 
-/// Add cache_control to messages for conversation caching.
-///
-/// Strategy: sliding two-marker window
-///   - Second-to-last assistant message → READ marker (re-uses cache snapshot from previous turn)
-///   - Last assistant message           → WRITE marker (creates new snapshot for the next turn)
-///
-/// This ensures each turn N+1 reads from turn N's conversation cache, paying only
-/// cache_read_input_tokens for the already-cached history instead of full input tokens.
-///
-/// Budget: system (1) + tools (1) + messages (up to 2) = 4 total, within Anthropic's limit.
+fn append_request_message(messages: &mut Vec<ApiMessage>, message: ApiMessage) {
+    if message.role == "user"
+        && let Some(last) = messages.last_mut()
+        && last.role == "user"
+    {
+        last.content.extend(message.content);
+    } else {
+        messages.push(message);
+    }
+}
+
+/// Anchor the latest reusable block and the stable boundary before the newest
+/// assistant message. The latter is normally the prior request's tail, and is
+/// explicit even when a large tool round puts it outside the API's lookback.
+/// Tools and system reserve one slot each and share the same TTL with messages.
 pub fn add_message_cache_breakpoint(messages: &mut [ApiMessage], cache_ttl_1h: bool) {
-    jcode_logging::info(&format!(
-        "Conversation caching: {} messages to process",
-        messages.len()
-    ));
+    let provisional_start = messages.iter().enumerate().find_map(|(i, message)| {
+        message
+            .content
+            .iter()
+            .position(ApiContentBlock::is_provisional_tool_result)
+            .map(|j| (i, j))
+    });
+    let stable_len = provisional_start.map_or(messages.len(), |(i, _)| i + 1);
 
-    if messages.len() < 3 {
-        // Need at least: user + assistant + user to be worth caching
-        jcode_logging::info("Conversation caching: too few messages, skipping");
-        return;
-    }
-
-    // Collect indices of up to 2 most recent assistant messages (newest first)
-    let mut assistant_indices: Vec<usize> = Vec::with_capacity(2);
-    for (i, msg) in messages.iter().enumerate().rev() {
-        if msg.role == "assistant" {
-            assistant_indices.push(i);
-            if assistant_indices.len() == 2 {
-                break;
-            }
-        }
-    }
-
-    if assistant_indices.is_empty() {
-        jcode_logging::info("Conversation caching: no assistant message found");
-        return;
-    }
-
-    // Place cache_control on both (newest = WRITE for next turn, older = READ from prev turn)
-    let total = assistant_indices.len();
-    for (slot, &idx) in assistant_indices.iter().enumerate() {
-        let label = if slot == 0 {
-            "WRITE (newest)"
-        } else {
-            "READ (prev-turn)"
-        };
-        let mut added = false;
-        if let Some(msg) = messages.get_mut(idx) {
-            for block in msg.content.iter_mut().rev() {
-                match block {
-                    ApiContentBlock::Text { cache_control, .. }
-                    | ApiContentBlock::ToolUse { cache_control, .. } => {
-                        *cache_control = Some(CacheControlParam::ephemeral(cache_ttl_1h));
-                        added = true;
-                        break;
-                    }
-                    _ => {}
+    let (mut tail, mut previous) = (false, false);
+    for (idx, message) in messages[..stable_len].iter_mut().enumerate().rev() {
+        if !tail || previous {
+            let len = match provisional_start {
+                Some((i, j)) if idx == i => j,
+                _ => message.content.len(),
+            };
+            let blocks = &mut message.content[..len];
+            if let Some(cache_control) = blocks
+                .iter_mut()
+                .rev()
+                .find_map(ApiContentBlock::cache_control_mut)
+            {
+                *cache_control = Some(CacheControlParam::ephemeral(cache_ttl_1h));
+                jcode_logging::info(&format!(
+                    "Conversation caching: breakpoint at message {idx}"
+                ));
+                if tail {
+                    break;
                 }
+                tail = true;
             }
         }
-        if added {
-            jcode_logging::info(&format!(
-                "Conversation caching: breakpoint {}/{} at message {} [{}]",
-                slot + 1,
-                total,
-                idx,
-                label
-            ));
-        } else {
-            jcode_logging::info(&format!(
-                "Conversation caching: no cacheable block in assistant message {} [{}]",
-                idx, label
-            ));
+        if tail && message.role == "assistant" {
+            previous = true;
         }
     }
 }
@@ -901,11 +862,17 @@ pub enum ApiContentBlock {
         content: ToolResultContent,
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControlParam>,
     },
     #[serde(rename = "thinking")]
     Thinking { thinking: String, signature: String },
     #[serde(rename = "image")]
-    Image { source: ApiImageSource },
+    Image {
+        source: ApiImageSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControlParam>,
+    },
     /// Effort carried by a mid-conversation control message. Only valid as the
     /// content of an [`ApiMessage::effort_control`], which serializes it as
     /// the message's `output_config` instead of a content block.
@@ -916,6 +883,24 @@ pub enum ApiContentBlock {
     /// kept, and its encrypted payloads must not be touched.
     #[serde(untagged)]
     Raw(Value),
+}
+
+impl ApiContentBlock {
+    fn cache_control_mut(&mut self) -> Option<&mut Option<CacheControlParam>> {
+        match self {
+            Self::Text { cache_control, .. }
+            | Self::ToolUse { cache_control, .. }
+            | Self::ToolResult { cache_control, .. }
+            | Self::Image { cache_control, .. } => Some(cache_control),
+            Self::Thinking { .. } | Self::EffortControl(_) | Self::Raw(_) => None,
+        }
+    }
+
+    fn is_provisional_tool_result(&self) -> bool {
+        matches!(self, Self::ToolResult { content: ToolResultContent::Text(text), is_error: true, .. }
+            if history_repair::is_placeholder_tool_result(text, Some(true))
+                || text == history_repair::DISPLACED_TOOL_RESULT_TEXT)
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -981,16 +966,8 @@ pub fn request_tools(custom: Vec<ApiTool>, server: Vec<Value>) -> Option<Vec<Api
 
 #[cfg(test)]
 mod cache_prefix_invariant_tests {
-    //! Deterministic proof that injecting a trailing memory message can never move
-    //! the Anthropic prefix-cache breakpoints off the stable assistant prefix.
-    //!
-    //! Anthropic caching is strict-prefix: a `cache_control` breakpoint caches every
-    //! token up to and including the block it sits on. `add_message_cache_breakpoint`
-    //! always anchors the two breakpoints on the two most recent *assistant* messages.
-    //! Memory is injected by the agent as a trailing *user* message (see
-    //! `turn_loops.rs` / `turn_streaming_mpsc.rs`). Therefore the breakpoint anchors,
-    //! and every token they cache, are identical with or without the memory suffix.
-    //! These tests pin that invariant so a refactor cannot silently break the cache.
+    //! Request-only user messages can merge into the last persisted user message.
+    //! The cache boundary is a block within that message, not its JSON envelope.
 
     use super::*;
     use jcode_message_types::{ContentBlock, Message, Role};
@@ -1035,6 +1012,12 @@ mod cache_prefix_invariant_tests {
                         } | ApiContentBlock::ToolUse {
                             cache_control: Some(_),
                             ..
+                        } | ApiContentBlock::ToolResult {
+                            cache_control: Some(_),
+                            ..
+                        } | ApiContentBlock::Image {
+                            cache_control: Some(_),
+                            ..
                         }
                     )
                 });
@@ -1043,44 +1026,48 @@ mod cache_prefix_invariant_tests {
             .collect()
     }
 
-    /// Serialize only the prefix up to and including the last breakpoint. This is the
-    /// exact span Anthropic caches; if it is byte-identical across two requests, the
-    /// cache is guaranteed to be reused.
+    /// Serialize only the prefix up to and including the last marked block.
     fn cached_prefix_json(messages: &[ApiMessage]) -> String {
         let last_bp = breakpoint_anchors(messages)
             .last()
             .map(|(idx, _)| *idx)
             .expect("expected at least one cache breakpoint");
-        serde_json::to_string(&messages[..=last_bp]).expect("serialize cached prefix")
+        let mut prefix = messages[..=last_bp].to_vec();
+        let blocks = &mut prefix[last_bp].content;
+        let end = blocks
+            .iter_mut()
+            .rposition(|block| {
+                block
+                    .cache_control_mut()
+                    .is_some_and(|control| control.is_some())
+            })
+            .unwrap();
+        blocks.truncate(end + 1);
+        serde_json::to_string(&prefix).expect("serialize cached prefix")
     }
 
     fn formatted_with_breakpoints(messages: &[Message]) -> Vec<ApiMessage> {
-        let mut api = format_messages(messages, false);
-        add_message_cache_breakpoint(&mut api, false);
-        api
+        format_messages_for_request(messages, false, &[], false, "", false)
     }
 
     #[test]
-    fn breakpoints_anchor_on_assistant_messages_only() {
+    fn breakpoints_cover_latest_user_and_prior_request_boundary() {
         let api = formatted_with_breakpoints(&base_conversation());
         let anchors = breakpoint_anchors(&api);
-        assert!(!anchors.is_empty(), "expected breakpoints to be placed");
-        for (idx, role) in &anchors {
-            assert_eq!(
-                role, "assistant",
-                "breakpoint at message {idx} must be on an assistant message, got {role}"
-            );
-        }
+        assert_eq!(anchors, vec![(2, "user".into()), (4, "user".into())]);
     }
 
     #[test]
     fn trailing_memory_message_does_not_move_breakpoints() {
         let base = base_conversation();
         let mut with_memory = base.clone();
-        with_memory.push(text_msg(
-            Role::User,
-            "<memory>relevant recall injected for this turn</memory>",
-        ));
+        with_memory.push(
+            text_msg(
+                Role::User,
+                "<memory>relevant recall injected for this turn</memory>",
+            )
+            .into_request_only(),
+        );
 
         let base_api = formatted_with_breakpoints(&base);
         let mem_api = formatted_with_breakpoints(&with_memory);
@@ -1098,10 +1085,9 @@ mod cache_prefix_invariant_tests {
     fn cached_prefix_is_byte_identical_with_and_without_memory() {
         let base = base_conversation();
         let mut with_memory = base.clone();
-        with_memory.push(text_msg(
-            Role::User,
-            "<memory>turn-specific recall</memory>",
-        ));
+        with_memory.push(
+            text_msg(Role::User, "<memory>turn-specific recall</memory>").into_request_only(),
+        );
 
         let base_prefix = cached_prefix_json(&formatted_with_breakpoints(&base));
         let mem_prefix = cached_prefix_json(&formatted_with_breakpoints(&with_memory));
@@ -1114,9 +1100,8 @@ mod cache_prefix_invariant_tests {
 
     #[test]
     fn different_memory_each_turn_keeps_identical_cached_prefix() {
-        // The memory content changes every turn. Because it is a trailing user message
-        // placed *after* the newest assistant breakpoint, the cached prefix must remain
-        // identical regardless of what memory is injected.
+        // Memory is appended after the marked history, even when it shares
+        // the last user message's content array on the wire.
         let base = base_conversation();
         let cached = cached_prefix_json(&formatted_with_breakpoints(&base));
 
@@ -1127,7 +1112,7 @@ mod cache_prefix_invariant_tests {
         ] {
             let mut msgs = base.clone();
             if !memory.is_empty() {
-                msgs.push(text_msg(Role::User, memory));
+                msgs.push(text_msg(Role::User, memory).into_request_only());
             }
             let candidate = cached_prefix_json(&formatted_with_breakpoints(&msgs));
             assert_eq!(

@@ -29,6 +29,8 @@ impl std::fmt::Debug for SharedContent {
 struct ContentPayload {
     blocks: Vec<ContentBlock>,
     #[serde(skip)]
+    request_only: bool,
+    #[serde(skip)]
     metrics: ContentMetrics,
 }
 
@@ -36,6 +38,7 @@ impl Clone for ContentPayload {
     fn clone(&self) -> Self {
         Self {
             blocks: self.blocks.clone(),
+            request_only: self.request_only,
             // COW detaches must never retain cached immutable measurements.
             metrics: ContentMetrics::default(),
         }
@@ -49,6 +52,14 @@ struct ContentMetrics {
 }
 
 impl SharedContent {
+    pub(super) fn mark_request_only(&mut self) {
+        Arc::make_mut(&mut self.0).request_only = true;
+    }
+
+    pub(super) fn is_request_only(&self) -> bool {
+        self.0.request_only
+    }
+
     /// Exact serialized array length, shared by immutable snapshots. Keeping a
     /// count rather than JSON bytes avoids retaining a second transcript copy.
     pub fn serialized_json_bytes(&self) -> usize {
@@ -136,6 +147,7 @@ impl From<Vec<ContentBlock>> for SharedContent {
     fn from(value: Vec<ContentBlock>) -> Self {
         Self(Arc::new(ContentPayload {
             blocks: value,
+            request_only: false,
             metrics: ContentMetrics::default(),
         }))
     }
