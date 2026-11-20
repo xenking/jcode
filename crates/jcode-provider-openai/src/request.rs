@@ -840,6 +840,34 @@ mod tests {
     }
 
     #[test]
+    fn repeated_tool_result_is_filtered_before_reordering_without_changing_input() {
+        let mut messages = vec![
+            ChatMessage::user("Run the tool"),
+            tool_call("call_1"),
+            ChatMessage::tool_result("call_1", "original", false),
+        ];
+        let first = build_responses_input(&messages);
+        messages.push(ChatMessage::tool_result("call_1", "duplicate", false));
+        let mut logs = Vec::new();
+        let second = build_responses_input_with_logger(&messages, |_, message| {
+            logs.push(message.to_string());
+        });
+        assert_eq!(
+            serde_json::to_vec(&first).unwrap(),
+            serde_json::to_vec(&second).unwrap(),
+        );
+        assert!(
+            logs.iter()
+                .any(|message| message.contains("Filtered 1 orphaned tool result"))
+        );
+        assert!(
+            !logs
+                .iter()
+                .any(|message| message.contains("duplicate tool output"))
+        );
+    }
+
+    #[test]
     fn build_tools_flattens_allof_schema_for_openai() {
         let defs = vec![ToolDefinition {
             name: "read".to_string(),
