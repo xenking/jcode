@@ -334,7 +334,7 @@ pub(crate) fn seed_spawn_lane(
 pub(crate) fn spawn_lane_message(initial_message: Option<&str>, brief: &str) -> String {
     match initial_message.filter(|message| !message.trim().is_empty()) {
         Some(message) => format!("{message}\n\nAuthoritative assigned todo lane:\n{brief}"),
-        None => format!("Begin your assigned todo lane.\n\n{brief}"),
+        None => format!("{}\n\n{brief}", jcode_session_types::AUTO_LANE_START),
     }
 }
 

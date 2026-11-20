@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+pub use jcode_session_types::AUTO_LANE_START;
 use jcode_session_types::{
     TitleAction, TitleDecisionInput, build_title_user_message, clean_prompt_text,
     plan_title_update, prompt_title, sanitize_title, title_model_candidates,

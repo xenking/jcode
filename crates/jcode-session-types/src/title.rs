@@ -172,6 +172,9 @@ pub fn needs_title_backfill(title: Option<&str>) -> bool {
         .any(|marker| title.contains(marker))
 }
 
+/// Synthetic first line used when a worker starts a lane without a prompt.
+pub const AUTO_LANE_START: &str = "Begin your assigned todo lane.";
+
 /// Strip internal wrappers, swarm lane boilerplate, and commands from a prompt
 /// so neither the heuristic title nor the title model sees them.
 ///
@@ -190,6 +193,7 @@ pub fn clean_prompt_text(text: &str) -> Option<String> {
         || trimmed.starts_with("[Scheduled task]")
         || trimmed.starts_with("[auto]")
         || trimmed.starts_with("[automated follow-up")
+        || trimmed.lines().next() == Some(AUTO_LANE_START)
         || is_poke_text(trimmed)
     {
         return None;
@@ -614,6 +618,8 @@ mod tests {
         let lane = "Fix the build\n\nAuthoritative assigned todo lane:\nYour todo list is this lane, in order. do work";
         let cleaned = clean_prompt_text(lane).unwrap();
         assert_eq!(cleaned, "Fix the build");
+        let auto_lane = "Begin your assigned todo lane.\n\nYour todo list is this lane, in order.\n- [pending] Open side questions";
+        assert_eq!(prompt_title(auto_lane), None);
 
         let reminder = "<system-reminder>\n# Session Context\n</system-reminder>";
         assert_eq!(clean_prompt_text(reminder), None);

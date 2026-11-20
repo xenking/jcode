@@ -18,8 +18,8 @@ impl Agent {
         &mut self,
         event_tx: Option<&mpsc::UnboundedSender<ServerEvent>>,
     ) {
-        // Debug-socket sessions exist for tests; a network side call there would
-        // make unrelated suites slow and flaky.
+        // Debug sessions include both test sessions and headless swarm workers.
+        // Workers use their assigned task label instead of a second model call.
         if self.session.is_debug {
             return;
         }

@@ -1063,6 +1063,74 @@ async fn global_agent_model_request_updates_server_config_not_session() {
 }
 
 #[tokio::test]
+async fn auto_lane_worker_publishes_a_task_label_without_a_spawn_prompt() {
+    let _env = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    let coordinator = "session_lead_1_test";
+    let todo = crate::todo::TodoItem {
+        id: "test".into(),
+        content: "Open side questions".into(),
+        status: "pending".into(),
+        stage: Some(1),
+        group: Some("btw-enter".into()),
+        lane_owner: Some("worker".into()),
+        ..Default::default()
+    };
+    let lane = crate::todo::stages::lane_id(&todo);
+    crate::todo::save_todos(coordinator, &[todo]).unwrap();
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
+    let provider: Arc<dyn Provider> =
+        Arc::new(RoutingProvider(std::sync::Mutex::new("mock".into())));
+    let (parent, _receiver) = member(coordinator, Some("swarm"), "coordinator");
+    let state = crate::server::SwarmState::new(
+        HashMap::from([(coordinator.into(), parent)]),
+        HashMap::from([("swarm".into(), HashSet::from([coordinator.into()]))]),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let pool = Arc::new(crate::mcp::SharedMcpPool::new(Default::default()));
+    let result = super::spawn_swarm_agent(
+        coordinator,
+        "swarm",
+        Some(lane),
+        Some(home.path().to_string_lossy().into_owned()),
+        None,
+        Some(crate::config::SwarmSpawnMode::Headless),
+        None,
+        None,
+        None,
+        &sessions,
+        &Arc::new(RwLock::new(String::new())),
+        &provider,
+        &state.members,
+        &state.swarms_by_id,
+        &state.coordinators,
+        &state.plans,
+        &Arc::new(RwLock::new(VecDeque::new())),
+        &Arc::new(AtomicU64::new(0)),
+        &broadcast::channel(16).0,
+        &pool,
+        &Arc::new(RwLock::new(HashMap::new())),
+        &Arc::new(RwLock::new(HashMap::new())),
+    )
+    .await;
+    let worker = result.unwrap();
+    let todo_title = crate::todo::load_session_title(&worker);
+    let live_label = state.members.read().await[&worker].task_label.clone();
+    if let Some(previous) = previous {
+        crate::env::set_var("JCODE_HOME", previous);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    assert_eq!(todo_title.as_deref(), Some("btw-enter"));
+    assert_eq!(live_label.as_deref(), Some("btw-enter"));
+}
+
+#[tokio::test]
 async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
     let _env = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().unwrap();

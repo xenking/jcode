@@ -656,9 +656,17 @@ pub(super) async fn spawn_swarm_agent(
     }
     // Label the worker with what it was spawned for so the swarm strip and
     // member lists can show the task, not just the animal name. An explicit
-    // spawn `label` wins; otherwise the label is derived from the initial prompt.
-    if let Some(label_text) = label.as_deref().or(initial_message.as_deref()) {
+    // spawn `label` wins. Auto-dispatch sends only a lane id, not a prompt.
+    let lane_title = lane_id
+        .as_ref()
+        .and_then(|_| crate::todo::load_session_title(&new_session_id));
+    if let Some(label_text) = label
+        .as_deref()
+        .or(lane_title.as_deref())
+        .or(initial_message.as_deref())
+    {
         set_member_task_label(&new_session_id, label_text, swarm_members).await;
+        broadcast_swarm_status(swarm_id, swarm_members, swarms_by_id).await;
     }
     let swarm_state = SwarmState {
         members: Arc::clone(swarm_members),

@@ -10,9 +10,10 @@ pub use ask::*;
 pub use memory::{memory_injection_content, memory_injection_label};
 mod transcription;
 pub use title::{
-    DEFAULT_TITLE_MODELS, TITLE_CHAR_MAX, TITLE_SYSTEM_PROMPT, TITLE_WORD_MAX, TitleAction,
-    TitleDecisionInput, TitleSkipReason, TitleStage, build_title_user_message, clean_prompt_text,
-    needs_title_backfill, plan_title_update, prompt_title, sanitize_title, title_model_candidates,
+    AUTO_LANE_START, DEFAULT_TITLE_MODELS, TITLE_CHAR_MAX, TITLE_SYSTEM_PROMPT, TITLE_WORD_MAX,
+    TitleAction, TitleDecisionInput, TitleSkipReason, TitleStage, build_title_user_message,
+    clean_prompt_text, needs_title_backfill, plan_title_update, prompt_title, sanitize_title,
+    title_model_candidates,
 };
 pub use transcription::{
     TRANSCRIPTION_CLOSE, TRANSCRIPTION_OPEN, strip_transcription, wrap_transcription,
