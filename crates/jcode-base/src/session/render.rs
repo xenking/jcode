@@ -997,7 +997,12 @@ pub fn compaction_divider_content(
         let _ = writeln!(detail, "tokens: {post} after");
     }
     if let Some(count) = messages_compacted {
-        let _ = writeln!(detail, "messages summarized: {count}");
+        let action = if method == "snapcompact" {
+            "archived"
+        } else {
+            "summarized"
+        };
+        let _ = writeln!(detail, "messages {action}: {count}");
     }
     if let Some(count) = messages_dropped {
         let _ = writeln!(detail, "messages dropped: {count}");
@@ -1005,7 +1010,10 @@ pub fn compaction_divider_content(
     if let Some(count) = active_messages {
         let _ = writeln!(detail, "messages kept verbatim: {count}");
     }
-    if let Some(summary) = summary.map(str::trim).filter(|summary| !summary.is_empty()) {
+    // Snapcompact's summary is a reading guide for the model, not a recap.
+    if method == "snapcompact" {
+        detail.push_str("\nScroll up to read earlier messages.");
+    } else if let Some(summary) = summary.map(str::trim).filter(|summary| !summary.is_empty()) {
         detail.push('\n');
         detail.push_str(summary);
     }
@@ -1014,6 +1022,57 @@ pub fn compaction_divider_content(
     } else {
         format!("{label}\n\n{detail}")
     }
+}
+
+#[test]
+fn snapcompact_divider_explains_how_to_read_older_messages_without_model_instructions() {
+    let content = compaction_divider_content(
+        Some("snapcompact"),
+        Some("automatic"),
+        Some(524_000),
+        Some(100_000),
+        None,
+        Some(89),
+        None,
+        Some(10),
+        Some(
+            "Resume prior conversation.\n\nArchived transcript scopes:\n\nReading HISTORY:\n\nHISTORY\n===================\n",
+        ),
+        false,
+    );
+    let (label, detail) = content.split_once("\n\n").unwrap();
+    assert_eq!(label, "compacted · snapcompact · 524k→100k");
+    assert!(detail.contains("tokens: 524000 before"), "{detail}");
+    assert!(detail.contains("messages archived: 89"), "{detail}");
+    assert!(
+        detail.contains("Scroll up to read earlier messages."),
+        "{detail}"
+    );
+    assert!(
+        !detail.contains("Resume prior conversation") && !detail.contains("HISTORY"),
+        "{detail}"
+    );
+}
+
+#[test]
+fn summary_divider_still_shows_the_conversation_recap() {
+    let content = compaction_divider_content(
+        Some("summary"),
+        None,
+        None,
+        None,
+        None,
+        Some(2),
+        None,
+        None,
+        Some("The user chose the smaller build."),
+        false,
+    );
+    assert!(content.contains("messages summarized: 2"), "{content}");
+    assert!(
+        content.ends_with("The user chose the smaller build."),
+        "{content}"
+    );
 }
 
 /// Insert one divider row per persisted compaction at its original timestamp.

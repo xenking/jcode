@@ -3514,7 +3514,7 @@ fn compaction_divider_renders_from_a_stored_session() {
             active_messages: Some(12),
         },
         Some("snapcompact"),
-        Some("## Summary\nThe user asked for a compaction divider."),
+        Some("Resume prior conversation.\n\nReading HISTORY:\n\nHISTORY\n==================="),
     );
 
     let rows = render_messages(&session);
@@ -3528,12 +3528,12 @@ fn compaction_divider_renders_from_a_stored_session() {
         .expect("a divider body is label plus detail");
     assert_eq!(label, "compacted · snapcompact · 180k→26k · 12s");
     assert!(
-        detail.contains("messages summarized: 84"),
+        detail.contains("messages archived: 84"),
         "detail must name the elided messages: {detail}"
     );
     assert!(
-        detail.contains("The user asked for a compaction divider."),
-        "detail must carry the summary: {detail}"
+        detail.contains("Scroll up to read earlier messages.") && !detail.contains("HISTORY"),
+        "detail must explain where to find history without model instructions: {detail}"
     );
 
     // Reload from the stored JSON, exactly as Desktop's provisional history and
@@ -3556,10 +3556,7 @@ fn compaction_divider_renders_from_a_stored_session() {
         .iter()
         .find(|row| row.role == "compaction")
         .expect("the divider must survive a reload");
-    assert_eq!(
-        divider.content.split_once("\n\n").map(|(label, _)| label),
-        Some("compacted · snapcompact · 180k→26k · 12s")
-    );
+    assert_eq!(divider.content, format!("{label}\n\n{detail}"));
 }
 
 /// An idle pre-compaction says so, so the reader knows why the fold happened
