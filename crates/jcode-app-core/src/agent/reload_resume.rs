@@ -12,6 +12,19 @@ use tokio::sync::mpsc;
 
 pub(crate) use crate::session::RELOAD_INTERRUPTED_MARKER;
 
+/// Restore and mode changes can append skill instructions without starting a
+/// turn. They are model-visible, but must neither create nor hide pending work.
+pub(crate) fn last_turn_message_for_recovery(messages: &[StoredMessage]) -> Option<&StoredMessage> {
+    messages.iter().rev().find(|message| {
+        !(message.role == Role::User
+            && message.display_role == Some(StoredDisplayRole::System)
+            && matches!(
+                &message.content[..],
+                [ContentBlock::Text { text, .. }] if text.starts_with("<system-reminder>\n# Active Skill\n\n")
+            ))
+    })
+}
+
 /// A tool request the restart left without a result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PendingToolUse {
@@ -132,7 +145,7 @@ impl Agent {
     /// authoritative evidence that work was in flight. Without that evidence a
     /// finished turn is never re-prompted.
     pub(crate) fn reload_resume_plan(&self, durable_intent: bool) -> ResumePlan {
-        let Some(last) = self.session.messages.last() else {
+        let Some(last) = last_turn_message_for_recovery(&self.session.messages) else {
             return ResumePlan::Nothing;
         };
         // An unanswered ask owns the continuation even when other tools from

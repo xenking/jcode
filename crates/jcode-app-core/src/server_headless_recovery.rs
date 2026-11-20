@@ -69,20 +69,21 @@ impl Server {
             if headless && !owner_live && !self.running_before_restart.contains(&session_id) {
                 continue;
             }
-            let interrupted = session.messages.last().is_some_and(|message| {
-                message.role == crate::message::Role::User
-                    || self::client_session::last_message_has_pending_tool(message)
-                    || message.content.iter().any(|block| match block {
-                        crate::message::ContentBlock::Text { text, .. } => {
-                            text.contains("server reloading")
-                        }
-                        crate::message::ContentBlock::ToolResult { content, .. } => {
-                            content.contains("server reload")
-                                || content.contains("Reload initiated.")
-                        }
-                        _ => false,
-                    })
-            });
+            let interrupted = crate::agent::last_turn_message_for_recovery(&session.messages)
+                .is_some_and(|message| {
+                    message.role == crate::message::Role::User
+                        || self::client_session::last_message_has_pending_tool(message)
+                        || message.content.iter().any(|block| match block {
+                            crate::message::ContentBlock::Text { text, .. } => {
+                                text.contains("server reloading")
+                            }
+                            crate::message::ContentBlock::ToolResult { content, .. } => {
+                                content.contains("server reload")
+                                    || content.contains("Reload initiated.")
+                            }
+                            _ => false,
+                        })
+                });
             let open_lane = owner_live
                 .then(|| worker_revive::open_lane_continuation(&session_id))
                 .flatten();

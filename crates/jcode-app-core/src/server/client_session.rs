@@ -12,7 +12,7 @@ use super::{
     rename_session_interrupt_queue, send_swarm_plan_to_session, swarm_id_for_session,
     unregister_session_event_sender, update_member_status,
 };
-use crate::agent::Agent;
+use crate::agent::{Agent, last_turn_message_for_recovery};
 use crate::message::ContentBlock;
 use crate::protocol::{NotificationType, ServerEvent};
 use crate::provider::Provider;
@@ -43,12 +43,11 @@ pub(super) fn last_message_has_pending_tool(session: &crate::session::StoredMess
 }
 
 pub(super) fn session_was_interrupted_by_reload(agent: &Agent) -> bool {
-    let messages = agent.messages();
-    let Some(last) = messages.last() else {
-        return false;
-    };
+    last_turn_message_for_recovery(agent.messages()).is_some_and(message_has_reload_interruption)
+}
 
-    last.content.iter().any(|block| match block {
+pub(super) fn message_has_reload_interruption(message: &crate::session::StoredMessage) -> bool {
+    message.content.iter().any(|block| match block {
         ContentBlock::Text { text, .. } => {
             text.ends_with("[generation interrupted - server reloading]")
         }
@@ -69,17 +68,11 @@ pub(super) fn restored_session_was_interrupted(
     previous_status: &crate::session::SessionStatus,
     agent: &Agent,
 ) -> bool {
-    let last_is_user = agent
-        .last_message_role()
-        .as_ref()
-        .map(|role| *role == crate::message::Role::User)
-        .unwrap_or(false);
-    let last_is_reload_interrupted = session_was_interrupted_by_reload(agent);
-    let pending_turn = last_is_user
-        || agent
-            .messages()
-            .last()
-            .is_some_and(last_message_has_pending_tool);
+    let last = last_turn_message_for_recovery(agent.messages());
+    let last_is_reload_interrupted = last.is_some_and(message_has_reload_interruption);
+    let pending_turn = last.is_some_and(|message| {
+        message.role == crate::message::Role::User || last_message_has_pending_tool(message)
+    });
     let closed_pending_turn_during_reload =
         matches!(previous_status, crate::session::SessionStatus::Closed)
             && pending_turn

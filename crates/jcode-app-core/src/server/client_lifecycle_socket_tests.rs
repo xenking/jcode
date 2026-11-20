@@ -1252,6 +1252,156 @@ async fn attachments_reach_the_provider_over_daemon_socket() {
     handle.await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restored_pinned_skill_does_not_start_a_turn_but_pending_work_recovers() {
+    use crate::server::{reload_recovery, runtime::ServerRuntime};
+    use crate::session::{Session, SessionStatus, StoredDisplayRole};
+    use serde_json::json;
+
+    let _lock = crate::storage::lock_test_env();
+    let home = IsolatedReloadRecoveryEnv::new();
+    let skill = home._home.path().join(".jcode/skills/restore-probe");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: restore-probe\ndescription: Restore test\n---\n\nStay concise.\n",
+    )
+    .unwrap();
+    let provider = TerminalSocketProvider::default();
+    provider.finish_first.notify_one();
+    let socket = home._runtime.path().join("pinned-restore.sock");
+    let server = crate::server::Server::new_with_paths(
+        Arc::new(provider.clone()),
+        socket.clone(),
+        home._runtime.path().join("pinned-debug.sock"),
+    );
+    let runtime = ServerRuntime::from_server(&server);
+    let daemon = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
+    let recovery = reload_recovery::RecoveryOwner::new(&server);
+
+    for (role, content, should_resume) in [
+        (
+            Role::Assistant,
+            ContentBlock::Text {
+                text: "Finished".into(),
+                cache_control: None,
+            },
+            false,
+        ),
+        (
+            Role::User,
+            ContentBlock::Text {
+                text: "Pending prompt".into(),
+                cache_control: None,
+            },
+            true,
+        ),
+        (
+            Role::Assistant,
+            ContentBlock::ToolUse {
+                id: "pending-call".into(),
+                name: "test-unknown-tool".into(),
+                input: json!({}),
+                thought_signature: None,
+            },
+            true,
+        ),
+    ] {
+        let before = provider.calls.load(Ordering::SeqCst);
+        let mut session = Session::create(None, None);
+        session.working_dir = Some(home._home.path().to_string_lossy().into_owned());
+        session.set_pinned_skill_names(vec!["restore-probe".into()]);
+        if role == Role::Assistant {
+            session.add_message(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "Original request".into(),
+                    cache_control: None,
+                }],
+            );
+        }
+        session.add_message(role, vec![content]);
+        assert_eq!(session.status, SessionStatus::Active);
+        session.save().unwrap();
+        let id = session.id;
+
+        let (reader, mut writer) = crate::transport::Stream::connect(&socket)
+            .await
+            .unwrap()
+            .into_split();
+        writer
+            .write_all(
+                format!(
+                    "{}\n{}\n",
+                    json!({"type":"subscribe","id":10,"working_dir":home._home.path()}),
+                    json!({"type":"resume_session","id":1,"session_id":id})
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut reader = BufReader::new(reader);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                let event: ServerEvent = serde_json::from_str(&line).unwrap();
+                match event {
+                    ServerEvent::Done { id: 1 } => break,
+                    ServerEvent::Error {
+                        id: 1 | 10,
+                        message,
+                        ..
+                    } => panic!("resume failed: {message}"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("resume did not finish");
+
+        let agent = server.sessions.read().await.get(&id).unwrap().clone();
+        {
+            let agent = agent.lock().await;
+            let last = agent.messages().last().unwrap();
+            assert_eq!(last.display_role, Some(StoredDisplayRole::System));
+            assert!(last.content.iter().any(|block| matches!(block,
+                ContentBlock::Text { text, .. } if text.contains("# Active Skill") && text.contains("Stay concise."))));
+        }
+        assert_eq!(
+            reload_recovery::peek_for_session(&id).unwrap().is_some(),
+            should_resume,
+            "a skill announcement must neither start work nor hide an unfinished turn"
+        );
+        let tasks = recovery.reconcile_once().await;
+        assert_eq!(tasks.len(), usize::from(should_resume));
+        for task in tasks {
+            tokio::time::timeout(Duration::from_secs(10), task)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let after = provider.calls.load(Ordering::SeqCst);
+        if should_resume {
+            assert!(after > before, "unfinished turn never reached the provider");
+            let session = Session::load(&id).unwrap();
+            assert!(session.messages.last().is_some_and(|last| {
+                last.role == Role::Assistant && last.content.iter().any(|block| {
+                    matches!(block, ContentBlock::Text { text, .. } if text == "completed")
+                })
+            }));
+        } else {
+            assert_eq!(
+                after, before,
+                "restoring a finished turn contacted the provider"
+            );
+        }
+    }
+
+    runtime.shutdown().await;
+    daemon.await.unwrap();
+}
+
 #[derive(Clone, Default)]
 struct TerminalSocketProvider {
     calls: Arc<std::sync::atomic::AtomicUsize>,

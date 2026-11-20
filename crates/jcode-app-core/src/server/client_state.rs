@@ -3,7 +3,7 @@ use super::SessionAgents;
 use super::server_has_newer_binary;
 use crate::agent::Agent;
 use crate::bus::Bus;
-use crate::message::{ContentBlock, Role};
+use crate::message::Role;
 use crate::protocol::{
     HistoryMessage, ServerEvent, SessionActivitySnapshot, TokenUsageTotals, encode_event,
 };
@@ -691,27 +691,6 @@ fn history_reload_recovery_snapshot_with(
     directive
 }
 
-fn persisted_session_has_reload_interruption_marker(session: &Session) -> bool {
-    let Some(last) = session.messages.last() else {
-        return false;
-    };
-
-    last.content.iter().any(|block| match block {
-        ContentBlock::Text { text, .. } => {
-            text.ends_with("[generation interrupted - server reloading]")
-        }
-        ContentBlock::ToolResult {
-            content, is_error, ..
-        } => {
-            content == "Reload initiated. Process restarting..."
-                || (is_error.unwrap_or(false)
-                    && (content.contains("interrupted by server reload")
-                        || content.contains("Skipped - server reloading")))
-        }
-        _ => false,
-    })
-}
-
 #[cfg(test)]
 fn infer_persisted_session_interrupted_by_reload(session_id: &str) -> bool {
     let session = match Session::load_for_remote_startup(session_id)
@@ -732,21 +711,15 @@ fn infer_persisted_session_interrupted_by_reload(session_id: &str) -> bool {
 
 fn session_interrupted_by_reload(session: &Session) -> bool {
     let session_id = session.id.as_str();
-    let last_is_user = session
-        .messages
-        .last()
-        .map(|message| message.role == Role::User)
-        .unwrap_or(false);
+    let last = crate::agent::last_turn_message_for_recovery(&session.messages);
+    let last_is_user = last.is_some_and(|message| message.role == Role::User);
     let marker_active = crate::server::reload_marker_active(RELOAD_RESTORE_MARKER_MAX_AGE);
-    let pending_turn = last_is_user
-        || session
-            .messages
-            .last()
-            .is_some_and(super::client_session::last_message_has_pending_tool);
+    let pending_turn =
+        last_is_user || last.is_some_and(super::client_session::last_message_has_pending_tool);
     let interrupted = matches!(session.status, SessionStatus::Crashed { .. })
         || (matches!(session.status, SessionStatus::Active) && pending_turn && marker_active)
         || (matches!(session.status, SessionStatus::Closed) && pending_turn && marker_active)
-        || persisted_session_has_reload_interruption_marker(session);
+        || last.is_some_and(super::client_session::message_has_reload_interruption);
 
     crate::logging::info(&format!(
         "history_reload_recovery_snapshot: fallback inspect session={} status={} last_is_user={} pending_turn={} marker_active={} interrupted={}",
