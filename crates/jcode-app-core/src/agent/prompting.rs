@@ -2,6 +2,17 @@ use super::Agent;
 use crate::logging;
 use crate::message::{Message, ToolDefinition};
 
+pub(super) enum StaticPromptState {
+    Bootstrap(crate::prompt::StaticPromptSources),
+    Frozen(crate::session::PersistedStaticPrompt),
+}
+
+impl StaticPromptState {
+    pub(super) fn bootstrap(working_dir: Option<&std::path::Path>) -> Self {
+        Self::Bootstrap(crate::prompt::StaticPromptSources::load(working_dir))
+    }
+}
+
 impl Agent {
     pub(crate) fn runtime_skills_snapshot(&self) -> serde_json::Value {
         let registry = self.current_skills_snapshot();
@@ -135,42 +146,97 @@ impl Agent {
         &self,
         memory_prompt: Option<&str>,
     ) -> crate::prompt::SplitSystemPrompt {
-        if let Some(ref override_prompt) = self.session.system_prompt {
-            return crate::prompt::SplitSystemPrompt {
-                static_part: self.append_session_system_prompt(override_prompt.clone()),
-                dynamic_part: crate::screen_context::dynamic_prompt(self.session_id()),
-            };
+        let (static_part, custom_prompt) = match &self.static_prompt {
+            StaticPromptState::Frozen(snapshot) => {
+                (snapshot.text.clone(), snapshot.file_versions.is_none())
+            }
+            StaticPromptState::Bootstrap(sources) => (
+                self.render_static_prompt(sources),
+                self.session.system_prompt.is_some(),
+            ),
+        };
+        let mut dynamic_part = if custom_prompt {
+            String::new()
+        } else {
+            memory_prompt.unwrap_or_default().to_string()
+        };
+        dynamic_part.push_str(&crate::screen_context::dynamic_prompt(self.session_id()));
+        crate::prompt::SplitSystemPrompt {
+            static_part,
+            dynamic_part,
         }
+    }
 
-        // The active skill prompt is announced once in the transcript when the
-        // skill is activated (see `announce_active_skill`). Keeping it out of
-        // the system prompt means switching skills never invalidates the cache.
-        let skill_prompt: Option<String> = None;
-
-        // Frozen per session so skill installs never rewrite the cached
-        // system prefix. Later installs are announced in the transcript.
-        let available_skills = &self.prompt_skills_snapshot;
-
+    fn render_static_prompt(&self, sources: &crate::prompt::StaticPromptSources) -> String {
+        if let Some(ref override_prompt) = self.session.system_prompt {
+            return self.append_session_system_prompt(override_prompt.clone());
+        }
         let working_dir = self
             .session
             .working_dir
-            .as_ref()
-            .map(std::path::PathBuf::from);
-
-        let (mut split, _context_info) = crate::prompt::build_system_prompt_split_with_agents_md(
-            skill_prompt.as_deref(),
-            available_skills,
+            .as_deref()
+            .map(std::path::Path::new);
+        let (split, _) = crate::prompt::build_system_prompt_split_with_sources(
+            None,
+            &self.prompt_skills_snapshot,
             self.session.is_canary,
-            memory_prompt,
-            working_dir.as_deref(),
+            None,
+            working_dir,
+            sources,
             self.agents_md_snapshot.clone(),
         );
+        self.append_session_system_prompt(split.static_part)
+    }
 
-        split.static_part = self.append_session_system_prompt(split.static_part);
-        split
-            .dynamic_part
-            .push_str(&crate::screen_context::dynamic_prompt(self.session_id()));
-        split
+    /// Finalize at the first real request, after the SDK has had a chance to
+    /// supply creation options. Debug inspection and speculative warmup do not
+    /// commit the prefix.
+    pub(super) fn freeze_static_prompt(&mut self) {
+        if let StaticPromptState::Bootstrap(sources) = &self.static_prompt {
+            self.static_prompt = StaticPromptState::Frozen(crate::session::PersistedStaticPrompt {
+                text: self.render_static_prompt(sources),
+                file_versions: self
+                    .session
+                    .system_prompt
+                    .is_none()
+                    .then(|| sources.files.versions()),
+            });
+            self.record_prompt_inputs();
+        }
+    }
+
+    pub(super) fn announce_prompt_file_changes(&mut self) -> anyhow::Result<()> {
+        let StaticPromptState::Frozen(snapshot) = &self.static_prompt else {
+            return Ok(());
+        };
+        let Some(previous) = snapshot.file_versions.as_ref() else {
+            return Ok(());
+        };
+        let working_dir = self
+            .session
+            .working_dir
+            .as_deref()
+            .map(std::path::Path::new);
+        let files = crate::prompt::PromptFiles::load(working_dir);
+        let Some((reminder, versions)) = files.change_reminder(previous) else {
+            return Ok(());
+        };
+        self.add_message_with_display_role(
+            crate::message::Role::User,
+            vec![crate::message::ContentBlock::Text {
+                text: reminder,
+                cache_control: None,
+            }],
+            Some(crate::session::StoredDisplayRole::System),
+        );
+        // Persist the model-visible message before committing its baseline.
+        self.session.save()?;
+        if let StaticPromptState::Frozen(snapshot) = &mut self.static_prompt {
+            snapshot.file_versions = Some(versions);
+        }
+        self.prompt_inputs_recorded = false;
+        self.record_prompt_inputs();
+        Ok(())
     }
 
     fn append_session_system_prompt(&self, mut prompt: String) -> String {

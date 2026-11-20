@@ -400,13 +400,13 @@ pub struct Agent {
     /// prefix (that forces a KV cache miss on everything after it), so the
     /// list is frozen here and later installs are announced in the transcript.
     prompt_skills_snapshot: Vec<crate::prompt::SkillInfo>,
+    static_prompt: prompting::StaticPromptState,
     /// Skill names already described to the model, either in the frozen
     /// system-prompt list or by a late-skill transcript announcement.
     announced_skills: HashSet<String>,
     /// Transcript index already scanned for late-skill announcements.
     announced_skills_scan_index: usize,
-    /// Whether `agents_md_snapshot` and `prompt_skills_snapshot` are already
-    /// recorded on disk for this session, so a reload can resend them.
+    /// Whether the current prompt inputs have been recorded for reload.
     prompt_inputs_recorded: bool,
     /// Whether memory features are enabled for this session
     memory_enabled: bool,
@@ -459,17 +459,14 @@ impl Agent {
             .as_deref()
             .map(std::path::Path::new);
         self.agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
+        self.static_prompt = prompting::StaticPromptState::bootstrap(working_dir);
         self.refresh_prompt_skills_snapshot();
         self.prompt_inputs_recorded = false;
     }
 
-    /// Adopt the AGENTS.md text and skills list this session's previous
-    /// process sent. A daemon reload builds a new Agent, and re-reading files
-    /// that changed in between (a rollout usually edits AGENTS.md) rewrote the
-    /// cached system prefix, so the first request after the reload paid for
-    /// the whole conversation again. Returns false for a session that never
-    /// recorded inputs or that moved to another directory: those read the
-    /// files, like a new session.
+    /// Adopt the exact bytes this session sent, and its AGENTS.md and skill
+    /// inputs. Legacy snapshots have only the latter and upgrade on next send.
+    /// An explicit move to another directory keeps the existing recapture rule.
     fn adopt_recorded_prompt_inputs(&mut self) -> bool {
         let Some(recorded) = crate::session::load_prompt_inputs(&self.session.id) else {
             return false;
@@ -486,6 +483,16 @@ impl Agent {
         };
         self.agents_md_snapshot = (recorded.agents_md, info);
         self.prompt_skills_snapshot = recorded.skills;
+        self.prompt_inputs_recorded = recorded.static_prompt.is_some();
+        self.static_prompt = match recorded.static_prompt {
+            Some(snapshot) => prompting::StaticPromptState::Frozen(snapshot),
+            None => prompting::StaticPromptState::bootstrap(
+                self.session
+                    .working_dir
+                    .as_deref()
+                    .map(std::path::Path::new),
+            ),
+        };
         // Skills installed since then are announced in the transcript, which
         // leaves the cached system prefix untouched.
         self.announced_skills = self
@@ -494,16 +501,18 @@ impl Agent {
             .map(|skill| skill.name.clone())
             .collect();
         self.announced_skills_scan_index = 0;
-        self.prompt_inputs_recorded = true;
         true
     }
 
     /// Record the inputs of the system prompt about to be sent, once per
     /// capture, so [`Self::adopt_recorded_prompt_inputs`] can restore them.
     fn record_prompt_inputs(&mut self) {
-        if self.prompt_inputs_recorded || self.session.system_prompt.is_some() {
+        if self.prompt_inputs_recorded {
             return;
         }
+        let prompting::StaticPromptState::Frozen(snapshot) = &self.static_prompt else {
+            return;
+        };
         let (agents_md, info) = &self.agents_md_snapshot;
         let inputs = crate::session::PersistedPromptInputs {
             working_dir: self.session.working_dir.clone(),
@@ -513,6 +522,7 @@ impl Agent {
             has_global_agents_md: info.has_global_agents_md,
             global_agents_md_chars: info.global_agents_md_chars,
             skills: self.prompt_skills_snapshot.clone(),
+            static_prompt: Some(snapshot.clone()),
         };
         match crate::session::save_prompt_inputs(&self.session.id, &inputs) {
             Ok(()) => self.prompt_inputs_recorded = true,
@@ -571,6 +581,7 @@ impl Agent {
         let working_dir = session.working_dir.as_deref().map(std::path::Path::new);
         let t = Instant::now();
         let agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
+        let static_prompt = prompting::StaticPromptState::bootstrap(working_dir);
         let agents_md_ms = t.elapsed().as_millis();
         let initial_provider_model = provider.model();
         let tool_policy_registration = crate::tool::register_session_tool_policy(
@@ -612,6 +623,7 @@ impl Agent {
             announced_mcp_scan_index: 0,
             agents_md_snapshot,
             prompt_skills_snapshot: Vec::new(),
+            static_prompt,
             announced_skills: HashSet::new(),
             announced_skills_scan_index: 0,
             prompt_inputs_recorded: false,
@@ -1468,6 +1480,7 @@ impl Agent {
         &mut self,
         event_tx: Option<&crate::stream_batching::BatchingSender>,
     ) -> Result<(Vec<Message>, Option<CompactionEvent>)> {
+        self.announce_prompt_file_changes()?;
         if self.provider.supports_compaction() || self.session.compaction.is_some() {
             let compaction = self.registry.compaction();
             {

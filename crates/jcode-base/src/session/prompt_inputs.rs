@@ -1,19 +1,12 @@
-//! Per-session copy of the system prompt's bootstrap inputs.
-//!
-//! An Agent freezes AGENTS.md and the "Available Skills" list when a session
-//! starts, so later edits to those files never rewrite the provider's cached
-//! prefix. That freeze lived only in memory: a daemon reload re-read both
-//! files, and one changed line in AGENTS.md made the first request after the
-//! reload miss the cache for the whole conversation. This store lets a
-//! restored Agent adopt the inputs its previous process actually sent.
+//! Per-session copy of the static system prompt and its bootstrap inputs.
 
-use crate::prompt::SkillInfo;
+use crate::prompt::{PromptFileVersions, SkillInfo};
 use crate::storage;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// The AGENTS.md text and skills list a session's system prompt was built from.
+/// The static system prompt a session sent, with its AGENTS.md and skills inputs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedPromptInputs {
     /// Directory the inputs were read for. A session restored into another
@@ -30,6 +23,17 @@ pub struct PersistedPromptInputs {
     pub global_agents_md_chars: usize,
     #[serde(default)]
     pub skills: Vec<SkillInfo>,
+    // Absent in snapshots written before the full static prompt was frozen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_prompt: Option<PersistedStaticPrompt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedStaticPrompt {
+    pub text: String,
+    /// Latest versions reflected either in the frozen text or in the transcript.
+    /// `None` when a custom system prompt replaces the normal instructions.
+    pub file_versions: Option<PromptFileVersions>,
 }
 
 pub(super) fn prompt_inputs_dir() -> Result<PathBuf> {
@@ -47,7 +51,7 @@ fn prompt_inputs_path(session_id: &str) -> Result<PathBuf> {
 pub fn save_prompt_inputs(session_id: &str, inputs: &PersistedPromptInputs) -> Result<()> {
     let path = prompt_inputs_path(session_id)?;
     storage::assert_not_real_home(&path);
-    storage::write_json_fast(&path, inputs)
+    storage::write_json_secret(&path, inputs)
 }
 
 /// The inputs a session last sent, if they were recorded and are readable.
