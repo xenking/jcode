@@ -1341,6 +1341,7 @@ fn persisted_state_restore_and_exports_share_encrypted_body() {
     let body: Arc<str> = "encrypted-body-".repeat(128 * 1024).into();
     let state = crate::session::StoredCompactionState {
         summary_text: "summary".into(),
+        plan_context: None,
         openai_encrypted_content: Some(body.clone()),
         snapcompact: None,
         covers_up_to_turn: 3,
@@ -1390,6 +1391,7 @@ fn test_persisted_state_matches_is_exact_for_every_field_and_absence() {
     assert!(manager.persisted_state_matches(None));
     let state = crate::session::StoredCompactionState {
         summary_text: "summary".into(),
+        plan_context: None,
         openai_encrypted_content: Some("encrypted".repeat(128 * 1024).into()),
         snapcompact: None,
         covers_up_to_turn: 3,
@@ -1435,6 +1437,7 @@ fn test_persisted_state_matches_is_exact_for_every_field_and_absence() {
 fn persisted_state_comparison_probe() {
     let state = crate::session::StoredCompactionState {
         summary_text: "summary".into(),
+        plan_context: None,
         openai_encrypted_content: Some("encrypted".repeat(1024 * 1024).into()),
         snapcompact: None,
         covers_up_to_turn: 3,

@@ -111,6 +111,7 @@ fn test_debug_memory_profile_reports_messages_and_provider_cache() {
     session.compaction = Some(
         StoredCompactionState {
             summary_text: "summary".to_string(),
+            plan_context: None,
             openai_encrypted_content: None,
             snapcompact: None,
             covers_up_to_turn: 7,

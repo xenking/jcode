@@ -221,6 +221,7 @@ fn test_prepare_review_spawned_session_uses_visible_transcript_for_judge_session
             child.compaction = Some(
                 crate::session::StoredCompactionState {
                     summary_text: "stale compaction".to_string(),
+                    plan_context: None,
                     openai_encrypted_content: None,
                     snapcompact: None,
                     covers_up_to_turn: 1,

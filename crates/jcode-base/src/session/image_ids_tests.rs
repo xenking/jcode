@@ -28,6 +28,7 @@ fn image_identity_survives_shake_and_snapcompact_persistence() -> anyhow::Result
     session.compaction = Some(
         StoredCompactionState {
             summary_text: "summary".into(),
+            plan_context: None,
             openai_encrypted_content: None,
             snapcompact: Some(jcode_message_types::SnapcompactArchive {
                 source: "archive".into(),

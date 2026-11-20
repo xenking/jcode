@@ -1302,6 +1302,7 @@ async fn messages_for_provider_caps_restored_snapcompact_pages() {
     );
     agent.session.compaction = Some(Arc::new(crate::session::StoredCompactionState {
         summary_text: "archive".into(),
+        plan_context: None,
         openai_encrypted_content: None,
         snapcompact: Some(jcode_message_types::SnapcompactArchive {
             source: "history".into(),

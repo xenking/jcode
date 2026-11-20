@@ -446,6 +446,10 @@ pub struct StoredTokenUsage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredCompactionState {
     pub summary_text: String,
+    /// Frozen when this checkpoint is first prepared for playback. An empty
+    /// snapshot means there was no plan, not that playback should reread it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_context: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     // Shared with manager summaries and copy-on-write session snapshots.
     pub openai_encrypted_content: Option<std::sync::Arc<str>>,

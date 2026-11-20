@@ -87,6 +87,7 @@ fn foreign_or_changed_route_snapshots_are_rejected() {
                 changed.compaction = Some(
                     jcode_session_types::StoredCompactionState {
                         summary_text: "new summary".into(),
+                        plan_context: None,
                         openai_encrypted_content: None,
                         snapcompact: None,
                         covers_up_to_turn: 2,

@@ -317,6 +317,7 @@ fn test_local_compacted_history_marker_scroll_expands_from_session() {
     app.session.compaction = Some(
         crate::session::StoredCompactionState {
             summary_text: "old prompts and responses".to_string(),
+            plan_context: None,
             openai_encrypted_content: None,
             snapcompact: None,
             covers_up_to_turn: TURNS,

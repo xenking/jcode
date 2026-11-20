@@ -1156,25 +1156,32 @@ impl Agent {
             .ok()
             .map(|manager| manager.token_estimate_with(self.session.provider_messages()) as u64);
         let encrypted_content_len = encrypted_content.len();
+        let history = self.session.provider_messages();
+        let readable = crate::compaction::native_compaction_transcript_summary(
+            &history[..compacted_count.min(history.len())],
+        );
         let (summary_text, openai_encrypted_content) =
             if crate::provider::openai_request::openai_encrypted_content_is_sendable(
                 &encrypted_content,
             ) {
-                (String::new(), Some(encrypted_content))
+                (readable.unwrap_or_default(), Some(encrypted_content))
             } else {
                 logging::warn(&format!(
                     "Discarding oversized OpenAI native compaction payload before persist ({} chars)",
                     encrypted_content_len,
                 ));
                 (
-                    crate::provider::openai_request::openai_encrypted_content_fallback_summary(
-                        encrypted_content_len,
-                    ),
+                    readable.unwrap_or_else(|| {
+                        crate::provider::openai_request::openai_encrypted_content_fallback_summary(
+                            encrypted_content_len,
+                        )
+                    }),
                     None,
                 )
             };
         let state = crate::session::StoredCompactionState {
             summary_text,
+            plan_context: None,
             openai_encrypted_content: openai_encrypted_content.map(Into::into),
             snapcompact: None,
             covers_up_to_turn: compacted_count,
@@ -1238,8 +1245,8 @@ impl Agent {
             })
     }
 
-    /// Shake before an LLM compaction or once the provider cache expired.
-    /// Only the cache-expiry reason may rewrite history while idle.
+    /// Only an expired provider cache permits an in-place shake. Ordinary
+    /// compaction applies shake to its private summarizer input instead.
     /// `fold_instead` skips the cold-cache shake because the cold fold will
     /// reduce this request alone (see `cold_shake_reaches_request_target`).
     ///
@@ -1270,21 +1277,17 @@ impl Agent {
             snapcompact_preferred,
         );
         let (reason, mut cfg) = plan?;
-        let cold = reason == crate::compaction::ShakeReason::CacheExpiry;
-        if cold
-            && (fold_instead
+        if reason != crate::compaction::ShakeReason::CacheExpiry
+            || (fold_instead
                 || manager.attempted_cache_expiry_compaction()
                 || self.cache_expiry_already_compacted(manager, now, ttl))
         {
             return None;
         }
-        if !cold && matches!(boundary, CompactionBoundary::Idle) {
-            return None;
-        }
         let started = Instant::now();
         let start = manager.active_start(self.session.provider_messages());
         let tokens_before = manager.effective_token_count_with(self.session.provider_messages());
-        if cold && !fold_planned {
+        if !fold_planned {
             cfg.min_savings_tokens = cfg
                 .min_savings_tokens
                 .max(tokens_before * COLD_SHAKE_MIN_SAVINGS_PERCENT / 100);
@@ -1327,14 +1330,9 @@ impl Agent {
             // shake would overwrite that slot and leave the shake invisible.
             self.note_compaction_applied();
             self.record_compaction_divider(event);
-            if cold {
-                self.session.last_cache_expiry_compaction_for =
-                    manager.expired_cache_response(now, ttl).map(Into::into);
-            }
+            self.session.last_cache_expiry_compaction_for =
+                manager.expired_cache_response(now, ttl).map(Into::into);
             self.persist_session_best_effort("shake compaction");
-        }
-        if !cold {
-            return None;
         }
         if event.is_some() {
             let detail = format!(
@@ -1577,7 +1575,16 @@ impl Agent {
                         }
                     }
                 }
-                let mut messages = {
+                let model = self.provider.model();
+                let accepts_native =
+                    crate::compaction::openai_native_replay_route(self.provider.name(), &model);
+                let supports_archive = crate::compaction::snapcompact_pages_usable(
+                    self.provider.supports_image_input(),
+                    &model,
+                );
+                let recovered_native =
+                    manager.recover_native_text(self.session.provider_messages(), accepts_native);
+                {
                     let all_messages = self.session.provider_messages();
                     if self.provider.uses_jcode_compaction() {
                         let action =
@@ -1598,30 +1605,36 @@ impl Agent {
                             crate::compaction::CompactionAction::None => {}
                         }
                     }
-                    manager.messages_for_api_with_vision(
-                        all_messages,
-                        crate::compaction::snapcompact_pages_usable(
-                            self.provider.supports_image_input(),
-                            &self.provider.model(),
-                        ),
-                    )
-                };
+                }
+                let replay = manager.messages_for_api_session(
+                    &mut self.session,
+                    supports_archive,
+                    accepts_native,
+                );
+                let mut messages = replay.messages;
                 let event = manager.take_compaction_event();
-                if event.is_some() || discarded_oversized_native {
+                if event.is_some()
+                    || discarded_oversized_native
+                    || recovered_native
+                    || replay.checkpoint_changed
+                {
                     self.sync_session_compaction_state_from_manager(&manager);
+                }
+                if replay.warn_missing_native_summary {
+                    self.warn_missing_native_compaction_summary(event_tx);
                 }
                 if let Some(event) = event.as_ref() {
                     self.note_compaction_applied();
                     self.record_compaction_divider(event);
                     self.persist_session_best_effort("compaction completion");
                     if self.session.pinned_skill.is_some() {
-                        messages = manager.messages_for_api_with_vision(
-                            self.session.provider_messages(),
-                            crate::compaction::snapcompact_pages_usable(
-                                self.provider.supports_image_input(),
-                                &self.provider.model(),
-                            ),
-                        );
+                        messages = manager
+                            .messages_for_api_session(
+                                &mut self.session,
+                                supports_archive,
+                                accepts_native,
+                            )
+                            .messages;
                     }
                 }
                 let user_count = messages

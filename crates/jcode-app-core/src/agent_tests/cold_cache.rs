@@ -468,6 +468,188 @@ async fn daemon_cold_cache_unreducible_prompt_is_not_sent() {
     );
 }
 
+fn anthropic_wire(messages: &[Message]) -> serde_json::Value {
+    serde_json::to_value(jcode_provider_anthropic::format_messages(messages, false)).unwrap()
+}
+
+#[tokio::test]
+async fn compaction_warm_threshold_does_not_rewrite_the_first_wire_request() {
+    let _guard = crate::storage::lock_test_env();
+    let (_home, mut agent, _) = fixture(3_600, 10_000, 5_000).await;
+    agent
+        .registry
+        .compaction()
+        .write()
+        .await
+        .note_provider_response(std::time::SystemTime::now(), Some(910_000));
+    agent
+        .registry
+        .compaction()
+        .write()
+        .await
+        .update_observed_input_tokens(910_000);
+    let before = anthropic_wire(agent.session.provider_messages());
+    let (outgoing, event) = agent.messages_for_provider(None).await.unwrap();
+    assert!(event.is_none());
+    assert!(
+        anthropic_wire(&outgoing) == before,
+        "unapplied fold changed the Anthropic request"
+    );
+    assert!(agent.is_compacting_now());
+    assert!(shake_dividers(&agent).is_empty());
+}
+
+#[tokio::test]
+async fn compaction_wire_preserves_user_text_plan_environment_and_native_fallback() {
+    let _guard = crate::storage::lock_test_env();
+    let (_home, mut agent, _) = fixture(3_600, 1, 1).await;
+    agent.session.ensure_initial_session_context_message();
+    let oversized = format!("Old oversized user message: {}", "я".repeat(8_000));
+    agent.add_message(Role::User, Message::user(&oversized).content.to_vec());
+    agent.add_message_with_display_role(
+        Role::User,
+        Message::user("Not user-authored: background-only note")
+            .content
+            .to_vec(),
+        Some(StoredDisplayRole::System),
+    );
+    let user_lines: Vec<_> = (0..6)
+        .map(|i| format!("Exact original request {i}:  два пробела\nsecond line"))
+        .collect();
+    for text in &user_lines {
+        agent.add_message(Role::User, Message::user(text).content.to_vec());
+        agent.add_message(
+            Role::Assistant,
+            Message::user("Previously edited src/important.rs")
+                .content
+                .to_vec(),
+        );
+    }
+    let cutoff = agent.session.messages.len();
+    agent.add_message(
+        Role::User,
+        Message::user("Continue the approved plan").content.to_vec(),
+    );
+    crate::todo::save_todos(
+        &agent.session.id,
+        &[
+            crate::todo::TodoItem {
+                content: "Set up fixtures".into(),
+                status: "completed".into(),
+                ..Default::default()
+            },
+            crate::todo::TodoItem {
+                content: "Verify exact recovery".into(),
+                status: "in_progress".into(),
+                ..Default::default()
+            },
+        ],
+    )
+    .unwrap();
+    // Legacy state created by a native OpenAI route before switching to Claude.
+    let state = crate::session::StoredCompactionState {
+        summary_text: String::new(),
+        plan_context: None,
+        openai_encrypted_content: Some("opaque-checkpoint".into()),
+        snapcompact: None,
+        covers_up_to_turn: cutoff,
+        original_turn_count: cutoff,
+        compacted_count: cutoff,
+    };
+    agent.session.compaction = Some(Arc::new(state.clone()));
+    agent
+        .registry
+        .compaction()
+        .write()
+        .await
+        .restore_persisted_stored_state_with(&state, &agent.session.messages);
+    let (outgoing, _) = agent.messages_for_provider(None).await.unwrap();
+    let wire = anthropic_wire(&outgoing);
+    let texts: Vec<_> = wire
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|message| message["content"].as_array().unwrap())
+        .filter_map(|block| block["text"].as_str())
+        .collect();
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("## Previous Conversation Summary")
+                && text.contains("src/important.rs")),
+        "legacy blob must produce a readable summary"
+    );
+    for line in user_lines.iter().rev().take(4) {
+        assert!(
+            texts.contains(&line.as_str()),
+            "missing original user message: {line:?}"
+        );
+    }
+    for expected in [
+        "# Session Context",
+        "[x] Set up fixtures",
+        "[>] Verify exact recovery",
+    ] {
+        assert!(
+            texts.iter().any(|text| text.contains(expected)),
+            "missing {expected}"
+        );
+    }
+    assert!(!texts.contains(&oversized.as_str()));
+    assert!(!texts.contains(&"Not user-authored: background-only note"));
+    assert!(!wire.to_string().contains("opaque-checkpoint"));
+
+    let persisted = agent.session.compaction.as_ref().unwrap();
+    assert!(persisted.summary_text.contains("src/important.rs"));
+    assert_eq!(
+        persisted.openai_encrypted_content.as_deref(),
+        Some("opaque-checkpoint")
+    );
+    let restored = serde_json::from_value(serde_json::to_value(persisted).unwrap()).unwrap();
+    crate::todo::save_todos(&agent.session.id, &[]).unwrap();
+    agent
+        .registry
+        .compaction()
+        .write()
+        .await
+        .restore_persisted_stored_state_with(&restored, &agent.session.messages);
+    let (after_reload, _) = agent.messages_for_provider(None).await.unwrap();
+    assert_eq!(anthropic_wire(&after_reload), wire);
+}
+
+#[tokio::test]
+async fn compaction_missing_native_summary_warns_once_without_dropping_live_context() {
+    let _guard = crate::storage::lock_test_env();
+    let (_home, mut agent, _) = fixture(3_600, 1, 1).await;
+    // A transferred session can have a legacy checkpoint but no original prefix.
+    let state = crate::session::StoredCompactionState {
+        summary_text: String::new(),
+        plan_context: None,
+        openai_encrypted_content: Some("opaque-without-source".into()),
+        snapcompact: None,
+        covers_up_to_turn: 500,
+        original_turn_count: 500,
+        compacted_count: 0,
+    };
+    agent.session.compaction = Some(Arc::new(state.clone()));
+    agent
+        .registry
+        .compaction()
+        .write()
+        .await
+        .restore_persisted_stored_state_with(&state, &agent.session.messages);
+    for _ in 0..2 {
+        let (messages, _) = agent.messages_for_provider(None).await.unwrap();
+        let wire = anthropic_wire(&messages).to_string();
+        assert!(wire.contains("Earlier context may be incomplete"));
+        assert!(wire.contains("cold-user-turn"));
+        assert!(!wire.contains("opaque-without-source"));
+    }
+    assert_eq!(agent.session.replay_events.iter().filter(|event| {
+        matches!(&event.kind, crate::session::StoredReplayEventKind::DisplayMessage { content, .. } if content.contains("Earlier context may be incomplete"))
+    }).count(), 1);
+}
+
 /// 2026-11-20 01:30: a cold cache made the shake cut three tool outputs out of
 /// a 102K context to save 4K. The prompt was re-cached in full either way, so
 /// the cut only lost context. Small savings must leave the history alone, and

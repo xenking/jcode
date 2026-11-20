@@ -1,6 +1,23 @@
 use super::*;
 
 impl Agent {
+    pub(super) fn warn_missing_native_compaction_summary(
+        &mut self,
+        event_tx: Option<&crate::stream_batching::BatchingSender>,
+    ) {
+        let detail = format!("⚠ {}", crate::compaction::MISSING_NATIVE_SUMMARY);
+        logging::warn(&format!(
+            "[compaction] session={}: {detail}",
+            self.session.id
+        ));
+        self.session
+            .record_replay_display_message("system", None, &detail);
+        self.persist_session_best_effort("missing native compaction summary warning");
+        if let Some(tx) = event_tx {
+            let _ = tx.send(ServerEvent::StatusDetail { detail });
+        }
+    }
+
     /// Flush an idle session before optional process replacement. Never abandon
     /// a pending compaction or lose a completed summary that has not been polled.
     pub(crate) fn checkpoint_idle_runtime_upgrade(&mut self) -> Result<()> {

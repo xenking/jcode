@@ -144,25 +144,32 @@ impl App {
         compacted_count: usize,
     ) -> anyhow::Result<()> {
         let encrypted_content_len = encrypted_content.len();
+        let provider_messages = self.materialized_provider_messages();
+        let readable = crate::compaction::native_compaction_transcript_summary(
+            &provider_messages[..compacted_count.min(provider_messages.len())],
+        );
         let (summary_text, openai_encrypted_content) =
             if crate::provider::openai_request::openai_encrypted_content_is_sendable(
                 &encrypted_content,
             ) {
-                (String::new(), Some(encrypted_content))
+                (readable.unwrap_or_default(), Some(encrypted_content))
             } else {
                 crate::logging::warn(&format!(
                     "Discarding oversized OpenAI native compaction payload before TUI persist ({} chars)",
                     encrypted_content_len,
                 ));
                 (
-                    crate::provider::openai_request::openai_encrypted_content_fallback_summary(
-                        encrypted_content_len,
-                    ),
+                    readable.unwrap_or_else(|| {
+                        crate::provider::openai_request::openai_encrypted_content_fallback_summary(
+                            encrypted_content_len,
+                        )
+                    }),
                     None,
                 )
             };
         let state = crate::session::StoredCompactionState {
             summary_text,
+            plan_context: None,
             openai_encrypted_content: openai_encrypted_content.map(Into::into),
             snapcompact: None,
             covers_up_to_turn: compacted_count,
@@ -171,7 +178,6 @@ impl App {
         };
 
         self.session.compaction = Some(Arc::new(state.clone()));
-        let provider_messages = self.materialized_provider_messages();
         let context_budget = self.context_limit as usize;
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
@@ -200,6 +206,10 @@ impl App {
             Ok(mut manager) => {
                 let discarded_oversized_native =
                     manager.discard_oversized_openai_native_compaction();
+                let model = self.provider.model();
+                let accepts_native =
+                    crate::compaction::openai_native_replay_route(self.provider.name(), &model);
+                let recovered_native = manager.recover_native_text(&base_messages, accepts_native);
                 if self.provider.uses_jcode_compaction() {
                     let action = manager.ensure_context_fits(&base_messages, self.provider.clone());
                     match action {
@@ -213,18 +223,32 @@ impl App {
                         crate::compaction::CompactionAction::None => {}
                     }
                 }
-                let messages = manager.messages_for_api_with_vision(
+                let replay = manager.messages_for_api_session_with(
+                    &self.session,
                     &base_messages,
                     crate::compaction::snapcompact_pages_usable(
                         self.provider.supports_image_input(),
-                        &self.provider.model(),
+                        &model,
                     ),
+                    accepts_native,
                 );
                 let event = manager.take_compaction_event();
-                if event.is_some() || discarded_oversized_native {
+                if event.is_some()
+                    || discarded_oversized_native
+                    || recovered_native
+                    || replay.checkpoint_changed
+                {
                     self.sync_session_compaction_state_from_manager(&manager);
                 }
-                (messages, event)
+                if replay.warn_missing_native_summary {
+                    let detail = crate::compaction::MISSING_NATIVE_SUMMARY;
+                    crate::logging::warn(&format!(
+                        "[compaction] session={}: {detail}",
+                        self.session.id
+                    ));
+                    self.push_display_message(DisplayMessage::system(detail));
+                }
+                (replay.messages, event)
             }
             Err(_) => (base_messages, None),
         }

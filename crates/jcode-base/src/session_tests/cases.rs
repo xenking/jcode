@@ -797,6 +797,7 @@ fn test_save_persists_compaction_state() -> Result<()> {
     session.compaction = Some(
         StoredCompactionState {
             summary_text: "saved summary".to_string(),
+            plan_context: None,
             openai_encrypted_content: None,
             snapcompact: None,
             covers_up_to_turn: 8,
@@ -841,6 +842,7 @@ fn test_startup_stub_save_preserves_compaction_state() -> Result<()> {
     owner.compaction = Some(
         StoredCompactionState {
             summary_text: "owner summary".to_string(),
+            plan_context: None,
             openai_encrypted_content: None,
             snapcompact: None,
             covers_up_to_turn: 3,
@@ -1700,6 +1702,7 @@ fn failed_wake_errors_follow_compacted_history_window() {
     session.compaction = Some(
         StoredCompactionState {
             summary_text: "older context".into(),
+            plan_context: None,
             openai_encrypted_content: None,
             snapcompact: None,
             covers_up_to_turn: 20,
@@ -1939,6 +1942,7 @@ fn test_render_messages_shows_recent_compacted_history_by_default() {
     session.compaction = Some(
         StoredCompactionState {
             summary_text: "old prompt and response".to_string(),
+            plan_context: None,
             openai_encrypted_content: None,
             snapcompact: None,
             covers_up_to_turn: 2,
@@ -1992,6 +1996,7 @@ fn test_render_messages_can_expand_compacted_history_window() {
     session.compaction = Some(
         StoredCompactionState {
             summary_text: "old prompt and response".to_string(),
+            plan_context: None,
             openai_encrypted_content: None,
             snapcompact: None,
             covers_up_to_turn: 2,
@@ -2072,6 +2077,7 @@ fn test_compacted_history_truncates_only_when_long_and_many_turns() {
     session.compaction = Some(
         StoredCompactionState {
             summary_text: "older compacted context".to_string(),
+            plan_context: None,
             openai_encrypted_content: None,
             snapcompact: None,
             covers_up_to_turn: prefix_turns,
@@ -2145,6 +2151,7 @@ fn test_compacted_history_never_truncates_single_long_turn() {
     session.compaction = Some(
         StoredCompactionState {
             summary_text: "older compacted context".to_string(),
+            plan_context: None,
             openai_encrypted_content: None,
             snapcompact: None,
             covers_up_to_turn: 1,
@@ -2209,6 +2216,7 @@ fn test_compacted_history_window_counts_renderable_messages_not_hidden_reminders
     session.compaction = Some(
         StoredCompactionState {
             summary_text: "older compacted context".to_string(),
+            plan_context: None,
             openai_encrypted_content: None,
             snapcompact: None,
             covers_up_to_turn: 4,
@@ -2832,6 +2840,7 @@ fn restored_tool_image_boundaries_follow_returned_history_rows() {
     session.compaction = Some(
         StoredCompactionState {
             summary_text: "summary".into(),
+            plan_context: None,
             openai_encrypted_content: None,
             snapcompact: None,
             covers_up_to_turn: 1,
@@ -3290,6 +3299,7 @@ fn route_journal_legacy_entries_preserve_snapshot_and_prior_journal_route() -> R
 fn big_compaction(tag: &str) -> std::sync::Arc<crate::session::StoredCompactionState> {
     crate::session::StoredCompactionState {
         summary_text: String::new(),
+        plan_context: None,
         openai_encrypted_content: Some(format!("{tag}{}", "e".repeat(300 * 1024)).into()),
         snapcompact: None,
         covers_up_to_turn: 3,
