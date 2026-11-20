@@ -202,7 +202,15 @@ async fn restore_wire(dialect: Dialect, case: &str) {
     let id = agent.session_id().to_owned();
     drop(agent);
     std::fs::write(&agents_md, "Different rule after restart.\n").unwrap();
-    let mut restored = Agent::new(Arc::new(dialect), registry(false).await);
+    let mut restored = Agent::new(
+        Arc::new(dialect),
+        if case == "plain" {
+            assert!(before["tools"].to_string().contains("read"));
+            Registry::empty()
+        } else {
+            registry(false).await
+        },
+    );
     restored.restore_session(&id).unwrap();
     append_text(&mut restored, Role::User, "New request after restart.");
     let after = request(&mut restored, dialect).await;
@@ -260,7 +268,10 @@ async fn restart_cache_deferred_responses() {
 fn restart_cache_continue_is_outside_anthropic_cached_history() {
     use jcode_provider_anthropic as wire;
 
-    let history = [Message::user("First request"), Message::assistant("Reply")];
+    let history = [
+        Message::user("First request"),
+        Message::assistant_text("Reply"),
+    ];
     let mut with_nudge = history.to_vec();
     with_nudge.push(
         super::super::reload_resume::trailing_assistant_nudge(&history)
