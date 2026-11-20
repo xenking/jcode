@@ -27,6 +27,7 @@ pub struct CanonicalInput {
     pub item_hashes: Vec<u64>,
     pub system_hash: Option<u64>,
     pub tools_hash: Option<u64>,
+    pub request_options_hash: Option<u64>,
 }
 
 tokio::task_local! {
@@ -42,6 +43,15 @@ pub async fn capture_canonical_input<F: Future>(future: F) -> (F::Output, Option
             (result, REQUEST_INPUT.with(RefCell::take))
         })
         .await
+}
+
+/// Attach the independently hashed options to the effective captured input.
+pub fn note_canonical_request_options(hash: u64) {
+    let _ = REQUEST_INPUT.try_with(|slot| {
+        if let Some(input) = slot.borrow_mut().as_mut() {
+            input.request_options_hash = Some(hash);
+        }
+    });
 }
 
 fn capture_request_input(
@@ -88,6 +98,7 @@ fn capture_request_input(
             item_hashes,
             system_hash: fingerprints.system.map(|(hash, _)| hash),
             tools_hash: fingerprints.tools.map(|(hash, _)| hash),
+            request_options_hash: None,
         }));
     });
 }

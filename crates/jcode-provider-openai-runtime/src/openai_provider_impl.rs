@@ -253,6 +253,7 @@ impl Provider for OpenAIProvider {
             .map(|tools| tools.len())
             .unwrap_or(tools.len());
         let canonical_fields = canonical_request_fields(&request);
+        let request_options_hash = cache_request_options_hash(&request);
         let prompt_cache_key_hash = request
             .get("prompt_cache_key")
             .map(jcode_provider_core::fingerprint::stable_hash_json);
@@ -275,6 +276,8 @@ impl Provider for OpenAIProvider {
                 ("chatgpt_mode", is_chatgpt_mode.to_string()),
                 ("request_kind", "full".to_string()),
                 ("cache_namespace", "full_request".to_string()),
+                ("request_options_hash", request_options_hash.to_string()),
+                ("store", request["store"].to_string()),
                 (
                     "prompt_cache_key_present",
                     request.get("prompt_cache_key").is_some().to_string(),
@@ -299,6 +302,7 @@ impl Provider for OpenAIProvider {
                 ),
             ],
         );
+        jcode_provider_core::fingerprint::note_canonical_request_options(request_options_hash);
         let usage_diag = match self.credentials.try_read() {
             Ok(credentials) => super::openai_stream_runtime::serving_account_diag(&credentials).0,
             Err(_) => "account=unknown (credentials busy)".to_string(),
@@ -360,8 +364,16 @@ impl Provider for OpenAIProvider {
         let model_for_transport = model_id.clone();
         let client = self.client.clone();
         let panic_tx = tx.clone();
+        let log_context = jcode_base::logging::current_context_snapshot();
 
         tokio::spawn(async move {
+            if let Some(session) = log_context.session.as_deref() {
+                jcode_base::logging::set_session(session);
+            }
+            if let Some(server) = log_context.server.as_deref() {
+                jcode_base::logging::set_server(server);
+            }
+            jcode_base::logging::set_provider_info("OpenAI", &model_for_transport);
             let stream_task = async move {
                 let Some(input) = request["input"].as_array() else {
                     if tx

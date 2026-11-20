@@ -136,6 +136,8 @@ pub enum MissReason {
     SystemChanged,
     ToolsChanged,
     PrefixChanged,
+    RequestOptionsChanged,
+    ProviderCachePartial,
     Compaction,
     ZeroRead,
     LowRead,
@@ -155,6 +157,8 @@ impl MissReason {
             Self::SystemChanged => "system_changed",
             Self::ToolsChanged => "tools_changed",
             Self::PrefixChanged => "prefix_changed",
+            Self::RequestOptionsChanged => "request_options_changed",
+            Self::ProviderCachePartial => "provider_cache_partial",
             Self::Compaction => "compaction",
             Self::ZeroRead => "zero_read",
             Self::LowRead => "low_read",
@@ -176,6 +180,10 @@ impl MissReason {
             Self::SystemChanged => "system prompt changed mid-session",
             Self::ToolsChanged => "tool set changed mid-session",
             Self::PrefixChanged => "an earlier message was modified",
+            Self::RequestOptionsChanged => "provider request options changed",
+            Self::ProviderCachePartial => {
+                "provider reported partial cache on an unchanged continuation"
+            }
             Self::Compaction => "provider automatically compacted the context",
             Self::ZeroRead => "provider reported no cache read",
             Self::LowRead => "provider read only part of the cache",
@@ -187,7 +195,10 @@ impl MissReason {
     pub fn harness_caused(self) -> bool {
         matches!(
             self,
-            Self::SystemChanged | Self::ToolsChanged | Self::PrefixChanged
+            Self::SystemChanged
+                | Self::ToolsChanged
+                | Self::PrefixChanged
+                | Self::RequestOptionsChanged
         )
     }
 }
@@ -395,6 +406,13 @@ pub fn describe_miss(reason: MissReason, ctx: &MissContext<'_>) -> String {
             None => "an earlier message was modified".to_string(),
         },
         MissReason::Compaction => "provider automatically compacted the context".to_string(),
+        MissReason::RequestOptionsChanged => {
+            "effective provider request settings outside input, instructions and tools changed"
+                .to_string()
+        }
+        MissReason::ProviderCachePartial => format!(
+            "OpenAI reported {read} of the {prefix}-token prefix on a persistent WS delta; previous input, instructions, tools and request options matched; backend cause unverified"
+        ),
         MissReason::ZeroRead | MissReason::LowRead => {
             let timing = ctx.timing();
             let timing = if timing.is_empty() {
@@ -431,6 +449,7 @@ struct Pending {
     signature: RequestSignature,
     canonical_input: Option<CanonicalInput>,
     provider_compaction: bool,
+    openai_ws_delta: bool,
     utc_day: i64,
     started_at: Instant,
 }
@@ -469,6 +488,7 @@ impl KvCacheMonitor {
             signature,
             canonical_input: None,
             provider_compaction: false,
+            openai_ws_delta: false,
             utc_day,
             started_at: Instant::now(),
         });
@@ -477,6 +497,12 @@ impl KvCacheMonitor {
     pub fn note_canonical_input(&mut self, input: CanonicalInput) {
         if let Some(pending) = self.pending.as_mut() {
             pending.canonical_input = Some(input);
+        }
+    }
+
+    pub fn note_openai_ws_delta(&mut self) {
+        if let Some(pending) = self.pending.as_mut() {
+            pending.openai_ws_delta = true;
         }
     }
 
@@ -588,8 +614,10 @@ fn classify(
     // read does the request's own size decide: when this request is materially
     // smaller than the baseline, the unread tokens were never part of it, so
     // nothing was lost.
-    if matches!(reason, MissReason::LowRead | MissReason::ZeroRead)
-        && let Some(prefix_tokens) = prefix_tokens
+    if matches!(
+        reason,
+        MissReason::LowRead | MissReason::ZeroRead | MissReason::ProviderCachePartial
+    ) && let Some(prefix_tokens) = prefix_tokens
         && prefix_tokens.saturating_add(SHRINK_NOISE_TOKENS) < expected
     {
         crate::logging::info(&format!(
@@ -650,10 +678,12 @@ fn classify(
     }
     Some(KvCacheMiss {
         reason,
-        prefix_unchanged: matches!(reason, MissReason::LowRead | MissReason::ZeroRead)
-            && pending
-                .signature
-                .checked_prefix_unchanged(&baseline.signature),
+        prefix_unchanged: matches!(
+            reason,
+            MissReason::LowRead | MissReason::ZeroRead | MissReason::ProviderCachePartial
+        ) && pending
+            .signature
+            .checked_prefix_unchanged(&baseline.signature),
         expected_tokens: expected,
         read_tokens,
         missed_tokens: missed,
@@ -716,6 +746,24 @@ fn reason(
     if !cur.extends(prev) || matches!(canonical_change, Some(CanonicalChange::Item(_))) {
         return Some(MissReason::PrefixChanged);
     }
+    let options_match = match (
+        baseline.canonical_input.as_ref(),
+        pending.canonical_input.as_ref(),
+    ) {
+        (Some(old), Some(new))
+            if old.format == "openai_responses_full"
+                && old.format == new.format
+                && old.model == new.model =>
+        {
+            old.request_options_hash
+                .zip(new.request_options_hash)
+                .map(|(old, new)| old == new)
+        }
+        _ => None,
+    };
+    if options_match == Some(false) {
+        return Some(MissReason::RequestOptionsChanged);
+    }
     // Harness-caused changes above stay visible as bugs. Only an otherwise
     // clean append that straddles 00:00 UTC is attributed to the provider.
     if baseline.utc_day != pending.utc_day && provider_rolls_cache_daily(&new.provider) {
@@ -726,6 +774,9 @@ fn reason(
     }
     // The absolute tolerance was already checked against the reusable boundary.
     // A large warm prefix must not hide a real small cache loss.
+    if pending.openai_ws_delta && options_match == Some(true) {
+        return Some(MissReason::ProviderCachePartial);
+    }
     Some(MissReason::LowRead)
 }
 
@@ -806,6 +857,46 @@ mod tests {
             } else {
                 assert!(miss.is_none());
             }
+        }
+    }
+
+    #[test]
+    fn canonical_options_and_response_chain_distinguish_partial_read() {
+        let route = RequestRoute {
+            provider: "openai".into(),
+            model: "gpt-6.2-sol".into(),
+            ..RequestRoute::default()
+        };
+        for (delta, options, expected) in [
+            (true, Some(5), MissReason::ProviderCachePartial),
+            (false, Some(5), MissReason::LowRead),
+            (true, None, MissReason::LowRead),
+            (true, Some(6), MissReason::RequestOptionsChanged),
+        ] {
+            let mut monitor = KvCacheMonitor::new();
+            let snapshot = |items, request_options_hash| CanonicalInput {
+                provider: "openai",
+                format: "openai_responses_full",
+                model: route.model.clone(),
+                item_hashes: items,
+                system_hash: Some(2),
+                tools_hash: Some(3),
+                request_options_hash,
+            };
+            monitor.begin_request(route.clone(), sig(&[10]));
+            monitor.note_canonical_input(snapshot(vec![10], Some(5)));
+            assert!(monitor.finish_request(20_000, Some(0)).is_none());
+            monitor.begin_request(route.clone(), sig(&[10, 11]));
+            monitor.note_canonical_input(snapshot(vec![10, 11], options));
+            if delta {
+                monitor.note_openai_ws_delta();
+            }
+            let miss = monitor.finish_request(22_000, Some(5_000)).unwrap();
+            assert_eq!(miss.reason, expected);
+            assert_eq!(
+                miss.reason.harness_caused(),
+                expected == MissReason::RequestOptionsChanged
+            );
         }
     }
 

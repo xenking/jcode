@@ -185,6 +185,24 @@ fn full_replay_and_delta_match_frozen_request_oracle() {
 }
 
 #[test]
+fn delta_preserves_text_options_and_fingerprints_settings_independently() {
+    let full = json!({"model":"gpt-5.4", "store":false, "input":["old"], "instructions":"static", "tools":[], "text":{"verbosity":"low"}, "reasoning":{"effort":"high"}});
+    let delta = persistent_ws_delta_request(&full, &[json!("new")], "previous");
+    assert_eq!(delta["text"], full["text"]);
+    let mut next = full.clone();
+    next["input"] = json!(["old", "new"]);
+    assert_eq!(
+        cache_request_options_hash(&next),
+        cache_request_options_hash(&full)
+    );
+    next["text"]["verbosity"] = json!("high");
+    assert_ne!(
+        cache_request_options_hash(&next),
+        cache_request_options_hash(&full)
+    );
+}
+
+#[test]
 fn cancelled_replay_preserves_native_reasoning_and_unanswered_tool_calls() {
     let input = vec![
         json!({"type":"reasoning","id":"rs_native","encrypted_content":"opaque"}),

@@ -323,6 +323,7 @@ impl Agent {
             let mut usage_cache_creation: Option<u64> = None;
             let mut usage_recorder = StreamUsageRecorder::new(&self.session.id);
             let mut saw_message_end = false;
+            let mut openai_ws_delta = false;
             let mut stop_reason: Option<String> = None;
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
@@ -842,6 +843,12 @@ impl Agent {
                         }
                     }
                     StreamEvent::ConnectionType { connection } => {
+                        openai_ws_delta = connection == "websocket/persistent-reuse";
+                        let connection = if connection == "websocket/persistent-replay" {
+                            "websocket/persistent-reuse".to_string()
+                        } else {
+                            connection
+                        };
                         crate::telemetry::record_connection_type(&connection);
                         self.last_connection_type = Some(connection.clone());
                         let _ = event_tx.send(ServerEvent::ConnectionType { connection });
@@ -864,6 +871,7 @@ impl Agent {
                     StreamEvent::RetryRollback { attempt, max } => {
                         // Retry bodies can be reshaped after the initial capture.
                         canonical_input = None;
+                        openai_ws_delta = false;
                         // Preserve reported usage from the failed attempt, but
                         // never let its model or counters bleed into the retry.
                         usage_recorder.finish();
@@ -1199,6 +1207,9 @@ impl Agent {
                         == oauth_account_label_at_request_start
                 {
                     self.kv_cache_monitor.note_canonical_input(input);
+                    if saw_message_end && openai_ws_delta {
+                        self.kv_cache_monitor.note_openai_ws_delta();
+                    }
                 }
                 if let Some(miss) = self.finish_kv_cache_monitor_request(
                     usage_input.unwrap_or(0),

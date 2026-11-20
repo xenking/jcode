@@ -194,7 +194,7 @@ fn test_websocket_continuation_delta_preserves_new_reasoning_items() {
         }),
     ];
 
-    let (delta, skipped_reasoning) = persistent_ws_incremental_items(&input, 2, &[]);
+    let (delta, skipped_reasoning) = persistent_ws_incremental_items(&input, 2, vec![]);
 
     assert_eq!(skipped_reasoning, 0);
     assert_eq!(delta.len(), 3);
@@ -226,14 +226,18 @@ fn websocket_delta_removes_only_matched_previous_response_output() {
         replay_text.clone(),
         user.clone(),
     ];
-    let (delta, skipped) = persistent_ws_incremental_items(&input, 1, &output);
+    let (delta, skipped) = persistent_ws_incremental_items(
+        &input,
+        1,
+        persistent_ws_replay_positions(&input, 1, &output).unwrap(),
+    );
     assert_eq!(skipped, 2);
     assert_eq!(
         delta,
         vec![callback, injected, injected_call, replay_text, user]
     );
     assert_eq!(input.len(), 8, "full canonical history must not be mutated");
-    let (without_output, skipped) = persistent_ws_incremental_items(&input, 1, &[]);
+    let (without_output, skipped) = persistent_ws_incremental_items(&input, 1, vec![]);
     assert_eq!(without_output, input[1..]);
     assert_eq!(skipped, 0);
 }
@@ -242,10 +246,13 @@ fn websocket_delta_removes_only_matched_previous_response_output() {
 fn websocket_delta_preserves_unmatched_nontext_assistant_content() {
     let previous = serde_json::json!({"type":"message", "role":"assistant", "content":[{"type":"refusal", "refusal":"previous"}]});
     let injected = serde_json::json!({"type":"message", "role":"assistant", "content":[{"type":"refusal", "refusal":"different"}]});
-    let (delta, skipped) =
-        persistent_ws_incremental_items(std::slice::from_ref(&injected), 0, &[previous]);
-    assert_eq!(delta, vec![injected]);
-    assert_eq!(skipped, 0);
+    let diff = persistent_ws_replay_positions(
+        std::slice::from_ref(&injected),
+        0,
+        std::slice::from_ref(&previous),
+    )
+    .unwrap_err();
+    assert_eq!((diff.input_index, diff.output_index), (0, 0));
 }
 
 #[test]
@@ -265,8 +272,9 @@ fn websocket_delta_does_not_replay_custom_tool_calls_as_functions() {
         let callback = serde_json::json!({
             "type":"function_call_output", "call_id":"call_1", "output":"done",
         });
-        let (delta, skipped) =
-            persistent_ws_incremental_items(&[replay, callback.clone()], 0, &[output]);
+        let input = [replay, callback.clone()];
+        let positions = persistent_ws_replay_positions(&input, 0, &[output]).unwrap();
+        let (delta, skipped) = persistent_ws_incremental_items(&input, 0, positions);
         assert_eq!(delta, vec![callback]);
         assert_eq!(skipped, 1);
     }
@@ -283,7 +291,9 @@ fn websocket_delta_matches_normalized_empty_tool_arguments() {
             "type":"function_call", "call_id":"call_1", "name":"read",
             "arguments":"{}",
         });
-        let (delta, skipped) = persistent_ws_incremental_items(&[replay], 0, &[output]);
+        let input = [replay];
+        let positions = persistent_ws_replay_positions(&input, 0, &[output]).unwrap();
+        let (delta, skipped) = persistent_ws_incremental_items(&input, 0, positions);
         assert!(delta.is_empty());
         assert_eq!(skipped, 1);
     }
@@ -303,13 +313,13 @@ fn websocket_delta_preserves_modified_custom_tool_calls() {
         let replay = serde_json::json!({
             "type":"function_call", "call_id":id, "name":name, "arguments":arguments,
         });
-        let (delta, skipped) = persistent_ws_incremental_items(
+        let diff = persistent_ws_replay_positions(
             std::slice::from_ref(&replay),
             0,
             std::slice::from_ref(&output),
-        );
-        assert_eq!(delta, vec![replay]);
-        assert_eq!(skipped, 0);
+        )
+        .unwrap_err();
+        assert_eq!((diff.input_index, diff.output_index), (0, 0));
     }
 }
 
@@ -358,7 +368,9 @@ fn websocket_empty_terminal_output_preserves_calls_for_next_delta() {
     let callback = serde_json::json!({
         "type":"function_call_output", "call_id":"call_1", "output":"spawned",
     });
-    let (delta, skipped) = persistent_ws_incremental_items(&[call, callback.clone()], 0, &output);
+    let input = [call, callback.clone()];
+    let positions = persistent_ws_replay_positions(&input, 0, &output).unwrap();
+    let (delta, skipped) = persistent_ws_incremental_items(&input, 0, positions);
     assert_eq!(
         delta,
         vec![callback],
@@ -594,8 +606,17 @@ fn gpt_6_2_places_stable_instructions_before_conversation() {
     for chatgpt in [true, false] {
         let input = vec![serde_json::json!({"role":"user", "content":"hello"})];
         let request = OpenAIProvider::build_response_request(
-            "gpt-6.2-sol", "system marker".into(), &input, &[], chatgpt,
-            None, None, None, Some("session"), None, None,
+            "gpt-6.2-sol",
+            "system marker".into(),
+            &input,
+            &[],
+            chatgpt,
+            None,
+            None,
+            None,
+            Some("session"),
+            None,
+            None,
         );
         assert!(request.get("instructions").is_none() || request["instructions"] == "");
         assert_eq!(request["input"][0]["role"], "developer");
