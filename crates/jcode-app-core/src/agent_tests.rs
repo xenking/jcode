@@ -47,6 +47,9 @@ mod cold_cache;
 #[path = "agent_tests/prompt_inputs_reload.rs"]
 mod prompt_inputs_reload;
 
+#[path = "agent_tests/restart_cache.rs"]
+mod restart_cache;
+
 struct DelayedProvider {
     open_delay: Duration,
     first_event_delay: Duration,

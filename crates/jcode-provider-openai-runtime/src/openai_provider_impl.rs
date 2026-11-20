@@ -207,6 +207,21 @@ impl Provider for OpenAIProvider {
             .as_array()
             .context("OpenAI request input is not an array")?;
         let input_item_count = input.len();
+        // A request-only continuation can be replaced on the next call. Only
+        // exclude it from miss attribution when it matches the serialized
+        // trailing items exactly, after Responses normalization.
+        let stable_item_count = if messages.last().is_some_and(ChatMessage::is_request_only) {
+            let start = messages
+                .iter()
+                .rposition(|message| !message.is_request_only())
+                .map_or(0, |index| index + 1);
+            let suffix = build_responses_input(&messages[start..]);
+            input
+                .ends_with(&suffix)
+                .then(|| input_item_count - suffix.len())
+        } else {
+            None
+        };
         let model_id = openai_request_model(&request);
         let is_chatgpt_mode = Self::is_chatgpt_mode(&*self.credentials.read().await);
 
@@ -303,6 +318,9 @@ impl Provider for OpenAIProvider {
             ],
         );
         jcode_provider_core::fingerprint::note_canonical_request_options(request_options_hash);
+        if let Some(count) = stable_item_count {
+            jcode_provider_core::fingerprint::truncate_canonical_items(count);
+        }
         let usage_diag = match self.credentials.try_read() {
             Ok(credentials) => super::openai_stream_runtime::serving_account_diag(&credentials).0,
             Err(_) => "account=unknown (credentials busy)".to_string(),

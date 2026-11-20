@@ -697,6 +697,27 @@ pub fn format_messages_for_request(
     dynamic_context: &str,
     cache_ttl_1h: bool,
 ) -> Vec<ApiMessage> {
+    format_messages_for_request_with_boundary(
+        messages,
+        is_oauth,
+        api_tools,
+        native_replay,
+        dynamic_context,
+        cache_ttl_1h,
+    )
+    .0
+}
+
+/// The second result locates the end of the durable history before request-only
+/// messages are appended or merged into its final user message.
+pub fn format_messages_for_request_with_boundary(
+    messages: &[Message],
+    is_oauth: bool,
+    api_tools: &[ApiTool],
+    native_replay: bool,
+    dynamic_context: &str,
+    cache_ttl_1h: bool,
+) -> (Vec<ApiMessage>, (usize, usize)) {
     let stable_end = messages
         .iter()
         .position(Message::is_request_only)
@@ -704,6 +725,10 @@ pub fn format_messages_for_request(
     let (history, suffix) = messages.split_at(stable_end);
     let mut out = format_messages_with_native(history, is_oauth, api_tools, native_replay);
     add_message_cache_breakpoint(&mut out, cache_ttl_1h);
+    let boundary = (
+        out.len(),
+        out.last().map_or(0, |message| message.content.len()),
+    );
 
     for message in format_messages_with_native(suffix, is_oauth, api_tools, native_replay) {
         append_request_message(&mut out, message);
@@ -724,7 +749,7 @@ pub fn format_messages_for_request(
             },
         );
     }
-    out
+    (out, boundary)
 }
 
 fn append_request_message(messages: &mut Vec<ApiMessage>, message: ApiMessage) {

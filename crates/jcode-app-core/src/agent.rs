@@ -101,6 +101,7 @@ enum CompactionBoundary {
 
 #[path = "agent/cache_request.rs"]
 mod cache_request;
+mod tool_replay;
 use cache_request::kv_cache_request_event;
 
 impl Agent {
@@ -201,7 +202,16 @@ impl Agent {
         );
         let miss =
             self.kv_cache_monitor
-                .finish_request_with_prefix(reusable, Some(prefix), cache_read)?;
+                .finish_request_with_prefix(reusable, Some(prefix), cache_read);
+        if reusable > 0
+            && let Err(error) = self.kv_cache_monitor.save_checkpoint(&self.session.id)
+        {
+            logging::warn(&format!(
+                "Failed to save KV cache baseline for {}: {error}",
+                self.session.id
+            ));
+        }
+        let miss = miss?;
         let expected_refresh = matches!(
             miss.reason,
             crate::kv_cache_monitor::MissReason::Compaction
@@ -367,6 +377,8 @@ pub struct Agent {
     /// to avoid cache invalidation when MCP tools arrive asynchronously.
     /// Cleared on compaction/reset.
     locked_tools: Option<Vec<ToolDefinition>>,
+    sent_tool_surface: Option<tool_replay::ToolSurface>,
+    compaction_persist_pending: bool,
     /// One-shot guard for the async MCP-registration race (#206).
     ///
     /// MCP servers connect on a background task and register `mcp__*` tools
@@ -547,6 +559,8 @@ impl Agent {
             kv_cache_monitor: Default::default(),
             last_usage: TokenUsage::default(),
             locked_tools: None,
+            sent_tool_surface: None,
+            compaction_persist_pending: false,
             mcp_late_register_resolved: false,
             last_recovery_compaction: None,
             locked_tools_native_deferred: false,
@@ -901,6 +915,8 @@ impl Agent {
         self.kv_cache_monitor.reset();
         self.last_usage = TokenUsage::default();
         self.locked_tools = None;
+        self.sent_tool_surface = None;
+        self.compaction_persist_pending = false;
         self.mcp_late_register_resolved = false;
         self.rewind_undo_snapshot = None;
     }
@@ -1063,15 +1079,29 @@ impl Agent {
         &mut self,
         manager: &crate::compaction::CompactionManager,
     ) {
+        if let Err(err) = self.persist_compaction_checkpoint(manager) {
+            logging::error(&format!(
+                "Failed to persist compaction state for session {}: {}",
+                self.session.id, err
+            ));
+        }
+    }
+
+    fn persist_compaction_checkpoint(
+        &mut self,
+        manager: &crate::compaction::CompactionManager,
+    ) -> Result<()> {
         if !manager.persisted_state_matches(self.session.compaction.as_deref()) {
             self.session.compaction = manager.persisted_state().map(Arc::new);
-            if let Err(err) = self.session.save() {
-                logging::error(&format!(
-                    "Failed to persist compaction state for session {}: {}",
-                    self.session.id, err
-                ));
-            }
+            self.compaction_persist_pending = true;
         }
+        if self.compaction_persist_pending {
+            self.session
+                .save()
+                .map_err(|err| err.context("persisting provider compaction checkpoint"))?;
+            self.compaction_persist_pending = false;
+        }
+        Ok(())
     }
 
     /// Append the transcript divider for a compaction that was just applied.
@@ -1564,14 +1594,15 @@ impl Agent {
                     accepts_native,
                 );
                 let mut messages = replay.messages;
-                let event = manager.take_compaction_event();
-                if event.is_some()
+                if self.compaction_persist_pending
                     || discarded_oversized_native
                     || recovered_native
                     || replay.checkpoint_changed
                 {
-                    self.sync_session_compaction_state_from_manager(&manager);
+                    self.persist_compaction_checkpoint(&manager)?;
+                    manager.take_decisions_updated();
                 }
+                let event = manager.take_compaction_event();
                 if replay.warn_missing_native_summary {
                     self.warn_missing_native_compaction_summary(event_tx);
                 }
@@ -1669,7 +1700,6 @@ impl Agent {
 
     fn record_client_cache_request(&mut self, messages: &[Message]) {
         self.note_provider_request_sent();
-        self.record_prompt_inputs();
         if !self.should_track_client_cache() {
             return;
         }

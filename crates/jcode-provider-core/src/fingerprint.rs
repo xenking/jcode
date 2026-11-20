@@ -19,10 +19,10 @@ struct ProviderInputSnapshot {
 /// Hash-only effective input of one completed request. Never compare a
 /// Responses websocket delta with a full input: the acknowledged prefix is
 /// part of the delta's effective input even though it isn't sent again.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CanonicalInput {
-    pub provider: &'static str,
-    pub format: &'static str,
+    pub provider: String,
+    pub format: String,
     pub model: String,
     pub item_hashes: Vec<u64>,
     pub system_hash: Option<u64>,
@@ -54,6 +54,63 @@ pub fn note_canonical_request_options(hash: u64) {
     });
 }
 
+pub fn truncate_canonical_items(count: usize) {
+    let _ = REQUEST_INPUT.try_with(|slot| {
+        if let Some(input) = slot.borrow_mut().as_mut() {
+            input.item_hashes.truncate(count);
+        }
+    });
+}
+
+/// The unmodified raw request still goes to the wire fingerprint log. For the
+/// cache-miss monitor ignore only the known one-shot suffix, including when it
+/// was merged into a durable user message, and unmarked deferred definitions.
+pub fn note_anthropic_cache_boundary(
+    items: &[Value],
+    boundary: (usize, usize),
+    tools: Option<&Value>,
+) {
+    let (item_count, last_block_count) = boundary;
+    let _ = REQUEST_INPUT.try_with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(input) = slot.as_mut() else { return };
+        input.item_hashes.truncate(item_count);
+        if let Some((item, hash)) = items
+            .get(..item_count)
+            .and_then(|items| items.last())
+            .zip(input.item_hashes.last_mut())
+            && let Some(blocks) = item["content"].as_array()
+            && blocks.len() > last_block_count
+        {
+            let mut item = item.clone();
+            if let Some(blocks) = item["content"].as_array_mut() {
+                blocks.truncate(last_block_count);
+            }
+            *hash = anthropic_message_hash(item);
+        }
+        if let Some(tools) = tools.and_then(Value::as_array)
+            && tools.iter().any(|tool| tool["defer_loading"] == true)
+        {
+            let eager: Vec<_> = tools
+                .iter()
+                .filter(|tool| tool["defer_loading"] != true)
+                .collect();
+            input.tools_hash = (!eager.is_empty()).then(|| stable_hash_json(&eager));
+        }
+    });
+}
+
+fn anthropic_message_hash(mut item: Value) -> u64 {
+    if let Some(blocks) = item["content"].as_array_mut() {
+        for block in blocks {
+            if let Some(object) = block.as_object_mut() {
+                object.remove("cache_control");
+            }
+        }
+    }
+    stable_hash_json(&item)
+}
+
 fn capture_request_input(
     provider: &str,
     model: &str,
@@ -79,21 +136,13 @@ fn capture_request_input(
                         .iter()
                         .any(|block| block.get("cache_control").is_some())
                 }) {
-                    let mut item = item.clone();
-                    if let Some(blocks) = item["content"].as_array_mut() {
-                        for block in blocks {
-                            if let Some(object) = block.as_object_mut() {
-                                object.remove("cache_control");
-                            }
-                        }
-                    }
-                    *hash = stable_hash_json(&item);
+                    *hash = anthropic_message_hash(item.clone());
                 }
             }
         }
         slot.replace(Some(CanonicalInput {
-            provider,
-            format,
+            provider: provider.to_owned(),
+            format: format.to_owned(),
             model: model.to_string(),
             item_hashes,
             system_hash: fingerprints.system.map(|(hash, _)| hash),

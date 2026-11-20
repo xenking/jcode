@@ -13,7 +13,7 @@
 //!    the previously cached prefix was not read back.
 
 use jcode_provider_core::fingerprint::CanonicalInput;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Misses smaller than this are noise (provider cache block granularity).
 pub const MIN_MISSED_TOKENS: u64 = 1_024;
@@ -66,7 +66,7 @@ pub fn utc_day_of(time: std::time::SystemTime) -> i64 {
 }
 
 /// Prompt-shape signature for one provider request.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RequestSignature {
     pub system_static_hash: u64,
     pub tools_hash: u64,
@@ -105,7 +105,7 @@ impl RequestSignature {
 }
 
 /// Provider identity and cache retention for one request.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RequestRoute {
     pub provider: String,
     pub model: String,
@@ -432,13 +432,16 @@ pub fn describe_miss(reason: MissReason, ctx: &MissContext<'_>) -> String {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct Baseline {
     route: RequestRoute,
     signature: RequestSignature,
     canonical_input: Option<CanonicalInput>,
     reusable_cache_tokens: u64,
-    completed_at: Instant,
+    completed_at: SystemTime,
+    /// Local invalidation events and monotonic time do not survive exec.
+    #[serde(skip)]
+    completed_in_process: Option<Instant>,
     /// UTC day on which the baseline request was sent (its cache was written).
     utc_day: i64,
 }
@@ -452,6 +455,7 @@ struct Pending {
     openai_ws_delta: bool,
     utc_day: i64,
     started_at: Instant,
+    started_at_wall: SystemTime,
 }
 
 /// Per-session miss detector. Reset whenever the provider-facing transcript is
@@ -470,6 +474,23 @@ impl KvCacheMonitor {
     pub fn reset(&mut self) {
         self.baseline = None;
         self.pending = None;
+    }
+
+    /// Read only on session restoration. Within a process, intentional resets
+    /// must not bring an old baseline back on the next request.
+    pub fn restore_checkpoint(&mut self, session_id: &str) {
+        self.baseline = baseline_path(session_id)
+            .ok()
+            .and_then(|path| crate::storage::read_json::<Baseline>(&path).ok());
+    }
+
+    pub fn save_checkpoint(&self, session_id: &str) -> anyhow::Result<()> {
+        if let Some(baseline) = &self.baseline {
+            let path = baseline_path(session_id)?;
+            crate::storage::assert_not_real_home(&path);
+            crate::storage::write_json_secret(&path, baseline)?;
+        }
+        Ok(())
     }
 
     pub fn begin_request(&mut self, route: RequestRoute, signature: RequestSignature) {
@@ -491,6 +512,7 @@ impl KvCacheMonitor {
             openai_ws_delta: false,
             utc_day,
             started_at: Instant::now(),
+            started_at_wall: SystemTime::now(),
         });
     }
 
@@ -555,12 +577,33 @@ impl KvCacheMonitor {
                 signature: pending.signature,
                 canonical_input: pending.canonical_input,
                 reusable_cache_tokens,
-                completed_at: Instant::now(),
+                completed_at: SystemTime::now(),
+                completed_in_process: Some(Instant::now()),
                 utc_day: pending.utc_day,
             });
         }
         miss
     }
+}
+
+fn baseline_path(session_id: &str) -> anyhow::Result<std::path::PathBuf> {
+    anyhow::ensure!(
+        !session_id.is_empty() && !session_id.contains(['/', '\\']) && !session_id.starts_with('.'),
+        "invalid session ID for cache baseline"
+    );
+    Ok(crate::session::session_path(session_id)?.with_extension("kv-cache"))
+}
+
+fn idle_duration(baseline: &Baseline, pending: &Pending) -> Option<Duration> {
+    baseline.completed_in_process.map_or_else(
+        || {
+            pending
+                .started_at_wall
+                .duration_since(baseline.completed_at)
+                .ok()
+        },
+        |completed| Some(pending.started_at.saturating_duration_since(completed)),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -570,12 +613,18 @@ enum CanonicalChange {
     Item(usize),
 }
 
-fn canonical_change(baseline: &Baseline, pending: &Pending) -> Option<CanonicalChange> {
+fn comparable_canonical_inputs<'a>(
+    baseline: &'a Baseline,
+    pending: &'a Pending,
+) -> Option<(&'a CanonicalInput, &'a CanonicalInput)> {
     let old = baseline.canonical_input.as_ref()?;
     let new = pending.canonical_input.as_ref()?;
-    if (old.provider, old.format, &old.model) != (new.provider, new.format, &new.model) {
-        return None;
-    }
+    ((&old.provider, &old.format, &old.model) == (&new.provider, &new.format, &new.model))
+        .then_some((old, new))
+}
+
+fn canonical_change(baseline: &Baseline, pending: &Pending) -> Option<CanonicalChange> {
+    let (old, new) = comparable_canonical_inputs(baseline, pending)?;
     if old.system_hash != new.system_hash {
         return Some(CanonicalChange::System);
     }
@@ -631,10 +680,10 @@ fn classify(
     } else if reason == MissReason::DailyRollover {
         Some("provider_daily_rollover".to_string())
     } else {
-        reason
-            .harness_caused()
-            .then(|| crate::cache_invalidation::most_recent_since(baseline.completed_at))
-            .flatten()
+        baseline
+            .completed_in_process
+            .filter(|_| reason.harness_caused())
+            .and_then(crate::cache_invalidation::most_recent_since)
             .map(|cause| cause.source.to_string())
     };
     let (old, new) = (&baseline.route, &pending.route);
@@ -651,22 +700,19 @@ fn classify(
             new_upstream: new.upstream_provider.as_deref(),
             old_effort: old.reasoning_effort.as_deref(),
             new_effort: new.reasoning_effort.as_deref(),
-            idle_secs: Some(
-                pending
-                    .started_at
-                    .saturating_duration_since(baseline.completed_at)
-                    .as_secs(),
-            ),
+            idle_secs: idle_duration(baseline, pending).map(|idle| idle.as_secs()),
             ttl_secs: old.cache_ttl_secs,
             ttl_is_estimate: old.ttl_is_estimate,
             expected_tokens: expected,
             read_tokens,
-            first_changed_message: pending
-                .signature
-                .message_hashes
-                .iter()
-                .zip(baseline.signature.message_hashes.iter())
-                .position(|(a, b)| a != b),
+            first_changed_message: baseline.completed_in_process.and_then(|_| {
+                pending
+                    .signature
+                    .message_hashes
+                    .iter()
+                    .zip(baseline.signature.message_hashes.iter())
+                    .position(|(a, b)| a != b)
+            }),
         },
     );
     if reason == MissReason::PrefixChanged
@@ -675,6 +721,12 @@ fn classify(
         detail.push_str(&format!(
             "; first changed canonical input item index {index} (zero-based)"
         ));
+    }
+    if baseline.completed_in_process.is_none()
+        && comparable_canonical_inputs(baseline, pending).is_none()
+        && matches!(reason, MissReason::LowRead | MissReason::ZeroRead)
+    {
+        detail.push_str("; comparable canonical provider input unavailable across restart");
     }
     Some(KvCacheMiss {
         reason,
@@ -722,18 +774,21 @@ fn reason(
     }
     if let Some(ttl) = old.cache_ttl_secs
         && !old.ttl_is_estimate
-        && baseline.completed_at.elapsed() >= Duration::from_secs(ttl)
+        && idle_duration(baseline, pending).is_some_and(|idle| idle >= Duration::from_secs(ttl))
     {
         return Some(MissReason::Expired);
     }
     let (prev, cur) = (&baseline.signature, &pending.signature);
-    if prev.system_static_hash != cur.system_static_hash
+    // A restored projection alone cannot prove a wire change. The formatter,
+    // its fingerprint version, or a provider fallback may differ after exec.
+    let allow_projected_reason = baseline.completed_in_process.is_some();
+    if (allow_projected_reason && prev.system_static_hash != cur.system_static_hash)
         || matches!(canonical_change, Some(CanonicalChange::System))
     {
         return Some(MissReason::SystemChanged);
     }
-    if prev.tools_hash != cur.tools_hash
-        || prev.tool_count != cur.tool_count
+    if (allow_projected_reason
+        && (prev.tools_hash != cur.tools_hash || prev.tool_count != cur.tool_count))
         || matches!(canonical_change, Some(CanonicalChange::Tools))
     {
         return Some(MissReason::ToolsChanged);
@@ -743,7 +798,9 @@ fn reason(
     if pending.provider_compaction {
         return Some(MissReason::Compaction);
     }
-    if !cur.extends(prev) || matches!(canonical_change, Some(CanonicalChange::Item(_))) {
+    if (allow_projected_reason && !cur.extends(prev))
+        || matches!(canonical_change, Some(CanonicalChange::Item(_)))
+    {
         return Some(MissReason::PrefixChanged);
     }
     let options_match = match (
@@ -875,8 +932,8 @@ mod tests {
         ] {
             let mut monitor = KvCacheMonitor::new();
             let snapshot = |items, request_options_hash| CanonicalInput {
-                provider: "openai",
-                format: "openai_responses_full",
+                provider: "openai".into(),
+                format: "openai_responses_full".into(),
                 model: route.model.clone(),
                 item_hashes: items,
                 system_hash: Some(2),

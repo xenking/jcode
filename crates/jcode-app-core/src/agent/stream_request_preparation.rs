@@ -16,6 +16,7 @@ impl Agent {
         // stable request settings are available.
         let mut tools = self.tool_definitions().await;
         self.freeze_static_prompt();
+        self.record_prompt_inputs()?;
         let mut split_prompt = self.build_system_prompt_split(None);
         self.provider
             .prewarm(&tools, &split_prompt.static_part)
@@ -47,6 +48,7 @@ impl Agent {
             split_prompt = self.build_system_prompt_split(None);
         }
 
+        let tools = self.prepare_tools_for_request(tools, &messages)?;
         Ok((tools, split_prompt, messages))
     }
 }

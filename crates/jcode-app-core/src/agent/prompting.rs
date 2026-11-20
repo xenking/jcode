@@ -56,12 +56,12 @@ impl Agent {
 
     /// Record the inputs of the system prompt about to be sent, once per
     /// capture, so [`Self::adopt_recorded_prompt_inputs`] can restore them.
-    pub(super) fn record_prompt_inputs(&mut self) {
+    pub(super) fn record_prompt_inputs(&mut self) -> anyhow::Result<()> {
         if self.prompt_inputs_recorded {
-            return;
+            return Ok(());
         }
         let StaticPromptState::Frozen(snapshot) = &self.static_prompt else {
-            return;
+            return Ok(());
         };
         let (agents_md, info) = &self.agents_md_snapshot;
         let inputs = crate::session::PersistedPromptInputs {
@@ -74,13 +74,9 @@ impl Agent {
             skills: self.prompt_skills_snapshot.clone(),
             static_prompt: Some(snapshot.clone()),
         };
-        match crate::session::save_prompt_inputs(&self.session.id, &inputs) {
-            Ok(()) => self.prompt_inputs_recorded = true,
-            Err(err) => logging::warn(&format!(
-                "Could not record prompt inputs for session {}: {err}",
-                self.session.id
-            )),
-        }
+        crate::session::save_prompt_inputs(&self.session.id, &inputs)?;
+        self.prompt_inputs_recorded = true;
+        Ok(())
     }
 
     pub(crate) fn runtime_skills_snapshot(&self) -> serde_json::Value {
@@ -270,7 +266,6 @@ impl Agent {
                     .is_none()
                     .then(|| sources.files.versions()),
             });
-            self.record_prompt_inputs();
         }
     }
 
@@ -304,8 +299,7 @@ impl Agent {
             snapshot.file_versions = Some(versions);
         }
         self.prompt_inputs_recorded = false;
-        self.record_prompt_inputs();
-        Ok(())
+        self.record_prompt_inputs()
     }
 
     fn append_session_system_prompt(&self, mut prompt: String) -> String {

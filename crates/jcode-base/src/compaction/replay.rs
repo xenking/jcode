@@ -52,6 +52,13 @@ pub fn format_compaction_plan(session_id: &str) -> anyhow::Result<String> {
     Ok(text)
 }
 
+pub(super) fn checkpoint_text(text: &str) -> Message {
+    Message {
+        timestamp: None,
+        ..Message::user(text)
+    }
+}
+
 pub(super) fn retained_checkpoint_messages(
     stored: &[StoredMessage],
     cutoff: usize,
@@ -111,7 +118,7 @@ pub(super) fn retained_checkpoint_messages(
         })
     });
     if let Some(environment) = environment {
-        recent.insert(0, Message::user(environment));
+        recent.insert(0, checkpoint_text(environment));
     }
     recent
 }

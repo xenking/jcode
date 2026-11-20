@@ -1,6 +1,9 @@
 use super::*;
 
-struct TestHome(Option<std::ffi::OsString>, tempfile::TempDir);
+pub(super) struct TestHome(
+    pub(super) Option<std::ffi::OsString>,
+    pub(super) tempfile::TempDir,
+);
 
 impl Drop for TestHome {
     fn drop(&mut self) {

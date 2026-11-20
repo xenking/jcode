@@ -1285,6 +1285,7 @@ fn log_anthropic_canonical_input(
     request: &ApiRequest,
     is_oauth: bool,
     split_prompt: bool,
+    cache_boundary: (usize, usize),
 ) {
     let payload = match anthropic_canonical_payload(request) {
         Ok(payload) => payload,
@@ -1315,6 +1316,11 @@ fn log_anthropic_canonical_input(
             ("oauth", is_oauth.to_string()),
             ("split_prompt", split_prompt.to_string()),
         ],
+    );
+    jcode_provider_core::fingerprint::note_anthropic_cache_boundary(
+        message_items,
+        cache_boundary,
+        tools_value,
     );
 }
 
@@ -1436,14 +1442,15 @@ impl Provider for AnthropicProvider {
             self.build_reasoning_request_parts(&model, is_oauth);
         let (messages, output_config, effort_record) =
             self.plan_effort_controls(messages, &model, is_oauth, &thinking, output_config);
-        let api_messages = jcode_provider_anthropic::format_messages_for_request(
-            &messages,
-            is_oauth,
-            &api_tools,
-            !server_tools.is_empty(),
-            "",
-            cache_ttl_1h,
-        );
+        let (api_messages, cache_boundary) =
+            jcode_provider_anthropic::format_messages_for_request_with_boundary(
+                &messages,
+                is_oauth,
+                &api_tools,
+                !server_tools.is_empty(),
+                "",
+                cache_ttl_1h,
+            );
 
         let request = ApiRequest {
             model: api_model,
@@ -1464,7 +1471,14 @@ impl Provider for AnthropicProvider {
             effort_record,
         };
 
-        log_anthropic_canonical_input(&model, "anthropic_messages", &request, is_oauth, false);
+        log_anthropic_canonical_input(
+            &model,
+            "anthropic_messages",
+            &request,
+            is_oauth,
+            false,
+            cache_boundary,
+        );
 
         jcode_base::logging::info(&format!(
             "Anthropic transport: HTTPS SSE stream (oauth={})",
@@ -1892,14 +1906,15 @@ impl Provider for AnthropicProvider {
             self.build_reasoning_request_parts(&model, is_oauth);
         let (messages, output_config, effort_record) =
             self.plan_effort_controls(messages, &model, is_oauth, &thinking, output_config);
-        let api_messages = jcode_provider_anthropic::format_messages_for_request(
-            &messages,
-            is_oauth,
-            &api_tools,
-            !server_tools.is_empty(),
-            system_dynamic,
-            cache_ttl_1h,
-        );
+        let (api_messages, cache_boundary) =
+            jcode_provider_anthropic::format_messages_for_request_with_boundary(
+                &messages,
+                is_oauth,
+                &api_tools,
+                !server_tools.is_empty(),
+                system_dynamic,
+                cache_ttl_1h,
+            );
 
         let request = ApiRequest {
             model: api_model,
@@ -1924,7 +1939,14 @@ impl Provider for AnthropicProvider {
             effort_record,
         };
 
-        log_anthropic_canonical_input(&model, "anthropic_messages_split", &request, is_oauth, true);
+        log_anthropic_canonical_input(
+            &model,
+            "anthropic_messages_split",
+            &request,
+            is_oauth,
+            true,
+            cache_boundary,
+        );
 
         jcode_base::logging::info(&format!(
             "Anthropic transport: HTTPS SSE split stream (oauth={})",

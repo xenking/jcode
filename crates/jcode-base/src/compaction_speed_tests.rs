@@ -145,12 +145,13 @@ async fn decisions_attach_to_applied_archive_without_second_compaction_event() {
     manager.seed_restored_messages_with(&messages);
     manager.pending_cutoff = 1;
     manager.pending_task = Some(tokio::spawn(async move { Ok(result) }));
-    tokio::time::timeout(Duration::from_secs(2), async {
+    let checkpoint = tokio::time::timeout(Duration::from_secs(2), async {
         while manager.is_compacting() {
             manager.check_and_apply_compaction_with(&messages);
             tokio::task::yield_now().await;
         }
         assert!(manager.take_compaction_event().is_some());
+        let checkpoint = manager.persisted_state().unwrap();
         let first_request =
             serde_json::to_vec(&manager.messages_for_api_with(&messages)[0]).unwrap();
         while manager.has_pending_decisions() {
@@ -164,6 +165,7 @@ async fn decisions_attach_to_applied_archive_without_second_compaction_event() {
             first_request, next_request,
             "sent summary must remain byte-identical after decisions arrive"
         );
+        checkpoint
     })
     .await
     .unwrap();
@@ -175,6 +177,10 @@ async fn decisions_attach_to_applied_archive_without_second_compaction_event() {
         .as_ref()
         .unwrap();
     assert!(archive.deferred_decisions.contains("Never force push"));
+    assert!(
+        !manager.persisted_state_matches(Some(&checkpoint)),
+        "the active request is unchanged, but its deferred decision must survive restart"
+    );
     assert!(manager.take_decisions_updated());
     assert!(!manager.take_decisions_updated());
     let next = summary_generation::generate_compaction_artifact_indexed(

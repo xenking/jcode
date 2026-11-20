@@ -733,6 +733,7 @@ impl CompactionManager {
                 summary.text == state.summary_text
                     && self.plan_context == state.plan_context
                     && summary.openai_encrypted_content == state.openai_encrypted_content
+                    && summary.snapcompact == state.snapcompact
                     && summary.covers_up_to_turn == state.covers_up_to_turn
                     && summary.original_turn_count == state.original_turn_count
                     && self.compacted_count == state.compacted_count
@@ -2344,7 +2345,7 @@ impl CompactionManager {
         self.check_and_apply_compaction_with(all_messages);
         let discarded = self.discard_oversized_openai_native_compaction();
         let mut checkpoint_changed = self.recover_native_text(all_messages, accepts_native);
-        checkpoint_changed |= discarded;
+        checkpoint_changed |= discarded || self.decisions_updated || self.last_compaction.is_some();
         if self.active_summary.is_some() && self.plan_context.is_none() {
             match format_compaction_plan(session_id) {
                 Ok(plan) => {
@@ -2494,7 +2495,7 @@ impl CompactionManager {
 
                 result.extend(retained);
                 if let Some(plan) = self.plan_context.as_deref().filter(|plan| !plan.is_empty()) {
-                    result.push(Message::user(plan));
+                    result.push(replay::checkpoint_text(plan));
                 }
                 result.extend(active.iter().cloned());
 

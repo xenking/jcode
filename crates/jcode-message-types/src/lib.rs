@@ -22,7 +22,7 @@ pub struct ToolCall {
 mod tool_prompt_size;
 
 /// Tool definition advertised to model providers.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
     /// Prompt-visible text sent to the model by provider adapters.

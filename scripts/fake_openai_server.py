@@ -45,6 +45,7 @@ class H(BaseHTTPRequestHandler):
         msgs = req.get("messages", [])
         with LOCK, open(LOG, "a") as log:
             log.write(json.dumps({"label": LABEL, "messages": msgs, "agent": bool(req.get("tools")),
+                                  "tools": req.get("tools", []),
                                   "time": time.time()}) + "\n")
         flat = json.dumps(msgs)
         seen_notice = "moved from" in flat and "to cloud host" in flat

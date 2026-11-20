@@ -67,6 +67,7 @@ impl Agent {
             // stable request settings are available.
             let mut tools = self.tool_definitions().await;
             self.freeze_static_prompt();
+            self.record_prompt_inputs()?;
             let mut split_prompt = self.build_system_prompt_split(None);
             self.provider
                 .prewarm(&tools, &split_prompt.static_part)
@@ -94,6 +95,7 @@ impl Agent {
                 split_prompt = self.build_system_prompt_split(None);
             }
 
+            let tools = self.prepare_tools_for_request(tools, &messages)?;
             let messages: std::sync::Arc<[Message]> = messages.into();
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_pending =
