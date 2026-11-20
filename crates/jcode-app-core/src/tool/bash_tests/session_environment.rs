@@ -104,16 +104,18 @@ async fn session_env_background_snapshots_before_deferred_launch() {
             .insert(sid.clone(), (reached_tx, release_rx));
         let mut ctx = make_ctx(None);
         ctx.session_id = sid.clone();
-        let result = BashTool::new()
-            .execute(
-                json!({
-                    "command": "printf '%s:%s\\n' \"$HTTPS_PROXY\" \"$JCODE_SESSION_ID\"",
-                    "run_in_background": true, "notify": false,
-                }),
-                ctx,
-            )
-            .await
-            .unwrap();
+        let execution = tokio::spawn(async move {
+            BashTool::new()
+                .execute(
+                    json!({
+                        "command": "printf '%s:%s\\n' \"$HTTPS_PROXY\" \"$JCODE_SESSION_ID\"",
+                        "run_in_background": true, "notify": false,
+                    }),
+                    ctx,
+                )
+                .await
+                .unwrap()
+        });
         tokio::time::timeout(std::time::Duration::from_secs(10), reached_rx)
             .await
             .unwrap()
@@ -130,6 +132,7 @@ async fn session_env_background_snapshots_before_deferred_launch() {
         // Teardown must not erase the snapshot of this already-accepted job.
         remove_session_env(&sid);
         release_tx.send(()).unwrap();
+        let result = execution.await.unwrap();
         let metadata = result.metadata.unwrap();
         let task_id = metadata["task_id"].as_str().unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(10), async {

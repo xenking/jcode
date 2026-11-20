@@ -163,6 +163,7 @@ fn status_label(status: &BackgroundTaskStatus) -> &'static str {
         BackgroundTaskStatus::Running => "running",
         BackgroundTaskStatus::Completed => "completed",
         BackgroundTaskStatus::Superseded => "superseded",
+        BackgroundTaskStatus::Interrupted => "interrupted",
         BackgroundTaskStatus::Failed => "failed",
     }
 }
@@ -173,7 +174,7 @@ fn is_terminal(status: &BackgroundTaskStatus) -> bool {
 
 fn is_success(status: &BackgroundTaskStatus, exit_code: Option<i32>) -> Option<bool> {
     match status {
-        BackgroundTaskStatus::Running => None,
+        BackgroundTaskStatus::Running | BackgroundTaskStatus::Interrupted => None,
         BackgroundTaskStatus::Completed => Some(exit_code.unwrap_or(0) == 0),
         BackgroundTaskStatus::Superseded => Some(true),
         BackgroundTaskStatus::Failed => Some(false),

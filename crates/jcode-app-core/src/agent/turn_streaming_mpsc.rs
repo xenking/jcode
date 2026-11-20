@@ -4,7 +4,7 @@ use super::*;
 use super::streaming::StreamUsageRecorder;
 
 #[path = "tool_handoff.rs"]
-mod tool_handoff;
+pub(super) mod tool_handoff;
 pub(super) use tool_handoff::execute_with_background;
 use tool_handoff::{incomplete_turn_stop, reload_interrupted_tool_result, wait_for_tool_handoff};
 
@@ -1642,11 +1642,19 @@ impl Agent {
                 let registry_clone = self.registry.clone();
                 let tool_name_for_spawn = tc.name.clone();
                 let tool_input_for_spawn = tc.input.clone();
+                #[cfg(unix)]
+                let bash_handoff = (tc.name == "bash").then(InterruptSignal::new);
+                #[cfg(unix)]
+                let bash_handoff_for_tool = bash_handoff.clone();
                 let tool_handle =
                     crate::runtime_activity::spawn_session(&self.session.id, async move {
-                        registry_clone
-                            .execute(&tool_name_for_spawn, tool_input_for_spawn, ctx)
-                            .await
+                        let execution =
+                            registry_clone.execute(&tool_name_for_spawn, tool_input_for_spawn, ctx);
+                        #[cfg(unix)]
+                        if let Some(signal) = bash_handoff_for_tool {
+                            return crate::tool::BASH_HANDOFF.scope(signal, execution).await;
+                        }
+                        execution.await
                     })
                     .ok_or_else(|| {
                         anyhow::anyhow!("Session transfer in progress; tool not accepted")
@@ -1679,7 +1687,11 @@ impl Agent {
                     }
                     automatic = wait_for_tool_handoff(&bg_signal, &shutdown_signal, handoff.is_some(), handoff.unwrap_or_default()) => {
                         automatic_background = automatic;
-                        if turn_cancel_guard.interruption_reason() == Some(crate::turn_cancel_registry::TurnInterruptionReason::Reload) && allow_reload_handoff {
+                        #[cfg(unix)]
+                        if !shutdown_signal.is_set() && let Some(signal) = &bash_handoff {
+                            signal.fire();
+                        }
+                        if allow_reload_handoff && (!shutdown_signal.is_set() || turn_cancel_guard.interruption_reason() == Some(crate::turn_cancel_registry::TurnInterruptionReason::Reload)) {
                             tool_result = match tokio::time::timeout(
                                 Duration::from_millis(750),
                                 &mut tool_handle,
@@ -1690,6 +1702,10 @@ impl Agent {
                                     Ok(r) => r,
                                     Err(e) => Err(anyhow::anyhow!("Tool task panicked: {}", e)),
                                 }),
+                                Err(_) if !shutdown_signal.is_set() && cfg!(unix) => {
+                                    tool_handle.abort();
+                                    Some(Err(anyhow::anyhow!("Bash did not acknowledge background handoff")))
+                                }
                                 Err(_) => None,
                             };
                         } else {
@@ -1818,9 +1834,14 @@ impl Agent {
                     ));
                     tool_handle.abort();
 
-                    // For selfdev reload and wait-like tools, the interruption is expected:
-                    // selfdev initiated the restart, while wait-like tools should be resumed
-                    // after reload rather than treated as failed work.
+                    // Leave the real tool_use unanswered: recovery runs the same
+                    // wait before calling the model. A placeholder result would
+                    // acknowledge it and make it disappear from the resume plan.
+                    if is_reload && tool_handoff::is_reload_replayable_wait(&tc.name, &tc.input) {
+                        self.session.save()?;
+                        return Ok(());
+                    }
+
                     let (interrupted_msg, is_error) = if is_reload {
                         reload_interrupted_tool_result(tc, tool_elapsed.as_secs_f64())
                     } else {
@@ -1870,6 +1891,14 @@ impl Agent {
 
                     // Add results for any remaining tools too
                     for remaining_tc in &tool_calls[(tool_index + 1)..] {
+                        if is_reload
+                            && tool_handoff::is_reload_replayable_wait(
+                                &remaining_tc.name,
+                                &remaining_tc.input,
+                            )
+                        {
+                            continue;
+                        }
                         self.add_message(
                             Role::User,
                             vec![ContentBlock::ToolResult {

@@ -218,9 +218,10 @@ class Harness:
         require(command in {"state", "history", "side-panel:stats"}, "Not an observation")
         return self.debug("client:" + command)
 
-    def debug(self, command):
+    def debug(self, command, private_exec=False):
         require(command in {"server:info", "clients:map", "client:state", "client:history",
-                            "client:frame", "client:side-panel:stats"},
+                            "client:frame", "client:side-panel:stats"}
+                or private_exec and command == "reload:verify-exec",
                 "Not a read-only server command")
         with socket.socket(socket.AF_UNIX) as connection:
             connection.settimeout(10)
@@ -363,6 +364,82 @@ class Harness:
         dump(self.evidence / "doctor.json", report)
         return report
 
+    def reload_background(self, token, start, label):
+        gate = self.root / "control" / token.replace("-", "_")
+        sid = self.observe("state")["remote_session_id"]
+        status_dir = self.root / "jcode-bg-tasks"
+        before = {p.name for p in status_dir.glob("*.status.json")}
+        self.send(f"{token} [e2e:reload-bg:{gate.name}]")
+        self.request_after(token, start)
+        self.idle()
+
+        def load_status(path):
+            try:
+                return json.loads(path.read_text())
+            except (OSError, ValueError):
+                return {}
+
+        def new_task():
+            for path in status_dir.glob("*.status.json"):
+                task = load_status(path)
+                if path.name not in before and task.get("session_id") == sid and task.get("tool_name") == "bash":
+                    return path
+
+        path = wait_for(new_task, "original background task registration")
+        task = load_status(path)
+        os_pid = wait_for(lambda: int(gate.with_suffix(".child").read_text())
+                          if gate.with_suffix(".child").exists() else None, "original command PID")
+        require(task.get("status") == "running" and task.get("notify") and task.get("wake"),
+                f"Expected running task with both delivery flags: {task}")
+        require(alive(os_pid) and alive(task["pid"]), "Original shell or supervisor is not alive")
+        daemon_pid = self.state["processes"]["server"]["pid"]
+        old_server = self.debug("server:info")["id"]
+        self.event(action="private-exec", daemon_pid=daemon_pid, shell_pid=os_pid)
+        try:
+            reload_id = self.debug("reload:verify-exec", private_exec=True)["request_id"]
+
+            def new_server():
+                try:
+                    server = self.debug("server:info")
+                    return server if server["id"] != old_server else None
+                except (OSError, RuntimeError, ValueError):
+                    return None
+
+            successor = wait_for(new_server, "replacement process image", 25)
+            trace = self.root / "data/reload-traces" / (reload_id + ".jsonl")
+            shutil.copy2(trace, self.evidence / f"{label}-exec.jsonl")
+            require(any(event.get("phase") == "exec_start" and event.get("pid") == daemon_pid
+                        and Path(event.get("binary", "")).resolve() == self.binary.resolve()
+                        for event in map(json.loads, trace.read_text().splitlines())),
+                    "No exec trace for the original daemon PID and staged binary")
+            require(alive(daemon_pid), "Exec did not preserve daemon PID")
+            wait_for(lambda: any(client["session_id"] == sid for client in self.debug("clients:map")["clients"]),
+                     "TUI reattached to its original session", 25)
+            require(alive(os_pid) and alive(task["pid"]) and load_status(path).get("pid") == task["pid"]
+                    and load_status(path).get("status") == "running", "Exec lost the original running task")
+            gate.with_suffix(".progress").touch()
+            wait_for(lambda: (load_status(path).get("progress") or {}).get("message") == "post-exec progress",
+                     "progress recorded by replacement daemon")
+            self.frame(label + "-running")
+        finally:
+            gate.with_suffix(".progress").touch()
+            gate.with_suffix(".release").touch()
+        wait_for(lambda: load_status(path).get("exit_code") == 23, "original code 23 recorded")
+        finished = load_status(path)
+        output = status_dir / (task["task_id"] + ".output")
+        require(finished.get("status") == "failed" and "completed by original shell" in output.read_text(),
+                f"Missing original output or exit status: {finished}")
+        wait_for(lambda: "exit 23" in self.pane(), "visible TUI background completion")
+        self.request_after("completed by original shell", start)
+        # The fixture text also appears inside the command arguments; the wake
+        # has a distinct natural-language instruction appended by the daemon.
+        self.request_after("A background task for this session just finished", start)
+        self.idle()
+        dump(self.evidence / f"{label}-task.json", finished)
+        return {"task_id": task["task_id"], "daemon_pid": daemon_pid, "shell_pid": os_pid,
+                "previous_server_id": old_server, "server_id": successor["id"],
+                "session_id": sid, "exit_code": finished["exit_code"], "reload_id": reload_id}
+
     def drive(self, feature, mode, text=None, keys=None, expect=None):
         self.doctor()
         self.state["drive_sequence"] = self.state.get("drive_sequence", 0) + 1
@@ -469,6 +546,8 @@ class Harness:
                 require(self.observe("state")["remote_session_id"] == sid, "Cancel changed session ID")
                 result["session_id"] = sid
                 dump(self.evidence / f"{label}-session.json", self.persisted(sid, token + "_continued"))
+            elif feature == "reload-bg":
+                result.update(self.reload_background(token, start, label))
             elif feature in {"resume", "restart", "mode-set"}:
                 if feature == "mode-set":
                     self.send("/mode toggle verify-probe")
@@ -714,7 +793,7 @@ def launch(args):
     evidence = Path(args.evidence).resolve()
     evidence.mkdir(mode=0o700, parents=True, exist_ok=False)
     os.chmod(evidence, 0o700)
-    root = Path(tempfile.mkdtemp(prefix="jv-", dir="/tmp"))
+    root = Path(tempfile.mkdtemp(prefix="jv-", dir="/tmp")).resolve()
     owner = uuid.uuid4().hex
     (root / "owner").write_text(owner)
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(root / "home"),
@@ -722,6 +801,7 @@ def launch(args):
            "JCODE_HOME": str(root / "data"), "JCODE_RUNTIME_DIR": str(root),
            "XDG_CONFIG_HOME": str(root / "home/.config"), "XDG_CACHE_HOME": str(root / "home/.cache"),
            "JCODE_TEST_SESSION": "1", "JCODE_DEBUG_CONTROL": "1", "JCODE_NO_MENUBAR": "1",
+           "JCODE_VERIFY_EXEC_RELOAD": "1",
            "JCODE_NO_TELEMETRY": "1", "JCODE_TELEMETRY": "off",
            "JCODE_NO_AUTO_UPDATE": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
            "GIT_TERMINAL_PROMPT": "0", "OPENAI_COMPAT_API_KEY": "synthetic-verification-key",
@@ -789,7 +869,7 @@ def main():
         command = sub.add_parser(name)
         command.add_argument("--evidence", required=True)
         if name == "drive":
-            command.add_argument("feature", choices=["cli", "tui", "slash", "resume", "restart", "cancel",
+            command.add_argument("feature", choices=["cli", "tui", "slash", "resume", "restart", "reload-bg", "cancel",
                                                      "side-panel", "mode", "mode-set", "draft-models", "input", "keys"])
             command.add_argument("--mode", choices=["plain", "json", "ndjson"], default="json")
             command.add_argument("--text", help="Text for exploratory input drive")

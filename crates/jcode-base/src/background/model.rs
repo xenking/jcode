@@ -33,6 +33,7 @@ pub enum BackgroundTaskEventKind {
     Checkpoint,
     Completed,
     Failed,
+    Interrupted,
     Superseded,
     Cancelled,
     DeliveryUpdated,
@@ -144,6 +145,7 @@ fn terminal_event_kind(
     match status {
         BackgroundTaskStatus::Completed => BackgroundTaskEventKind::Completed,
         BackgroundTaskStatus::Superseded => BackgroundTaskEventKind::Superseded,
+        BackgroundTaskStatus::Interrupted => BackgroundTaskEventKind::Interrupted,
         BackgroundTaskStatus::Failed if error == Some("Cancelled by user") => {
             BackgroundTaskEventKind::Cancelled
         }
@@ -252,6 +254,7 @@ pub(super) struct RunningTask {
 }
 
 /// Result from a background task execution
+#[derive(Serialize, Deserialize)]
 pub struct TaskResult {
     pub exit_code: Option<i32>,
     pub error: Option<String>,

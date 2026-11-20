@@ -39,8 +39,14 @@ pub(super) fn handoff_budget(
 pub(super) fn auto_background_allowed(name: &str, input: &serde_json::Value) -> bool {
     // Human decisions belong to the live turn that owns the response channel.
     // `ask` is the registered tool name; `ask_user` is the legacy spelling.
-    !(matches!(name, "ask" | "ask_user")
-        || name == "bg" && input.get("action").and_then(|value| value.as_str()) == Some("wait"))
+    !(matches!(name, "ask" | "ask_user") || is_reload_replayable_wait(name, input))
+}
+
+pub(in crate::agent) fn is_reload_replayable_wait(name: &str, input: &serde_json::Value) -> bool {
+    matches!(
+        (name, input.get("action").and_then(|value| value.as_str())),
+        ("bg", Some("wait")) | ("swarm", Some("await_members"))
+    )
 }
 
 /// Name a handed-off task after the call's `intent`, so wait rows read
@@ -89,8 +95,17 @@ pub(crate) async fn execute_with_background_budget(
     let tool_name = name.clone();
     let display_name = handoff_display_name(&input);
     let mut shutdown = ctx.graceful_shutdown_signal.clone();
+    #[cfg(unix)]
+    let bash_handoff = (name == "bash").then(InterruptSignal::new);
+    #[cfg(unix)]
+    let bash_handoff_for_tool = bash_handoff.clone();
     let mut work = crate::runtime_activity::spawn_session(&session_id, async move {
-        registry.execute(&tool_name, input, ctx).await
+        let execution = registry.execute(&tool_name, input, ctx);
+        #[cfg(unix)]
+        if let Some(signal) = bash_handoff_for_tool {
+            return crate::tool::BASH_HANDOFF.scope(signal, execution).await;
+        }
+        execution.await
     })
     .ok_or_else(|| anyhow::anyhow!("Session transfer in progress; tool not accepted"))?;
     let shutdown_requested = async {
@@ -118,6 +133,17 @@ pub(crate) async fn execute_with_background_budget(
         }
         result = &mut work => result.map_err(|e| anyhow::anyhow!("Tool task panicked: {}", e))?,
         _ = tokio::time::sleep(handoff.unwrap_or_default()), if handoff.is_some() => {
+            #[cfg(unix)]
+            if let Some(signal) = bash_handoff {
+                signal.fire();
+                return match tokio::time::timeout(CANCEL_TOOL_GRACE, &mut work).await {
+                    Ok(result) => result.map_err(|error| anyhow::anyhow!("Tool task panicked: {error}"))?,
+                    Err(_) => {
+                        work.abort();
+                        anyhow::bail!("Bash did not acknowledge background handoff")
+                    }
+                };
+            }
             let info = crate::background::global()
                 .adopt_with_options(&name, display_name, &session_id, true, false, work)
                 .await;
@@ -151,25 +177,6 @@ mod handoff_tests;
 pub(super) fn reload_interrupted_tool_result(tc: &ToolCall, elapsed_secs: f64) -> (String, bool) {
     if tc.name == "selfdev" {
         return ("Reload initiated. Process restarting...".to_string(), false);
-    }
-
-    let action = tc
-        .input
-        .get("action")
-        .and_then(|value| value.as_str())
-        .unwrap_or("");
-    let is_wait_like =
-        (tc.name == "bg" && action == "wait") || (tc.name == "swarm" && action == "await_members");
-
-    if is_wait_like {
-        let input = serde_json::to_string(&tc.input).unwrap_or_else(|_| "{}".to_string());
-        return (
-            format!(
-                "[Tool '{}' wait interrupted by server reload after {:.1}s. The underlying operation may still be running. Resume the wait by rerunning the same tool call with input: {}]",
-                tc.name, elapsed_secs, input
-            ),
-            false,
-        );
     }
 
     (

@@ -16,6 +16,8 @@ Press Escape while the TUI is processing. For daemon recovery, stop the daemon p
 
 ## Driving it with verify-jcode
 
+Run `drive reload-bg` on Unix to execute an actual same-binary reload, not a stop/start simulation. The fake provider invokes the real Bash tool with a file-gated background command. The private daemon pins its staged binary, then uses the normal reload channel, cleanup and exec. The helper verifies the unchanged daemon PID and command/supervisor PIDs, the changed server identity, TUI reconnect to the original session, post-exec task progress, exit 23, visible completion and a provider request caused by wake. It retains the reload trace and the terminal task record. The exec command is limited to the verifier's staged binary, socket and home. It cannot run on the normal daemon.
+
 Preconditions: Launch and doctor passed. The provider uses the existing file-gated fixture.
 
 - **Cancel:** `"$V" drive --evidence "$E" cancel`. The helper sends a fresh `[e2e:hold:<token>]` prompt, waits for the provider gate, captures the processing frame, and presses Escape through tmux. It requires an idle TUI before releasing the provider gate. It then sends a fresh continuation.

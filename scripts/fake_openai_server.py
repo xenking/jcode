@@ -6,6 +6,7 @@ transcripts, daemons, SSH transport and TUI. Optional file gates let a test
 hold a real streamed turn while submitting /cloud, without timing sleeps.
 """
 import json
+import shlex
 import os
 from pathlib import Path
 import re
@@ -78,6 +79,21 @@ class H(BaseHTTPRequestHandler):
                     "todos": [{"id": "acceptance-open", "content": "Continue on cloud",
                                "status": "in_progress", "priority": "high", "confidence": "plausible"}],
                 })}}]
+        elif CONTROL and not has_tool_result and (match := re.search(r"\[e2e:reload-bg:([a-z0-9_]+)\]", prompt)):
+            prefix = CONTROL / match.group(1)
+            child, progress, release = [shlex.quote(str(prefix.with_suffix(suffix)))
+                                        for suffix in (".child", ".progress", ".release")]
+            command = (
+                f"printf '%s\\n' \"$$\" > {child}; "
+                f"while [ ! -f {progress} ]; do sleep 0.1; done; "
+                "echo 'JCODE_PROGRESS {\"message\":\"post-exec progress\",\"percent\":50}'; "
+                f"while [ ! -f {release} ]; do sleep 0.1; done; "
+                "echo 'completed by original shell'; exit 23"
+            )
+            tool_calls = [{"id": "call_reload_background", "type": "function", "function": {
+                "name": "bash", "arguments": json.dumps({"intent": "Verify background exec reload",
+                    "command": command, "run_in_background": True, "notify": True,
+                    "wake": True, "timeout": 60000})}}]
         elif CONTROL and "[e2e:longtool]" in prompt and not has_tool_result:
             # A tool still running when the daemon dies: the turn must be
             # resumed by the next daemon, with no client sending anything.

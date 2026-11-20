@@ -106,6 +106,17 @@ fn run_main() -> Result<()> {
     configure_system_allocator();
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
+    #[cfg(unix)]
+    {
+        use jcode::tool::background_worker;
+        if std::env::args_os().nth(1).as_deref()
+            == Some(std::ffi::OsStr::new(background_worker::ARG))
+        {
+            return background_worker::run();
+        }
+        background_worker::enable();
+    }
+
     // Stale SessionStart hooks written by older versions still call
     // `setup-hotkey --notify-cli-launch <cli>`. Answer before the Tokio runtime
     // and normal startup so they stay instant and silent: remove the hook and

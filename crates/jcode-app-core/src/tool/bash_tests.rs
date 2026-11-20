@@ -49,6 +49,134 @@ pub(super) async fn wait_for_session_env_launch_gate(session_id: &str) {
 #[path = "bash_tests/session_environment.rs"]
 mod session_environment;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn reload_survival_background_and_promoted_bash() {
+    use crate::background::BackgroundTaskManager;
+    use crate::bus::{Bus, BusEvent};
+
+    for background in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let manager =
+            std::sync::Arc::new(BackgroundTaskManager::with_output_dir(dir.path().into()));
+        let mut ctx = make_ctx(None);
+        ctx.working_dir = Some(dir.path().into());
+        let result = BashTool { manager: Some(manager.clone()) }
+            .execute(json!({
+                "command": "echo started; for i in {1..160}; do if test -f go; then printf 'JCODE_PROGRESS {\"current\":2,\"total\":3}\\n'; sleep 1; echo finished; exit 0; fi; sleep 0.05; done; exit 99",
+                "run_in_background": background,
+                "timeout": if background { 15000 } else { 50 },
+                "notify": false, "wake": true,
+            }), ctx)
+            .await.unwrap();
+        let metadata = result.metadata.unwrap();
+        let id = metadata["task_id"].as_str().unwrap();
+        let first = manager.status(id).await.unwrap();
+        assert_eq!(manager.abort_live_tasks_for_reload().await, 0);
+        drop(manager);
+        let successor = BackgroundTaskManager::with_output_dir(dir.path().into());
+        let restored = successor.status(id).await.unwrap();
+        assert_eq!(restored.status, BackgroundTaskStatus::Running);
+        assert!(restored.detached);
+        let pid = first.pid.unwrap();
+        assert_eq!(restored.pid, Some(pid));
+        assert!(crate::platform::is_process_running(pid));
+        let mut events = Bus::global().subscribe();
+        std::fs::write(dir.path().join("go"), "").unwrap();
+        let completion = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                successor.sweep().await;
+                if let Ok(BusEvent::BackgroundTaskCompleted(event)) = events.try_recv() {
+                    if event.task_id == id {
+                        break event;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(35)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(completion.status, BackgroundTaskStatus::Completed);
+        assert_eq!(completion.exit_code, Some(0));
+        assert!(completion.notify && completion.wake);
+        assert!(successor.output(id).await.unwrap().contains("finished"));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reload_survival_bash_timeout_and_group_cancellation() {
+    use crate::background::BackgroundTaskManager;
+    for cancel in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let manager =
+            std::sync::Arc::new(BackgroundTaskManager::with_output_dir(dir.path().into()));
+        let mut ctx = make_ctx(None);
+        ctx.working_dir = Some(dir.path().into());
+        let launch = BashTool {
+            manager: Some(manager.clone()),
+        }
+        .execute(
+            json!({
+                "command": "bash -c 'trap \"\" TERM; echo $$ > child; sleep 8' & wait",
+                "run_in_background": true,
+                "timeout": if cancel { 8000 } else { 1200 },
+                "notify": false,
+            }),
+            ctx,
+        )
+        .await
+        .unwrap();
+        let meta = launch.metadata.unwrap();
+        let id = meta["task_id"].as_str().unwrap();
+        let first = manager.status(id).await.unwrap();
+        assert_eq!(manager.abort_live_tasks_for_reload().await, 0);
+        let successor = BackgroundTaskManager::with_output_dir(dir.path().into());
+        assert_eq!(
+            successor.status(id).await.unwrap().status,
+            BackgroundTaskStatus::Running
+        );
+        let descendants = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(contents) = tokio::fs::read_to_string(dir.path().join("child")).await
+                    && let Ok(pid) = contents.trim().parse::<u32>()
+                {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(crate::platform::is_process_running(descendants));
+        if cancel {
+            assert!(successor.cancel(id).await.unwrap());
+        }
+        tokio::time::timeout(Duration::from_secs(4), async {
+            while crate::platform::is_process_running(first.pid.unwrap())
+                || crate::platform::is_process_running(descendants)
+            {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let final_status = successor.status(id).await.unwrap();
+        assert_eq!(final_status.status, BackgroundTaskStatus::Failed);
+        if cancel {
+            assert_eq!(final_status.error.as_deref(), Some("Cancelled by user"));
+        } else {
+            assert_eq!(final_status.exit_code, Some(124));
+            assert!(
+                final_status
+                    .error
+                    .unwrap()
+                    .contains("timed out after 1200ms")
+            );
+        }
+    }
+}
+
 #[cfg(not(windows))]
 #[tokio::test]
 async fn bash_search_hint_is_scoped_and_nonblocking() {

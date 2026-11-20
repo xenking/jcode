@@ -5,6 +5,10 @@ pub mod ambient;
 mod apply_patch;
 mod ask;
 mod bash;
+#[cfg(unix)]
+pub(crate) use bash::{
+    BASH_HANDOFF, BASH_SUPERVISED, follow_detached_task, restore_detached_task_monitoring,
+};
 // The bash tool is the only place a turn cancel has to kill a process group,
 // so its behaviour is exercised from the agent-side cancel tests too.
 #[cfg(test)]
@@ -39,6 +43,8 @@ pub(crate) mod interactive;
 mod jcode_docs;
 pub(crate) mod load_tools;
 pub use jcode_docs::{BundledDocs, bundled_docs, register_bundled_docs};
+#[cfg(unix)]
+pub mod background_worker;
 pub mod mcp;
 mod memory;
 mod name_suggestions;
