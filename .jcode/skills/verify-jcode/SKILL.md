@@ -43,6 +43,7 @@ Require `status: ready`. This is read-only against the app: verify the runtime o
 "$V" drive --evidence "$E" resume
 "$V" drive --evidence "$E" cancel
 "$V" drive --evidence "$E" restart
+"$V" drive --evidence "$E" worker-reload
 "$V" drive --evidence "$E" side-panel
 "$V" drive --evidence "$E" mode
 "$V" drive --evidence "$E" mode-set

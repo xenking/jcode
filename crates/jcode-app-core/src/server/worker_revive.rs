@@ -1,12 +1,8 @@
 //! Lazily restore an idle-unloaded session or a headless swarm worker from disk.
 //!
-//! Startup recovery only restores headless workers that were mid-turn when the
-//! server went down. A worker that had already failed (for example on a
-//! provider rate limit) or was idle stays in the swarm as a durable member
-//! record with no live agent. Every later wake, resume, retry or DM then found
-//! "no live agent" and the only way forward was spawning a replacement, which
-//! throws away the worker's transcript. This module rebuilds the agent on
-//! demand from the persisted session so the coordinator can simply resume it.
+//! An owned idle worker's durable member stays ready across restart. Rebuild
+//! its runtime on the first wake, retry or DM, without changing its identity
+//! or loading idle transcripts at startup.
 
 use super::{
     SessionAgents, SessionInterruptQueues, SwarmMember, register_background_tool_signal,
@@ -33,6 +29,20 @@ pub(super) async fn live_or_revived_agent(
     session_id: &str,
     sessions: &SessionAgents,
 ) -> Option<Arc<Mutex<Agent>>> {
+    if let Some(context) = sessions.revive.get()
+        && context
+            .members
+            .read()
+            .await
+            .get(session_id)
+            .is_some_and(|member| {
+                member.is_headless && member.status == "running" && member.event_tx.is_closed()
+            })
+    {
+        // Startup recovery owns this turn. A wake can queue its input, but
+        // must not race to publish a fresh turn before recovery claims it.
+        return None;
+    }
     if let Some(agent) = sessions.read().await.get(session_id).cloned() {
         return Some(agent);
     }
@@ -76,6 +86,7 @@ pub(super) async fn live_or_revived_agent(
             )
             .await;
         let mut agent = Agent::new_with_session(provider, registry, session, None);
+        agent.restore_persisted_soft_interrupts();
         agent.restored_from_idle_unload = was_idle_unloaded;
         if is_headless_member {
             agent.set_debug(true);

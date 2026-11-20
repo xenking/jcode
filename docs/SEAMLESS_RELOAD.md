@@ -18,6 +18,13 @@ happened. It must not send a prompt "from the user".
   asserts this on the neutral provider request.
 - **Idle sessions are not touched.** A finished turn has no recovery intent and
   is never re-prompted.
+- **Ready headless workers keep their address.** The daemon checkpoints swarm
+  ownership before shutdown. A ready worker with a live coordinator in its
+  swarm retains its ID, report and lane, and loads its agent on the next wake
+  or retry. Unowned idle workers still enter terminal-member collection.
+- **Interrupted headless workers remain busy.** A saved running worker still
+  appears running while its continuation is being admitted. The coordinator
+  observes the actual result, not an intermediate crash or idle status.
 - **Clients show a status, not a transcript row.** TUI and Desktop show a
   transient "reconnected"/"resumed" status line. The display-only
   `[generation interrupted - server reloading]` marker is stripped from history

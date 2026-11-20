@@ -34,4 +34,5 @@ Record the feature ID, exact user entry point, action, resulting frame/response,
 | [Session mode](session-mode.md) | `drive mode`: pin, compact, spawn, clear. `drive mode-set`: toggle, restart, continued provider request, unpin one | auto-compaction, resume after compaction |
 | [Side panel](side-panel.md) | `drive side-panel`: /splitview on | /splitview off/status, /todos panel, swarm worker lifecycle |
 | [Cancellation and daemon restart](lifecycle.md) | `drive cancel`, `drive restart` | tool cancellation, queue races, binary reload, in-flight reload recovery |
+| [Headless swarm worker restart](worker-reload.md) | `drive worker-reload`: idle DM and interrupted worker turn | exec reload, coordinator-less workers, explicit retry |
 | [Provider route and auth boundaries](provider-route.md) | `drive cli --mode json` for the synthetic route | multi-route picker, forced catalog refresh, real vendor auth and token refresh |

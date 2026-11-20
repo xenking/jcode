@@ -365,14 +365,55 @@ async fn startup_recovery_resumes_interrupted_headless_sessions_after_reload() -
             members
                 .get(&initiator.id)
                 .map(|member| member.status.as_str()),
-            Some("crashed"),
-            "persisted running headless sessions should load as crashed before recovery"
+            Some("running"),
+            "an interrupted turn is still busy even before recovery is admitted"
         );
         assert_eq!(
             members.get(&peer.id).map(|member| member.status.as_str()),
-            Some("crashed")
+            Some("running")
         );
     }
+
+    let watched = [peer.id.clone()];
+    let targets = [
+        "ready".into(),
+        "failed".into(),
+        "stopped".into(),
+        "crashed".into(),
+    ];
+    let read_wait = || {
+        crate::server::comm_await::awaited_member_statuses(
+            &initiator.id,
+            swarm_id,
+            &watched,
+            &targets,
+            &server.swarm_state.members,
+            &server.swarm_state.swarms_by_id,
+        )
+    };
+    assert!(!read_wait().await[0].done);
+    use crate::server::await_members_state::{ensure_pending_state, load_state};
+    let wait = ensure_pending_state(
+        "interrupted-headless-wait",
+        &initiator.id,
+        swarm_id,
+        &watched,
+        &targets,
+        Some("all"),
+        crate::todo::await_dependency::now_unix_ms() + 10_000,
+        true,
+        false,
+        false,
+    );
+    crate::server::comm_await::resume_background_awaits(
+        &server.swarm_state.members,
+        &server.swarm_state.swarms_by_id,
+        &server.swarm_event_tx,
+        &server.await_members_runtime,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(load_state(&wait.key).expect("persisted wait").is_pending());
 
     server.recover_headless_sessions_on_startup().await;
 
@@ -423,6 +464,24 @@ async fn startup_recovery_resumes_interrupted_headless_sessions_after_reload() -
     })
     .await
     .expect("headless reload recovery should resume both sessions");
+    let completed = &read_wait().await[0];
+    assert!(completed.done);
+    assert_eq!(completed.status, "ready");
+    assert_eq!(
+        completed.completion_report.as_deref(),
+        Some("continued after reload")
+    );
+    let result = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(result) = load_state(&wait.key).and_then(|state| state.final_response) {
+                break result;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    assert!(result.completed);
+    assert_eq!(result.members[0].status, "ready");
 
     assert!(
         ReloadContext::peek_for_session(&initiator.id)?.is_none(),

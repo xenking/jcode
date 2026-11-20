@@ -53,6 +53,10 @@ class H(BaseHTTPRequestHandler):
             text += " " + " ".join(f"pad{i}" for i in range(6000))
         last_user = max((i for i, m in enumerate(msgs) if m.get("role") == "user"), default=-1)
         prompt = text_of(msgs[last_user]) if last_user >= 0 else ""
+        if ("You just received a direct swarm message" in prompt and last_user > 0
+                and "[e2e:worker-step:" in text_of(msgs[last_user - 1])):
+            last_user -= 1
+            prompt = text_of(msgs[last_user])
         has_tool_result = any(m.get("role") == "tool" for m in msgs[last_user + 1:])
         tool_calls = None
         if CONTROL and "[e2e:verify-env]" in prompt:
@@ -86,6 +90,43 @@ class H(BaseHTTPRequestHandler):
                     "intent": "Run a long command the daemon will not outlive",
                     "command": "sleep 600",
                 })}}]
+        elif CONTROL and (match := re.search(r"\[e2e:worker-spawn:([a-z0-9_]+)\]", prompt)) and not has_tool_result:
+            tool_calls = [{"id": "call_worker_reload_spawn", "type": "function", "function": {
+                "name": "swarm", "arguments": json.dumps({
+                    "action": "spawn", "intent": "Spawn the isolated restart verification worker",
+                    "label": "verify-reload-child",
+                    "prompt": match.group(1) + " Acknowledge. [e2e:worker-finish]",
+                    "spawn_mode": "headless",
+                })}}]
+        elif CONTROL and "[e2e:worker-finish]" in prompt and not has_tool_result:
+            tool_calls = [{"id": "call_worker_reload_finish", "type": "function", "function": {
+                "name": "todo", "arguments": json.dumps({
+                    "intent": "Complete the spawned worker's original lane",
+                    "update": [{"name": "verify-reload-child", "status": "completed",
+                                "completion_confidence": "verified"}],
+                })}}]
+        elif CONTROL and (match := re.search(r"\[e2e:worker-dm:([a-z0-9_]+):([a-z0-9_]+)\]", prompt)) and not has_tool_result:
+            session_id, text_to_worker = match.groups()
+            call_id = "call_worker_reload_dm_" + text_to_worker
+            if text_to_worker.endswith("_running"):
+                text_to_worker += f" [e2e:worker-step:{text_to_worker.split('_running')[0]}]"
+            tool_calls = [{"id": call_id, "type": "function", "function": {
+                "name": "swarm", "arguments": json.dumps({
+                    "action": "message", "intent": "Send a real DM to the same worker",
+                    "to_session": session_id, "message": text_to_worker,
+                })}}]
+        elif CONTROL and (match := re.search(r"\[e2e:worker-step:([a-z0-9_]+)\]", prompt)):
+            token = match.group(1)
+            if not has_tool_result:
+                tool_calls = [{"id": "call_worker_reload_step", "type": "function", "function": {
+                    "name": "edit", "arguments": json.dumps({
+                        "intent": "Append one marker in the isolated workspace to detect duplicate execution",
+                        "file_path": "worker-reload-step.txt",
+                        "old_string": "worker-step-anchor\n",
+                        "new_string": f"worker-step-anchor\n{token}\n",
+                    })}}]
+            elif not self.hold(token):
+                return
         elif CONTROL and "[e2e:spawn]" in prompt and not has_tool_result:
             # Real swarm spawn through the tool executor; the child's provider
             # requests land in the same FAKE_LOG.
@@ -96,15 +137,8 @@ class H(BaseHTTPRequestHandler):
                     "spawn_mode": "headless",
                 })}}]
         elif CONTROL and (match := re.search(r"\[e2e:hold:([a-z0-9_-]+)\]", prompt)):
-            token = match.group(1)
-            CONTROL.mkdir(parents=True, exist_ok=True)
-            (CONTROL / (token + ".held")).write_text("provider request received\n")
-            deadline = time.monotonic() + 90
-            while not (CONTROL / (token + ".release")).exists():
-                if time.monotonic() >= deadline:
-                    self.send_error(504, "acceptance test did not release provider gate")
-                    return
-                time.sleep(0.05)
+            if not self.hold(match.group(1)):
+                return
         if not req.get("stream"):
             message = {"role": "assistant", "content": None if tool_calls else text}
             if tool_calls:
@@ -140,6 +174,17 @@ class H(BaseHTTPRequestHandler):
                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}})
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
+
+    def hold(self, token):
+        CONTROL.mkdir(parents=True, exist_ok=True)
+        (CONTROL / (token + ".held")).write_text("provider request received\n")
+        deadline = time.monotonic() + 90
+        while not (CONTROL / (token + ".release")).exists():
+            if time.monotonic() >= deadline:
+                self.send_error(504, "acceptance test did not release provider gate")
+                return False
+            time.sleep(0.05)
+        return True
 
 
 if __name__ == "__main__":

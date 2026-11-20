@@ -113,11 +113,13 @@ async fn receive_reload_signal(
 
 pub(super) async fn await_reload_signal(
     sessions: crate::server::SessionAgents,
-    swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarm_state: super::SwarmState,
     shutdown_signals: Arc<RwLock<HashMap<String, InterruptSignal>>>,
     swarm_event_tx: broadcast::Sender<SwarmEvent>,
 ) {
     use std::process::Command as ProcessCommand;
+
+    let swarm_members = &swarm_state.members;
 
     let mut rx = super::reload_state::reload_signal().1.clone();
     // Treat any signal already sitting in the (process-global) reload channel as
@@ -212,10 +214,11 @@ pub(super) async fn await_reload_signal(
         };
         persist_reload_recovery_intents(
             &signal.request_id,
-            &swarm_members,
+            swarm_members,
             signal.triggering_session.as_deref(),
         )
         .await;
+        super::checkpoint_swarm_workers_for_restart(&swarm_state).await;
         super::reload_trace::record_value(
             &signal.request_id,
             "intent_persistence_complete",
@@ -225,7 +228,7 @@ pub(super) async fn await_reload_signal(
         graceful_shutdown_sessions(
             &signal.request_id,
             &sessions,
-            &swarm_members,
+            swarm_members,
             &shutdown_signals,
             &swarm_event_tx,
             signal.triggering_session.as_deref(),

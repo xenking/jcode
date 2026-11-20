@@ -414,6 +414,22 @@ pub(super) async fn persist_swarm_state_for(swarm_id: &str, swarm_state: &SwarmS
     );
 }
 
+async fn checkpoint_swarm_workers_for_restart(swarm_state: &SwarmState) {
+    // The ordinary plan snapshot can still say running after the worker's
+    // turn finished. Capture the actual roster before shutdown interrupts it.
+    let swarms: HashSet<_> = swarm_state
+        .members
+        .read()
+        .await
+        .values()
+        .filter(|member| member.is_headless)
+        .filter_map(|member| member.swarm_id.clone())
+        .collect();
+    for swarm_id in swarms {
+        persist_swarm_state_for(&swarm_id, swarm_state).await;
+    }
+}
+
 pub(super) async fn remove_persisted_swarm_state_for(swarm_id: &str, swarm_state: &SwarmState) {
     // Persist and remove share one per-swarm ordering domain. The file version
     // is an extra CAS guard against direct/recovery writers outside this path.
@@ -901,9 +917,8 @@ impl Server {
         reload_recovery::RecoveryOwner::new(self)
             .spawn(runtime.cancellation_token(), recovery_tasks);
 
-        // Restored running workers initially appear stopped in durable swarm
-        // snapshots. Resume their turns before evaluating persisted awaits,
-        // otherwise an await can falsely resolve during the startup window.
+        // Keep interrupted workers busy while recovery admits their turns.
+        // Reconcile the roster before evaluating persisted awaits.
         comm_await::resume_background_awaits(
             &self.swarm_state.members,
             &self.swarm_state.swarms_by_id,
@@ -953,13 +968,13 @@ impl Server {
         // In the unified server design, self-dev sessions share the main server,
         // so the shared server must always listen for reload signals.
         let signal_sessions = Arc::clone(&self.sessions);
-        let signal_swarm_members = Arc::clone(&self.swarm_state.members);
+        let signal_swarm_state = self.swarm_state.clone();
         let signal_shutdown_signals = Arc::clone(&self.shutdown_signals);
         let signal_swarm_event_tx = self.swarm_event_tx.clone();
         tokio::spawn(async move {
             await_reload_signal(
                 signal_sessions,
-                signal_swarm_members,
+                signal_swarm_state,
                 signal_shutdown_signals,
                 signal_swarm_event_tx,
             )
@@ -972,17 +987,18 @@ impl Server {
         #[cfg(unix)]
         {
             let sigterm_server_name = self.identity.name.clone();
-            let sigterm_swarm_members = Arc::clone(&self.swarm_state.members);
+            let sigterm_swarm_state = self.swarm_state.clone();
             tokio::spawn(async move {
                 use tokio::signal::unix::{SignalKind, signal};
                 if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
                     sigterm.recv().await;
                     // Bounded: a wedged registry must not keep a terminated
                     // daemon alive. Restore still recovers what this misses.
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_secs(2),
-                        reload::persist_shutdown_recovery_intents(&sigterm_swarm_members),
-                    )
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                        reload::persist_shutdown_recovery_intents(&sigterm_swarm_state.members)
+                            .await;
+                        checkpoint_swarm_workers_for_restart(&sigterm_swarm_state).await;
+                    })
                     .await;
                     let _ = crate::registry::unregister_server(&sigterm_server_name).await;
                     lifecycle::drain_session_saves_before_exit().await;

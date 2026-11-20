@@ -6,6 +6,7 @@ impl Server {
     pub(super) async fn recover_headless_sessions_on_startup(
         &self,
     ) -> Vec<tokio::task::JoinHandle<()>> {
+        let recovery = reload_recovery::RecoveryOwner::new(self);
         // Migrate legacy snapshots into the same durable owner. An existing
         // record, including Stop/superseded tombstones, is authoritative.
         let current_reload_id = recent_reload_state(Duration::from_secs(600))
@@ -28,7 +29,8 @@ impl Server {
                         || (member.is_headless
                             && owner_live
                             && (headless_member_should_restore(&member.status, true)
-                                || worker_revive::has_open_lane(&member.session_id)))
+                                || (member.status == "ready"
+                                    && worker_revive::has_open_lane(&member.session_id))))
                 })
                 .map(|member| member.session_id.clone())
                 .collect::<Vec<_>>()
@@ -39,14 +41,26 @@ impl Server {
         for session_id in candidates {
             // Stop/superseded tombstones stay authoritative. A consumed continuation
             // from an earlier reload does not cover a turn the daemon died in later.
-            if reload_recovery::peek_for_session(&session_id)
+            if let Some(record) = reload_recovery::peek_for_session(&session_id)
                 .ok()
                 .flatten()
-                .is_some_and(|record| !record.status.is_consumed())
+                .filter(|record| !record.status.is_consumed())
             {
+                if !record.status.needs_admission() {
+                    recovery
+                        .finish_unstarted_headless(&session_id, "stopped", None)
+                        .await;
+                }
                 continue;
             }
             let Ok(session) = crate::session::Session::load(&session_id) else {
+                recovery
+                    .finish_unstarted_headless(
+                        &session_id,
+                        "crashed",
+                        Some("Cannot load the worker transcript".into()),
+                    )
+                    .await;
                 continue;
             };
             let (owner_live, headless) = {
@@ -131,12 +145,24 @@ impl Server {
                         "Cannot migrate recovery intent for {session_id}: {error}"
                     ));
                 }
+            } else if self.running_before_restart.contains(&session_id) {
+                let (status, detail) = if interrupted {
+                    (
+                        "crashed",
+                        Some("No continuation available after server restart".into()),
+                    )
+                } else if owner_live {
+                    ("ready", None)
+                } else {
+                    ("stopped", None)
+                };
+                recovery
+                    .finish_unstarted_headless(&session_id, status, detail)
+                    .await;
             }
         }
         // Both attached and headless sessions, including records whose session
         // is absent from the swarm snapshot, enter this one admission path.
-        reload_recovery::RecoveryOwner::new(self)
-            .reconcile_once()
-            .await
+        recovery.reconcile_once().await
     }
 }

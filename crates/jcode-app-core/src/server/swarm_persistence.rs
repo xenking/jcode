@@ -448,11 +448,38 @@ pub(super) fn from_persisted_member(
     loaded_at_unix_ms: u64,
     terminal_retention: Duration,
 ) -> Option<SwarmMember> {
+    decode_member(
+        member,
+        snapshot_updated_at_unix_ms,
+        loaded_at_unix_ms,
+        terminal_retention,
+        false,
+    )
+}
+
+fn decode_member(
+    member: PersistedSwarmMember,
+    snapshot_updated_at_unix_ms: u64,
+    loaded_at_unix_ms: u64,
+    terminal_retention: Duration,
+    daemon_restart: bool,
+) -> Option<SwarmMember> {
     let record = member.record;
     let original_status = record.status.as_str();
     let was_terminal_before_recovery =
         super::swarm::member_status_is_terminal(original_status.as_ref());
-    let (status, detail) = recover_member_status(record.status, record.detail, record.is_headless);
+    let (status, detail) = if daemon_restart
+        && record.is_headless
+        && (record.status == SwarmLifecycleStatus::Ready
+            || (record.status == SwarmLifecycleStatus::Running
+                && crate::session::session_exists(&record.session_id)))
+    {
+        // Ready workers are checked against the deduplicated roster below.
+        // A saved running worker is busy until recovery resolves its turn.
+        (record.status, record.detail)
+    } else {
+        recover_member_status(record.status, record.detail, record.is_headless)
+    };
     let status_text = status.as_str();
     let terminal_since_unix_ms = super::swarm::member_status_is_terminal(status_text.as_ref())
         .then(|| {
@@ -614,11 +641,12 @@ pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
                 SwarmLifecycleStatus::Running | SwarmLifecycleStatus::Ready
             );
             let was_running = member.record.status == SwarmLifecycleStatus::Running;
-            let Some(member) = from_persisted_member(
+            let Some(member) = decode_member(
                 member,
                 state.updated_at_unix_ms,
                 loaded_at_unix_ms,
                 terminal_retention,
+                true,
             ) else {
                 pruned_terminal_members += 1;
                 pruned_members_by_swarm
@@ -645,6 +673,41 @@ pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
             .get(swarm_id)
             .is_some_and(|pruned| pruned.contains(session_id))
     });
+    let loaded_at = Instant::now();
+    let unowned_idle: Vec<_> = members
+        .values()
+        .filter(|member| member.is_headless && member.status == "ready")
+        .filter(|member| {
+            let Some(swarm_id) = member.swarm_id.as_ref().filter(|_| member.swarm_enabled) else {
+                return true;
+            };
+            let owner = member
+                .report_back_to_session_id
+                .as_ref()
+                .or_else(|| coordinators.get(swarm_id));
+            !owner.and_then(|id| members.get(id)).is_some_and(|owner| {
+                // Only an attached root can own spawned workers. Do not let
+                // provisional ready headless rows keep each other alive.
+                !owner.is_headless
+                    && owner.swarm_enabled
+                    && owner.swarm_id.as_ref() == Some(swarm_id)
+                    && super::coordinator_was_live_at_restart(
+                        owner,
+                        &live_before_restart,
+                        loaded_at,
+                    )
+            })
+        })
+        .map(|member| member.session_id.clone())
+        .collect();
+    for id in unowned_idle {
+        if let Some(member) = members.get_mut(&id) {
+            member.status = "stopped".into();
+            member.detail =
+                append_recovery_detail(member.detail.take(), IDLE_WORKER_NOT_RESTORED_NOTE);
+            member.last_status_change = loaded_at;
+        }
+    }
     for (swarm_id, pruned_session_ids) in &pruned_members_by_swarm {
         if let Some(plan) = plans.get_mut(swarm_id) {
             plan.participants
