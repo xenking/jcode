@@ -185,26 +185,33 @@ async fn memory_recall_is_a_stable_responses_prefix_across_turns_and_resume() {
     let provider: Arc<dyn Provider> = Arc::new(capture.clone());
     let mut agent = Agent::new_with_session(provider.clone(), Registry::empty(), session, None);
     agent.memory_enabled = true;
-    let entry = crate::memory::MemoryEntry::new(
-        crate::memory::MemoryCategory::Fact,
-        "Wire fixture: always use the blue notebook.",
-    );
-    crate::memory::MemoryManager::new()
-        .with_project_dir(project.path())
-        .remember_project(entry.clone())
-        .unwrap();
-    let prompt = crate::memory::format_relevant_prompt(std::slice::from_ref(&entry), 1).unwrap();
-    let enqueue_recall = || {
+    let mut entries = [
+        crate::memory::MemoryEntry::new(
+            crate::memory::MemoryCategory::Fact,
+            "Wire fixture: always use the blue notebook.",
+        ),
+        crate::memory::MemoryEntry::new(
+            crate::memory::MemoryCategory::Fact,
+            "Wire fixture: archive the notebook on Friday.",
+        ),
+    ];
+    let manager = crate::memory::MemoryManager::new().with_project_dir(project.path());
+    for entry in &entries {
+        manager.remember_project(entry.clone()).unwrap();
+    }
+    let enqueue_recall = |entries: &[crate::memory::MemoryEntry]| {
+        let prompt = crate::memory::format_relevant_prompt(entries, entries.len()).unwrap();
         crate::memory::set_pending_memory_for_project(
             &id,
             prompt.clone(),
-            1,
-            vec![entry.id.clone()],
+            entries.len(),
+            entries.iter().map(|entry| entry.id.clone()).collect(),
             None,
             Some(project.path().to_str().unwrap()),
         );
+        prompt
     };
-    enqueue_recall();
+    let prompt = enqueue_recall(&entries);
     assert!(crate::memory::has_pending_memory(&id));
     let (tx, _rx) = tokio_mpsc::unbounded_channel();
     agent
@@ -212,10 +219,12 @@ async fn memory_recall_is_a_stable_responses_prefix_across_turns_and_resume() {
         .await
         .unwrap();
 
-    // Force a repeated recall despite the in-memory expiry/overlap guards.
+    // Force a repeated recall with a different relevance ranking despite the
+    // in-memory expiry/overlap guards.
     // The provider-facing transcript still must not grow a duplicate.
     crate::memory::clear_pending_memory(&id);
-    enqueue_recall();
+    entries.reverse();
+    enqueue_recall(&entries);
     assert!(crate::memory::has_pending_memory(&id));
     agent.run_once_capture("second prompt").await.unwrap();
     drop(agent);

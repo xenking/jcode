@@ -650,26 +650,33 @@ fn selected_entries_for_prompt(entries: &[MemoryEntry], limit: usize) -> Vec<&Me
 }
 
 pub fn format_entries_for_prompt(entries: &[MemoryEntry], limit: usize) -> Option<String> {
-    format_entries_for_prompt_with_header(entries, limit, false, false)
+    format_selected_entries(selected_entries_for_prompt(entries, limit), false, false)
 }
 
 pub fn format_relevant_prompt(entries: &[MemoryEntry], limit: usize) -> Option<String> {
-    format_entries_for_prompt(entries, limit).map(|formatted| format!("# Memory\n\n{formatted}"))
+    format_selected_entries(selected_recall_entries(entries, limit), true, false)
 }
 
 pub fn format_relevant_display_prompt(entries: &[MemoryEntry], limit: usize) -> Option<String> {
-    format_entries_for_prompt_with_header(entries, limit, true, true)
+    format_selected_entries(selected_recall_entries(entries, limit), true, true)
 }
 
-fn format_entries_for_prompt_with_header(
-    entries: &[MemoryEntry],
-    limit: usize,
+fn selected_recall_entries(entries: &[MemoryEntry], limit: usize) -> Vec<&MemoryEntry> {
+    let mut selected = selected_entries_for_prompt(entries, limit);
+    // Preserve relevance ranking for selection, not for rendering. A new
+    // ranking of the same facts must not append another recall to history.
+    selected.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+    selected
+}
+
+fn format_selected_entries(
+    entries: Vec<&MemoryEntry>,
     include_header: bool,
     include_updated_at_comments: bool,
 ) -> Option<String> {
     let mut sections: HashMap<MemoryCategory, Vec<&MemoryEntry>> = HashMap::new();
 
-    for entry in selected_entries_for_prompt(entries, limit) {
+    for entry in entries {
         sections
             .entry(entry.category.clone())
             .or_default()
