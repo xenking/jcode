@@ -591,14 +591,17 @@ class Harness:
                  "durable completion acknowledgement")
         self.idle()
         if wait_in_turn:
-            requests = [entry for entry in self.records()[start:] if entry.get("agent")
-                        and any(wait_prompt in json.dumps(m.get("content")) for m in entry["messages"])]
-            require(len(requests) >= 2, "No provider continuation for the original wait")
-            first_continuation = requests[1]["messages"]
+            def wait_continuation():
+                requests = [entry for entry in self.records()[start:] if entry.get("agent")
+                            and any(wait_prompt in json.dumps(m.get("content")) for m in entry["messages"])]
+                return requests[1]["messages"] if len(requests) >= 2 else None
+
+            first_continuation = wait_for(wait_continuation, "provider continuation for the original wait")
             require(any(m.get("role") == "tool" and m.get("tool_call_id") == "call_reload_wait"
                         and "Exit code: 23" in json.dumps(m.get("content"))
                         and "completed by original shell" in json.dumps(m.get("content"))
                         for m in first_continuation), "The first continued provider request lacks the original wait result")
+            self.idle()
         dump(self.evidence / f"{label}-task.json", load_status(path))
         return {"task_id": task["task_id"], "daemon_pid": daemon_pid, "shell_pid": os_pid,
                 "previous_server_id": old_server, "server_id": successor["id"],
