@@ -13,6 +13,10 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompt/system_prompt.md");
 /// This is a *replacement* hook. To merely add guidance on top of the default,
 /// use `.jcode/prompt-overlay.md` instead.
 pub fn load_base_system_prompt(working_dir: Option<&Path>) -> String {
+    load_base_system_prompt_override(working_dir).unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.into())
+}
+
+fn load_base_system_prompt_override(working_dir: Option<&Path>) -> Option<String> {
     let project_dir = working_dir.unwrap_or(Path::new("."));
     let candidates = [
         Some(project_dir.join(".jcode").join("system-prompt.md")),
@@ -24,11 +28,11 @@ pub fn load_base_system_prompt(working_dir: Option<&Path>) -> String {
         if let Ok(content) = std::fs::read_to_string(&path) {
             let trimmed = content.trim();
             if !trimmed.is_empty() {
-                return trimmed.to_string();
+                return Some(trimmed.to_string());
             }
         }
     }
-    DEFAULT_SYSTEM_PROMPT.to_string()
+    None
 }
 
 /// Prompt guidance for the optional Mermaid rendering capability.
@@ -77,11 +81,8 @@ impl PromptCapabilities {
     }
 }
 
-fn base_system_prompt_parts(
-    capabilities: PromptCapabilities,
-    working_dir: Option<&Path>,
-) -> Vec<String> {
-    let mut parts = vec![load_base_system_prompt(working_dir)];
+fn base_system_prompt_parts(capabilities: PromptCapabilities, base: String) -> Vec<String> {
+    let mut parts = vec![base];
     if capabilities.mermaid {
         parts.push(MERMAID_PROMPT.to_string());
     }
@@ -89,6 +90,94 @@ fn base_system_prompt_parts(
         parts.push(CODEMODE_PROMPT.to_string());
     }
     parts
+}
+
+/// Fingerprints of the effective overrides, independent of Jcode's embedded
+/// prompt version. `None` means the corresponding file section is absent.
+pub type PromptFileVersions = [Option<String>; 3];
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StaticPromptSnapshot {
+    pub text: String,
+    /// Latest versions reflected either in the frozen text or in the transcript.
+    /// `None` when a custom system prompt replaces the normal instructions.
+    pub file_versions: Option<PromptFileVersions>,
+}
+
+pub struct PromptFiles {
+    base_override: Option<String>,
+    overlay: (Option<String>, usize),
+    preferred_tools: (Option<String>, usize),
+}
+
+impl PromptFiles {
+    pub fn load(working_dir: Option<&Path>) -> Self {
+        Self {
+            base_override: load_base_system_prompt_override(working_dir),
+            overlay: load_prompt_overlay_files_from_dir(working_dir),
+            preferred_tools: load_preferred_tools_files_from_dir(working_dir),
+        }
+    }
+
+    fn sections(&self) -> [(&'static str, Option<&str>); 3] {
+        [
+            ("system-prompt.md", self.base_override.as_deref()),
+            ("prompt-overlay.md", self.overlay.0.as_deref()),
+            ("preferred-tools.md", self.preferred_tools.0.as_deref()),
+        ]
+    }
+
+    pub fn versions(&self) -> PromptFileVersions {
+        use sha2::{Digest, Sha256};
+        self.sections()
+            .map(|(_, text)| text.map(|text| format!("{:x}", Sha256::digest(text))))
+    }
+
+    pub fn change_reminder(
+        &self,
+        previous: &PromptFileVersions,
+    ) -> Option<(String, PromptFileVersions)> {
+        let versions = self.versions();
+        if &versions == previous {
+            return None;
+        }
+        let mut reminder = String::from(
+            "<system-reminder>\nLocal prompt files changed. The sections below supersede their frozen counterparts and any earlier updates for the same files.\n",
+        );
+        for (index, (name, text)) in self.sections().into_iter().enumerate() {
+            if versions[index] == previous[index] {
+                continue;
+            }
+            reminder.push_str(&format!("\n## {name}\n\n"));
+            reminder.push_str(match (name, text) {
+                (_, Some(text)) => text,
+                ("system-prompt.md", None) => DEFAULT_SYSTEM_PROMPT,
+                _ => "This file section is no longer configured.",
+            });
+            reminder.push('\n');
+        }
+        reminder.push_str("</system-reminder>");
+        Some((reminder, versions))
+    }
+}
+
+/// Bootstrap inputs frozen along with AGENTS.md and the skill list.
+pub struct StaticPromptSources {
+    capabilities: PromptCapabilities,
+    pub files: PromptFiles,
+}
+
+impl StaticPromptSources {
+    pub fn load(working_dir: Option<&Path>) -> Self {
+        Self::with_capabilities(working_dir, PromptCapabilities::current())
+    }
+
+    fn with_capabilities(working_dir: Option<&Path>, capabilities: PromptCapabilities) -> Self {
+        Self {
+            capabilities,
+            files: PromptFiles::load(working_dir),
+        }
+    }
 }
 
 /// Built-in default swarm prompt: model-routing guidance for spawned swarm
@@ -414,7 +503,7 @@ pub fn build_system_prompt_full_with_capabilities(
     working_dir: Option<&Path>,
     capabilities: PromptCapabilities,
 ) -> (String, ContextInfo) {
-    let mut parts = base_system_prompt_parts(capabilities, working_dir);
+    let mut parts = base_system_prompt_parts(capabilities, load_base_system_prompt(working_dir));
     let mut info = ContextInfo {
         system_prompt_chars: parts.join("\n\n").len(),
         ..Default::default()
@@ -506,13 +595,13 @@ pub fn build_system_prompt_split_with_capabilities(
     capabilities: PromptCapabilities,
 ) -> (SplitSystemPrompt, ContextInfo) {
     let agents_md = load_agents_md_files_from_dir(working_dir);
-    build_system_prompt_split_with_capabilities_and_agents_md(
+    build_system_prompt_split_with_sources(
         skill_prompt,
         available_skills,
         is_selfdev,
         memory_prompt,
         working_dir,
-        capabilities,
+        &StaticPromptSources::with_capabilities(working_dir, capabilities),
         agents_md,
     )
 }
@@ -530,27 +619,32 @@ pub fn build_system_prompt_split_with_agents_md(
     working_dir: Option<&Path>,
     agents_md: (Option<String>, ContextInfo),
 ) -> (SplitSystemPrompt, ContextInfo) {
-    build_system_prompt_split_with_capabilities_and_agents_md(
+    build_system_prompt_split_with_sources(
         skill_prompt,
         available_skills,
         is_selfdev,
         memory_prompt,
         working_dir,
-        PromptCapabilities::current(),
+        &StaticPromptSources::load(working_dir),
         agents_md,
     )
 }
 
-fn build_system_prompt_split_with_capabilities_and_agents_md(
+pub fn build_system_prompt_split_with_sources(
     skill_prompt: Option<&str>,
     available_skills: &[SkillInfo],
     is_selfdev: bool,
     memory_prompt: Option<&str>,
     working_dir: Option<&Path>,
-    capabilities: PromptCapabilities,
+    sources: &StaticPromptSources,
     agents_md: (Option<String>, ContextInfo),
 ) -> (SplitSystemPrompt, ContextInfo) {
-    let mut static_parts = base_system_prompt_parts(capabilities, working_dir);
+    let base = sources
+        .files
+        .base_override
+        .as_deref()
+        .unwrap_or(DEFAULT_SYSTEM_PROMPT);
+    let mut static_parts = base_system_prompt_parts(sources.capabilities, base.into());
     let mut dynamic_parts = Vec::new();
     let mut info = ContextInfo {
         system_prompt_chars: static_parts.join("\n\n").len(),
@@ -580,18 +674,17 @@ fn build_system_prompt_split_with_capabilities_and_agents_md(
     info.global_agents_md_chars = md_info.global_agents_md_chars;
 
     // Add optional prompt overlays from ~/.jcode/ and ./.jcode/
-    let (overlay_content, overlay_chars) = load_prompt_overlay_files_from_dir(working_dir);
+    let (overlay_content, overlay_chars) = &sources.files.overlay;
     if let Some(content) = overlay_content {
-        info.prompt_overlay_chars = overlay_chars;
-        static_parts.push(content);
+        info.prompt_overlay_chars = *overlay_chars;
+        static_parts.push(content.clone());
     }
 
     // Add optional preferred-tool guidance (static per project/user)
-    let (preferred_tools_content, preferred_tools_chars) =
-        load_preferred_tools_files_from_dir(working_dir);
+    let (preferred_tools_content, preferred_tools_chars) = &sources.files.preferred_tools;
     if let Some(content) = preferred_tools_content {
-        info.preferred_tools_chars = preferred_tools_chars;
-        static_parts.push(content);
+        info.preferred_tools_chars = *preferred_tools_chars;
+        static_parts.push(content.clone());
     }
 
     // Add available skills list (fairly static)

@@ -66,6 +66,7 @@ impl Agent {
             // compacting the request history. This is the first point where the
             // stable request settings are available.
             let mut tools = self.tool_definitions().await;
+            self.freeze_static_prompt();
             let mut split_prompt = self.build_system_prompt_split(None);
             self.provider
                 .prewarm(&tools, &split_prompt.static_part)
