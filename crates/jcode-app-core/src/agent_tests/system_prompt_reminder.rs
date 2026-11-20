@@ -23,7 +23,7 @@ async fn static_prompt_freeze_survives_file_edits_and_resume_on_the_wire() {
     );
     let (capture_tx, mut capture_rx) = tokio::sync::mpsc::unbounded_channel();
     let fixture = tokio::spawn(async move {
-        for _ in 0..5 {
+        for _ in 0..6 {
             let (socket, _) = listener.accept().await.unwrap();
             let mut socket = BufReader::new(socket);
             let mut length = None;
@@ -72,10 +72,10 @@ async fn static_prompt_freeze_survives_file_edits_and_resume_on_the_wire() {
     provider.set_oauth_account(Some(&account)).unwrap();
     provider.set_model("claude-opus-5-5").unwrap();
     let provider: Arc<dyn Provider> = Arc::new(provider);
-    let new_agent = || {
+    let new_agent = async || {
         let mut agent = Agent::new_with_initial_working_dir(
             provider.fork(),
-            Registry::empty(),
+            Registry::new(provider.clone()).await,
             project.path().to_str(),
         );
         agent
@@ -84,7 +84,7 @@ async fn static_prompt_freeze_survives_file_edits_and_resume_on_the_wire() {
         agent.set_memory_enabled(false);
         agent
     };
-    let mut agent = new_agent();
+    let mut agent = new_agent().await;
     let (sdk_tx, _sdk_rx) = tokio::sync::mpsc::unbounded_channel();
     let sdk_owner = crate::tool::sdk::ConnectionGuard("static-freeze-wire-owner".into());
     crate::tool::sdk::configure(
@@ -104,7 +104,14 @@ async fn static_prompt_freeze_survives_file_edits_and_resume_on_the_wire() {
             .unwrap()
             .unwrap();
     }
-    turn(&mut agent, "first request").await;
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        agent.run_once_streaming_mpsc("first request", vec![], None, tx),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let first = capture_rx.try_recv().unwrap();
     for sentinel in [
         "base-before-freeze",
@@ -124,6 +131,11 @@ async fn static_prompt_freeze_survives_file_edits_and_resume_on_the_wire() {
         first["system"].to_string().as_bytes() == second["system"].to_string().as_bytes(),
         "overlay edit rewrote the static wire prefix"
     );
+    assert!(
+        first["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty())
+    );
     assert_eq!(first["tools"], second["tools"]);
     let second_messages = second["messages"].as_array().unwrap();
     let tail = second_messages.last().unwrap().to_string();
@@ -139,7 +151,7 @@ async fn static_prompt_freeze_survives_file_edits_and_resume_on_the_wire() {
     drop(agent);
     std::fs::write(&base, "base-after-freeze").unwrap();
     std::fs::remove_file(&preferred).unwrap();
-    let mut resumed = new_agent();
+    let mut resumed = new_agent().await;
     resumed.restore_session(&id).unwrap();
     turn(&mut resumed, "resumed request").await;
     let after_resume = capture_rx.try_recv().unwrap();
@@ -169,7 +181,37 @@ async fn static_prompt_freeze_survives_file_edits_and_resume_on_the_wire() {
             .count(),
         1
     );
-    let mut fresh = new_agent();
+    for i in 0..80 {
+        resumed.add_message(
+            if i % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            },
+            vec![ContentBlock::Text {
+                text: format!("compaction fixture {i}"),
+                cache_control: None,
+            }],
+        );
+    }
+    let full_history = resumed.session.messages_for_provider();
+    assert!(
+        resumed
+            .registry
+            .compaction()
+            .write()
+            .await
+            .hard_compact_with(&full_history)
+            .unwrap()
+            > 0
+    );
+    assert!(resumed.poll_compaction_completion_event().is_some());
+    turn(&mut resumed, "request after compaction").await;
+    let after_compaction = capture_rx.try_recv().unwrap();
+    assert!(after_compaction["messages"].as_array().unwrap().len() < full_history.len());
+    assert_eq!(first["system"], after_compaction["system"]);
+
+    let mut fresh = new_agent().await;
     turn(&mut fresh, "new session request").await;
     let fresh = capture_rx.try_recv().unwrap();
     assert!(fresh["system"].to_string().contains("overlay-after-freeze"));
