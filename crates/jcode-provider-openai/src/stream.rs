@@ -655,6 +655,11 @@ fn extract_stop_reason_from_response(response: &Value) -> Option<String> {
         .map(|value| value.to_string())
 }
 
+/// Project provider output text into the representation stored by the agent.
+pub fn render_openai_output_text(text: &str, annotations: Option<&Value>) -> String {
+    crate::citations::render_annotated_text(text, annotations)
+}
+
 pub fn handle_openai_output_item(
     item: Value,
     saw_text_delta: &mut bool,
@@ -734,10 +739,7 @@ pub fn handle_openai_output_item(
                         && let Some(t) = entry.get("text").and_then(|v| v.as_str())
                     {
                         text.push_str(t);
-                        rendered.push_str(&crate::citations::render_annotated_text(
-                            t,
-                            entry.get("annotations"),
-                        ));
+                        rendered.push_str(&render_openai_output_text(t, entry.get("annotations")));
                     }
                 }
             }

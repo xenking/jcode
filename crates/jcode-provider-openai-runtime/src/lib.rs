@@ -312,21 +312,52 @@ struct PersistentWsState {
 }
 
 fn persistent_request_options(request: &Value) -> Value {
-    let mut options = request.clone();
-    if let Some(object) = options.as_object_mut() {
-        for key in [
-            "input",
-            "type",
-            "previous_response_id",
-            "client_metadata",
-            "stream",
-            "background",
-            "generate",
-        ] {
-            object.remove(key);
-        }
-    }
-    options
+    Value::Object(
+        request
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(key, _)| {
+                !matches!(
+                    key.as_str(),
+                    "input"
+                        | "type"
+                        | "previous_response_id"
+                        | "client_metadata"
+                        | "stream"
+                        | "background"
+                        | "generate"
+                )
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    )
+}
+
+fn cache_request_options_hash(request: &Value) -> u64 {
+    // System/tools are compared independently; do not encode them twice.
+    let settings: serde_json::Map<_, _> = request
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "input"
+                    | "type"
+                    | "previous_response_id"
+                    | "client_metadata"
+                    | "stream"
+                    | "background"
+                    | "generate"
+                    | "instructions"
+                    | "tools"
+                    | "prompt_cache_options"
+            )
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    jcode_provider_core::fingerprint::stable_hash_json(&Value::Object(settings))
 }
 
 fn capture_turn_state(turn_state: &StdMutex<Option<String>>, value: Option<&str>) {

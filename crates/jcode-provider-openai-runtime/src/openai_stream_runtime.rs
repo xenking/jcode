@@ -481,6 +481,9 @@ fn persistent_ws_delta_request(
     if let Some(reasoning) = request.get("reasoning") {
         continuation_request["reasoning"] = reasoning.clone();
     }
+    if let Some(text) = request.get("text") {
+        continuation_request["text"] = text.clone();
+    }
     if let Some(context_management) = request.get("context_management") {
         continuation_request["context_management"] = context_management.clone();
     }
@@ -775,25 +778,52 @@ async fn continue_persistent_ws_locked(
         return PersistentWsResult::NotAvailable;
     }
 
-    if !full_replay
-        && state.message_count > 0
-        && !persistent_ws_output_prefix_matches(
+    // Match only the server-owned items at the replay cursor. An identical
+    // client item later in the history must not disappear from the delta.
+    let replay_positions = if full_replay || state.message_count == 0 {
+        Vec::new()
+    } else {
+        match persistent_ws_replay_positions(
             input,
             state.last_input_item_count,
             &state.last_response_output,
-        )
-    {
-        *guard = None;
-        log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
-            "persistent_state_reset",
-            vec![
-                ("model", request_model.clone()),
-                ("reason", "response_output_changed".to_string()),
-            ],
-        );
-        return PersistentWsResult::NotAvailable;
-    }
+        ) {
+            Ok(positions) => positions,
+            Err(diff) => {
+                use jcode_provider_core::fingerprint::stable_hash_json;
+                log_openai_stream_lifecycle(
+                    jcode_base::logging::LogLevel::Info,
+                    "persistent_state_reset",
+                    vec![
+                        ("model", request_model.clone()),
+                        ("reason", "response_output_changed".to_string()),
+                        ("first_changed_input_index", diff.input_index.to_string()),
+                        ("first_changed_output_index", diff.output_index.to_string()),
+                        (
+                            "previous_output_item_type",
+                            replay_item_type(Some(diff.previous)).to_string(),
+                        ),
+                        (
+                            "replay_item_type",
+                            replay_item_type(diff.current).to_string(),
+                        ),
+                        (
+                            "previous_output_item_hash",
+                            stable_hash_json(diff.previous).to_string(),
+                        ),
+                        (
+                            "replay_item_hash",
+                            diff.current
+                                .map(stable_hash_json)
+                                .map_or_else(|| "none".to_string(), |hash| hash.to_string()),
+                        ),
+                    ],
+                );
+                *guard = None;
+                return PersistentWsResult::NotAvailable;
+            }
+        }
+    };
 
     // Compute incremental items: everything after the last_input_item_count.
     //
@@ -811,11 +841,8 @@ async fn continue_persistent_ws_locked(
         // all history (including encrypted reasoning) for its first generation.
         (std::borrow::Cow::Owned(input.to_vec()), 0)
     } else {
-        let (items, skipped) = persistent_ws_incremental_items(
-            input,
-            state.last_input_item_count,
-            &state.last_response_output,
-        );
+        let (items, skipped) =
+            persistent_ws_incremental_items(input, state.last_input_item_count, replay_positions);
         (std::borrow::Cow::Owned(items), skipped)
     };
     if skipped_output_items > 0 {
@@ -1063,6 +1090,11 @@ async fn continue_persistent_ws_locked(
                     .unwrap_or_else(|| "null".to_string()),
             ),
             (
+                "request_options_hash",
+                cache_request_options_hash(&continuation_request).to_string(),
+            ),
+            ("store", continuation_request["store"].to_string()),
+            (
                 "service_tier",
                 continuation_request
                     .get("service_tier")
@@ -1084,7 +1116,12 @@ async fn continue_persistent_ws_locked(
 
     let _ = tx
         .send(Ok(StreamEvent::ConnectionType {
-            connection: "websocket/persistent-reuse".to_string(),
+            connection: if full_replay || state.message_count == 0 {
+                "websocket/persistent-replay"
+            } else {
+                "websocket/persistent-reuse"
+            }
+            .to_string(),
         }))
         .await;
 
