@@ -266,6 +266,14 @@ impl App {
         divider: Option<String>,
     ) {
         self.commit_pending_streaming_assistant_message();
+        if event.method.as_deref() == Some(crate::session::CACHE_COLD_DIVIDER_METHOD) {
+            // A cold-cache notice: the transcript is unchanged, so only the
+            // divider is shown.
+            if let Some(divider) = divider {
+                self.push_compaction_divider(divider);
+            }
+            return;
+        }
         self.invalidate_kv_cache_after_compaction();
         self.reannounce_pinned_skill();
         // Remote clients hold a transcript-stripped stub; the server owns the

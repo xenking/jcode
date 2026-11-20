@@ -89,6 +89,9 @@ static JCODE_REPO_SOURCE_STATE: LazyLock<(Option<String>, Option<bool>)> = LazyL
 static WORKING_GIT_STATE_CACHE: LazyLock<StdMutex<HashMap<PathBuf, Option<GitState>>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 const STREAM_KEEPALIVE_PONG_ID: u64 = 0;
+/// Share of the context a cold-cache shake must free to be applied when no
+/// fold follows it. A smaller cut loses tool output for no real saving.
+const COLD_SHAKE_MIN_SAVINGS_PERCENT: usize = 10;
 
 #[path = "agent/cache_request.rs"]
 mod cache_request;
@@ -1209,10 +1212,18 @@ impl Agent {
     /// provider prompt cache expired. Never while the cache is warm.
     /// `fold_instead` skips the cold-cache shake because the cold fold will
     /// reduce this request alone (see `cold_shake_reaches_request_target`).
+    ///
+    /// `fold_planned` says a cold-cache fold will reduce this request anyway.
+    /// Without one, a cold shake has to earn its place: on 2026-11-20 it cut
+    /// three tool outputs out of a 102K context to save 4K (4%), and the prompt
+    /// was re-cached in full either way. Below
+    /// [`COLD_SHAKE_MIN_SAVINGS_PERCENT`] the history is left alone and the
+    /// transcript says the cache went cold instead.
     fn maybe_shake_before_request(
         &mut self,
         manager: &mut crate::compaction::CompactionManager,
         fold_instead: bool,
+        fold_planned: bool,
     ) -> Option<(String, Option<CompactionEvent>)> {
         let now = std::time::SystemTime::now();
         let started = Instant::now();
@@ -1228,12 +1239,18 @@ impl Agent {
             ttl,
             snapcompact_preferred,
         );
-        let (reason, cfg) = plan?;
-        if fold_instead && reason == crate::compaction::ShakeReason::CacheExpiry {
+        let (reason, mut cfg) = plan?;
+        let cold = reason == crate::compaction::ShakeReason::CacheExpiry;
+        if fold_instead && cold {
             return None;
         }
         let start = manager.active_start(self.session.provider_messages());
         let tokens_before = manager.effective_token_count_with(self.session.provider_messages());
+        if cold && !fold_planned {
+            cfg.min_savings_tokens = cfg
+                .min_savings_tokens
+                .max(tokens_before * COLD_SHAKE_MIN_SAVINGS_PERCENT / 100);
+        }
         let outcome = self.session.shake_stored_messages(start, &cfg);
         manager.record_shake(reason, outcome);
         let tokens_after = manager.effective_token_count_with(self.session.provider_messages());
@@ -1274,13 +1291,55 @@ impl Agent {
             self.record_compaction_divider(event);
             self.persist_session_best_effort("shake compaction");
         }
+        if !cold {
+            return None;
+        }
+        if event.is_some() {
+            let detail = format!(
+                "🧊 Cache cold · {} · ~{}K → ~{}K tok",
+                reason.label(),
+                tokens_before / 1000,
+                tokens_after / 1000,
+            );
+            return Some((detail, event));
+        }
+        // Nothing was trimmed. When a fold follows, its divider tells the
+        // story; otherwise the whole prompt is about to be re-cached and the
+        // transcript should say so once.
+        if fold_planned {
+            return None;
+        }
         let detail = format!(
-            "🧊 Cache cold · {} · ~{}K → ~{}K tok",
-            reason.label(),
-            tokens_before / 1000,
-            tokens_after / 1000,
+            "🧊 Cache cold · ~{}K tok re-cached in full",
+            tokens_before / 1000
         );
-        (reason == crate::compaction::ShakeReason::CacheExpiry).then_some((detail, event))
+        let already_noted = self.session.replay_events.last().is_some_and(|last| {
+            matches!(
+                &last.kind,
+                crate::session::StoredReplayEventKind::Compaction { method: Some(method), .. }
+                    if method == crate::session::CACHE_COLD_DIVIDER_METHOD
+            ) && (chrono::Utc::now() - last.timestamp).num_seconds() < 120
+        });
+        if already_noted {
+            // A retried request is the same cold cache, not a second one.
+            return Some((detail, None));
+        }
+        let event = CompactionEvent {
+            trigger: reason.label().to_string(),
+            method: Some(crate::session::CACHE_COLD_DIVIDER_METHOD.to_string()),
+            pre_tokens: Some(tokens_before as u64),
+            post_tokens: Some(tokens_before as u64),
+            tokens_saved: Some(0),
+            duration_ms: None,
+            messages_dropped: None,
+            messages_compacted: None,
+            summary_chars: None,
+            active_messages: None,
+        };
+        self.session
+            .record_compaction_event(&event, event.method.as_deref(), None);
+        self.persist_session_best_effort("cold cache notice");
+        Some((detail, Some(event)))
     }
 
     /// Cold-cache snapcompact: once the prompt cache TTL lapsed, fold history
@@ -1366,16 +1425,19 @@ impl Agent {
                     // One cold cache, one reduction: when the shake alone cannot
                     // reach the target and the fold will run, fold instead of
                     // shaking first and then folding the shaken prefix again.
-                    let fold_instead = target.is_some_and(|target| {
-                        manager.plan_cache_expiry_compaction(
+                    let fold_planned = target.is_some()
+                        && manager.plan_cache_expiry_compaction(
                             self.session.provider_messages(),
                             std::time::SystemTime::now(),
                             ttl,
-                        ) && !manager.cold_shake_reaches_request_target(
-                            self.session.provider_messages(),
-                            target,
-                        )
-                    });
+                        );
+                    let fold_instead = fold_planned
+                        && target.is_some_and(|target| {
+                            !manager.cold_shake_reaches_request_target(
+                                self.session.provider_messages(),
+                                target,
+                            )
+                        });
                     if fold_instead {
                         logging::info(&format!(
                             "[compaction] cold cache: shake alone cannot reach ~{}K from ~{}K, folding instead",
@@ -1384,7 +1446,7 @@ impl Agent {
                         ));
                     }
                     if let Some((detail, event)) =
-                        self.maybe_shake_before_request(&mut manager, fold_instead)
+                        self.maybe_shake_before_request(&mut manager, fold_instead, fold_planned)
                     {
                         logging::info(&detail);
                         if let Some(tx) = event_tx {

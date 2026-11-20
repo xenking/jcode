@@ -940,6 +940,10 @@ fn memory_injection_row(injection: &StoredMemoryInjection) -> RenderedMessage {
     }
 }
 
+/// Divider method for a request sent on an expired prompt cache with nothing
+/// trimmed. It is a notice, not a compaction.
+pub const CACHE_COLD_DIVIDER_METHOD: &str = "cache_cold";
+
 /// The transcript divider body for a compaction: `label` + blank line + detail.
 ///
 /// The label is what a collapsed divider shows (`compacted · snapcompact ·
@@ -964,6 +968,20 @@ pub fn compaction_divider_content(
     // strings and integers, whose Display implementations cannot return Err.
     use std::fmt::Write as _;
     let method = method.unwrap_or("summary");
+    if method == CACHE_COLD_DIVIDER_METHOD {
+        // Nothing was compacted: the provider's prompt cache expired and the
+        // whole prompt is written to it again.
+        let size = pre_tokens.map(compact_token_count);
+        let label = match &size {
+            Some(size) => format!("cache cold · {size} re-cached"),
+            None => "cache cold".to_string(),
+        };
+        return format!(
+            "{label}\n\nThe provider's prompt cache expired while this session was idle, so \
+             this request writes the whole prompt to the cache again. Nothing was removed \
+             from the conversation."
+        );
+    }
     let mut parts: Vec<String> = Vec::new();
     if idle {
         parts.push("compacted while waiting".to_string());

@@ -360,3 +360,89 @@ async fn daemon_cold_cache_unreducible_prompt_is_not_sent() {
             .contains("refusing to resend")
     );
 }
+
+/// 2026-11-20 01:30: a cold cache made the shake cut three tool outputs out of
+/// a 102K context to save 4K. The prompt was re-cached in full either way, so
+/// the cut only lost context. Small savings must leave the history alone, and
+/// the transcript must still say the cache went cold.
+#[tokio::test]
+async fn a_cold_cache_does_not_shake_for_a_few_percent() {
+    let _guard = crate::storage::lock_test_env();
+    // The tool results outside the 16K protected tail hold about 6K of a
+    // ~133K context: over the 4K absolute floor, under the 10% a cold shake
+    // must free.
+    let (_home, mut agent, before) = fixture(0, 100_000, 1_200).await;
+    {
+        let compaction = agent.registry.compaction();
+        let manager = compaction.read().await;
+        let saved = crate::compaction::shake_savings(
+            agent.session.provider_messages(),
+            &manager.shake_config().unwrap(),
+        );
+        assert!(
+            saved >= 4_000 && saved * 10 < before,
+            "fixture must sit between the two thresholds: {saved} of {before}"
+        );
+    }
+    assert!((120_000..160_000).contains(&before), "fixture: {before}");
+    // Under the 200K cold-fold threshold, so no fold follows the shake.
+    agent
+        .registry
+        .compaction()
+        .write()
+        .await
+        .note_provider_response(
+            std::time::SystemTime::now() - Duration::from_secs(3_601),
+            Some(before as u64),
+        );
+    let original = agent.session.messages_for_provider().to_vec();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let tx = crate::stream_batching::BatchingSender::new(tx, agent.session_id().into());
+
+    let (outgoing, _) = agent.messages_for_provider(Some(&tx)).await.unwrap();
+
+    assert_eq!(
+        serde_json::to_value(&outgoing).unwrap(),
+        serde_json::to_value(&original).unwrap(),
+        "a shake worth a few percent must not rewrite history"
+    );
+    let methods: Vec<_> = agent
+        .session
+        .replay_events
+        .iter()
+        .filter_map(|record| match &record.kind {
+            crate::session::StoredReplayEventKind::Compaction { method, .. } => method.clone(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        methods,
+        [crate::session::CACHE_COLD_DIVIDER_METHOD],
+        "only the cold-cache notice is recorded, no shake"
+    );
+    drop(tx);
+    let mut dividers = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let ServerEvent::Compaction { divider, .. } = event {
+            dividers.extend(divider);
+        }
+    }
+    assert_eq!(dividers.len(), 1, "one cold-cache notice: {dividers:?}");
+    assert!(dividers[0].starts_with("cache cold · "), "{}", dividers[0]);
+
+    // A retried request is the same cold cache: no second notice.
+    agent.messages_for_provider(None).await.unwrap();
+    let stored = agent
+        .session
+        .replay_events
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.kind,
+                crate::session::StoredReplayEventKind::Compaction { method: Some(method), .. }
+                    if method == crate::session::CACHE_COLD_DIVIDER_METHOD
+            )
+        })
+        .count();
+    assert_eq!(stored, 1);
+}
