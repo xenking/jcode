@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "ev", rename_all = "snake_case")]
 pub enum ApiEvent {
+    DraftModels {
+        current: Option<String>,
+        routes: Vec<ModelRouteInfo>,
+    },
     /// Handshake accepted. Sent in reply to `Hello`.
     HelloOk {
         version: u32,

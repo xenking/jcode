@@ -1415,6 +1415,19 @@ impl JcodeClient {
         .map(drop)
     }
 
+    /// Routes and default model for a new local conversation. Does not create one.
+    pub fn list_draft_models(
+        &self,
+    ) -> Result<(Option<String>, Vec<jcode_harness_api::ModelRouteInfo>)> {
+        if !self.supports("draft_model_catalog") {
+            return Ok((None, Vec::new()));
+        }
+        match self.request_ok(ApiRequest::ListDraftModels)?.event {
+            ApiEvent::DraftModels { current, routes } => Ok((current, routes)),
+            other => Err(unexpected("draft_models", &other)),
+        }
+    }
+
     /// Models this session can switch to, and which one is serving it.
     pub fn list_models(&self, session_id: &str) -> Result<(Vec<String>, Option<String>)> {
         match self

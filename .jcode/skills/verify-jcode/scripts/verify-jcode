@@ -387,6 +387,45 @@ class Harness:
                 self.frame(label + "-after")
                 result.update(status="observed", expected_text=expect)
                 return result
+            if feature == "draft-models":
+                socket_path = self.root / "api.sock"
+                env = dict(self.env, JCODE_SOCKET=str(self.root / "app.sock"),
+                           JCODE_API_SOCKET=str(socket_path))
+                self.spawn("api-bridge", [self.binary, "--no-update", "--no-selfdev", "api-bridge"], env)
+                wait_for(socket_path.is_socket, "private API bridge socket")
+                session_dir = self.root / "data/sessions"
+                before_files = sorted(path.name for path in session_dir.iterdir())
+                with socket.socket(socket.AF_UNIX) as connection:
+                    connection.settimeout(8)
+                    connection.connect(str(socket_path))
+                    with connection.makefile("rwb") as wire:
+                        def call(request_id, request, **fields):
+                            frame = {"v": 1, "id": request_id, "req": request, **fields}
+                            self.event(action="api-request", frame=frame)
+                            wire.write((json.dumps(frame) + "\n").encode())
+                            wire.flush()
+                            for line in wire:
+                                reply = json.loads(line)
+                                if reply.get("reply_to") == request_id:
+                                    return reply
+                            raise RuntimeError("Private bridge closed before replying")
+
+                        hello = call(1, "hello", min_version=1, max_version=1, client="verify-jcode/draft-models")
+                        require("draft_model_catalog" in hello.get("capabilities", []), "Missing draft catalog capability")
+                        before = call(2, "list_sessions")
+                        models = call(3, "list_draft_models")
+                        after = call(4, "list_sessions")
+                require(models.get("ev") == "draft_models" and models.get("current") == "fake-model",
+                        f"Unexpected draft catalog: {models}")
+                require(any(route["model"] == "fake-model" and route["available"] for route in models["routes"]),
+                        "Fake provider's ready model is absent from the draft catalog")
+                require(before.get("ev") == after.get("ev") == "sessions" and before["sessions"] == after["sessions"],
+                        "Reading the catalog changed the session list")
+                require(sorted(path.name for path in session_dir.iterdir()) == before_files,
+                        "Reading the catalog created persistent state")
+                require(len(self.records()) == start, "The draft catalog triggered inference")
+                result.update(status="passed", models=models, session_count=len(after["sessions"]))
+                return result
             if feature == "cli":
                 output = self.cli(label, token, mode)
                 result["mode"] = mode
@@ -747,7 +786,7 @@ def main():
         command.add_argument("--evidence", required=True)
         if name == "drive":
             command.add_argument("feature", choices=["cli", "tui", "slash", "resume", "restart", "cancel",
-                                                     "side-panel", "mode", "mode-set", "input", "keys"])
+                                                     "side-panel", "mode", "mode-set", "draft-models", "input", "keys"])
             command.add_argument("--mode", choices=["plain", "json", "ndjson"], default="json")
             command.add_argument("--text", help="Text for exploratory input drive")
             command.add_argument("--keys", nargs="+", help="tmux keys, e.g. Escape or C-u")

@@ -74,6 +74,8 @@ pub struct QueuedPrompt {
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "req", rename_all = "snake_case")]
 pub enum ApiRequest {
+    /// Discover routes for a new local conversation without creating it.
+    ListDraftModels,
     /// Version negotiation. Must be the first frame on a connection.
     Hello {
         min_version: u32,

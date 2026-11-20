@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 18;
+export const API_VERSION_MINOR = 19;
 
 export type RuntimeCommand = "mode" | "skills" | "context" | "info" | "cache" | "memory" | "swarm" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout" | "background_output";
 
@@ -257,6 +257,7 @@ export interface ToolConfiguration {
 }
 
 export type ApiRequest =
+  | { req: "list_draft_models" }
   | { req: "hello"; min_version: number; max_version: number; client: string; supports_user_response?: boolean }
   | { req: "list_sessions"; include_archived?: boolean; limit?: number }
   | { req: "archive_session"; session_id: string }
@@ -410,6 +411,7 @@ export interface SidePanelSnapshot {
 }
 
 export type ApiEvent =
+  | { ev: "draft_models"; current: string | null; routes: ModelRouteInfo[] }
   | { ev: "hello_ok"; version: number; server: string; capabilities?: string[]; runtime_identity?: { pid: number; binary_path: string; git_hash: string; version_label?: string; reload_id?: string; generation: number } }
   | { ev: "ok" }
   | { ev: "runtime_command_result"; session_id: string; command: RuntimeCommand; data: unknown; message: string }
@@ -641,6 +643,7 @@ export type ServerFrame = { v: number; reply_to?: number } & UnknownApiEvent;
 /** Every event tag the SDK knows about, for drift checks and routing. */
 export const KNOWN_EVENT_KINDS = [
   "runtime_command_result",
+  "draft_models",
   "hello_ok",
   "ok",
   "error",
@@ -714,6 +717,7 @@ export const KNOWN_EVENT_KINDS = [
 export const KNOWN_REQUEST_KINDS = [
   "runtime_command",
   "hello",
+  "list_draft_models",
   "list_sessions",
   "archive_session",
   "restore_session",

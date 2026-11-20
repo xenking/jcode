@@ -906,6 +906,17 @@ pub(super) async fn handle_comm_list_models(
     provider_template: &Arc<dyn Provider>,
     send_event: impl FnOnce(ServerEvent),
 ) {
+    if req_session_id.is_empty() {
+        let mut model_routes = provider_template.model_routes();
+        crate::model_usage::enrich_routes(&mut model_routes);
+        send_event(ServerEvent::CommListModelsResponse {
+            id,
+            current_model: Some(provider_template.model()),
+            configured_swarm_model: None,
+            model_routes,
+        });
+        return;
+    }
     let coordinator = resolve_coordinator_spawn_identity(req_session_id, sessions).await;
 
     let agent = {

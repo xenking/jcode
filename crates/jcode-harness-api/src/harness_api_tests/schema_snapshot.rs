@@ -441,6 +441,7 @@ fn unknown_fields_are_ignored() {
 #[test]
 fn request_roundtrip() {
     let reqs = [
+        ApiRequest::ListDraftModels,
         ApiRequest::Hello {
             min_version: 1,
             max_version: 1,

@@ -96,6 +96,56 @@ async fn daemon_capabilities(socket: &std::path::Path) -> Option<Vec<String>> {
         .flatten()
 }
 
+async fn daemon_draft_models(socket: &std::path::Path) -> ApiEvent {
+    let query = async {
+        // A first-frame lightweight command closes its daemon stream after the
+        // reply. Give it its own connection, never the client's session stream.
+        let mut stream = Stream::connect(socket).await?;
+        write_json_line(
+            &mut stream,
+            &serde_json::json!({"type":"comm_list_models", "id":1, "session_id":""}),
+        )
+        .await?;
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        while read_frame(&mut reader, &mut line).await? != 0 {
+            let reply: Value = serde_json::from_str(&line)?;
+            if reply["id"] != 1 {
+                continue;
+            }
+            match reply["type"].as_str() {
+                Some("comm_list_models_response") => {
+                    return Ok(ApiEvent::DraftModels {
+                        current: reply["current_model"].as_str().map(str::to_owned),
+                        routes: if reply["model_routes"].is_null() {
+                            Vec::new()
+                        } else {
+                            serde_json::from_value(reply["model_routes"].clone())?
+                        },
+                    });
+                }
+                Some("error") => anyhow::bail!(
+                    "{}",
+                    reply["message"].as_str().unwrap_or("catalog unavailable")
+                ),
+                _ => {}
+            }
+        }
+        anyhow::bail!("daemon closed before returning the draft catalog")
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(4), query).await {
+        Ok(Ok(event)) => event,
+        Ok(Err(error)) => ApiEvent::Error {
+            code: ErrorCode::Internal,
+            message: error.to_string(),
+        },
+        Err(_) => ApiEvent::Error {
+            code: ErrorCode::Internal,
+            message: "Draft model catalog timed out".into(),
+        },
+    }
+}
+
 /// Fresh source-daemon connections. A disposable Ping never subscribes,
 /// resumes, or creates a session. Failed snapshots clear connection presence.
 async fn daemon_user_connections(socket: &std::path::Path) -> std::collections::HashSet<String> {
@@ -491,6 +541,7 @@ where
             server: format!("jcode-harness-api-bridge/{}", env!("CARGO_PKG_VERSION")),
             capabilities: [
                 "sessions",
+                "draft_model_catalog",
                 "bridge_lifecycle_v1",
                 "peer_user_message_v1",
                 "streaming",
@@ -640,6 +691,12 @@ where
                     state.user_connected_sessions = if user_connections_supported {
                         daemon_user_connections(&legacy_socket).await
                     } else { Default::default() };
+                }
+                if request["req"] == "list_draft_models" {
+                    let id = request["id"].as_u64().unwrap_or(0);
+                    let event = daemon_draft_models(&legacy_socket).await;
+                    write_json_line(&mut write_half, &ServerFrame::reply(id, event)).await?;
+                    continue;
                 }
                 // Translation may inspect persisted session/archive files. Tell
                 // Tokio before entering that synchronous region so it can keep
