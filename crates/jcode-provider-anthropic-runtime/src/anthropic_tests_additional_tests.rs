@@ -1,42 +1,70 @@
 use super::*;
 
-#[tokio::test]
-async fn consecutive_split_requests_cache_tool_result_before_screen_reminder() {
-    use std::io::{BufRead, BufReader, Read, Write};
+type CapturedRequest = (String, serde_json::Value);
 
-    let _lock = jcode_base::storage::lock_test_env();
-    let _home = tempfile::TempDir::new().unwrap();
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", _home.path());
+fn capture_anthropic_requests<const N: usize>()
+-> (String, std::thread::JoinHandle<[CapturedRequest; N]>) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::time::{Duration, Instant};
+
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
     let endpoint = format!("http://{}/v1/messages", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
-        std::array::from_fn::<_, 2, _>(|_| {
-            let (mut socket, _) = listener.accept().unwrap();
+        std::array::from_fn(|_| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "Anthropic request did not arrive"
+                        );
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accepting Anthropic request: {error}"),
+                }
+            };
+            socket.set_nonblocking(false).unwrap();
             socket
-                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
             let mut reader = BufReader::new(&mut socket);
             let mut length = None;
+            let mut credential = String::new();
             loop {
                 let mut line = String::new();
                 assert_ne!(reader.read_line(&mut line).unwrap(), 0);
                 if line == "\r\n" {
                     break;
                 }
-                if let Some((key, value)) = line.split_once(':')
-                    && key.eq_ignore_ascii_case("content-length")
-                {
-                    length = Some(value.trim().parse().unwrap());
+                if let Some((key, value)) = line.split_once(':') {
+                    if key.eq_ignore_ascii_case("content-length") {
+                        length = Some(value.trim().parse().unwrap());
+                    } else if key.eq_ignore_ascii_case("authorization")
+                        || key.eq_ignore_ascii_case("x-api-key")
+                    {
+                        credential = value.trim().to_string();
+                    }
                 }
             }
             let mut request = vec![0; length.unwrap()];
             reader.read_exact(&mut request).unwrap();
             let body = "event: message_stop\ndata: {}\n\n";
             write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-            serde_json::from_slice::<serde_json::Value>(&request).unwrap()
+            (credential, serde_json::from_slice(&request).unwrap())
         })
     });
+    (endpoint, server)
+}
 
+#[tokio::test]
+async fn consecutive_split_requests_cache_tool_result_before_screen_reminder() {
+    let _lock = jcode_base::storage::lock_test_env();
+    let _home = tempfile::TempDir::new().unwrap();
+    let _home_guard = EnvVarGuard::set("JCODE_HOME", _home.path());
+    let (endpoint, server) = capture_anthropic_requests::<2>();
     let _endpoint = EnvVarGuard::set("JCODE_ANTHROPIC_API_BASE", endpoint);
     let _auth = EnvVarGuard::set("JCODE_ANTHROPIC_AUTH", "header");
     let _key_name = EnvVarGuard::set("JCODE_ANTHROPIC_API_KEY_NAME", "JCODE_TEST_ANTHROPIC_KEY");
@@ -106,7 +134,7 @@ async fn consecutive_split_requests_cache_tool_result_before_screen_reminder() {
         });
         messages.push(Message::user("new user turn"));
     }
-    let [first, second] = server.join().unwrap();
+    let [(_, first), (_, second)] = server.join().unwrap();
     let result = &first["messages"][2]["content"][0];
     assert_eq!(result["type"], "tool_result");
     assert_eq!(result["cache_control"]["type"], "ephemeral");
@@ -174,6 +202,134 @@ async fn consecutive_split_requests_cache_tool_result_before_screen_reminder() {
             .collect();
         assert_eq!(directives.len(), 4);
         assert!(directives.iter().all(|c| *c == directives[0]));
+    }
+}
+
+#[test]
+fn cache_budget_for_short_and_long_histories_in_both_auth_and_completion_modes() {
+    let _lock = jcode_base::storage::lock_test_env();
+    let home = tempfile::TempDir::new().unwrap();
+    let _home_guard = EnvVarGuard::set("JCODE_HOME", home.path());
+    let (endpoint, server) = capture_anthropic_requests::<16>();
+    let _endpoint = EnvVarGuard::set("JCODE_ANTHROPIC_API_BASE", &endpoint);
+    let _auth = EnvVarGuard::set("JCODE_ANTHROPIC_AUTH", "header");
+    let _model = EnvVarGuard::set("JCODE_ANTHROPIC_MODEL", "claude-sonnet-4-6");
+    let _key_name = EnvVarGuard::set("JCODE_ANTHROPIC_API_KEY_NAME", "JCODE_TEST_ANTHROPIC_KEY");
+    let _key = EnvVarGuard::set("JCODE_TEST_ANTHROPIC_KEY", "fake-key");
+    let mut api_key = AnthropicProvider::new();
+    api_key.client = Client::builder().no_proxy().build().unwrap();
+    *api_key.credential_mode.try_write().unwrap() = AnthropicCredentialMode::ApiKey;
+    let oauth = AnthropicProvider::new()
+        .with_oauth_test_endpoint(&endpoint)
+        .unwrap();
+    *oauth.credentials.try_write().unwrap() = Some(CachedCredentials {
+        access_token: "fake-oauth".into(),
+        refresh_token: String::new(),
+        expires_at: i64::MAX,
+    });
+
+    let mut history = vec![Message::user("first question")];
+    for i in 0..25 {
+        history.push(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: format!("answer {i}"),
+                cache_control: None,
+            }]
+            .into(),
+            timestamp: None,
+            tool_duration_ms: None,
+        });
+        history.push(Message::user(&format!("question {i}")));
+    }
+    let tools = [ToolDefinition::new(
+        "read",
+        "Read a file",
+        serde_json::json!({"type":"object"}),
+    )];
+    let cases = [
+        (1, vec![0]),
+        (2, vec![0, 1]),
+        (3, vec![0, 2]),
+        (history.len(), vec![48, 50]),
+    ];
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        for provider in [&api_key, &oauth] {
+            for split in [false, true] {
+                for (length, _) in &cases {
+                    let messages = &history[..*length];
+                    let mut stream = if split {
+                        provider
+                            .complete_split(
+                                messages,
+                                &tools,
+                                "stable instructions",
+                                "volatile screen",
+                                None,
+                            )
+                            .await
+                    } else {
+                        provider
+                            .complete(messages, &tools, "stable instructions", None)
+                            .await
+                    }
+                    .unwrap();
+                    while let Some(event) = stream.next().await {
+                        event.unwrap();
+                    }
+                }
+            }
+        }
+    });
+    for (i, (credential, request)) in server.join().unwrap().into_iter().enumerate() {
+        let is_oauth = i >= 8;
+        assert_eq!(
+            credential,
+            if is_oauth {
+                "Bearer fake-oauth"
+            } else {
+                "fake-key"
+            }
+        );
+        let case = &cases[i % cases.len()];
+        let messages = request["messages"].as_array().unwrap();
+        let message_markers: Vec<_> = messages
+            .iter()
+            .enumerate()
+            .flat_map(|(index, m)| {
+                m["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(move |b| b.get("cache_control").map(|_| index))
+            })
+            .collect();
+        assert_eq!(
+            message_markers, case.1,
+            "request {i}, history length {}",
+            case.0
+        );
+        let system = request["system"].as_array().unwrap();
+        assert_eq!(system.len(), 1 + usize::from(is_oauth));
+        if is_oauth {
+            assert!(
+                system[0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("x-anthropic-billing-header: ")
+            );
+            assert!(system[0].get("cache_control").is_none());
+        }
+        assert_eq!(system.last().unwrap()["text"], "stable instructions");
+        assert_eq!(system.last().unwrap()["cache_control"]["type"], "ephemeral");
+        let tools = request["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["cache_control"]["type"], "ephemeral");
+        assert!(message_markers.len() + 2 <= 4);
     }
 }
 
