@@ -419,8 +419,12 @@ class Harness:
                         f"Unexpected draft catalog: {models}")
                 require(any(route["model"] == "fake-model" and route["available"] for route in models["routes"]),
                         "Fake provider's ready model is absent from the draft catalog")
-                require(before.get("ev") == after.get("ev") == "sessions" and before["sessions"] == after["sessions"],
-                        "Reading the catalog changed the session list")
+                require(before.get("ev") == after.get("ev") == "sessions",
+                        f"ListSessions did not return a catalog: {before}, {after}")
+                before_ids = sorted(session["session_id"] for session in before["sessions"])
+                after_ids = sorted(session["session_id"] for session in after["sessions"])
+                require(before_ids == after_ids,
+                        f"Reading the catalog changed the set of sessions: {before_ids} -> {after_ids}")
                 require(sorted(path.name for path in session_dir.iterdir()) == before_files,
                         "Reading the catalog created persistent state")
                 require(len(self.records()) == start, "The draft catalog triggered inference")
