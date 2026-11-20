@@ -73,6 +73,16 @@ async fn emit_external_wake(
     true
 }
 
+/// Scan only after the attachment is established, without holding up its socket.
+pub(super) fn schedule_detached_completion_replay(session_id: &str) {
+    let session_id = session_id.to_owned();
+    tokio::spawn(async move {
+        crate::background::global()
+            .replay_detached_completions_for(&session_id)
+            .await;
+    });
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "background task completion needs session, interrupt, and swarm status state"

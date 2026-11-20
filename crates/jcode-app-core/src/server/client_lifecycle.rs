@@ -2011,16 +2011,6 @@ pub(super) async fn handle_client(
                             ),
                         )
                         .await?;
-                        // A connection that switched sessions no longer owns the
-                        // old session's SDK tools: the callback stream is this
-                        // connection's, so answering them would route a callback
-                        // to a client that is not showing that session.
-                        if client_session_id != pre_resume_session_id {
-                            crate::tool::sdk::release_other_sessions(
-                                &client_connection_id,
-                                &client_session_id,
-                            );
-                        }
                         session_control = refresh_session_control_handle(
                             &client_session_id,
                             &agent,
@@ -2150,6 +2140,7 @@ pub(super) async fn handle_client(
                 }
                 client_subscribed = true;
                 provisional_session = false;
+                super::background_tasks::schedule_detached_completion_replay(&client_session_id);
             }
 
             Request::GetHistory { id } => {
@@ -2322,12 +2313,6 @@ pub(super) async fn handle_client(
                 .await?;
                 if client_session_id != pre_resume_session_id {
                     provisional_session = false;
-                    // See the target-aware subscribe path: a switched connection
-                    // must not keep answering the old session's tool callbacks.
-                    crate::tool::sdk::release_other_sessions(
-                        &client_connection_id,
-                        &client_session_id,
-                    );
                 }
                 super::client_session::apply_or_defer_desktop_response_capability(
                     &agent,
@@ -2344,6 +2329,7 @@ pub(super) async fn handle_client(
                 if let Some(snapshot) = try_available_models_snapshot(&agent).await {
                     last_available_models_snapshot = Some(snapshot);
                 }
+                super::background_tasks::schedule_detached_completion_replay(&client_session_id);
             }
 
             Request::ResumeAllSessions { id } => {
