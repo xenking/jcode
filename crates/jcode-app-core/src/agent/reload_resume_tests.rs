@@ -167,6 +167,8 @@ fn session_has_synthetic_user_prompt(session: &crate::session::Session) -> bool 
 async fn memory_recall_is_a_stable_responses_prefix_across_turns_and_resume() {
     let _lock = crate::storage::lock_test_env();
     let _home = TestHome::new();
+    crate::config::invalidate_config_cache();
+    assert!(crate::config::config().features.persist_memory_injections);
     let mut session = crate::session::Session::create(None, None);
     let project = tempfile::tempdir().unwrap();
     session.working_dir = Some(project.path().to_string_lossy().into_owned());
@@ -254,11 +256,11 @@ async fn memory_recall_is_a_stable_responses_prefix_across_turns_and_resume() {
     };
     assert_eq!(first.iter().filter(|item| is_recall(item)).count(), 1);
     let prefix = serde_json::to_vec(first).unwrap();
-    for request in &requests[1..] {
+    for (index, request) in requests.iter().enumerate().skip(1) {
         assert_eq!(
             request.iter().filter(|item| is_recall(item)).count(),
             1,
-            "exactly one memory recall must survive every replay"
+            "exactly one memory recall must survive replay {index}: {request:#?}"
         );
         assert_eq!(serde_json::to_vec(&request[..first.len()]).unwrap(), prefix);
     }
