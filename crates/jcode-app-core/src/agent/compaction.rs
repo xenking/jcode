@@ -60,6 +60,46 @@ impl Agent {
         event
     }
 
+    /// The server only calls this while a client is attached and owns no turn.
+    pub(crate) fn idle_cache_expiry_at(
+        &mut self,
+        now: std::time::SystemTime,
+    ) -> (bool, Option<CompactionEvent>) {
+        if !self.provider.uses_jcode_compaction() {
+            return (false, None);
+        }
+        let compaction = self.registry.compaction();
+        let Ok(mut manager) = compaction.try_write() else {
+            return (false, None);
+        };
+        let ttl = self.cache_expiry_ttl_secs(&manager);
+        if !manager.claim_idle_cache_expiry(
+            now,
+            ttl,
+            self.session
+                .last_cache_expiry_compaction_for
+                .map(Into::into),
+        ) {
+            return (false, None);
+        }
+        let boundary = CompactionBoundary::Idle;
+        let messages = self.session.provider_messages();
+        let target = manager.cache_expiry_request_target(messages, now, ttl);
+        let fold_planned =
+            target.is_some() && manager.plan_cache_expiry_compaction(messages, now, ttl);
+        let fold_instead = self.prefer_cold_cache_fold(&manager, target, fold_planned);
+        if let Some((detail, Some(event))) =
+            self.maybe_shake_at(&mut manager, now, boundary, fold_instead, fold_planned)
+        {
+            logging::info(&detail);
+            return (false, Some(event));
+        }
+        (
+            self.maybe_cache_expiry_compaction(&mut manager, now, boundary),
+            None,
+        )
+    }
+
     /// Opportunistic compaction while the session is idle but still waiting.
     ///
     /// The caller owns the definition of "waiting" (a swarm member still
@@ -77,18 +117,12 @@ impl Agent {
             Ok(manager) => manager,
             Err(_) => return false,
         };
-        let ttl = {
-            let configured = manager.effective_config().cache_ttl_secs;
-            if configured > 0 {
-                Some(configured)
-            } else {
-                let model = self.provider.model();
-                crate::provider::shake_cache_ttl_for_provider_model(
-                    self.provider.name(),
-                    Some(&model),
-                )
-            }
-        };
+        let ttl = self.cache_expiry_ttl_secs(&manager);
+        if manager.attempted_cache_expiry_compaction()
+            || self.cache_expiry_already_compacted(&manager, now, ttl)
+        {
+            return false;
+        }
         let messages = self.session.provider_messages();
         if !manager.plan_idle_precompaction_with(messages, now, ttl) {
             return false;

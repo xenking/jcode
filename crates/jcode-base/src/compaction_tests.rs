@@ -30,6 +30,7 @@ async fn snapcompact_copied_session_pipeline_benchmark() {
         true,
         None,
         None,
+        false,
     )
     .await
     .unwrap();
@@ -77,6 +78,7 @@ async fn snapcompact_copied_session_incremental_benchmark() {
             true,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -388,6 +390,7 @@ async fn ineffective_snapcompact_escalates_to_text_summary() {
         None,
         0,
         500_000,
+        false,
     )
     .await
     .unwrap();
@@ -412,6 +415,7 @@ async fn ineffective_text_compaction_is_reported_as_failure() {
         None,
         400_000,
         500_000,
+        false,
     )
     .await;
     assert!(matches!(result, Err(error) if error.to_string().contains("at least 10%")));
@@ -2646,6 +2650,49 @@ async fn cache_expiry_snapcompact_runs_on_first_turn_after_ttl_once() {
     m.note_provider_response(t1, Some(0));
     assert!(!m.plan_cache_expiry_compaction(&msgs, t1 + Duration::from_secs(10), Some(300)));
     assert!(m.plan_cache_expiry_compaction(&msgs, t1 + Duration::from_secs(300), Some(300)));
+}
+
+#[tokio::test]
+async fn idle_cache_expiry_uses_a_local_archive_when_the_model_can_read_it() {
+    let messages = std::iter::once(make_text_message(
+        Role::User,
+        &"historical payload ".repeat(12_000),
+    ))
+    .chain((0..12).map(|_| make_text_message(Role::User, "recent")))
+    .collect::<Vec<_>>();
+    let mut manager = cache_expiry_manager();
+    manager.compaction_config.cache_expiry_threshold_tokens = 40_000;
+    manager.compaction_config.snapcompact_decisions_model = "auto".into();
+    let response = SystemTime::UNIX_EPOCH;
+    let now = response + Duration::from_secs(300);
+    manager.note_provider_response(response, None);
+    assert!(manager.claim_idle_cache_expiry(now, Some(300), None));
+    assert!(manager.plan_cache_expiry_compaction(&messages, now, Some(300)));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    assert!(manager.start_idle_cache_expiry_compaction(
+        &messages,
+        Arc::new(CountingVisionProvider {
+            calls: calls.clone()
+        }),
+    ));
+    let event = tokio::time::timeout(Duration::from_secs(20), async {
+        while manager.is_compacting() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            if let Some(event) = manager.poll_compaction_event_with(&messages) {
+                return event;
+            }
+        }
+        panic!(
+            "idle archive didn't complete: {:?}",
+            manager.take_compaction_error()
+        );
+    })
+    .await
+    .unwrap();
+    assert_eq!(event.trigger, CACHE_EXPIRY_COMPACTION_TRIGGER);
+    assert_eq!(event.method.as_deref(), Some("snapcompact"));
+    assert!(event.post_tokens.unwrap() < 40_000);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
 /// Idle pre-compaction: a waiting session folds its context early instead of

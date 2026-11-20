@@ -275,6 +275,7 @@ pub struct CompactionManager {
     /// Response timestamp whose cold stretch already got a cache-expiry
     /// snapcompact, so a failed or skipped attempt does not repeat every turn.
     cache_expiry_compacted_for: Option<SystemTime>,
+    idle_cache_expiry_checked_for: Option<SystemTime>,
 }
 
 /// Trigger label for snapcompact started by an expired prompt cache.
@@ -448,6 +449,7 @@ impl CompactionManager {
             last_response_at: None,
             last_response_cache_read: false,
             cache_expiry_compacted_for: None,
+            idle_cache_expiry_checked_for: None,
         }
     }
 
@@ -1187,12 +1189,9 @@ impl CompactionManager {
         snapcompact_preferred: bool,
     ) -> Option<(ShakeReason, ShakeConfig)> {
         let cfg = self.shake_config()?;
-        // Cache expiry is a request-boundary reduction, not a choice between
-        // ordinary compaction strategies. Always try the cheap local pass first.
+        // Prefer the cheap cold-cache pass over ordinary pre-compaction.
         if self.compaction_config.shake_cache_expiry
-            && let (Some(ttl), Some(last)) =
-                (cache_ttl_secs.filter(|ttl| *ttl > 0), self.last_response_at)
-            && wall_clock_elapsed(now, last) >= Duration::from_secs(ttl)
+            && self.expired_cache_response(now, cache_ttl_secs).is_some()
         {
             return Some((ShakeReason::CacheExpiry, cfg));
         }
@@ -1213,6 +1212,42 @@ impl CompactionManager {
         (self.compaction_config.shake_cache_expiry
             && wall_clock_elapsed(now, last).as_secs() >= ttl)
             .then_some((ShakeReason::CacheExpiry, cfg))
+    }
+
+    pub fn expired_cache_response(
+        &self,
+        now: SystemTime,
+        cache_ttl_secs: Option<u64>,
+    ) -> Option<SystemTime> {
+        let ttl = cache_ttl_secs.filter(|ttl| *ttl > 0)?;
+        let last = self.last_response_at?;
+        (wall_clock_elapsed(now, last) >= Duration::from_secs(ttl)).then_some(last)
+    }
+
+    pub fn attempted_cache_expiry_compaction(&self) -> bool {
+        self.last_response_at.is_some() && self.cache_expiry_compacted_for == self.last_response_at
+    }
+
+    /// Claim one cold-cache evaluation per expiry for idle clients sharing
+    /// this manager. No-op checks do not need a session write.
+    pub fn claim_idle_cache_expiry(
+        &mut self,
+        now: SystemTime,
+        ttl: Option<u64>,
+        persisted: Option<SystemTime>,
+    ) -> bool {
+        let Some(last) = self.expired_cache_response(now, ttl) else {
+            return false;
+        };
+        if self.is_compacting()
+            || self.idle_cache_expiry_checked_for == Some(last)
+            || self.attempted_cache_expiry_compaction()
+            || persisted == Some(last)
+        {
+            return false;
+        }
+        self.idle_cache_expiry_checked_for = Some(last);
+        true
     }
 
     /// Seed the cache-expiry clock from persisted session state.
@@ -1434,7 +1469,7 @@ impl CompactionManager {
         {
             return false;
         }
-        if self.cache_expiry_compacted_for == self.last_response_at {
+        if self.attempted_cache_expiry_compaction() {
             return false;
         }
         self.active_messages(all_messages).len() > RECENT_TURNS_TO_KEEP
@@ -1476,12 +1511,10 @@ impl CompactionManager {
         cache_ttl_secs: Option<u64>,
     ) -> Option<usize> {
         let cfg = &self.compaction_config;
-        let ttl = cache_ttl_secs.filter(|ttl| *ttl > 0)?;
-        let last = self.last_response_at?;
         (cfg.snapcompact
             && cfg.snapcompact_cache_expiry
             && cfg.cache_expiry_threshold_tokens > 0
-            && wall_clock_elapsed(now, last) >= Duration::from_secs(ttl)
+            && self.expired_cache_response(now, cache_ttl_secs).is_some()
             && self.effective_token_count_with(all_messages) >= cfg.cache_expiry_threshold_tokens)
             .then_some(cfg.cache_expiry_threshold_tokens)
     }
@@ -1498,6 +1531,25 @@ impl CompactionManager {
             all_messages,
             provider,
             CACHE_EXPIRY_COMPACTION_TRIGGER.to_string(),
+        );
+        self.pending_task.is_some()
+    }
+
+    /// Prefer the local archive when it can be sent verbatim. Attached
+    /// sessions may still use the ordinary fallback if the archive fails.
+    pub fn start_idle_cache_expiry_compaction(
+        &mut self,
+        all_messages: &[Message],
+        provider: Arc<dyn Provider>,
+    ) -> bool {
+        self.cache_expiry_compacted_for = self.last_response_at;
+        let prefer_local =
+            snapcompact_pages_usable(provider.supports_image_input(), &provider.model());
+        self.start_background_compaction_with(
+            all_messages,
+            provider,
+            CACHE_EXPIRY_COMPACTION_TRIGGER.to_string(),
+            prefer_local,
         );
         self.pending_task.is_some()
     }
@@ -1594,6 +1646,16 @@ impl CompactionManager {
         provider: Arc<dyn Provider>,
         mode_label: String,
     ) {
+        self.start_background_compaction_with(all_messages, provider, mode_label, false);
+    }
+
+    fn start_background_compaction_with(
+        &mut self,
+        all_messages: &[Message],
+        provider: Arc<dyn Provider>,
+        mode_label: String,
+        prefer_local: bool,
+    ) {
         let active = self.active_messages(all_messages);
 
         // Calculate cutoff within active messages.
@@ -1682,9 +1744,15 @@ impl CompactionManager {
                 shake_config,
                 remaining_chars,
                 token_budget,
+                prefer_local,
             )
             .await;
             let result = match result {
+                // Automatic enrichment is optional; don't make a provider
+                // call just because an idle archive was rendered locally.
+                Ok(result) if prefer_local && decisions_model.eq_ignore_ascii_case("auto") => {
+                    Ok(result)
+                }
                 Ok(result) => {
                     Ok(snap_decisions::prepare(result, decisions_model, decisions_count).await)
                 }
@@ -1925,6 +1993,7 @@ impl CompactionManager {
                 shake_config,
                 remaining_chars,
                 token_budget,
+                false,
             )
             .await;
             let result = match result {

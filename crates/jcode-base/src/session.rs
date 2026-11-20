@@ -164,6 +164,10 @@ pub struct Session {
     /// or session resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_provider_request_at: Option<DateTime<Utc>>,
+    /// Cache touch already handled by a completed cold-cache compaction.
+    /// Unfinished work can be retried after reload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_cache_expiry_compaction_for: Option<DateTime<Utc>>,
     /// Whether this is a debug/test session (created via debug socket)
     #[serde(default)]
     pub is_debug: bool,
@@ -634,6 +638,8 @@ impl Session {
             status: self.status.clone(),
             last_pid: self.last_pid,
             last_active_at: self.last_active_at,
+            last_provider_request_at: self.last_provider_request_at,
+            last_cache_expiry_compaction_for: self.last_cache_expiry_compaction_for,
             is_debug: self.is_debug,
             hidden: self.hidden,
             saved: self.saved,
@@ -847,6 +853,13 @@ impl Session {
         self.status = meta.status;
         self.last_pid = meta.last_pid;
         self.last_active_at = meta.last_active_at;
+        // Pre-cache-expiry journals did not record these timestamps.
+        self.last_provider_request_at = meta
+            .last_provider_request_at
+            .or(self.last_provider_request_at);
+        self.last_cache_expiry_compaction_for = meta
+            .last_cache_expiry_compaction_for
+            .or(self.last_cache_expiry_compaction_for);
         self.is_debug = meta.is_debug;
         self.hidden = meta.hidden;
         self.saved = meta.saved;
@@ -897,6 +910,7 @@ impl Session {
             last_pid: Some(std::process::id()),
             last_active_at: Some(now),
             last_provider_request_at: None,
+            last_cache_expiry_compaction_for: None,
             is_debug,
             hidden: false,
             saved: false,
@@ -962,6 +976,7 @@ impl Session {
             last_pid: Some(std::process::id()),
             last_active_at: Some(now),
             last_provider_request_at: None,
+            last_cache_expiry_compaction_for: None,
             is_debug,
             hidden: false,
             saved: false,

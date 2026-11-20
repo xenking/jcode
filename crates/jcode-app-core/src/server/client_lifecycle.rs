@@ -836,12 +836,10 @@ pub(super) async fn handle_client(
                 }
                 continue;
             }
-            // Opportunistic pre-compaction for an idle but still-waiting
-            // session (swarm members running, a bg wait, an await_members
-            // dependency). Without this timer the compaction would only happen
-            // on the next user message, inside that message's own turn.
+            // Only an attached client can initiate paid compaction. Run before
+            // the next prompt, not as part of its foreground request.
             _ = idle_precompact_tick.tick(), if client_subscribed => {
-                maybe_idle_precompact(&agent, &client_session_id, client_is_processing).await;
+                maybe_idle_compact(&agent, &client_session_id, client_is_processing).await;
                 continue;
             }
             // Handle client debug commands from debug socket

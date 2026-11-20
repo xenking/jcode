@@ -44,6 +44,10 @@ impl Agent {
     }
 
     pub(crate) fn checkpoint_for_idle_unload(&mut self) -> Result<bool> {
+        if self.is_compacting_now() {
+            // The last subscriber may have detached before CompactionFinished.
+            self.poll_compaction_completion_event();
+        }
         if self.rewind_undo_snapshot.is_some() || self.idle_memory_eligible().is_none() {
             return Ok(false);
         }

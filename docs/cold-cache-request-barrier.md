@@ -29,6 +29,14 @@ Do not subtract the logged shake savings from the provider baseline: local chara
 - The expiry clock is the successful response completion recorded by `note_provider_response`, not request start. This avoids expiring during a long streaming response.
 - Previously `plan_shake_with` considered the ordinary compaction threshold before cache expiry. A vision provider with snapcompact preferred could therefore skip the local shake on a cold, already-large request. The cold reason must take priority over method ordering intended for normal warm threshold compaction.
 
+## Idle maintenance
+
+The daemon checks attached sessions every 15 seconds. An idle session can shake or fold its cold prefix after the same cache TTL and savings checks used at request time. A shake that reaches the cold request target wins over a fold. Shake alone must meet the configured absolute savings floor and the 10% savings rule when no fold is otherwise due.
+
+Only a subscribed client can initiate this work, so a closed session cannot start a paid request. A compatible vision model uses the local snapcompact archive first without automatic model-based enrichment. Text-only models, an insufficient archive, or explicitly configured model-based enrichment can still call a provider.
+
+The active turn and the idle check share the session's agent lock. If a prompt comes in before an idle fold finishes, the existing cold-request barrier waits for that fold rather than starting a second reduction. A finished result is persisted with the cache touch that triggered it and sent through the usual compaction event. A reload restores the cache clock and completed result from the snapshot and journal; it can retry an interrupted fold when the session is attached again.
+
 ## omp comparison
 
 Read-only `~/.omp/agent/config.yml`: `idleEnabled: true`, `thresholdTokens: 550000`, `idleThresholdTokens: 550000`, method order `remote, snapcompact, handoff, shake, soft`. Thus a 433K context is below this installation's ordinary idle compaction threshold.

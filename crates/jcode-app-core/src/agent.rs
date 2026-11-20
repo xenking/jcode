@@ -93,6 +93,12 @@ const STREAM_KEEPALIVE_PONG_ID: u64 = 0;
 /// fold follows it. A smaller cut loses tool output for no real saving.
 const COLD_SHAKE_MIN_SAVINGS_PERCENT: usize = 10;
 
+#[derive(Clone, Copy)]
+enum CompactionBoundary {
+    Request,
+    Idle,
+}
+
 #[path = "agent/cache_request.rs"]
 mod cache_request;
 use cache_request::kv_cache_request_event;
@@ -1123,6 +1129,10 @@ impl Agent {
     /// witness the completion. `method` names what replaced the folded history:
     /// the artifact kind is what a reader needs to know, not the trigger label.
     fn record_compaction_divider(&mut self, event: &crate::compaction::CompactionEvent) {
+        if event.trigger == crate::compaction::CACHE_EXPIRY_COMPACTION_TRIGGER {
+            self.session.last_cache_expiry_compaction_for =
+                self.persisted_last_provider_request_at().map(Into::into);
+        }
         let summary = self
             .session
             .compaction
@@ -1215,8 +1225,21 @@ impl Agent {
         crate::provider::shake_cache_ttl_for_provider_model(self.provider.name(), Some(&model))
     }
 
-    /// Shake hook: before LLM compaction or on the first request after the
-    /// provider prompt cache expired. Never while the cache is warm.
+    fn cache_expiry_already_compacted(
+        &self,
+        manager: &crate::compaction::CompactionManager,
+        now: std::time::SystemTime,
+        ttl: Option<u64>,
+    ) -> bool {
+        self.session
+            .last_cache_expiry_compaction_for
+            .is_some_and(|compacted_for| {
+                manager.expired_cache_response(now, ttl) == Some(compacted_for.into())
+            })
+    }
+
+    /// Shake before an LLM compaction or once the provider cache expired.
+    /// Only the cache-expiry reason may rewrite history while idle.
     /// `fold_instead` skips the cold-cache shake because the cold fold will
     /// reduce this request alone (see `cold_shake_reaches_request_target`).
     ///
@@ -1226,14 +1249,14 @@ impl Agent {
     /// was re-cached in full either way. Below
     /// [`COLD_SHAKE_MIN_SAVINGS_PERCENT`] the history is left alone and the
     /// transcript says the cache went cold instead.
-    fn maybe_shake_before_request(
+    fn maybe_shake_at(
         &mut self,
         manager: &mut crate::compaction::CompactionManager,
+        now: std::time::SystemTime,
+        boundary: CompactionBoundary,
         fold_instead: bool,
         fold_planned: bool,
     ) -> Option<(String, Option<CompactionEvent>)> {
-        let now = std::time::SystemTime::now();
-        let started = Instant::now();
         let ttl = self.cache_expiry_ttl_secs(manager);
         // omp `methodOrder` is remote, snapcompact, handoff, shake, soft: when
         // snapcompact can archive this compaction the bitmap archive wins, and
@@ -1248,9 +1271,17 @@ impl Agent {
         );
         let (reason, mut cfg) = plan?;
         let cold = reason == crate::compaction::ShakeReason::CacheExpiry;
-        if fold_instead && cold {
+        if cold
+            && (fold_instead
+                || manager.attempted_cache_expiry_compaction()
+                || self.cache_expiry_already_compacted(manager, now, ttl))
+        {
             return None;
         }
+        if !cold && matches!(boundary, CompactionBoundary::Idle) {
+            return None;
+        }
+        let started = Instant::now();
         let start = manager.active_start(self.session.provider_messages());
         let tokens_before = manager.effective_token_count_with(self.session.provider_messages());
         if cold && !fold_planned {
@@ -1296,6 +1327,10 @@ impl Agent {
             // shake would overwrite that slot and leave the shake invisible.
             self.note_compaction_applied();
             self.record_compaction_divider(event);
+            if cold {
+                self.session.last_cache_expiry_compaction_for =
+                    manager.expired_cache_response(now, ttl).map(Into::into);
+            }
             self.persist_session_best_effort("shake compaction");
         }
         if !cold {
@@ -1313,7 +1348,7 @@ impl Agent {
         // Nothing was trimmed. When a fold follows, its divider tells the
         // story; otherwise the whole prompt is about to be re-cached and the
         // transcript should say so once.
-        if fold_planned {
+        if fold_planned || matches!(boundary, CompactionBoundary::Idle) {
             return None;
         }
         let detail = format!(
@@ -1349,26 +1384,47 @@ impl Agent {
         Some((detail, Some(event)))
     }
 
-    /// Cold-cache snapcompact: once the prompt cache TTL lapsed, fold history
-    /// now instead of re-sending a stale prefix at full price. Runs after shake.
+    fn prefer_cold_cache_fold(
+        &mut self,
+        manager: &crate::compaction::CompactionManager,
+        target: Option<usize>,
+        fold_planned: bool,
+    ) -> bool {
+        // One cold cache, one reduction. Do not trim a prefix that the fold
+        // would rewrite anyway.
+        fold_planned
+            && target.is_some_and(|target| {
+                !manager.cold_shake_reaches_request_target(self.session.provider_messages(), target)
+            })
+    }
+
     fn maybe_cache_expiry_compaction(
         &mut self,
         manager: &mut crate::compaction::CompactionManager,
-    ) {
-        let now = std::time::SystemTime::now();
+        now: std::time::SystemTime,
+        boundary: CompactionBoundary,
+    ) -> bool {
         let ttl = self.cache_expiry_ttl_secs(manager);
         let messages = self.session.provider_messages();
         if !manager.plan_cache_expiry_compaction(messages, now, ttl) {
-            return;
+            return false;
         }
         let tokens = manager.effective_token_count_with(messages);
-        let started = manager.start_cache_expiry_compaction(messages, self.provider.clone());
+        let started = match boundary {
+            CompactionBoundary::Request => {
+                manager.start_cache_expiry_compaction(messages, self.provider.clone())
+            }
+            CompactionBoundary::Idle => {
+                manager.start_idle_cache_expiry_compaction(messages, self.provider.clone())
+            }
+        };
         logging::info(&format!(
             "[compaction] snapcompact_cache_expiry: cache ttl={}s lapsed, tokens_before={}, started={}",
             ttl.unwrap_or(0),
             tokens,
             started,
         ));
+        started
     }
 
     /// Remember the wall clock of the request that is about to leave.
@@ -1424,27 +1480,19 @@ impl Agent {
                     let ttl = self.cache_expiry_ttl_secs(&manager);
                     let cold_tokens_before =
                         manager.effective_token_count_with(self.session.provider_messages());
+                    let now = std::time::SystemTime::now();
                     let target = manager.cache_expiry_request_target(
                         self.session.provider_messages(),
-                        std::time::SystemTime::now(),
+                        now,
                         ttl,
                     );
-                    // One cold cache, one reduction: when the shake alone cannot
-                    // reach the target and the fold will run, fold instead of
-                    // shaking first and then folding the shaken prefix again.
                     let fold_planned = target.is_some()
                         && manager.plan_cache_expiry_compaction(
                             self.session.provider_messages(),
-                            std::time::SystemTime::now(),
+                            now,
                             ttl,
                         );
-                    let fold_instead = fold_planned
-                        && target.is_some_and(|target| {
-                            !manager.cold_shake_reaches_request_target(
-                                self.session.provider_messages(),
-                                target,
-                            )
-                        });
+                    let fold_instead = self.prefer_cold_cache_fold(&manager, target, fold_planned);
                     if fold_instead {
                         logging::info(&format!(
                             "[compaction] cold cache: shake alone cannot reach ~{}K from ~{}K, folding instead",
@@ -1452,9 +1500,13 @@ impl Agent {
                             cold_tokens_before / 1000,
                         ));
                     }
-                    if let Some((detail, event)) =
-                        self.maybe_shake_before_request(&mut manager, fold_instead, fold_planned)
-                    {
+                    if let Some((detail, event)) = self.maybe_shake_at(
+                        &mut manager,
+                        now,
+                        CompactionBoundary::Request,
+                        fold_instead,
+                        fold_planned,
+                    ) {
                         logging::info(&detail);
                         if let Some(tx) = event_tx {
                             let _ = tx.send(ServerEvent::StatusDetail { detail });
@@ -1465,7 +1517,11 @@ impl Agent {
                             }
                         }
                     }
-                    self.maybe_cache_expiry_compaction(&mut manager);
+                    self.maybe_cache_expiry_compaction(
+                        &mut manager,
+                        std::time::SystemTime::now(),
+                        CompactionBoundary::Request,
+                    );
                     // Expiry can cross the boundary while local shake runs.
                     // Recheck before allowing an asynchronously-started fold
                     // to race the foreground request.

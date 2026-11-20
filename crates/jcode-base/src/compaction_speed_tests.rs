@@ -189,6 +189,7 @@ async fn decisions_attach_to_applied_archive_without_second_compaction_event() {
         true,
         None,
         None,
+        false,
     )
     .await
     .unwrap();

@@ -25,7 +25,7 @@ pub(super) fn compaction_server_event(event: crate::compaction::CompactionEvent)
     crate::compaction::compaction_server_event(&event)
 }
 
-/// How often a waiting session re-checks its context level for compaction.
+/// How often an attached session re-checks cache expiry and context level.
 pub(super) const IDLE_PRECOMPACT_TICK: Duration = Duration::from_secs(15);
 
 /// Whether the session is idle but still waiting on work of its own.
@@ -54,22 +54,48 @@ pub(super) async fn session_is_idle_waiting(session_id: &str) -> bool {
         })
 }
 
-/// Compact opportunistically while a session is parked on external work.
-pub(super) async fn maybe_idle_precompact(
+/// Compact a cold, attached session even when it is just waiting for input.
+pub(super) async fn maybe_idle_compact(
     agent: &Arc<Mutex<Agent>>,
     session_id: &str,
     processing: bool,
 ) {
-    if processing {
+    let busy = || crate::turn_cancel_registry::has_active_turn(session_id);
+    if processing || busy() {
         return;
     }
-    if !session_is_idle_waiting(session_id).await {
-        return;
+    {
+        let Ok(mut owner) = agent.try_lock() else {
+            return;
+        };
+        if busy() {
+            return;
+        }
+        // A reopened session can have missed the worker's completion event
+        // while no client was listening.
+        let (pending, event) = if owner.is_compacting_now() {
+            (true, owner.poll_compaction_completion_event())
+        } else {
+            owner.idle_cache_expiry_at(std::time::SystemTime::now())
+        };
+        if let Some(event) = event {
+            publish_compaction_completion(
+                Bus::global(),
+                session_id,
+                compaction_server_event(event),
+            );
+            return;
+        }
+        if pending {
+            return;
+        }
     }
-    let Ok(mut agent) = agent.try_lock() else {
-        return;
-    };
-    agent.maybe_idle_precompact();
+    if session_is_idle_waiting(session_id).await
+        && let Ok(mut owner) = agent.try_lock()
+        && !busy()
+    {
+        owner.maybe_idle_precompact();
+    }
 }
 
 pub(super) async fn poll_agent_compaction_completion(

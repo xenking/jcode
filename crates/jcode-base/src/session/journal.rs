@@ -59,6 +59,10 @@ pub(super) struct SessionJournalMeta {
     pub(super) status: SessionStatus,
     pub(super) last_pid: Option<u32>,
     pub(super) last_active_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) last_provider_request_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) last_cache_expiry_compaction_for: Option<DateTime<Utc>>,
     pub(super) is_debug: bool,
     /// `/btw` side-question forks stay off the session list until promoted.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

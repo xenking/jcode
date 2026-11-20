@@ -163,6 +163,100 @@ fn compaction_dividers(agent: &Agent) -> Vec<String> {
         .collect()
 }
 
+#[tokio::test]
+async fn idle_cache_expiry_shakes_at_ttl_before_the_next_user_turn() {
+    let _guard = crate::storage::lock_test_env();
+    let (_home, mut agent, before) = fixture(300, 1_000, 20_000).await;
+    let response = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+    let compaction = agent.registry.compaction();
+    compaction
+        .write()
+        .await
+        .note_provider_response(response, None);
+    agent.session.last_provider_request_at = Some(response.into());
+    assert!(
+        agent
+            .idle_cache_expiry_at(response + Duration::from_secs(299))
+            .1
+            .is_none()
+    );
+    assert!(shake_dividers(&agent).is_empty());
+    let now = response + Duration::from_secs(300);
+    let (started, event) = agent.idle_cache_expiry_at(now);
+    assert!(!started, "shake alone reaches the target");
+    let event = event.expect("idle tick must reduce the expired cache without user input");
+    assert_eq!(event.trigger, "shake_cache_expiry");
+    let after = compaction
+        .read()
+        .await
+        .token_estimate_with(agent.session.provider_messages());
+    assert!(before > 400_000 && after < 60_000, "{before} -> {after}");
+    assert!(
+        agent
+            .idle_cache_expiry_at(now + Duration::from_secs(1))
+            .1
+            .is_none()
+    );
+    // The post-reload owner must not report a second reduction or a false
+    // "re-cached in full" notice before its first provider request.
+    agent.session = Session::load(agent.session_id()).unwrap();
+    agent.seed_compaction_from_session();
+    assert_eq!(
+        agent.session.last_cache_expiry_compaction_for,
+        Some(response.into())
+    );
+    assert!(
+        agent
+            .idle_cache_expiry_at(now + Duration::from_secs(2))
+            .1
+            .is_none()
+    );
+    agent.messages_for_provider(None).await.unwrap();
+    assert_eq!(compaction_dividers(&agent), ["shake_cache_expiry"]);
+}
+
+#[tokio::test]
+async fn prompt_arriving_during_idle_fold_joins_it_without_shaking() {
+    let _guard = crate::storage::lock_test_env();
+    let (_home, mut agent, _) = fixture(300, 250_000, 9_000).await;
+    let now = std::time::SystemTime::now();
+    let response = now - Duration::from_secs(300);
+    agent
+        .registry
+        .compaction()
+        .write()
+        .await
+        .note_provider_response(response, None);
+    agent.session.last_provider_request_at = Some(response.into());
+    let (started, event) = agent.idle_cache_expiry_at(now);
+    assert!(
+        started && event.is_none(),
+        "idle work must start the fold, not shake"
+    );
+    assert!(agent.is_compacting_now());
+    let (restarted, event) = agent.idle_cache_expiry_at(now + Duration::from_secs(1));
+    assert!(!restarted && event.is_none());
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "prompt during fold".into(),
+            cache_control: None,
+        }],
+    );
+    let (messages, event) = agent.messages_for_provider(None).await.unwrap();
+    assert_eq!(
+        event.unwrap().trigger,
+        crate::compaction::CACHE_EXPIRY_COMPACTION_TRIGGER
+    );
+    assert!(messages.last().unwrap().content.iter().any(|block| {
+        matches!(block, ContentBlock::Text { text, .. } if text == "prompt during fold")
+    }));
+    assert_eq!(
+        compaction_dividers(&agent),
+        [crate::compaction::CACHE_EXPIRY_COMPACTION_TRIGGER]
+    );
+}
+
 async fn cold_request(configured_ttl: u64) {
     let _guard = crate::storage::lock_test_env();
     let (_home, mut agent, before) = fixture(configured_ttl, 315_000, 5_000).await;
@@ -396,6 +490,16 @@ async fn a_cold_cache_does_not_shake_for_a_few_percent() {
             Some(before as u64),
         );
     let original = agent.session.messages_for_provider().to_vec();
+    let (started, event) = agent.idle_cache_expiry_at(std::time::SystemTime::now());
+    assert!(
+        !started && event.is_none(),
+        "idle reductions must pass the same threshold"
+    );
+    assert!(compaction_dividers(&agent).is_empty());
+    assert_eq!(
+        serde_json::to_value(agent.session.messages_for_provider()).unwrap(),
+        serde_json::to_value(&original).unwrap(),
+    );
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let tx = crate::stream_batching::BatchingSender::new(tx, agent.session_id().into());
 

@@ -79,6 +79,7 @@ pub(super) async fn generate_compaction_artifact(
         snapcompact_enabled,
         snapcompact_shape,
         shake_config,
+        false,
     )
     .await
 }
@@ -96,6 +97,7 @@ pub(super) async fn generate_effective_compaction_artifact(
     shake_config: Option<ShakeConfig>,
     remaining_chars: usize,
     token_budget: usize,
+    prefer_local: bool,
 ) -> Result<CompactionResult> {
     let before_chars = messages
         .iter()
@@ -123,6 +125,7 @@ pub(super) async fn generate_effective_compaction_artifact(
         snapcompact_enabled,
         snapcompact_shape,
         shake_config,
+        prefer_local,
     )
     .await?;
     let mut after = post(&result);
@@ -139,6 +142,7 @@ pub(super) async fn generate_effective_compaction_artifact(
             false,
             None,
             shake_config,
+            false,
         )
         .await?;
         after = post(&result);
@@ -156,6 +160,7 @@ pub(super) async fn generate_effective_compaction_artifact(
     Ok(result)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_compaction_artifact_indexed(
     provider: Arc<dyn Provider>,
     mut messages: Vec<Message>,
@@ -164,6 +169,7 @@ pub(super) async fn generate_compaction_artifact_indexed(
     snapcompact_enabled: bool,
     snapcompact_shape: Option<String>,
     shake_config: Option<ShakeConfig>,
+    prefer_local: bool,
 ) -> Result<CompactionResult> {
     let start = Instant::now();
     if let Some(summary) = existing_summary.as_mut()
@@ -188,9 +194,14 @@ pub(super) async fn generate_compaction_artifact_indexed(
         }
     }
 
-    if existing_summary
-        .as_ref()
-        .is_none_or(|s| s.snapcompact.is_none())
+    let can_archive = snapcompact_enabled
+        && existing_summary
+            .as_ref()
+            .is_none_or(|s| s.openai_encrypted_content.is_none());
+    if !(prefer_local && can_archive)
+        && existing_summary
+            .as_ref()
+            .is_none_or(|s| s.snapcompact.is_none())
         && let Ok(native) = provider
             .native_compact(
                 &messages,
@@ -237,11 +248,7 @@ pub(super) async fn generate_compaction_artifact_indexed(
     let mut snapcompact = None;
     let mut snapcompact_summary = None;
     let mut decisions_job = None;
-    if snapcompact_enabled
-        && existing_summary
-            .as_ref()
-            .is_none_or(|s| s.openai_encrypted_content.is_none())
-    {
+    if can_archive {
         let input = messages.clone();
         let message_offset = archive_history.len().saturating_sub(input.len());
         let prior_archive = existing_summary
