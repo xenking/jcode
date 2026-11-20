@@ -1,4 +1,5 @@
 use super::*;
+pub(super) use jcode_provider_core::fingerprint::capture_canonical_input;
 use std::hash::{Hash, Hasher};
 
 pub(super) fn stable_hash_str(value: &str) -> u64 {

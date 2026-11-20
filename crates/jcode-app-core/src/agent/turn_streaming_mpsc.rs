@@ -220,15 +220,17 @@ impl Agent {
             drop(cache_signature_messages);
             drop(ephemeral_signature_messages);
             let mut keepalive = stream_keepalive_ticker();
-            let mut stream = {
+            let (mut stream, mut canonical_input) = {
                 provider.set_session_id(&self.session.id);
-                let mut complete_future = std::pin::pin!(provider.complete_split(
-                    send_messages,
-                    &tools,
-                    &split_prompt.static_part,
-                    &split_prompt.dynamic_part,
-                    resume_session_id.as_deref(),
-                ));
+                let mut complete_future = std::pin::pin!(
+                    super::cache_request::capture_canonical_input(provider.complete_split(
+                        send_messages,
+                        &tools,
+                        &split_prompt.static_part,
+                        &split_prompt.dynamic_part,
+                        resume_session_id.as_deref(),
+                    ))
+                );
                 loop {
                     tokio::select! {
                         _ = keepalive.tick() => {
@@ -240,10 +242,10 @@ impl Agent {
                             );
                             return Ok(());
                         }
-                        result = &mut complete_future => {
+                        (result, canonical_input) = &mut complete_future => {
                             self.sync_bound_account_route();
                             match result {
-                                Ok(stream) => break stream,
+                                Ok(stream) => break (stream, canonical_input),
                                 Err(e) => {
                                     self.record_failed_account_route(&e.to_string());
                                     if self.try_auto_compact_after_context_limit(&e.to_string()) {
@@ -860,6 +862,8 @@ impl Agent {
                         usage_recorder.resolve_model(model);
                     }
                     StreamEvent::RetryRollback { attempt, max } => {
+                        // Retry bodies can be reshaped after the initial capture.
+                        canonical_input = None;
                         // Preserve reported usage from the failed attempt, but
                         // never let its model or counters bleed into the retry.
                         usage_recorder.finish();
@@ -1187,6 +1191,14 @@ impl Agent {
                 // this item, so discarded attempts cannot explain a real miss.
                 if openai_native_compaction.is_some() {
                     self.kv_cache_monitor.note_provider_compaction();
+                }
+                if let Some(input) = canonical_input.take()
+                    && provider.model() == model_at_request_start
+                    && provider.active_resolved_credential() == credential_at_request_start
+                    && provider.serving_oauth_account_label()
+                        == oauth_account_label_at_request_start
+                {
+                    self.kv_cache_monitor.note_canonical_input(input);
                 }
                 if let Some(miss) = self.finish_kv_cache_monitor_request(
                     usage_input.unwrap_or(0),

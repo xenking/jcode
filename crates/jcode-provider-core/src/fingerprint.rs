@@ -1,6 +1,7 @@
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::Instant;
@@ -13,6 +14,82 @@ struct ProviderInputSnapshot {
     system_hash: Option<u64>,
     tools_hash: Option<u64>,
     captured_at: Instant,
+}
+
+/// Hash-only effective input of one completed request. Never compare a
+/// Responses websocket delta with a full input: the acknowledged prefix is
+/// part of the delta's effective input even though it isn't sent again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalInput {
+    pub provider: &'static str,
+    pub format: &'static str,
+    pub model: String,
+    pub item_hashes: Vec<u64>,
+    pub system_hash: Option<u64>,
+    pub tools_hash: Option<u64>,
+}
+
+tokio::task_local! {
+    static REQUEST_INPUT: RefCell<Option<CanonicalInput>>;
+}
+
+/// Scope capture to the request-building future rather than a session or
+/// thread. Background requests and competing sessions cannot overwrite it.
+pub async fn capture_canonical_input<F: Future>(future: F) -> (F::Output, Option<CanonicalInput>) {
+    REQUEST_INPUT
+        .scope(RefCell::new(None), async {
+            let result = future.await;
+            (result, REQUEST_INPUT.with(RefCell::take))
+        })
+        .await
+}
+
+fn capture_request_input(
+    provider: &str,
+    model: &str,
+    format: &str,
+    fingerprints: &CanonicalFingerprints,
+    items: &[Value],
+) {
+    let (provider, format) = match (provider, format) {
+        ("openai", "openai_responses_full") => ("openai", "openai_responses_full"),
+        ("anthropic", "anthropic_messages_split") => ("anthropic", "anthropic_messages_split"),
+        ("anthropic", "anthropic_messages") => ("anthropic", "anthropic_messages"),
+        _ => return,
+    };
+    let _ = REQUEST_INPUT.try_with(|slot| {
+        let mut item_hashes = fingerprints.items.0.clone();
+        if provider == "anthropic" {
+            // Anthropic intentionally moves message breakpoints to the most
+            // recent turns. Compare content, excluding only that placement.
+            // The log retains the original hashes with markers included.
+            for (item, hash) in items.iter().zip(&mut item_hashes) {
+                if item["content"].as_array().is_some_and(|blocks| {
+                    blocks
+                        .iter()
+                        .any(|block| block.get("cache_control").is_some())
+                }) {
+                    let mut item = item.clone();
+                    if let Some(blocks) = item["content"].as_array_mut() {
+                        for block in blocks {
+                            if let Some(object) = block.as_object_mut() {
+                                object.remove("cache_control");
+                            }
+                        }
+                    }
+                    *hash = stable_hash_json(&item);
+                }
+            }
+        }
+        slot.replace(Some(CanonicalInput {
+            provider,
+            format,
+            model: model.to_string(),
+            item_hashes,
+            system_hash: fingerprints.system.map(|(hash, _)| hash),
+            tools_hash: fingerprints.tools.map(|(hash, _)| hash),
+        }));
+    });
 }
 
 static PROVIDER_INPUT_BASELINES: LazyLock<Mutex<HashMap<String, ProviderInputSnapshot>>> =
@@ -231,6 +308,7 @@ pub fn log_provider_canonical_input(
     extra_fields: &[(&str, String)],
 ) {
     let fingerprints = canonical_fingerprints(payload, items, system, tools);
+    capture_request_input(provider, model, format, &fingerprints, items);
     log_canonical_fingerprints(
         provider,
         model,
@@ -270,6 +348,7 @@ pub fn log_provider_canonical_input_fields(
             system: system.map(stable_json_fingerprint),
             tools: tools.map(stable_json_fingerprint),
         });
+    capture_request_input(provider, model, format, &fingerprints, items);
     log_canonical_fingerprints(
         provider,
         model,
