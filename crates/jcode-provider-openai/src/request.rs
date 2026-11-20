@@ -1,3 +1,4 @@
+use jcode_message_types::provider_native::PROVIDER_NATIVE_OPENAI;
 use jcode_message_types::{
     ContentBlock, Message as ChatMessage, Role, TOOL_OUTPUT_MISSING_TEXT, ToolDefinition,
     sanitize_tool_id,
@@ -75,6 +76,53 @@ pub fn build_tool(t: &ToolDefinition) -> Value {
     })
 }
 
+const DEFERRED_TOOLS_SNAPSHOT: &str = "jcode_deferred_tools";
+
+/// Store the exact Responses definitions to replay with this tool result.
+/// An empty snapshot also matters: an unresolved reference must not start
+/// adding items to old requests when its MCP server connects later.
+pub fn freeze_deferred_tools(blocks: &mut Vec<ContentBlock>, tools: &[ToolDefinition]) {
+    let names: Vec<_> = blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolReference { tool_name, .. } => Some(tool_name.as_str()),
+            _ => None,
+        })
+        .collect();
+    if names.is_empty() || deferred_tools_snapshot(blocks).is_some() {
+        return;
+    }
+    let definitions: Vec<_> = names
+        .into_iter()
+        .filter_map(|name| {
+            tools
+                .iter()
+                .find(|def| def.defer_loading && def.name == name)
+                .map(build_tool)
+        })
+        .collect();
+    blocks.push(ContentBlock::ProviderNative {
+        provider: PROVIDER_NATIVE_OPENAI.into(),
+        item: serde_json::json!({"type": DEFERRED_TOOLS_SNAPSHOT, "tools": definitions}),
+    });
+}
+
+fn deferred_tools_snapshot(blocks: &[ContentBlock]) -> Option<&[Value]> {
+    blocks.iter().find_map(|block| match block {
+        ContentBlock::ProviderNative { provider, item }
+            if provider == PROVIDER_NATIVE_OPENAI && item["type"] == DEFERRED_TOOLS_SNAPSHOT =>
+        {
+            Some(
+                item["tools"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+            )
+        }
+        _ => None,
+    })
+}
+
 /// Insert Responses `additional_tools` items for `ContentBlock::ToolReference`
 /// blocks.
 ///
@@ -82,8 +130,8 @@ pub fn build_tool(t: &ToolDefinition) -> Value {
 /// is part of the cached prefix). Each referenced deferred tool is instead
 /// loaded at the point in the conversation where it was referenced, right
 /// after the matching `function_call_output`, so earlier input items and the
-/// cached prefix are unchanged. References to tools not in `tools` (for
-/// example a server that has since disconnected) are dropped.
+/// cached prefix are unchanged. Old transcripts without snapshots still
+/// resolve references against the live registry.
 pub fn insert_additional_tools(
     input: &mut Vec<Value>,
     messages: &[ChatMessage],
@@ -94,12 +142,10 @@ pub fn insert_additional_tools(
         .filter(|t| t.defer_loading)
         .map(|t| (t.name.as_str(), t))
         .collect();
-    if deferred.is_empty() {
-        return;
-    }
-    let mut by_call: Vec<(String, Vec<&ToolDefinition>)> = Vec::new();
+    let mut by_call: Vec<(String, Vec<Value>)> = Vec::new();
     let mut seen: HashSet<&str> = HashSet::new();
     for msg in messages {
+        let snapshot = deferred_tools_snapshot(&msg.content);
         for block in &msg.content {
             let ContentBlock::ToolReference {
                 tool_use_id,
@@ -108,12 +154,20 @@ pub fn insert_additional_tools(
             else {
                 continue;
             };
-            let Some(def) = deferred.get(tool_name.as_str()) else {
-                continue;
-            };
-            if !seen.insert(def.name.as_str()) {
+            if seen.contains(tool_name.as_str()) {
                 continue;
             }
+            let def = match snapshot {
+                Some(definitions) => definitions
+                    .iter()
+                    .find(|def| def["name"] == *tool_name)
+                    .cloned(),
+                None => deferred.get(tool_name.as_str()).map(|def| build_tool(def)),
+            };
+            let Some(def) = def else {
+                continue;
+            };
+            seen.insert(tool_name.as_str());
             let call_id = sanitize_tool_id(tool_use_id);
             match by_call.iter_mut().find(|(id, _)| *id == call_id) {
                 Some((_, defs)) => defs.push(def),
@@ -133,7 +187,7 @@ pub fn insert_additional_tools(
             serde_json::json!({
                 "type": "additional_tools",
                 "role": "developer",
-                "tools": defs.into_iter().map(build_tool).collect::<Vec<_>>(),
+                "tools": defs,
             }),
         );
     }
@@ -1136,6 +1190,43 @@ mod tests {
         assert_eq!(loaded, vec!["mcp__weather__forecast"]);
         // Everything before the insertion point is unchanged (cache prefix).
         assert_eq!(&input[..pos], &before[..pos]);
+    }
+
+    #[test]
+    fn responses_input_replays_persisted_deferred_schema() {
+        let name = "mcp__weather__forecast";
+        let original = deferred_def(name);
+        let mut updated = original.clone();
+        updated.description = "A different schema on reconnection".into();
+        updated.input_schema = json!({"type":"object","properties":{"new_arg":{"type":"string"}}});
+        let mut result = ChatMessage::tool_result("call_1", "found", false);
+        result.content.push(ContentBlock::ToolReference {
+            tool_use_id: "call_1".into(),
+            tool_name: name.into(),
+        });
+        let mut blocks = result.content.to_vec();
+        freeze_deferred_tools(&mut blocks, std::slice::from_ref(&original));
+        result.content = blocks.into();
+        let responses = |messages: &[ChatMessage], tools: &[ToolDefinition]| {
+            let mut items = build_responses_input(messages);
+            insert_additional_tools(&mut items, messages, tools);
+            items
+        };
+        let history = vec![tool_call("call_1"), result];
+        let first = responses(&history, &[original]);
+        assert_eq!(first[2]["type"], "additional_tools");
+        let mut restored: Vec<ChatMessage> =
+            serde_json::from_slice(&serde_json::to_vec(&history).unwrap()).unwrap();
+        restored.push(tool_call("call_2"));
+        restored.push(ChatMessage::tool_result("call_2", "ok", false));
+        for live in [vec![], vec![updated]] {
+            let replay = responses(&restored, &live);
+            assert_eq!(replay.len(), first.len() + 2);
+            assert_eq!(
+                serde_json::to_vec(&replay[..first.len()]).unwrap(),
+                serde_json::to_vec(&first).unwrap(),
+            );
+        }
     }
 
     #[test]

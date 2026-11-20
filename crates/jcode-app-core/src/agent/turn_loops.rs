@@ -1274,7 +1274,15 @@ impl Agent {
                             println!("{}", preview.lines().next().unwrap_or("(done)"));
                         }
 
-                        let blocks = tool_output_to_content_blocks(tc.id, output);
+                        let mut blocks = tool_output_to_content_blocks(tc.id, output);
+                        if self.provider.name().eq_ignore_ascii_case("openai")
+                            && self.native_deferred_mcp()
+                        {
+                            crate::provider::openai_request::freeze_deferred_tools(
+                                &mut blocks,
+                                &tools,
+                            );
+                        }
                         self.add_message_with_duration(
                             Role::User,
                             blocks,

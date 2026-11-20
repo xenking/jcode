@@ -188,7 +188,9 @@ impl Provider for OpenAIProvider {
         }
 
         let mut input = build_responses_input(messages);
-        insert_additional_tools(&mut input, messages, tools);
+        if self.supports_deferred_tools() {
+            insert_additional_tools(&mut input, messages, tools);
+        }
         {
             // Stored hosted-search items are replayed only when this request
             // also declares the hosted tool; otherwise send their summary.

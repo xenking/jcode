@@ -1700,7 +1700,15 @@ impl Agent {
                             let output = cap_tool_output_for_history(&tc.name, output);
                             let mut side_pane_images =
                                 tool_output_side_pane_images(&tc.id, &tc.name, &tc.input, &output);
-                            let blocks = tool_output_to_content_blocks(tc.id.clone(), output);
+                            let mut blocks = tool_output_to_content_blocks(tc.id.clone(), output);
+                            if self.provider.name().eq_ignore_ascii_case("openai")
+                                && self.native_deferred_mcp()
+                            {
+                                crate::provider::openai_request::freeze_deferred_tools(
+                                    &mut blocks,
+                                    &tools,
+                                );
+                            }
                             let message_id = self.add_message_with_duration(
                                 Role::User,
                                 blocks,
