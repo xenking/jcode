@@ -404,8 +404,9 @@ todo_gate_digest = false
 todo_gate_diagnostics = false
 # Inject timestamps into user messages and tool results sent to the model
 message_timestamps = true
-# Persist memory injections into session history instead of sending them as request-only ephemeral context
-persist_memory_injections = false
+# Keep recalled memory in the model's session history until compaction.
+# Set false to send it only in the current request.
+# persist_memory_injections = true
 # Show an in-chat warning when a request misses the KV cache for a harness-caused
 # (avoidable) reason: system prompt, tool set, or message prefix changed. These
 # should essentially never happen and indicate a prefix-cache bug.

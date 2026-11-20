@@ -1301,7 +1301,7 @@ pub struct FeatureConfig {
     /// Inject timestamps into user messages and tool results sent to the model (default: true)
     pub message_timestamps: bool,
     /// Persist auto-recalled memory injections into normal session history instead of sending
-    /// them as request-only ephemeral suffix messages (default: false)
+    /// them as request-only ephemeral suffix messages (default: true).
     pub persist_memory_injections: bool,
     /// Surface an in-chat system message for each meaningful observed KV cache
     /// miss, including low/zero reads, route changes, expiry, and harness prefix
@@ -1337,7 +1337,7 @@ impl Default for FeatureConfig {
             todo_gate_digest: false,
             todo_gate_diagnostics: false,
             message_timestamps: true,
-            persist_memory_injections: false,
+            persist_memory_injections: true,
             kv_cache_miss_notices: true,
             code_mode: true,
             update_channel: UpdateChannel::default(),

@@ -892,36 +892,45 @@ impl Agent {
             age_ms,
             memory.memory_ids.clone(),
         );
-        if let Err(err) = self.session.save() {
-            logging::warn(&format!(
-                "Failed to persist memory injection for session {}: {}",
-                self.session.id, err
-            ));
-        }
     }
 
-    fn memory_injection_message(memory: &crate::memory::PendingMemory) -> Message {
-        Message::user(&format!(
-            "<system-reminder>\n{}\n</system-reminder>",
-            memory.prompt
-        ))
+    /// Model-facing User role, but never a human input in the transcript.
+    fn append_model_reminder(&mut self, text: &str) -> Message {
+        let mut message = Message::user(text);
+        self.add_message_with_display_role(
+            Role::User,
+            message.content.clone(),
+            Some(StoredDisplayRole::System),
+        );
+        message.timestamp = self.session.messages.last().and_then(|m| m.timestamp);
+        message
     }
 
     pub(super) fn prepare_memory_injection_message(
         &mut self,
+        history: &[Message],
         memory: &crate::memory::PendingMemory,
-    ) -> (Message, bool) {
-        let message = Self::memory_injection_message(memory);
-        let persist = crate::config::config().features.persist_memory_injections;
-        if persist {
-            self.add_message_with_display_role(
-                Role::User,
-                message.content.clone(),
-                Some(StoredDisplayRole::System),
-            );
-            self.persist_session_best_effort("persisted memory injection message");
+    ) -> Option<(Message, bool)> {
+        let text = format!("<system-reminder>\n{}\n</system-reminder>", memory.prompt);
+        // Pending-memory dedup expires. The active provider history is the
+        // authority on whether these exact bytes are still present, even
+        // after process restart. Compaction may remove them from that view.
+        if history.iter().rev().any(|message| {
+            matches!(message.content.as_ref(), [ContentBlock::Text { text: previous, .. }] if previous == &text)
+        }) {
+            return None;
         }
-        (message, persist)
+        let persist = crate::config::config().features.persist_memory_injections;
+        // Capture the index for the human-facing recall card before appending
+        // the provider block. Save both in the same journal update.
+        self.record_memory_injection_in_session(memory);
+        let message = if persist {
+            self.append_model_reminder(&text)
+        } else {
+            Message::user(&text)
+        };
+        self.persist_session_best_effort("memory injection");
+        Some((message, persist))
     }
 
     fn persist_session_best_effort(&mut self, context: &str) {
