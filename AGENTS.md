@@ -105,6 +105,7 @@ Two things that waste time otherwise:
   with `readlink -f` first.
 
 ## Fork notes (xenking/jcode, keep at end for clean upstream merges)
+- [Fork feature ledger](docs/FORK_LEDGER.md): CLI and Desktop changes and post-sync checks.
 - Fork-only features: codemode (`crates/jcode-codemode`, docs `CODEMODE.md`, `[features] code_mode`), MCP `MCP-Protocol-Version` header on initialize, Soniox realtime `stt-rt-v6` in `crates/jcode-voice` (`[dictation] backend`), native `ask` tool (`crates/jcode-app-core/src/tool/ask.rs`, exposed on harness API), self-update source defaults to `xenking/jcode` branch `master`.
 - Verify a slice: `justrust check -p jcode-codemode -p jcode-voice`. Upstream merges: keep this section last.
 - Upstream sync: `scripts/xk-upstream-agent.sh` starts a separate jcode session that runs `scripts/xk-upstream-sync.sh` (jcode + Desktop) and OpenRig's catch-up; `--dry-run` shows the gap.
