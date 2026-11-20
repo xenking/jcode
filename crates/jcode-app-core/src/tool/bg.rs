@@ -32,6 +32,37 @@ const DEFAULT_TAIL_LINES: usize = 80;
 const DEFAULT_WAIT_PREVIEW_LINES: usize = 40;
 const MAX_OUTPUT_BYTES: usize = 50_000;
 
+/// A resumed wait has already used the time since its original ToolUse.
+/// Round elapsed time down to retain the last partial second, since the
+/// public wait API takes whole seconds. An expired wait does a status poll.
+pub(crate) fn replay_wait_input(
+    mut input: Value,
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Value {
+    if let Some(started_at) = started_at
+        && let Some(fields) = input.as_object_mut()
+    {
+        let elapsed = (chrono::Utc::now() - started_at)
+            .to_std()
+            .unwrap_or_default();
+        let requested = match fields.get("max_wait_seconds") {
+            None | Some(Value::Null) => None,
+            Some(value) => match value.as_u64() {
+                Some(seconds) => Some(seconds),
+                None => return input,
+            },
+        };
+        let original = requested
+            .unwrap_or(DEFAULT_WAIT_SECONDS)
+            .min(MAX_WAIT_SECONDS);
+        fields.insert(
+            "max_wait_seconds".into(),
+            original.saturating_sub(elapsed.as_secs()).into(),
+        );
+    }
+    input
+}
+
 pub struct BgTool;
 
 impl BgTool {

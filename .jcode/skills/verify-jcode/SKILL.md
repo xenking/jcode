@@ -45,6 +45,7 @@ Require `status: ready`. This is read-only against the app: verify the runtime o
 "$V" drive --evidence "$E" restart
 "$V" drive --evidence "$E" reload-bg
 "$V" drive --evidence "$E" reload-bg-before-attach
+"$V" drive --evidence "$E" reload-bg-wait
 "$V" drive --evidence "$E" reload-selfdev
 "$V" drive --evidence "$E" side-panel
 "$V" drive --evidence "$E" mode

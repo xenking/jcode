@@ -341,6 +341,11 @@ impl Agent {
                         _ => None,
                     });
                     if let Some(input) = wait {
+                        let input = if tool.name == "bg" {
+                            crate::tool::replay_bg_wait_input(input, message.timestamp)
+                        } else {
+                            input
+                        };
                         if !self
                             .replay_pending_wait(tool, message.id.clone(), input, &event_tx)
                             .await?

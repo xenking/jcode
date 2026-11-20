@@ -365,13 +365,14 @@ class Harness:
         dump(self.evidence / "doctor.json", report)
         return report
 
-    def reload_background(self, token, start, label, finish_before_attach=False):
+    def reload_background(self, token, start, label, finish_before_attach=False, wait_in_turn=False):
         routed = bool(self.env.get("JCODE_EXEC_WORKER"))
         gate = self.root / "control" / token.replace("-", "_")
         sid = self.observe("state")["remote_session_id"]
         status_dir = self.root / "jcode-bg-tasks"
         before = {p.name for p in status_dir.glob("*.status.json")}
-        self.send(f"{token} [e2e:reload-bg:{gate.name}]")
+        flags = " verify-no-bg-wake" if wait_in_turn else ""
+        self.send(f"{token} [e2e:reload-bg:{gate.name}]{flags}")
         self.request_after(token, start)
         self.idle()
 
@@ -391,11 +392,17 @@ class Harness:
         task = load_status(path)
         os_pid = wait_for(lambda: int(gate.with_suffix(".child").read_text())
                           if gate.with_suffix(".child").exists() else None, "original command PID")
-        require(task.get("status") == "running" and task.get("notify") and task.get("wake"),
-                f"Expected running task with both delivery flags: {task}")
+        require(task.get("status") == "running" and task.get("notify") and task.get("wake") == (not wait_in_turn),
+                f"Expected running task with the requested delivery flags: {task}")
         require(alive(os_pid) and alive(task["pid"]), "Original shell or supervisor is not alive")
         daemon_pid = self.state["processes"]["server"]["pid"]
         old_server = self.debug("server:info")["id"]
+        if wait_in_turn:
+            wait_prompt = f"{token}_wait [e2e:reload-wait:{task['task_id']}]"
+            self.send(wait_prompt)
+            self.request_after(wait_prompt, start)
+            wait_for(lambda: "Verify original wait survives daemon exec" in self.pane()
+                     and self.observe("state")["processing"], "the original bg wait is in flight")
         self.event(action="private-exec", daemon_pid=daemon_pid, shell_pid=os_pid)
         tui_closed = False
         try:
@@ -446,17 +453,26 @@ class Harness:
         output = status_dir / (task["task_id"] + ".output")
         require(finished.get("status") == "failed" and "completed by original shell" in output.read_text(),
                 f"Missing original output or exit status: {finished}")
-        wait_for(lambda: "exit 23" in self.pane(), "visible TUI background completion")
-        # Only a user message with the completion payload proves delivery. In
-        # particular, the fixture text in the assistant's command is not a wake.
-        wait_for(lambda: any(m.get("role") == "user"
-                             and f"**Background task** `{task['task_id']}`" in json.dumps(m.get("content"))
-                             and "completed by original shell" in json.dumps(m.get("content"))
-                             for entry in self.records()[start:] if entry.get("agent")
-                             for m in entry["messages"][-2:]), "provider request from task wake")
+        if not wait_in_turn:
+            wait_for(lambda: "exit 23" in self.pane(), "visible TUI background completion")
+            # The fixture text in the assistant's command is not a wake.
+            wait_for(lambda: any(m.get("role") == "user"
+                                 and f"**Background task** `{task['task_id']}`" in json.dumps(m.get("content"))
+                                 and "completed by original shell" in json.dumps(m.get("content"))
+                                 for entry in self.records()[start:] if entry.get("agent")
+                                 for m in entry["messages"][-2:]), "provider request from task wake")
         wait_for(lambda: load_status(path).get("completion_delivered") is True,
                  "durable completion acknowledgement")
         self.idle()
+        if wait_in_turn:
+            requests = [entry for entry in self.records()[start:] if entry.get("agent")
+                        and any(wait_prompt in json.dumps(m.get("content")) for m in entry["messages"])]
+            require(len(requests) >= 2, "No provider continuation for the original wait")
+            first_continuation = requests[1]["messages"]
+            require(any(m.get("role") == "tool" and m.get("tool_call_id") == "call_reload_wait"
+                        and "Exit code: 23" in json.dumps(m.get("content"))
+                        and "completed by original shell" in json.dumps(m.get("content"))
+                        for m in first_continuation), "The first continued provider request lacks the original wait result")
         dump(self.evidence / f"{label}-task.json", load_status(path))
         return {"task_id": task["task_id"], "daemon_pid": daemon_pid, "shell_pid": os_pid,
                 "previous_server_id": old_server, "server_id": successor["id"],
@@ -637,8 +653,9 @@ class Harness:
                 require(self.observe("state")["remote_session_id"] == sid, "Cancel changed session ID")
                 result["session_id"] = sid
                 dump(self.evidence / f"{label}-session.json", self.persisted(sid, token + "_continued"))
-            elif feature in {"reload-bg", "reload-bg-before-attach"}:
-                result.update(self.reload_background(token, start, label, feature == "reload-bg-before-attach"))
+            elif feature in {"reload-bg", "reload-bg-before-attach", "reload-bg-wait"}:
+                result.update(self.reload_background(token, start, label,
+                    finish_before_attach=feature == "reload-bg-before-attach", wait_in_turn=feature == "reload-bg-wait"))
             elif feature == "reload-selfdev":
                 result.update(self.reload_selfdev(token, label))
             elif feature in {"resume", "restart", "mode-set"}:
@@ -966,7 +983,7 @@ def main():
         command = sub.add_parser(name)
         command.add_argument("--evidence", required=True)
         if name == "drive":
-            command.add_argument("feature", choices=["cli", "tui", "slash", "resume", "restart", "reload-bg", "reload-bg-before-attach", "reload-selfdev", "cancel",
+            command.add_argument("feature", choices=["cli", "tui", "slash", "resume", "restart", "reload-bg", "reload-bg-before-attach", "reload-bg-wait", "reload-selfdev", "cancel",
                                                      "side-panel", "mode", "mode-set", "draft-models", "input", "keys"])
             command.add_argument("--mode", choices=["plain", "json", "ndjson"], default="json")
             command.add_argument("--text", help="Text for exploratory input drive")

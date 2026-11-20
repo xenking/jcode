@@ -433,6 +433,10 @@ async fn reload_replays_pending_wait_before_contacting_the_provider() {
         ) -> Result<crate::tool::ToolOutput> {
             assert_eq!(ctx.tool_call_id, "call-wait");
             assert_eq!(input["intent"], "same wait");
+            assert_eq!(
+                input["max_wait_seconds"],
+                if self.0 == "bg" { 0 } else { 45 }
+            );
             Ok(crate::tool::ToolOutput::new("the original wait finished"))
         }
     }
@@ -453,10 +457,12 @@ async fn reload_replays_pending_wait_before_contacting_the_provider() {
             vec![ContentBlock::ToolUse {
                 id: "call-wait".into(),
                 name: name.into(),
-                input: serde_json::json!({"action": action, "intent": "same wait"}),
+                input: serde_json::json!({"action": action, "intent": "same wait", "max_wait_seconds": 45}),
                 thought_signature: None,
             }],
         );
+        session.messages.last_mut().unwrap().timestamp =
+            Some(chrono::Utc::now() - chrono::Duration::seconds(50));
         session.save().unwrap();
         let capture = ScriptedProvider::default();
         let registry = Registry::empty();

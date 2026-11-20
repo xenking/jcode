@@ -15,6 +15,7 @@ pub(crate) use bash::{
 pub(crate) use bash::BashTool as TestBashTool;
 mod batch;
 mod bg;
+pub(crate) use bg::replay_wait_input as replay_bg_wait_input;
 #[cfg(unix)]
 pub(crate) mod bridge_reload;
 mod browser;
