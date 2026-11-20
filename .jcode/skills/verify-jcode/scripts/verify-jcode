@@ -219,7 +219,7 @@ class Harness:
         return self.debug("client:" + command)
 
     def debug(self, command):
-        require(command in {"server:info", "clients:map", "client:state", "client:history",
+        require(command in {"server:info", "clients:map", "swarm:members", "client:state", "client:history",
                             "client:frame", "client:side-panel:stats"},
                 "Not a read-only server command")
         with socket.socket(socket.AF_UNIX) as connection:
@@ -258,6 +258,125 @@ class Harness:
     def idle(self, timeout=45):
         return wait_for(lambda: not (s := self.observe("state"))["processing"]
                         and not s["queued_messages"], "idle TUI", timeout)
+
+    def stop_daemon(self):
+        old_id = self.debug("server:info")["id"]
+        process = self.state["processes"]["server"]
+        require(alive(process["pid"]) and identity(process["pid"]) == process["identity"],
+                "Daemon process ownership changed")
+        self.event(action="daemon-stop", pid=process["pid"], signal="SIGTERM")
+        os.killpg(process["pid"], signal.SIGTERM)
+        wait_for(lambda: not alive(process["pid"]), "old daemon shutdown", 15)
+        return old_id
+
+    def start_replacement(self, old_id):
+        self.spawn("server", [self.binary, "--no-update", "--no-selfdev", "--provider",
+                              "openai-compatible", "--model", "fake-model", "--debug-socket",
+                              "--socket", self.root / "app.sock", "serve"])
+
+        def replacement():
+            try:
+                server_id = self.debug("server:info")["id"]
+                return server_id if server_id != old_id else None
+            except (OSError, RuntimeError):
+                return None
+        return wait_for(replacement, "new isolated daemon identity")
+
+    def worker_reload(self, label, token, start):
+        history_token = token + "_original Acknowledge."
+        sid = self.observe("state")["remote_session_id"]
+
+        def workers():
+            return {m["session_id"]: m for m in self.debug("swarm:members") if m["is_headless"]}
+
+        def conversation(record):
+            return [m for m in record["messages"] if m["role"] != "system"]
+
+        def worker_requests(after, text):
+            return [r for r in self.records()[after:] if r["agent"] and all(any(
+                m["role"] == "user" and marker in json.dumps(m["content"])
+                for m in conversation(r)) for marker in [history_token, text])]
+
+        def restart():
+            # Keep the coordinator attached while SIGTERM captures ownership.
+            old_id = self.stop_daemon()
+            if alive(self.state["processes"]["tmux"]["pid"]):
+                self.tmux("kill-session", "-t", "verify")
+            wait_for(lambda: not alive(self.state["processes"]["tmux"]["pid"]), "old terminal shutdown", 10)
+            new_id = self.start_replacement(old_id)
+            return old_id, new_id
+
+        def send_to_worker(text):
+            self.send(f"{text}_coordinator [e2e:worker-dm:{worker_id}:{text}]")
+
+        prior = workers()
+        self.send(f"{token}_spawn [e2e:worker-spawn:{token}_original]")
+        created = wait_for(lambda: workers().keys() - prior.keys(), "spawned headless worker")
+        require(len(created) == 1, f"Expected exactly one new worker, got {created}")
+        worker_id = created.pop()
+        self.persisted(worker_id, history_token)
+        wait_for(lambda: workers()[worker_id]["status"] == "ready", "original ready worker")
+        self.idle()
+        original = wait_for(lambda: worker_requests(start, history_token),
+                            "initial worker inference")[0]
+        before_idle_restart = len(self.records())
+        first_restart = restart()
+        ready = workers()[worker_id]
+        dump(self.evidence / f"{label}-ready-after-restart.json", ready)
+        require(ready["status"] == "ready" and not ready["provider"],
+                f"Idle worker was not restored lazily: {ready}")
+        self.start_tui(resume=sid)
+        self.doctor()
+        require(not worker_requests(before_idle_restart, history_token), "Idle worker ran without a message")
+        post = len(self.records())
+        send_to_worker(token + "_idle_dm")
+        dm = wait_for(lambda: [r for r in worker_requests(post, token + "_idle_dm")
+                              if conversation(r)[:len(conversation(original))] == conversation(original)],
+                      "DM on the restored worker's original provider history")[0]
+        idle_saved = self.persisted(worker_id, token + "_idle_dm")
+        wait_for(lambda: workers()[worker_id]["status"] == "ready", "worker ready after DM")
+        self.idle()
+        require("stopped by the server restart and not restored" not in self.pane(),
+                "Coordinator got a false unrestored-worker notice")
+
+        before_running = len(self.records())
+        held = self.root / "control" / (token + ".held")
+        release = held.with_suffix(".release")
+        step = self.root / "workspace/worker-reload-step.txt"
+        step.write_text("worker-step-anchor\n")
+        expected_step = ["worker-step-anchor", token]
+        try:
+            send_to_worker(token + "_running")
+            wait_for(held.exists, "worker provider held after successful tool result")
+            require(step.read_text().splitlines() == expected_step, "Worker tool did not execute exactly once before restart")
+            require(workers()[worker_id]["status"] == "running", "Provider hold did not keep worker running")
+            self.idle()
+            before = next(r for r in worker_requests(before_running, token + "_running")
+                          if any(m.get("tool_call_id") == "call_worker_reload_step" for m in r["messages"]))
+            post = len(self.records())
+            second_restart = restart()
+            busy = workers()[worker_id]
+            dump(self.evidence / f"{label}-running-after-restart.json", busy)
+            require(busy["status"] == "running", f"Interrupted worker falsely appeared finished: {busy}")
+            resumed = wait_for(lambda: worker_requests(post, token + "_running"),
+                               "automatic worker continuation on replacement daemon")[0]
+            require(conversation(resumed) == conversation(before),
+                    "Continuation changed the provider history after a completed tool result")
+        finally:
+            release.write_text("release isolated worker fixture\n")
+            self.event(action="fixture-release", token=token)
+        saved = self.persisted(worker_id, token + "_running")
+        wait_for(lambda: workers()[worker_id]["status"] == "ready", "worker finished recovered turn")
+        require(len(worker_requests(post, token + "_running")) == 1,
+                "Expected exactly one continuation inference for the interrupted turn")
+        require(step.read_text().splitlines() == expected_step, "Reload repeated an already completed tool")
+        self.start_tui(resume=sid)
+        self.doctor()
+        for key, value in [("initial-request", original), ("dm-request", dm), ("dm-session", idle_saved),
+                           ("held-request", before), ("resumed-request", resumed), ("worker-session", saved)]:
+            dump(self.evidence / f"{label}-{key}.json", value)
+        shutil.copy2(step, self.evidence / f"{label}-worker-reload-step.txt")
+        return {"session_id": sid, "worker_id": worker_id, "restarts": [first_restart, second_restart]}
 
     def frame(self, label):
         require(re.fullmatch(r"[a-zA-Z0-9_-]+", label), "Frame label must be a basename")
@@ -370,7 +489,7 @@ class Harness:
         self.save()
         label = f"drive-{number:03d}-{feature}"
         start = len(self.records())
-        token = f"verify_{feature}_{uuid.uuid4().hex[:10]}"
+        token = f"verify_{feature.replace('-', '_')}_{uuid.uuid4().hex[:10]}"
         self.frame(label + "-before")
         result = {"feature": feature, "entry_point": feature, "token": token, "status": "failed"}
         try:
@@ -469,6 +588,8 @@ class Harness:
                 require(self.observe("state")["remote_session_id"] == sid, "Cancel changed session ID")
                 result["session_id"] = sid
                 dump(self.evidence / f"{label}-session.json", self.persisted(sid, token + "_continued"))
+            elif feature == "worker-reload":
+                result.update(self.worker_reload(label, token, start))
             elif feature in {"resume", "restart", "mode-set"}:
                 if feature == "mode-set":
                     self.send("/mode toggle verify-probe")
@@ -485,25 +606,9 @@ class Harness:
                 self.tmux("kill-session", "-t", "verify")
                 wait_for(lambda: not alive(self.state["processes"]["tmux"]["pid"]), "old terminal shutdown", 10)
                 if feature in {"restart", "mode-set"}:
-                    old_server_id = self.debug("server:info")["id"]
-                    process = self.state["processes"]["server"]
-                    require(alive(process["pid"]) and identity(process["pid"]) == process["identity"],
-                            "Daemon process ownership changed")
-                    self.event(action="daemon-stop", pid=process["pid"], signal="SIGTERM")
-                    os.killpg(process["pid"], signal.SIGTERM)
-                    wait_for(lambda: not alive(process["pid"]), "old daemon shutdown", 15)
-                    self.spawn("server", [self.binary, "--no-update", "--no-selfdev", "--provider",
-                                          "openai-compatible", "--model", "fake-model", "--debug-socket",
-                                          "--socket", self.root / "app.sock", "serve"])
-
-                    def restarted():
-                        try:
-                            return self.debug("server:info")["id"] != old_server_id
-                        except (OSError, RuntimeError):
-                            return False
-                    wait_for(restarted, "new isolated daemon identity")
+                    old_server_id = self.stop_daemon()
                     result["previous_server_id"] = old_server_id
-                    result["server_id"] = self.debug("server:info")["id"]
+                    result["server_id"] = self.start_replacement(old_server_id)
                 self.start_tui(resume=sid)
                 self.doctor()
                 require(self.observe("state")["remote_session_id"] == sid, "Resume changed session ID")
@@ -790,7 +895,7 @@ def main():
         command.add_argument("--evidence", required=True)
         if name == "drive":
             command.add_argument("feature", choices=["cli", "tui", "slash", "resume", "restart", "cancel",
-                                                     "side-panel", "mode", "mode-set", "draft-models", "input", "keys"])
+                                                     "side-panel", "mode", "mode-set", "draft-models", "worker-reload", "input", "keys"])
             command.add_argument("--mode", choices=["plain", "json", "ndjson"], default="json")
             command.add_argument("--text", help="Text for exploratory input drive")
             command.add_argument("--keys", nargs="+", help="tmux keys, e.g. Escape or C-u")
