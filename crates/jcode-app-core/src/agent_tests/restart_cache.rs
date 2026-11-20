@@ -328,4 +328,15 @@ async fn restart_cache_monitor_reports_first_changed_canonical_item() {
         if reason == "prefix_changed" && message.contains("canonical input item index 1")),
         "{miss:?}"
     );
+    drop(restored);
+
+    let mut restored = Agent::new(Arc::new(Dialect::Anthropic), Registry::empty());
+    restored.restore_session(&id).unwrap();
+    restored.begin_kv_cache_monitor_request(&event, "claude-opus-5-5");
+    let miss = restored.finish_kv_cache_monitor_request(0, Some(0), Some(20_000));
+    assert!(
+        matches!(&miss, Some(ServerEvent::KvCacheMiss { reason, message, .. })
+        if reason == "zero_read" && message.contains("comparable canonical provider input unavailable")),
+        "{miss:?}"
+    );
 }

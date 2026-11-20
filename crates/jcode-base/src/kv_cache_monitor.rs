@@ -722,8 +722,9 @@ fn classify(
             "; first changed canonical input item index {index} (zero-based)"
         ));
     }
+    let comparable_input = comparable_canonical_inputs(baseline, pending).is_some();
     if baseline.completed_in_process.is_none()
-        && comparable_canonical_inputs(baseline, pending).is_none()
+        && !comparable_input
         && matches!(reason, MissReason::LowRead | MissReason::ZeroRead)
     {
         detail.push_str("; comparable canonical provider input unavailable across restart");
@@ -733,9 +734,13 @@ fn classify(
         prefix_unchanged: matches!(
             reason,
             MissReason::LowRead | MissReason::ZeroRead | MissReason::ProviderCachePartial
-        ) && pending
-            .signature
-            .checked_prefix_unchanged(&baseline.signature),
+        ) && if baseline.completed_in_process.is_some() {
+            pending
+                .signature
+                .checked_prefix_unchanged(&baseline.signature)
+        } else {
+            comparable_input && canonical_change.is_none()
+        },
         expected_tokens: expected,
         read_tokens,
         missed_tokens: missed,
