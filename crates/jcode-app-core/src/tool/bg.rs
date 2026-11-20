@@ -10,6 +10,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -32,7 +33,63 @@ const DEFAULT_TAIL_LINES: usize = 80;
 const DEFAULT_WAIT_PREVIEW_LINES: usize = 40;
 const MAX_OUTPUT_BYTES: usize = 50_000;
 
-/// A resumed wait has already used the time since its original ToolUse.
+/// The wait keeps its resolved targets even if the task list changes during exec.
+#[derive(serde::Serialize, Deserialize)]
+struct WaitIntent {
+    task_ids: Vec<String>,
+    deadline: chrono::DateTime<chrono::Utc>,
+}
+
+impl WaitIntent {
+    fn path(ctx: &ToolContext) -> Option<std::path::PathBuf> {
+        if ctx.execution_mode != jcode_tool_core::ToolExecutionMode::AgentTurn {
+            return None;
+        }
+        let mut id = Sha256::new();
+        for component in [&ctx.session_id, &ctx.message_id, &ctx.tool_call_id] {
+            id.update((component.len() as u64).to_le_bytes());
+            id.update(component);
+        }
+        Some(
+            crate::storage::runtime_dir()
+                .join("bg-wait-intents")
+                .join(format!("{:x}.json", id.finalize())),
+        )
+    }
+
+    fn remaining(&self) -> Duration {
+        (self.deadline - chrono::Utc::now())
+            .to_std()
+            .unwrap_or_default()
+    }
+}
+
+fn prune_wait_intents(dir: &std::path::Path) {
+    use std::sync::{Mutex, OnceLock};
+    static LAST_PRUNED: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
+    let mut last = LAST_PRUNED
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if last.is_some_and(|time| time.elapsed() < Duration::from_secs(3600)) {
+        return;
+    }
+    *last = Some(std::time::Instant::now());
+    drop(last);
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        if entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > Duration::from_secs(7 * 86400))
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Fallback for old in-flight calls that have no persisted WaitIntent.
 /// Round elapsed time down to retain the last partial second, since the
 /// public wait API takes whole seconds. An expired wait does a status poll.
 pub(crate) fn replay_wait_input(
@@ -914,10 +971,31 @@ impl Tool for BgTool {
             }
 
             "wait" => {
-                let task_ids = resolve_task_ids(manager, &ctx, &params, "wait", true).await?;
                 let requested_wait = params.max_wait_seconds.unwrap_or(DEFAULT_WAIT_SECONDS);
                 let capped_wait = requested_wait.min(MAX_WAIT_SECONDS);
-                let wait_duration = Duration::from_secs(capped_wait);
+                let intent_path = WaitIntent::path(&ctx);
+                let intent = intent_path
+                    .as_deref()
+                    .and_then(|path| crate::storage::read_json::<WaitIntent>(path).ok());
+                let (task_ids, wait_duration) = if let Some(intent) = intent {
+                    let remaining = intent.remaining();
+                    (intent.task_ids, remaining)
+                } else {
+                    let task_ids = resolve_task_ids(manager, &ctx, &params, "wait", true).await?;
+                    let duration = Duration::from_secs(capped_wait);
+                    if let Some(path) = intent_path {
+                        if let Some(parent) = path.parent() {
+                            prune_wait_intents(parent);
+                        }
+                        let intent = WaitIntent {
+                            task_ids: task_ids.clone(),
+                            deadline: chrono::Utc::now()
+                                + chrono::Duration::seconds(capped_wait as i64),
+                        };
+                        crate::storage::write_json_fast(&path, &intent)?;
+                    }
+                    (task_ids, duration)
+                };
                 // watch/delivery only updates notification settings and does not
                 // block. Only the actual wait action owns foreground metadata.
 
@@ -996,7 +1074,7 @@ impl Tool for BgTool {
                     ));
                 };
                 let current = manager.status(&task_id).await;
-                let blocking = capped_wait > 0
+                let blocking = !wait_duration.is_zero()
                     && current
                         .as_ref()
                         .is_some_and(|task| !is_terminal(&task.status));

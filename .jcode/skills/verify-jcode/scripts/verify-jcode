@@ -398,11 +398,18 @@ class Harness:
         daemon_pid = self.state["processes"]["server"]["pid"]
         old_server = self.debug("server:info")["id"]
         if wait_in_turn:
-            wait_prompt = f"{token}_wait [e2e:reload-wait:{task['task_id']}]"
+            wait_prompt = f"{token}_wait [e2e:reload-wait-latest]"
             self.send(wait_prompt)
             self.request_after(wait_prompt, start)
             wait_for(lambda: "Verify original wait survives daemon exec" in self.pane()
                      and self.observe("state")["processing"], "the original bg wait is in flight")
+            # Add a newer terminal task after the wait resolved its selector.
+            # This status represents another tool submitting work before exec.
+            time.sleep(0.25)
+            distractor = ("z" if task["task_id"][0] != "z" else "y") + task["task_id"][1:]
+            dump(status_dir / f"{distractor}.status.json", dict(task, task_id=distractor,
+                 started_at="2099-01-01T00:00:00+00:00", status="completed", exit_code=0,
+                 pid=None, detached=False, notify=False))
         self.event(action="private-exec", daemon_pid=daemon_pid, shell_pid=os_pid)
         tui_closed = False
         try:

@@ -94,9 +94,9 @@ class H(BaseHTTPRequestHandler):
                 "name": "bash", "arguments": json.dumps({"intent": "Verify background exec reload",
                     "command": command, "run_in_background": True, "notify": True,
                     "wake": "verify-no-bg-wake" not in prompt, "timeout": 60000})}}]
-        elif CONTROL and not has_tool_result and (match := re.search(r"\[e2e:reload-wait:([a-z0-9]+)\]", prompt)):
+        elif CONTROL and not has_tool_result and "[e2e:reload-wait-latest]" in prompt:
             tool_calls = [{"id": "call_reload_wait", "type": "function", "function": {
-                "name": "bg", "arguments": json.dumps({"action": "wait", "task_id": match.group(1),
+                "name": "bg", "arguments": json.dumps({"action": "wait", "latest": True,
                     "intent": "Verify original wait survives daemon exec", "max_wait_seconds": 30,
                     "return_on_progress": False})}}]
         elif CONTROL and not has_tool_result and (match := re.search(r"\[e2e:reload-selfdev:(build|test)\]", prompt)):
