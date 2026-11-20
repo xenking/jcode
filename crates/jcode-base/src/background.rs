@@ -249,6 +249,7 @@ impl BackgroundTaskManager {
         status.completed_at = Some(completed_at.to_rfc3339());
         status.duration_secs = duration_secs;
         status.pid = Some(pid);
+        status.completion_delivered = Some(false);
         push_task_event(
             &mut status,
             terminal_event_record(final_status.clone(), exit_code, final_error.as_deref()),
@@ -262,6 +263,11 @@ impl BackgroundTaskManager {
             return self.read_status_file(status_path).await.unwrap_or(status);
         }
 
+        self.publish_detached_completion(&status, output);
+        status
+    }
+
+    fn publish_detached_completion(&self, status: &TaskStatusFile, output: String) {
         let output_preview = if output.len() > 500 {
             format!("{}...", crate::util::truncate_str(&output, 500))
         } else {
@@ -272,16 +278,50 @@ impl BackgroundTaskManager {
             tool_name: status.tool_name.clone(),
             display_name: status.display_name.clone(),
             session_id: status.session_id.clone(),
-            status: final_status,
-            exit_code,
+            status: status.status.clone(),
+            exit_code: status.exit_code,
             output_preview,
-            output_file: output_path,
-            duration_secs: duration_secs.unwrap_or_default(),
+            output_file: self.output_path_for(&status.task_id),
+            duration_secs: status.duration_secs.unwrap_or_default(),
             notify: status.notify,
             wake: status.wake,
         }));
+    }
 
-        status
+    pub async fn detached_completion_delivered(&self, task_id: &str) -> Option<bool> {
+        self.read_status_file(&self.status_path_for(task_id))
+            .await?
+            .completion_delivered
+    }
+
+    pub async fn mark_detached_completion_delivered(&self, task_id: &str) {
+        let _guard = self.progress_updates.lock().await;
+        let path = self.status_path_for(task_id);
+        if let Some(mut status) = self.read_status_file(&path).await
+            && status.completion_delivered == Some(false)
+        {
+            status.completion_delivered = Some(true);
+            self.write_status_file(&path, &status).await;
+        }
+    }
+
+    /// An owner can attach after the supervisor completed, including during
+    /// exec. Re-submit only its unacknowledged completions to the normal bus.
+    pub async fn replay_detached_completions_for(&self, session_id: &str) {
+        let Ok(mut entries) = fs::read_dir(&self.output_dir).await else {
+            return;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "json")
+                && let Some(status) = self.read_status_file(&path).await
+                && status.session_id == session_id
+                && status.completion_delivered == Some(false)
+            {
+                let output = self.output(&status.task_id).await.unwrap_or_default();
+                self.publish_detached_completion(&status, output);
+            }
+        }
     }
 
     /// True when a non-detached `Running` status file provably belongs to a
@@ -458,6 +498,7 @@ impl BackgroundTaskManager {
             owner_pid: None,
             owner_instance: None,
             detached: true,
+            completion_delivered: None,
             notify,
             wake,
             progress: None,
@@ -567,6 +608,7 @@ impl BackgroundTaskManager {
             owner_pid: Some(std::process::id()),
             owner_instance: Some(model::process_instance_token().to_string()),
             detached: false,
+            completion_delivered: None,
             notify,
             wake,
             progress: None,
@@ -645,6 +687,7 @@ impl BackgroundTaskManager {
                 owner_pid: Some(std::process::id()),
                 owner_instance: Some(model::process_instance_token().to_string()),
                 detached: false,
+                completion_delivered: None,
                 notify: notify_flag,
                 wake: wake_flag,
                 progress: prior_progress,
@@ -790,6 +833,7 @@ impl BackgroundTaskManager {
             owner_pid: Some(std::process::id()),
             owner_instance: Some(model::process_instance_token().to_string()),
             detached: false,
+            completion_delivered: None,
             notify,
             wake,
             progress: None,
@@ -876,6 +920,7 @@ impl BackgroundTaskManager {
                 owner_pid: Some(std::process::id()),
                 owner_instance: Some(model::process_instance_token().to_string()),
                 detached: false,
+                completion_delivered: None,
                 notify: notify_flag,
                 wake: wake_flag,
                 progress: prior_progress,
@@ -1418,6 +1463,7 @@ impl BackgroundTaskManager {
                 owner_pid: Some(std::process::id()),
                 owner_instance: Some(model::process_instance_token().to_string()),
                 detached: false,
+                completion_delivered: None,
                 notify: notify_flag,
                 wake: wake_flag,
                 progress: None,
@@ -1538,6 +1584,7 @@ impl BackgroundTaskManager {
                 owner_pid: Some(std::process::id()),
                 owner_instance: Some(model::process_instance_token().to_string()),
                 detached: false,
+                completion_delivered: None,
                 notify: notify_flag,
                 wake: wake_flag,
                 progress: prior_status

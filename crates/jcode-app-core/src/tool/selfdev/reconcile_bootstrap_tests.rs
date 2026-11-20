@@ -33,6 +33,7 @@ fn reconcile_keeps_running_request_not_yet_registered_in_live_task_map() {
             owner_pid: None,
             owner_instance: None,
             detached: false,
+            completion_delivered: None,
             notify: true,
             wake: true,
             progress: None,

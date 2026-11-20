@@ -84,6 +84,10 @@ pub struct TaskStatusFile {
     pub owner_instance: Option<String>,
     #[serde(default)]
     pub detached: bool,
+    /// `Some(false)` is a durable completion that the owning daemon has not
+    /// yet delivered. Old statuses have no delivery bookkeeping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_delivered: Option<bool>,
     #[serde(default = "default_true")]
     pub notify: bool,
     #[serde(default)]

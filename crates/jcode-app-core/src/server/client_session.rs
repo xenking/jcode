@@ -999,6 +999,9 @@ pub(super) async fn handle_subscribe(
         session_id: client_session_id.to_string(),
     });
     let _ = client_event_tx.send(ServerEvent::Done { id });
+    crate::background::global()
+        .replay_detached_completions_for(client_session_id)
+        .await;
     prewarm_idle_agent(agent);
 }
 
@@ -1551,6 +1554,9 @@ pub(super) async fn handle_resume_session(
         )
         .await?;
         let _ = client_event_tx.send(ServerEvent::Done { id });
+        crate::background::global()
+            .replay_detached_completions_for(&session_id)
+            .await;
         // Resolve project-local MCP config against the resumed session's
         // working dir, not the server process cwd (issue #420).
         // Do not block on the agent lock here: the target agent may be busy
@@ -2029,6 +2035,9 @@ pub(super) async fn handle_resume_session(
             history_result?;
             let history_sent_ms = resume_start.elapsed().as_millis();
             let _ = client_event_tx.send(ServerEvent::Done { id });
+            crate::background::global()
+                .replay_detached_completions_for(&session_id)
+                .await;
             // Re-send the swarm plan AFTER the History payload: the client
             // clears its plan snapshot on session change, so without this the
             // plan graph would stay blank until the next plan mutation.

@@ -200,10 +200,14 @@ fn parse_status_filter(value: Option<&Value>) -> HashSet<&'static str> {
         "superseded" => {
             set.insert("superseded");
         }
+        "interrupted" => {
+            set.insert("interrupted");
+        }
         "terminal" | "finished" | "done" => {
             set.insert("completed");
             set.insert("failed");
             set.insert("superseded");
+            set.insert("interrupted");
         }
         "all" | "any" => {}
         _ => {}

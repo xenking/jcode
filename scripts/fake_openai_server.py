@@ -94,6 +94,16 @@ class H(BaseHTTPRequestHandler):
                 "name": "bash", "arguments": json.dumps({"intent": "Verify background exec reload",
                     "command": command, "run_in_background": True, "notify": True,
                     "wake": True, "timeout": 60000})}}]
+        elif CONTROL and not has_tool_result and (match := re.search(r"\[e2e:reload-selfdev:(build|test)\]", prompt)):
+            action = match.group(1)
+            arguments = {"action": action, "reason": f"verify queued selfdev {action}",
+                         "notify": True, "wake": False}
+            if action == "build":
+                arguments.update(target="tui", release_notes="Verification fixture only.")
+            else:
+                arguments["command"] = "printf 'verify test fixture\\n'"
+            tool_calls = [{"id": f"call_reload_selfdev_{action}", "type": "function", "function": {
+                "name": "selfdev", "arguments": json.dumps(arguments)}}]
         elif CONTROL and "[e2e:longtool]" in prompt and not has_tool_result:
             # A tool still running when the daemon dies: the turn must be
             # resumed by the next daemon, with no client sending anything.

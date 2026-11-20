@@ -603,6 +603,7 @@ fn running_status_fixture(task_id: &str, session_id: &str) -> TaskStatusFile {
         owner_pid: None,
         owner_instance: None,
         detached: false,
+        completion_delivered: None,
         notify: false,
         wake: false,
         progress: None,

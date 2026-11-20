@@ -661,6 +661,11 @@ fn spawn_detached_progress_follower(
 pub(crate) async fn restore_detached_task_monitoring() {
     let manager = crate::background::global();
     for task in manager.detached_tasks_for_monitoring().await {
+        // The output directory is shared across local daemon sockets. Only
+        // this home's saved sessions can have lost their watcher on this exec.
+        if !crate::session::session_exists(&task.session_id) {
+            continue;
+        }
         let output = manager.output_path_for(&task.task_id);
         if let Some(seconds) = task.stall_wake_seconds {
             manager.arm_stall_watchdog(&task.task_id, seconds).await;
