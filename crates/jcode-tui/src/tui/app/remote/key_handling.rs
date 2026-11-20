@@ -164,6 +164,7 @@ mod recovery_queue_guard_tests {
             input::PreparedInput {
                 raw_input: "[pasted text]".to_string(),
                 expanded: "expanded private prompt".to_string(),
+                pasted_contents: Vec::new(),
                 images: images.clone(),
             },
         );
@@ -199,6 +200,7 @@ mod recovery_queue_guard_tests {
             input::PreparedInput {
                 raw_input: "second".to_string(),
                 expanded: "expanded second".to_string(),
+                pasted_contents: Vec::new(),
                 images: Vec::new(),
             },
         );
