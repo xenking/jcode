@@ -1021,24 +1021,6 @@ impl Drop for Warm {
         }
     }
 }
-#[cfg(test)]
-async fn transcribe(
-    key: String,
-    samples: Vec<i16>,
-    cancel: Arc<AtomicBool>,
-) -> Result<String, VoiceError> {
-    let session = NariSession::connect(&key, cancel.clone()).await?;
-    let (tx, rx) = crate::nari_pcm_channel();
-    let send = async move {
-        for chunk in samples.chunks(crate::NARI_PCM_CHUNK_SAMPLES) {
-            if tx.send(chunk.to_vec()).await.is_err() {
-                break;
-            }
-        }
-    };
-    let (_, result) = tokio::join!(send, session.run(rx, |_| {}));
-    result
-}
 #[path = "continuous_capture_loop.rs"]
 mod capture_loop;
 use capture_loop::run;

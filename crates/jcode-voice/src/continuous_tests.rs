@@ -523,8 +523,11 @@ fn manual_trigger_sends_only_recent_speech() {
 fn live_latency_profile() {
     let pcm = std::fs::read(std::env::var("JCODE_TEST_CONTINUOUS_PCM").unwrap()).unwrap();
     let samples: Vec<i16> = pcm
-        .chunks_exact(2)
-        .map(|b| i16::from_le_bytes([b[0], b[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .copied()
+        .map(i16::from_le_bytes)
         .collect();
     let key = crate::nari_api_key().unwrap();
     let gate = jcode_base::jev::JevClient::for_voice().unwrap();
@@ -569,8 +572,11 @@ fn live_latency_profile() {
 fn live_nari_idle_probe() {
     let pcm = std::fs::read(std::env::var("JCODE_TEST_CONTINUOUS_PCM").unwrap()).unwrap();
     let samples: Vec<i16> = pcm
-        .chunks_exact(2)
-        .map(|b| i16::from_le_bytes([b[0], b[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .copied()
+        .map(i16::from_le_bytes)
         .collect();
     let key = crate::nari_api_key().unwrap();
     let idle: Vec<u64> = std::env::var("JCODE_TEST_NARI_IDLE")
