@@ -186,7 +186,15 @@ fn handle_server_event_inner(
     {
         remote.finish_runtime_command(id);
         if command == "mode" {
-            app.session.pinned_skill = data["pinned_skill"].as_str().map(str::to_owned);
+            let names = serde_json::from_value::<Vec<String>>(data["pinned_skills"].clone())
+                .unwrap_or_else(|_| {
+                    data["pinned_skill"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .into_iter()
+                        .collect()
+                });
+            app.session.set_pinned_skill_names(names);
             app.active_skill = app.session.pinned_skill.clone();
         }
         if command == "poke"
@@ -195,7 +203,9 @@ fn handle_server_event_inner(
             app.auto_poke_incomplete_todos = enabled;
             app.auto_poke_default_on = enabled;
         }
-        app.push_display_message(DisplayMessage::system(message));
+        if !message.is_empty() {
+            app.push_display_message(DisplayMessage::system(message));
+        }
         return true;
     }
 
@@ -1644,6 +1654,7 @@ fn handle_server_event_inner(
             provider_model,
             subagent_model,
             pinned_skill,
+            pinned_skills,
             agent_model_overrides,
             autoreview_enabled,
             autojudge_enabled,
@@ -2033,7 +2044,9 @@ fn handle_server_event_inner(
                 app.invalidate_command_candidates_cache();
             }
             if authoritative {
-                app.session.pinned_skill = pinned_skill;
+                app.session.set_pinned_skill_names(
+                    pinned_skills.unwrap_or_else(|| pinned_skill.into_iter().collect()),
+                );
                 app.active_skill = app.session.pinned_skill.clone();
                 app.remote_sessions = all_sessions;
                 app.remote_client_count = client_count;

@@ -16,6 +16,8 @@ pub(super) struct SessionJournalMeta {
     pub(super) system_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) pinned_skill: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) pinned_skills: Vec<String>,
     pub(super) updated_at: DateTime<Utc>,
     pub(super) compaction: Option<std::sync::Arc<StoredCompactionState>>,
     /// Compaction state can be several MB (OpenAI encrypted context). When it
@@ -113,6 +115,7 @@ pub(super) fn metadata_requires_snapshot(
         || prev.custom_title != current.custom_title
         || prev.system_prompt != current.system_prompt
         || prev.pinned_skill != current.pinned_skill
+        || prev.pinned_skills != current.pinned_skills
         || prev.provider_key != current.provider_key
         || prev.route_api_method != current.route_api_method
         || prev.reasoning_effort != current.reasoning_effort

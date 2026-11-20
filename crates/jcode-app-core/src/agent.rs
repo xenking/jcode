@@ -957,18 +957,20 @@ impl Agent {
     }
 
     pub(crate) fn set_pinned_skill(&mut self, name: Option<&str>) -> Result<()> {
-        if let Some(name) = name
-            && self.current_skills_snapshot().get(name).is_none()
-        {
-            anyhow::bail!(crate::skill::unknown_skill_message(name));
+        self.set_pinned_skills(name.map(str::to_owned).into_iter().collect())
+    }
+
+    fn set_pinned_skills(&mut self, next: Vec<String>) -> Result<()> {
+        let skills = self.current_skills_snapshot();
+        if let Some(missing) = next.iter().find(|name| skills.get(name).is_none()) {
+            anyhow::bail!(crate::skill::unknown_skill_message(missing));
         }
-        let next = name.map(str::to_owned);
-        if self.session.pinned_skill == next && self.active_skill == next {
+        if self.session.pinned_skill_names() == next && self.active_skill.as_ref() == next.first() {
             return Ok(());
         }
-        self.session.pinned_skill = next.clone();
-        self.active_skill = next;
-        if name.is_some() {
+        self.session.set_pinned_skill_names(next);
+        self.active_skill = self.session.pinned_skill.clone();
+        if self.active_skill.is_some() {
             self.announce_active_skill();
         } else {
             self.add_message_with_display_role(
@@ -998,11 +1000,25 @@ impl Agent {
         match argument.trim() {
             "" => {}
             "off" => self.set_pinned_skill(None)?,
+            toggle if toggle.starts_with("toggle ") => {
+                let name = toggle.trim_start_matches("toggle ");
+                let mut names = self.session.pinned_skill_names().to_vec();
+                if let Some(index) = names.iter().position(|active| active == name) {
+                    names.remove(index);
+                } else {
+                    names.push(name.to_owned());
+                }
+                self.set_pinned_skills(names)?;
+            }
             name => self.set_pinned_skill(Some(name))?,
         }
         Ok(format!(
             "Session mode: {}",
-            self.session.pinned_skill.as_deref().unwrap_or("off")
+            if self.session.pinned_skill_names().is_empty() {
+                "off".into()
+            } else {
+                self.session.pinned_skill_names().join(", ")
+            }
         ))
     }
 
@@ -1044,31 +1060,22 @@ impl Agent {
         if self.current_skills_snapshot().get(&name).is_none() {
             return false;
         }
-        self.session.pinned_skill = Some(name.clone());
+        self.session.set_pinned_skill_names(vec![name.clone()]);
         self.active_skill = Some(name);
         self.announce_active_skill_inner()
     }
 
     fn active_skill_announcement(&self) -> Option<String> {
-        let name = self.active_skill.as_deref()?;
+        self.active_skill.as_ref()?;
         let skills = self.current_skills_snapshot();
-        skills
-            .get(name)
-            .map(|skill| {
-                format!(
-                    "<system-reminder>\n# Active Skill\n\n{}\n</system-reminder>",
-                    skill.get_prompt().trim()
-                )
-            })
-            .or_else(|| {
-                (self.session.pinned_skill == self.active_skill)
-                    .then(|| {
-                        self.session
-                            .stored_pinned_skill_announcement()
-                            .map(str::to_owned)
-                    })
-                    .flatten()
-            })
+        Session::render_pinned_skill_announcement(self.session.pinned_skill_names(), |name| {
+            skills.get(name).map(|skill| skill.get_prompt())
+        })
+        .or_else(|| {
+            self.session
+                .stored_pinned_skill_announcement()
+                .map(str::to_owned)
+        })
     }
 
     /// Record the newly active skill's instructions as a hidden transcript

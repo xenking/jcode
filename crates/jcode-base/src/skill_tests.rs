@@ -70,6 +70,8 @@ fn test_skill(name: &str, description: &str, content: &str) -> Skill {
     Skill {
         name: name.to_string(),
         description: description.to_string(),
+        icon: None,
+        mode: None,
         allowed_tools: None,
         content: content.to_string(),
         path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),

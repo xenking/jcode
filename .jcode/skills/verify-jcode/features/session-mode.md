@@ -1,6 +1,8 @@
 # Session mode (`/mode`)
 
-User POV: `/mode <skill>` keeps a skill's instructions active for the whole session, across later turns, compaction and swarm workers. `/mode` shows it, `/mode off` ends it.
+User POV: `/mode <skill>` replaces the session's pinned skills. `/mode toggle <skill>` adds or removes one without changing the others. `/mode` lists the selection and `/mode off` clears it. A pinned skill stays active across later turns, compaction and swarm workers. `skill_manage load` reads instructions without pinning them.
+
+Run `drive mode-set` to pin two fixture skills through the terminal, restart the private daemon, check the saved set and the continued provider request, then toggle one off.
 
 ## Drive
 

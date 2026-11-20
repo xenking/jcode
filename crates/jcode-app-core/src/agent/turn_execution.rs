@@ -251,7 +251,7 @@ impl Agent {
                     if has_queued_skills {
                         let previous_count = self.session.messages.len();
                         let previous_skill = self.active_skill.clone();
-                        let previous_pinned_skill = self.session.pinned_skill.clone();
+                        let previous_pinned_skills = self.session.pinned_skill_names().to_vec();
                         let result = (|| {
                             for mut item in queued_items {
                                 if let Some(skill) = item.active_skill {
@@ -294,7 +294,7 @@ impl Agent {
                         if result.is_err() {
                             self.session.truncate_messages(previous_count);
                             self.active_skill = previous_skill;
-                            self.session.pinned_skill = previous_pinned_skill;
+                            self.session.set_pinned_skill_names(previous_pinned_skills);
                         }
                         result
                     } else {

@@ -2692,6 +2692,7 @@ fn resumed_history_restores_last_provider_reported_context_usage() {
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
             pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,

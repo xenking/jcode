@@ -8,7 +8,8 @@ fn reload_replay_history(
         messages: vec![crate::protocol::HistoryMessage {
             tool_duration_ms: None,
             attachments: Vec::new(),
-            response_stats: None, timestamp_ms: None,
+            response_stats: None,
+            timestamp_ms: None,
             role: "assistant".to_string(),
             content: "Work interrupted by reload".to_string(),
             tool_calls: None,
@@ -21,6 +22,7 @@ fn reload_replay_history(
         provider_model: None,
         subagent_model: None,
         pinned_skill: None,
+        pinned_skills: None,
         agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,
@@ -339,7 +341,7 @@ fn reload_recovery_prepared_send_failure_restores_draft_without_exiting() {
         &mut app,
         &mut connection,
         input::PreparedInput {
-                pasted_contents: Vec::new(),
+            pasted_contents: Vec::new(),
             raw_input: "Continue the interrupted work".to_string(),
             expanded: "Expanded instructions for the interrupted work".to_string(),
             images: images.clone(),
@@ -471,14 +473,20 @@ fn reload_recovery_preserves_visible_turn_timer_through_dispatch() {
         );
         assert!(app.is_processing);
         assert_eq!(app.processing_started, Some(started));
-        assert_eq!(app.visible_turn_started, has_visible_timer.then_some(started));
+        assert_eq!(
+            app.visible_turn_started,
+            has_visible_timer.then_some(started)
+        );
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
         remote.mark_history_loaded();
         rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
         assert!(app.is_processing);
         assert!(app.current_message_id.is_none());
         assert!(app.hidden_queued_system_messages.is_empty());
-        assert_eq!(app.visible_turn_started, has_visible_timer.then_some(started));
+        assert_eq!(
+            app.visible_turn_started,
+            has_visible_timer.then_some(started)
+        );
         assert!(app.elapsed().unwrap() >= Duration::from_secs(90));
     }
 }
@@ -626,7 +634,10 @@ fn reload_recovery_dedup_is_session_scoped_and_resets_for_new_reload() {
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
     app.handle_server_event(
-        crate::protocol::ServerEvent::Reloading { new_socket: None, reload_id: None },
+        crate::protocol::ServerEvent::Reloading {
+            new_socket: None,
+            reload_id: None,
+        },
         &mut remote,
     );
     assert!(remote::show_reload_recovery_notice_once(

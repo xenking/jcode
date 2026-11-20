@@ -243,6 +243,7 @@ fn ssh_remote_history_is_authoritative_even_when_empty_or_server_version_differs
             provider_model: Some("remote-model".into()),
             subagent_model: None,
             pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: Some(false),
             autojudge_enabled: Some(false),

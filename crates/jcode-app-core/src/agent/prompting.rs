@@ -13,6 +13,7 @@ impl Agent {
                 serde_json::json!({
                     "name": skill.name, "description": skill.description,
                     "path": skill.path, "allowed_tools": skill.allowed_tools,
+                    "icon": skill.icon, "mode": skill.mode,
                 })
             })
             .collect();
@@ -20,7 +21,7 @@ impl Agent {
             "name": skill.name, "description": skill.description, "category": skill.category,
             "source": skill.source, "install": skill.install, "installed": registry.contains(skill.name),
         })).collect();
-        serde_json::json!({"skills": skills, "endorsed": endorsed, "active_skill": self.active_skill})
+        serde_json::json!({"skills": skills, "endorsed": endorsed, "active_skill": self.active_skill, "pinned_skills": self.session_for_split().pinned_skill_names()})
     }
 
     pub(crate) fn runtime_agent_model_overrides(&self) -> serde_json::Value {

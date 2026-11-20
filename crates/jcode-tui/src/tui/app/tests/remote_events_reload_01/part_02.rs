@@ -394,7 +394,8 @@ fn test_remote_rewind_completion_shows_undo_hint_after_history_refresh() {
             messages: vec![crate::protocol::HistoryMessage {
                 tool_duration_ms: None,
                 attachments: Vec::new(),
-                response_stats: None, timestamp_ms: None,
+                response_stats: None,
+                timestamp_ms: None,
                 role: "user".to_string(),
                 content: "hello".to_string(),
                 tool_calls: None,
@@ -405,6 +406,7 @@ fn test_remote_rewind_completion_shows_undo_hint_after_history_refresh() {
             provider_model: Some("mock-model".to_string()),
             subagent_model: None,
             pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,

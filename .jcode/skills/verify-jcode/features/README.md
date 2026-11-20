@@ -31,7 +31,7 @@ Record the feature ID, exact user entry point, action, resulting frame/response,
 | [Interactive turn and tools](tui-tool.md) | `drive tui`: type, Enter, stream, real write | paste, queued/interrupt turns, tool expansion/collapse |
 | [Slash commands and skills](slash-skill.md) | `drive slash`: /help, /verify-probe prompt | /?, /commands, /skills listing, bare activation, completion picker |
 | [Session resume](resume.md) | `drive resume`: quit UI, --resume exact ID, continue | --resume picker, /resume picker, CLI --resume run, full daemon restart |
-| [Session mode](session-mode.md) | `drive mode`: /mode, padded turns, /compact, post-compaction turn, swarm spawn, /mode off | auto-compaction, resume after compaction, mode switch between skills |
+| [Session mode](session-mode.md) | `drive mode`: pin, compact, spawn, clear. `drive mode-set`: toggle, restart, continued provider request, unpin one | auto-compaction, resume after compaction |
 | [Side panel](side-panel.md) | `drive side-panel`: /splitview on | /splitview off/status, /todos panel, swarm worker lifecycle |
 | [Cancellation and daemon restart](lifecycle.md) | `drive cancel`, `drive restart` | tool cancellation, queue races, binary reload, in-flight reload recovery |
 | [Provider route and auth boundaries](provider-route.md) | `drive cli --mode json` for the synthetic route | multi-route picker, forced catalog refresh, real vendor auth and token refresh |

@@ -58,6 +58,8 @@ mod tests {
                 std::sync::Arc::new(Skill {
                     name: (*name).to_string(),
                     description: "Test skill".to_string(),
+                    icon: None,
+                    mode: None,
                     allowed_tools: None,
                     content: "content".to_string(),
                     path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),

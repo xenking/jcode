@@ -593,6 +593,7 @@ fn startup_history(session_id: &str) -> ServerEvent {
         provider_model: None,
         subagent_model: None,
         pinned_skill: None,
+        pinned_skills: None,
         agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,

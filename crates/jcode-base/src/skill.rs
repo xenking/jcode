@@ -34,6 +34,8 @@ pub fn unknown_skill_message(name: &str) -> String {
 pub struct Skill {
     pub name: String,
     pub description: String,
+    pub icon: Option<String>,
+    pub mode: Option<bool>,
     pub allowed_tools: Option<Vec<String>>,
     pub content: String,
     pub path: PathBuf,
@@ -47,6 +49,8 @@ pub struct Skill {
 struct SkillFrontmatter {
     name: String,
     description: String,
+    icon: Option<String>,
+    mode: Option<bool>,
     #[serde(rename = "allowed-tools")]
     allowed_tools: Option<AllowedTools>,
 }
@@ -576,6 +580,8 @@ impl SkillRegistry {
         let SkillFrontmatter {
             name,
             description,
+            icon,
+            mode,
             allowed_tools,
         } = frontmatter;
 
@@ -589,6 +595,8 @@ impl SkillRegistry {
         Ok(Skill {
             name,
             description,
+            icon,
+            mode,
             allowed_tools,
             content: body,
             path: path.to_path_buf(),
@@ -688,6 +696,8 @@ impl SkillRegistry {
 
         let name = scalar("name")?;
         let description = scalar("description")?;
+        let icon = scalar("icon");
+        let mode = scalar("mode").and_then(|value| value.parse().ok());
         let allowed_tools = entries
             .iter()
             .find(|(entry, _)| *entry == "allowed-tools")
@@ -710,6 +720,8 @@ impl SkillRegistry {
         Some(SkillFrontmatter {
             name,
             description,
+            icon,
+            mode,
             allowed_tools,
         })
     }

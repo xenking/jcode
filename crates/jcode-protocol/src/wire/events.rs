@@ -840,6 +840,8 @@ pub enum ServerEvent {
         subagent_model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pinned_skill: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pinned_skills: Option<Vec<String>>,
         #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
         agent_model_overrides: std::collections::BTreeMap<String, String>,
         /// Session-scoped automatic review toggle.

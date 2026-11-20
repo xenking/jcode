@@ -763,7 +763,8 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         messages: vec![HistoryMessage {
             tool_duration_ms: None,
             attachments: Vec::new(),
-            response_stats: None, timestamp_ms: None,
+            response_stats: None,
+            timestamp_ms: None,
             role: "assistant".to_string(),
             content: "hello".to_string(),
             tool_calls: None,
@@ -806,6 +807,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         service_tier: None,
         subagent_model: None,
         pinned_skill: None,
+        pinned_skills: None,
         agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,
@@ -866,7 +868,8 @@ fn test_compacted_history_event_roundtrip() -> Result<()> {
         messages: vec![HistoryMessage {
             tool_duration_ms: None,
             attachments: Vec::new(),
-            response_stats: None, timestamp_ms: None,
+            response_stats: None,
+            timestamp_ms: None,
             role: "assistant".to_string(),
             content: "older response".to_string(),
             tool_calls: None,
@@ -1027,7 +1030,8 @@ fn history_prefix_fingerprint_is_stable_and_streaming_consistent() {
     let message = |role: &str, content: &str| HistoryMessage {
         tool_duration_ms: None,
         attachments: Vec::new(),
-        response_stats: None, timestamp_ms: None,
+        response_stats: None,
+        timestamp_ms: None,
         role: role.to_string(),
         content: content.to_string(),
         tool_calls: None,
@@ -1056,10 +1060,9 @@ fn history_prefix_fingerprint_is_stable_and_streaming_consistent() {
 
 #[test]
 fn history_delta_fields_are_backward_compatible() {
-    let event: ServerEvent = serde_json::from_str(
-        r#"{"type":"history","id":1,"session_id":"s","messages":[]}"#,
-    )
-    .expect("legacy History without messages_base_count");
+    let event: ServerEvent =
+        serde_json::from_str(r#"{"type":"history","id":1,"session_id":"s","messages":[]}"#)
+            .expect("legacy History without messages_base_count");
     let ServerEvent::History {
         messages_base_count,
         ..

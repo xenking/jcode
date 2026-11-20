@@ -3822,9 +3822,34 @@ impl App {
             return false;
         }
         let argument = input.strip_prefix("/mode").unwrap_or_default().trim();
-        if argument == "off" {
+        if let Some(name) = argument.strip_prefix("toggle ") {
+            let mut names = self.session.pinned_skill_names().to_vec();
+            if let Some(index) = names.iter().position(|active| active == name) {
+                names.remove(index);
+            } else {
+                names.push(name.into());
+            }
+            let skills = self.current_skills_snapshot();
+            if let Some(missing) = names.iter().find(|name| skills.get(name).is_none()) {
+                self.push_display_message(DisplayMessage::error(
+                    crate::skill::unknown_skill_message(missing),
+                ));
+                return true;
+            }
+            self.session.set_pinned_skill_names(names);
+            self.active_skill = self.session.pinned_skill.clone();
+            if !self.is_remote {
+                if self.active_skill.is_some() {
+                    self.reannounce_pinned_skill();
+                } else {
+                    self.append_turn_system_reminder(Some(crate::skill::MODE_OFF_REMINDER.into()));
+                }
+            }
+            self.session_save_pending = true;
+        } else if argument == "off" {
             let changed =
-                self.session.pinned_skill.take().is_some() | self.active_skill.take().is_some();
+                !self.session.pinned_skill_names().is_empty() | self.active_skill.take().is_some();
+            self.session.set_pinned_skill_names(Vec::new());
             if changed {
                 if !self.is_remote {
                     self.append_turn_system_reminder(Some(crate::skill::MODE_OFF_REMINDER.into()));
@@ -3843,14 +3868,19 @@ impl App {
         }
         self.push_display_message(DisplayMessage::system(format!(
             "Session mode: {}",
-            self.session.pinned_skill.as_deref().unwrap_or("off")
+            if self.session.pinned_skill_names().is_empty() {
+                "off".into()
+            } else {
+                self.session.pinned_skill_names().join(", ")
+            }
         )));
         true
     }
 
     fn activate_pinned_skill(&mut self, name: &str, prompt: String) {
-        let changed = self.session.pinned_skill.as_deref() != Some(name);
-        self.session.pinned_skill = Some(name.into());
+        let names = vec![name.to_owned()];
+        let changed = self.session.pinned_skill_names() != names;
+        self.session.set_pinned_skill_names(names);
         self.active_skill = Some(name.into());
         if changed && !self.is_remote {
             self.append_turn_system_reminder(Some(format!("# Active Skill\n\n{}", prompt.trim())));
@@ -3863,22 +3893,17 @@ impl App {
             return;
         }
         self.active_skill = self.session.pinned_skill.clone();
-        let reminder = self
-            .session
-            .pinned_skill
+        let skills = self.current_skills_snapshot();
+        let rendered = crate::session::Session::render_pinned_skill_announcement(
+            self.session.pinned_skill_names(),
+            |name| skills.get(name).map(|skill| skill.get_prompt()),
+        );
+        let reminder = rendered
             .as_deref()
-            .and_then(|name| {
-                self.current_skills_snapshot()
-                    .get(name)
-                    .map(|skill| format!("# Active Skill\n\n{}", skill.get_prompt().trim()))
-            })
-            .or_else(|| {
-                self.session
-                    .stored_pinned_skill_announcement()
-                    .and_then(|text| text.strip_prefix("<system-reminder>\n"))
-                    .and_then(|text| text.strip_suffix("\n</system-reminder>"))
-                    .map(str::to_owned)
-            });
+            .or_else(|| self.session.stored_pinned_skill_announcement())
+            .and_then(|text| text.strip_prefix("<system-reminder>\n"))
+            .and_then(|text| text.strip_suffix("\n</system-reminder>"))
+            .map(str::to_owned);
         self.append_turn_system_reminder(reminder);
     }
 

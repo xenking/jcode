@@ -108,9 +108,14 @@ pub(super) async fn execute(
         }
         RuntimeCommand::Mode => {
             let message = agent.mode_command(&args.join(" "))?;
+            let session = agent.session_for_split();
             return Ok((
-                json!({"pinned_skill": agent.session_for_split().pinned_skill}),
-                message,
+                json!({"pinned_skill": session.pinned_skill, "pinned_skills": session.pinned_skill_names()}),
+                if args.first().is_some_and(|arg| arg == "toggle") {
+                    String::new()
+                } else {
+                    message
+                },
             ));
         }
         RuntimeCommand::Review | RuntimeCommand::Judge | RuntimeCommand::Subagent => {
@@ -448,7 +453,10 @@ fn skills_report(data: &Value) -> String {
     }
     for skill in loaded {
         let name = skill["name"].as_str().unwrap_or("");
-        let active = if data["active_skill"].as_str() == Some(name) {
+        let active = if data["pinned_skills"]
+            .as_array()
+            .is_some_and(|names| names.iter().any(|active| active == name))
+        {
             " (active)"
         } else {
             ""
@@ -744,6 +752,62 @@ mod tests {
                 .is_none()
         );
     }
+    #[tokio::test]
+    async fn mode_toggles_roundtrip_through_session_storage() {
+        let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        for name in ["alpha-mode", "beta-mode", "gamma-mode"] {
+            let dir = project.path().join(".jcode/skills").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), format!(
+                "---\nname: {name}\ndescription: Runtime mode\nicon: '⚙'\n---\n{name} instructions\n"
+            )).unwrap();
+        }
+        let mut agent = Agent::new_with_initial_working_dir(
+            Arc::new(NoInferenceProvider::default()),
+            crate::tool::Registry::empty(),
+            project.path().to_str(),
+        );
+        for (name, expected) in [
+            ("alpha-mode", json!(["alpha-mode"])),
+            ("beta-mode", json!(["alpha-mode", "beta-mode"])),
+            (
+                "gamma-mode",
+                json!(["alpha-mode", "beta-mode", "gamma-mode"]),
+            ),
+            ("beta-mode", json!(["alpha-mode", "gamma-mode"])),
+        ] {
+            let (data, _) = execute(
+                &mut agent,
+                RuntimeCommand::Mode,
+                &["toggle".into(), name.into()],
+                false,
+                Value::Null,
+            )
+            .await
+            .unwrap();
+            assert_eq!(data["pinned_skills"], expected);
+            assert_eq!(data["pinned_skill"], "alpha-mode");
+        }
+        let loaded = crate::session::Session::load(agent.session_id()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap()["pinned_skills"],
+            json!(["alpha-mode", "gamma-mode"])
+        );
+        let snapshot = agent.runtime_skills_snapshot();
+        assert_eq!(
+            snapshot["pinned_skills"],
+            json!(["alpha-mode", "gamma-mode"])
+        );
+        let alpha = snapshot["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|skill| skill["name"] == "alpha-mode")
+            .unwrap();
+        assert_eq!(alpha["icon"], "⚙");
+    }
+
     #[test]
     fn role_arguments_preserve_model_and_task_and_reject_unsupported_resume() {
         let args = [

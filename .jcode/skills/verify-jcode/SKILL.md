@@ -24,7 +24,7 @@ If justrust is unavailable, use `scripts/dev_cargo.sh build --target-dir "$BUILD
 
 Launch copies that binary into a short-lived owner-only runtime directory, records its SHA-256/version and checkout revision, starts the existing `scripts/fake_openai_server.py` on a kernel-selected loopback port, starts `serve --socket <private>/app.sock`, completes a real CLI inference and opens a 160x48 TUI in a private `tmux -S` server. Use `launch --cols 60 --rows 30` for a separate narrow-terminal run. It drives the optional first-run welcome screen with Right, Enter. Ready means a completed inference, usable terminal prompt and daemon attachment, not just a socket file.
 
-Both server and clients receive a clean environment with private HOME, JCODE_HOME, JCODE_RUNTIME_DIR, debug-file paths, `JCODE_TEST_SESSION=1`, `JCODE_DEBUG_CONTROL=1`, and `JCODE_NO_MENUBAR=1`. The TUI uses `--fresh-spawn` to skip host setup hints. The disposable workspace contains only a seeded `verify-probe` skill. Launch neither loads the developer's credentials/skills/config nor repoints or restarts their shared daemon. It refuses an existing evidence directory. Failed or interrupted commands automatically clean their processes and retain failure logs.
+Both server and clients receive a clean environment with private HOME, JCODE_HOME, JCODE_RUNTIME_DIR, debug-file paths, `JCODE_TEST_SESSION=1`, `JCODE_DEBUG_CONTROL=1`, and `JCODE_NO_MENUBAR=1`. The TUI uses `--fresh-spawn` to skip host setup hints. The disposable workspace contains only the seeded `verify-probe` and `verify-review` skills. Launch neither loads the developer's credentials/skills/config nor repoints or restarts their shared daemon. It refuses an existing evidence directory. Failed or interrupted commands automatically clean their processes and retain failure logs.
 
 ## Doctor
 
@@ -45,6 +45,7 @@ Require `status: ready`. This is read-only against the app: verify the runtime o
 "$V" drive --evidence "$E" restart
 "$V" drive --evidence "$E" side-panel
 "$V" drive --evidence "$E" mode
+"$V" drive --evidence "$E" mode-set
 "$V" frame --evidence "$E" --label reviewed
 ```
 
