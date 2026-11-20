@@ -1171,11 +1171,7 @@ impl Agent {
                     encrypted_content_len,
                 ));
                 (
-                    readable.unwrap_or_else(|| {
-                        crate::provider::openai_request::openai_encrypted_content_fallback_summary(
-                            encrypted_content_len,
-                        )
-                    }),
+                    crate::compaction::oversized_native_summary(encrypted_content_len, readable),
                     None,
                 )
             };
@@ -1474,6 +1470,18 @@ impl Agent {
                 let mut manager = compaction.write().await;
                 let discarded_oversized_native =
                     manager.discard_oversized_openai_native_compaction();
+                let model = self.provider.model();
+                let accepts_native =
+                    crate::compaction::openai_native_replay_route(self.provider.name(), &model);
+                let supports_archive = crate::compaction::snapcompact_pages_usable(
+                    self.provider.supports_image_input(),
+                    &model,
+                );
+                let recovered_native =
+                    manager.recover_native_text(self.session.provider_messages(), accepts_native);
+                if manager.take_missing_native_summary_warning(accepts_native) {
+                    self.warn_missing_native_compaction_summary(event_tx);
+                }
                 let now = std::time::SystemTime::now();
                 let ttl = self.cache_expiry_ttl_secs(&manager);
                 // A completed cold reduction covers the old prefix. A large
@@ -1575,15 +1583,6 @@ impl Agent {
                         }
                     }
                 }
-                let model = self.provider.model();
-                let accepts_native =
-                    crate::compaction::openai_native_replay_route(self.provider.name(), &model);
-                let supports_archive = crate::compaction::snapcompact_pages_usable(
-                    self.provider.supports_image_input(),
-                    &model,
-                );
-                let recovered_native =
-                    manager.recover_native_text(self.session.provider_messages(), accepts_native);
                 {
                     let all_messages = self.session.provider_messages();
                     if self.provider.uses_jcode_compaction() {

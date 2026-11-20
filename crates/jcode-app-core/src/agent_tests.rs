@@ -1459,7 +1459,6 @@ async fn messages_for_provider_applies_manual_compaction_in_native_auto_mode() {
     agent.provider_session_id = Some("stale-provider-session".to_string());
     agent.session.provider_session_id = Some("stale-provider-session".to_string());
 
-    let provider_messages = agent.provider_messages();
     let (message, success) = agent.request_manual_compaction();
     assert!(success, "manual compaction should start: {message}");
 
@@ -1481,7 +1480,15 @@ async fn messages_for_provider_applies_manual_compaction_in_native_auto_mode() {
     assert!(agent.session.compaction.is_some());
     assert!(agent.provider_session_id.is_none());
     assert!(agent.session.provider_session_id.is_none());
-    assert!(compacted_messages.len() < provider_messages.len());
+    assert!(agent.session.compaction.as_ref().unwrap().compacted_count > 0);
+    let last_user_message = format!("turn 29 {}", "x".repeat(120));
+    assert!(
+        compacted_messages
+            .iter()
+            .any(|message| message.content.iter().any(|block| {
+                matches!(block, ContentBlock::Text { text, .. } if text == &last_user_message)
+            }))
+    );
     match &compacted_messages[0].content[0] {
         ContentBlock::Text { text, .. } => {
             assert!(text.contains("Previous Conversation Summary"));

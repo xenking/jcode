@@ -35,6 +35,14 @@ pub fn openai_native_replay_route(provider: &str, model: &str) -> bool {
     provider.eq_ignore_ascii_case("openai")
         && model.trim() != jcode_provider_core::CHATGPT_WEB_MODEL
 }
+
+pub fn oversized_native_summary(encrypted_content_len: usize, readable: Option<String>) -> String {
+    let warning = openai_encrypted_content_fallback_summary(encrypted_content_len);
+    match readable {
+        Some(text) => format!("{warning}\n\n{text}"),
+        None => warning,
+    }
+}
 use crate::provider::Provider;
 use crate::provider::openai_request::{
     openai_encrypted_content_fallback_summary, openai_encrypted_content_is_sendable,
@@ -2354,12 +2362,16 @@ impl CompactionManager {
                 }
             }
         }
-        let warn_missing_native_summary = !accepts_native
+        let warn_missing_native_summary = self.take_missing_native_summary_warning(accepts_native);
+        (checkpoint_changed, warn_missing_native_summary)
+    }
+
+    pub fn take_missing_native_summary_warning(&mut self, accepts_native: bool) -> bool {
+        !accepts_native
             && self.active_summary.as_ref().is_some_and(|summary| {
                 summary.openai_encrypted_content.is_some() && summary.text.trim().is_empty()
             })
-            && !std::mem::replace(&mut self.warned_missing_native_summary, true);
-        (checkpoint_changed, warn_missing_native_summary)
+            && !std::mem::replace(&mut self.warned_missing_native_summary, true)
     }
 
     fn project_messages(

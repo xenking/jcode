@@ -63,6 +63,14 @@ pub(super) fn retained_checkpoint_messages(
         if message.role != Role::User || !crate::session::is_visible_conversation_message(message) {
             continue;
         }
+        if message.content.iter().any(|block| {
+            !matches!(
+                block,
+                ContentBlock::Text { .. } | ContentBlock::Image { .. }
+            )
+        }) {
+            continue;
+        }
         let bytes = message
             .content
             .iter()

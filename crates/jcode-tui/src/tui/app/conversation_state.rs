@@ -159,11 +159,7 @@ impl App {
                     encrypted_content_len,
                 ));
                 (
-                    readable.unwrap_or_else(|| {
-                        crate::provider::openai_request::openai_encrypted_content_fallback_summary(
-                            encrypted_content_len,
-                        )
-                    }),
+                    crate::compaction::oversized_native_summary(encrypted_content_len, readable),
                     None,
                 )
             };
