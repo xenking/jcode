@@ -1,5 +1,193 @@
 use super::*;
 
+#[tokio::test]
+async fn static_prompt_freeze_survives_file_edits_and_resume_on_the_wire() {
+    use jcode_provider_anthropic_runtime::AnthropicProvider;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+    let home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let project = tempfile::tempdir_in(home.root()).unwrap();
+    let config_dir = project.path().join(".jcode");
+    std::fs::create_dir(&config_dir).unwrap();
+    let overlay = config_dir.join("prompt-overlay.md");
+    std::fs::write(&overlay, "overlay-before-freeze").unwrap();
+    let base = config_dir.join("system-prompt.md");
+    std::fs::write(&base, "base-before-freeze").unwrap();
+    let preferred = config_dir.join("preferred-tools.md");
+    std::fs::write(&preferred, "preferred-before-freeze").unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!(
+        "http://{}/v1/messages?beta=true",
+        listener.local_addr().unwrap()
+    );
+    let (capture_tx, mut capture_rx) = tokio::sync::mpsc::unbounded_channel();
+    let fixture = tokio::spawn(async move {
+        for _ in 0..5 {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            let mut length = None;
+            loop {
+                let mut line = String::new();
+                assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    length = Some(value.trim().parse::<usize>().unwrap());
+                }
+            }
+            let mut bytes = vec![0; length.unwrap()];
+            socket.read_exact(&mut bytes).await.unwrap();
+            capture_tx
+                .send(serde_json::from_slice::<serde_json::Value>(&bytes).unwrap())
+                .unwrap();
+            let body = concat!(
+                "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"prompt-fixture\",\"model\":\"claude-opus-5-5\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+                "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"done\"}}\n\n",
+                "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            );
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        }
+    });
+    let account =
+        jcode_base::auth::claude::upsert_account(jcode_base::auth::claude::AnthropicAccount {
+            label: "prompt-freeze".into(),
+            access: "prompt-fixture-token".into(),
+            refresh: String::new(),
+            expires: i64::MAX,
+            email: None,
+            subscription_type: None,
+            scopes: vec![],
+        })
+        .unwrap();
+    let provider = AnthropicProvider::new()
+        .with_oauth_test_endpoint(&endpoint)
+        .unwrap();
+    provider.set_oauth_account(Some(&account)).unwrap();
+    provider.set_model("claude-opus-5-5").unwrap();
+    let provider: Arc<dyn Provider> = Arc::new(provider);
+    let new_agent = || {
+        let mut agent = Agent::new_with_initial_working_dir(
+            provider.fork(),
+            Registry::empty(),
+            project.path().to_str(),
+        );
+        agent
+            .rename_session_title(Some("Prompt fixture".into()))
+            .unwrap();
+        agent.set_memory_enabled(false);
+        agent
+    };
+    let mut agent = new_agent();
+    let (sdk_tx, _sdk_rx) = tokio::sync::mpsc::unbounded_channel();
+    let sdk_owner = crate::tool::sdk::ConnectionGuard("static-freeze-wire-owner".into());
+    crate::tool::sdk::configure(
+        agent.session_id(),
+        "static-freeze-wire-owner",
+        crate::protocol::SessionToolConfig {
+            system_prompt_append: Some("sdk-before-freeze".into()),
+            ..Default::default()
+        },
+        sdk_tx,
+    )
+    .unwrap();
+
+    async fn turn(agent: &mut Agent, text: &str) {
+        tokio::time::timeout(Duration::from_secs(15), agent.run_once_capture(text))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    turn(&mut agent, "first request").await;
+    let first = capture_rx.try_recv().unwrap();
+    for sentinel in [
+        "base-before-freeze",
+        "overlay-before-freeze",
+        "preferred-before-freeze",
+        "sdk-before-freeze",
+    ] {
+        assert!(
+            first["system"].to_string().contains(sentinel),
+            "missing {sentinel}"
+        );
+    }
+    std::fs::write(&overlay, "overlay-after-freeze").unwrap();
+    turn(&mut agent, "second request").await;
+    let second = capture_rx.try_recv().unwrap();
+    assert!(
+        first["system"].to_string().as_bytes() == second["system"].to_string().as_bytes(),
+        "overlay edit rewrote the static wire prefix"
+    );
+    assert_eq!(first["tools"], second["tools"]);
+    let second_messages = second["messages"].as_array().unwrap();
+    let tail = second_messages.last().unwrap().to_string();
+    assert!(tail.contains("<system-reminder>") && tail.contains("overlay-after-freeze"));
+    assert!(
+        !second_messages[..second_messages.len() - 1]
+            .iter()
+            .any(|message| message.to_string().contains("overlay-after-freeze"))
+    );
+
+    let id = agent.session_id().to_owned();
+    drop(sdk_owner);
+    drop(agent);
+    std::fs::write(&base, "base-after-freeze").unwrap();
+    std::fs::remove_file(&preferred).unwrap();
+    let mut resumed = new_agent();
+    resumed.restore_session(&id).unwrap();
+    turn(&mut resumed, "resumed request").await;
+    let after_resume = capture_rx.try_recv().unwrap();
+    assert!(
+        first["system"].to_string().as_bytes() == after_resume["system"].to_string().as_bytes(),
+        "resume rewrote the static wire prefix"
+    );
+    let resumed_messages = after_resume["messages"].to_string();
+    assert_eq!(resumed_messages.matches("overlay-after-freeze").count(), 1);
+    assert!(resumed_messages.contains("base-after-freeze"));
+    assert!(
+        after_resume["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .to_string()
+            .contains("preferred-tools.md")
+    );
+
+    turn(&mut resumed, "unchanged follow-up").await;
+    let follow_up = capture_rx.try_recv().unwrap();
+    assert_eq!(
+        follow_up["messages"]
+            .to_string()
+            .matches("base-after-freeze")
+            .count(),
+        1
+    );
+    let mut fresh = new_agent();
+    turn(&mut fresh, "new session request").await;
+    let fresh = capture_rx.try_recv().unwrap();
+    assert!(fresh["system"].to_string().contains("overlay-after-freeze"));
+    assert!(fresh["system"].to_string().contains("base-after-freeze"));
+    assert!(
+        !fresh["system"]
+            .to_string()
+            .contains("preferred-before-freeze")
+    );
+    assert!(!fresh["system"].to_string().contains("sdk-before-freeze"));
+    assert!(
+        !fresh["messages"]
+            .to_string()
+            .contains("overlay-after-freeze")
+    );
+    fixture.await.unwrap();
+}
+
 type CapturedSystemPromptRequests = Arc<std::sync::Mutex<Vec<(String, Vec<Message>)>>>;
 
 #[tokio::test]
