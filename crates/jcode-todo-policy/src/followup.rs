@@ -364,7 +364,9 @@ impl FollowUpPolicy {
             })
             .collect();
         if !incomplete.is_empty()
-            && (actionable.is_empty() || !snapshot.running_swarm_members.is_empty())
+            && (actionable.is_empty()
+                || !snapshot.running_swarm_members.is_empty()
+                || snapshot.pending_swarm_await == Some(true))
         {
             // Waiting is not a new todo set. The completion wake is enough,
             // and must not reset the fingerprint of an earlier poke.

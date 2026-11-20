@@ -820,6 +820,31 @@ fn running_swarm_members_suppress_poke_without_spending_budget() {
 }
 
 #[test]
+fn pending_swarm_await_suppresses_poke_without_spending_budget() {
+    // Desktop decides from `get_todo_state`, which cannot list running swarm
+    // members but does report a live wake-enabled await. An open todo that
+    // carries no `waiting_on` must still not be poked while that await runs.
+    let mut policy = FollowUpPolicy::new(true);
+    let mut state = snapshot(vec![todo("roll out after workers", "pending")]);
+    state.session_id = "coordinator".into();
+    state.pending_swarm_await = Some(true);
+    for _ in 0..10 {
+        assert_eq!(policy.decide(&state), Decision::default());
+    }
+    // The await resolving wakes the session with a fresh budget. An unknown
+    // await state (older bridge, disk-only read) stays actionable.
+    for settled in [Some(false), None] {
+        let mut policy = policy.clone();
+        state.pending_swarm_await = settled;
+        assert_eq!(
+            kind(&policy.decide(&state)),
+            Some(FollowUpKind::IncompleteTodos),
+            "{settled:?}"
+        );
+    }
+}
+
+#[test]
 fn swarm_member_status_classification() {
     for status in [
         "queued",
