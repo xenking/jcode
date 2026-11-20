@@ -100,27 +100,17 @@ impl Agent {
             // Use split prompt for better caching - static content cached, dynamic not
             self.log_prompt_prefix_accounting(&split_prompt, &tools);
 
-            // Check for client-side cache violations before memory injection.
-            // Memory is an ephemeral suffix that changes each turn; tracking it would cause
-            // false-positive violations every turn (prior turn's memory ≠ current history prefix).
-            self.record_client_cache_request(&messages);
-
             // `messages` now owns the provider-facing request snapshot. Do not
             // retain the session's second, derived copy for the entire network
             // wait and response stream.
             self.session.release_provider_messages_cache();
 
-            let mut cache_signature_messages =
-                if crate::config::config().features.message_timestamps {
-                    Message::with_timestamps(&messages)
-                } else {
-                    messages.iter().cloned().collect()
-                };
-            let mut ephemeral_signature_messages = Vec::new();
-
-            // Inject memory as a user message at the end (preserves cache prefix)
             let mut messages_with_memory: Vec<Message> = messages.iter().cloned().collect();
-            if let Some(memory) = memory_pending.as_ref() {
+            let mut ephemeral_memory = None;
+            if let Some(memory) = memory_pending.as_ref()
+                && let Some((message, persisted)) =
+                    self.prepare_memory_injection_message(&messages, memory)
+            {
                 let memory_count = memory.count.max(1);
                 let computed_age_ms = memory.computed_at.elapsed().as_millis() as u64;
                 crate::memory::record_injected_prompt(
@@ -128,7 +118,6 @@ impl Agent {
                     memory_count,
                     computed_age_ms,
                 );
-                self.record_memory_injection_in_session(memory);
                 let _ = event_tx.send(ServerEvent::MemoryInjected {
                     count: memory_count,
                     prompt: memory.prompt.clone(),
@@ -136,13 +125,12 @@ impl Agent {
                     prompt_chars: memory.prompt.chars().count(),
                     computed_age_ms,
                 });
-                let (memory_msg, persisted) = self.prepare_memory_injection_message(memory);
-                if !persisted {
-                    ephemeral_signature_messages.push(memory_msg.clone());
-                    messages_with_memory.push(memory_msg.into_request_only());
+                if persisted {
+                    messages_with_memory.push(message);
                 } else {
-                    cache_signature_messages.push(memory_msg.clone());
-                    messages_with_memory.push(memory_msg);
+                    // An opted-out recall is absent from the next request, so
+                    // it must not carry a provider cache marker.
+                    ephemeral_memory = Some(message.into_request_only());
                 }
             }
             // Surface background plan-limit hits once so the user sees the
@@ -153,14 +141,19 @@ impl Agent {
                 .flatten()
             {
                 crate::subscription_notice::show_upgrade_card(&notice, &self.session.id);
-                let reminder = Message::user(&Self::plan_limit_reminder(&notice));
-                ephemeral_signature_messages.push(reminder.clone());
-                messages_with_memory.push(reminder.into_request_only());
+                let reminder = self.append_model_reminder(&Self::plan_limit_reminder(&notice));
+                self.persist_session_best_effort("plan-limit reminder");
+                messages_with_memory.push(reminder);
             }
-            if let Some(nudge) =
+            self.record_client_cache_request(&messages_with_memory);
+
+            // Request-only messages follow every durable block.
+            let durable_message_count = messages_with_memory.len();
+            messages_with_memory.extend(ephemeral_memory);
+            if let Some(mut nudge) =
                 super::reload_resume::trailing_assistant_nudge(&messages_with_memory)
             {
-                ephemeral_signature_messages.push(nudge.clone());
+                nudge.timestamp = None;
                 messages_with_memory.push(nudge.into_request_only());
             }
 
@@ -196,6 +189,10 @@ impl Agent {
                 jcode_provider_core::parse_provider_hint(provider.name()),
                 Some(jcode_provider_core::ActiveProvider::Claude)
             );
+            // Claude receives the dynamic block after the transcript, so it
+            // belongs to the request-only tail of the cache signature.
+            let mut ephemeral_signature_messages: Vec<Message> =
+                send_messages[durable_message_count..].to_vec();
             if dynamic_is_tail && !split_prompt.dynamic_part.is_empty() {
                 let mut dynamic = Message::user(&split_prompt.dynamic_part);
                 dynamic.timestamp = None;
@@ -210,21 +207,17 @@ impl Agent {
                 ))
             };
             let kv_request = kv_cache_request_event(
-                &cache_signature_messages,
+                &send_messages[..durable_message_count],
                 &tools,
                 &system_signature_text,
                 &ephemeral_signature_messages,
             );
             drop(system_signature_text);
+            drop(ephemeral_signature_messages);
             self.begin_kv_cache_monitor_request(&kv_request, &model_at_request_start);
             if let Err(error) = event_tx.send(kv_request) {
                 logging::debug(&format!("KV request event receiver disconnected: {error}"));
             }
-            // These vectors are only needed to build the cache telemetry event.
-            // Explicitly release their deeply cloned transcript strings before
-            // waiting for the provider stream.
-            drop(cache_signature_messages);
-            drop(ephemeral_signature_messages);
             let mut keepalive = stream_keepalive_ticker();
             let (mut stream, mut canonical_input) = {
                 provider.set_session_id(&self.session.id);

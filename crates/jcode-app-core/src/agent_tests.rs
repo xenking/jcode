@@ -2010,7 +2010,7 @@ async fn build_memory_prompt_nonblocking_defers_pending_memory_during_tool_loop(
 }
 
 #[tokio::test]
-async fn memory_injection_message_defaults_to_ephemeral_history() {
+async fn memory_injection_message_can_opt_out_of_persisting_to_history() {
     let _guard = crate::storage::lock_test_env();
     let previous = std::env::var_os("JCODE_PERSIST_MEMORY_INJECTIONS");
     crate::env::set_var("JCODE_PERSIST_MEMORY_INJECTIONS", "false");
@@ -2028,7 +2028,9 @@ async fn memory_injection_message_defaults_to_ephemeral_history() {
         memory_ids: vec!["mem-ephemeral".to_string()],
     };
 
-    let (message, persisted) = agent.prepare_memory_injection_message(&memory);
+    let (message, persisted) = agent
+        .prepare_memory_injection_message(&[], &memory)
+        .unwrap();
 
     assert!(!persisted);
     assert_eq!(agent.session.messages.len(), before);
@@ -2061,7 +2063,9 @@ async fn memory_injection_message_can_persist_to_history() {
         memory_ids: vec!["mem-persisted".to_string()],
     };
 
-    let (message, persisted) = agent.prepare_memory_injection_message(&memory);
+    let (message, persisted) = agent
+        .prepare_memory_injection_message(&[], &memory)
+        .unwrap();
 
     assert!(persisted);
     assert_eq!(agent.session.messages.len(), before + 1);

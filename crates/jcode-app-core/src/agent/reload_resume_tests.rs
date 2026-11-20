@@ -163,6 +163,132 @@ fn session_has_synthetic_user_prompt(session: &crate::session::Session) -> bool 
     })
 }
 
+#[tokio::test]
+async fn memory_recall_is_a_stable_responses_prefix_across_turns_and_resume() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = TestHome::new();
+    crate::config::invalidate_config_cache();
+    assert!(crate::config::config().features.persist_memory_injections);
+    let mut session = crate::session::Session::create(None, None);
+    let project = tempfile::tempdir().unwrap();
+    session.working_dir = Some(project.path().to_string_lossy().into_owned());
+    let id = session.id.clone();
+    let capture = ScriptedProvider::default();
+    capture.push_reply(vec![
+        StreamEvent::ToolUseStart {
+            id: "memory-tool-call".into(),
+            name: "unregistered_fixture_tool".into(),
+        },
+        StreamEvent::ToolUseEnd,
+        StreamEvent::MessageEnd {
+            stop_reason: Some("tool_use".into()),
+        },
+    ]);
+    let provider: Arc<dyn Provider> = Arc::new(capture.clone());
+    let mut agent = Agent::new_with_session(provider.clone(), Registry::empty(), session, None);
+    agent.memory_enabled = true;
+    let mut entries = [
+        crate::memory::MemoryEntry::new(
+            crate::memory::MemoryCategory::Fact,
+            "Wire fixture: always use the blue notebook.",
+        ),
+        crate::memory::MemoryEntry::new(
+            crate::memory::MemoryCategory::Fact,
+            "Wire fixture: archive the notebook on Friday.",
+        ),
+    ];
+    let manager = crate::memory::MemoryManager::new().with_project_dir(project.path());
+    for entry in &entries {
+        manager.remember_project(entry.clone()).unwrap();
+    }
+    let enqueue_recall = |entries: &[crate::memory::MemoryEntry]| {
+        let prompt = crate::memory::format_relevant_prompt(entries, entries.len()).unwrap();
+        crate::memory::set_pending_memory_for_project(
+            &id,
+            prompt.clone(),
+            entries.len(),
+            entries.iter().map(|entry| entry.id.clone()).collect(),
+            None,
+            Some(project.path().to_str().unwrap()),
+        );
+        prompt
+    };
+    let prompt = enqueue_recall(&entries);
+    assert!(crate::memory::has_pending_memory(&id));
+    let (tx, _rx) = tokio_mpsc::unbounded_channel();
+    agent
+        .run_once_streaming_mpsc("first prompt", vec![], None, tx)
+        .await
+        .unwrap();
+
+    // Force a repeated recall with a different relevance ranking despite the
+    // in-memory expiry/overlap guards.
+    // The provider-facing transcript still must not grow a duplicate.
+    crate::memory::clear_pending_memory(&id);
+    entries.reverse();
+    enqueue_recall(&entries);
+    assert!(crate::memory::has_pending_memory(&id));
+    agent.run_once_capture("second prompt").await.unwrap();
+    drop(agent);
+
+    let saved = crate::session::Session::load(&id).unwrap();
+    let mut resumed = Agent::new_with_session(provider, Registry::empty(), saved, None);
+    resumed.memory_enabled = true;
+    resumed.run_once_capture("resumed prompt").await.unwrap();
+
+    // Use the same Responses serializer as the real provider, not just the
+    // in-memory Message shape. The whole first prefix should survive replay.
+    let requests: Vec<_> = capture
+        .requests()
+        .iter()
+        .map(|messages| crate::provider::openai_request::build_responses_input(messages))
+        .collect();
+    assert_eq!(requests.len(), 4);
+    assert!(requests[1].iter().any(|item| {
+        item["type"] == "function_call_output" && item["call_id"] == "memory-tool-call"
+    }));
+    let first = &requests[0];
+    let recall = format!("<system-reminder>\n{prompt}\n</system-reminder>");
+    let is_recall = |item: &serde_json::Value| {
+        item["content"]
+            .as_array()
+            .is_some_and(|blocks| blocks.iter().any(|block| block["text"] == recall))
+    };
+    assert_eq!(first.iter().filter(|item| is_recall(item)).count(), 1);
+    let prefix = serde_json::to_vec(first).unwrap();
+    for (index, request) in requests.iter().enumerate().skip(1) {
+        assert_eq!(
+            request.iter().filter(|item| is_recall(item)).count(),
+            1,
+            "exactly one memory recall must survive replay {index}: {request:#?}"
+        );
+        assert_eq!(serde_json::to_vec(&request[..first.len()]).unwrap(), prefix);
+    }
+    let stored = resumed
+        .session
+        .messages
+        .iter()
+        .find(|message| {
+            message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Text { text, .. } if text == &recall))
+        })
+        .expect("memory recall in the journal");
+    assert_eq!(stored.display_role, Some(StoredDisplayRole::System));
+    assert_eq!(resumed.session.memory_injections.len(), 1);
+    let rendered = crate::session::render_messages(&resumed.session);
+    assert_eq!(
+        rendered.iter().filter(|row| row.role == "memory").count(),
+        1
+    );
+    assert!(
+        !rendered.iter().any(|row| {
+            row.role == "user" && row.content.contains("always use the blue notebook")
+        })
+    );
+}
+
 /// Reload mid-tool: the resumed request must be the pre-reload request plus the
 /// persisted assistant tool request and exactly one `tool_result`. Nothing may
 /// be injected in the user role, so the provider prompt cache still hits.
@@ -333,7 +459,7 @@ async fn reload_mid_stream_continues_without_a_user_message() {
     let (nudge, rest) = request.split_last().expect("continuation nudge");
     assert_eq!(nudge.role, Role::User);
     assert!(
-        matches!(nudge.content.iter().last(), Some(ContentBlock::Text { text, .. }) if text.ends_with("Continue.")),
+        matches!(nudge.content.iter().last(), Some(ContentBlock::Text { text, .. }) if text == "Continue."),
         "providers never see a trailing assistant message: {nudge:?}"
     );
     let last = rest.last().expect("assistant continuation");
