@@ -76,6 +76,7 @@ impl App {
         }
 
         self.queued_messages = queued_messages;
+        self.queued_images = restored.queued_images;
         self.queued_commands = restored.queued_commands;
         self.uncertain_queue_prompts = restored.uncertain_queue_prompts;
         if self.has_queued_followups() {

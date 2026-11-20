@@ -14,7 +14,7 @@ mod todo_payload_cache_tests;
 mod todo_stages;
 pub(crate) use todo_stages::TodoCardAgent;
 pub(crate) use todo_stages::animate_lane_spinners;
-use todo_stages::{agent_roster_spans, push_stage_lines, push_stage_pips, render_todo_item_line};
+use todo_stages::{agent_roster_spans, push_stage_pips, render_todo_item_line};
 
 use super::*;
 #[path = "ui_messages_cache.rs"]
@@ -374,6 +374,33 @@ pub(super) fn needs_message_separator(msg: &DisplayMessage) -> bool {
     !matches!(msg.effective_role(), "tool" | "meta" | "swarm")
         && !compact_reasoning
         && !is_kv_cache_footer(msg)
+}
+
+pub(crate) fn is_routine_swarm_await_result(msg: &DisplayMessage) -> bool {
+    if !matches!(msg.effective_role(), "system" | "background_task" | "swarm") {
+        return false;
+    }
+    let summary = if msg
+        .content
+        .trim_start()
+        .starts_with("🐝 **Swarm await finished**")
+    {
+        compact_swarm_await_summary(&msg.content)
+    } else if msg.title.as_deref() == Some("🐝 Swarm await") {
+        msg.content.to_string()
+    } else {
+        return false;
+    };
+    let Some((_, statuses)) = summary.split_once(" matched · ") else {
+        return false;
+    };
+    !summary.starts_with("recovered")
+        && !summary.starts_with("timed out")
+        && statuses.split(", ").all(|status| {
+            status.split_once(' ').is_some_and(|(count, state)| {
+                count.parse::<usize>().is_ok() && matches!(state, "ready" | "completed" | "running")
+            })
+        })
 }
 
 pub(crate) fn is_swarm_await_started(msg: &DisplayMessage) -> bool {
@@ -1023,7 +1050,7 @@ pub(crate) fn render_todos_message(
     width: u16,
     diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
-    render_todos_message_with_cap(msg, width, diff_mode, true)
+    render_todos_message_with_cap(msg, width, diff_mode, true, false)
 }
 
 /// Dedicated composer chrome, one non-wrapping row per todo awaiting the
@@ -1122,12 +1149,22 @@ pub(super) fn todo_blocker_notes(payload: Option<&str>) -> Vec<Line<'static>> {
 /// Todo card for the pinned band at the top of the viewport. The band owns
 /// its full rows (info widgets never dock beside it), so the card spans the
 /// whole available width instead of the transcript's readability cap.
+#[cfg(test)]
 pub(crate) fn render_pinned_todos_message(
     msg: &DisplayMessage,
     width: u16,
     diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
-    render_todos_message_with_cap(msg, width, diff_mode, false)
+    pinned_todo_rows(msg, width, diff_mode, false)
+}
+
+pub(super) fn pinned_todo_rows(
+    msg: &DisplayMessage,
+    width: u16,
+    diff_mode: crate::config::DiffDisplayMode,
+    active_first: bool,
+) -> Vec<Line<'static>> {
+    render_todos_message_with_cap(msg, width, diff_mode, false, active_first)
         .into_iter()
         .map(|line| super::truncate_line_with_ellipsis_to_width(&line, usize::from(width)))
         .collect()
@@ -1138,6 +1175,7 @@ fn render_todos_message_with_cap(
     width: u16,
     diff_mode: crate::config::DiffDisplayMode,
     cap_width: bool,
+    active_first: bool,
 ) -> Vec<Line<'static>> {
     let Ok(payload) = serde_json::from_str::<TodoCardPayload>(&msg.content) else {
         return render_system_message(msg, width, diff_mode);
@@ -1205,7 +1243,7 @@ fn render_todos_message_with_cap(
                 .map(str::to_string)
         };
         let has_groups = todos.iter().any(|t| group_of(t).is_some());
-        let all_refs: Vec<&crate::todo::TodoItem> = todos.iter().collect();
+        let mut all_refs: Vec<&crate::todo::TodoItem> = todos.iter().collect();
         if crate::todo::stages::has_stages(todos.iter()) {
             // Stage grid: groups become lanes inside each stage, so they are
             // drawn as column headers instead of goal sections.
@@ -1217,13 +1255,14 @@ fn render_todos_message_with_cap(
             ));
             let goal = todo_card_goal_for_group(&goals, None);
             push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
-            push_stage_lines(
+            todo_stages::push_ordered_stage_lines(
                 &mut lines,
                 &all_refs,
                 &agents,
                 &background_tasks,
                 base_indent,
                 inner_width,
+                active_first,
             );
         } else if has_groups {
             lines.push(render_todo_stage_status_header(
@@ -1242,6 +1281,12 @@ fn render_todos_message_with_cap(
                 }
             }
             groups.sort_by_key(|(key, _)| key.is_none());
+            if active_first {
+                for (_, items) in &mut groups {
+                    items.sort_by_key(|t| todo_stages::work_rank(&[t], &agents));
+                }
+                groups.sort_by_key(|(_, items)| todo_stages::work_rank(items, &agents));
+            }
             for (group, items) in &groups {
                 let label = group.as_deref().unwrap_or("other");
                 let goal = todo_card_goal_for_group(&goals, group.as_deref());
@@ -1272,6 +1317,9 @@ fn render_todos_message_with_cap(
             ));
             if goal.is_some() {
                 push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
+            }
+            if active_first {
+                all_refs.sort_by_key(|t| todo_stages::work_rank(&[t], &agents));
             }
             push_todo_item_lines(
                 &mut lines,

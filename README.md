@@ -51,6 +51,10 @@
 curl -fsSL https://raw.githubusercontent.com/xenking/jcode/master/scripts/install.sh | bash
 ```
 
+Want to test a maintainer's latest iteration on Linux x86_64? See
+[Linux self-dev prereleases](RELEASING.md#linux-self-dev-prereleases).
+The installer above stays on stable.
+
 <div align="center">
 
 ## Benches

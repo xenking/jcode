@@ -169,6 +169,69 @@ fn streaming_body_without_length_is_bounded() {
 }
 
 #[test]
+#[cfg(unix)]
+fn speech_beginning_during_synthesis_blocks_prepared_audio_until_authorized() {
+    for revise in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = endpoint(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let (synth, started) = mpsc::channel();
+        let (finish, ready) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buf = [0; 4096];
+            assert!(socket.read(&mut buf).unwrap() > 0);
+            synth.send(()).unwrap();
+            ready.recv_timeout(Duration::from_secs(5)).unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: 12\r\nConnection: close\r\n\r\nRIFF\x04\0\0\0WAVE").unwrap();
+        });
+        let (spawned, played) = mpsc::channel();
+        let player = create_with_player(
+            options(url),
+            Arc::new(move |_| {
+                spawned.send(()).unwrap();
+                Command::new("cat")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .spawn()
+            }),
+        )
+        .unwrap();
+        player
+            .enqueue_gated(
+                "test",
+                super::super::PlaybackTrace {
+                    session: "test".into(),
+                    utterance: 1,
+                },
+            )
+            .unwrap();
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        // It was quiet when synthesis started. Audio isn't ready, so no
+        // mic claim can occur. The user starts speaking before WAV arrives.
+        assert!(!player.authorize_ready(|| panic!("suppressed mic during synthesis")));
+        assert!(!player.owns_audio_output());
+        finish.send(()).unwrap();
+        server.join().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !player.shared.0.lock().unwrap().awaiting_quiet {
+            assert!(Instant::now() < deadline);
+            thread::sleep(POLL);
+        }
+        assert!(!player.authorize_ready(|| false));
+        assert!(!player.owns_audio_output());
+        assert!(played.try_recv().is_err());
+        if revise {
+            player.cancel();
+            drop(player);
+            assert!(played.try_recv().is_err());
+        } else {
+            assert!(player.authorize_ready(|| true));
+            played.recv_timeout(Duration::from_secs(3)).unwrap();
+        }
+    }
+}
+
+#[test]
 fn blocked_http_does_not_block_enqueue_cancel_or_drop() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = endpoint(&format!("http://{}", listener.local_addr().unwrap())).unwrap();

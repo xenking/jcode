@@ -75,9 +75,9 @@ fn remote_image_queue_sends_complete_payload_for_both_enter_shortcuts() {
             &mut connection,
         ))
         .unwrap();
-        assert!(
-            app.queued_messages.is_empty(),
-            "no image-less prompt may be queued"
+        assert_eq!(
+            app.queued_messages.as_slice(),
+            std::slice::from_ref(&expected)
         );
         assert!(app.input.is_empty());
         assert!(app.pending_images.is_empty());

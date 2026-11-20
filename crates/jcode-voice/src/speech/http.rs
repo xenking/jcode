@@ -169,7 +169,7 @@ fn run_http(
 ) {
     let (lock, wake) = &*shared;
     loop {
-        let (text, generation) = {
+        let ((text, trace), generation) = {
             let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
             loop {
                 if state.stopped {
@@ -178,7 +178,10 @@ fn run_http(
                 if let Some((child, start)) = state.active.as_mut() {
                     match child.try_wait() {
                         Ok(None) if start.elapsed() < MAX_PLAYBACK => {}
-                        Ok(Some(status)) if status.success() => state.stop_child(),
+                        Ok(Some(status)) if status.success() => {
+                            crate::timing::mark("speech playback complete");
+                            state.stop_child();
+                        }
                         _ => {
                             state.last_error =
                                 Some("Local speech audio playback failed or timed out");
@@ -198,6 +201,10 @@ fn run_http(
                     .0;
             }
         };
+        crate::timing::mark("speech synthesis started");
+        if let Some(trace) = &trace {
+            trace.mark("synthesis_started", 0);
+        }
         let wav = runtime.block_on(async {
             tokio::select! {
                 result = synthesize(&client, &options, &text) => result,
@@ -219,9 +226,11 @@ fn run_http(
             continue;
         };
         let stdin = {
-            let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let state = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let (mut state, authorized) =
+                super::await_quiet(state, wake, generation, trace.is_some());
             state.synthesizing = false;
-            if state.stopped || state.generation != generation {
+            if !authorized {
                 continue;
             }
             // Spawn is serialized with cancel, but network and pipe writes never hold the lock.
@@ -233,6 +242,10 @@ fn run_http(
                 }
             };
             let stdin = child.stdin.take();
+            if let Some(trace) = &trace {
+                trace.mark("player_started", 0);
+            }
+            crate::timing::mark("speech playback process started");
             state.active = Some((child, Instant::now()));
             stdin
         };

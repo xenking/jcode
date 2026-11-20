@@ -10,6 +10,10 @@ mod remote_startup;
 use super::*;
 use crate::tui::{backend, keybind};
 
+#[cfg(test)]
+#[path = "tui_lifecycle_terminal_retry_tests.rs"]
+mod terminal_retry_tests;
+
 impl App {
     pub(super) async fn begin_remote_send(
         &mut self,
@@ -306,6 +310,7 @@ impl App {
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
             should_quit: false,
             queued_messages: Vec::new(),
+            queued_images: Vec::new(),
             queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             upstream_provider: None,
@@ -842,6 +847,7 @@ impl App {
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
             should_quit: false,
             queued_messages: Vec::new(),
+            queued_images: Vec::new(),
             queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             upstream_provider: None,

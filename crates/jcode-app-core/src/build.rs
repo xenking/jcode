@@ -30,3 +30,4 @@ pub use jcode_build_support::{
     ChannelAdvance, advance_update_channels, install_verified_binary_at_version,
     selfdev_hold_reason, verify_binary_built_from,
 };
+pub use jcode_build_support::{dispatch_linux_prerelease, linux_prerelease_candidate};

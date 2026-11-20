@@ -806,13 +806,7 @@ fn load_sessions_prefers_generated_title_over_todo_lane_label() {
         .expect("session with mixed todo statuses");
     assert_eq!(
         loaded.todo_statuses,
-        [
-            "in_progress",
-            "pending",
-            "completed",
-            "cancelled",
-            "future_status"
-        ]
+        ["in_progress", "pending", "completed", "future_status"]
     );
 }
 
