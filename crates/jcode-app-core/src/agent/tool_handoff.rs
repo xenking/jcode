@@ -1,4 +1,5 @@
 use super::*;
+use crate::tool::{BASH_HANDOFF, BashHandoff};
 
 pub(super) fn foreground_budget() -> Duration {
     Duration::from_millis(crate::config::config().tools.auto_background_timeout_ms)
@@ -95,17 +96,10 @@ pub(crate) async fn execute_with_background_budget(
     let tool_name = name.clone();
     let display_name = handoff_display_name(&input);
     let mut shutdown = ctx.graceful_shutdown_signal.clone();
-    #[cfg(unix)]
-    let bash_handoff = (name == "bash").then(InterruptSignal::new);
-    #[cfg(unix)]
+    let bash_handoff = BashHandoff::for_tool(&name);
     let bash_handoff_for_tool = bash_handoff.clone();
     let mut work = crate::runtime_activity::spawn_session(&session_id, async move {
-        let execution = registry.execute(&tool_name, input, ctx);
-        #[cfg(unix)]
-        if let Some(signal) = bash_handoff_for_tool {
-            return crate::tool::BASH_HANDOFF.scope(signal, execution).await;
-        }
-        execution.await
+        run_tool(registry, tool_name, input, ctx, bash_handoff_for_tool).await
     })
     .ok_or_else(|| anyhow::anyhow!("Session transfer in progress; tool not accepted"))?;
     let shutdown_requested = async {
@@ -132,10 +126,9 @@ pub(crate) async fn execute_with_background_budget(
             }
         }
         result = &mut work => result.map_err(|e| anyhow::anyhow!("Tool task panicked: {}", e))?,
-        _ = tokio::time::sleep(handoff.unwrap_or_default()), if handoff.is_some() => {
-            #[cfg(unix)]
-            if let Some(signal) = bash_handoff {
-                signal.fire();
+        _ = wait_for_automatic_handoff(handoff, bash_handoff.as_ref()) => {
+            if let Some(handoff) = &bash_handoff {
+                handoff.request.fire();
                 return match tokio::time::timeout(CANCEL_TOOL_GRACE, &mut work).await {
                     Ok(result) => result.map_err(|error| anyhow::anyhow!("Tool task panicked: {error}"))?,
                     Err(_) => {
@@ -155,18 +148,50 @@ pub(crate) async fn execute_with_background_budget(
     }
 }
 
+pub(super) async fn run_tool(
+    registry: Registry,
+    name: String,
+    input: serde_json::Value,
+    ctx: ToolContext,
+    bash_handoff: Option<BashHandoff>,
+) -> Result<crate::tool::ToolOutput> {
+    let execution = registry.execute(&name, input, ctx);
+    match bash_handoff {
+        Some(handoff) => BASH_HANDOFF.scope(handoff, execution).await,
+        None => execution.await,
+    }
+}
+
+async fn wait_for_automatic_handoff(budget: Option<Duration>, bash: Option<&BashHandoff>) {
+    let Some(budget) = budget else {
+        return std::future::pending().await;
+    };
+    if let Some(bash) = bash {
+        // The registry may spend the entire budget in policy hooks before
+        // there is a foreground Bash process that can acknowledge handoff.
+        tokio::time::sleep_until(bash.started_at().await + budget).await;
+    } else {
+        tokio::time::sleep(budget).await;
+    }
+}
+
 /// Returns true for an automatic handoff, false for a user/reload signal.
 pub(super) async fn wait_for_tool_handoff(
     bg: &InterruptSignal,
     shutdown: &InterruptSignal,
-    auto_background: bool,
-    budget: Duration,
+    budget: Option<Duration>,
+    bash: Option<&BashHandoff>,
 ) -> bool {
     tokio::select! {
         biased;
         _ = shutdown.notified() => false,
-        _ = bg.notified() => false,
-        _ = tokio::time::sleep(budget), if auto_background && !budget.is_zero() => true,
+        _ = async {
+            bg.notified().await;
+            if let Some(bash) = bash {
+                bash.started_at().await;
+            }
+        } => false,
+        _ = wait_for_automatic_handoff(budget, bash) => true,
     }
 }
 

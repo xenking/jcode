@@ -6,10 +6,9 @@ mod apply_patch;
 mod ask;
 pub(crate) use ask::ask_for_real_answer;
 mod bash;
+pub(crate) use bash::{BASH_HANDOFF, BashHandoff};
 #[cfg(unix)]
-pub(crate) use bash::{
-    BASH_HANDOFF, BASH_SUPERVISED, follow_detached_task, restore_detached_task_monitoring,
-};
+pub(crate) use bash::{BASH_SUPERVISED, follow_detached_task, restore_detached_task_monitoring};
 // The bash tool is the only place a turn cancel has to kill a process group,
 // so its behaviour is exercised from the agent-side cancel tests too.
 #[cfg(test)]

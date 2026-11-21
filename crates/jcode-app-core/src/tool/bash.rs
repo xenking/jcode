@@ -38,10 +38,34 @@ const BASH_TOOL_DESCRIPTION: &str =
 const WINDOWS_SHELL_TOOL_DESCRIPTION: &str =
     "Run a Windows cmd.exe command (compatibility name `bash`). Use cmd.exe syntax, not Bash.";
 
-#[cfg(unix)]
 tokio::task_local! {
-    pub(crate) static BASH_HANDOFF: jcode_agent_runtime::InterruptSignal;
+    pub(crate) static BASH_HANDOFF: BashHandoff;
+    #[cfg(unix)]
     pub(crate) static BASH_SUPERVISED: ();
+}
+
+#[derive(Clone)]
+pub(crate) struct BashHandoff {
+    started_at: tokio::sync::watch::Sender<Option<tokio::time::Instant>>,
+    pub(crate) request: jcode_agent_runtime::InterruptSignal,
+}
+
+impl BashHandoff {
+    pub(crate) fn for_tool(name: &str) -> Option<Self> {
+        (cfg!(unix) && name == "bash").then(|| Self {
+            started_at: tokio::sync::watch::Sender::new(None),
+            request: jcode_agent_runtime::InterruptSignal::new(),
+        })
+    }
+
+    pub(crate) async fn started_at(&self) -> tokio::time::Instant {
+        let mut started = self.started_at.subscribe();
+        started
+            .wait_for(Option::is_some)
+            .await
+            .expect("the Bash handoff still owns the sender")
+            .expect("the Bash process has started")
+    }
 }
 
 #[cfg(unix)]
@@ -1425,12 +1449,17 @@ impl BashTool {
         )?;
         let pid = child.id();
         let mut guard = ProcessGroupKillGuard::new(Some(pid));
+        let handoff = BASH_HANDOFF.try_with(Clone::clone).ok();
+        if let Some(handoff) = &handoff {
+            handoff
+                .started_at
+                .send_replace(Some(tokio::time::Instant::now()));
+        }
         let title = params
             .intent
             .clone()
             .unwrap_or_else(|| params.command.clone());
         let shutdown = ctx.graceful_shutdown_signal.as_ref();
-        let handoff = BASH_HANDOFF.try_with(Clone::clone).ok();
         let stops_work = crate::turn_cancel_registry::capture_running_work_cancel(&ctx.session_id);
         let (reason, reload, timed_out) = loop {
             if let Some(status) = child.try_wait()? {
@@ -1463,7 +1492,10 @@ impl BashTool {
                     false,
                 );
             }
-            if handoff.as_ref().is_some_and(|signal| signal.is_set()) {
+            if handoff
+                .as_ref()
+                .is_some_and(|handoff| handoff.request.is_set())
+            {
                 break (
                     "Command moved to background and is still running.".to_owned(),
                     false,

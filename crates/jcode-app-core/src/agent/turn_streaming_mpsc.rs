@@ -1659,19 +1659,18 @@ impl Agent {
                 let registry_clone = self.registry.clone();
                 let tool_name_for_spawn = tc.name.clone();
                 let tool_input_for_spawn = tc.input.clone();
-                #[cfg(unix)]
-                let bash_handoff = (tc.name == "bash").then(InterruptSignal::new);
-                #[cfg(unix)]
+                let bash_handoff = crate::tool::BashHandoff::for_tool(&tc.name);
                 let bash_handoff_for_tool = bash_handoff.clone();
                 let tool_handle =
                     crate::runtime_activity::spawn_session(&self.session.id, async move {
-                        let execution =
-                            registry_clone.execute(&tool_name_for_spawn, tool_input_for_spawn, ctx);
-                        #[cfg(unix)]
-                        if let Some(signal) = bash_handoff_for_tool {
-                            return crate::tool::BASH_HANDOFF.scope(signal, execution).await;
-                        }
-                        execution.await
+                        tool_handoff::run_tool(
+                            registry_clone,
+                            tool_name_for_spawn,
+                            tool_input_for_spawn,
+                            ctx,
+                            bash_handoff_for_tool,
+                        )
+                        .await
                     })
                     .ok_or_else(|| {
                         anyhow::anyhow!("Session transfer in progress; tool not accepted")
@@ -1702,15 +1701,14 @@ impl Agent {
                             Err(e) => Err(anyhow::anyhow!("Tool task panicked: {}", e)),
                         });
                     }
-                    automatic = wait_for_tool_handoff(&bg_signal, &shutdown_signal, handoff.is_some(), handoff.unwrap_or_default()) => {
+                    automatic = wait_for_tool_handoff(&bg_signal, &shutdown_signal, handoff, bash_handoff.as_ref()) => {
                         automatic_background = automatic;
-                        #[cfg(unix)]
-                        if !shutdown_signal.is_set() && let Some(signal) = &bash_handoff {
-                            signal.fire();
+                        if !shutdown_signal.is_set() && let Some(handoff) = &bash_handoff {
+                            handoff.request.fire();
                         }
                         if allow_reload_handoff && (!shutdown_signal.is_set() || turn_cancel_guard.interruption_reason() == Some(crate::turn_cancel_registry::TurnInterruptionReason::Reload)) {
                             tool_result = match tokio::time::timeout(
-                                Duration::from_millis(750),
+                                tool_handoff::CANCEL_TOOL_GRACE,
                                 &mut tool_handle,
                             )
                             .await

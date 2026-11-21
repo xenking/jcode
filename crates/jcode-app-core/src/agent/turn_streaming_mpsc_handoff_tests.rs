@@ -6,7 +6,7 @@ async fn configured_streaming_budget_and_disabled_handoff() {
         let bg = InterruptSignal::new();
         let shutdown = InterruptSignal::new();
         let start = tokio::time::Instant::now();
-        assert!(wait_for_tool_handoff(&bg, &shutdown, true, budget).await);
+        assert!(wait_for_tool_handoff(&bg, &shutdown, Some(budget), None).await);
         assert_eq!(start.elapsed(), budget);
     }
     for shutdown_requested in [false, true] {
@@ -14,7 +14,7 @@ async fn configured_streaming_budget_and_disabled_handoff() {
         let shutdown = InterruptSignal::new();
         tokio::select! {
             biased;
-            _ = wait_for_tool_handoff(&bg, &shutdown, true, Duration::ZERO) => {
+            _ = wait_for_tool_handoff(&bg, &shutdown, None, None) => {
                 panic!("zero budget should disable automatic handoff");
             }
             _ = tokio::time::sleep(Duration::from_secs(30)) => {}
@@ -24,7 +24,7 @@ async fn configured_streaming_budget_and_disabled_handoff() {
         } else {
             bg.fire();
         }
-        assert!(!wait_for_tool_handoff(&bg, &shutdown, true, Duration::ZERO).await);
+        assert!(!wait_for_tool_handoff(&bg, &shutdown, None, None).await);
     }
 }
 
@@ -96,6 +96,73 @@ async fn callback_paths_honor_custom_and_disabled_budgets() {
 
 struct WaitProbe;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_handoff_budget_starts_after_slow_pre_tool_hook() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const CHILD: &str = "JCODE_TEST_SLOW_PRE_TOOL_DIR";
+    let Some(dir) = std::env::var_os(CHILD).map(PathBuf::from) else {
+        let dir = tempfile::tempdir().unwrap();
+        let hook = dir.path().join("pre-tool");
+        std::fs::write(&hook, "#!/bin/sh\nsleep 1.5\ntouch hook-finished\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                concat!(
+                    module_path!(),
+                    "::bash_handoff_budget_starts_after_slow_pre_tool_hook"
+                )
+                .split_once("::")
+                .unwrap()
+                .1,
+                "--nocapture",
+            ])
+            .env_clear()
+            .envs(std::env::vars_os().filter(|(key, _)| key == "PATH"))
+            .env("HOME", dir.path())
+            .env("JCODE_HOME", dir.path())
+            .env("JCODE_TEST_SESSION", "1")
+            .env("JCODE_HOOK_PRE_TOOL", hook)
+            .env(CHILD, dir.path())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(
+            result.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    };
+    let _allow_hooks = jcode_base::hooks::TestHooksGuard::allow();
+
+    let registry = Registry::empty();
+    registry
+        .register("bash".into(), Arc::new(crate::tool::TestBashTool::new()))
+        .await;
+    let result = execute_with_background_budget(
+        registry,
+        "bash".into(),
+        serde_json::json!({"command": "test -f hook-finished && echo completed-after-hook"}),
+        ToolContext {
+            session_id: "slow-pre-tool-bash".into(),
+            message_id: "message".into(),
+            tool_call_id: "echo-after-hook".into(),
+            working_dir: Some(dir),
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: ToolExecutionMode::Direct,
+        },
+        Duration::from_millis(500),
+    )
+    .await;
+
+    let output = result.expect("the Bash call should finish after the hook");
+    assert_eq!(output.output.trim(), "completed-after-hook");
+}
+
 /// A human decision wait is not handed off: the tool runs long past the 3s
 /// foreground budget. Hook isolation is not this test's job any more: test builds
 /// suppress the machine's hooks by default (jcode-base `hooks_suppressed`), so the
@@ -140,13 +207,13 @@ async fn streaming_ask_user_wait_is_not_automatically_backgrounded() {
         let shutdown = InterruptSignal::new();
         tokio::select! {
             biased;
-            _ = wait_for_tool_handoff(&bg, &shutdown, auto_background_allowed("ask_user", &input), Duration::from_secs(3)) => {
+            _ = wait_for_tool_handoff(&bg, &shutdown, handoff_budget("ask_user", &input, Duration::from_secs(3)), None) => {
                 panic!("human decision was automatically backgrounded");
             }
             _ = tokio::time::sleep(Duration::from_secs(30)) => {}
         }
         shutdown.fire();
-        assert!(!wait_for_tool_handoff(&bg, &shutdown, false, Duration::from_secs(3)).await);
+        assert!(!wait_for_tool_handoff(&bg, &shutdown, None, None).await);
     }
 }
 
@@ -160,7 +227,7 @@ async fn native_ask_tool_wait_is_not_automatically_backgrounded() {
     let shutdown = InterruptSignal::new();
     tokio::select! {
         biased;
-        _ = wait_for_tool_handoff(&bg, &shutdown, auto_background_allowed("ask", &input), Duration::from_secs(3)) => {
+        _ = wait_for_tool_handoff(&bg, &shutdown, handoff_budget("ask", &input, Duration::from_secs(3)), None) => {
             panic!("ask was automatically backgrounded");
         }
         _ = tokio::time::sleep(Duration::from_secs(30)) => {}
@@ -227,14 +294,14 @@ async fn background_wait_is_not_automatically_backgrounded() {
     let shutdown = InterruptSignal::new();
     tokio::select! {
         biased;
-        _ = wait_for_tool_handoff(&bg, &shutdown, auto_background_allowed("bg", &input), Duration::from_secs(3)) => {
+        _ = wait_for_tool_handoff(&bg, &shutdown, handoff_budget("bg", &input, Duration::from_secs(3)), None) => {
             panic!("bg wait was backgrounded while waiting for its dependency");
         }
         _ = tokio::time::sleep(Duration::from_secs(30)) => {}
     }
     // Reloads still interrupt a wait safely, without waiting for its deadline.
     shutdown.fire();
-    assert!(!wait_for_tool_handoff(&bg, &shutdown, false, Duration::from_secs(3)).await);
+    assert!(!wait_for_tool_handoff(&bg, &shutdown, None, None).await);
 }
 
 #[tokio::test(start_paused = true)]
@@ -249,7 +316,7 @@ async fn slow_tool_handoff_occurs_after_three_seconds_without_cancelling_work() 
     tokio::select! {
         biased;
         _ = &mut work => panic!("slow work completed before handoff"),
-        automatic = wait_for_tool_handoff(&bg, &shutdown, true, Duration::from_secs(3)) => assert!(automatic),
+        automatic = wait_for_tool_handoff(&bg, &shutdown, Some(Duration::from_secs(3)), None) => assert!(automatic),
     }
     assert_eq!(start.elapsed(), Duration::from_secs(3));
     assert!(!work.is_finished());
@@ -263,7 +330,7 @@ async fn fast_tool_finishes_in_foreground() {
     tokio::select! {
         biased;
         _ = tokio::time::sleep(Duration::from_secs(1)) => {},
-        _ = wait_for_tool_handoff(&bg, &shutdown, true, Duration::from_secs(3)) => panic!("fast tool backgrounded"),
+        _ = wait_for_tool_handoff(&bg, &shutdown, Some(Duration::from_secs(3)), None) => panic!("fast tool backgrounded"),
     }
 }
 
@@ -278,7 +345,7 @@ async fn manual_background_and_shutdown_do_not_wait_for_budget() {
             bg.fire();
         }
         let start = tokio::time::Instant::now();
-        assert!(!wait_for_tool_handoff(&bg, &shutdown, true, Duration::from_secs(3)).await);
+        assert!(!wait_for_tool_handoff(&bg, &shutdown, Some(Duration::from_secs(3)), None).await);
         assert_eq!(start.elapsed(), Duration::ZERO);
     }
 }
