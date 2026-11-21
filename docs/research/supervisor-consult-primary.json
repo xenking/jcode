@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "since": "2026-11-21T09:05:00Z",
+  "until": "2026-11-21T09:11:00Z",
+  "scope": "primary",
+  "events": [
+    "assistant_with_tools", "tool_call", "tool_result", "assistant_with_tools", "tool_call",
+    "tool_result", "assistant_with_tools", "tool_call", "tool_result", "system_input",
+    "assistant_with_tools", "tool_call", "swarm_message", "tool_result", "assistant_text_only",
+    "system_input", "system_input", "assistant_with_tools", "tool_call", "swarm_message",
+    "tool_result", "assistant_text_only", "user_candidate", "assistant_with_tools", "tool_call",
+    "swarm_other", "tool_result", "assistant_with_tools", "tool_call", "tool_result",
+    "assistant_with_tools", "tool_call", "tool_result", "system_input", "assistant_with_tools",
+    "tool_call", "swarm_spawn", "tool_result", "system_input", "assistant_with_tools",
+    "tool_call", "swarm_spawn", "tool_result", "assistant_with_tools", "tool_call",
+    "swarm_other", "tool_result", "assistant_text_only", "system_input", "system_input",
+    "assistant_with_tools", "tool_call", "tool_result", "system_input"
+  ]
+}
