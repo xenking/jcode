@@ -1390,6 +1390,11 @@ async fn indirect_dispatch_paths_cannot_bypass_the_gate() {
 #[test]
 fn explicit_background_title_reaches_the_renderer_as_one_line() {
     let title = "Сверить установленную пару daemon и Desktop";
+    let long_title = format!("{} Проверка статуса", title.repeat(6));
+    assert_eq!(
+        super::summarize_background_command(Some(&long_title), "jcode rollout --dry-run"),
+        long_title,
+    );
     assert_eq!(
         super::summarize_background_command(
             Some("  Сверить установленную пару\n daemon и Desktop  "),

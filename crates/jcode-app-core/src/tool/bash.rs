@@ -188,13 +188,7 @@ fn summarize_background_command(description: Option<&str>, command: &str) -> Str
         .map(str::trim)
         .filter(|description| !description.is_empty())
     {
-        let title = description.split_whitespace().collect::<Vec<_>>().join(" ");
-        const MAX_TITLE_BYTES: usize = 240;
-        return if title.len() > MAX_TITLE_BYTES {
-            format!("{}…", truncate_str(&title, MAX_TITLE_BYTES - "…".len()))
-        } else {
-            title
-        };
+        return description.split_whitespace().collect::<Vec<_>>().join(" ");
     }
 
     let trimmed = command.trim();
