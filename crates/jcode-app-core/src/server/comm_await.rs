@@ -1,6 +1,6 @@
 use super::await_members_state::{
     PersistedAwaitMembersState, all_pending_await_members_including_expired, ensure_pending_state,
-    load_state, persist_final_response, request_key, save_state,
+    load_state, persist_final_response, request_key, save_state, stopped_member,
 };
 use super::{AwaitMembersRuntime, SwarmEvent, SwarmMember};
 use crate::bus::{Bus, BusEvent, SwarmAwaitCompleted, UiActivity};
@@ -38,28 +38,47 @@ pub(super) async fn awaited_member_statuses(
         requested_ids.to_vec()
     };
 
-    let members = swarm_members.read().await;
-    watch_ids
-        .iter()
-        .map(|session_id| {
-            let member = members.get(session_id).or_else(|| {
-                let mut matches = members.values().filter(|member| {
-                    member.swarm_id.as_deref() == Some(swarm_id)
-                        && member.friendly_name.as_deref() == Some(session_id.as_str())
+    let live = {
+        let members = swarm_members.read().await;
+        watch_ids
+            .iter()
+            .map(|session_id| {
+                let mut ambiguous = false;
+                let member = members.get(session_id).or_else(|| {
+                    let mut matches = members.values().filter(|member| {
+                        member.swarm_id.as_deref() == Some(swarm_id)
+                            && member.friendly_name.as_deref() == Some(session_id.as_str())
+                    });
+                    let first = matches.next()?;
+                    ambiguous = matches.next().is_some();
+                    (!ambiguous).then_some(first)
                 });
-                let first = matches.next()?;
-                matches.next().is_none().then_some(first)
-            });
+                (
+                    member.map(|member| {
+                        (
+                            member.session_id.clone(),
+                            member.friendly_name.clone(),
+                            member.status.clone(),
+                            member.latest_completion_report.clone(),
+                        )
+                    }),
+                    ambiguous,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    watch_ids
+        .into_iter()
+        .zip(live)
+        .map(|(session_id, (member, ambiguous))| {
             let (resolved_id, name, status, completion_report) = member
-                .map(|member| {
-                    (
-                        member.session_id.clone(),
-                        member.friendly_name.clone(),
-                        member.status.clone(),
-                        member.latest_completion_report.clone(),
-                    )
+                .or_else(|| {
+                    (!ambiguous)
+                        .then(|| stopped_member(swarm_id, &session_id))
+                        .flatten()
+                        .map(|(id, name)| (id, name, "stopped".to_owned(), None))
                 })
-                .unwrap_or((session_id.clone(), None, "unknown".to_string(), None));
+                .unwrap_or((session_id, None, "unknown".to_owned(), None));
             let done = status != "unknown" && target_status.contains(&status);
             AwaitedMemberStatus {
                 session_id: resolved_id,

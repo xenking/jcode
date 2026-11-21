@@ -9,9 +9,45 @@ use std::time::Duration;
 use tokio::sync::{RwLock, mpsc};
 
 const AWAIT_MEMBERS_DIR: &str = "jcode-await-members";
+const STOPPED_MEMBERS_DIR: &str = "jcode-await-stopped-members";
 const FINAL_STATE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const PENDING_STATE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 static STATE_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[derive(Serialize, Deserialize)]
+struct StoppedMember {
+    session_id: String,
+    friendly_name: Option<String>,
+}
+
+pub(super) fn record_stopped_member(
+    swarm_id: &str,
+    session_id: &str,
+    friendly_name: Option<String>,
+    unique_name: bool,
+) {
+    let stopped = StoppedMember {
+        session_id: session_id.to_owned(),
+        friendly_name,
+    };
+    let mut identifiers = vec![session_id];
+    if unique_name
+        && let Some(name) = stopped.friendly_name.as_deref()
+        && name != session_id
+    {
+        identifiers.push(name);
+    }
+    for identifier in identifiers {
+        let key = hashed_request_key(identifier, "stopped-member", &[swarm_id.to_owned()]);
+        save_json_state(STOPPED_MEMBERS_DIR, &key, &stopped, "stopped swarm member");
+    }
+}
+
+pub(super) fn stopped_member(swarm_id: &str, identifier: &str) -> Option<(String, Option<String>)> {
+    let key = hashed_request_key(identifier, "stopped-member", &[swarm_id.to_owned()]);
+    let stopped: StoppedMember = load_json_state(STOPPED_MEMBERS_DIR, &key, |_| false)?;
+    Some((stopped.session_id, stopped.friendly_name))
+}
 
 #[test]
 fn partial_await_record_loads_without_resuming_an_unidentifiable_swarm() {

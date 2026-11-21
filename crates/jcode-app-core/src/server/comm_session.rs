@@ -1057,6 +1057,26 @@ pub(super) async fn handle_comm_stop(
     // keeps generating and editing files with nothing left to stop it by.
     super::swarm::cancel_active_turns(&target_session);
 
+    // Publish the terminal fact before removing the member. Absence alone
+    // cannot settle an await: members can also be temporarily missing on reload.
+    let stopped = {
+        let members = swarm_members.read().await;
+        members.get(&target_session).and_then(|member| {
+            let swarm_id = member.swarm_id.clone()?;
+            let name = member.friendly_name.clone();
+            let unique = name.is_some()
+                && !members.values().any(|other| {
+                    other.session_id != target_session
+                        && other.swarm_id.as_ref() == Some(&swarm_id)
+                        && other.friendly_name == name
+                });
+            Some((swarm_id, name, unique))
+        })
+    };
+    if let Some((swarm_id, name, unique)) = stopped {
+        super::await_members_state::record_stopped_member(&swarm_id, &target_session, name, unique);
+    }
+
     let removed_agent = super::remove_session_entry(sessions, &target_session).await;
     let removed_live_agent = removed_agent.is_some();
     if let Some(agent_arc) = removed_agent {

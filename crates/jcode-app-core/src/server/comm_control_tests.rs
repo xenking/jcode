@@ -154,6 +154,7 @@ include!("comm_control_tests/task_control.rs");
 include!("comm_control_tests/assign_next_dependency.rs");
 include!("comm_control_tests/assign_next_metadata.rs");
 include!("comm_control_tests/await_unknown.rs");
+include!("comm_control_tests/await_stopped.rs");
 include!("comm_control_tests/await_late_joiners.rs");
 include!("comm_control_tests/await_dependencies.rs");
 include!("comm_control_tests/await_disconnect.rs");
