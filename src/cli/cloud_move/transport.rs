@@ -206,7 +206,7 @@ impl Target {
     fn preflight_uncached(&self, host: &str) -> Result<()> {
         timed_move_stage("host preflight", || {
             let managed = super::super::cloud_managed::is_managed(host) && self.transport.is_none();
-            let self_hosted = managed && super::super::cloud_managed::is_self_hosted();
+            let self_hosted = managed && super::super::cloud_managed::is_self_hosted(host);
             if self_hosted {
                 // Sessions keep their local paths, so this computer's home has
                 // to exist there. Best effort: a repository elsewhere may not
@@ -430,7 +430,7 @@ impl Target {
     pub(super) fn ssh_command(host: &str) -> Result<Command> {
         let mut command = Command::new("ssh");
         if super::super::cloud_managed::is_managed(host) {
-            command.args(super::super::cloud_managed::ssh_args()?);
+            command.args(super::super::cloud_managed::ssh_args(host)?);
         }
         command.args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30", "--"]);
         command.arg(host);

@@ -1095,7 +1095,11 @@ pub(crate) enum CloudCommand {
 
     /// Internal: SSH ProxyCommand that wakes and authorizes the managed machine.
     #[command(hide = true)]
-    Proxy,
+    Proxy {
+        /// A machine registered with a self-hosted control plane.
+        #[arg(long)]
+        machine: Option<String>,
+    },
 
     /// Internal: transfer one named OAuth account over the private SSH channel.
     #[command(hide = true)]
@@ -1175,6 +1179,7 @@ pub(crate) enum CloudMachineAction {
 pub(crate) struct CloudMoveTarget {
     /// SSH host alias for the cloud machine. Defaults to $JCODE_CLOUD_HOST,
     /// else your subscription's managed Jcode Cloud machine (`jcode-cloud`).
+    /// `cloud:<name>` picks a machine registered with a self-hosted control plane.
     #[arg(long)]
     pub(crate) host: Option<String>,
     /// Remote jcode binary (name or path). Defaults to `jcode`.

@@ -37,10 +37,10 @@ fn base(config: &[String]) -> Command {
     command
 }
 
-fn master_running(config: &[String]) -> bool {
+fn master_running(config: &[String], host: &str) -> bool {
     // Also unlinks a stale socket left by a master that was killed.
     base(config)
-        .args(["-O", "check", "--", cloud_managed::HOST])
+        .args(["-O", "check", "--", host])
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
@@ -71,14 +71,14 @@ fn master_args() -> Vec<&'static str> {
 
 /// Make sure a shared master exists. Returns false when multiplexing is not
 /// available (signed out), in which case callers connect directly as before.
-pub(crate) fn ensure_master(deadline: Duration) -> Result<bool> {
+pub(crate) fn ensure_master(host: &str, deadline: Duration) -> Result<bool> {
     // Signed-out configs disable multiplexing. A detached `ssh -N` without a
     // control socket would be an unreachable connection that never exits.
     if cloud_managed::preparation_namespace().is_err() {
         return Ok(false);
     }
-    let config = cloud_managed::ssh_args()?;
-    if master_running(&config) {
+    let config = cloud_managed::ssh_args(host)?;
+    if master_running(&config, host) {
         return Ok(true);
     }
     let started = Instant::now();
@@ -92,10 +92,15 @@ pub(crate) fn ensure_master(deadline: Duration) -> Result<bool> {
         .open(dir.join("master.lock"))
         .context("open cloud master lock")?;
     lock.lock().context("lock cloud master creation")?;
-    if master_running(&config) {
+    if master_running(&config, host) {
         return Ok(true);
     }
-    let result = spawn_master(&config, &dir, deadline.saturating_sub(started.elapsed()));
+    let result = spawn_master(
+        &config,
+        &dir,
+        host,
+        deadline.saturating_sub(started.elapsed()),
+    );
     crate::logging::info(&format!(
         "[CLOUD_TIMING] stage=ssh_master outcome={} duration_ms={:.3}",
         if result.is_ok() { "ok" } else { "error" },
@@ -104,7 +109,12 @@ pub(crate) fn ensure_master(deadline: Duration) -> Result<bool> {
     result.map(|()| true)
 }
 
-fn spawn_master(config: &[String], dir: &std::path::Path, deadline: Duration) -> Result<()> {
+fn spawn_master(
+    config: &[String],
+    dir: &std::path::Path,
+    host: &str,
+    deadline: Duration,
+) -> Result<()> {
     let log_path = dir.join("master.log");
     // The master and its proxy outlive this process, so they must not hold
     // the caller's terminal or a pipe it will close.
@@ -120,7 +130,7 @@ fn spawn_master(config: &[String], dir: &std::path::Path, deadline: Duration) ->
     };
     let mut child = base(config)
         .args(master_args())
-        .args(["--", cloud_managed::HOST])
+        .args(["--", host])
         .stderr(Stdio::from(log))
         // Its own group: a terminal hangup or the owned transport's group
         // kill must not take the shared connection down with one client.
@@ -147,7 +157,7 @@ fn spawn_master(config: &[String], dir: &std::path::Path, deadline: Duration) ->
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    if !status.success() || !master_running(config) {
+    if !status.success() || !master_running(config, host) {
         let detail = match std::fs::read_to_string(&log_path) {
             Ok(log) => log,
             Err(error) => format!("cannot read SSH master log: {error}"),
@@ -170,10 +180,11 @@ pub(crate) async fn ensure(host: &str, deadline: Duration) {
     // A plain thread, not `spawn_blocking`: runtime shutdown waits for
     // blocking tasks, and this may sit in a network timeout.
     let (done, result) = tokio::sync::oneshot::channel();
+    let host = host.to_string();
     let spawned = std::thread::Builder::new()
         .name("cloud-ssh-master".into())
         .spawn(move || {
-            if let Err(result) = done.send(ensure_master(deadline))
+            if let Err(result) = done.send(ensure_master(&host, deadline))
                 && let Err(error) = result
             {
                 crate::logging::warn(&format!(

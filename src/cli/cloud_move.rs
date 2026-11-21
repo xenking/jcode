@@ -2326,7 +2326,7 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             println!("{}", super::cloud_managed::describe(&reply));
             Ok(())
         }
-        C::Proxy => super::cloud_managed::run_proxy(),
+        C::Proxy { machine } => super::cloud_managed::run_proxy(machine),
         C::Credentials {
             provider,
             account,

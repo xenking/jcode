@@ -145,8 +145,11 @@ async fn run_unix(args: Args) -> Result<()> {
             super::cloud_ephemeral::ssh_config_path(id)?,
         );
     } else if super::cloud_managed::is_managed(host) {
-        let _ = super::cloud_managed::ssh_args()?;
-        crate::env::set_var("JCODE_SSH_CONFIG", super::cloud_managed::ssh_config_path()?);
+        let _ = super::cloud_managed::ssh_args(host)?;
+        crate::env::set_var(
+            "JCODE_SSH_CONFIG",
+            super::cloud_managed::ssh_config_path(host)?,
+        );
     } else {
         crate::env::remove_var("JCODE_SSH_CONFIG");
     }

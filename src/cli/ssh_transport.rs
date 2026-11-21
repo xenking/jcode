@@ -236,7 +236,7 @@ impl SshOptions {
                 command.arg("-F").arg(path);
             }
         } else if super::cloud_managed::is_managed(&self.host)
-            && let Ok(args) = super::cloud_managed::ssh_args()
+            && let Ok(args) = super::cloud_managed::ssh_args(&self.host)
         {
             command.args(args);
             managed_config = true;
