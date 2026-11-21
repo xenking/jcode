@@ -1,4 +1,4 @@
-use super::super::{ComputerTool, Tool, ToolContext, ToolOutput, tests::approved_ctx};
+use super::super::{Engine, ToolOutput};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdout, Command, Stdio};
@@ -73,11 +73,8 @@ impl Drop for Fixture {
     }
 }
 
-async fn execute(ctx: &ToolContext, input: Value) -> ToolOutput {
-    ComputerTool::new()
-        .execute(input, ctx.clone())
-        .await
-        .unwrap()
+async fn execute(engine: &Engine, input: Value) -> ToolOutput {
+    crate::tests::execute(engine, input).unwrap()
 }
 
 fn state(output: ToolOutput) -> Value {
@@ -105,7 +102,7 @@ async fn live_native_fixture() {
         "TCC has not granted Accessibility to this tool host"
     );
     let mut fixture = Fixture::launch();
-    let ctx = approved_ctx();
+    let ctx = Engine::default();
     let ax = execute(&ctx, json!({"op":"observe", "window_id":fixture.first})).await;
     eprintln!("AX_TEXT {}", ax.output);
     assert!(!ax.output.contains("fixture-secret-value"));

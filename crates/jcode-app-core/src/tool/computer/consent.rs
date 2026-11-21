@@ -7,7 +7,7 @@ use tokio::sync::OnceCell;
 
 pub(super) struct Session {
     consent: OnceCell<bool>,
-    pub(super) snapshots: Mutex<super::native::Snapshots>,
+    pub(super) engine: jcode_computer::Engine,
 }
 
 // Do not evict consent: eviction would silently prompt again in a live session.
@@ -24,9 +24,7 @@ pub(super) async fn authorize(ctx: &ToolContext) -> Result<Arc<Session>, Denial>
         }
         if !sessions.contains_key(&ctx.session_id) {
             for session in sessions.values() {
-                if let Ok(mut snapshots) = session.snapshots.try_lock() {
-                    snapshots.discard_expired();
-                }
+                session.engine.discard_expired();
             }
         }
         sessions
@@ -34,7 +32,7 @@ pub(super) async fn authorize(ctx: &ToolContext) -> Result<Arc<Session>, Denial>
             .or_insert_with(|| {
                 Arc::new(Session {
                     consent: OnceCell::new(),
-                    snapshots: Mutex::default(),
+                    engine: jcode_computer::Engine::default(),
                 })
             })
             .clone()

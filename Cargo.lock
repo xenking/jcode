@@ -3753,8 +3753,6 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
- "core-foundation 0.9.4",
- "core-graphics",
  "dirs",
  "flate2",
  "futures",
@@ -3769,6 +3767,7 @@ dependencies = [
  "jcode-build-support",
  "jcode-codemode",
  "jcode-command-risk",
+ "jcode-computer",
  "jcode-core",
  "jcode-desktop-open",
  "jcode-docs-data",
@@ -4013,6 +4012,24 @@ dependencies = [
  "tempfile",
  "tokio",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "jcode-computer"
+version = "1.0.3"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "core-foundation 0.9.4",
+ "core-graphics",
+ "jcode-base",
+ "jcode-tool-types",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

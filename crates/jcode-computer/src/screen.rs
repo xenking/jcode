@@ -55,9 +55,9 @@ struct SentCapture {
 
 fn fit_capture(bytes: Vec<u8>) -> SentCapture {
     let captured = png_dimensions(&bytes);
-    match crate::image_normalize::normalize_image_bytes(bytes.clone()) {
+    match jcode_base::image_normalize::normalize_image_bytes(bytes.clone()) {
         Ok(image) => {
-            let fitted = crate::image_normalize::fit_image_for_model(image);
+            let fitted = jcode_base::image_normalize::fit_image_for_model(image);
             SentCapture {
                 media_type: fitted.image.media_type,
                 size: fitted.scaled.map(|(_, sent)| sent).or(captured),

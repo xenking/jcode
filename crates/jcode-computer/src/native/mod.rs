@@ -7,7 +7,7 @@ mod tests;
 
 pub(super) use platform::{capture_trusted, trusted};
 
-use super::{ToolOutput, consent::Session, screen};
+use super::{ToolOutput, screen};
 use anyhow::ensure;
 use platform::{AxError, Element};
 use serde::Deserialize;
@@ -171,7 +171,7 @@ impl Request {
         }))
     }
 
-    pub(super) fn execute(self, session: &Session) -> ToolOutput {
+    pub(super) fn execute(self, slots: &mut Snapshots) -> ToolOutput {
         // Even the image route uses AX to pin a window before capturing it.
         if !trusted() {
             let reason = "accessibility_permission_required";
@@ -183,11 +183,10 @@ impl Request {
                 Self::Wait(_) => receipt(json!({"matched":false, "reason":reason})),
             };
         }
-        let mut slots = session.snapshots.lock().unwrap();
         match self {
-            Self::Observe(request) => observe(request, &mut slots).unwrap_or_else(failure),
-            Self::Act(request) => act(request, &mut slots),
-            Self::Wait(request) => wait(request, &mut slots),
+            Self::Observe(request) => observe(request, slots).unwrap_or_else(failure),
+            Self::Act(request) => act(request, slots),
+            Self::Wait(request) => wait(request, slots),
         }
     }
 }

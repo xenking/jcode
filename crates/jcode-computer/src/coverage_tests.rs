@@ -1,20 +1,14 @@
 //! Exhaustive live coverage of EVERY computer action. These mutate the desktop
 //! (open TextEdit, move windows, clipboard, etc.) so they are `#[ignore]`d and
 //! run explicitly:
-//!   cargo test -p jcode-app-core tool::computer::coverage -- --ignored --nocapture --test-threads=1
+//!   justrust test -p jcode-computer coverage -- --ignored --nocapture --test-threads=1
 //!
 //! Each test asserts the action returns Ok and (where checkable) the expected
 //! effect. The goal is to prove no action panics or silently misbehaves.
 
 use super::*;
-use jcode_tool_core::ToolContext;
-
-fn ctx() -> ToolContext {
-    super::tests::approved_ctx()
-}
-
 async fn act(v: Value) -> Result<ToolOutput> {
-    ComputerTool::new().execute(v, ctx()).await
+    crate::tests::execute(&Engine::default(), v)
 }
 
 async fn ok(v: Value) -> ToolOutput {

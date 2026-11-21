@@ -42,11 +42,11 @@ unsafe extern "C" {
     fn CGPreflightScreenCaptureAccess() -> bool;
 }
 
-pub(in crate::tool::computer) fn capture_trusted() -> bool {
+pub(crate) fn capture_trusted() -> bool {
     unsafe { CGPreflightScreenCaptureAccess() }
 }
 
-pub(in crate::tool::computer) fn trusted() -> bool {
+pub(crate) fn trusted() -> bool {
     unsafe { AXIsProcessTrusted() != 0 }
 }
 
