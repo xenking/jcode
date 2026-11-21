@@ -851,7 +851,12 @@ async fn continue_persistent_ws_locked(
             skipped_output_items
         ));
     }
-    if incremental_items.is_empty() {
+    // Codex permits an empty suffix. Require positive evidence that the
+    // caller replayed the entire completed output, not just the old input.
+    let output_only = skipped_output_items > 0
+        && skipped_output_items == state.last_response_output.len()
+        && state.last_request_options.is_some();
+    if incremental_items.is_empty() && !output_only {
         jcode_base::logging::info("No incremental items to send; need fresh request");
         *guard = None;
         log_openai_stream_lifecycle(

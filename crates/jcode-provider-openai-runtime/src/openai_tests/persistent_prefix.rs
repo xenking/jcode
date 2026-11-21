@@ -3,6 +3,10 @@
 type PrefixTestSocket = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
 
 async fn prefix_test_request(socket: &mut PrefixTestSocket) -> Value {
+    serde_json::from_str(&prefix_test_frame(socket).await).expect("request JSON")
+}
+
+async fn prefix_test_frame(socket: &mut PrefixTestSocket) -> String {
     loop {
         match socket
             .next()
@@ -10,9 +14,140 @@ async fn prefix_test_request(socket: &mut PrefixTestSocket) -> Value {
             .expect("request frame")
             .expect("valid frame")
         {
-            WsMessage::Text(text) => return serde_json::from_str(&text).expect("request JSON"),
+            WsMessage::Text(text) => return text.to_string(),
             WsMessage::Ping(payload) => socket.send(WsMessage::Pong(payload)).await.unwrap(),
             other => panic!("expected response.create, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn codex_parity_verified_empty_delta_then_compaction() {
+    assert_codex_parity_verified_empty_delta(false).await;
+}
+
+#[tokio::test]
+async fn codex_parity_verified_empty_delta_and_stale_full_replay() {
+    assert_codex_parity_verified_empty_delta(true).await;
+}
+
+async fn assert_codex_parity_verified_empty_delta(stale: bool) {
+    use serde_json::json;
+
+    let _lock = jcode_base::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", home.path());
+    let _test_session = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _base = EnvVarGuard::set("JCODE_OPENAI_API_BASE", &format!("http://{addr}/v1"));
+    let _transport = EnvVarGuard::set("JCODE_OPENAI_TRANSPORT", "websocket");
+    let _prewarm = EnvVarGuard::set("JCODE_OPENAI_PREWARM", "0");
+    let _key = EnvVarGuard::set("JCODE_OPENAI_PROMPT_CACHE_KEY", "parity-fixture-key");
+
+    let user = ChatMessage::user(&"synthetic history ".repeat(128));
+    let replay = [user.clone(), ChatMessage::assistant_text("resp_fixture")];
+    let full_input = build_responses_input(&replay);
+    let compacted = [ChatMessage {
+        role: Role::User,
+        content: vec![ContentBlock::OpenAICompaction {
+            encrypted_content: "opaque-compaction-fixture".into(),
+        }]
+        .into(),
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+    let mut server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut original = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let first = prefix_test_request(&mut original).await;
+        assert_eq!(first["input"], json!(&full_input[..1]));
+        assert_eq!(first["prompt_cache_key"], "parity-fixture-key");
+        let mut output = full_input[1].clone();
+        output["id"] = json!("msg_fixture");
+        output["status"] = json!("completed");
+        for event in [
+            json!({"type":"response.created","response":{"id":"resp_fixture"}}),
+            json!({"type":"response.output_text.delta","delta":"resp_fixture"}),
+            json!({"type":"response.completed","response":{"id":"resp_fixture","status":"completed","output":[output]}}),
+        ] {
+            original
+                .send(WsMessage::Text(event.to_string()))
+                .await
+                .unwrap();
+        }
+
+        // Codex prepare_websocket_request uses allow_empty_delta=true. The
+        // logical input is exactly the previous input plus its completed output.
+        let delta = prefix_test_frame(&mut original).await;
+        let mut expected = first.clone();
+        expected["input"] = json!([]);
+        expected["previous_response_id"] = json!("resp_fixture");
+        expected["prompt_cache_options"]["comparison_response_id"] = json!("resp_fixture");
+        assert_eq!(delta, expected.to_string(), "actual continuation bytes");
+        let mut full = first.clone();
+        full["input"] = json!(full_input);
+        let full = full.to_string();
+        assert!(delta.len() + 2_048 < full.len());
+
+        if stale {
+            let rejected = json!({"type":"error","error":{
+                "code":"previous_response_not_found", "message":"Previous response not found."
+            }});
+            original
+                .send(WsMessage::Text(rejected.to_string()))
+                .await
+                .unwrap();
+            prefix_test_expect_disconnect(&mut original).await;
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut fresh = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            assert_eq!(
+                prefix_test_frame(&mut fresh).await,
+                full,
+                "fresh retry without stale ID"
+            );
+            prefix_test_response(&mut fresh, "resp_recovered").await;
+        } else {
+            prefix_test_response(&mut original, "resp_continued").await;
+            prefix_test_expect_disconnect(&mut original).await;
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut fresh = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let mut expected = first;
+            expected["input"] =
+                json!([{"type":"compaction","encrypted_content":"opaque-compaction-fixture"}]);
+            assert_eq!(
+                prefix_test_frame(&mut fresh).await,
+                expected.to_string(),
+                "compaction starts a full request"
+            );
+            prefix_test_response(&mut fresh, "resp_compacted").await;
+        }
+    });
+    let provider = prefix_test_provider().await;
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        prefix_test_complete(&provider, &[user], "resp_fixture").await;
+        if stale {
+            prefix_test_complete(&provider, &replay, "resp_recovered").await;
+        } else {
+            prefix_test_complete(&provider, &replay, "resp_continued").await;
+            prefix_test_complete(&provider, &compacted, "resp_compacted").await;
+        }
+    })
+    .await;
+    if result.is_err() {
+        server.abort();
+    }
+    // On failure, surface the server assertion before a client-side timeout.
+    (&mut server).await.expect("Codex-parity wire assertions");
+    result.expect("loopback completions");
+}
+
+async fn prefix_test_expect_disconnect(socket: &mut PrefixTestSocket) {
+    while let Some(frame) = socket.next().await {
+        match frame {
+            Ok(WsMessage::Ping(data)) => socket.send(WsMessage::Pong(data)).await.unwrap(),
+            Ok(WsMessage::Close(_)) | Err(_) => break,
+            other => panic!("reused old response chain: {other:?}"),
         }
     }
 }
