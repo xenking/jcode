@@ -105,8 +105,9 @@ Two things that waste time otherwise:
   with `readlink -f` first.
 
 ## Fork notes (xenking/jcode, keep at end for clean upstream merges)
-- [Fork feature ledger](docs/FORK_LEDGER.md): CLI and Desktop changes and post-sync checks.
+- [Fork ledger](docs/FORK_LEDGER.md): CLI and Desktop features, confirmed removals, current owners and sync checks.
 - Fork-only features: codemode (`crates/jcode-codemode`, docs `CODEMODE.md`, `[features] code_mode`), MCP `MCP-Protocol-Version` header on initialize, Soniox realtime `stt-rt-v6` in `crates/jcode-voice` (`[dictation] backend`), native `ask` tool (`crates/jcode-app-core/src/tool/ask.rs`, exposed on harness API), self-update source defaults to `xenking/jcode` branch `master`.
 - Verify a slice: `justrust check -p jcode-codemode -p jcode-voice`. Upstream merges: keep this section last.
 - Upstream sync: `scripts/xk-upstream-agent.sh` starts a separate jcode session that runs `scripts/xk-upstream-sync.sh` (jcode + Desktop) and OpenRig's catch-up; `--dry-run` shows the gap.
+- Before pushing any upstream sync, run `scripts/check_fork_removals.py jcode . HEAD` and `scripts/check_fork_removals.py desktop ../jcode-desktop HEAD` on the candidate commits. The sync script enforces this even with `--skip-checks`, including after a clean merge or a late merge from origin. Keep deliberate removals and owner changes from the ledger. Absence alone does not establish intent.
 - Parallel agents (swarm workers, other sessions) never share a checkout: each works in its own `git worktree` under `~/.jcode/wt/<name>-<repo>` off origin, ships by rebase + fast-forward push to the primary branch, then removes the worktree and branch. This overrides "Prefer master/main" for parallel work.

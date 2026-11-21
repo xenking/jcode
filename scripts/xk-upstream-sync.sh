@@ -18,7 +18,7 @@ Usage: xk-upstream-sync.sh [--dry-run] [--repo jcode|desktop|all] [--continue] [
   --repo         which fork to sync (default all; desktop always builds against the synced jcode)
   --continue     resume after you resolved conflicts or fixed checks in the left-over worktree
   --no-push      merge and check, but leave the result in the worktree
-  --skip-checks  merge and push without builds/tests (only for doc-only upstream changes)
+  --skip-checks  skip builds/tests only, not the fork-removal guard (doc-only upstream changes)
 EOF
   exit 2
 }
@@ -55,17 +55,33 @@ fork_info() {
   esac
 }
 
-check_remotes() {
-  local name=$1 src branch up origin
-  read -r src branch up < <(fork_info "$name")
+check_origin() {
+  local name=$1 src=$2 origin
   git -C "$src" rev-parse --git-dir >/dev/null 2>&1 || die 1 "$name: no checkout at $src"
   origin=$(git -C "$src" remote get-url origin)
   case "$origin" in *github.com[:/]xenking/*) ;; *) die 1 "$name: origin is not a xenking fork: $origin" ;; esac
+}
+
+check_remotes() {
+  local name=$1 src branch up
+  read -r src branch up < <(fork_info "$name")
+  check_origin "$name" "$src"
   git -C "$src" remote get-url upstream >/dev/null 2>&1 || git -C "$src" remote add upstream "$up"
   # Fetch-only upstream: a push there must be impossible, not merely avoided.
   git -C "$src" remote set-url --push upstream DISABLED-never-push-to-upstream
   git -C "$src" fetch -q origin "$branch"
   git -C "$src" fetch -q upstream "$branch"
+}
+
+# The installed agent launcher copies only this shell script. Read policy from
+# the published CLI ref captured before merging, never from the candidate tree.
+removal_guard() {
+  git -C "$ROOT/jcode" show "$guard_ref:scripts/check_fork_removals.py" | python3 - "$@"
+}
+
+check_removals() {
+  removal_guard "$1" "$2" "$3" ||
+    die 4 "$1: fork-removal guard failed for $3 in $2. See docs/FORK_LEDGER.md."
 }
 
 behind() {
@@ -92,7 +108,7 @@ merge_upstream() {
   read -r src branch _up < <(fork_info "$name")
   dir="$WT/$(basename "$src")"
   if git -C "$dir" rev-parse -q --verify MERGE_HEAD >/dev/null; then
-    keep_fork_workflow_deletions "$dir"
+    keep_fork_workflow_deletions "$name" "$dir"
     local left
     left=$(git -C "$dir" diff --name-only --diff-filter=U)
     [ -z "$left" ] || die 3 "$name: unresolved conflicts remain in $dir:"$'\n'"$left"
@@ -105,7 +121,7 @@ merge_upstream() {
     return
   fi
   if ! git -C "$dir" merge -q --no-edit "upstream/$branch"; then
-    keep_fork_workflow_deletions "$dir"
+    keep_fork_workflow_deletions "$name" "$dir"
     local left
     left=$(git -C "$dir" diff --name-only --diff-filter=U)
     [ -z "$left" ] || die 3 "$name: merge conflicts in $dir. Resolve them (keep fork features, see AGENTS.md Fork notes), git add, then rerun with --continue:"$'\n'"$left"
@@ -114,14 +130,15 @@ merge_upstream() {
   log "$name: merged $(git -C "$dir" rev-list --count "HEAD^1..upstream/$branch") upstream commits"
 }
 
-# The forks removed upstream CI workflows on purpose (no Actions budget, no
-# cron). Upstream edits to a workflow the fork deleted conflict as
-# deleted-by-us; keep the deletion. Anything else stays a real conflict.
+# Resolve only verified workflow deletions. An unknown deleted-by-us path is
+# still a real conflict. A clean re-add is handled by check_removals.
 keep_fork_workflow_deletions() {
-  local dir=$1 f
+  local name=$1 dir=$2 paths f
+  paths=$(removal_guard "$name" "$dir" --deleted-workflows) ||
+    die 4 "$name: could not read known workflow deletions"
   git -C "$dir" status --porcelain | while IFS= read -r line; do
     f=${line:3}
-    if [ "${line:0:2}" = DU ] && [[ "$f" == .github/workflows/* ]]; then
+    if [ "${line:0:2}" = DU ] && grep -Fxq -- "$f" <<< "$paths"; then
       git -C "$dir" rm -q -- "$f"
       log "kept fork deletion of $f"
     fi
@@ -163,7 +180,7 @@ run_checks() {
 }
 
 ship() {
-  local name=$1 src branch _up dir wbranch
+  local name=$1 src branch _up dir tip
   read -r src branch _up < <(fork_info "$name")
   dir="$WT/$(basename "$src")"
   if ! $push; then log "$name: --no-push, result left in $dir"; return; fi
@@ -172,8 +189,10 @@ ship() {
     git -C "$dir" merge -q --no-edit "origin/$branch" ||
       die 3 "$name: origin/$branch moved and conflicts with the merge in $dir; resolve, then --continue"
   fi
-  git -C "$dir" push -q origin "HEAD:$branch" || die 5 "$name: push to origin/$branch refused"
-  log "$name: pushed $(git -C "$dir" rev-parse --short HEAD) to origin/$branch"
+  tip=$(git -C "$dir" rev-parse HEAD)
+  check_removals "$name" "$dir" "$tip"
+  git -C "$dir" push -q origin "$tip:$branch" || die 5 "$name: push to origin/$branch refused"
+  log "$name: pushed ${tip:0:12} to origin/$branch"
 }
 
 cleanup() {
@@ -199,14 +218,24 @@ if $dry; then
   exit 0
 fi
 
+if [ "$repo" = desktop ]; then
+  check_origin jcode "$ROOT/jcode"
+  git -C "$ROOT/jcode" fetch -q origin master
+fi
+guard_ref=$(git -C "$ROOT/jcode" rev-parse --verify refs/remotes/origin/master)
+
 synced=()
 for n in "${names[@]}"; do
   if ! $resume && [ "$(behind "$n")" = 0 ]; then
+    read -r src branch _up < <(fork_info "$n")
+    check_removals "$n" "$src" "origin/$branch"
     log "$n: nothing new upstream"
     continue
   fi
   ensure_worktree "$n"
   merge_upstream "$n"
+  read -r src branch _up < <(fork_info "$n")
+  check_removals "$n" "$WT/$(basename "$src")" HEAD
   synced+=("$n")
 done
 
