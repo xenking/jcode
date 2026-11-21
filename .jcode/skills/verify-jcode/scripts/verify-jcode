@@ -1120,6 +1120,48 @@ def launch(args, *, prepare_workspace=None):
         raise
 
 
+def cloud_group_round_trip(args):
+    require(sys.platform.startswith("linux"), "Group migration fixture requires Linux and bubblewrap")
+    binary = Path(args.binary).resolve(strict=True)
+    evidence = Path(args.evidence).resolve()
+    script = REPO / "scripts/test_cloud_group_e2e.sh"
+    evidence.mkdir(mode=0o700)
+    state = {"repo_head": run(["git", "rev-parse", "HEAD"], cwd=REPO).stdout.strip(),
+             "binary": str(binary), "binary_sha256": digest(binary),
+             "fixture_sha256": digest(script), "cleaned": False}
+    dump(evidence / "run.json", state)
+    output = evidence / "cloud-group-round-trip.log"
+    result = {"feature": "cloud-group-return", "entry_point": "jcode cloud return --session group-worker",
+              "status": "failed"}
+    scratch = tempfile.TemporaryDirectory(prefix="verify-cloud-group-")
+    try:
+        with scratch as directory:
+            env = {"PATH": os.defpath, "HOME": directory, "TMPDIR": directory,
+                   "JCODE_SCRATCH_DIR": directory, "JCODE_BIN": str(binary)}
+            with output.open("w") as log:
+                process = subprocess.Popen(["bash", str(script)], cwd=REPO, env=env,
+                                           stdout=log, stderr=subprocess.STDOUT)
+                try:
+                    result["exit_code"] = process.wait(timeout=360)
+                except BaseException:
+                    process.terminate()
+                    process.wait(timeout=20)
+                    raise
+            result["checks"] = [line for line in output.read_text().splitlines()
+                                if line.startswith("PASS:")]
+            require(result["exit_code"] == 0 and result["checks"],
+                    f"Group return failed. See {output}")
+            (fixture,) = Path(directory).glob("cloud-group-test.*")
+            shutil.copy2(fixture / "return.json", evidence / "group-return.json")
+        result["status"] = "passed"
+        return result
+    finally:
+        state["cleaned"] = not Path(scratch.name).exists()
+        dump(evidence / "drive-001-cloud-group-return.json", result)
+        dump(evidence / "cleanup.json", {"fixture_removed": state["cleaned"]})
+        dump(evidence / "run.json", state)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1130,6 +1172,9 @@ def main():
     start.add_argument("--rows", type=int, default=48)
     start.add_argument("--loopback-exec-worker", action="store_true",
                        help="Route Bash through the staged executable's execution worker, with no SSH")
+    group = sub.add_parser("cloud-group-return", help="Run the isolated Linux group migration round trip")
+    group.add_argument("--binary", required=True)
+    group.add_argument("--evidence", required=True, help="New evidence directory, survives cleanup")
     for name in ("doctor", "drive", "frame", "cleanup"):
         command = sub.add_parser(name)
         command.add_argument("--evidence", required=True)
@@ -1146,6 +1191,9 @@ def main():
     os.umask(0o077)
     if args.command == "launch":
         print(json.dumps(launch(args), indent=2))
+        return
+    if args.command == "cloud-group-return":
+        print(json.dumps(cloud_group_round_trip(args), indent=2))
         return
     evidence = Path(args.evidence).resolve()
     # Fail closed instead of racing file-debug requests from two agents.

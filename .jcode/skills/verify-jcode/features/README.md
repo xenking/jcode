@@ -36,3 +36,4 @@ Record the feature ID, exact user entry point, action, resulting frame/response,
 | [Cancellation and daemon restart](lifecycle.md) | `drive cancel`, `drive restart`, `drive reload-bg` (private exec, PID, progress, exit, notify and wake), `drive reload-selfdev` (build/test queue across exec) | tool cancellation, queue races, other in-flight reload recovery |
 | [Headless swarm worker restart](worker-reload.md) | `drive worker-reload`: idle DM and interrupted worker turn | exec reload, coordinator-less workers, explicit retry |
 | [Provider route and auth boundaries](provider-route.md) | `drive cli --mode json` for the synthetic route | multi-route picker, forced catalog refresh, real vendor auth and token refresh |
+| [Coordinated cloud migration](cloud-group-return.md) | `cloud-group-return` using two isolated Linux daemons | managed control plane, real SSH, real account credentials |

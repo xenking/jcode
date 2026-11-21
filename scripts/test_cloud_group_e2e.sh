@@ -9,7 +9,7 @@ if [[ ${1:-} != --isolated ]]; then
   exec env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 HOME="$W/home" \
     TMPDIR="$W/tmp" XDG_RUNTIME_DIR="$W/runtime" JCODE_RUNTIME_DIR="$W/runtime" \
     JCODE_HOME="$W/home/.jcode" JCODE_NO_AUTO_UPDATE=1 JCODE_NO_TELEMETRY=1 \
-    JCODE_NON_INTERACTIVE=1 W="$W" JCODE_BIN="$BINARY" bash "$SCRIPT" --isolated
+    JCODE_NON_INTERACTIVE=1 JCODE_TEST_SESSION=1 W="$W" JCODE_BIN="$BINARY" bash "$SCRIPT" --isolated
 fi
 RUNTIME=$(mktemp -d /tmp/jcg.XXXXXX)
 mkdir "$RUNTIME/local" "$RUNTIME/cloud"
@@ -77,7 +77,7 @@ run_remote() {
     --ro-bind "$BINARY" /tmp/jcode-group-test --clearenv \
     --setenv PATH /usr/local/bin:/usr/bin:/bin --setenv HOME "$W/home" \
     --setenv JCODE_HOME "$W/home/.jcode" --setenv JCODE_NO_AUTO_UPDATE 1 \
-    --setenv JCODE_NO_TELEMETRY 1 --setenv JCODE_NON_INTERACTIVE 1 \
+    --setenv JCODE_NO_TELEMETRY 1 --setenv JCODE_NON_INTERACTIVE 1 --setenv JCODE_TEST_SESSION 1 \
     --setenv JCODE_RUNTIME_DIR "$RUNTIME/cloud" --setenv XDG_RUNTIME_DIR "$RUNTIME/cloud" \
     --setenv JCODE_SOCKET "$RUNTIME/cloud/cloud.sock" \
     --chdir / bash -c "$1"
