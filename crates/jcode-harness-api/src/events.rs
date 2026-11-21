@@ -718,6 +718,8 @@ pub struct SessionInfo {
     /// Cumulative built-in file-tool changes. Absent when unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edit_stats: Option<crate::SessionEditStats>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::SessionCatalogContext>,
     pub session_id: String,
     /// Swarm owner this agent reports to, not the transcript's fork parent.
     /// Absent for ordinary sessions and user-created forks.

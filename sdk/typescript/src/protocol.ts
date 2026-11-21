@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 21;
+export const API_VERSION_MINOR = 22;
 
 export type RuntimeCommand = "mode" | "skills" | "context" | "info" | "cache" | "memory" | "swarm" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout" | "background_output";
 
@@ -29,8 +29,17 @@ export interface SessionEditStats {
   approximate: boolean;
 }
 
+export interface SessionCatalogContext {
+  model?: string;
+  reasoning_effort?: string;
+  modes?: string[];
+  /** Estimated prompt-cache expiry in Unix milliseconds, not a guaranteed hit. */
+  cache_expires_at_ms?: number;
+}
+
 export interface SessionInfo {
   edit_stats?: SessionEditStats;
+  context?: SessionCatalogContext;
   session_id: string;
   /** Swarm owner, never the transcript's ordinary fork parent. */
   parent_session_id?: string;

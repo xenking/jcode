@@ -323,6 +323,7 @@ struct RecentSessionIndexEntry {
     save_label: Option<String>,
     updated_at_ms: i64,
     last_active_at_ms: Option<i64>,
+    context: Option<jcode_harness_api::SessionCatalogContext>,
 }
 
 impl From<&RecentSessionIndexEntry> for PersistedSessionMetadata {
@@ -1085,6 +1086,9 @@ impl BridgeState {
                     .map(|session_id| SessionInfo {
                         user_connected: self.user_connected_sessions.contains(&session_id),
                         edit_stats: None,
+                        context: indexed_metadata
+                            .get(&session_id)
+                            .and_then(|entry| entry.context.clone()),
                         parent_session_id: None,
                         agent_label: None,
                         swarm_status: None,
@@ -2135,6 +2139,7 @@ impl BridgeState {
                             session: SessionInfo {
                                 user_connected: self.user_connected_sessions.contains(&session_id),
                                 edit_stats: None,
+                                context: None,
                                 parent_session_id: None,
                                 agent_label: None,
                                 swarm_status: None,
@@ -2551,6 +2556,7 @@ impl BridgeState {
                         session: SessionInfo {
                             user_connected: self.user_connected_sessions.contains(&session_id),
                             edit_stats: None,
+                            context: None,
                             parent_session_id: None,
                             agent_label: None,
                             swarm_status: None,
@@ -3929,7 +3935,8 @@ impl BridgeState {
                      updated_at_ms INTEGER NOT NULL,
                      last_active_at_ms INTEGER,
                      saved INTEGER NOT NULL DEFAULT 0,
-                     save_label TEXT
+                     save_label TEXT,
+                     catalog_context TEXT
                  );
                  CREATE INDEX IF NOT EXISTS recent_sessions_activity
                  ON recent_sessions(COALESCE(last_active_at_ms, updated_at_ms) DESC);",
@@ -3943,9 +3950,13 @@ impl BridgeState {
             [],
         );
         let _ = connection.execute("ALTER TABLE recent_sessions ADD COLUMN save_label TEXT", []);
+        let _ = connection.execute(
+            "ALTER TABLE recent_sessions ADD COLUMN catalog_context TEXT",
+            [],
+        );
         let Ok(mut statement) = connection.prepare(
             "SELECT session_id, working_dir, generated_title, custom_title,
-                    todo_title, saved, updated_at_ms, last_active_at_ms, save_label
+                    todo_title, saved, updated_at_ms, last_active_at_ms, save_label, catalog_context
              FROM recent_sessions
              ORDER BY COALESCE(last_active_at_ms, updated_at_ms) DESC
              LIMIT 500",
@@ -3964,6 +3975,9 @@ impl BridgeState {
                     updated_at_ms: row.get(6)?,
                     last_active_at_ms: row.get(7)?,
                     save_label: row.get(8)?,
+                    context: row
+                        .get::<_, Option<String>>(9)?
+                        .and_then(|value| serde_json::from_str(&value).ok()),
                 })
             })
             .and_then(|rows| rows.collect())

@@ -7,6 +7,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use jcode_session_types::SessionCatalogContext;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::session::Session;
@@ -118,6 +119,7 @@ fn open_at(path: &std::path::Path) -> Result<Connection> {
         ("resume_short_name", "TEXT"),
         ("resume_fingerprint", "TEXT"),
         ("resume_updated_at", "TEXT"),
+        ("catalog_context", "TEXT"),
     ] {
         if !columns.contains(column) {
             transaction.execute(
@@ -192,6 +194,8 @@ fn index_session(
         last_active_at_ms: session.last_active_at.map(|time| time.timestamp_millis()),
     };
     let encoded_fingerprint = fingerprint.map(serde_json::to_string).transpose()?;
+    let context = session_catalog_context(session);
+    let encoded_context = serde_json::to_string(&context)?;
     with_connection(|connection| {
         // Acquire the SQLite write lock before validating the read. A newer
         // save either already changed the files (we skip it) or publishes its
@@ -216,6 +220,7 @@ fn index_session(
             session.short_name.as_deref(),
             encoded_fingerprint.as_deref(),
             Some(&session.updated_at.to_rfc3339()),
+            Some(&encoded_context),
         )?;
         if let Some(transaction) = transaction {
             transaction.commit()?;
@@ -224,12 +229,33 @@ fn index_session(
     })
 }
 
+fn session_catalog_context(session: &Session) -> SessionCatalogContext {
+    let cache_expires_at_ms = session.last_provider_request_at.and_then(|last_request| {
+        let provider = session
+            .route_api_method
+            .as_deref()
+            .or(session.provider_key.as_deref())?;
+        let ttl =
+            crate::provider::cache_ttl_for_provider_model(provider, session.model.as_deref())?;
+        let ttl = chrono::TimeDelta::try_seconds(ttl.try_into().ok()?)?;
+        last_request
+            .checked_add_signed(ttl)
+            .map(|time| time.timestamp_millis())
+    });
+    SessionCatalogContext {
+        model: session.model.clone(),
+        reasoning_effort: session.reasoning_effort.clone(),
+        modes: session.pinned_skill_names().to_vec(),
+        cache_expires_at_ms,
+    }
+}
+
 pub fn upsert(entry: &RecentSessionMetadata) -> Result<()> {
     with_connection(|connection| upsert_with(connection, entry))
 }
 
 fn upsert_with(connection: &Connection, entry: &RecentSessionMetadata) -> Result<()> {
-    upsert_with_resume(connection, entry, None, None, None)
+    upsert_with_resume(connection, entry, None, None, None, None)
 }
 
 fn upsert_with_resume(
@@ -238,13 +264,14 @@ fn upsert_with_resume(
     short_name: Option<&str>,
     fingerprint: Option<&str>,
     updated_at: Option<&str>,
+    catalog_context: Option<&str>,
 ) -> Result<()> {
     connection.execute(
         "INSERT INTO recent_sessions (
              session_id, working_dir, generated_title, custom_title, todo_title,
              saved, updated_at_ms, last_active_at_ms, save_label,
-             resume_short_name, resume_fingerprint, resume_updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             resume_short_name, resume_fingerprint, resume_updated_at, catalog_context
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT(session_id) DO UPDATE SET
              working_dir = excluded.working_dir,
              generated_title = excluded.generated_title,
@@ -256,7 +283,8 @@ fn upsert_with_resume(
              save_label = excluded.save_label,
              resume_short_name = excluded.resume_short_name,
              resume_fingerprint = excluded.resume_fingerprint,
-             resume_updated_at = excluded.resume_updated_at",
+             resume_updated_at = excluded.resume_updated_at,
+             catalog_context = COALESCE(excluded.catalog_context, recent_sessions.catalog_context)",
         params![
             entry.session_id,
             entry.working_dir,
@@ -270,6 +298,7 @@ fn upsert_with_resume(
             short_name,
             fingerprint,
             updated_at,
+            catalog_context,
         ],
     )?;
     Ok(())

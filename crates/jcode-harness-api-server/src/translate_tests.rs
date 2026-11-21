@@ -2856,6 +2856,33 @@ fn unattached_list_sessions_discovers_all_persisted_records() {
 }
 
 #[test]
+fn listed_session_context_comes_from_persisted_session_without_history() {
+    let _home = ScopedJcodeHome::new("catalog-context");
+    let mut session =
+        jcode_base::session::Session::create_with_id("catalog_context".to_owned(), None, None);
+    session.model = Some("example-model".into());
+    session.reasoning_effort = Some("high".into());
+    session.pinned_skills = vec!["swarm".into(), "selfdev".into()];
+    session.route_api_method = Some("openrouter".into());
+    session.last_provider_request_at = Some(session.updated_at);
+    jcode_base::recent_session_index::upsert_session(&session).unwrap();
+
+    let event = only_reply_event(
+        BridgeState::default()
+            .api_request_to_legacy(&json!({"req": "list_sessions", "id": 1, "limit": 1})),
+    );
+    let wire = serde_json::to_value(event).unwrap();
+    assert_eq!(wire["sessions"][0]["session_id"], session.id);
+    assert_eq!(
+        wire["sessions"][0]["context"],
+        json!({
+            "model": "example-model", "reasoning_effort": "high", "modes": ["swarm", "selfdev"],
+            "cache_expires_at_ms": session.updated_at.timestamp_millis() + 300_000,
+        })
+    );
+}
+
+#[test]
 fn limited_session_list_reads_compact_index_without_transcript_records() {
     let home = ScopedJcodeHome::new("metadata-index");
     assert!(BridgeState::recent_session_index_entries().is_empty());

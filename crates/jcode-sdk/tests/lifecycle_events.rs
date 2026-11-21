@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 fn session(id: &str) -> SessionInfo {
     SessionInfo {
         edit_stats: None,
+        context: None,
         user_connected: false,
         parent_session_id: (id == "persisted-2").then(|| "persisted-1".into()),
         agent_label: (id == "persisted-2").then(|| "API reviewer".into()),
