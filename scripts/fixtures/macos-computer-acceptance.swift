@@ -23,33 +23,44 @@ if CommandLine.arguments.count == 2 {
     exit(0)
 }
 
-if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "sheet" {
-    guard AXIsProcessTrusted(), let pid = pid_t(CommandLine.arguments[2]) else { exit(77) }
-    func contents(_ element: AXUIElement, _ depth: Int) -> [String] {
-        guard depth > 0 else { return [] }
-        var strings: [String] = []
+if CommandLine.arguments.count >= 4 && CommandLine.arguments[1] == "sheet" {
+    let args = CommandLine.arguments
+    guard AXIsProcessTrusted(), let pid = pid_t(args[2]) else { exit(77) }
+    var elements: [(AXUIElement, [String])] = []
+    func visit(_ element: AXUIElement, _ depth: Int) {
+        guard depth > 0, !elements.contains(where: { CFEqual($0.0, element) }) else { return }
+        var labels: [String] = []
         for name in [kAXRoleAttribute, kAXTitleAttribute, kAXValueAttribute, kAXDescriptionAttribute] {
             var value: CFTypeRef?
             if AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success,
-               let text = value as? String { strings.append(text) }
+               let text = value as? String { labels.append(text) }
         }
+        elements.append((element, labels))
         for name in [kAXWindowsAttribute, "AXSheets", kAXChildrenAttribute] {
             var value: CFTypeRef?
             if AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success,
                let children = value as? [AXUIElement] {
-                for child in children { strings += contents(child, depth - 1) }
+                for child in children { visit(child, depth - 1) }
             }
         }
-        return strings
     }
-    let strings = contents(AXUIElementCreateApplication(pid), 6)
+    visit(AXUIElementCreateApplication(pid), 6)
+    let strings = elements.flatMap { $0.1 }
     guard strings.contains("Computer use"), strings.contains("Allow for this session"), strings.contains("Deny"),
-          strings.contains(where: { $0.contains("for session " + CommandLine.arguments[3]) }) else {
+          strings.contains(where: { $0.contains("for session " + args[3]) }) else {
         reply("AX roles: \(Set(strings.filter { $0.hasPrefix("AX") }).sorted()); " +
               "dialog labels: \(strings.filter { $0.contains("Computer use") || $0.contains("this session") })")
         exit(1)
     }
-    reply("Computer use sheet for \(CommandLine.arguments[3]) in Desktop PID \(pid)")
+    reply("Computer use sheet for \(args[3]) in Desktop PID \(pid)")
+    if args.count == 6 {
+        guard NSRunningApplication(processIdentifier: pid)?.executableURL?.resolvingSymlinksInPath().path == args[5]
+        else { exit(2) }
+        let buttons = elements.filter { $0.1.contains(kAXButtonRole) && $0.1.contains(args[4]) }
+        guard buttons.count == 1,
+              AXUIElementPerformAction(buttons[0].0, kAXPressAction as CFString) == .success else { exit(2) }
+        reply("Fixture invoked \(args[4]) in Desktop PID \(pid)")
+    }
     exit(0)
 }
 

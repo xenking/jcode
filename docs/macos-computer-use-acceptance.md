@@ -15,15 +15,21 @@ one Jcode Desktop process. The model fixture listens on loopback. No inference
 service, shared daemon, existing history or installation is used.
 
 When the runner prints `PENDING`, check the session ID in the **Computer use**
-sheet in the test Desktop. Choose **Allow for this session** for the first
-session and **Deny** for the second. The runner never chooses those buttons,
-answers a macOS permission prompt, invokes interactive `setup` or changes TCC.
+sheet in the test Desktop. Choose **Deny** for the first session and **Allow for
+this session** for the second. By default the runner waits for your clicks.
+For automated acceptance, add `--fixture-clicks`. It invokes the AppKit
+buttons through Accessibility only in the runner's freshly spawned Desktop,
+checking its executable, PID and synthetic session ID. It also checks dismissal
+and attempts to reuse approval on a different window and new session. Neither
+mode answers a macOS permission prompt, invokes interactive `setup` or changes
+TCC.
 
 The checks verify the following:
 
 - Without an open Desktop, a real daemon turn fails closed.
-- The new session asks separately, its denied work does not execute, and the
-  next tool call stays denied without a prompt.
+- The first session's denied work does not execute. The next tool call and a
+  direct socket request stay denied without a prompt. The second session still
+  asks separately.
 - The allowed session observes, edits, waits and reads back the fixture in the
   background without asking again. The decoy window stays unchanged. The
   receipts report the test Desktop's PID, not the daemon's.

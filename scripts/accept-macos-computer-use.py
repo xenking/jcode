@@ -328,28 +328,34 @@ def desktop_target(control, session_id, pid):
     return targets[0] if targets else None
 
 
-def decide(active, fixture, binary, desktop, route, button, action, **arguments):
+def decide(active, fixture, binary, desktop, route, button, action, *, automate=False, **arguments):
     endpoint, target = route
     focus = {"action": "focus", "target": target, "allow_user_window": True}
     reply = desktop_request(endpoint, **focus)
     require(reply.get("status") == "ok", f"could not focus test window: {reply}")
     before = state(fixture)[:2]
     with ThreadPoolExecutor(max_workers=1) as worker:
-        result = worker.submit(active.receipt, action, timeout=170, **arguments)
+        result = worker.submit(active.receipt, action, timeout=25 if automate else 170, **arguments)
         try:
-            for _ in range(8):
+            def inspect():
                 if result.done():
                     raise RuntimeError(f"request completed before Desktop consent: {result.result()}")
-                probe = subprocess.run([binary, "sheet", str(desktop.pid), active.session_id],
+                reply = subprocess.run([binary, "sheet", str(desktop.pid), active.session_id],
                                        capture_output=True, text=True, timeout=3)
-                if probe.returncode in (0, BLOCKED):
-                    break
-                time.sleep(0.25)
+                if reply.returncode == BLOCKED:
+                    raise RuntimeError("fixture cannot inspect the consent sheet without Accessibility")
+                return reply.stdout.strip() if reply.returncode == 0 else None
+
+            visible = until(inspect, "native Computer use sheet", desktop)
             require(state(fixture)[:2] == before, "fixture changed before consent")
-            if probe.stdout.strip():
-                print(probe.stdout.strip(), flush=True)
-            print(f"PENDING session {active.session_id}, Desktop PID {desktop.pid}; fixture unchanged. "
-                  f"Click '{button}' only on the 'Computer use' sheet with that session ID.", flush=True)
+            print(visible, flush=True)
+            if automate:
+                choice = subprocess.check_output([binary, "sheet", str(desktop.pid), active.session_id,
+                                                  button, desktop.args[0]], text=True, timeout=5)
+                print(choice.splitlines()[-1], flush=True)
+            else:
+                print(f"PENDING session {active.session_id}, Desktop PID {desktop.pid}; fixture unchanged. "
+                      f"Choose '{button}' only on the 'Computer use' sheet with that session ID.", flush=True)
             return result.result()
         except BaseException:
             active.sock.shutdown(socket.SHUT_RDWR)
@@ -389,8 +395,8 @@ def run(args, root, log):
                     return stack.enter_context(child(command, cwd=root, env=env, stderr=log, **kwargs))
 
                 daemon = spawn(command, stdout=log)
-                allowed = stack.enter_context(session(socket_path, provider, root, daemon))
-                missing = allowed.receipt("observe", view="ax", app="pid:2147483647")
+                denied = stack.enter_context(session(socket_path, provider, root, daemon))
+                missing = denied.receipt("observe", view="ax", app="pid:2147483647")
                 require(missing.get("reason") == "desktop_unavailable" and "executor_pid" not in missing,
                         f"a session without Desktop did not fail closed: {missing}")
                 print(f"PASS no Desktop, no execution (daemon PID {daemon.pid}).", flush=True)
@@ -403,18 +409,22 @@ def run(args, root, log):
                 if subprocess.run([binary, "--check-aqua"], timeout=5).returncode == BLOCKED:
                     print("BLOCKED: unlock the macOS Aqua session before showing the consent sheets.", flush=True)
                     return BLOCKED
-                denied = stack.enter_context(session(socket_path, provider, root, daemon))
-                denied.tool("discover")  # Persist a second real session for the Desktop catalog.
+                allowed = stack.enter_context(session(socket_path, provider, root, daemon))
+                fresh = stack.enter_context(session(socket_path, provider, root, daemon)) if args.fixture_clicks else None
+                allowed.tool("discover")  # Persist a second real session for the Desktop catalog.
+                if fresh:
+                    fresh.tool("discover")
                 require(allowed.session_id != denied.session_id, "sessions must be distinct")
                 bridge = spawn([Path(args.bridge).resolve(strict=True)], stdout=log)
                 until(lambda: api_socket.is_socket(), "private harness API", bridge)
                 desktop_path = Path(args.desktop).resolve(strict=True)
                 desktop = spawn([desktop_path, "--single-panel", "--no-hot-reload",
-                                 f"--session={allowed.session_id}"], stdout=log)
+                                 f"--session={denied.session_id}"], stdout=log)
                 print(f"Isolated Desktop: {desktop_path}; PID {desktop.pid} != daemon {daemon.pid}", flush=True)
                 require(desktop.pid != daemon.pid, "Desktop must have its own process")
-                endpoint, target = until(lambda: desktop_target(control, allowed.session_id, desktop.pid),
-                                         "Desktop window attached to allowed session", desktop)
+                denied_route = until(lambda: desktop_target(control, denied.session_id, desktop.pid),
+                                     "Desktop window attached to first session", desktop)
+                denied_endpoint, denied_target = denied_route
                 allowed.executor_pid = denied.executor_pid = desktop.pid
 
                 fixture = spawn([binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
@@ -422,24 +432,15 @@ def run(args, root, log):
                 require(window > 0 and decoy > 0 and window != decoy, "invalid fixture WindowServer IDs")
                 scope = {"app": f"pid:{fixture.pid}", "window_id": window}
 
-                snapshot = decide(allowed, fixture, binary, desktop, (endpoint, target),
-                                  "Allow for this session", "observe", view="ax", **scope)
-                allowed.check_executor(snapshot, "approved observe")
-                ax, screen = status(allowed)
-                live_exit = live(allowed, fixture, binary, root, scope, snapshot, ax, screen)
-                before_denial = state(fixture)[:2]
-                print("Opening the second test session. Choose 'Deny' on its separate consent sheet.", flush=True)
-                until(lambda: desktop_request(endpoint, action="open_session", session_id=denied.session_id,
-                                              destination="new_window").get("status") == "ok",
-                      "new session in the private Desktop catalog", desktop)
-                denied_endpoint, denied_target = until(
-                    lambda: desktop_target(control, denied.session_id, desktop.pid),
-                    "second session attached to the same Desktop", desktop)
-                require(target != denied_target, "both session targets were identical")
-                receipt = decide(denied, fixture, binary, desktop, (denied_endpoint, denied_target),
-                                 "Deny", "act", verb="set_value",
-                                 snapshot_id=snapshot.get("snapshot_id", "none"),
-                                 element_ref="none", value="DO NOT WRITE")
+                if args.fixture_clicks:
+                    closed = decide(denied, fixture, binary, desktop, denied_route, "Not now",
+                                    "observe", automate=True, view="ax", **scope)
+                    require(closed.get("reason") == "consent_required" and "executor_pid" not in closed,
+                            f"dismissing the AppKit sheet was not fail-closed: {closed}")
+                    print("PASS Not now (AppKit cancel): no execution and no cached approval.", flush=True)
+                receipt = decide(denied, fixture, binary, desktop, denied_route,
+                                 "Deny", "act", automate=args.fixture_clicks, verb="set_value",
+                                 snapshot_id="none", element_ref="none", value="DO NOT WRITE")
                 require(receipt.get("reason") == "consent_denied" and "executor_pid" not in receipt,
                         f"Desktop denied but executed the operation: {receipt}")
                 require(denied.receipt("observe", view="ax", **scope).get("reason") == "consent_denied",
@@ -447,8 +448,40 @@ def run(args, root, log):
                 direct = desktop_request(denied_endpoint, action="computer_use", target=denied_target,
                                          input={"action": "observe", "view": "ax", **scope})
                 require(direct.get("code") == "consent_denied", f"direct socket bypassed the denial: {direct}")
-                require(state(fixture)[:2] == before_denial, "denial changed the fixture")
-                print("PASS second session asked independently, denied before dispatch, no second prompt.", flush=True)
+                require(state(fixture)[:2] == [ORIGINAL, DECOY], "denial changed the fixture")
+                print("PASS denied before dispatch, no second prompt, direct UDS denied.", flush=True)
+
+                print("Opening the second test session for 'Allow for this session'.", flush=True)
+                until(lambda: desktop_request(denied_endpoint, action="open_session", session_id=allowed.session_id,
+                                              destination="new_window").get("status") == "ok",
+                      "new session in the private Desktop catalog", desktop)
+                allowed_route = until(lambda: desktop_target(control, allowed.session_id, desktop.pid),
+                                      "second session attached to the same Desktop", desktop)
+                require(allowed_route[1] != denied_target, "both session targets were identical")
+                snapshot = decide(allowed, fixture, binary, desktop, allowed_route,
+                                  "Allow for this session", "observe", automate=args.fixture_clicks,
+                                  view="ax", **scope)
+                allowed.check_executor(snapshot, "approved observe")
+                ax, screen = status(allowed)
+                live_exit = live(allowed, fixture, binary, root, scope, snapshot, ax, screen)
+                if fresh:
+                    fresh.executor_pid = desktop.pid
+                    until(lambda: desktop_request(allowed_route[0], action="open_session", session_id=fresh.session_id,
+                                                  destination="new_window").get("status") == "ok",
+                          "fresh session in the private Desktop catalog", desktop)
+                    fresh_route = until(lambda: desktop_target(control, fresh.session_id, desktop.pid),
+                                        "fresh session on the previously approved Desktop", desktop)
+                    crosswired = {**fresh_route[1], "session_id": allowed.session_id}
+                    wrong_target = desktop_request(fresh_route[0], action="computer_use", target=crosswired,
+                                                   input={"action": "observe", "view": "ax", **scope})
+                    require(wrong_target.get("code") == "session_not_found",
+                            f"old approval accepted on a mismatched window: {wrong_target}")
+                    closed = decide(fresh, fixture, binary, desktop, fresh_route, "Deny", "observe",
+                                    automate=True, view="ax", **scope)
+                    require(closed.get("reason") == "consent_denied" and "executor_pid" not in closed,
+                            f"a new session inherited prior Allow: {closed}")
+                    print("PASS no stale approval: mismatched window and fresh session stopped before execution.",
+                          flush=True)
                 return live_exit
         finally:
             provider.shutdown()
@@ -461,6 +494,8 @@ def main():
     parser.add_argument("--desktop", help="pinned Jcode Desktop executable (not an app bundle)")
     parser.add_argument("--bridge", help="pinned jcode-harness-api-bridge executable")
     parser.add_argument("--no-desktop", action="store_true", help="only assert the missing broker fails closed")
+    parser.add_argument("--fixture-clicks", action="store_true",
+                        help="invoke native choices only in the isolated Desktop process spawned by this test")
     args = parser.parse_args()
     if not args.no_desktop and not (args.desktop and args.bridge):
         parser.error("--desktop and --bridge are required for the interactive test")
