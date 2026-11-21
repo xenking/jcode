@@ -86,7 +86,18 @@ impl Session {
                 .or_else(|| parent_skills.get(name))
                 .map(|skill| skill.get_prompt())
         })
-        .or_else(|| parent.stored_pinned_skill_announcement().map(str::to_owned));
+        .or_else(|| parent.stored_pinned_skill_announcement().map(str::to_owned))
+        .or_else(|| {
+            // Spawn normally uses a metadata-only parent. Read its transcript
+            // only when the installed sources cannot reconstruct the mode.
+            if !parent.persist_state.transcript_stripped {
+                return None;
+            }
+            let saved_parent = Self::load(&parent.id).ok()?;
+            saved_parent
+                .stored_pinned_skill_announcement()
+                .map(str::to_owned)
+        });
         if let Some(text) = announcement {
             self.add_message_with_display_role(
                 Role::User,
