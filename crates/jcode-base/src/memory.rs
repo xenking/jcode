@@ -43,7 +43,7 @@ pub use activity::{
     get_activity, pipeline_start, pipeline_update, record_injected_prompt, set_state,
 };
 use cache::{cache_graph, cached_graph};
-pub(crate) use pending::set_pending_memory_for_project_with_selection;
+pub(crate) use pending::{discard_pending_memory, set_pending_memory_for_project_with_selection};
 pub use pending::{
     PendingMemory, clear_all_injected_memories, clear_all_pending_memory, clear_injected_memories,
     clear_pending_memory, has_any_pending_memory, has_pending_memory, is_memory_injected,
@@ -1170,12 +1170,12 @@ impl MemoryManager {
                     emit_memory_activity(event_tx.as_ref());
                 }
                 Ok(MemoryRelevanceResult { prompt: None, .. }) => {
-                    clear_pending_memory(&sid);
+                    discard_pending_memory(&sid);
                     set_state(MemoryState::Idle);
                     emit_memory_activity(event_tx.as_ref());
                 }
                 Err(e) => {
-                    clear_pending_memory(&sid);
+                    discard_pending_memory(&sid);
                     crate::logging::error(&format!("Background memory check failed: {}", e));
                     add_event(MemoryEventKind::Error {
                         message: e.to_string(),
@@ -1197,7 +1197,7 @@ impl MemoryManager {
         event_tx: Option<MemoryEventSink>,
     ) -> Result<MemoryRelevanceResult> {
         if !crate::config::config().agents.memory_auto_recall {
-            clear_pending_memory(session_id);
+            discard_pending_memory(session_id);
             return Ok(MemoryRelevanceResult::default());
         }
         self.get_relevant_parallel_enabled(session_id, messages, event_tx)
@@ -1220,7 +1220,7 @@ impl MemoryManager {
         let entries = match crate::memory_jev::collect_scoped(self, MemoryScope::All) {
             Ok(entries) => entries,
             Err(error) => {
-                clear_pending_memory(session_id);
+                discard_pending_memory(session_id);
                 pipeline_update(|p| {
                     p.search = StepStatus::Error;
                     p.verify = StepStatus::Skipped;
@@ -1261,7 +1261,7 @@ impl MemoryManager {
         let relevant: Vec<MemoryEntry> = match result {
             Ok(results) => results.into_iter().map(|(entry, _)| entry).collect(),
             Err(error) => {
-                clear_pending_memory(session_id);
+                discard_pending_memory(session_id);
                 pipeline_update(|p| {
                     p.verify = StepStatus::Error;
                     p.inject = StepStatus::Skipped;

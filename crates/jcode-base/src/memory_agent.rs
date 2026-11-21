@@ -218,7 +218,7 @@ impl MemoryAgent {
                         stats.turns_processed += 1;
                     }
                     if let Err(error) = self.process_context(&session_id, &messages).await {
-                        memory::clear_pending_memory(&session_id);
+                        memory::discard_pending_memory(&session_id);
                         self.sessions.entry(session_id).or_default().failed_at =
                             Some(Instant::now());
                         memory::add_event(MemoryEventKind::Error {
@@ -268,7 +268,7 @@ impl MemoryAgent {
         ss.last_query = Some(query);
         ss.last_check = Some(Instant::now());
         let manager = manager_for_working_dir(ss.working_dir.as_deref());
-        memory::clear_pending_memory(session_id);
+        memory::discard_pending_memory(session_id);
         if !memory::memory_runtime_active() {
             return Ok(());
         }

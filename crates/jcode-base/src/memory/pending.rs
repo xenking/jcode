@@ -635,23 +635,18 @@ pub fn clear_all_injected_memories() {
     }
 }
 
-/// Clear any pending memory result for a session.
-pub fn clear_pending_memory(session_id: &str) {
+/// Discard an unused result without forgetting what the session has seen.
+pub(crate) fn discard_pending_memory(session_id: &str) {
     if let Ok(mut guard) = PENDING_MEMORY.lock()
         && let Some(map) = guard.as_mut()
     {
         map.remove(session_id);
     }
-    if let Ok(mut guard) = LAST_INJECTED_PROMPT_SIGNATURE.lock()
-        && let Some(map) = guard.as_mut()
-    {
-        map.remove(session_id);
-    }
-    if let Ok(mut guard) = LAST_INJECTED_MEMORY_SET.lock()
-        && let Some(map) = guard.as_mut()
-    {
-        map.remove(session_id);
-    }
+}
+
+/// Reset pending recall and its deduplication state for a session.
+pub fn clear_pending_memory(session_id: &str) {
+    discard_pending_memory(session_id);
     clear_injected_memories(session_id);
 }
 
