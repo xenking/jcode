@@ -1,9 +1,9 @@
 use super::*;
 use std::io::{Read, Write};
 
-struct EnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+pub(super) struct EnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
 impl EnvGuard {
-    fn set(values: &[(&'static str, &str)]) -> Self {
+    pub(super) fn set(values: &[(&'static str, &str)]) -> Self {
         let mut previous = Vec::new();
         for (key, value) in values {
             previous.push((*key, std::env::var_os(key)));

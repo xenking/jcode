@@ -141,6 +141,8 @@ jcode-docs-data = { path = "../jcode-docs-data" }
 # Paused-time browser tests must compile when this package is tested alone,
 # without inheriting test-util from another workspace package's dev-dependencies.
 tokio = { version = "1", features = ["test-util"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 # Used by async streaming tests (ambient/runner_tests, server/client_actions_tests).
 async-stream = "0.3"
 # Enables jcode-base's test-support helpers (storage::lock_test_env,

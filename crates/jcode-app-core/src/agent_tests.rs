@@ -14,6 +14,9 @@ mod pinned_mode;
 #[path = "agent_tests/cache_session_affinity.rs"]
 mod cache_session_affinity;
 
+#[path = "agent_tests/request_only_recall_wire.rs"]
+mod request_only_recall_wire;
+
 #[path = "agent_tests/worker_http_capture.rs"]
 mod worker_http_capture;
 
