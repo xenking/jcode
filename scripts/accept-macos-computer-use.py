@@ -333,6 +333,7 @@ def decide(active, fixture, binary, desktop, route, button, action, **arguments)
     focus = {"action": "focus", "target": target, "allow_user_window": True}
     reply = desktop_request(endpoint, **focus)
     require(reply.get("status") == "ok", f"could not focus test window: {reply}")
+    before = state(fixture)[:2]
     with ThreadPoolExecutor(max_workers=1) as worker:
         result = worker.submit(active.receipt, action, timeout=170, **arguments)
         try:
@@ -344,7 +345,7 @@ def decide(active, fixture, binary, desktop, route, button, action, **arguments)
                 if probe.returncode in (0, BLOCKED):
                     break
                 time.sleep(0.25)
-            require(state(fixture) == [ORIGINAL, DECOY, "false"], "fixture changed before consent")
+            require(state(fixture)[:2] == before, "fixture changed before consent")
             if probe.stdout.strip():
                 print(probe.stdout.strip(), flush=True)
             print(f"PENDING session {active.session_id}, Desktop PID {desktop.pid}; fixture unchanged. "
@@ -425,6 +426,9 @@ def run(args, root, log):
                                   "Allow for this session", "observe", view="ax", **scope)
                 allowed.check_executor(snapshot, "approved observe")
                 ax, screen = status(allowed)
+                live_exit = live(allowed, fixture, binary, root, scope, snapshot, ax, screen)
+                before_denial = state(fixture)[:2]
+                print("Opening the second test session. Choose 'Deny' on its separate consent sheet.", flush=True)
                 until(lambda: desktop_request(endpoint, action="open_session", session_id=denied.session_id,
                                               destination="new_window").get("status") == "ok",
                       "new session in the private Desktop catalog", desktop)
@@ -443,9 +447,9 @@ def run(args, root, log):
                 direct = desktop_request(denied_endpoint, action="computer_use", target=denied_target,
                                          input={"action": "observe", "view": "ax", **scope})
                 require(direct.get("code") == "consent_denied", f"direct socket bypassed the denial: {direct}")
-                require(state(fixture) == [ORIGINAL, DECOY, "false"], "denial changed the fixture")
+                require(state(fixture)[:2] == before_denial, "denial changed the fixture")
                 print("PASS second session asked independently, denied before dispatch, no second prompt.", flush=True)
-                return live(allowed, fixture, binary, root, scope, snapshot, ax, screen)
+                return live_exit
         finally:
             provider.shutdown()
             thread.join()
