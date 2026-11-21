@@ -205,12 +205,25 @@ impl Target {
 
     fn preflight_uncached(&self, host: &str) -> Result<()> {
         timed_move_stage("host preflight", || {
+            let managed = super::super::cloud_managed::is_managed(host) && self.transport.is_none();
+            let self_hosted = managed && super::super::cloud_managed::is_self_hosted();
+            if self_hosted {
+                // Sessions keep their local paths, so this computer's home has
+                // to exist there. Best effort: a repository elsewhere may not
+                // need it, and the receive step reports a path it cannot create.
+                if let Some(home) = dirs::home_dir() {
+                    let home = shell_quote(&home.to_string_lossy());
+                    let _ = self.run_shell(
+                        host,
+                        &format!(
+                            "[ -d {home} ] || mkdir -p {home} 2>/dev/null || sudo -n install -d -o \"$(id -un)\" -g \"$(id -gn)\" -m 755 {home}\n"
+                        ),
+                    );
+                }
+            }
             // A self-hosted machine keeps its owner's jcode, so it gets the
             // capability probe below like any other SSH host.
-            if super::super::cloud_managed::is_managed(host)
-                && self.transport.is_none()
-                && !super::super::cloud_managed::is_self_hosted()
-            {
+            if managed && !self_hosted {
                 // The SSH ProxyCommand connects and reports wake progress.
                 // Calling connect here too would authorize the same key twice
                 // whenever the multiplexed master has expired.
