@@ -111,9 +111,9 @@ fn configuration() -> SessionToolConfig {
                 "action":{"type":"string","enum":["status","sync","fetch"]},
                 "reason":{"type":"string","maxLength":1024},
                 "resource":{"oneOf":[
-                    {"type":"object","additionalProperties":false,"required":["kind","path"],"properties":{"kind":{"const":"project_file"},"path":{"type":"string"}}},
-                    {"type":"object","additionalProperties":false,"required":["kind","name"],"properties":{"kind":{"const":"env_var"},"name":{"type":"string"}}},
-                    {"type":"object","additionalProperties":false,"required":["kind","name"],"properties":{"kind":{"const":"credential"},"name":{"enum":["github","aws","npm"]}}}
+                    {"type":"object","additionalProperties":false,"required":["kind","path"],"properties":{"kind":{"type":"string","const":"project_file"},"path":{"type":"string"}}},
+                    {"type":"object","additionalProperties":false,"required":["kind","name"],"properties":{"kind":{"type":"string","const":"env_var"},"name":{"type":"string"}}},
+                    {"type":"object","additionalProperties":false,"required":["kind","name"],"properties":{"kind":{"type":"string","const":"credential"},"name":{"type":"string","enum":["github","aws","npm"]}}}
                 ]}
             }}),
         }], ..Default::default()
@@ -382,6 +382,33 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn every_parameter_declares_a_type() {
+        // OpenAI rejects the whole request when any property lacks `type`.
+        fn untyped(schema: &Value, path: &str, found: &mut Vec<String>) {
+            let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+                return;
+            };
+            for (name, property) in properties {
+                let path = format!("{path}.{name}");
+                let variants = property.get("oneOf").or_else(|| property.get("anyOf"));
+                if let Some(variants) = variants.and_then(Value::as_array) {
+                    for variant in variants {
+                        if variant.get("type").is_none() {
+                            found.push(path.clone());
+                        }
+                        untyped(variant, &path, found);
+                    }
+                } else if property.get("type").is_none() {
+                    found.push(path.clone());
+                }
+                untyped(property, &path, found);
+            }
+        }
+        let mut found = Vec::new();
+        untyped(&configuration().custom[0].parameters, "", &mut found);
+        assert!(found.is_empty(), "untyped parameters: {found:?}");
+    }
     #[test]
     fn installation_waits_for_idle_loaded_history() {
         assert!(!installation_ready(true, false));
