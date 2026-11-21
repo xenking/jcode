@@ -1,7 +1,7 @@
 use super::{
     SessionInterruptQueues, SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan,
-    broadcast_swarm_status, create_headless_session, persist_swarm_state_for, record_swarm_event,
-    remove_background_tool_signal, remove_session_interrupt_queue,
+    create_headless_session, persist_swarm_state_for, record_swarm_event,
+    remove_background_tool_signal, remove_session_from_swarm, remove_session_interrupt_queue,
 };
 use crate::provider::Provider;
 use anyhow::Result;
@@ -112,6 +112,19 @@ pub(super) async fn maybe_handle_session_admin_command(
             return Err(anyhow::anyhow!("destroy_session: requires a session_id"));
         }
 
+        let stopped = crate::turn_activity::session_is_stopped(target_id)
+            && (crate::session::session_exists(target_id)
+                || swarm_members.read().await.contains_key(target_id));
+        if stopped {
+            anyhow::ensure!(
+                !crate::turn_activity::global()
+                    .snapshot()
+                    .session(target_id)
+                    .is_some_and(|activity| activity.is_busy()),
+                "Cannot destroy session '{target_id}' while its stopped turn is still finishing"
+            );
+            super::reload_recovery::cancel(target_id)?;
+        }
         let removed_agent = super::remove_session_entry(sessions, target_id).await;
         remove_session_interrupt_queue(soft_interrupt_queues, target_id).await;
         remove_background_tool_signal(target_id);
@@ -136,7 +149,7 @@ pub(super) async fn maybe_handle_session_admin_command(
             }
         }
 
-        if removed_agent.is_none() {
+        if removed_agent.is_none() && !stopped {
             return Err(anyhow::anyhow!("Unknown session_id '{}'", target_id));
         }
 
@@ -154,19 +167,6 @@ pub(super) async fn maybe_handle_session_admin_command(
                 event_counter,
                 swarm_event_tx,
                 target_id.to_string(),
-                friendly_name.clone(),
-                Some(swarm_id.clone()),
-                SwarmEventType::StatusChange {
-                    old_status: "ready".to_string(),
-                    new_status: "stopped".to_string(),
-                },
-            )
-            .await;
-            record_swarm_event(
-                event_history,
-                event_counter,
-                swarm_event_tx,
-                target_id.to_string(),
                 friendly_name,
                 Some(swarm_id.clone()),
                 SwarmEventType::MemberChange {
@@ -175,45 +175,15 @@ pub(super) async fn maybe_handle_session_admin_command(
             )
             .await;
 
-            {
-                let mut swarms = swarms_by_id.write().await;
-                if let Some(swarm) = swarms.get_mut(swarm_id) {
-                    swarm.remove(target_id);
-                    if swarm.is_empty() {
-                        swarms.remove(swarm_id);
-                    }
-                }
-            }
-
-            let was_coordinator = {
-                let coordinators = swarm_coordinators.read().await;
-                coordinators
-                    .get(swarm_id)
-                    .map(|coordinator| coordinator == target_id)
-                    .unwrap_or(false)
-            };
-            if was_coordinator {
-                let new_coordinator = {
-                    let swarms = swarms_by_id.read().await;
-                    swarms
-                        .get(swarm_id)
-                        .and_then(|members| members.iter().min().cloned())
-                };
-                let mut coordinators = swarm_coordinators.write().await;
-                coordinators.remove(swarm_id);
-                if let Some(new_id) = new_coordinator {
-                    coordinators.insert(swarm_id.clone(), new_id);
-                }
-            }
-            let swarm_state = SwarmState {
-                members: Arc::clone(swarm_members),
-                swarms_by_id: Arc::clone(swarms_by_id),
-                plans: Arc::clone(swarm_plans),
-                coordinators: Arc::clone(swarm_coordinators),
-            };
-            persist_swarm_state_for(swarm_id, &swarm_state).await;
-
-            broadcast_swarm_status(swarm_id, swarm_members, swarms_by_id).await;
+            remove_session_from_swarm(
+                target_id,
+                swarm_id,
+                swarm_members,
+                swarms_by_id,
+                swarm_coordinators,
+                swarm_plans,
+            )
+            .await;
         }
 
         return Ok(Some(format!("Session '{}' destroyed", target_id)));

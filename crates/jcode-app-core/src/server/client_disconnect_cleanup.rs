@@ -221,7 +221,11 @@ pub(super) async fn cleanup_client_connection(
         && sessions
             .turn_observer(client_session_id)
             .is_some_and(|observer| observer.snapshot().1.is_some());
-    if continue_on_disconnect || server_owned_worker || server_owned_turn {
+    if continue_on_disconnect
+        || server_owned_worker
+        || server_owned_turn
+        || crate::turn_activity::session_is_stopped(client_session_id)
+    {
         // Remote continuation is a session lifetime policy, not merely a
         // promise to finish the current turn. Idle coordinators must remain
         // addressable for worker reports and future wake turns after EOF.

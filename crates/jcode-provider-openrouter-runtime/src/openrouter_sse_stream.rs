@@ -87,7 +87,11 @@ pub(super) async fn run_stream_with_retries(
                 next_retry_delay.take(),
             )
             .min(retry_backoff_cap);
-            tokio::time::sleep(delay).await;
+            tokio::select! {
+                biased;
+                _ = tx.closed() => return,
+                _ = tokio::time::sleep(delay) => {}
+            }
             jcode_base::logging::info(&format!(
                 "Retrying API request using {} (attempt {}/{})",
                 auth.label(),
@@ -122,7 +126,7 @@ pub(super) async fn run_stream_with_retries(
             jcode_provider_core::fresh_transport_client()
         };
 
-        match stream_response(
+        let response = stream_response(
             attempt_client,
             api_base.clone(),
             auth.clone(),
@@ -134,9 +138,13 @@ pub(super) async fn run_stream_with_retries(
             Arc::clone(&provider_pin),
             model.clone(),
             responses_api,
-        )
-        .await
-        {
+        );
+        let result = tokio::select! {
+            biased;
+            _ = tx.closed() => return,
+            result = response => result,
+        };
+        match result {
             Ok(()) => {
                 let _ = attempt_guard.finish().await;
                 return;

@@ -741,7 +741,7 @@ pub(super) async fn handle_lightweight_control_request(
                 event_counter,
                 swarm_event_tx,
                 soft_interrupt_queues,
-                swarm_mutation_runtime,
+                await_members_runtime,
             )
             .await;
         }

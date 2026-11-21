@@ -572,6 +572,39 @@ pub(super) async fn handle_debug_client(
                         // Handle tester commands
                         execute_tester_command(cmd).await
                     }
+                    _ if cmd == "create_session"
+                        || cmd.starts_with("create_session:")
+                        || cmd.starts_with("destroy_session:") =>
+                    {
+                        maybe_handle_session_admin_command(
+                            cmd,
+                            &sessions,
+                            &session_id,
+                            &provider,
+                            &swarm_members,
+                            &swarms_by_id,
+                            &swarm_coordinators,
+                            &swarm_plans,
+                            &event_history,
+                            &event_counter,
+                            &swarm_event_tx,
+                            &soft_interrupt_queues,
+                            mcp_pool.clone(),
+                        )
+                        .await
+                        .and_then(|output| {
+                            output.ok_or_else(|| anyhow::anyhow!("Unknown session admin command"))
+                        })
+                    }
+                    _ if cmd == "cancel"
+                        && requested_session.as_deref().is_some_and(|target| {
+                            crate::turn_activity::session_is_stopped(target)
+                        }) =>
+                    {
+                        let target = requested_session.as_deref().expect("matched session id");
+                        super::swarm::cancel_active_turns(target);
+                        Ok("Session is stopped".to_string())
+                    }
                     _ => {
                         // Server commands (default)
                         match super::group_transfer::handle(
@@ -591,24 +624,6 @@ pub(super) async fn handle_debug_client(
                             Ok(None) => {
                                 if let Some(output) =
                                     maybe_handle_job_command(cmd, &debug_jobs).await?
-                                {
-                                    Ok(output)
-                                } else if let Some(output) = maybe_handle_session_admin_command(
-                                    cmd,
-                                    &sessions,
-                                    &session_id,
-                                    &provider,
-                                    &swarm_members,
-                                    &swarms_by_id,
-                                    &swarm_coordinators,
-                                    &swarm_plans,
-                                    &event_history,
-                                    &event_counter,
-                                    &swarm_event_tx,
-                                    &soft_interrupt_queues,
-                                    mcp_pool.clone(),
-                                )
-                                .await?
                                 {
                                     Ok(output)
                                 } else if let Some(output) = maybe_handle_server_state_command(

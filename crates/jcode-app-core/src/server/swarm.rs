@@ -1754,6 +1754,9 @@ pub(super) async fn update_member_status_with_report_tldr(
         report_back_to_session_id,
     ) = {
         let mut members = swarm_members.write().await;
+        if status != "stopped" && crate::turn_activity::session_is_stopped(session_id) {
+            return;
+        }
         if let Some(member) = members.get_mut(session_id) {
             // The live gallery buffer mixes tool activity and partial prose.
             // Never promote it to the worker's final response on interruption.

@@ -7,10 +7,9 @@ use super::turn_failover::process_reserved_locked_message_with_swarm_fallbacks;
 use super::{
     SessionInterruptQueues, SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan,
     broadcast_swarm_plan, broadcast_swarm_status, create_headless_session, fanout_session_event,
-    persist_swarm_state_for, record_swarm_event, record_swarm_event_for_session,
-    remove_background_tool_signal, remove_session_channel_subscriptions, remove_session_from_swarm,
-    remove_session_interrupt_queue, set_member_task_label, truncate_detail, update_member_status,
-    update_member_status_with_report,
+    persist_swarm_state_for, record_swarm_event_for_session, remove_background_tool_signal,
+    remove_session_channel_subscriptions, remove_session_interrupt_queue, set_member_task_label,
+    truncate_detail, update_member_status, update_member_status_with_report,
 };
 use crate::config::SwarmSpawnMode;
 use crate::protocol::{NotificationType, ServerEvent};
@@ -427,6 +426,12 @@ pub(super) async fn spawn_swarm_agent(
     soft_interrupt_queues: &SessionInterruptQueues,
     client_connections: &ClientConnections,
 ) -> anyhow::Result<String> {
+    let parent_lock = spawn_admission_lock(&format!("stop-tree:{req_session_id}"));
+    let _parent_guard = parent_lock.lock().await;
+    anyhow::ensure!(
+        !crate::turn_activity::session_is_stopped(req_session_id),
+        "Stopped sessions cannot spawn workers"
+    );
     let agents_config = &crate::config::config().agents;
     agents_config
         .validate_swarm_model_request(requested_model.as_deref())
@@ -969,7 +974,7 @@ pub(super) async fn handle_comm_stop(
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
     soft_interrupt_queues: &SessionInterruptQueues,
-    swarm_mutation_runtime: &SwarmMutationRuntime,
+    await_members_runtime: &super::await_members_state::AwaitMembersRuntime,
 ) {
     // Stopping is authorized per-target by ownership (the requester is the
     // target's spawner or a transitive ancestor) rather than by the swarm-level
@@ -1030,140 +1035,148 @@ pub(super) async fn handle_comm_stop(
         return;
     }
 
-    let _ = fanout_session_event(
-        swarm_members,
-        &target_session,
-        ServerEvent::SessionCloseRequested {
-            reason: format!("Stopped by coordinator {req_session_id}"),
-        },
-    )
-    .await;
-
-    let mutation_key = request_key(&req_session_id, "stop", &[swarm_id, target_session.clone()]);
-    let Some(mutation_state) = begin_or_replay(
-        swarm_mutation_runtime,
-        &mutation_key,
-        "stop",
-        &req_session_id,
-        id,
-        client_event_tx,
-    )
-    .await
-    else {
-        return;
-    };
-
-    // Cancel the worker's in-flight turn before its handles are removed, or it
-    // keeps generating and editing files with nothing left to stop it by.
-    super::swarm::cancel_active_turns(&target_session);
-
-    // Publish the terminal fact before removing the member. Absence alone
-    // cannot settle an await: members can also be temporarily missing on reload.
-    let stopped = {
-        let members = swarm_members.read().await;
-        members.get(&target_session).and_then(|member| {
-            let swarm_id = member.swarm_id.clone()?;
-            let name = member.friendly_name.clone();
-            let unique = name.is_some()
-                && !members.values().any(|other| {
-                    other.session_id != target_session
-                        && other.swarm_id.as_ref() == Some(&swarm_id)
-                        && other.friendly_name == name
-                });
-            Some((swarm_id, name, unique))
-        })
-    };
-    if let Some((swarm_id, name, unique)) = stopped {
-        super::await_members_state::record_stopped_member(&swarm_id, &target_session, name, unique);
-    }
-
-    let removed_agent = super::remove_session_entry(sessions, &target_session).await;
-    let removed_live_agent = removed_agent.is_some();
-    if let Some(agent_arc) = removed_agent {
-        remove_session_interrupt_queue(soft_interrupt_queues, &target_session).await;
-        remove_background_tool_signal(&target_session);
-        if let Ok(mut agent) = agent_arc.try_lock() {
-            agent.mark_closed();
-            let memory_enabled = agent.memory_enabled();
-            let transcript = if memory_enabled {
-                Some(agent.build_transcript_for_extraction())
-            } else {
-                None
-            };
-            let sid = target_session.clone();
-            let working_dir = agent.working_dir().map(|dir| dir.to_string());
-            drop(agent);
-            if let Some(transcript) = transcript {
-                crate::memory_agent::trigger_final_extraction_with_dir(
-                    transcript,
-                    sid,
-                    working_dir,
-                );
+    let stop = async {
+        anyhow::ensure!(
+            target_session != req_session_id,
+            "A turn cannot stop itself"
+        );
+        let activity = crate::turn_activity::global();
+        let mut pending = vec![target_session];
+        let mut tree = HashMap::new();
+        let reason = format!("Stopped by coordinator {req_session_id}");
+        while let Some(session) = pending.pop() {
+            if tree.contains_key(&session) {
+                continue;
             }
-        } else {
-            // The agent was mid-turn so its lock was busy; still record that
-            // the session is closed, or it looks alive on disk forever (and
-            // reload keeps re-announcing awaits on it).
-            if let Ok(mut session) = crate::session::Session::load(&target_session) {
-                session.mark_closed();
-                // save_prepared: a worker stopped before it wrote any message
-                // must still persist Closed (plain save skips empty sessions).
-                if let Err(error) = session.save_prepared() {
-                    crate::logging::warn(&format!(
-                        "stop {target_session}: failed to persist closed status: {error}"
-                    ));
+            // A concurrent spawn either registered its child before this read,
+            // or observes the stop marker at its own admission boundary.
+            let parent_lock = spawn_admission_lock(&format!("stop-tree:{session}"));
+            let guard = {
+                let _parent_guard = parent_lock.lock().await;
+                let guard = activity.stop(&session)?;
+                pending.extend(
+                    swarm_members
+                        .read()
+                        .await
+                        .values()
+                        .filter(|member| {
+                            member.report_back_to_session_id.as_deref() == Some(&session)
+                        })
+                        .map(|member| member.session_id.clone()),
+                );
+                guard
+            };
+            crate::turn_cancel_registry::mark_interruption(
+                &session,
+                crate::turn_cancel_registry::TurnInterruptionReason::Cancel,
+            );
+            super::swarm::cancel_active_turns(&session);
+            super::reload_recovery::cancel(&session)?;
+            tree.insert(session, guard);
+        }
+        let idle = || async {
+            for session in tree.keys() {
+                activity.wait_until_idle(session).await;
+            }
+        };
+        if tokio::time::timeout(std::time::Duration::from_secs(1), idle())
+            .await
+            .is_err()
+        {
+            for session in tree.keys() {
+                crate::turn_cancel_registry::force_stop(session);
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(4), idle())
+                .await
+                .map_err(|_| anyhow::anyhow!("Timed out waiting for stopped turns to finish"))?;
+        }
+
+        let background = crate::background::global();
+        for task in background.list().await.into_iter().filter(|task| {
+            tree.contains_key(&task.session_id)
+                && task.status == crate::bus::BackgroundTaskStatus::Running
+        }) {
+            background.cancel(&task.task_id).await?;
+        }
+
+        let swarm_state = SwarmState {
+            members: Arc::clone(swarm_members),
+            swarms_by_id: Arc::clone(swarms_by_id),
+            plans: Arc::clone(swarm_plans),
+            coordinators: Arc::clone(swarm_coordinators),
+        };
+        let mut affected_swarms = HashSet::new();
+        for session in tree.keys() {
+            super::ask_escalation::withdraw_worker(session);
+            super::comm_await::stop_session_awaits(await_members_runtime, session).await;
+            {
+                let members = swarm_members.read().await;
+                if let Some(member) = members.get(session)
+                    && let Some(swarm_id) = &member.swarm_id
+                {
+                    let unique_name = member.friendly_name.is_some()
+                        && !members.values().any(|other| {
+                            other.session_id != *session
+                                && other.swarm_id == member.swarm_id
+                                && other.friendly_name == member.friendly_name
+                        });
+                    super::await_members_state::record_stopped_member(
+                        swarm_id,
+                        session,
+                        member.friendly_name.clone(),
+                        unique_name,
+                    );
+                    affected_swarms.insert(swarm_id.clone());
                 }
             }
+            update_member_status(
+                session,
+                "stopped",
+                Some(reason.clone()),
+                swarm_members,
+                swarms_by_id,
+                Some(event_history),
+                Some(event_counter),
+                Some(swarm_event_tx),
+            )
+            .await;
+            fanout_session_event(
+                swarm_members,
+                session,
+                ServerEvent::SessionCloseRequested {
+                    reason: reason.clone(),
+                },
+            )
+            .await;
+            if let Some(agent) = super::remove_session_entry(sessions, session).await {
+                tokio::time::timeout(std::time::Duration::from_secs(2), agent.lock())
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Timed out closing stopped session '{session}'"))?
+                    .mark_closed();
+            }
+            remove_session_interrupt_queue(soft_interrupt_queues, session).await;
+            remove_background_tool_signal(session);
+            remove_session_channel_subscriptions(
+                session,
+                channel_subscriptions,
+                channel_subscriptions_by_session,
+            )
+            .await;
         }
-    }
-
-    let (removed_swarm_id, removed_name) = {
-        let mut members = swarm_members.write().await;
-        if let Some(member) = members.remove(&target_session) {
-            (member.swarm_id, member.friendly_name)
-        } else {
-            (None, None)
+        for swarm_id in affected_swarms {
+            persist_swarm_state_for(&swarm_id, &swarm_state).await;
         }
+        Ok::<_, anyhow::Error>(())
     };
-    if let Some(ref swarm_id) = removed_swarm_id {
-        record_swarm_event(
-            event_history,
-            event_counter,
-            swarm_event_tx,
-            target_session.clone(),
-            removed_name.clone(),
-            Some(swarm_id.clone()),
-            SwarmEventType::MemberChange {
-                action: "left".to_string(),
-            },
-        )
-        .await;
-        remove_session_from_swarm(
-            &target_session,
-            swarm_id,
-            swarm_members,
-            swarms_by_id,
-            swarm_coordinators,
-            swarm_plans,
-        )
-        .await;
-    }
-    remove_session_channel_subscriptions(
-        &target_session,
-        channel_subscriptions,
-        channel_subscriptions_by_session,
-    )
-    .await;
-
-    let response = if removed_live_agent || removed_swarm_id.is_some() {
-        PersistedSwarmMutationResponse::Done
-    } else {
-        PersistedSwarmMutationResponse::Error {
-            message: format!("Unknown session '{target_session}'"),
+    let response = match stop.await {
+        Ok(()) => ServerEvent::Done { id },
+        Err(error) => ServerEvent::Error {
+            id,
+            message: format!("Cannot stop swarm session: {error:#}"),
             retry_after_secs: None,
-        }
+        },
     };
-    finish_request(swarm_mutation_runtime, &mutation_state, response).await;
+    let _ = client_event_tx.send(response);
 }
 
 #[path = "swarm_stop_target.rs"]

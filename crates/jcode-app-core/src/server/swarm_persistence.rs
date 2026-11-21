@@ -493,7 +493,8 @@ fn decode_member(
         });
     if terminal_since_unix_ms.is_some_and(|terminal_since| {
         loaded_at_unix_ms.saturating_sub(terminal_since) >= terminal_retention.as_millis() as u64
-    }) {
+    }) && !crate::turn_activity::session_is_stopped(&record.session_id)
+    {
         return None;
     }
 
@@ -609,7 +610,7 @@ pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
         if let Some(coordinator_session_id) = state.coordinator_session_id {
             coordinators.insert(swarm_id, coordinator_session_id);
         }
-        for member in state.members {
+        for mut member in state.members {
             let Some(member_swarm_id) = member.record.swarm_id.clone() else {
                 continue;
             };
@@ -636,6 +637,9 @@ pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
                 member_session_id.clone(),
                 (state.updated_at_unix_ms, member_swarm_id.clone()),
             );
+            if crate::turn_activity::session_is_stopped(&member_session_id) {
+                member.record.status = SwarmLifecycleStatus::Stopped;
+            }
             let was_live = matches!(
                 member.record.status,
                 SwarmLifecycleStatus::Running | SwarmLifecycleStatus::Ready

@@ -159,6 +159,7 @@ struct State {
     next_token: u64,
     fence: Option<u64>,
     sessions: BTreeMap<String, SessionState>,
+    stopping: std::collections::HashSet<std::path::PathBuf>,
 }
 
 impl State {
@@ -213,7 +214,63 @@ impl ActivityRegistry {
             state.fence.is_none(),
             "turn admission is fenced for runtime replacement, retry after reconnect"
         );
+        ensure!(!stop_path(session_id)?.try_exists()?, "Session is stopped");
         Ok(self.insert(&mut state, session_id, Participant::Admission))
+    }
+
+    pub(crate) fn stop(&self, session_id: &str) -> Result<SessionStopGuard> {
+        let path = stop_path(session_id)?;
+        let mut state = self.lock();
+        ensure!(
+            !state.stopping.contains(&path),
+            "Session is already stopping"
+        );
+        if !path.try_exists()? {
+            // This independent marker cannot be overwritten by a turn saving
+            // its transcript or by reload restoring an older swarm snapshot.
+            crate::storage::write_json(&path, &session_id)?;
+        }
+        state.stopping.insert(path.clone());
+        Ok(SessionStopGuard {
+            registry: self.clone(),
+            path,
+        })
+    }
+
+    pub(crate) fn resume(&self, session_id: &str) -> Result<()> {
+        let path = stop_path(session_id)?;
+        let state = self.lock();
+        if !path.try_exists()? {
+            return Ok(());
+        }
+        ensure!(!state.stopping.contains(&path), "Session is still stopping");
+        ensure!(
+            !state
+                .sessions
+                .get(session_id)
+                .is_some_and(|state| !state.participants.is_empty()),
+            "Stopped turn has not finished yet"
+        );
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub(crate) async fn wait_until_idle(&self, session_id: &str) {
+        loop {
+            let changed = self.changed.notified();
+            if !self
+                .lock()
+                .sessions
+                .get(session_id)
+                .is_some_and(|state| !state.participants.is_empty())
+            {
+                return;
+            }
+            changed.await;
+        }
     }
 
     /// Execution may already own admission. This also covers non-server turns.
@@ -349,6 +406,31 @@ impl ActivityRegistry {
             // deadline is not reported using a stale unfinished list.
             let _deadline_reached = tokio::time::timeout_at(deadline, notified).await;
         }
+    }
+}
+
+fn stop_path(session_id: &str) -> Result<std::path::PathBuf> {
+    use sha2::{Digest, Sha256};
+    let key = Sha256::digest(session_id.as_bytes());
+    Ok(crate::storage::jcode_dir()?
+        .join("stopped-sessions")
+        .join(format!("{key:x}.json")))
+}
+
+pub(crate) fn session_is_stopped(session_id: &str) -> bool {
+    stop_path(session_id)
+        .and_then(|path| Ok(path.try_exists()?))
+        .unwrap_or(true)
+}
+
+pub(crate) struct SessionStopGuard {
+    registry: ActivityRegistry,
+    path: std::path::PathBuf,
+}
+
+impl Drop for SessionStopGuard {
+    fn drop(&mut self) {
+        self.registry.lock().stopping.remove(&self.path);
     }
 }
 

@@ -1680,6 +1680,9 @@ pub(super) async fn queue_soft_interrupt_with_images_for_session(
     queues: &SessionInterruptQueues,
     sessions: &super::SessionAgents,
 ) -> bool {
+    if crate::turn_activity::session_is_stopped(session_id) {
+        return false;
+    }
     if let Some(queue) = queues.read().await.get(session_id).cloned() {
         let queued = enqueue_soft_interrupt(&queue, content, images, urgent, source);
         if queued {

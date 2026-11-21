@@ -1746,6 +1746,7 @@ pub(super) async fn handle_comm_task_control(
             &req_session_id,
             &owner_swarm_id,
             target,
+            action,
             message.as_deref(),
             client_event_tx,
             sessions,
@@ -1789,6 +1790,7 @@ pub(super) async fn handle_comm_task_control(
             &req_session_id,
             &swarm_id,
             target,
+            action,
             message.as_deref(),
             client_event_tx,
             sessions,
@@ -1906,6 +1908,16 @@ pub(super) async fn handle_comm_task_control(
             // first and only then discover the agent was missing or busy,
             // leaving a live task falsely queued with its run history mangled
             // even though the request was rejected.
+            if action == TaskControlAction::Resume
+                && let Err(error) = crate::turn_activity::global().resume(&assignee)
+            {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: error.to_string(),
+                    retry_after_secs: None,
+                });
+                return;
+            }
             let Some(agent_arc) = task_agent_session(&assignee, sessions).await else {
                 let _ = client_event_tx.send(ServerEvent::Error {
                     id,
@@ -2383,6 +2395,7 @@ async fn wake_session_without_plan(
     req_session_id: &str,
     swarm_id: &str,
     target: &str,
+    action: TaskControlAction,
     message: Option<&str>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     sessions: &SessionAgents,
@@ -2408,6 +2421,16 @@ async fn wake_session_without_plan(
         let _ = client_event_tx.send(ServerEvent::Error {
             id,
             message: "Coordinator cannot wake itself.".to_string(),
+            retry_after_secs: None,
+        });
+        return;
+    }
+    if action == TaskControlAction::Resume
+        && let Err(error) = crate::turn_activity::global().resume(&session_id)
+    {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: error.to_string(),
             retry_after_secs: None,
         });
         return;

@@ -1,4 +1,108 @@
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn swarm_stop_seals_the_spawn_tree_before_acknowledging() {
+    let (_env, _dir) = RuntimeEnvGuard::new();
+    let owner = "stop-tree-owner";
+    let worker = "stop-tree-worker";
+    let child = "stop-tree-child";
+    let other = "stop-tree-unrelated";
+    let swarm = "stop-tree";
+    let child_swarm = "stop-tree-nested";
+    let members = Arc::new(RwLock::new(HashMap::from([
+        (owner.into(), member(owner, swarm, "ready")),
+        (worker.into(), owned_member(worker, swarm, "running", owner)),
+        (
+            child.into(),
+            owned_member(child, child_swarm, "running", worker),
+        ),
+        (other.into(), member(other, swarm, "ready")),
+    ])));
+    let swarms = Arc::new(RwLock::new(HashMap::from([
+        (
+            swarm.into(),
+            HashSet::from([owner.into(), worker.into(), other.into()]),
+        ),
+        (child_swarm.into(), HashSet::from([child.into()])),
+    ])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
+    let (events, _) = broadcast::channel(32);
+    let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
+    let activity = crate::turn_activity::global();
+    let worker_turn = activity.admit(worker).unwrap();
+    let child_turn = activity.admit(child).unwrap();
+    let stop = async {
+        crate::server::comm_session::handle_comm_stop(
+            17,
+            owner.into(),
+            worker.into(),
+            false,
+            &stop_tx,
+            &sessions,
+            &members,
+            &swarms,
+            &Arc::new(RwLock::new(HashMap::new())),
+            &Arc::new(RwLock::new(HashMap::new())),
+            &Arc::new(RwLock::new(HashMap::new())),
+            &Arc::new(RwLock::new(HashMap::new())),
+            &Arc::new(RwLock::new(VecDeque::new())),
+            &Arc::new(AtomicU64::new(0)),
+            &events,
+            &Arc::new(RwLock::new(HashMap::new())),
+            &AwaitMembersRuntime::default(),
+        )
+        .await;
+    };
+    let verify = async {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), stop_rx.recv())
+                .await
+                .is_err(),
+            "acknowledged stop while both turn leases were still alive"
+        );
+        drop(worker_turn);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), stop_rx.recv())
+                .await
+                .is_err(),
+            "acknowledged stop while a descendant turn was still alive"
+        );
+        drop(child_turn);
+        assert!(matches!(
+            stop_rx.recv().await,
+            Some(ServerEvent::Done { id: 17 })
+        ));
+        assert!(
+            activity.admit(worker).is_err(),
+            "stopped worker accepted a new turn"
+        );
+        assert!(
+            activity.admit(child).is_err(),
+            "stopped descendant accepted a new turn"
+        );
+        assert!(
+            activity.admit(other).is_ok(),
+            "unrelated session was fenced"
+        );
+        activity.resume(worker).unwrap();
+        assert!(
+            activity.admit(worker).is_ok(),
+            "explicit resume did not let the worker run"
+        );
+        assert!(
+            activity.admit(child).is_err(),
+            "resuming the parent implicitly resumed its child"
+        );
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(stop, verify);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn await_all_settles_after_both_workers_are_stopped() {
     assert_await_settles_after_both_workers_are_stopped(vec!["wolf".into(), "koala-id".into()]).await;
 }
@@ -79,7 +183,6 @@ async fn assert_await_settles_after_both_workers_are_stopped(requested: Vec<Stri
     let history = Arc::new(RwLock::new(VecDeque::new()));
     let counter = Arc::new(AtomicU64::new(0));
     let interrupts = Arc::new(RwLock::new(HashMap::new()));
-    let mutations = SwarmMutationRuntime::default();
     let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
     for (id, worker) in [(3, "wolf-id"), (4, "koala-id")] {
         crate::server::comm_session::handle_comm_stop(
@@ -99,11 +202,11 @@ async fn assert_await_settles_after_both_workers_are_stopped(requested: Vec<Stri
             &counter,
             &events,
             &interrupts,
-            &mutations,
+            &runtime,
         )
         .await;
         assert!(matches!(stop_rx.recv().await, Some(ServerEvent::Done { id: done }) if done == id));
-        assert!(!members.read().await.contains_key(worker));
+        assert_eq!(members.read().await[worker].status, "stopped");
         if id == 3 {
             assert!(rx.try_recv().is_err(), "the other worker is still running");
             assert_eq!(pending().len(), 1);

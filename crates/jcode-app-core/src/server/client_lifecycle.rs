@@ -1464,6 +1464,13 @@ pub(super) async fn handle_client(
                     .await;
                     continue;
                 }
+                if (!content.trim().is_empty() || !images.is_empty())
+                    && !crate::todo::is_auto_poke_message(&content)
+                    && let Err(error) = crate::turn_activity::global().resume(&client_session_id)
+                {
+                    send_client_event_best_effort(&client_event_tx, ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None }, "client_lifecycle: Error");
+                    continue;
+                }
                 if !client_is_processing {
                     // A live resume cannot replace stdin routing while the old
                     // turn owns the agent. Restore it when this client starts a
@@ -1577,6 +1584,13 @@ pub(super) async fn handle_client(
                 urgent,
                 client_id,
             } => {
+                if (!content.trim().is_empty() || !images.is_empty())
+                    && !crate::todo::is_auto_poke_message(&content)
+                    && let Err(error) = crate::turn_activity::global().resume(&client_session_id)
+                {
+                    send_client_event_best_effort(&client_event_tx, ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None }, "client_lifecycle: Error");
+                    continue;
+                }
                 if crate::tool::interactive::answer_with_text(&client_session_id, &content, images.clone()) {
                     send_client_event_best_effort(&client_event_tx, ServerEvent::SoftInterruptInjected {
                         content,
@@ -3359,7 +3373,7 @@ pub(super) async fn handle_client(
                     &event_counter,
                     &swarm_event_tx,
                     &soft_interrupt_queues,
-                    &swarm_mutation_runtime,
+                    &await_members_runtime,
                 )
                 .await;
             }

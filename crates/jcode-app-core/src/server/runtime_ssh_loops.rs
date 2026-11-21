@@ -430,7 +430,9 @@ pub(super) async fn run_reserved_followups(
     // cloud campaign can legitimately make progress across hundreds of turns.
     // The persisted policy still limits no-progress retries and quality gates.
     loop {
-        if agent.graceful_shutdown_signal().is_set() {
+        if agent.graceful_shutdown_signal().is_set()
+            || crate::turn_activity::session_is_stopped(&session_id)
+        {
             return Ok(());
         }
         let mut snapshot = snapshot(&session_id)?;

@@ -291,7 +291,11 @@ async fn finish_await(
     let (state, newly_finalized) =
         persist_final_response(&state, completed, members.clone(), summary.clone());
 
-    let event = if newly_finalized && state.background && (state.notify || state.wake) {
+    let event = if newly_finalized
+        && state.background
+        && (state.notify || state.wake)
+        && !crate::turn_activity::session_is_stopped(&state.session_id)
+    {
         let notification = background_completion_notification(completed, &summary, &members);
         Some(SwarmAwaitCompleted {
             session_id: state.session_id.clone(),
@@ -332,6 +336,22 @@ async fn finish_await(
     event
 }
 
+pub(super) async fn stop_session_awaits(runtime: &AwaitMembersRuntime, session_id: &str) {
+    for state in all_pending_await_members_including_expired()
+        .into_iter()
+        .filter(|state| state.session_id == session_id)
+    {
+        finish_await(
+            runtime,
+            &state,
+            false,
+            Vec::new(),
+            "Await cancelled because the requesting session was stopped".into(),
+        )
+        .await;
+    }
+}
+
 pub(super) async fn spawn_or_resume_await_members(
     state: PersistedAwaitMembersState,
     req_session_id: String,
@@ -363,8 +383,10 @@ pub(super) async fn spawn_or_resume_await_members(
                 &swarms_by_id,
             )
             .await;
-            let latest = refresh_pending_state(&state);
-            include_stopped_swarm_members(&mut snapshot, latest.as_ref().unwrap_or(&state));
+            let Some(latest) = refresh_pending_state(&state) else {
+                return;
+            };
+            include_stopped_swarm_members(&mut snapshot, &latest);
             let member_statuses = snapshot.unwrap_or_default();
 
             // Empty membership during startup is not successful completion.
@@ -387,10 +409,7 @@ pub(super) async fn spawn_or_resume_await_members(
             // the result via notify/wake. Re-read the persisted prefs here: a
             // duplicate request may have upgraded this wait to background mode
             // after this watcher was spawned with a blocking-state copy.
-            let is_background = latest
-                .map(|latest| latest.background)
-                .unwrap_or(state.background);
-            if !is_background && await_members_runtime.retain_open_waiters(&key).await == 0 {
+            if !latest.background && await_members_runtime.retain_open_waiters(&key).await == 0 {
                 await_members_runtime.clear_active(&key).await;
                 return;
             }
@@ -782,6 +801,17 @@ pub(super) async fn resume_background_awaits(
     let mut recovered: HashMap<String, Vec<(SwarmAwaitCompleted, Vec<AwaitedMemberStatus>)>> =
         HashMap::new();
     for state in pending {
+        if crate::turn_activity::session_is_stopped(&state.session_id) {
+            finish_await(
+                await_members_runtime,
+                &state,
+                false,
+                Vec::new(),
+                "Await cancelled because the requesting session was stopped".into(),
+            )
+            .await;
+            continue;
+        }
         // Deadline passed while the server was down: the wait can never
         // resolve, so finalize it as a timeout now so the promised
         // notify/wake still fires instead of the await silently vanishing.

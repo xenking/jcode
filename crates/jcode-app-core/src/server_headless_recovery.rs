@@ -17,6 +17,7 @@ impl Server {
             let members = self.swarm_state.members.read().await;
             members
                 .values()
+                .filter(|member| !crate::turn_activity::session_is_stopped(&member.session_id))
                 .filter(|member| {
                     let owner_live = worker_has_live_coordinator(
                         member,

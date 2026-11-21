@@ -260,6 +260,7 @@ async fn prune_expired_terminal_swarm_members(
             let still_expired = members.get(&session_id).is_some_and(|member| {
                 swarm::member_status_is_terminal(&member.status)
                     && member.last_status_change.elapsed() >= retention
+                    && !crate::turn_activity::session_is_stopped(&session_id)
             });
             if still_expired {
                 members

@@ -210,6 +210,12 @@ pub fn register_active_turn(session_id: &str, signal: InterruptSignal) -> Active
         entry.push((token, signal.clone(), Arc::clone(&reason)));
         entry.len()
     };
+    // Stop may land after the turn reserved admission but before the stream
+    // registered its signal. Once registered, either side observes the stop.
+    if crate::turn_activity::session_is_stopped(session_id) {
+        reason.store(TurnInterruptionReason::Cancel as u8, Ordering::Release);
+        signal.fire();
+    }
     crate::logging::info(&format!(
         "TURN_CANCEL_REGISTERED session={} active_turns={}",
         session_id, active

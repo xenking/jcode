@@ -612,6 +612,60 @@ async fn startup_recovery_honors_pending_intent_for_stopped_worker() -> Result<(
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn startup_recovery_cannot_admit_an_explicitly_stopped_worker() -> Result<()> {
+    use super::super::reload_recovery::{self, ReloadRecoveryRole, ReloadRecoveryStatus};
+
+    let _storage_guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new()?;
+    let _env = configure_test_env(&temp);
+    let mut worker = crate::session::Session::create(None, Some("worker".into()));
+    worker.save()?;
+    let swarm_id = "swarm-explicit-stop";
+    persist_swarm_state_snapshot(
+        swarm_id,
+        None,
+        None,
+        &[persisted_headless_member(
+            &worker.id,
+            swarm_id,
+            "running",
+            "old snapshot",
+        )],
+    );
+    reload_recovery::persist_intent(
+        "reload-explicit-stop",
+        &worker.id,
+        ReloadRecoveryRole::Headless,
+        crate::tool::selfdev::ReloadRecoveryDirective {
+            reconnect_notice: None,
+            continuation_message: "This old intent must never run".into(),
+        },
+        "work in flight before stop",
+    )?;
+    // Crash after sealing stop, before cancelling the intent or writing a new snapshot.
+    drop(crate::turn_activity::global().stop(&worker.id)?);
+
+    let server = Server::new(Arc::new(StreamingMockProvider::default()));
+    assert_eq!(
+        server.swarm_state.members.read().await[&worker.id].status,
+        "stopped"
+    );
+    assert!(!server.running_before_restart.contains(&worker.id));
+    for task in server.recover_headless_sessions_on_startup().await {
+        task.await?;
+    }
+    assert!(!server.sessions.read().await.contains_key(&worker.id));
+    assert_eq!(
+        reload_recovery::peek_for_session(&worker.id)?
+            .unwrap()
+            .status,
+        ReloadRecoveryStatus::Cancelled,
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn startup_recovery_preserves_headed_session_reload_context_for_later_reconnect() -> Result<()>
 {
     let _storage_guard = crate::storage::lock_test_env();

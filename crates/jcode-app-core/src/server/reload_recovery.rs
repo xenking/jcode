@@ -270,6 +270,9 @@ fn persist_intent_with_mode(
     wake: bool,
 ) -> Result<()> {
     let _guard = lock_store();
+    if crate::turn_activity::session_is_stopped(session_id) {
+        return Ok(());
+    }
     let role_label = role.as_str();
     if peek_for_session(session_id)?.is_some_and(|record| record.reload_id == reload_id) {
         return Ok(());
@@ -861,6 +864,10 @@ impl RecoveryOwner {
             return Ok(None);
         }
         let session_id = &record.session_id;
+        if crate::turn_activity::session_is_stopped(session_id) {
+            cancel(session_id)?;
+            return Ok(None);
+        }
         if !crate::session::session_exists(session_id)
             && !self.sessions.read().await.contains_key(session_id)
         {
