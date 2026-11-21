@@ -21,6 +21,7 @@ GLOBAL = "POTETO_PROBE_GLOBAL_BODY"
 EPHEMERAL = "POTETO_PROBE_UNAVAILABLE_BODY"
 PROJECT_RULE = "POTETO_PROBE_PROJECT_AGENTS"
 GLOBAL_RULE = "POTETO_PROBE_HOME_AGENTS"
+WORKER_FILE = "POTETO_PROBE_UNREAD_WORKER_FILE"
 
 
 def fixture(path, name, marker, source=None):
@@ -49,7 +50,10 @@ def record(harness, send, text):
 
 def worker(harness, wait_for, send, *, missing_source=False):
     start = len(harness.records())
-    prompt, marker = ("[e2e:worker-spawn:poteto_unavailable]", "poteto_unavailable Acknowledge.") if missing_source else ("[e2e:spawn]", "[e2e:child]")
+    if missing_source:
+        prompt, marker = "[e2e:worker-spawn:poteto_unavailable]", "poteto_unavailable Acknowledge."
+    else:
+        prompt, marker = "[e2e:spawn]", "[e2e:child]"
     send(prompt)
     return wait_for(lambda: next((json.dumps(r["messages"], ensure_ascii=False)
                                  for r in harness.records()[start:] if r["agent"]
@@ -71,7 +75,8 @@ def prepare(root, source):
     fixture(root / "data", NAME, GLOBAL, source)
     fixture(workspace / ".claude", NAME, "POTETO_PROBE_PROJECT_CLAUDE")
     fixture(workspace / ".agents", NAME, "POTETO_PROBE_PROJECT_AGENTS_SKILL")
-    fixture(workspace / ".jcode", NAME, BODY)
+    project = fixture(workspace / ".jcode", NAME, BODY, source)
+    project.with_name("worker.md").write_text(WORKER_FILE)
     fixture(workspace / ".jcode", "ephemeral-mode", EPHEMERAL)
 
 
@@ -84,7 +89,8 @@ def cli(harness, verify):
         return result
 
     cold = turn("probe_cli_cold")
-    require(NAME in cold and BODY not in cold and GLOBAL not in cold, "catalog was absent or mode auto-activated")
+    require(NAME in cold and not any(marker in cold for marker in (BODY, GLOBAL, WORKER_FILE)),
+            "catalog was absent or mode auto-activated")
     require(PROJECT_RULE in cold, "missing project AGENTS")
     require(GLOBAL_RULE in cold, "missing global AGENTS")
 
@@ -96,8 +102,7 @@ def cli(harness, verify):
     require(BODY in active and GLOBAL not in active, "project .jcode overlay did not win")
     seen = worker(harness, verify.wait_for, harness.send)
     harness.idle()
-    require(all(marker in seen for marker in (BODY, PROJECT_RULE, GLOBAL_RULE)),
-            "headless worker lost active body or its own bootstrap AGENTS")
+    assert_worker_context(seen)
 
     (workspace / ".jcode/skills/poteto-mode/SKILL.md").unlink()
     harness.send("/mode off")
@@ -135,6 +140,12 @@ def rpc(path, request):
             return json.loads(reader.readline())
 
 
+def assert_worker_context(seen):
+    require(all(marker in seen for marker in (BODY, PROJECT_RULE, GLOBAL_RULE)),
+            "headless worker lost active body or its own bootstrap AGENTS")
+    require(WORKER_FILE not in seen, "worker.md was implicitly delivered to the worker")
+
+
 def desktop(harness, verify, binary):
     root = harness.root
     api = root / "data/api.sock"
@@ -154,6 +165,10 @@ def desktop(harness, verify, binary):
                JCODE_DESKTOP_MUTE_SOUNDS="1", JCODE_DESKTOP_CONFIG=str(root / "desktop.toml"),
                JCODE_DESKTOP_WORKING_DIR=str(root / "workspace"))
     process = harness.spawn("desktop", [binary, "--no-hot-reload"], env)
+    harness.state["desktop_binary"] = str(binary)
+    harness.state["desktop_sha256"] = verify.digest(binary)
+    harness.state["desktop_version"] = verify.run([binary, "--version"], env=env).stdout.strip()
+    harness.save()
     endpoint = verify.wait_for(lambda: next(iter(control.glob(f"{process.pid}-*.sock")), None),
                                "owned hidden Desktop socket")
 
@@ -178,12 +193,18 @@ def desktop(harness, verify, binary):
         return result
 
     cold = turn("probe_desktop_cold")
-    require(NAME in cold and BODY not in cold and GLOBAL not in cold, "Desktop catalog missing or mode auto-activated")
-    active = turn("/poteto-mode probe_desktop_active")
-    require(BODY in active and GLOBAL not in active, "Desktop did not deliver slash skill from the project overlay")
+    require(NAME in cold and BODY not in cold and GLOBAL not in cold,
+            "Desktop catalog missing or mode auto-activated")
+    native("set_composer", target=target, text="/mode poteto-mode", allow_user_window=True)
+    verify.wait_for(lambda: any(row["name"] == NAME for row in native("state", target=target)["panel"]["mode_rows"]),
+                    "Desktop mode picker received the daemon's skill catalog")
+    native("press_key", target=target, key="fixture:enter", allow_user_window=True)
+    verify.wait_for(lambda: NAME in native("state", target=target)["panel"]["active_modes"],
+                    "Desktop active mode confirmation")
+    active = turn("probe_desktop_active")
+    require(BODY in active and GLOBAL not in active, "Desktop did not deliver the project mode body")
     seen = worker(harness, verify.wait_for, send)
-    require(all(marker in seen for marker in (BODY, PROJECT_RULE, GLOBAL_RULE)),
-            "Desktop headless worker lost active body or its own bootstrap AGENTS")
+    assert_worker_context(seen)
     print(json.dumps({"client": "desktop", "fresh": "catalog only", "manual": "body",
                       "headless": "pinned body and project/home AGENTS"}), flush=True)
 
