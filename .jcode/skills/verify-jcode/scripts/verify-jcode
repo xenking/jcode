@@ -347,6 +347,14 @@ class Harness:
         step = self.root / "workspace/worker-reload-step.txt"
         step.write_text("worker-step-anchor\n")
         expected_step = ["worker-step-anchor", token]
+        worker_terminal = re.compile(r"\bnew_status=(ready|completed|failed|stopped|crashed)\b")
+
+        def terminal_statuses():
+            return [line for path in sorted((self.root / "data/logs").glob("jcode-*.log"))
+                    for line in path.read_text().splitlines()
+                    if f" session_id={worker_id} " in line
+                    and "phase=member_status_updated" in line and worker_terminal.search(line)]
+
         try:
             send_to_worker(token + "_running")
             wait_for(held.exists, "worker provider held after successful tool result")
@@ -356,7 +364,29 @@ class Harness:
             before = next(r for r in worker_requests(before_running, token + "_running")
                           if any(m.get("tool_call_id") == "call_worker_reload_step" for m in r["messages"]))
             post = len(self.records())
-            second_restart = restart()
+            previous = self.debug("server:info")["id"]
+            before_terminal = terminal_statuses()
+            require(len(before_terminal) >= 2, "Missing status events for the worker's completed turns")
+            reload_id = self.debug("reload:verify-exec", private_exec=True)["request_id"]
+
+            def successor():
+                try:
+                    current = self.debug("server:info")["id"]
+                    return current if current != previous else None
+                except (OSError, RuntimeError, ValueError):
+                    return None
+
+            second_restart = (previous, wait_for(successor, "replacement process image"))
+            trace = self.root / "data/reload-traces" / (reload_id + ".jsonl")
+            shutil.copy2(trace, self.evidence / f"{label}-exec.jsonl")
+            reload_events = [json.loads(line) for line in trace.read_text().splitlines()]
+            require(any(event.get("phase") == "exec_start"
+                        and event.get("pid") == self.state["processes"]["server"]["pid"]
+                        for event in reload_events),
+                    "No exec trace for the original daemon PID")
+            require(any(event.get("phase") == "intent_persisted" and event.get("session_id") == worker_id
+                        and event.get("is_headless") for event in reload_events),
+                    "No durable headless recovery intent for the interrupted worker")
             busy = workers()[worker_id]
             dump(self.evidence / f"{label}-running-after-restart.json", busy)
             require(busy["status"] == "running", f"Interrupted worker falsely appeared finished: {busy}")
@@ -364,6 +394,9 @@ class Harness:
                                "automatic worker continuation on replacement daemon")[0]
             require(conversation(resumed) == conversation(before),
                     "Continuation changed the provider history after a completed tool result")
+            unexpected = terminal_statuses()[len(before_terminal):]
+            dump(self.evidence / f"{label}-terminal-before-continuation.json", unexpected)
+            require(not unexpected, f"Worker published terminal status before resuming: {unexpected}")
         finally:
             release.write_text("release isolated worker fixture\n")
             self.event(action="fixture-release", token=token)
@@ -372,13 +405,14 @@ class Harness:
         require(len(worker_requests(post, token + "_running")) == 1,
                 "Expected exactly one continuation inference for the interrupted turn")
         require(step.read_text().splitlines() == expected_step, "Reload repeated an already completed tool")
-        self.start_tui(resume=sid)
-        self.doctor()
+        wait_for(lambda: any(c["session_id"] == sid for c in self.debug("clients:map")["clients"]),
+                 "TUI reattached to the original coordinator")
         for key, value in [("initial-request", original), ("dm-request", dm), ("dm-session", idle_saved),
                            ("held-request", before), ("resumed-request", resumed), ("worker-session", saved)]:
             dump(self.evidence / f"{label}-{key}.json", value)
         shutil.copy2(step, self.evidence / f"{label}-worker-reload-step.txt")
-        return {"session_id": sid, "worker_id": worker_id, "restarts": [first_restart, second_restart]}
+        return {"session_id": sid, "worker_id": worker_id, "restarts": [first_restart, second_restart],
+                "reload_id": reload_id}
 
     def frame(self, label):
         require(re.fullmatch(r"[a-zA-Z0-9_-]+", label), "Frame label must be a basename")
