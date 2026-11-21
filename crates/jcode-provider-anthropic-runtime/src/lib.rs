@@ -1405,6 +1405,17 @@ mod canonical_input_tests {
 
 #[async_trait]
 impl Provider for AnthropicProvider {
+    fn api_key_long_context_pricing(
+        &self,
+    ) -> jcode_provider_core::context_pricing::LongContextPricing {
+        use jcode_provider_core::{RuntimeKey, context_pricing};
+        context_pricing::long_context_pricing(
+            &RuntimeKey::AnthropicApiKey,
+            &self.model(),
+            self.direct_transport.api_url.strip_suffix("/messages"),
+        )
+    }
+
     async fn complete(
         &self,
         messages: &[Message],

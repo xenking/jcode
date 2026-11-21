@@ -82,7 +82,11 @@ mod openrig_identity_tests {
             let request = String::from_utf8_lossy(&buf[..n]);
             assert!(request.starts_with("GET /healthz HTTP/1.1\r\n"));
             assert!(!request.to_ascii_lowercase().contains("authorization:"));
-            let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
             stream.write_all(response.as_bytes()).await.unwrap();
         });
         let result = openrig_host_identity_at(&format!("http://{address}/healthz")).await;
@@ -92,7 +96,10 @@ mod openrig_identity_tests {
 
     #[tokio::test]
     async fn real_read_only_health_requires_authoritative_id() {
-        assert_eq!(probe(r#"{"selfHostId":"host-a"}"#).await.as_deref(), Some("host-a"));
+        assert_eq!(
+            probe(r#"{"selfHostId":"host-a"}"#).await.as_deref(),
+            Some("host-a")
+        );
         assert_eq!(probe(r#"{"name":"same-name"}"#).await, None);
         assert_eq!(probe(r#"{"selfHostId":""}"#).await, None);
         assert_eq!(probe("broken").await, None);
@@ -343,13 +350,14 @@ pub(super) async fn handle_lightweight_control_request(
         session_id,
         model,
         cwd,
+        summary_only,
     } = request
     {
         let event = super::context_breakdown::reply(
             id,
             session_id,
-            model.as_deref(),
-            cwd.as_deref(),
+            (model.as_deref(), cwd.as_deref()),
+            summary_only,
             sessions,
             provider_template,
         )

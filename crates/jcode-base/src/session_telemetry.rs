@@ -23,6 +23,8 @@ pub struct SessionTelemetry {
     pub account_label: Option<String>,
     #[serde(default)]
     pub account_usage: Option<jcode_protocol::AccountUsageSnapshot>,
+    #[serde(default)]
+    pub context_policy: Option<jcode_session_types::ContextMeter>,
 }
 
 fn path(session_id: &str) -> Option<std::path::PathBuf> {
@@ -47,6 +49,7 @@ pub fn save_context(
     serving_provider: &str,
     credential: Option<jcode_provider_core::ResolvedCredential>,
     account_label: Option<String>,
+    context_policy: Option<jcode_session_types::ContextMeter>,
 ) {
     let Some(path) = path(&session.id) else {
         return;
@@ -99,6 +102,7 @@ pub fn save_context(
         credential,
         account_label,
         account_usage,
+        context_policy,
     };
     // Best-effort UI metadata must never fail a provider turn.
     if let Err(error) = crate::storage::write_json_fast(&path, &snapshot) {
@@ -107,7 +111,11 @@ pub fn save_context(
 }
 
 pub fn load_context(session: &Session) -> Option<SessionTelemetry> {
-    let bytes = match std::fs::read(path(&session.id)?) {
+    read_context(&session.id).filter(|snapshot| snapshot.matches_session(session))
+}
+
+pub fn read_context(session_id: &str) -> Option<SessionTelemetry> {
+    let bytes = match std::fs::read(path(session_id)?) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
         Err(error) => {
@@ -122,7 +130,7 @@ pub fn load_context(session: &Session) -> Option<SessionTelemetry> {
             return None;
         }
     };
-    snapshot.matches_session(session).then_some(snapshot)
+    (snapshot.session_id == session_id).then_some(snapshot)
 }
 
 impl SessionTelemetry {
@@ -166,6 +174,7 @@ mod tests {
             "OpenAI",
             Some(jcode_provider_core::ResolvedCredential::Oauth),
             Some("account-a".into()),
+            None,
         );
         let saved = load_context(&session).unwrap();
         assert_eq!(saved.context_tokens, 1234);

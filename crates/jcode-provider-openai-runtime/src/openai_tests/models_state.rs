@@ -751,6 +751,35 @@ fn oauth_creds() -> CodexCredentials {
     }
 }
 
+#[test]
+fn oauth_astra_context_meter_threshold_matches_responses_request() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let mut provider = OpenAIProvider::new(oauth_creds());
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec!["gpt-6.2-astra".into()],
+    );
+    provider.set_model("gpt-6.2-astra").unwrap();
+    provider.native_compaction_mode = OpenAINativeCompactionMode::Auto;
+    provider.native_compaction_threshold_tokens = 200_000;
+
+    let request =
+        provider.response_request_for_model("gpt-6.2-astra", &[][..], &[], "fixture only", true);
+    assert!(!provider.uses_jcode_compaction());
+    assert_eq!(provider.native_compaction_threshold_tokens(), Some(200_000));
+    assert_eq!(
+        request["context_management"][0]["compact_threshold"],
+        200_000
+    );
+    assert_eq!(provider.context_window(), 1_000_000);
+    assert_eq!(
+        provider.active_long_context_pricing(),
+        jcode_provider_core::context_pricing::LongContextPricing::Unknown,
+    );
+}
+
 /// Regression: the ChatGPT/Codex OAuth catalog and the platform API-key
 /// catalog used to share one per-account scope. Whichever refresh landed last
 /// overwrote the other, so selecting `openai-api:<api-only model>` failed with

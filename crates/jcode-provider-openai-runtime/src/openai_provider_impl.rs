@@ -40,6 +40,17 @@ fn catalog_error_is_auth_rejection(err: &anyhow::Error) -> bool {
 
 #[async_trait]
 impl Provider for OpenAIProvider {
+    fn api_key_long_context_pricing(
+        &self,
+    ) -> jcode_provider_core::context_pricing::LongContextPricing {
+        use jcode_provider_core::{RuntimeKey, context_pricing};
+        context_pricing::long_context_pricing(
+            &RuntimeKey::OpenAIApiKey,
+            &self.model(),
+            Some(&Self::resolve_api_base()),
+        )
+    }
+
     async fn begin_turn(&self, turn_id: &str) {
         let changed = {
             let mut current = self.turn_id.write().unwrap_or_else(|p| p.into_inner());
@@ -1088,8 +1099,9 @@ impl Provider for OpenAIProvider {
     }
 
     fn native_compaction_threshold_tokens(&self) -> Option<usize> {
-        (self.native_compaction_mode != OpenAINativeCompactionMode::Off)
-            .then_some(self.native_compaction_threshold_tokens)
+        (!is_chatgpt_web_model(&self.model()))
+            .then(|| self.native_compaction_threshold_for_context_window(self.context_window()))
+            .flatten()
     }
 
     fn set_service_tier(&self, service_tier: &str) -> Result<()> {

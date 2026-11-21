@@ -203,6 +203,19 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Published long-context pricing for the active request route, when known.
+    fn active_long_context_pricing(&self) -> context_pricing::LongContextPricing {
+        if self.active_resolved_credential() == Some(ResolvedCredential::ApiKey) {
+            return self.api_key_long_context_pricing();
+        }
+        context_pricing::LongContextPricing::Unknown
+    }
+
+    /// Pricing for this endpoint if authenticated by a direct API key.
+    fn api_key_long_context_pricing(&self) -> context_pricing::LongContextPricing {
+        context_pricing::LongContextPricing::Unknown
+    }
+
     /// The credential the active dual-auth provider (Anthropic / OpenAI) will
     /// use *when the user has explicitly pinned one* (OAuth or API key), without
     /// resolving "auto".

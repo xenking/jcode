@@ -268,6 +268,7 @@ pub struct RemoteConnection {
     client_instance_id: Option<String>,
     next_request_id: u64,
     pending_runtime_commands: std::collections::HashSet<u64>,
+    pending_context_meters: std::collections::HashSet<u64>,
     // Bootstrap Done is not turn completion. Retain ids for duplicate acks.
     control_done_ids: std::sync::Mutex<std::collections::VecDeque<u64>>,
     request_timings: super::cloud_latency::RequestTimings,
@@ -359,6 +360,12 @@ pub(crate) trait RemoteEventState {
     }
     /// Replay has no outstanding control requests. Live connections track IDs.
     fn finish_runtime_command(&mut self, _id: u64) -> bool {
+        false
+    }
+    fn request_context_meter(&mut self, _session_id: &str) -> Option<u64> {
+        None
+    }
+    fn finish_context_meter(&mut self, _id: u64) -> bool {
         false
     }
 
@@ -486,6 +493,7 @@ impl RemoteConnection {
             // Keep reattached turn Done distinct from bootstrap acknowledgments.
             next_request_id: (rand::random::<u64>() & ((1_u64 << 62) - 1)) | (1_u64 << 62),
             pending_runtime_commands: Default::default(),
+            pending_context_meters: Default::default(),
             control_done_ids: Default::default(),
             request_timings: Default::default(),
             tool_diff: RemoteDiffTracker::default(),
@@ -1648,6 +1656,7 @@ impl RemoteConnection {
             client_instance_id: None,
             next_request_id: 1,
             pending_runtime_commands: Default::default(),
+            pending_context_meters: Default::default(),
             control_done_ids: Default::default(),
             request_timings: Default::default(),
             tool_diff: RemoteDiffTracker::default(),

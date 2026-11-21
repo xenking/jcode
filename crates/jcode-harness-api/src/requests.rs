@@ -318,6 +318,9 @@ pub enum ApiRequest {
         model: Option<String>,
         /// Draft working directory. Ignored for existing sessions.
         cwd: Option<String>,
+        /// Return only the meter, omitting categories and the residual.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        summary_only: bool,
     },
 
     /// Preview or confirm local elision of old tool outputs in one open session.

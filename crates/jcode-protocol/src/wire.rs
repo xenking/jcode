@@ -269,7 +269,10 @@ pub enum Request {
     Rewind { id: u64, message_index: usize },
 
     #[serde(rename = "rewind_transcript")]
-    RewindTranscript { id: u64, target: jcode_session_types::RewindAnchor },
+    RewindTranscript {
+        id: u64,
+        target: jcode_session_types::RewindAnchor,
+    },
 
     /// Undo the most recent rewind, if one is available.
     #[serde(rename = "rewind_undo")]
@@ -416,6 +419,8 @@ pub enum Request {
         session_id: Option<String>,
         model: Option<String>,
         cwd: Option<String>,
+        #[serde(default)]
+        summary_only: bool,
     },
 
     #[serde(rename = "session_shake_tools")]

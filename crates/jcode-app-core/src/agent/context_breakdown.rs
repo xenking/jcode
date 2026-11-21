@@ -5,19 +5,29 @@ use crate::prompt::{self, SplitSystemPrompt};
 use crate::provider::models::{
     context_limit_for_model_with_provider, provider_for_model_with_hint,
 };
+use crate::session_telemetry::{self, SessionTelemetry};
 use crate::util::APPROX_CHARS_PER_TOKEN;
 use jcode_session_types::{
     ContextActionForecast, ContextActionSavings, ContextBreakdown, ContextBreakdownCategory,
-    ContextBreakdownKind as Kind,
+    ContextBreakdownKind as Kind, ContextMeter, ContextMeterState as State,
+    ContextOccupancySource as Source,
 };
 use std::path::Path;
 
 impl Agent {
-    pub(crate) async fn inspect_context_breakdown(&self) -> ContextBreakdown {
+    pub(crate) async fn inspect_context_breakdown(&self, summary_only: bool) -> ContextBreakdown {
         let model = self.provider_model();
         let provider = self.provider.name();
+        let telemetry = session_telemetry::read_context(&self.session.id);
+        let mut meter = self.context_policy().await;
+        apply_occupancy(&mut meter, &self.session, telemetry.as_ref(), State::Live);
+        if summary_only && meter.occupied_tokens.is_some() {
+            return meter_only(Some(self.session.id.clone()), Some(model), meter);
+        }
         let source = self.session.messages_for_provider_uncached();
-        let action_forecast = self.forecast_context_actions(&source);
+        let action_forecast = (!summary_only)
+            .then(|| self.forecast_context_actions(&source))
+            .flatten();
         let messages = inspect_messages(
             &self.session,
             source,
@@ -33,17 +43,62 @@ impl Agent {
             crate::tool::sdk::custom(self.session_id(), name)
         });
         counts.action_forecast = action_forecast;
-        counts.finish(
-            Some(self.session.id.clone()),
-            Some(model.clone()),
-            effective_limit(
-                Some(provider),
-                Some(&model),
-                self.session.context_cap,
-                Some(self.provider_context_window()),
-            ),
-            self.session.context_occupancy_tokens(),
-        )
+        counts.finish(Some(self.session.id.clone()), Some(model), meter)
+    }
+
+    pub(super) async fn record_completed_context_observation(&mut self, prompt_tokens: u64) {
+        if prompt_tokens == 0 {
+            return;
+        }
+        self.sync_bound_account_route();
+        let policy = self.context_policy().await;
+        session_telemetry::save_context(
+            &self.session,
+            prompt_tokens,
+            policy.effective_budget_tokens.map(|n| n as usize),
+            self.provider.name(),
+            self.provider.active_resolved_credential(),
+            self.provider.serving_oauth_account_label(),
+            Some(policy),
+        );
+    }
+
+    async fn context_policy(&self) -> ContextMeter {
+        let mut meter = ContextMeter::default();
+        let mode = self.registry.compaction().read().await.explicit_mode();
+        configure_meter(
+            &mut meter,
+            Some(self.provider.name()),
+            Some(&self.provider_model()),
+            self.session.context_cap,
+            Some(self.provider_context_window()),
+            mode,
+        );
+        if let jcode_provider_core::context_pricing::LongContextPricing::Cutoff {
+            above_input_tokens,
+            ..
+        } = self.provider.active_long_context_pricing()
+        {
+            meter.long_context_pricing_above_input_tokens = Some(above_input_tokens);
+        }
+        let jcode_compaction = self.provider.uses_jcode_compaction();
+        if !jcode_compaction {
+            meter.compaction_threshold_tokens = self
+                .provider
+                .native_compaction_threshold_tokens()
+                .map(|n| n as u64);
+            meter.compaction_mode = meter
+                .compaction_threshold_tokens
+                .map(|_| "provider_native".into());
+        }
+        if self.is_swarm_worker() && jcode_compaction {
+            meter.compaction_threshold_tokens = None;
+            meter.compaction_mode = Some("worker".into());
+        }
+        if !jcode_compaction || self.is_swarm_worker() {
+            meter.idle_precompaction_tokens = None;
+        }
+        meter
     }
 }
 
@@ -82,11 +137,41 @@ impl Agent {
 }
 
 /// No Agent or provider route is constructed to inspect an unloaded session.
-pub(crate) fn inspect_saved(session: &Session) -> ContextBreakdown {
+pub(crate) fn inspect_saved(session: &Session, summary_only: bool) -> ContextBreakdown {
     let model = session.model.as_deref();
-    let provider = session.provider_key.as_deref();
-    let reported = session.context_occupancy_tokens();
-    let past_request = reported.is_some()
+    let telemetry = session_telemetry::read_context(&session.id);
+    let matching = telemetry
+        .as_ref()
+        .filter(|sample| sample.matches_session(session));
+    let provider = matching
+        .and_then(|sample| sample.serving_provider.as_deref())
+        .or_else(|| {
+            model.and_then(|model| {
+                provider_for_model_with_hint(model, session.provider_key.as_deref())
+            })
+        })
+        .or(session.provider_key.as_deref());
+    let cap = session.context_cap.filter(|n| *n > 0).map(|n| n as u64);
+    let historical_policy = matching.and_then(|sample| sample.context_policy.as_ref());
+    let mut meter = historical_policy
+        .filter(|policy| policy.session_cap_tokens == cap)
+        .cloned()
+        .unwrap_or_else(|| ContextMeter {
+            session_cap_tokens: cap,
+            model_window_tokens: model
+                .and_then(|model| context_limit_for_model_with_provider(model, provider))
+                .map(|n| n as u64),
+            effective_budget_tokens: matching
+                .filter(|_| historical_policy.is_none())
+                .and_then(|sample| sample.context_limit)
+                .map(|n| n as u64),
+            ..Default::default()
+        });
+    apply_occupancy(&mut meter, session, telemetry.as_ref(), State::Saved);
+    if summary_only && meter.occupied_tokens.is_some() {
+        return meter_only(Some(session.id.clone()), session.model.clone(), meter);
+    }
+    let past_request = meter.occupied_tokens.is_some()
         || session.last_provider_request_at.is_some()
         || session
             .messages
@@ -127,17 +212,7 @@ pub(crate) fn inspect_saved(session: &Session) -> ContextBreakdown {
     if let Some(tools) = super::tool_replay::saved_context_tools(session) {
         counts.tools(&tools, &messages, |_| false);
     }
-    counts.finish(
-        Some(session.id.clone()),
-        session.model.clone(),
-        effective_limit(
-            provider,
-            model,
-            session.context_cap,
-            model.and_then(|model| context_limit_for_model_with_provider(model, provider)),
-        ),
-        reported,
-    )
+    counts.finish(Some(session.id.clone()), session.model.clone(), meter)
 }
 
 pub(crate) async fn inspect_draft(
@@ -188,16 +263,34 @@ pub(crate) async fn inspect_draft(
     counts.tools(&tools, &[], |_| false);
     // The draft has a local baseline, not a discovered per-session tool surface.
     counts.dynamic_tokens = None;
-    counts.finish(
-        None,
-        Some(model.to_owned()),
-        effective_limit(provider, Some(model), None, window),
-        None,
-    )
+    let mut meter = ContextMeter {
+        state: State::Draft,
+        ..Default::default()
+    };
+    configure_meter(&mut meter, provider, Some(model), None, window, None);
+    counts.finish(None, Some(model.to_owned()), meter)
 }
 
 pub(crate) fn unavailable(session_id: String) -> ContextBreakdown {
-    Counts::default().finish(Some(session_id), None, None, None)
+    Counts::default().finish(Some(session_id), None, ContextMeter::default())
+}
+
+fn meter_only(
+    session_id: Option<String>,
+    model: Option<String>,
+    meter: ContextMeter,
+) -> ContextBreakdown {
+    ContextBreakdown {
+        session_id,
+        model,
+        total_tokens: meter.occupied_tokens,
+        limit_tokens: meter.effective_budget_tokens,
+        estimated: true,
+        categories: Vec::new(),
+        meter: Some(meter),
+        residual_tokens: None,
+        action_forecast: None,
+    }
 }
 
 fn bootstrap_prompt(
@@ -221,17 +314,88 @@ fn bootstrap_prompt(
     (prompt, info.skills_chars)
 }
 
-fn effective_limit(
+fn configure_meter(
+    meter: &mut ContextMeter,
     provider: Option<&str>,
     model: Option<&str>,
     cap: Option<usize>,
     window: Option<usize>,
-) -> Option<u64> {
-    let window = window.filter(|window| *window > 0)?;
+    mode: Option<crate::config::CompactionMode>,
+) {
+    meter.session_cap_tokens = cap.filter(|cap| *cap > 0).map(|cap| cap as u64);
+    let Some(window) = window.filter(|window| *window > 0) else {
+        return;
+    };
     let mut compaction = CompactionManager::new().with_budget(window);
     compaction.set_active_model(provider, model);
     compaction.set_context_cap_override(cap);
-    Some(compaction.token_budget() as u64)
+    if let Some(mode) = mode {
+        compaction.set_mode(mode);
+    }
+    meter.model_window_tokens = Some(window as u64);
+    meter.effective_budget_tokens = Some(compaction.token_budget() as u64);
+    meter.compaction_mode = Some(compaction.mode().as_str().into());
+    meter.compaction_threshold_tokens = compaction
+        .reactive_compaction_threshold_tokens()
+        .map(|n| n as u64);
+    meter.idle_precompaction_tokens = compaction.idle_precompaction_tokens().map(|n| n as u64);
+}
+
+fn apply_occupancy(
+    meter: &mut ContextMeter,
+    session: &Session,
+    telemetry: Option<&SessionTelemetry>,
+    state: State,
+) {
+    meter.state = state;
+    meter.occupied_tokens = None;
+    meter.source = Source::Unknown;
+    meter.measured_at_ms = None;
+    meter.route = None;
+    let report = if let Some(telemetry) = telemetry {
+        (telemetry.context_tokens > 0 && telemetry.matches_session(session)).then(|| {
+            meter.route = telemetry
+                .route_api_method
+                .clone()
+                .or_else(|| telemetry.serving_provider.clone());
+            (
+                Some(telemetry.measured_at),
+                telemetry.context_tokens,
+                Source::ProviderReported,
+            )
+        })
+    } else {
+        session.messages.iter().rev().find_map(|message| {
+            let tokens = message.token_usage.as_ref()?.prompt_tokens?;
+            (tokens > 0).then_some((message.timestamp, tokens, Source::HistoricalReport))
+        })
+    };
+    let compacted = session
+        .replay_events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            crate::session::StoredReplayEventKind::Compaction { post_tokens, .. } => {
+                Some((event.timestamp, *post_tokens))
+            }
+            _ => None,
+        });
+    if let Some((when, post_tokens)) = compacted.filter(|(when, _)| {
+        !report.is_some_and(|(reported_at, _, _)| {
+            reported_at.is_some_and(|reported_at| reported_at > *when)
+        })
+    }) {
+        meter.occupied_tokens = post_tokens;
+        if post_tokens.is_some() {
+            meter.source = Source::CompactionEstimate;
+            meter.measured_at_ms = Some(when.timestamp_millis());
+        }
+        meter.route = None;
+    } else if let Some((when, tokens, source)) = report {
+        meter.occupied_tokens = Some(tokens);
+        meter.source = source;
+        meter.measured_at_ms = when.map(|when| when.timestamp_millis());
+    }
 }
 
 fn inspect_messages(
@@ -351,8 +515,7 @@ impl Counts {
         self,
         session_id: Option<String>,
         model: Option<String>,
-        limit_tokens: Option<u64>,
-        reported: Option<u64>,
+        mut meter: ContextMeter,
     ) -> ContextBreakdown {
         fn estimate(chars: usize) -> u64 {
             if chars == 0 {
@@ -376,7 +539,6 @@ impl Counts {
             (Kind::Agents, self.agent_tokens.map(|tokens| tokens as u64)),
             (Kind::Conversation, self.conversation_chars.map(estimate)),
         ];
-        let unknown = counts.iter().any(|(_, tokens)| tokens.is_none());
         let not_attributed = estimate(
             self.unattributed_chars
                 + if self.dynamic_tokens.is_none() {
@@ -385,37 +547,53 @@ impl Counts {
                     0
                 },
         );
-        let attributed_total = counts.iter().filter_map(|(_, tokens)| *tokens).sum::<u64>();
-        let lower_bound = attributed_total + not_attributed;
+        let categories: Vec<_> = counts
+            .into_iter()
+            .chain([(
+                Kind::Unattributed,
+                (not_attributed > 0).then_some(not_attributed),
+            )])
+            .map(|(kind, tokens)| ContextBreakdownCategory { kind, tokens })
+            .collect();
+        let estimated_total = categories
+            .iter()
+            .filter_map(|category| category.tokens)
+            .sum::<u64>();
         let local_total = (self.prompt_present
             && self.conversation_chars.is_some()
             && self.builtin_tokens.is_some())
-        .then_some(lower_bound);
-        // Last observed occupancy includes the prefix. Do not add it to the
-        // categories. A smaller report may predate the current material.
-        let total_tokens = reported
-            .filter(|reported| *reported >= lower_bound)
-            .or(local_total);
-        let unattributed = total_tokens
-            .map(|total| total - attributed_total)
-            .filter(|&tokens| tokens > 0 || !unknown)
-            .or_else(|| (not_attributed > 0).then_some(not_attributed));
-        let categories = counts
-            .into_iter()
-            .chain([(Kind::Unattributed, unattributed)])
-            .map(|(kind, tokens)| ContextBreakdownCategory { kind, tokens })
-            .collect();
+        .then_some(estimated_total);
+        if meter.occupied_tokens.is_none()
+            && let Some(local_total) = local_total
+        {
+            meter.occupied_tokens = Some(local_total);
+            meter.source = Source::LocalEstimate;
+        }
+        let residual_tokens = (categories.iter().any(|category| category.tokens.is_some())
+            && matches!(
+                meter.source,
+                Source::ProviderReported | Source::HistoricalReport | Source::CompactionEstimate
+            ))
+        .then(|| {
+            i64::try_from(
+                i128::from(meter.occupied_tokens.unwrap_or_default()) - i128::from(estimated_total),
+            )
+            .ok()
+        })
+        .flatten();
         ContextBreakdown {
             session_id,
             model,
-            total_tokens,
-            limit_tokens,
+            total_tokens: meter.occupied_tokens,
+            limit_tokens: meter.effective_budget_tokens,
             estimated: true,
             categories,
             action_forecast: self.action_forecast.map(|mut forecast| {
                 forecast.current_tokens = local_total;
                 forecast
             }),
+            meter: Some(meter),
+            residual_tokens,
         }
     }
 }

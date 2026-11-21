@@ -902,12 +902,19 @@ impl BridgeState {
                 let target = match RewindAnchor::deserialize(&request["target"]) {
                     Ok(target) => target,
                     Err(error) => {
-                        return Self::error_reply(api_id, ErrorCode::InvalidRequest, &error.to_string());
+                        return Self::error_reply(
+                            api_id,
+                            ErrorCode::InvalidRequest,
+                            &error.to_string(),
+                        );
                     }
                 };
                 let id = self.legacy_id();
-                self.pending_simple.push((id, api_id, SimpleKind::OkOnHistory));
-                vec![Outbound::Legacy(json!({"type": "rewind_transcript", "id": id, "target": target}))]
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::OkOnHistory));
+                vec![Outbound::Legacy(
+                    json!({"type": "rewind_transcript", "id": id, "target": target}),
+                )]
             }
             "get_history" => {
                 let id = self.legacy_id();
@@ -957,12 +964,20 @@ impl BridgeState {
                         "session_id, model, and cwd must be strings or null",
                     );
                 }
+                if !request["summary_only"].is_null() && !request["summary_only"].is_boolean() {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "summary_only must be a boolean",
+                    );
+                }
                 let id = self.legacy_id();
                 self.pending_simple
                     .push((id, api_id, SimpleKind::ContextBreakdown));
                 vec![Outbound::Legacy(json!({
                     "type": "session_context_breakdown", "id": id,
                     "session_id": request["session_id"], "model": request["model"], "cwd": request["cwd"],
+                    "summary_only": request["summary_only"].as_bool().unwrap_or(false),
                 }))]
             }
             "session_shake_tools" => {

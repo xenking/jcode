@@ -167,6 +167,12 @@ fn handle_server_event_inner(
         return true;
     }
 
+    if let ServerEvent::Error { id, .. } = &event
+        && remote.finish_context_meter(*id)
+    {
+        return false;
+    }
+
     // Control failures use the shared Error wire shape, but must not end an
     // unrelated active turn, trigger rate-limit retry, or discard draft input.
     if let ServerEvent::Error { id, message, .. } = &event
@@ -1189,6 +1195,10 @@ fn handle_server_event_inner(
                     ));
                 }
             }
+            if completed_current_message && let Some(session_id) = app.remote_session_id.as_deref()
+            {
+                app.remote_context_meter_request = remote.request_context_meter(session_id);
+            }
             completed_current_message || auto_poked
         }
         ServerEvent::Error {
@@ -1569,6 +1579,10 @@ fn handle_server_event_inner(
             }
             remote.set_session_id(session_id.clone());
             app.cloud_environment_session_changed(&session_id);
+            if app.remote_session_id.as_ref() != Some(&session_id) {
+                app.remote_compaction_threshold = None;
+                app.remote_context_meter_request = remote.request_context_meter(&session_id);
+            }
             app.remote_session_id = Some(session_id.clone());
             crate::set_current_session(&session_id);
             app.note_client_focus(true);
@@ -1857,6 +1871,10 @@ fn handle_server_event_inner(
             remote.set_session_id(session_id.clone());
             app.jarvis_session_changed(&session_id);
             app.cloud_environment_session_changed(&session_id);
+            if app.remote_session_id.as_ref() != Some(&session_id) {
+                app.remote_compaction_threshold = None;
+            }
+            app.remote_context_meter_request = remote.request_context_meter(&session_id);
             app.remote_session_id = Some(session_id.clone());
             history_laps.push(("pre_set_session", history_lap.elapsed().as_millis()));
             history_lap = Instant::now();
@@ -2625,6 +2643,27 @@ fn handle_server_event_inner(
             // user is typing during startup.
             false
         }
+        ServerEvent::ContextCapChanged { session_id, .. } => {
+            if app.remote_session_id.as_ref() == Some(&session_id) {
+                app.remote_compaction_threshold = None;
+                app.remote_context_meter_request = remote.request_context_meter(&session_id);
+            }
+            false
+        }
+        ServerEvent::ContextBreakdown { id, breakdown } => {
+            if remote.finish_context_meter(id)
+                && app.remote_context_meter_request == Some(id)
+                && breakdown.session_id == app.remote_session_id
+            {
+                app.remote_context_meter_request = None;
+                app.remote_compaction_threshold = breakdown
+                    .meter
+                    .and_then(|meter| meter.compaction_threshold_tokens)
+                    .and_then(|tokens| usize::try_from(tokens).ok());
+                return true;
+            }
+            false
+        }
         ServerEvent::ModelChanged {
             id,
             model,
@@ -2707,6 +2746,10 @@ fn handle_server_event_inner(
                 // ModelChanged predates capability metadata. Fetch the typed
                 // History catalog after a successful model/account switch.
                 app.model_catalog_after_history = true;
+                app.remote_compaction_threshold = None;
+                if let Some(session_id) = app.remote_session_id.as_deref() {
+                    app.remote_context_meter_request = remote.request_context_meter(session_id);
+                }
                 let account_actually_changed = !app.remote_session_facts_provisional
                     && app.remote_provider_model.is_some()
                     && (app.remote_provider_oauth_account_label != provider_oauth_account_label

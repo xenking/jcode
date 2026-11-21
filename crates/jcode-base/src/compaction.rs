@@ -377,14 +377,21 @@ fn threshold_tokens_after_overrides(
     cfg: &crate::config::CompactionConfig,
     context_window: usize,
 ) -> Option<usize> {
-    if context_window == 0 {
-        return None;
-    }
     let budget = if cfg.max_context_tokens > 0 {
         context_window.min(cfg.max_context_tokens)
     } else {
         context_window
     };
+    threshold_tokens_for_budget(cfg, budget)
+}
+
+fn threshold_tokens_for_budget(
+    cfg: &crate::config::CompactionConfig,
+    budget: usize,
+) -> Option<usize> {
+    if budget == 0 {
+        return None;
+    }
     let by_ratio = (budget as f64 * f64::from(cfg.reactive_threshold.clamp(0.0, 1.0))) as usize;
     let threshold = if cfg.reactive_threshold_tokens > 0 {
         by_ratio.min(cfg.reactive_threshold_tokens)
@@ -1194,7 +1201,10 @@ impl CompactionManager {
     /// An explicit request uses the same thresholds as automatic shake, even
     /// when the user has not opted into rewriting history automatically.
     pub fn manual_tool_shake_config(&self) -> ShakeConfig {
-        ShakeConfig { code_blocks: false, ..self.shake_thresholds() }
+        ShakeConfig {
+            code_blocks: false,
+            ..self.shake_thresholds()
+        }
     }
 
     fn shake_thresholds(&self) -> ShakeConfig {
@@ -1460,11 +1470,11 @@ impl CompactionManager {
         match self.mode {
             CompactionMode::Reactive => {
                 self.pending_task.is_none()
-                    && (self.context_usage_with(all_messages)
-                        >= self.compaction_config.reactive_threshold
-                        || (self.compaction_config.reactive_threshold_tokens > 0
-                            && self.effective_token_count_with(all_messages)
-                                >= self.compaction_config.reactive_threshold_tokens))
+                    && self
+                        .resolved_compaction_threshold_tokens()
+                        .is_some_and(|threshold| {
+                            self.effective_token_count_with(all_messages) >= threshold
+                        })
                     && active.len() > RECENT_TURNS_TO_KEEP
             }
             CompactionMode::Proactive => {
@@ -1602,7 +1612,13 @@ impl CompactionManager {
     /// Resolved reactive trigger in tokens for the active model, regardless of
     /// the configured compaction mode.
     pub fn resolved_compaction_threshold_tokens(&self) -> Option<usize> {
-        threshold_tokens_after_overrides(&self.compaction_config, self.model_token_budget)
+        threshold_tokens_for_budget(&self.compaction_config, self.token_budget)
+    }
+
+    pub fn reactive_compaction_threshold_tokens(&self) -> Option<usize> {
+        (self.mode == crate::config::CompactionMode::Reactive)
+            .then(|| self.resolved_compaction_threshold_tokens())
+            .flatten()
     }
 
     /// Token count at which idle pre-compaction fires: `idle_precompact_ratio`
@@ -2578,6 +2594,10 @@ impl CompactionManager {
     /// Get the active compaction mode
     pub fn mode(&self) -> crate::config::CompactionMode {
         self.mode.clone()
+    }
+
+    pub fn explicit_mode(&self) -> Option<crate::config::CompactionMode> {
+        self.mode_overridden.then(|| self.mode())
     }
 
     /// Change the active compaction mode for this session at runtime.

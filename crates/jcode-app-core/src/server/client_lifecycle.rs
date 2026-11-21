@@ -1169,9 +1169,9 @@ pub(super) async fn handle_client(
             continue;
         }
 
-        if let Request::SessionContextBreakdown { id, session_id, model, cwd } = request {
+        if let Request::SessionContextBreakdown { id, session_id, model, cwd, summary_only } = request {
             let event = super::context_breakdown::reply(
-                id, session_id, model.as_deref(), cwd.as_deref(), &sessions, &provider_template,
+                id, session_id, (model.as_deref(), cwd.as_deref()), summary_only, &sessions, &provider_template,
             ).await;
             let _ = client_event_tx.send(event);
             continue;

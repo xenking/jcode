@@ -8,6 +8,27 @@ impl RemoteEventState for RemoteConnection {
         Self::finish_runtime_command(self, id)
     }
 
+    fn request_context_meter(&mut self, session_id: &str) -> Option<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.pending_context_meters.insert(id);
+        self.send_request_detached(
+            Request::SessionContextBreakdown {
+                id,
+                session_id: Some(session_id.to_owned()),
+                model: None,
+                cwd: None,
+                summary_only: true,
+            },
+            "context meter",
+        );
+        Some(id)
+    }
+
+    fn finish_context_meter(&mut self, id: u64) -> bool {
+        self.pending_context_meters.remove(&id)
+    }
+
     fn handle_tool_start(&mut self, id: &str, name: &str) {
         Self::handle_tool_start(self, id, name);
     }

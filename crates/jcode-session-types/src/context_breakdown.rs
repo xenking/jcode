@@ -7,16 +7,62 @@ pub const CONTEXT_BREAKDOWN_CAPABILITY: &str = "session_context_breakdown";
 pub struct ContextBreakdown {
     pub session_id: Option<String>,
     pub model: Option<String>,
-    /// Recent usage when compatible with the available estimates, or a local
-    /// estimate. A draft estimates the local baseline before MCP discovery.
+    /// Legacy mirror of `meter.occupied_tokens`.
     pub total_tokens: Option<u64>,
+    /// Legacy context budget, not an auto-compaction trigger.
     pub limit_tokens: Option<u64>,
     /// Category counts are estimates, even when the total has a usage anchor.
     pub estimated: bool,
     pub categories: Vec<ContextBreakdownCategory>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meter: Option<ContextMeter>,
+    /// Occupancy minus the sum of known estimated components. This is not a
+    /// category or an estimate of how much unknown content exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub residual_tokens: Option<i64>,
     /// Read-only plans from the same live snapshot as the breakdown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_forecast: Option<ContextActionForecast>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextMeter {
+    pub state: ContextMeterState,
+    pub occupied_tokens: Option<u64>,
+    pub source: ContextOccupancySource,
+    pub measured_at_ms: Option<i64>,
+    /// Serving route snapshot. An unverified historical report has no route.
+    pub route: Option<String>,
+    pub model_window_tokens: Option<u64>,
+    pub effective_budget_tokens: Option<u64>,
+    pub session_cap_tokens: Option<u64>,
+    pub compaction_mode: Option<String>,
+    pub compaction_threshold_tokens: Option<u64>,
+    pub idle_precompaction_tokens: Option<u64>,
+    /// Published pricing boundary for one request's total input, never occupancy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub long_context_pricing_above_input_tokens: Option<u64>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextMeterState {
+    Live,
+    Saved,
+    Draft,
+    #[default]
+    Unavailable,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextOccupancySource {
+    ProviderReported,
+    HistoricalReport,
+    CompactionEstimate,
+    LocalEstimate,
+    #[default]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

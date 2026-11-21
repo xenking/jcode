@@ -642,6 +642,11 @@ fn typescript_context_breakdown_matches_flattened_wire_payload() {
     use ContextBreakdownKind::*;
     let event = ApiEvent::ContextBreakdown {
         breakdown: ContextBreakdown {
+            meter: Some(ContextMeter {
+                long_context_pricing_above_input_tokens: Some(272_000),
+                ..Default::default()
+            }),
+            residual_tokens: Some(-1_000),
             session_id: None,
             model: None,
             total_tokens: None,
@@ -679,6 +684,14 @@ fn typescript_context_breakdown_matches_flattened_wire_payload() {
         serde_json::json!({"kind":"upper_bound","tokens":8_000})
     );
     assert!(!block.contains("breakdown:"));
+    let meter = sdk.split_once("export interface ContextMeter {").unwrap().1;
+    let meter = meter.split_once('}').unwrap().0;
+    for key in wire["meter"].as_object().unwrap().keys() {
+        assert!(
+            meter.contains(&format!("{key}:")) || meter.contains(&format!("{key}?:")),
+            "missing context meter field {key}"
+        );
+    }
     let kinds = sdk
         .split_once("export type ContextBreakdownKind =")
         .unwrap()

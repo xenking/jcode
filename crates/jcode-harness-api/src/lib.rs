@@ -47,8 +47,9 @@ pub use jcode_selfdev_types::ServingIdentity;
 pub use jcode_session_types::{
     AskAnswer, AskOption, AskQuestion, AskResponse, CONTEXT_BREAKDOWN_CAPABILITY,
     ContextActionForecast, ContextActionMeasurement, ContextActionSavings, ContextBreakdown,
-    ContextBreakdownCategory, ContextBreakdownKind, SHAKE_TOOLS_CAPABILITY, SessionCatalogContext,
-    ShakeToolsAction, ShakeToolsResult, ShakeToolsStats,
+    ContextBreakdownCategory, ContextBreakdownKind, ContextMeter, ContextMeterState,
+    ContextOccupancySource, SHAKE_TOOLS_CAPABILITY, SessionCatalogContext, ShakeToolsAction,
+    ShakeToolsResult, ShakeToolsStats,
 };
 pub use jcode_session_types::{
     Attachment, FILE_ATTACHMENTS_CAPABILITY, RewindAnchor, RewindMessageKey, StoredAttachment,

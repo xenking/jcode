@@ -358,7 +358,7 @@ export type ApiRequest =
   | { req: "get_history_image_chunk"; session_id: string; key: string; offset: number }
   | { req: "list_session_images"; session_id: string }
   | { req: "get_session_image"; session_id: string; image_id: string; offset: number }
-  | { req: "session_context_breakdown"; session_id?: string | null; model?: string | null; cwd?: string | null }
+  | { req: "session_context_breakdown"; session_id?: string | null; model?: string | null; cwd?: string | null; summary_only?: boolean }
   | { req: "session_shake_tools"; session_id: string; action: ShakeToolsAction }
   | { req: "peek_session"; session_id: string; limit?: number }
   | { req: "clear"; session_id: string }
@@ -464,6 +464,22 @@ export interface SidePanelSnapshot {
   pages?: SidePanelPage[];
 }
 
+export interface ContextMeter {
+  state: "live" | "saved" | "draft" | "unavailable";
+  occupied_tokens: number | null;
+  source: "provider_reported" | "historical_report" | "compaction_estimate" | "local_estimate" | "unknown";
+  measured_at_ms: number | null;
+  route: string | null;
+  model_window_tokens: number | null;
+  effective_budget_tokens: number | null;
+  session_cap_tokens: number | null;
+  compaction_mode: string | null;
+  compaction_threshold_tokens: number | null;
+  idle_precompaction_tokens: number | null;
+  /** Published threshold above which one request's input costs more. Not an occupancy cap. */
+  long_context_pricing_above_input_tokens?: number;
+}
+
 export type ContextBreakdownKind =
   | "system_prompt"
   | "builtin_tools"
@@ -548,6 +564,8 @@ export type ApiEvent =
       estimated: boolean;
       categories: ContextBreakdownCategory[];
       action_forecast?: ContextActionForecast;
+      meter?: ContextMeter;
+      residual_tokens?: number;
     }
   | { ev: "shake_tools"; session_id: string; result: ShakeToolsResult }
   | { ev: "user_image_ids"; session_id: string; original_content: string; content: string; image_ids: string[] }

@@ -13,6 +13,7 @@ pub struct MockProvider {
     responses: Arc<Mutex<VecDeque<Vec<StreamEvent>>>>,
     models: Vec<&'static str>,
     current_model: Arc<Mutex<String>>,
+    context_compaction: bool,
     /// Captured system prompts from complete() calls (for testing)
     pub captured_system_prompts: Arc<Mutex<Vec<String>>>,
     /// Captured resume session IDs from complete() calls (for testing)
@@ -27,6 +28,7 @@ impl MockProvider {
             responses: Arc::new(Mutex::new(VecDeque::new())),
             models: Vec::new(),
             current_model: Arc::new(Mutex::new("mock".to_string())),
+            context_compaction: false,
             captured_system_prompts: Arc::new(Mutex::new(Vec::new())),
             captured_resume_session_ids: Arc::new(Mutex::new(Vec::new())),
             captured_models: Arc::new(Mutex::new(Vec::new())),
@@ -42,10 +44,16 @@ impl MockProvider {
             responses: Arc::new(Mutex::new(VecDeque::new())),
             models,
             current_model: Arc::new(Mutex::new(current)),
+            context_compaction: false,
             captured_system_prompts: Arc::new(Mutex::new(Vec::new())),
             captured_resume_session_ids: Arc::new(Mutex::new(Vec::new())),
             captured_models: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    pub fn with_context_compaction(mut self) -> Self {
+        self.context_compaction = true;
+        self
     }
 
     /// Queue a response (sequence of StreamEvents) to be returned on next complete() call
@@ -110,12 +118,17 @@ impl Provider for MockProvider {
         self.models.clone()
     }
 
+    fn supports_compaction(&self) -> bool {
+        self.context_compaction
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         let current = self.current_model.lock().unwrap().clone();
         Arc::new(MockProvider {
             responses: self.responses.clone(),
             models: self.models.clone(),
             current_model: Arc::new(Mutex::new(current)),
+            context_compaction: self.context_compaction,
             captured_system_prompts: self.captured_system_prompts.clone(),
             captured_resume_session_ids: self.captured_resume_session_ids.clone(),
             captured_models: self.captured_models.clone(),

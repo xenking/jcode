@@ -194,7 +194,7 @@ async fn manual_shake_requires_a_current_preview_and_records_only_one_reduction(
         panic!("expected a warm preview, got {preview:?}");
     };
     assert!(event.is_none() && stats.estimated_tokens_saved > 0);
-    let breakdown = agent.inspect_context_breakdown().await;
+    let breakdown = agent.inspect_context_breakdown(false).await;
     let forecast = breakdown.action_forecast.unwrap();
     assert_eq!(
         forecast.shake,

@@ -1191,16 +1191,6 @@ impl Agent {
                     )
                     .saturating_add(output);
                 crate::session_metrics::record_token_usage(&self.session.id, total, output);
-                if usage_input.is_some() {
-                    crate::session_telemetry::save_context(
-                        &self.session,
-                        total.saturating_sub(output),
-                        Some(self.effective_context_budget().await),
-                        self.provider.name(),
-                        self.provider.active_resolved_credential(),
-                        self.provider.serving_oauth_account_label(),
-                    );
-                }
             }
 
             if usage_input.is_some()
@@ -1281,6 +1271,15 @@ impl Agent {
                 crate::server::provider_oauth_email(self.provider.as_ref());
             let credential_after_stream = self.provider.active_resolved_credential();
             let oauth_account_label_after_stream = self.provider.serving_oauth_account_label();
+            let prompt_tokens = self.effective_context_tokens_from_usage(
+                self.last_usage.input_tokens,
+                self.last_usage.cache_read_input_tokens,
+                self.last_usage.cache_creation_input_tokens,
+            );
+            if saw_message_end {
+                self.record_completed_context_observation(prompt_tokens)
+                    .await;
+            }
             if model_after_stream != model_at_request_start
                 || credential_after_stream != credential_at_request_start
                 || oauth_email_after_stream != oauth_email_at_request_start
@@ -1326,11 +1325,7 @@ impl Agent {
             let assistant_message_id = if !content_blocks.is_empty() {
                 crate::telemetry::record_assistant_response();
                 let token_usage = Some(crate::session::StoredTokenUsage {
-                    prompt_tokens: Some(self.effective_context_tokens_from_usage(
-                        self.last_usage.input_tokens,
-                        self.last_usage.cache_read_input_tokens,
-                        self.last_usage.cache_creation_input_tokens,
-                    )),
+                    prompt_tokens: (saw_message_end && prompt_tokens > 0).then_some(prompt_tokens),
                     input_tokens: self.last_usage.input_tokens,
                     output_tokens: self.last_usage.output_tokens,
                     cache_read_input_tokens: self.last_usage.cache_read_input_tokens,

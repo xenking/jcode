@@ -1039,6 +1039,8 @@ pub struct App {
     cost: CostState,
     // Context limit tracking (for compaction warning)
     context_limit: u64,
+    remote_context_meter_request: Option<u64>,
+    remote_compaction_threshold: Option<usize>,
     context_warning_shown: bool,
     // Context info (what's loaded in system prompt)
     context_info: crate::prompt::ContextInfo,

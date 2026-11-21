@@ -8,6 +8,7 @@ mod context_breakdown;
 pub use context_breakdown::{
     CONTEXT_BREAKDOWN_CAPABILITY, ContextActionForecast, ContextActionMeasurement,
     ContextActionSavings, ContextBreakdown, ContextBreakdownCategory, ContextBreakdownKind,
+    ContextMeter, ContextMeterState, ContextOccupancySource,
 };
 mod memory;
 mod shake_tools;

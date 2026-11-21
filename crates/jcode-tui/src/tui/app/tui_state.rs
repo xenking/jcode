@@ -1684,6 +1684,18 @@ impl crate::tui::TuiState for App {
             None
         };
 
+        let compaction_threshold_tokens = if self.is_remote {
+            self.remote_compaction_threshold
+        } else if !self.provider.uses_jcode_compaction() {
+            self.provider.native_compaction_threshold_tokens()
+        } else {
+            self.registry
+                .compaction()
+                .try_read()
+                .ok()
+                .and_then(|manager| manager.reactive_compaction_threshold_tokens())
+        };
+
         crate::tui::info_widget::InfoWidgetData {
             startup_runtime_pending: self.is_remote && self.remote_startup_phase.is_some(),
             startup_usage_pending: startup_usage_slot_pending(
@@ -1696,15 +1708,7 @@ impl crate::tui::TuiState for App {
             historical_context: false,
             queue_mode: Some(self.queue_mode),
             context_limit: Some(self.context_limit as usize),
-            compaction_threshold_tokens: crate::compaction::compaction_threshold_tokens(
-                if uses_remote_widget_metadata {
-                    self.remote_provider_name.as_deref()
-                } else {
-                    Some(self.provider.name())
-                },
-                model.as_deref(),
-                self.context_limit as usize,
-            ),
+            compaction_threshold_tokens,
             model,
             reasoning_effort,
             service_tier: if !self.is_remote {

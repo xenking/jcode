@@ -184,6 +184,9 @@ class H(BaseHTTPRequestHandler):
         elif CONTROL and (match := re.search(r"\[e2e:hold:([a-z0-9_-]+)\]", prompt)):
             if not self.hold(match.group(1)):
                 return
+        usage_marker = re.search(r"\[e2e:input-tokens:([0-9]{1,7})\]", prompt) if CONTROL else None
+        input_tokens = int(usage_marker.group(1)) if usage_marker else 1
+        usage = {"prompt_tokens": input_tokens, "completion_tokens": 1, "total_tokens": input_tokens + 1}
         if not req.get("stream"):
             message = {"role": "assistant", "content": None if tool_calls else text}
             if tool_calls:
@@ -192,7 +195,7 @@ class H(BaseHTTPRequestHandler):
                 "id": "x", "object": "chat.completion", "model": "fake-model",
                 "choices": [{"index": 0, "finish_reason": "tool_calls" if tool_calls else "stop",
                              "message": message}],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                "usage": usage,
             }).encode()
             self.send_response(200)
             self.send_header("content-type", "application/json")
@@ -216,7 +219,7 @@ class H(BaseHTTPRequestHandler):
         event({"id": "x", "object": "chat.completion.chunk", "model": "fake-model",
                "choices": [{"index": 0, "delta": {},
                             "finish_reason": "tool_calls" if tool_calls else "stop"}],
-               "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}})
+               "usage": usage})
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
 

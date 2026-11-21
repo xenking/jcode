@@ -1929,6 +1929,21 @@ impl Provider for MultiProvider {
         }
     }
 
+    fn api_key_long_context_pricing(
+        &self,
+    ) -> jcode_provider_core::context_pricing::LongContextPricing {
+        match self.active_provider() {
+            ActiveProvider::OpenAI => self
+                .openai_provider()
+                .map(|p| p.api_key_long_context_pricing()),
+            ActiveProvider::Claude => self
+                .anthropic_provider()
+                .map(|p| p.api_key_long_context_pricing()),
+            _ => None,
+        }
+        .unwrap_or(jcode_provider_core::context_pricing::LongContextPricing::Unknown)
+    }
+
     fn credential_mode(&self) -> CredentialMode {
         let active = self.active_provider();
         match active {

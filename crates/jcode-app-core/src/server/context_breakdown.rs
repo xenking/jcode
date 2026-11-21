@@ -5,25 +5,25 @@ use std::path::Path;
 pub(super) async fn reply(
     id: u64,
     session_id: Option<String>,
-    model: Option<&str>,
-    cwd: Option<&str>,
+    (model, cwd): (Option<&str>, Option<&str>),
+    summary_only: bool,
     sessions: &SessionAgents,
     provider_template: &Arc<dyn Provider>,
 ) -> ServerEvent {
-    let breakdown = if let Some(session_id) = session_id {
+    let mut breakdown = if let Some(session_id) = session_id {
         if session_id.is_empty() || session_id.starts_with('.') || session_id.contains(['/', '\\'])
         {
             return error(id, "invalid session ID");
         }
         let live = sessions.read().await.get(&session_id).cloned();
         if let Some(agent) = live.as_ref().and_then(|agent| agent.try_lock().ok()) {
-            agent.inspect_context_breakdown().await
+            agent.inspect_context_breakdown(summary_only).await
         } else {
             let saved_id = session_id.clone();
             match tokio::task::spawn_blocking(move || {
                 crate::session::Session::load_for_remote_startup(&saved_id)
                     .ok()
-                    .map(|session| inspect_saved(&session))
+                    .map(|session| inspect_saved(&session, summary_only))
             })
             .await
             {
@@ -39,6 +39,10 @@ pub(super) async fn reply(
         }
         inspect_draft(provider_template, model, cwd).await
     };
+    if summary_only {
+        breakdown.categories.clear();
+        breakdown.residual_tokens = None;
+    }
     ServerEvent::ContextBreakdown { id, breakdown }
 }
 
