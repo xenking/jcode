@@ -48,6 +48,47 @@ fn ensure_success(response: &ServerEvent) -> Result<()> {
     }
 }
 
+fn queued_cold_output(response: &ServerEvent) -> Option<ToolOutput> {
+    match response {
+        ServerEvent::RuntimeCommandResult {
+            command,
+            data,
+            message,
+            ..
+        } if command == "swarm_message" && data["status"] == "queued_cold" => {
+            Some(ToolOutput::new(message.clone()))
+        }
+        _ => None,
+    }
+}
+
+pub(super) async fn deliver_agent_draft(
+    sender: String,
+    recipient: String,
+    message: String,
+) -> Result<Value> {
+    let response = send_request(Request::CommMessage {
+        id: REQUEST_ID,
+        from_session: sender,
+        to_session: Some(recipient),
+        message,
+        delivery: Some(CommDeliveryMode::Wake),
+        channel: None,
+        wake: None,
+        tldr: None,
+        to_swarm: None,
+        require_target: true,
+    })
+    .await?;
+    ensure_success(&response)?;
+    Ok(match response {
+        ServerEvent::RuntimeCommandResult { command, data, .. } if command == "swarm_message" => {
+            data
+        }
+        _ => json!({"status":"sent"}),
+    })
+}
+
 async fn fetch_plan_status(session_id: &str) -> Result<PlanGraphStatus> {
     let request = Request::CommPlanStatus {
         id: REQUEST_ID,
@@ -1018,6 +1059,9 @@ impl Tool for CommunicateTool {
                 match send_request(request).await {
                     Ok(response) => {
                         ensure_success(&response)?;
+                        if let Some(output) = queued_cold_output(&response) {
+                            return Ok(output);
+                        }
                         if let Some(swarm) = to_swarm {
                             return Ok(ToolOutput::new(cross_swarm_confirmation(
                                 &swarm,
@@ -1071,6 +1115,9 @@ impl Tool for CommunicateTool {
                 match send_request(request).await {
                     Ok(response) => {
                         ensure_success(&response)?;
+                        if let Some(output) = queued_cold_output(&response) {
+                            return Ok(output);
+                        }
                         Ok(ToolOutput::new(format!(
                             "Broadcast sent to your spawned subtree: {}",
                             message
@@ -1110,6 +1157,9 @@ impl Tool for CommunicateTool {
                 match send_request(request).await {
                     Ok(response) => {
                         ensure_success(&response)?;
+                        if let Some(output) = queued_cold_output(&response) {
+                            return Ok(output);
+                        }
                         if let Some(swarm) = to_swarm {
                             return Ok(ToolOutput::new(cross_swarm_confirmation(
                                 &swarm,
@@ -1154,6 +1204,9 @@ impl Tool for CommunicateTool {
                 match send_request(request).await {
                     Ok(response) => {
                         ensure_success(&response)?;
+                        if let Some(output) = queued_cold_output(&response) {
+                            return Ok(output);
+                        }
                         Ok(ToolOutput::new(format!(
                             "Channel message sent to #{}: {}",
                             channel, message

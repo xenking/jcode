@@ -218,6 +218,15 @@ async fn idle_unload_preserves_attached_busy_pending_tool_and_active_coordinator
 
 #[tokio::test]
 async fn idle_unload_default_swarm_dm_wakes_a_finished_worker() {
+    check_idle_unload_dm(false).await;
+}
+
+#[tokio::test]
+async fn idle_unload_cold_large_swarm_dm_queues_without_starting_a_turn() {
+    check_idle_unload_dm(true).await;
+}
+
+async fn check_idle_unload_dm(large_context: bool) {
     let _env = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
     let provider = TerminalSocketProvider::default();
@@ -240,14 +249,19 @@ async fn idle_unload_default_swarm_dm_wakes_a_finished_worker() {
             .is_ok()
     );
     let root = "session_unload_root";
-    let worker = "session_unload_worker";
+    let worker = if large_context {
+        "session_unload_large_worker"
+    } else {
+        "session_unload_worker"
+    };
     seed(&server, worker, home._home.path(), false).await;
+    let mut recipient = member(worker, "agent", "completed", Some(root));
+    if large_context {
+        recipient.runtime.model = Some("claude-sonnet-4-6".into());
+    }
     server.swarm_state.members.write().await.extend([
         (root.into(), member(root, "coordinator", "ready", None)),
-        (
-            worker.into(),
-            member(worker, "agent", "completed", Some(root)),
-        ),
+        (worker.into(), recipient),
     ]);
     server.swarm_state.swarms_by_id.write().await.insert(
         "unload-swarm".into(),
@@ -262,7 +276,10 @@ async fn idle_unload_default_swarm_dm_wakes_a_finished_worker() {
         server.swarm_state.members.read().await[worker].status,
         "completed"
     );
-    let (tx, _) = mpsc::unbounded_channel();
+    if large_context {
+        crate::session_metrics::record_token_usage(worker, 950_000, 1);
+    }
+    let (tx, mut rx) = mpsc::unbounded_channel();
     provider.finish_first.notify_one();
     crate::server::client_comm_message::handle_comm_message(
         11,
@@ -287,6 +304,78 @@ async fn idle_unload_default_swarm_dm_wakes_a_finished_worker() {
         &server.client_connections,
     )
     .await;
+    if large_context {
+        assert!(
+            !server.sessions.read().await.contains_key(worker),
+            "expensive cold DM unexpectedly restored the sleeping worker"
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert!(
+            matches!(rx.try_recv().unwrap(), ServerEvent::RuntimeCommandResult { data, .. } if data["status"] == "queued_cold")
+        );
+        let path = home._runtime.path().join("unload.sock");
+        let runtime = crate::server::runtime::ServerRuntime::from_server(&server);
+        let listener =
+            runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&path).unwrap());
+        let (reader, mut writer) = crate::transport::Stream::connect(&path)
+            .await
+            .unwrap()
+            .into_split();
+        let mut reader = BufReader::new(reader);
+        for (request, expected_id) in [
+            (
+                json!({"type":"subscribe", "id":7, "target_session_id":worker}),
+                7,
+            ),
+            (
+                json!({"type":"message", "id":8, "content":"user wakes recipient"}),
+                8,
+            ),
+        ] {
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+            writer
+                .write_all(format!("{request}\n").as_bytes())
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let mut line = String::new();
+                    assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                    match serde_json::from_str::<ServerEvent>(&line).unwrap() {
+                        ServerEvent::History { id: 7, .. } if expected_id == 7 => break,
+                        ServerEvent::Done { id } if expected_id == 8 && id == expected_id => break,
+                        ServerEvent::Error { id, message, .. } if id == expected_id => {
+                            panic!("{message}")
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        {
+            let messages = provider.messages.lock().unwrap();
+            assert!(
+                messages[0]
+                    .iter()
+                    .any(|text| text.contains("wake from idle unload DM"))
+            );
+            assert!(
+                messages[0]
+                    .iter()
+                    .any(|text| text.contains("user wakes recipient"))
+            );
+        }
+        assert!(crate::server::cold_agent_wake::pending_for_user_turn(worker).is_empty());
+        drop(reader);
+        drop(writer);
+        runtime.shutdown().await;
+        listener.await.unwrap();
+        crate::session_metrics::forget(worker);
+        return;
+    }
     tokio::time::timeout(Duration::from_secs(5), async {
         while provider.calls.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;

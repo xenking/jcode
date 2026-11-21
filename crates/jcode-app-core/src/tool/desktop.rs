@@ -33,15 +33,58 @@ impl Tool for DesktopTool {
             "condition":{"type":"object", "required":["kind"], "properties":{"kind":{"type":"string", "enum":["selector_visible","text_contains","session_idle"]}, "selector":{"type":"string","description":"Visible tool:<call_id> or row:<revision>:<index> from state."}, "text":{"type":"string"}}, "additionalProperties":false},"timeout_ms":{"type":"integer","minimum":1,"maximum":120000}
         }})
     }
-    async fn execute(&self, mut input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, mut input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let object = input.as_object_mut().context("expected an object")?;
         object.remove("intent");
         object.remove("accept_large_output");
         object.retain(|_, value| !value.is_null());
         let action: DesktopAction =
             serde_json::from_value(input).context("invalid desktop action")?;
+        if matches!(&action, DesktopAction::Click { selector, .. } if selector.starts_with("ask:ask-cold-wake-"))
+        {
+            bail!("answer the cold-session wake confirmation directly in the chat");
+        }
+        if let Some(target) =
+            submit_target(&action).filter(|target| target.session_id != ctx.session_id)
+        {
+            let recipient = target.session_id.clone();
+            let target = target.clone();
+            let state =
+                tokio::task::spawn_blocking(move || execute_local(DesktopAction::State { target }))
+                    .await??;
+            let panel = &state["panel"];
+            if panel["agent_owned_draft"] != true {
+                bail!(
+                    "refusing to send a user draft to another session; set an agent-owned draft first or use swarm dm with your own text"
+                );
+            }
+            let draft = panel["composer"]
+                .as_str()
+                .filter(|text| !text.trim().is_empty())
+                .context("agent draft is empty")?;
+            let mut result =
+                super::communicate::deliver_agent_draft(ctx.session_id, recipient, draft.into())
+                    .await?;
+            result["draft_preserved"] = true.into();
+            return Ok(ToolOutput::new(serde_json::to_string_pretty(&result)?));
+        }
         let result = tokio::task::spawn_blocking(move || execute_local(action)).await??;
         Ok(ToolOutput::new(serde_json::to_string_pretty(&result)?))
+    }
+}
+
+fn submit_target(action: &DesktopAction) -> Option<&jcode_sdk::desktop_control::DesktopTarget> {
+    match action {
+        DesktopAction::Send { target, .. } => Some(target),
+        DesktopAction::Click {
+            target, selector, ..
+        } if selector == "composer.send" => Some(target),
+        DesktopAction::PressKey { target, key, .. }
+            if key.eq_ignore_ascii_case("enter") || key.eq_ignore_ascii_case("return") =>
+        {
+            Some(target)
+        }
+        _ => None,
     }
 }
 

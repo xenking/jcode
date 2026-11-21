@@ -509,6 +509,22 @@ pub(super) async fn handle_comm_message(
         };
 
         let mut delivered_targets = 0usize;
+        let mut queued_cold = Vec::new();
+        let operator_chain = {
+            let members = swarm_members.read().await;
+            let mut chain = vec![from_session.clone()];
+            while let Some(parent) = chain
+                .last()
+                .and_then(|id| members.get(id))
+                .and_then(|member| member.report_back_to_session_id.as_ref())
+            {
+                if chain.contains(parent) {
+                    break;
+                }
+                chain.push(parent.clone());
+            }
+            chain
+        };
         for session_id in &target_sessions {
             if !swarm_session_ids.contains(session_id) {
                 continue;
@@ -516,7 +532,7 @@ pub(super) async fn handle_comm_message(
             if known_member_ids.contains(session_id) {
                 let from_label = friendly_name
                     .clone()
-                    .unwrap_or_else(|| from_session[..8.min(from_session.len())].to_string());
+                    .unwrap_or_else(|| from_session.clone());
                 let scope_label = match (scope, channel.as_deref()) {
                     _ if cross_swarm_id.is_some() && !global_dm => "Cross-swarm DM".to_string(),
                     ("channel", Some(channel_name)) => format!("#{}", channel_name),
@@ -530,6 +546,42 @@ pub(super) async fn handle_comm_message(
                 };
                 let delivery_mode = resolve_comm_delivery_mode(scope, delivery, wake);
                 let notification_msg = format!("{} from {}: {}", scope_label, from_label, message);
+                if delivery_mode == CommDeliveryMode::Wake && session_id != &from_session {
+                    let model = swarm_members
+                        .read()
+                        .await
+                        .get(session_id)
+                        .and_then(|member| member.runtime.model.clone());
+                    if let Some(risk) =
+                        super::cold_agent_wake::assess(session_id, sessions, model).await
+                        && !super::cold_agent_wake::approved(&from_session, &operator_chain, &risk)
+                            .await
+                    {
+                        match super::cold_agent_wake::defer(
+                            session_id,
+                            from_session.clone(),
+                            friendly_name.clone(),
+                            notification_msg,
+                        ) {
+                            Ok(()) => queued_cold.push(session_id.clone()),
+                            Err(error) => {
+                                send_client_event_best_effort(
+                                    client_event_tx,
+                                    ServerEvent::Error {
+                                        id,
+                                        message: format!(
+                                            "Could not queue cold message to {session_id}: {error}"
+                                        ),
+                                        retry_after_secs: None,
+                                    },
+                                    "client_comm_message: cold queue error",
+                                );
+                                return;
+                            }
+                        }
+                        continue;
+                    }
+                }
                 let _ = fanout_session_event(
                     swarm_members,
                     session_id,
@@ -676,6 +728,21 @@ pub(super) async fn handle_comm_message(
             .await;
         }
 
+        if !queued_cold.is_empty() {
+            send_client_event_best_effort(
+                client_event_tx,
+                ServerEvent::RuntimeCommandResult {
+                    id,
+                    command: "swarm_message".into(),
+                    data: serde_json::json!({"status":"queued_cold", "recipients": queued_cold, "delivered_immediately": delivered_targets}),
+                    message: format!(
+                        "queued_cold: saved without waking {}; delivered on the next user-started turn",
+                        queued_cold.join(", ")
+                    ),
+                },
+                "client_comm_message: queued cold",
+            );
+        }
         send_client_event_best_effort(
             client_event_tx,
             ServerEvent::Done { id },

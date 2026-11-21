@@ -431,8 +431,51 @@ pub(super) async fn start_processing_message(
         return;
     }
 
+    let deferred = if !content.trim().is_empty() || !images.is_empty() {
+        super::super::cold_agent_wake::pending_for_user_turn(client_session_id)
+    } else {
+        Vec::new()
+    };
+    for message in &deferred {
+        agent_guard.add_message_with_display_role(
+            crate::message::Role::User,
+            vec![crate::message::ContentBlock::Text {
+                text: message.text.clone(),
+                cache_control: None,
+            }],
+            Some(jcode_session_types::StoredDisplayRole::System),
+        );
+    }
+    if !deferred.is_empty()
+        && let Err(error) = agent_guard
+            .persist_session_now()
+            .and_then(|()| super::super::cold_agent_wake::mark_stored(client_session_id, &deferred))
+    {
+        crate::logging::warn(&format!(
+            "Could not persist deferred agent messages for {client_session_id}: {error}"
+        ));
+    }
+
     let status_title = agent_guard.session_display_title_or_name();
     drop(agent_guard);
+
+    for message in deferred {
+        super::super::fanout_session_event(
+            swarm.members,
+            client_session_id,
+            ServerEvent::Notification {
+                from_session: message.from_session,
+                from_name: message.from_name,
+                notification_type: crate::protocol::NotificationType::Message {
+                    scope: Some("dm".into()),
+                    channel: None,
+                    tldr: None,
+                },
+                message: message.text,
+            },
+        )
+        .await;
+    }
 
     *state.client_is_processing = true;
     crate::agents_status::turn_started(client_session_id, &status_title);

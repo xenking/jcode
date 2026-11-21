@@ -13,6 +13,7 @@ mod client_comm;
 mod client_comm_channels;
 mod client_comm_context;
 mod client_comm_message;
+mod cold_agent_wake;
 mod client_comm_swarms;
 mod client_disconnect_cleanup;
 mod client_lifecycle;

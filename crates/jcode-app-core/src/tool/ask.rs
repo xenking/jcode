@@ -148,6 +148,17 @@ impl Tool for AskTool {
     }
 }
 
+pub(crate) async fn ask_for_real_answer(
+    session_chain: &[String],
+    request_id: &str,
+    questions: &[AskQuestion],
+) -> Option<AskResponse> {
+    let tx = session_chain
+        .iter()
+        .find_map(|session| super::interactive::sender(session))?;
+    ask_client(tx, questions, request_id).await.ok()
+}
+
 async fn ask_client(
     tx: tokio::sync::mpsc::UnboundedSender<StdinInputRequest>,
     questions: &[AskQuestion],

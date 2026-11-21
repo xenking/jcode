@@ -4,6 +4,7 @@ mod agentgrep;
 pub mod ambient;
 mod apply_patch;
 mod ask;
+pub(crate) use ask::ask_for_real_answer;
 mod bash;
 #[cfg(unix)]
 pub(crate) use bash::{
