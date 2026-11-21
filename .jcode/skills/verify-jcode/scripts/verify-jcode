@@ -1040,7 +1040,7 @@ class Harness:
         return report
 
 
-def launch(args):
+def launch(args, *, prepare_workspace=None):
     binary = Path(args.binary).resolve(strict=True)
     require(args.cols >= 40 and args.rows >= 15, "Terminal must be at least 40x15")
     require(binary.is_file() and os.access(binary, os.X_OK), "Binary must be executable")
@@ -1091,6 +1091,8 @@ def launch(args):
         (review / "SKILL.md").write_text(
             '---\nname: verify-review\ndescription: A second isolated verification skill\n---\n'
             'VERIFY_REVIEW_SKILL_BODY\nAcknowledge the user prompt.\n')
+        if prepare_workspace is not None:
+            prepare_workspace(root)
         harness.state["binary_version"] = run([root / "jcode", "--no-update", "--version"], env=env).stdout.strip()
         harness.save()
         (evidence / "source.diff").write_text(run(["git", "-C", REPO, "diff", "HEAD"]).stdout)
