@@ -294,9 +294,46 @@ async fn memory_recall_is_a_stable_responses_prefix_across_turns_and_resume() {
 /// be injected in the user role, so the provider prompt cache still hits.
 #[tokio::test]
 async fn reload_mid_tool_resumes_with_only_a_tool_result() {
+    reload_mid_tool_with_prefix(false).await;
+}
+
+#[tokio::test]
+async fn reload_mid_tool_preserves_compacted_anthropic_prefix_with_pinned_skill() {
+    reload_mid_tool_with_prefix(true).await;
+}
+
+async fn reload_mid_tool_with_prefix(compacted: bool) {
     let _lock = crate::storage::lock_test_env();
-    let _home = TestHome::new();
+    let home = TestHome::new();
     let mut session = crate::session::Session::create(None, None);
+    if compacted {
+        let skill = home._home.path().join(".jcode/skills/reload-probe");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: reload-probe\ndescription: reload fixture\n---\nRetain this skill across reload.\n",
+        )
+        .unwrap();
+        session.working_dir = Some(home._home.path().to_string_lossy().into_owned());
+        session.add_message(
+            Role::User,
+            Message::user("Archived prompt").content.to_vec(),
+        );
+        session.add_message(
+            Role::Assistant,
+            Message::assistant_text("Archived answer").content.to_vec(),
+        );
+        let cutoff = session.messages.len();
+        session.compaction = Some(Arc::new(crate::session::StoredCompactionState {
+            summary_text: "Retain the archived summary".into(),
+            plan_context: None,
+            openai_encrypted_content: None,
+            snapcompact: None,
+            covers_up_to_turn: cutoff,
+            original_turn_count: cutoff,
+            compacted_count: cutoff,
+        }));
+    }
     session.add_message(
         Role::User,
         vec![ContentBlock::Text {
@@ -309,7 +346,11 @@ async fn reload_mid_tool_resumes_with_only_a_tool_result() {
 
     let capture = ScriptedProvider::default();
     let provider: Arc<dyn Provider> = Arc::new(capture.clone());
-    let mut resumed = Agent::new_with_session(provider, Registry::empty(), session, None);
+    let mut resumed = Agent::new_with_session(provider.clone(), Registry::empty(), session, None);
+    if compacted {
+        resumed.set_pinned_skill(Some("reload-probe")).unwrap();
+        resumed.seed_compaction_from_session();
+    }
     // The request that was in flight before the restart.
     let (tx, _rx) = tokio_mpsc::unbounded_channel();
     let batcher = crate::stream_batching::BatchingSender::new(tx.clone(), session_id.clone());
@@ -342,6 +383,9 @@ async fn reload_mid_tool_resumes_with_only_a_tool_result() {
         ],
     );
     resumed.session.save().unwrap();
+    drop(resumed);
+    let mut resumed = Agent::new(provider, Registry::empty());
+    resumed.restore_session(&session_id).unwrap();
 
     let plan = resumed.reload_resume_plan(true);
     assert!(
@@ -361,6 +405,37 @@ async fn reload_mid_tool_resumes_with_only_a_tool_result() {
     assert_eq!(outcome, ResumeOutcome::Continued);
 
     let post = capture.requests()[0].clone();
+    if compacted {
+        let format = |messages: &[Message]| {
+            let items = jcode_provider_anthropic::format_messages_for_request(
+                messages,
+                false,
+                &[],
+                true,
+                "",
+                true,
+            );
+            let mut items = serde_json::to_value(items).unwrap();
+            for item in items.as_array_mut().unwrap() {
+                for block in item["content"].as_array_mut().unwrap() {
+                    block.as_object_mut().unwrap().remove("cache_control");
+                }
+            }
+            items
+        };
+        let before = format(&pre_reload);
+        let before_text = before.to_string();
+        assert!(before_text.contains("Retain the archived summary"));
+        assert!(before_text.contains("Retain this skill across reload"));
+        let after = format(&post);
+        let before = before.as_array().unwrap();
+        let after = after.as_array().unwrap();
+        assert_eq!(
+            serde_json::to_vec(before).unwrap(),
+            serde_json::to_vec(&after[..before.len()]).unwrap(),
+            "reload must preserve the compacted provider prefix byte for byte"
+        );
+    }
     assert_eq!(
         serde_json::to_value(&post[..pre_reload.len()]).unwrap(),
         serde_json::to_value(&pre_reload).unwrap(),
