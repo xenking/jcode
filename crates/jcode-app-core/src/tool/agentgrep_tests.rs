@@ -642,10 +642,7 @@ fn build_args_for_trace_still_requires_terms() {
     };
 
     let error = trace_or_smart_terms_owned(&params).unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "agentgrep trace requires non-empty 'terms'"
-    );
+    assert!(error.to_string().contains("nonempty parameter `terms`"));
 }
 
 #[test]

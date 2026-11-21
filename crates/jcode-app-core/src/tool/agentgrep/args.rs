@@ -46,7 +46,7 @@ pub(super) fn build_grep_args(params: &AgentGrepInput, ctx: &ToolContext) -> Res
     let query = params
         .query
         .clone()
-        .ok_or_else(|| anyhow::anyhow!("agentgrep grep requires 'query'"))?;
+        .ok_or_else(|| anyhow::anyhow!("Missing parameter `query`. Example: {GREP_EXAMPLE}"))?;
     let scope = resolved_search_scope(
         ctx,
         params.path.as_deref(),
@@ -77,7 +77,7 @@ pub(super) fn build_find_args(params: &AgentGrepInput, ctx: &ToolContext) -> Res
         && params.file_type.as_deref().is_none_or(str::is_empty)
     {
         return Err(anyhow::anyhow!(
-            "agentgrep find requires 'query' unless path, glob, or type narrows the search"
+            "Missing parameter `query` (unless path, glob, or type narrows the search). Example: {FIND_EXAMPLE}"
         ));
     }
     let scope = resolved_search_scope(
@@ -141,10 +141,12 @@ pub(super) fn build_smart_args_and_query(
 ) -> Result<(SmartArgs, SmartQuery)> {
     let terms = trace_or_smart_terms_owned(params)?;
     let query = parse_smart_query(&terms).map_err(|err| {
-        anyhow::anyhow!(
-            "{}\n\ntrace queries use a small DSL. Example:\n  agentgrep trace subject:auth_status relation:rendered support:ui",
-            err
-        )
+        let parameter = if params.terms.as_ref().is_some_and(|terms| !terms.is_empty()) {
+            "terms"
+        } else {
+            "query"
+        };
+        anyhow::anyhow!("Invalid parameter `{parameter}`. Example: {TRACE_EXAMPLE}\n{err}")
     })?;
     let scope = resolved_search_scope(
         ctx,
@@ -192,13 +194,13 @@ pub(super) fn trace_or_smart_terms_owned(params: &AgentGrepInput) -> Result<Vec<
     }
 
     let field_hint = if params.mode == "smart" {
-        "non-empty 'terms' or 'query'"
+        "nonempty parameter `terms` or `query`"
     } else {
-        "non-empty 'terms'"
+        "nonempty parameter `terms`"
     };
 
     Err(anyhow::anyhow!(
-        "agentgrep {} requires {}",
+        "agentgrep {} requires {}. Example: {TRACE_EXAMPLE}",
         params.mode,
         field_hint
     ))
@@ -215,9 +217,7 @@ fn outline_file_arg(params: &AgentGrepInput) -> Result<String> {
                 .as_ref()
                 .and_then(|terms| terms.first().cloned())
         })
-        .ok_or_else(|| {
-            anyhow::anyhow!("agentgrep outline requires 'file' (or legacy 'query' / first term)")
-        })
+        .ok_or_else(|| anyhow::anyhow!("Missing parameter `file`. Example: {OUTLINE_EXAMPLE}"))
 }
 
 fn parse_full_region_mode(value: Option<&str>) -> Result<FullRegionMode> {
@@ -226,7 +226,7 @@ fn parse_full_region_mode(value: Option<&str>) -> Result<FullRegionMode> {
         "always" => Ok(FullRegionMode::Always),
         "never" => Ok(FullRegionMode::Never),
         other => Err(anyhow::anyhow!(
-            "agentgrep trace full_region must be one of: auto, always, never; got {other}"
+            "Invalid parameter `full_region`: {other}. Use auto, always, or never. Example: await tools.agentgrep({{mode: 'trace', terms: ['subject:auth_status', 'relation:rendered'], full_region: 'auto'}})"
         )),
     }
 }

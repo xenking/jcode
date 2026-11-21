@@ -53,6 +53,8 @@ pub const CODEMODE_PROMPT: &str = "# Tool calls
 - a tool returns far more output than you need and you only want a summary.
 Only the script's return value and console output reach the conversation, so intermediate data costs no context.
 
+For example, use `agentgrep` to find matches, use their paths and line numbers to `read` small windows, then return only the relevant `path:line` entries. Use `max_output_tokens: 4000` when a preview is enough. For independent reads where partial results are useful, use `Promise.allSettled`.
+
 Use `batch` for a handful (1-10) independent calls whose results you want verbatim. Use `bash` for shell work, not as a way to fan out tool calls. Call a tool directly when one call is enough.";
 
 /// Harness capabilities that conditionally contribute prompt modules.

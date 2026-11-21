@@ -26,6 +26,8 @@ const EXCLUDED: &[&str] = &["codemode", "batch"];
 
 /// Maximum characters of the final report returned to the model.
 const MAX_REPORT_CHARS: usize = 60_000;
+const MIN_OUTPUT_TOKENS: usize = 512;
+const MAX_OUTPUT_TOKENS: usize = 15_000;
 
 const DESCRIPTION: &str = "Run one JavaScript or TypeScript program that calls tools itself. Reach for it when work needs several calls: dependent chains, loops over a previous result, 5+ calls, or big outputs you only want summarized. Only your return value and console.log output reach the conversation, so intermediate data costs no context. Prefer it over repeated single calls or `batch`; use `batch` for 1-10 independent calls whose results you want verbatim, and `bash` for shell work.\n\
 Supply an async function body using await/return; tools.<name>(args) or callTool(name, args) takes normal tool arguments, JSON output becomes objects, and failures throw. Use Promise.all for independent calls. Write JS or TS: type annotations, interfaces, `as`, generics and `satisfies` are erased first, so `types()` output is safe to copy.\n\
@@ -46,6 +48,7 @@ impl CodemodeTool {
 struct CodemodeInput {
     #[serde(alias = "script", alias = "source", alias = "js")]
     code: String,
+    max_output_tokens: Option<usize>,
 }
 
 struct RegistryHost {
@@ -137,12 +140,8 @@ fn truncate_chars(text: &str, max: usize) -> String {
 
 /// Bound the report. When it is over budget, the full text is spilled to a
 /// file under the jcode dir so nothing is silently lost.
-fn bound_report(text: String, max: usize, spill: Option<PathBuf>) -> String {
-    if text.chars().count() <= max {
-        return text;
-    }
-    let total = text.len();
-    let saved = spill.and_then(|path| {
+fn spill_report(text: &str, spill: Option<PathBuf>) -> Option<PathBuf> {
+    spill.and_then(|path| {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .inspect_err(|error| {
@@ -150,13 +149,21 @@ fn bound_report(text: String, max: usize, spill: Option<PathBuf>) -> String {
                 })
                 .ok()?;
         }
-        std::fs::write(&path, &text)
+        std::fs::write(&path, text)
             .inspect_err(|error| {
                 crate::logging::warn(&format!("Codemode report spill failed: {error}"))
             })
             .ok()?;
         Some(path)
-    });
+    })
+}
+
+fn bound_report(text: String, max: usize, spill: Option<PathBuf>) -> String {
+    if text.chars().count() <= max {
+        return text;
+    }
+    let total = text.len();
+    let saved = spill_report(&text, spill);
     let cut: String = text.chars().take(max).collect();
     match saved {
         Some(path) => format!(
@@ -165,6 +172,69 @@ fn bound_report(text: String, max: usize, spill: Option<PathBuf>) -> String {
         ),
         None => format!("{cut}\n...(truncated; return a smaller value or store() the rest)"),
     }
+}
+
+fn budget_report(
+    out: &jcode_codemode::RunOutput,
+    max_tokens: usize,
+    spill: Option<PathBuf>,
+    store_saved: bool,
+) -> String {
+    let (report, body_end) = render_report_with_body(out);
+    let max_bytes = max_tokens * jcode_core::util::APPROX_CHARS_PER_TOKEN;
+    if report.len() <= max_bytes {
+        return report;
+    }
+
+    let mut notice = format!("\n...(truncated to ~{max_tokens} tokens)");
+    if let Some(path) = spill_report(&report, spill) {
+        let path = path.to_string_lossy();
+        if path.len() <= 512 {
+            notice.push_str(&format!("\nFull report: {path}"));
+        }
+    }
+    if store_saved {
+        if let Some(key) = out.store.keys().find(|key| key.len() <= 64)
+            && let Ok(key) = serde_json::to_string(key)
+            && key.len() <= 80
+        {
+            notice.push_str(&format!(
+                "\nFor stored data, use storedKeys() and load({key}) in a new script."
+            ));
+        } else {
+            notice.push_str("\nTo page script data, save it with store(key, value) before returning, then slice load(key) in another run.");
+        }
+    }
+
+    let mut diagnostics = String::new();
+    if let Some(error) = &out.error {
+        diagnostics.push_str("error: ");
+        diagnostics.push_str(crate::util::truncate_str(error, 850));
+        if error.len() > 850 {
+            diagnostics.push('…');
+        }
+        diagnostics.push('\n');
+    }
+    let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+    for receipt in &out.receipts {
+        *counts.entry(receipt.status.as_str()).or_default() += 1;
+    }
+    let status = counts
+        .iter()
+        .map(|(status, count)| format!("{count} {status}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut footer = String::new();
+    if !status.is_empty() {
+        footer.push_str(&format!(
+            "\ncalls:\n  ...{} more ({status})\n",
+            out.receipts.len()
+        ));
+    }
+    footer.push_str(&call_count_footer(out));
+    let remaining = max_bytes.saturating_sub(diagnostics.len() + notice.len() + footer.len());
+    let body = crate::util::truncate_str(&report[..body_end], remaining);
+    format!("{diagnostics}{body}{notice}{footer}")
 }
 
 fn spill_path(session_id: &str, call_id: &str) -> Option<PathBuf> {
@@ -191,7 +261,7 @@ fn spill_path(session_id: &str, call_id: &str) -> Option<PathBuf> {
     )
 }
 
-pub(crate) fn render_report(out: &jcode_codemode::RunOutput) -> String {
+fn render_report_with_body(out: &jcode_codemode::RunOutput) -> (String, usize) {
     let mut report = String::new();
     if !out.logs.is_empty() || out.logs_truncated {
         report.push_str("console:\n");
@@ -207,6 +277,7 @@ pub(crate) fn render_report(out: &jcode_codemode::RunOutput) -> String {
         }
         report.push('\n');
     }
+    let mut body_end = report.len();
     match (&out.error, &out.result) {
         (Some(err), _) => {
             report.push_str("error: ");
@@ -223,6 +294,9 @@ pub(crate) fn render_report(out: &jcode_codemode::RunOutput) -> String {
             report.push('\n');
         }
         (None, None) => report.push_str("result: undefined\n"),
+    }
+    if out.error.is_none() {
+        body_end = report.len();
     }
     if !out.receipts.is_empty() {
         report.push_str("\ncalls:\n");
@@ -255,19 +329,28 @@ pub(crate) fn render_report(out: &jcode_codemode::RunOutput) -> String {
             ));
         }
     }
-    let mut footer = format!(
-        "\n[{} tool call{}, {:.1}s",
-        out.tool_calls,
-        if out.tool_calls == 1 { "" } else { "s" },
-        out.elapsed.as_secs_f64()
-    );
+    let mut footer = call_count_footer(out);
+    footer.pop(); // Append the store keys before the closing bracket.
     if !out.store.is_empty() {
         let keys: Vec<&str> = out.store.keys().map(String::as_str).take(20).collect();
         footer.push_str(&format!(", stored: {}", keys.join(", ")));
     }
     footer.push(']');
     report.push_str(&footer);
-    report
+    (report, body_end)
+}
+
+fn call_count_footer(out: &jcode_codemode::RunOutput) -> String {
+    format!(
+        "\n[{} tool call{}, {:.1}s]",
+        out.tool_calls,
+        if out.tool_calls == 1 { "" } else { "s" },
+        out.elapsed.as_secs_f64()
+    )
+}
+
+fn render_report(out: &jcode_codemode::RunOutput) -> String {
+    render_report_with_body(out).0
 }
 
 #[async_trait]
@@ -289,6 +372,12 @@ impl Tool for CodemodeTool {
                 "code": {
                     "type": "string",
                     "description": "Body of an async JavaScript function. Use await and return."
+                },
+                "max_output_tokens": {
+                    "type": "integer",
+                    "minimum": MIN_OUTPUT_TOKENS,
+                    "maximum": MAX_OUTPUT_TOKENS,
+                    "description": "Optional approximate report budget. Use 4000 for a compact preview. Save full script data with store(key, value), then page it with load(key). Intermediate tool output is unaffected."
                 }
             }
         })
@@ -302,6 +391,13 @@ impl Tool for CodemodeTool {
         let params: CodemodeInput = serde_json::from_value(input)?;
         if params.code.trim().is_empty() {
             anyhow::bail!("code is empty");
+        }
+        if let Some(max_tokens) = params.max_output_tokens
+            && !(MIN_OUTPUT_TOKENS..=MAX_OUTPUT_TOKENS).contains(&max_tokens)
+        {
+            anyhow::bail!(
+                "max_output_tokens must be between {MIN_OUTPUT_TOKENS} and {MAX_OUTPUT_TOKENS}"
+            );
         }
 
         let tools: Vec<ToolInfo> = registry
@@ -327,12 +423,7 @@ impl Tool for CodemodeTool {
             ..Limits::default()
         };
         let out = jcode_codemode::run(params.code, host, tools, store, limits).await;
-        save_store(&ctx.session_id, &out.store).with_context(|| {
-            format!(
-                "codemode executed but its store was NOT persisted:\n{}",
-                render_report(&out)
-            )
-        })?;
+        let store_result = save_store(&ctx.session_id, &out.store);
 
         crate::logging::info(&format!(
             "[tool:codemode] session={} calls={} elapsed_ms={} error={}",
@@ -342,11 +433,14 @@ impl Tool for CodemodeTool {
             out.error.as_deref().unwrap_or("none")
         ));
 
-        let report = bound_report(
-            render_report(&out),
-            MAX_REPORT_CHARS,
-            spill_path(&ctx.session_id, &ctx.tool_call_id),
-        );
+        let spill = spill_path(&ctx.session_id, &ctx.tool_call_id);
+        let report = match params.max_output_tokens {
+            Some(tokens) => budget_report(&out, tokens, spill, store_result.is_ok()),
+            None => bound_report(render_report(&out), MAX_REPORT_CHARS, spill),
+        };
+        store_result.with_context(|| {
+            format!("codemode executed but its store was NOT persisted:\n{report}")
+        })?;
         if out.error.is_some() && out.tool_calls == 0 && out.logs.is_empty() {
             // Nothing happened: surface as a tool error so the model retries.
             anyhow::bail!("{report}");

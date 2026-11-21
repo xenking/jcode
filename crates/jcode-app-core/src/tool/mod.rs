@@ -84,6 +84,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[path = "name_policy.rs"]
 mod name_policy;
 pub(crate) use name_policy::tool_name_is_allowed;
+
+fn parse_tool_args<T: serde::de::DeserializeOwned>(input: Value, example: &str) -> Result<T> {
+    serde_path_to_error::deserialize(input).map_err(|err| {
+        if err.path().iter().next().is_some() {
+            anyhow::anyhow!(
+                "Invalid parameter `{}`. Example: {example}\n{}",
+                err.path(),
+                err.inner()
+            )
+        } else {
+            anyhow::anyhow!("Invalid arguments: {}. Example: {example}", err.inner())
+        }
+    })
+}
+
 /// The unified schema may be exposed for a restricted MCP allowlist. That
 /// must not grant management privileges or bypass a disabled legacy surface.
 fn ensure_mcp_action_allowed(session_id: &str, surface: &str) -> Result<()> {

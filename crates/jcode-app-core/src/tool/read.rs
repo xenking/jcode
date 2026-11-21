@@ -148,7 +148,10 @@ impl Tool for ReadTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
-        let params: ReadInput = serde_json::from_value(input)?;
+        let params: ReadInput = super::parse_tool_args(
+            input,
+            "await tools.read({file_path: 'Cargo.toml', start_line: 1, limit: 10})",
+        )?;
         if let Some(id) = params.file_path.strip_prefix("session-image://") {
             let session = crate::session::Session::load_for_remote_startup(&ctx.session_id)?;
             let image = session

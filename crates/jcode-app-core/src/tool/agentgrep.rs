@@ -26,6 +26,20 @@ use std::sync::{
 use std::time::Duration;
 
 const AGENTGREP_FOREGROUND_BUDGET: Duration = Duration::from_secs(5);
+const GREP_EXAMPLE: &str = "await tools.agentgrep({mode: 'grep', query: 'TODO'})";
+const FIND_EXAMPLE: &str = "await tools.agentgrep({mode: 'find', query: 'Cargo.toml'})";
+const OUTLINE_EXAMPLE: &str = "await tools.agentgrep({mode: 'outline', file: 'src/main.rs'})";
+const TRACE_EXAMPLE: &str =
+    "await tools.agentgrep({mode: 'trace', terms: ['subject:auth_status', 'relation:rendered']})";
+
+fn example_for_mode(mode: &str) -> &'static str {
+    match mode {
+        "find" => FIND_EXAMPLE,
+        "outline" => OUTLINE_EXAMPLE,
+        "trace" | "smart" => TRACE_EXAMPLE,
+        _ => GREP_EXAMPLE,
+    }
+}
 
 struct CancelSearchOnDrop(Arc<AtomicBool>);
 
@@ -304,7 +318,8 @@ impl Tool for AgentGrepTool {
                 context: (&ctx).into(),
             }
         });
-        let params: AgentGrepInput = serde_json::from_value(input)?;
+        let example = example_for_mode(input["mode"].as_str().unwrap_or_default());
+        let params: AgentGrepInput = super::parse_tool_args(input, example)?;
         let display_name = summarize_background_search(&params);
         let session_id = ctx.session_id.clone();
         // The search shells out to ripgrep and walks/reads files (and for
@@ -543,7 +558,7 @@ fn execute_linked_agentgrep(
                 .with_title(format!("agentgrep {}", params.mode)))
         }
         _ => Err(anyhow::anyhow!(
-            "Unsupported agentgrep mode: {}. Use grep, find, outline, or trace.",
+            "Invalid parameter `mode`: {}. Use grep, find, outline, or trace. Example: {GREP_EXAMPLE}",
             params.mode
         )),
     }

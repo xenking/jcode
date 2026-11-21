@@ -22,7 +22,10 @@ Three places now carry that guidance:
 - `CODEMODE_PROMPT` in `jcode-base/src/prompt.rs`, appended to the static
   system prompt when both `[features] code_mode` and `[tools] codemode` are
   on. It lists the work shapes: 5+ calls, dependent chains, loops over a
-  previous result, and large outputs that only need a summary.
+  previous result, and large outputs that only need a summary. For example,
+  find matches with `agentgrep`, pass their paths and line numbers to `read`
+  for small windows, and return only relevant `path:line` entries. Use
+  `Promise.allSettled` when independent reads can succeed or fail separately.
 - The tool description leads with the same shapes before the mechanics, and
   says which tool wins for each (`batch` for 1-10 independent calls, `bash`
   for shell work).
@@ -44,7 +47,7 @@ codemode = true    # legacy alias, also default; either false disables
 
 | Global | Meaning |
 | --- | --- |
-| `await tools.<name>(args)` / `callTool(name, args)` | Run a tool. JSON output is parsed to objects; failures throw `Error("<tool>: <reason>")`. |
+| `await tools.<name>(args)` / `callTool(name, args)` | Run a tool. JSON object/array output becomes a JS object/array. Other output is a string. Failures throw `Error("<tool>: <reason>")`. |
 | `listTools(filter?)` | `[{name, description}]` (first line of each description). |
 | `types(filter?)` | TypeScript declarations (`type XInput = {...}; declare const tools: {...}`) for matching tools. |
 | `describeTool(name)` | `{name, description, input_schema, typescript}`. |
@@ -54,6 +57,13 @@ codemode = true    # legacy alias, also default; either false disables
 MCP tools appear under their registry dispatch names (`mcp__<server>__<tool>`,
 which are always valid identifiers). The unified `mcp` tool is also callable.
 The legacy `mcp_search`/`mcp_call` names are hidden.
+
+The script sees the registry's rendered MCP output, not a guaranteed native
+MCP envelope. Check the returned shape before using it. Argument errors from
+`agentgrep` and JSON shape errors from `read` identify the bad field and show
+one valid call. For example, `agentgrep` trace expects a `terms` array with
+DSL entries such as `['subject:auth_status', 'relation:rendered']`. Repair the
+failed step rather than replaying successful calls with side effects.
 
 Report shape returned to the model:
 
@@ -108,6 +118,23 @@ affects output size only, never permissions.
 - Report: 60k chars. Past that, the full report is spilled to
   `~/.jcode/codemode/spill/<session>-<call>.txt` and the path is included in
   the report.
+- Optional `max_output_tokens` (512–15,000): use `4000` when a preview is
+  enough. This is a provider-independent estimate of one token per four UTF-8
+  bytes, not a billing count. The budget applies only to the final report,
+  not nested results or stored values. A truncated preview includes the error
+  (or its beginning), call counts by status, and the full report path when
+  available. Omit the parameter to keep the original report limit.
+
+To page data without repeating tool calls, save it before returning:
+
+```js
+const matches = await tools.agentgrep({mode: 'grep', query: 'TODO'});
+store('matches', matches);
+return matches; // Call codemode with max_output_tokens: 4000 for a preview.
+```
+
+Then run `return load('matches').slice(12000, 14000)` in the same session.
+For structured data, slice the array or return selected fields instead.
 
 ## Engine choice: rquickjs
 

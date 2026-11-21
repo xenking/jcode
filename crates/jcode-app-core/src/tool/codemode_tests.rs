@@ -155,6 +155,122 @@ async fn registry() -> Registry {
     registry
 }
 
+#[tokio::test]
+async fn opt_in_budget_preserves_unbudgeted_output_and_store() {
+    let registry = registry().await;
+    let session = format!("codemode-budget-{}", uuid::Uuid::new_v4());
+    let script = "const data = await tools.shout({text: 'word '.repeat(5000) + 'tail'}); store('full', data); return data;";
+    let preview = registry
+        .execute(
+            "codemode",
+            json!({"code": script, "max_output_tokens": 4000}),
+            ctx(&session),
+        )
+        .await
+        .unwrap()
+        .output;
+    assert!(preview.len() <= 16_000, "{} bytes", preview.len());
+    assert!(
+        preview.contains("truncated") && preview.contains("load(\"full\")"),
+        "{preview}"
+    );
+    assert!(
+        preview.contains("[1 tool call") && preview.contains("1 ok"),
+        "{preview}"
+    );
+    assert!(
+        std::fs::read_to_string(spill_path(&session, "codemode-call").unwrap())
+            .unwrap()
+            .contains("TAIL")
+    );
+    let recovered = registry
+        .execute(
+            "codemode",
+            json!({"code": "return load('full').slice(-4);"}),
+            ctx(&session),
+        )
+        .await
+        .unwrap()
+        .output;
+    assert!(recovered.contains("TAIL"), "{recovered}");
+    let full = registry
+        .execute("codemode", json!({"code": script}), ctx(&session))
+        .await
+        .unwrap()
+        .output;
+    assert!(
+        full.contains("TAIL") && !full.contains("truncated"),
+        "{} bytes",
+        full.len()
+    );
+}
+
+#[tokio::test]
+async fn budget_keeps_agentgrep_argument_repair_after_large_console_output() {
+    let registry = registry().await;
+    registry
+        .register(
+            "agentgrep".into(),
+            Arc::new(super::super::agentgrep::AgentGrepTool::new()),
+        )
+        .await;
+    let mut context = ctx("codemode-agentgrep-argument");
+    context.working_dir = Some(std::env::current_dir().unwrap());
+    let output = registry.execute("codemode", json!({
+        "max_output_tokens": 4000,
+        "code": "console.log('word '.repeat(5000)); await tools.agentgrep({mode:'trace', terms:['not-a-dsl-term']});"
+    }), context).await.unwrap().output;
+    assert!(output.len() <= 16_000, "{} bytes", output.len());
+    assert!(
+        output.contains("error: Error: agentgrep:") && output.contains("parameter `terms`"),
+        "{output}"
+    );
+    assert!(output.contains("await tools.agentgrep({mode: 'trace', terms: ['subject:auth_status', 'relation:rendered']})"), "{output}");
+    assert!(output.contains("1 failed"), "{output}");
+}
+
+#[tokio::test]
+async fn nested_argument_errors_show_field_and_one_runnable_example() {
+    let registry = registry().await;
+    registry
+        .register(
+            "agentgrep".into(),
+            Arc::new(super::super::agentgrep::AgentGrepTool::new()),
+        )
+        .await;
+    registry
+        .register("read".into(), Arc::new(super::super::read::ReadTool::new()))
+        .await;
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("Cargo.toml"), "# TODO\n").unwrap();
+    let mut context = ctx("codemode-argument-examples");
+    context.working_dir = Some(fixture.path().to_path_buf());
+    let output = registry.execute("codemode", json!({"code": r#"
+        const cases = [
+          [() => tools.agentgrep({query: ['TODO']}), 'agentgrep', 'query'],
+          [() => tools.read({file_path: 'Cargo.toml', limit: 'ten'}), 'read', 'limit'],
+        ];
+        const recovered = [];
+        for (const [run, tool, field] of cases) {
+          try { await run(); throw new Error('accepted malformed arguments'); }
+          catch (error) {
+            const message = error.message;
+            if (!message.startsWith(tool + ':') || !message.includes('parameter `' + field + '`')) throw error;
+            const examples = message.match(/Example: (.*)/g);
+            if (examples?.length !== 1) throw error;
+            const result = await eval('(async () => ' + examples[0].slice(9) + ')()');
+            recovered.push([tool, String(result).includes('TODO')]);
+          }
+        }
+        return JSON.stringify(recovered);
+    "#}), context).await.unwrap().output;
+    assert!(
+        output.contains(r#"[["agentgrep",true],["read",true]]"#),
+        "{output}"
+    );
+    assert!(output.contains("[4 tool calls"), "{output}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn codemode_exposes_only_unified_mcp_and_can_search() {
     let registry = registry().await;
