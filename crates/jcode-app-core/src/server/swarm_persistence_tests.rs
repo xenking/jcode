@@ -818,8 +818,8 @@ fn load_runtime_state_ignores_bak_when_primary_json_exists() {
     );
 }
 
-#[test]
-fn persisted_swarm_state_without_plan_still_restores_coordinator_and_members() {
+#[tokio::test]
+async fn planless_swarm_restores_only_members_who_have_not_left() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let _env = test_env(&dir);
 
@@ -847,6 +847,16 @@ fn persisted_swarm_state_without_plan_still_restores_coordinator_and_members() {
         task_label: None,
     }];
 
+    let worker = SwarmMember {
+        session_id: "worker-1".to_string(),
+        status: "running".to_string(),
+        role: "agent".to_string(),
+        report_back_to_session_id: Some("coord-1".to_string()),
+        is_headless: true,
+        ..members[0].clone()
+    };
+    let mut members = members;
+    members.push(worker);
     persist_swarm_state("swarm-gamma", None, Some("coord-1"), &members);
 
     let loaded = load_runtime_state();
@@ -862,8 +872,28 @@ fn persisted_swarm_state_without_plan_still_restores_coordinator_and_members() {
             .and_then(|member| member.friendly_name.as_deref()),
         Some("owl")
     );
+    assert!(loaded.running_before_restart.contains("worker-1"));
+    let runtime = crate::server::SwarmState::new(
+        loaded.members,
+        loaded.swarms_by_id,
+        loaded.plans,
+        loaded.coordinators,
+    );
+    runtime.members.write().await.remove("worker-1");
+    crate::server::remove_session_from_swarm(
+        "worker-1",
+        "swarm-gamma",
+        &runtime.members,
+        &runtime.swarms_by_id,
+        &runtime.coordinators,
+        &runtime.plans,
+    )
+    .await;
+
+    let restored = load_runtime_state();
+    assert!(!restored.members.contains_key("worker-1"));
     assert_eq!(
-        loaded.swarms_by_id.get("swarm-gamma"),
+        restored.swarms_by_id.get("swarm-gamma"),
         Some(&HashSet::from(["coord-1".to_string()]))
     );
 }
@@ -920,11 +950,11 @@ fn empty_persist_dissolution_removes_backup_and_cannot_resurrect() {
     );
 }
 
-/// Delete-vs-write interleaving between `remove_persisted_swarm_state_for`
+/// Delete-vs-write interleaving between `persist_swarm_state_after_departure`
 /// and a concurrent persist (wiring-audit.bak-resurrection, part b).
 ///
-/// `remove_persisted_swarm_state_for` (server.rs:120) is `load_runtime()
-/// .await` followed by an unserialized `remove_swarm_state`. Like the
+/// Before the snapshot version guard, the removal was `load_runtime().await`
+/// followed by a deletion with no stale-file check. Like the
 /// persist inversion race above, `load_runtime` observes the four state
 /// maps across multiple await points, so a remover that saw an all-empty
 /// (dissolved) runtime can park, lose the race to a swarm re-creation plus
@@ -965,7 +995,8 @@ async fn stale_remove_cannot_delete_fresh_snapshot_or_restore_backup() {
     let a = tokio::spawn({
         let swarm_state = swarm_state.clone();
         async move {
-            crate::server::remove_persisted_swarm_state_for("swarm-del-race", &swarm_state).await;
+            crate::server::persist_swarm_state_after_departure("swarm-del-race", &swarm_state)
+                .await;
         }
     });
     // Current-thread test runtime: yielding runs A until it parks on the

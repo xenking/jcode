@@ -1,6 +1,6 @@
 use super::state::{MAX_EVENT_HISTORY, fanout_session_event};
 use super::{SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan};
-use super::{persist_swarm_state_for, remove_persisted_swarm_state_for};
+use super::{persist_swarm_state_after_departure, persist_swarm_state_for};
 use crate::agent::Agent;
 use crate::plan::{PlanItem, newly_ready_item_ids};
 use crate::protocol::{NotificationType, ServerEvent};
@@ -1402,23 +1402,13 @@ pub(super) async fn remove_session_from_swarm(
         );
     }
 
-    if swarm_plans.read().await.contains_key(swarm_id) {
-        let swarm_state = SwarmState {
-            members: Arc::clone(swarm_members),
-            swarms_by_id: Arc::clone(swarms_by_id),
-            plans: Arc::clone(swarm_plans),
-            coordinators: Arc::clone(swarm_coordinators),
-        };
-        persist_swarm_state_for(swarm_id, &swarm_state).await;
-    } else {
-        let swarm_state = SwarmState {
-            members: Arc::clone(swarm_members),
-            swarms_by_id: Arc::clone(swarms_by_id),
-            plans: Arc::clone(swarm_plans),
-            coordinators: Arc::clone(swarm_coordinators),
-        };
-        remove_persisted_swarm_state_for(swarm_id, &swarm_state).await;
-    }
+    let swarm_state = SwarmState {
+        members: Arc::clone(swarm_members),
+        swarms_by_id: Arc::clone(swarms_by_id),
+        plans: Arc::clone(swarm_plans),
+        coordinators: Arc::clone(swarm_coordinators),
+    };
+    persist_swarm_state_after_departure(swarm_id, &swarm_state).await;
 
     let remaining_member_count = swarms_by_id
         .read()

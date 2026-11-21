@@ -431,17 +431,23 @@ async fn checkpoint_swarm_workers_for_restart(swarm_state: &SwarmState) {
     }
 }
 
-pub(super) async fn remove_persisted_swarm_state_for(swarm_id: &str, swarm_state: &SwarmState) {
-    // Persist and remove share one per-swarm ordering domain. The file version
-    // is an extra CAS guard against direct/recovery writers outside this path.
+pub(super) async fn persist_swarm_state_after_departure(swarm_id: &str, swarm_state: &SwarmState) {
     let operation_lock = swarm_operation_lock(swarm_id);
     let _operation_guard = operation_lock.lock().await;
     let file_version = capture_swarm_state_version(swarm_id);
     let runtime = swarm_state.load_runtime(swarm_id).await;
     if runtime.has_any_state() {
-        return;
+        // A planless swarm can still have an owner and a durable roster.
+        persist_swarm_state_snapshot(
+            swarm_id,
+            runtime.plan.as_ref(),
+            runtime.coordinator_session_id.as_deref(),
+            &runtime.members,
+        );
+    } else {
+        // A direct snapshot writer can land a newer snapshot during the reads.
+        let _ = remove_swarm_state_if_version(swarm_id, &file_version);
     }
-    let _ = remove_swarm_state_if_version(swarm_id, &file_version);
 }
 
 fn headless_member_should_restore(status: &str, is_headless: bool) -> bool {
