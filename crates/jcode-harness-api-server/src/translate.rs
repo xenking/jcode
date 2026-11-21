@@ -3137,13 +3137,21 @@ impl BridgeState {
                     ServerFrame::event(self.runtime_info()),
                 ]
             }
-            // Background-task traffic reaches clients as a notification whose
-            // body is the markdown the TUI renders. The API refuses to make
-            // clients re-derive a progress bar from prose, so the two shapes
-            // that matter (a progress tick and a task finishing) are parsed
-            // into one typed event and everything else is dropped.
             "notification" => {
                 let message = event["message"].as_str().unwrap_or("");
+                let notification = &event["notification_type"];
+                if notification["kind"] == "message" && notification["scope"] == "dm" {
+                    return match event["from_session"].as_str().filter(|id| !id.is_empty()) {
+                        Some(from_session) => vec![ServerFrame::event(ApiEvent::AgentMessage {
+                            session_id: session(self),
+                            from_session: from_session.to_owned(),
+                            from_name: event["from_name"].as_str().map(str::to_owned),
+                            message: message.to_owned(),
+                        })],
+                        None => vec![],
+                    };
+                }
+                // Background-task traffic still arrives as rendered Markdown.
                 match parse_background_notification(message) {
                     Some(mut progress) => {
                         progress.session_id = session(self);

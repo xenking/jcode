@@ -476,6 +476,13 @@ pub enum ApiEvent {
 
     /// A prompt submitted by another client attached to this session.
     PeerUserMessage { session_id: String, content: String },
+    /// A signed swarm DM addressed to this session. Not a user prompt.
+    AgentMessage {
+        session_id: String,
+        from_session: String,
+        from_name: Option<String>,
+        message: String,
+    },
 
     /// The agent accepted a user message: it is in the session's queue and
     /// will be processed. Sent once per `SendMessage` that the daemon acks.

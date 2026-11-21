@@ -2,7 +2,7 @@
 //! endpoint so test instances and the user's running Desktop are never confused.
 pub use jcode_harness_api::desktop_control::{
     DESKTOP_CONTROL_VERSION, DesktopAction, DesktopRequest, DesktopResponse, DesktopTarget,
-    OpenDestination, WaitCondition,
+    OpenDestination, RevealRow, WaitCondition,
 };
 #[cfg(unix)]
 use std::{

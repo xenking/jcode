@@ -1846,8 +1846,31 @@ fn background_notifications_become_progress_events() {
     }
 }
 
-/// A DM or a shared-context push is not progress, and inventing a bar for it
-/// would put a phantom task on every client's screen.
+#[test]
+fn direct_agent_message_reaches_the_recipient_with_server_assigned_sender() {
+    let mut state = state_with_session();
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "notification",
+        "from_session": "session_fox",
+        "from_name": "fox",
+        "notification_type": {"kind": "message", "scope": "dm"},
+        "message": "DM from fox: verify the output"
+    }));
+    let [frame] = frames.as_slice() else {
+        panic!("expected one signed DM event, got {frames:?}");
+    };
+    let event = serde_json::to_value(frame).unwrap();
+    assert_eq!(event["ev"], "agent_message");
+    assert_eq!(event["from_session"], "session_fox");
+    assert_eq!(event["from_name"], "fox");
+    assert_eq!(event["message"], "DM from fox: verify the output");
+    assert!(
+        event["session_id"]
+            .as_str()
+            .is_some_and(|id| id != "session_fox")
+    );
+}
+
 #[test]
 fn unrelated_notifications_are_dropped() {
     let mut state = state_with_session();

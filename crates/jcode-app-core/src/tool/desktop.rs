@@ -23,12 +23,13 @@ impl Tool for DesktopTool {
     fn parameters_schema(&self) -> Value {
         json!({"type":"object", "required":["action"], "properties":{
             "intent":super::intent_schema_property(),
-            "action":{"type":"string","description":"Use state selectors. Ask clicks require allow_user_window.","enum":["list","open_session","state","click","set_composer","send","press_key","search","expand_tool","render","wait_for"]},
+            "action":{"type":"string","description":"Open and reveal do not activate the window. Call focus only when the user asks to bring it forward. Ask clicks and focus require allow_user_window.","enum":["list","open_session","state","focus","reveal","click","set_composer","send","press_key","search","expand_tool","render","wait_for"]},
             "target":{"type":"object","required":["window_id","session_id"],"properties":{"window_id":{"type":"string"},"session_id":{"type":"string"}},"additionalProperties":false},
             "session_id":{"type":"string","description":"Session to open."},
+            "row":{"description":"Reveal a loaded transcript message without changing focus. Zero-based index and optional inclusive end_index refer to state.panel.loaded_transcript_items. Text must uniquely match a message (case-sensitive).","oneOf":[{"type":"object","required":["kind","index"],"properties":{"kind":{"type":"string","enum":["index"]},"index":{"type":"integer","minimum":0},"end_index":{"type":"integer","minimum":0}},"additionalProperties":false},{"type":"object","required":["kind","text"],"properties":{"kind":{"type":"string","enum":["text"]},"text":{"type":"string","minLength":1}},"additionalProperties":false}]},
             "destination":{"description":"Open in a background panel by default.","oneOf":[{"type":"string","enum":["new_window"]},{"type":"object","required":["background_panel"],"properties":{"background_panel":{"type":"object","required":["window_id"],"properties":{"window_id":{"type":"string"}},"additionalProperties":false}},"additionalProperties":false}]},
             "selector":{"type":"string", "description":"Click: tool:<id>, ask:<req>:<question>:<option>, composer.send. Render: row:<rev>:<index>."}, "text":{"type":"string"}, "key":{"type":"string", "description":"Enter/Return to send, Escape/Esc to close search."}, "query":{"type":"string"}, "path":{"type":"string"},
-            "allow_user_window":{"type":"boolean","description":"Explicitly allow changing focused composers, existing drafts, search focus or ask selections."},
+            "allow_user_window":{"type":"boolean","description":"Opt in to activating a window with focus, or to changing focused composers, existing drafts, search focus or ask selections."},
             "condition":{"type":"object", "required":["kind"], "properties":{"kind":{"type":"string", "enum":["selector_visible","text_contains","session_idle"]}, "selector":{"type":"string","description":"Visible tool:<call_id> or row:<revision>:<index> from state."}, "text":{"type":"string"}}, "additionalProperties":false},"timeout_ms":{"type":"integer","minimum":1,"maximum":120000}
         }})
     }
@@ -67,6 +68,29 @@ fn execute_with_paths(action: DesktopAction, paths: Vec<std::path::PathBuf>) -> 
             json!({"windows":windows.into_iter().map(|(_, state)| state).collect::<Vec<_>>()}),
         );
     }
+    if let DesktopAction::OpenSession {
+        destination: OpenDestination::NewWindow,
+        session_id,
+    } = &action
+    {
+        let (path, _) = windows
+            .iter()
+            .filter(|(_, state)| {
+                state["sessions"].as_array().is_some_and(|sessions| {
+                    sessions
+                        .iter()
+                        .any(|session| session["session_id"].as_str() == Some(session_id))
+                })
+            })
+            .min_by_key(|(_, state)| state["window_id"].as_str())
+            .context("session not found in a Desktop window catalog on this host")?;
+        return match request(path, action, Duration::from_secs(5))
+            .context("Desktop request failed")?
+        {
+            DesktopResponse::Ok { result } => Ok(result),
+            DesktopResponse::Error { code, message } => bail!("{code}: {message}"),
+        };
+    }
     let target_window = match &action {
         DesktopAction::OpenSession {
             destination: OpenDestination::BackgroundPanel { window_id },
@@ -75,8 +99,10 @@ fn execute_with_paths(action: DesktopAction, paths: Vec<std::path::PathBuf>) -> 
         DesktopAction::OpenSession {
             destination: OpenDestination::NewWindow,
             ..
-        } => bail!("opening a new window is not implemented"),
+        } => unreachable!(),
         DesktopAction::State { target }
+        | DesktopAction::Focus { target, .. }
+        | DesktopAction::Reveal { target, .. }
         | DesktopAction::Click { target, .. }
         | DesktopAction::SetComposer { target, .. }
         | DesktopAction::Send { target, .. }
