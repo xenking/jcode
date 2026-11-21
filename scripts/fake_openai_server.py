@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 LOG = os.environ.get("FAKE_LOG", "")
 LABEL = os.environ.get("FAKE_LABEL", "model")
 CONTROL = Path(os.environ["FAKE_CONTROL_DIR"]) if os.environ.get("FAKE_CONTROL_DIR") else None
+PREMIUM_MODEL = os.environ.get("FAKE_PREMIUM_MODEL")
 LOCK = threading.Lock()
 
 
@@ -33,7 +34,8 @@ class H(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        body = json.dumps({"data": [{"id": "fake-model", "object": "model"}]}).encode()
+        models = ["fake-model"] + ([PREMIUM_MODEL] if PREMIUM_MODEL else [])
+        body = json.dumps({"data": [{"id": model, "object": "model"} for model in models]}).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))
@@ -45,6 +47,7 @@ class H(BaseHTTPRequestHandler):
         msgs = req.get("messages", [])
         with LOCK, open(LOG, "a") as log:
             log.write(json.dumps({"label": LABEL, "messages": msgs, "agent": bool(req.get("tools")),
+                                  "model": req.get("model"), "reasoning_effort": req.get("reasoning_effort"),
                                   "tools": req.get("tools", []),
                                   "time": time.time()}) + "\n")
         flat = json.dumps(msgs)
@@ -122,6 +125,15 @@ class H(BaseHTTPRequestHandler):
                 "name": "bash", "arguments": json.dumps({
                     "intent": "Run a long command the daemon will not outlive",
                     "command": "sleep 600",
+                })}}]
+        elif CONTROL and PREMIUM_MODEL and not has_tool_result and (
+                match := re.search(r"\[e2e:premium-spawn:([a-z0-9_]+)\]", prompt)):
+            token = match.group(1)
+            tool_calls = [{"id": "call_premium_" + token, "type": "function", "function": {
+                "name": "swarm", "arguments": json.dumps({
+                    "action": "spawn", "intent": "Exercise owner approval on the isolated fake provider",
+                    "label": "premium-" + token, "prompt": "premium-child-" + token,
+                    "spawn_mode": "headless",
                 })}}]
         elif CONTROL and (match := re.search(r"\[e2e:worker-spawn:([a-z0-9_]+)\]", prompt)) and not has_tool_result:
             tool_calls = [{"id": "call_worker_reload_spawn", "type": "function", "function": {

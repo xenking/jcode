@@ -284,6 +284,47 @@ class Harness:
                 return None
         return wait_for(replacement, "new isolated daemon identity")
 
+    def premium_spawn(self, label, token, start):
+        model = self.state.get("fake_premium_model")
+        require(model, "Launch this isolated fixture with --premium-spawn")
+        sid = self.observe("state")["remote_session_id"]
+
+        def workers():
+            return {m["session_id"] for m in self.debug("swarm:members") if m["is_headless"]}
+
+        def premium_requests():
+            return [r for r in self.records()[start:] if r.get("model") == model]
+
+        initial_workers = workers()
+        for choice, keys in [("deny", ["Enter"]), ("allow", ["Down", "Enter"])]:
+            case = token + "_" + choice
+            prompt = f"[e2e:premium-spawn:{case}]"
+            self.send(prompt)
+            wait_for(lambda: "Allow this worker" in self.pane(), "fresh owner approval modal", 12)
+            text = self.frame(f"{label}-{choice}-modal")
+            require(model in text and "effort high" in text, "Modal did not show the capped model and effort")
+            require(workers() == initial_workers and not premium_requests(), "Worker started before approval")
+            self.event(action="terminal-keys", keys=keys, purpose=choice + " premium worker")
+            self.tmux("send-keys", "-t", "verify", *keys)
+            self.idle()
+            self.persisted(sid, prompt)
+            if choice == "deny":
+                require(workers() == initial_workers and not premium_requests(), "Deny allocated a premium worker")
+        wait_for(premium_requests, "approved request at the fake provider")
+        approved = workers() - initial_workers
+        require(len(approved) == 1, "Approval did not allocate exactly one worker")
+        worker = approved.pop()
+        child_prompt = "premium-child-" + case
+        self.persisted(worker, child_prompt)
+        requests = premium_requests()
+        startup = [r for r in requests if not any(m["role"] == "assistant" for m in r["messages"])]
+        require(len(startup) == 1 and child_prompt in json.dumps(startup[0]["messages"]),
+                "Unexpected or duplicated premium startup request")
+        require(all(r.get("reasoning_effort") == "high" for r in requests),
+                "A worker request used an effort other than the approved cap")
+        return {"session_id": sid, "worker_id": worker, "model": model, "effort": "high",
+                "startup_count": len(startup), "request_count": len(requests)}
+
     def worker_reload(self, label, token, start):
         history_token = token + "_original Acknowledge."
         sid = self.observe("state")["remote_session_id"]
@@ -818,6 +859,8 @@ class Harness:
                 dump(self.evidence / f"{label}-session.json", self.persisted(sid, token + "_continued"))
             elif feature == "worker-reload":
                 result.update(self.worker_reload(label, token, start))
+            elif feature == "premium-spawn":
+                result.update(self.premium_spawn(label, token, start))
             elif feature in {"reload-bg", "reload-bg-before-attach", "reload-bg-wait"}:
                 result.update(self.reload_background(token, start, label,
                     finish_before_attach=feature == "reload-bg-before-attach", wait_in_turn=feature == "reload-bg-wait"))
@@ -1093,11 +1136,20 @@ def launch(args, *, prepare_workspace=None):
             'VERIFY_REVIEW_SKILL_BODY\nAcknowledge the user prompt.\n')
         if prepare_workspace is not None:
             prepare_workspace(root)
+        if getattr(args, "premium_spawn", False):
+            model = "gpt-5.9-astra"
+            harness.state["fake_premium_model"] = model
+            (root / "data/config.toml").write_text(
+                f'[agents]\nswarm_model = "openai-compatible:{model}"\n'
+                f'spawn_allowed_models = ["openai-compatible:{model}"]\n'
+                f'swarm_effort = "xhigh"\nswarm_effort_caps = {{ "{model}" = "high" }}\n')
         harness.state["binary_version"] = run([root / "jcode", "--no-update", "--version"], env=env).stdout.strip()
         harness.save()
         (evidence / "source.diff").write_text(run(["git", "-C", REPO, "diff", "HEAD"]).stdout)
         provider_env = dict(env, FAKE_LOG=str(evidence / "provider.jsonl"), FAKE_LABEL="verify-jcode",
                             FAKE_PORT_FILE=str(root / "provider.port"), FAKE_CONTROL_DIR=str(root / "control"))
+        if model := harness.state.get("fake_premium_model"):
+            provider_env["FAKE_PREMIUM_MODEL"] = model
         harness.spawn("provider", [sys.executable, REPO / "scripts/fake_openai_server.py", "0"], provider_env)
         port = wait_for(lambda: (root / "provider.port").read_text().strip()
                         if (root / "provider.port").exists() else None, "fake provider port")
@@ -1170,6 +1222,7 @@ def main():
     start.add_argument("--evidence", required=True, help="New evidence directory, survives cleanup")
     start.add_argument("--cols", type=int, default=160)
     start.add_argument("--rows", type=int, default=48)
+    start.add_argument("--premium-spawn", action="store_true", help="Expose a synthetic Astra model at loopback")
     start.add_argument("--loopback-exec-worker", action="store_true",
                        help="Route Bash through the staged executable's execution worker, with no SSH")
     group = sub.add_parser("cloud-group-return", help="Run the isolated Linux group migration round trip")
@@ -1180,7 +1233,7 @@ def main():
         command.add_argument("--evidence", required=True)
         if name == "drive":
             command.add_argument("feature", choices=["cli", "tui", "slash", "resume", "restart", "reload-bg", "reload-bg-before-attach", "reload-bg-wait", "reload-selfdev", "cancel",
-                                                     "side-panel", "mode", "mode-set", "draft-models", "worker-reload", "input", "keys"])
+                                                     "side-panel", "mode", "mode-set", "draft-models", "worker-reload", "premium-spawn", "input", "keys"])
             command.add_argument("--mode", choices=["plain", "json", "ndjson"], default="json")
             command.add_argument("--text", help="Text for exploratory input drive")
             command.add_argument("--keys", nargs="+", help="tmux keys, e.g. Escape or C-u")

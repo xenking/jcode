@@ -35,5 +35,6 @@ Record the feature ID, exact user entry point, action, resulting frame/response,
 | [Side panel](side-panel.md) | `drive side-panel`: /splitview on | /splitview off/status, /todos panel, swarm worker lifecycle |
 | [Cancellation and daemon restart](lifecycle.md) | `drive cancel`, `drive restart`, `drive reload-bg` (private exec, PID, progress, exit, notify and wake), `drive reload-selfdev` (build/test queue across exec) | tool cancellation, queue races, other in-flight reload recovery |
 | [Headless swarm worker restart](worker-reload.md) | `drive worker-reload`: idle DM and interrupted worker turn | exec reload, coordinator-less workers, explicit retry |
+| [Premium swarm worker approval](premium-spawn.md) | `launch --premium-spawn`, `drive premium-spawn`: owner deny and allow | synthetic Astra via loopback; Fable, saved consent, and todo lane covered by app-core tests |
 | [Provider route and auth boundaries](provider-route.md) | `drive cli --mode json` for the synthetic route | multi-route picker, forced catalog refresh, real vendor auth and token refresh |
 | [Coordinated cloud migration](cloud-group-return.md) | `cloud-group-return` using two isolated Linux daemons | managed control plane, real SSH, real account credentials |
