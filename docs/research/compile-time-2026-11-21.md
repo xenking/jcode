@@ -82,3 +82,45 @@ graph LR
 - [Zed: Building for macOS](https://zed.dev/docs/development/macos#avoiding-continual-rebuilds): даже разные переменные окружения `cargo run` и IDE инвалидируют артефакты. Поэтому параметры замера фиксируем, IDE и демон не используем для запуска benchmark.
 - [Bevy: Enable Fast Compiles](https://bevy.org/learn/quick-start/getting-started/setup/#enable-fast-compiles): динамическая линковка как opt-in для dev, не рекомендация менять поставку; на macOS руководство отдельно отмечает `ld-prime`. Здесь Cargo измеряет, где линковка действительно доминирует.
 - [resvg changelog 0.47.0](https://github.com/linebender/resvg/blob/main/CHANGELOG.md#0470-2026-02-05), [cargo-machete](https://github.com/bnjbvr/cargo-machete): поведение SVG изменилось; статической находки недостаточно для удаления реальной зависимости.
+
+## Независимый нативный A/B: Mermaid без upstream PNG и CLI
+
+Контроль и опыт собраны из `d08ec7b86f7146a6eb8a2c96f9c5efb4cb28f9a6` в разных пустых target. Для обеих сторон использован непосредственно Cargo (`/usr/bin/time -p ~/.cargo/bin/cargo build --offline --locked -j 4 --timings -p jcode --bin jcode`), без общего rustc/depcache. `CARGO_TARGET_DIR` и `CARGO_BUILD_BUILD_DIR` указывали в собственный target каждой стороны. Профиль `dev`, Cargo и Rust 1.100.0, LLVM 23.1.5. В опыте `mermaid-rs-renderer` остался на том же коммите v0.3.1, но без его defaults `cli` и `png`. Приложение вызывает его парсер, layout и SVG; PNG по-прежнему делает действующий растеризатор Jcode на `resvg` 0.46. Ни один из двух рендереров не обновлялся.
+
+| Показатель | Контроль | Без defaults Mermaid |
+| --- | ---: | ---: |
+| Холодная сборка, wall, по одному прогону | 353,80 с | 523,30 с |
+| Холодная сборка, Cargo units | 817 | 813 |
+| Холодный target, KiB | 7 319 300 | 7 331 404 |
+| Холодный `debug/build`, KiB | 4 713 144 | 4 702 780 |
+| Холодный `debug/incremental`, KiB | 2 145 304 | 2 167 696 |
+| Инкрементальная правка `src/cli/args.rs`, wall | 16,68 / 15,43 / 10,86 с | 21,12 / 11,54 / 15,34 с |
+| Cargo units на инкрементальную правку | 2 | 2 |
+| Target после трёх правок, KiB | 7 324 856 | 7 307 456 |
+
+Прогрев исключён из таблицы; затем A и B чередовались для трёх уникальных комментариев в одном файле. Именно пара root lib / bin пересобиралась в каждом прогоне. В первой отдельной пробе аналогичная правка на A заняла 25,02 с. Разница медиан A/B 0,09 с меньше разброса. Холодные прогоны шли при нагрузке около 30 против 75 на 14 логических ядрах; даже неизменный `jcode-base` вырос с 60,43 до 181,50 с. Эти измерения не дают оценки изменения пользовательского времени.
+
+Что повторяемо: исчезли четыре версии (`resvg` и `usvg` 0.47, `tiny-skia` и `tiny-skia-path` 0.12), а оставшиеся поколения сохранили features. Удалённые units в контроле имели 0,91 / 2,04 / 1,73 / 0,34 с Cargo wall (перекрываются), а их пакетные каталоги `debug/build` уменьшились на 16,59 MiB. Плюс 11,82 MiB полного холодного target и минус 16,99 MiB прогретого отражают в том числе изменчивость каталога incremental. Уверенное утверждение здесь только об удалении ветки из графа и её собственных артефактов, не о размере каждого будущего target.
+
+Приёмка в опытном дереве: 85 тестов `jcode-tui-mermaid` прошли (4 помечены `ignored`), `clippy --all-targets -- -D warnings`, проверка `jcode-codemode` и `jcode-voice`, пять обязательных скриптов из `AGENTS.md` и guardrails `check_dependency_boundaries.py` / `check_fork_ledger.py` прошли. `plan_graph_probe` отрисовал тот же PNG для обеих диаграмм у A и B, используя раздельные временные `HOME` и кеши. Для `minimal` (249×408) SHA-256 `e65da23d02bf986dce184b3dc0fdd161e9452c70b34e9b4fa34c2d8dde351a10`; для `plan-graph` (343×408) `d36eca734e4e5a7f34541f9648d9e4bcafe35adb308244e63ddc3256154fefee`. Это тот же вызов `render_mermaid_untracked`, что и в рабочем приложении, а не эмуляция PNG.
+
+## LLVM IR: где деривации заметны, а где нет мономорфизации
+
+`cargo-llvm-lines 0.4.48 llvm-lines --offline --locked -j 2 -p jcode --lib` на том же CLI pin собрал 1 224 513 строк IR и 30 884 тела/инстанцирования. Это IR корневой библиотеки. Он включает сгенерированный в ней код импортированных generics, но не является сводкой всех крейтов. Числа показывают объём IR до дальнейшей оптимизации, а не wall time компилятора или размер финального бинарника.
+
+| Тело | Строки IR | Конкретные реализации в строке отчёта |
+| --- | ---: | ---: |
+| `handle_server_event_inner::<RemoteConnection>` | 18 629 | 1 |
+| `ServerEvent::serialize::<serde_json::value::Serializer>` | 16 351 | 1 |
+| `ServerEvent::serialize::<serde_json::value::ser::RawValueEmitter>` | 16 259 | 1 |
+| Async тело `submit_prepared_remote_enter_input` | 14 284 | 1 |
+| `Command::augment_subcommands_for_update` / `augment_subcommands` | 10 746 / 10 338 | по 1 |
+| `PendingScriptableLogin::deserialize::__Visitor::visit_map` (одна группа) | 3 260 | 8 |
+
+Самое крупное тело имеет только один backend в этой сборке, поэтому замена его на `dyn` не устраняет дубли. У двух сериализаторов `ServerEvent` разные потребители и wire-тип общий. Делегирование за `dyn` или ручная serde-реализация имеют риск для протокола и не оправданы без отдельного profile и тестов на побайтовую совместимость. `Command` порождает крупные парные методы Clap, но замена derive на ручной parsing затронула бы help, ошибки, update и completion. У `PendingScriptableLogin` восемь копий одной группы `visit_map`, но `scriptable.rs` уже использует `serde_json::from_str` во всех production вызовах. Символ показывает внутренний serde `MapDeserializer<serde_json::Error>`, а не восемь разных вызывающих JSON-парсеров. Разворачивать приватный tagged enum вручную ради 0,3% IR без отдельного измерения и проверки совместимости legacy-записей не стали.
+
+### Изоляция AWS SDK от Desktop: графовый прототип
+
+На `dbc14d16b6f0201375acdadd5564c1f14f1abfbf` в manifest двух потребителей (`jcode-desktop-ui`, `jcode-desktop-harness`) выставление `jcode-base/default-features=false` уменьшает нативный Cargo unit graph с 878 до 840 (34 уникальных пакета). `jcode-base` имеет только один default, `bedrock`. Для Desktop больше не требуются `aws-sdk-bedrock`, `aws-sdk-bedrockruntime`, `aws-config` и транзитивные пакеты. Jcode CLI по-прежнему компилирует Bedrock, версия протокола и типы не меняются. Desktop использует локальную метаинформацию учётных записей, цены, TTL и failover, а за операциями модели обращается к daemon. Тем не менее нужно подтвердить маршрутизацию реальным сценарием, поскольку no-SDK реализация преднамеренно выдаёт ошибку при живом вызове Bedrock. Desktop ARM Windows уже собирается без default для `jcode-base`; это отдельный сигнал, не проверка остальных целей.
+
+Граф получен в Desktop worktree с соседним `../jcode` через `RUSTC_BOOTSTRAP=1 ~/.cargo/bin/cargo build --offline --locked -Zunstable-options --unit-graph -p jcode-desktop --bin jcode-desktop`. По реальным arm64-графам CLI имеет 92 local/path пакета и 287 уникальных рёбер между ними, Desktop 60 и 152. `jcode-base` имеет 15 прямых или транзитивных потребителей в CLI и 7 в Desktop. `jcode-session-types` имеет 24 потребителя в CLI, поэтому совместное использование wire-структур и часто меняющейся логики дороже, чем кажется по размеру крейта (2 830 строк Rust вместе с тестами). Во время рабочей недели `justrust profile --here --days 7` показал 311 Desktop-прогонов, 4 597,7 с компиляции (76,2% времени), p50/p90 12,66/44,50 с. Измеренный вход build script `jcode-desktop-ui` затрагивается часто. Он меняет показываемый build ID, поэтому просто убрать его наблюдение за исходниками нельзя.
