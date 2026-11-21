@@ -205,7 +205,12 @@ impl Target {
 
     fn preflight_uncached(&self, host: &str) -> Result<()> {
         timed_move_stage("host preflight", || {
-            if super::super::cloud_managed::is_managed(host) && self.transport.is_none() {
+            // A self-hosted machine keeps its owner's jcode, so it gets the
+            // capability probe below like any other SSH host.
+            if super::super::cloud_managed::is_managed(host)
+                && self.transport.is_none()
+                && !super::super::cloud_managed::is_self_hosted()
+            {
                 // The SSH ProxyCommand connects and reports wake progress.
                 // Calling connect here too would authorize the same key twice
                 // whenever the multiplexed master has expired.

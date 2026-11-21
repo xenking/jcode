@@ -191,6 +191,29 @@ fn remember_user(namespace: &str, reply: &Reply) {
     {
         let _ = write_private(&path, user);
     }
+    if let Ok(path) = self_hosted_path(namespace) {
+        if reply.self_hosted {
+            let _ = write_private(&path, "1");
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn self_hosted_path(namespace: &str) -> Result<PathBuf> {
+    Ok(dir()?.join(format!("self-hosted-{namespace}")))
+}
+
+/// Whether the account's machine is one the owner registered with a
+/// self-hosted control plane. Such a machine keeps the jcode its owner
+/// installed: Jcode must not install a release into `/opt` there.
+pub(crate) fn is_self_hosted() -> bool {
+    // Learns the machine's login and kind once per account.
+    let _ = write_ssh_files(true);
+    preparation_namespace()
+        .ok()
+        .and_then(|namespace| self_hosted_path(&namespace).ok())
+        .is_some_and(|path| path.is_file())
 }
 
 fn remembered_user(namespace: &str) -> Option<String> {
@@ -281,6 +304,9 @@ pub(crate) struct Reply {
     /// Sent by a self-hosted control plane. Jcode's own machines omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    /// Set by a self-hosted control plane for a machine the owner registered.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub self_hosted: bool,
     #[serde(default)]
     pub host_keys: Vec<String>,
     #[serde(default)]
@@ -1066,6 +1092,16 @@ mod tests {
 
     #[test]
     fn prepare_ssh_cli_is_hidden_and_only_prepares_local_files() {
+        // Parsing the whole CLI in a debug build overflows the 2 MiB test stack.
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(prepare_ssh_only_prepares_local_files)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn prepare_ssh_only_prepares_local_files() {
         use super::super::args::{Args, CloudCommand, CloudMachineAction};
         use clap::{Parser, ValueEnum};
 
