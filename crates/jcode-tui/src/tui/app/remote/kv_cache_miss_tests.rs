@@ -60,6 +60,44 @@ fn remote_prefix_tag_upgrades_provisional_notice_once_and_preserves_counters() {
 }
 
 #[test]
+fn remote_wire_suffix_evidence_corrects_provisional_prefix_without_losing_usage() {
+    let mut app = create_test_app();
+    app.kv_cache.kv_cache_turn_number = Some(2);
+    app.kv_cache.kv_cache_turn_call_index = 3;
+    app.kv_cache.kv_cache_miss_samples.push(KvCacheMissSample {
+        turn_number: 2,
+        call_index: 3,
+        missed_tokens: 122_307,
+        reason: KvCacheMissReason::LowRead,
+    });
+    app.push_display_message(DisplayMessage::system(
+        "KV cache miss [low read] [prefix unchanged] turn 2 call 3: 20K cached / 142K expected tokens: ~122K tokens below prior cache baseline.",
+    ));
+    let daemon =
+        "KV cache miss [low_read] [wire suffix changed]: ~122K tokens below prior cache baseline";
+    let count = app.display_messages.len();
+    assert!(handle_kv_cache_miss(
+        &mut app,
+        "low_read",
+        122_307,
+        daemon.into(),
+        true
+    ));
+    assert!(!handle_kv_cache_miss(
+        &mut app,
+        "low_read",
+        122_307,
+        daemon.into(),
+        true
+    ));
+    assert_eq!(app.display_messages.len(), count);
+    let notice = &app.display_messages[count - 1].content;
+    assert!(notice.contains("[wire suffix changed] turn 2 call 3: 20K cached / 142K"));
+    assert!(!notice.contains("[prefix unchanged]"));
+    assert_eq!(app.kv_cache.kv_cache_miss_samples[0].missed_tokens, 122_307);
+}
+
+#[test]
 fn remote_prefix_tag_is_revoked_by_authoritative_harness_change() {
     for (reason, expected) in [
         ("system_changed", KvCacheMissReason::HarnessSystemChanged),

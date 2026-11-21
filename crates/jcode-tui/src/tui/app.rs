@@ -2307,7 +2307,7 @@ impl App {
             .unwrap_or_else(|| self.fallback_pending_kv_cache_request());
         self.kv_cache.current_api_usage_recorded = true;
 
-        self.record_kv_cache_miss_sample(&request);
+        self.record_kv_cache_miss_sample(&request, effective_prompt_tokens);
 
         let baseline_session_id = self.kv_cache_session_id();
 
@@ -2407,16 +2407,20 @@ impl App {
         }
     }
 
-    fn record_kv_cache_miss_sample(&mut self, request: &PendingKvCacheRequest) {
+    fn record_kv_cache_miss_sample(&mut self, request: &PendingKvCacheRequest, input_tokens: u64) {
         // A first fill without a reusable-prefix baseline is not a proven
         // cache loss, even with an explicit zero read. Do not label it a miss.
         let Some(baseline) = request.baseline.as_ref() else {
             return;
         };
-        let expected_tokens = baseline.input_tokens;
-        if expected_tokens == 0 {
+        if baseline.input_tokens == 0 {
             return;
         }
+        let expected_tokens = if request.provider == baseline.provider {
+            baseline.input_tokens
+        } else {
+            input_tokens
+        };
 
         // Missing telemetry is not an explicit cache miss. Write-only usage
         // and providers omitting cached_tokens must not trigger harness alarms.
@@ -2491,8 +2495,13 @@ impl App {
                 | KvCacheMissReason::HarnessToolsChanged
                 | KvCacheMissReason::HarnessPrefixChanged
         );
+        let denominator = if reason == KvCacheMissReason::ProviderSwitch {
+            "input"
+        } else {
+            "expected"
+        };
         let usage = format!(
-            "turn {} call {}: {} cached / {} expected tokens",
+            "turn {} call {}: {} cached / {} {denominator} tokens",
             request.turn_number,
             request.call_index,
             crate::kv_cache_monitor::format_token_count(read_tokens),
@@ -2517,8 +2526,15 @@ impl App {
         } else {
             ""
         };
+        let measurement = match reason {
+            KvCacheMissReason::ProviderSwitch => "uncached on the new provider",
+            KvCacheMissReason::LowRead | KvCacheMissReason::ZeroRead => {
+                "below prior cache baseline"
+            }
+            _ => "resent",
+        };
         self.push_kv_cache_notice(format!(
-            "{} KV cache miss [{}]{} {}: ~{} tokens resent ({}). See KV_CACHE_USAGE in logs.",
+            "{} KV cache miss [{}]{} {}: ~{} tokens {measurement} ({}). See KV_CACHE_USAGE in logs.",
             if harness_change { "⚠️" } else { "ℹ️" },
             reason.label(),
             prefix_tag,

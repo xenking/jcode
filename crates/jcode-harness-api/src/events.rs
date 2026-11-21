@@ -287,8 +287,8 @@ pub enum ApiEvent {
         prompt_tokens: u64,
     },
 
-    /// The provider request that just completed missed the KV (prompt) cache:
-    /// a meaningful part of the previously cached prefix had to be resent.
+    /// The completed provider request reported substantially fewer prompt cache
+    /// reads than the diagnostic baseline. This does not measure retransmission.
     /// Follows the request's `TokenUsage`. `harness_caused` misses (the
     /// harness mutated the prefix) should be rendered prominently; switches
     /// and expiry are informational.
@@ -297,7 +297,9 @@ pub enum ApiEvent {
         /// Stable snake_case id, e.g. `prefix_changed`, `expired`.
         reason: String,
         harness_caused: bool,
+        /// Diagnostic shortfall, or current uncached input on a provider switch.
         missed_tokens: u64,
+        /// Prior reusable input, or current input on a provider switch.
         expected_tokens: u64,
         read_tokens: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]

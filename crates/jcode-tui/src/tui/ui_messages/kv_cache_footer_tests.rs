@@ -117,3 +117,16 @@ fn summarizes_miss_reason_missed_and_hit_pct() {
         Some("19.0K KV cache miss · provider switch · 60% hit")
     );
 }
+#[test]
+fn footer_distinguishes_uncached_input_from_estimated_shortfall() {
+    let switch = "KV cache miss [provider_switch]: ~138K tokens uncached on the new provider (caches are not shared).";
+    assert_eq!(
+        super::kv_cache_footer_summary(switch).as_deref(),
+        Some("138K uncached input · provider switch")
+    );
+    let low_read = "KV cache miss [low read] [wire suffix changed] turn 2 call 3: 20K cached / 142K expected tokens: ~122K tokens below prior cache baseline.";
+    assert_eq!(
+        super::kv_cache_footer_summary(low_read).as_deref(),
+        Some("~122K KV cache miss · low read · wire suffix changed · 14% hit")
+    );
+}

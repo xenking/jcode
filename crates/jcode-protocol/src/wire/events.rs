@@ -378,7 +378,9 @@ pub enum ServerEvent {
         reason: String,
         /// True when the harness itself changed the cached prefix.
         harness_caused: bool,
+        /// Diagnostic shortfall, or current uncached input on a provider switch.
         missed_tokens: u64,
+        /// Prior reusable input, or current input on a provider switch.
         expected_tokens: u64,
         read_tokens: u64,
         /// Documented intentional invalidation that explains the miss.

@@ -658,11 +658,12 @@ fn kv_cache_notice_explicit_loss_matrix() {
             assert_eq!(notices.len(), 1, "route={route} read={read:?}");
             assert!(notices[0].content.contains(reason), "{:?}", notices[0]);
             assert!(notices[0].content.contains("call 3"));
-            assert!(
-                notices[0].content.contains("cached / 100K expected"),
-                "{:?}",
-                notices[0]
-            );
+            let denominator = if route == "provider" {
+                "cached / 110K input tokens"
+            } else {
+                "cached / 100K expected"
+            };
+            assert!(notices[0].content.contains(denominator), "{:?}", notices[0]);
             if route == "account" {
                 assert!(
                     notices[0].content.contains("account switched fox -> otter"),

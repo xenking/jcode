@@ -17,6 +17,32 @@ pub(super) fn handle_kv_cache_miss(
             .iter_mut()
             .find(|sample| sample.turn_number == turn_number && sample.call_index == call_index)
         {
+            // TokenUsage compares projected history; only the daemon can see
+            // that a request-only suffix actually changed on the wire.
+            if notices_enabled
+                && matches!(reason, "low_read" | "zero_read" | "provider_cache_partial")
+                && matches!(
+                    sample.reason,
+                    KvCacheMissReason::LowRead | KvCacheMissReason::ZeroRead
+                )
+                && message.contains("] [wire suffix changed]")
+            {
+                let marker = format!("turn {turn_number} call {call_index}:");
+                if let Some(idx) = app.display_messages.iter().rposition(|entry| {
+                    entry.role == "system"
+                        && entry.content.contains("KV cache miss [")
+                        && entry.content.contains(&marker)
+                        && !entry.content.contains("] [wire suffix changed]")
+                }) {
+                    let prior = &app.display_messages[idx].content;
+                    let updated = if prior.contains("] [prefix unchanged]") {
+                        prior.replacen("] [prefix unchanged]", "] [wire suffix changed]", 1)
+                    } else {
+                        prior.replacen("] ", "] [wire suffix changed] ", 1)
+                    };
+                    return app.replace_display_message_content(idx, updated);
+                }
+            }
             // The daemon can have complete request fingerprints after a
             // reconnect while the client only has provisional usage telemetry.
             // Upgrade evidence in place without losing local turn/hit counters.

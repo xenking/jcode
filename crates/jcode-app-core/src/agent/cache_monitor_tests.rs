@@ -398,7 +398,7 @@ async fn same_account_zero_read_explains_what_was_ruled_out() {
     eprintln!("same-account zero read notice: {message}");
     assert_eq!(reason, "zero_read");
     assert!(
-        message.contains("read 0 of the 33.1K-token prefix"),
+        message.contains("read 0 against a 33.1K-token prior cache baseline"),
         "{message}"
     );
     assert!(message.contains("after the previous call"), "{message}");

@@ -318,9 +318,9 @@ impl Provider for OpenAIProvider {
             ],
         );
         jcode_provider_core::fingerprint::note_canonical_request_options(request_options_hash);
-        if let Some(count) = stable_item_count {
-            jcode_provider_core::fingerprint::truncate_canonical_items(count);
-        }
+        jcode_provider_core::fingerprint::note_responses_stable_item_count(
+            stable_item_count.unwrap_or(input_item_count),
+        );
         let usage_diag = match self.credentials.try_read() {
             Ok(credentials) => super::openai_stream_runtime::serving_account_diag(&credentials).0,
             Err(_) => "account=unknown (credentials busy)".to_string(),

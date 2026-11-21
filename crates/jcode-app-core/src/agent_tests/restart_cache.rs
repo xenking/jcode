@@ -313,6 +313,7 @@ async fn restart_cache_monitor_reports_first_changed_canonical_item() {
         system_hash: Some(100),
         tools_hash: Some(200),
         request_options_hash: None,
+        responses_request_only_suffix: None,
     };
     let mut agent = Agent::new(Arc::new(Dialect::Anthropic), Registry::empty());
     append_text(&mut agent, Role::User, "Existing request");

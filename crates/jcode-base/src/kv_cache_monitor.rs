@@ -210,12 +210,14 @@ pub struct KvCacheMiss {
     /// Checked system, tool and prior-message fingerprints are unchanged.
     /// This is evidence about the prefix, not proof of a provider-side cause.
     pub prefix_unchanged: bool,
-    /// Tokens expected to be served from cache (previous reusable boundary).
+    /// First changed Responses input item outside the stable history.
+    pub wire_suffix_change: Option<usize>,
+    /// Prior reusable boundary, or the new provider's own input on a switch.
     pub expected_tokens: u64,
     /// Tokens the provider reported as read from cache.
     pub read_tokens: u64,
-    /// Estimated shortfall against the previous reusable prefix. A compaction
-    /// changes that prefix, so this is not measured resent or avoidable input.
+    /// Estimated shortfall against the previous boundary, or measured uncached
+    /// input on a provider switch. Neither measures avoidable input or wire bytes.
     pub missed_tokens: u64,
     /// Documented intentional invalidation that explains a harness-caused miss.
     pub documented_cause: Option<String>,
@@ -234,7 +236,9 @@ impl KvCacheMiss {
             );
         }
         let tokens = format_token_count(self.missed_tokens);
-        let prefix_tag = if self.prefix_unchanged {
+        let prefix_tag = if self.wire_suffix_change.is_some() {
+            " [wire suffix changed]"
+        } else if self.prefix_unchanged {
             " [prefix unchanged]"
         } else {
             ""
@@ -252,10 +256,21 @@ impl KvCacheMiss {
                 "KV cache miss [{}]: ~{tokens} tokens resent ({detail}). This is likely a harness bug.",
                 self.reason.id()
             ),
-            (None, false) => format!(
-                "KV cache miss [{}]{prefix_tag}: ~{tokens} tokens resent ({detail}).",
-                self.reason.id()
-            ),
+            (None, false) => match self.reason {
+                MissReason::ProviderSwitch => format!(
+                    "KV cache miss [provider_switch]: ~{tokens} tokens uncached on the new provider ({detail})."
+                ),
+                MissReason::LowRead | MissReason::ZeroRead | MissReason::ProviderCachePartial => {
+                    format!(
+                        "KV cache miss [{}]{prefix_tag}: ~{tokens} tokens below prior cache baseline ({detail}).",
+                        self.reason.id()
+                    )
+                }
+                _ => format!(
+                    "KV cache miss [{}]: ~{tokens} tokens resent ({detail}).",
+                    self.reason.id()
+                ),
+            },
         }
     }
 }
@@ -426,7 +441,7 @@ pub fn describe_miss(reason: MissReason, ctx: &MissContext<'_>) -> String {
                 "provider, model"
             };
             format!(
-                "provider read {read} of the {prefix}-token prefix{timing}; no detected change to {same}, system prompt, tools or message prefix; cause unconfirmed (possible provider routing, eviction or cache-boundary differences)"
+                "provider read {read} against a {prefix}-token prior cache baseline{timing}; no detected change to {same}, system prompt, tools or stable message history; cache-read cause unconfirmed"
             )
         }
     }
@@ -640,6 +655,19 @@ fn canonical_change(baseline: &Baseline, pending: &Pending) -> Option<CanonicalC
     (common < old.item_hashes.len()).then_some(CanonicalChange::Item(common))
 }
 
+fn responses_wire_suffix_change(baseline: &Baseline, pending: &Pending) -> Option<usize> {
+    let (old, new) = comparable_canonical_inputs(baseline, pending)?;
+    let old_suffix = old.responses_request_only_suffix.as_deref()?;
+    let new_suffix = new.responses_request_only_suffix.as_deref()?;
+    let next_items = new.item_hashes.get(old.item_hashes.len()..)?;
+    let common = old_suffix
+        .iter()
+        .zip(next_items.iter().chain(new_suffix))
+        .take_while(|(a, b)| a == b)
+        .count();
+    (common < old_suffix.len()).then_some(old.item_hashes.len() + common)
+}
+
 fn classify(
     baseline: &Baseline,
     pending: &Pending,
@@ -647,10 +675,15 @@ fn classify(
     read_tokens: Option<u64>,
 ) -> Option<KvCacheMiss> {
     let read_tokens = read_tokens?;
-    let expected = baseline.reusable_cache_tokens;
-    if expected == 0 {
+    if baseline.reusable_cache_tokens == 0 {
         return None;
     }
+    // Cache domains and token counts are not comparable across providers.
+    let expected = if baseline.route.provider != pending.route.provider {
+        prefix_tokens?
+    } else {
+        baseline.reusable_cache_tokens
+    };
     let missed = expected.saturating_sub(read_tokens);
     if missed < min_missed_tokens_for_provider(&pending.route.provider) {
         return None;
@@ -723,6 +756,20 @@ fn classify(
         ));
     }
     let comparable_input = comparable_canonical_inputs(baseline, pending).is_some();
+    let low_read = matches!(
+        reason,
+        MissReason::LowRead | MissReason::ZeroRead | MissReason::ProviderCachePartial
+    );
+    let wire_suffix_change = if low_read {
+        responses_wire_suffix_change(baseline, pending)
+    } else {
+        None
+    };
+    if let Some(index) = wire_suffix_change {
+        detail.push_str(&format!(
+            "; Responses wire input changed at item {index} (zero-based) after stable history"
+        ));
+    }
     if baseline.completed_in_process.is_none()
         && !comparable_input
         && matches!(reason, MissReason::LowRead | MissReason::ZeroRead)
@@ -731,16 +778,16 @@ fn classify(
     }
     Some(KvCacheMiss {
         reason,
-        prefix_unchanged: matches!(
-            reason,
-            MissReason::LowRead | MissReason::ZeroRead | MissReason::ProviderCachePartial
-        ) && if baseline.completed_in_process.is_some() {
-            pending
-                .signature
-                .checked_prefix_unchanged(&baseline.signature)
-        } else {
-            comparable_input && canonical_change.is_none()
-        },
+        prefix_unchanged: low_read
+            && wire_suffix_change.is_none()
+            && if baseline.completed_in_process.is_some() {
+                pending
+                    .signature
+                    .checked_prefix_unchanged(&baseline.signature)
+            } else {
+                comparable_input && canonical_change.is_none()
+            },
+        wire_suffix_change,
         expected_tokens: expected,
         read_tokens,
         missed_tokens: missed,
@@ -869,6 +916,96 @@ mod tests {
         }
     }
 
+    #[test]
+    fn provider_switch_uses_the_new_providers_uncached_input() {
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request(route(), sig(&[10]));
+        assert!(monitor.finish_request(205_894, Some(203_137)).is_none());
+        monitor.begin_request(
+            RequestRoute {
+                provider: "openai-oauth".into(),
+                model: "fixture".into(),
+                ..RequestRoute::default()
+            },
+            sig(&[10, 11]),
+        );
+        let miss = monitor
+            .finish_request_with_prefix(142_275, Some(142_275), Some(4_352))
+            .unwrap();
+        assert_eq!(miss.reason, MissReason::ProviderSwitch);
+        assert_eq!(
+            (miss.expected_tokens, miss.read_tokens, miss.missed_tokens),
+            (142_275, 4_352, 137_923)
+        );
+        let message = miss.message();
+        assert!(message.contains("138K tokens uncached"), "{message}");
+        assert!(message.contains("caches are not shared"), "{message}");
+        assert!(!message.contains("resent"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn low_read_reports_wire_suffix_change_without_blame_or_resend_claim() {
+        use jcode_provider_core::fingerprint::{
+            capture_canonical_input, log_provider_canonical_input, note_responses_stable_item_count,
+        };
+        use serde_json::json;
+
+        let route = RequestRoute {
+            provider: "openai-oauth".into(),
+            model: "fixture".into(),
+            ..RequestRoute::default()
+        };
+        let mut monitor = KvCacheMonitor::new();
+        for (items, stable_count, projected, total, read) in [
+            (
+                vec!["user", "request-only nudge"],
+                1,
+                vec![10],
+                142_275,
+                4_352,
+            ),
+            (
+                vec!["user", "assistant", "next user"],
+                3,
+                vec![10, 11, 12],
+                142_566,
+                19_968,
+            ),
+        ] {
+            monitor.begin_request(route.clone(), sig(&projected));
+            let (_, canonical) = capture_canonical_input(async {
+                let body = json!({"input": items});
+                log_provider_canonical_input(
+                    "openai",
+                    &route.model,
+                    "openai_responses_full",
+                    &body,
+                    body["input"].as_array().unwrap(),
+                    None,
+                    None,
+                    None,
+                    &[],
+                );
+                note_responses_stable_item_count(stable_count);
+            })
+            .await;
+            monitor.note_canonical_input(canonical.unwrap());
+            let miss = monitor.finish_request_with_prefix(total, Some(total), Some(read));
+            if read == 4_352 {
+                assert!(miss.is_none());
+            } else {
+                let miss = miss.unwrap();
+                assert_eq!(miss.reason, MissReason::LowRead);
+                assert_eq!(miss.missed_tokens, 122_307);
+                let message = miss.message();
+                assert!(message.contains("[wire suffix changed]"), "{message}");
+                assert!(message.contains("stable history"), "{message}");
+                assert!(!message.contains("[prefix unchanged]"), "{message}");
+                assert!(!message.contains("resent"), "{message}");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn identifies_drift_in_actual_responses_input_despite_stable_agent_prefix() {
         use jcode_provider_core::fingerprint::{
@@ -941,6 +1078,7 @@ mod tests {
                 format: "openai_responses_full".into(),
                 model: route.model.clone(),
                 item_hashes: items,
+                responses_request_only_suffix: None,
                 system_hash: Some(2),
                 tools_hash: Some(3),
                 request_options_hash,
@@ -1041,7 +1179,8 @@ mod tests {
         let miss = monitor.finish_request(52_000, Some(0)).expect("miss");
         assert_eq!(miss.reason, MissReason::ZeroRead);
         assert!(
-            miss.detail.contains("read 0 of the 50K-token prefix"),
+            miss.detail
+                .contains("read 0 against a 50K-token prior cache baseline"),
             "{}",
             miss.detail
         );

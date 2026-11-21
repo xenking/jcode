@@ -25,6 +25,10 @@ pub struct CanonicalInput {
     pub format: String,
     pub model: String,
     pub item_hashes: Vec<u64>,
+    /// Verified request-only suffix of Responses input. `None` also covers old
+    /// checkpoints that stored only the trimmed prefix. `Some([])` is complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub responses_request_only_suffix: Option<Vec<u64>>,
     pub system_hash: Option<u64>,
     pub tools_hash: Option<u64>,
     pub request_options_hash: Option<u64>,
@@ -54,10 +58,12 @@ pub fn note_canonical_request_options(hash: u64) {
     });
 }
 
-pub fn truncate_canonical_items(count: usize) {
+pub fn note_responses_stable_item_count(count: usize) {
     let _ = REQUEST_INPUT.try_with(|slot| {
-        if let Some(input) = slot.borrow_mut().as_mut() {
-            input.item_hashes.truncate(count);
+        if let Some(input) = slot.borrow_mut().as_mut()
+            && count <= input.item_hashes.len()
+        {
+            input.responses_request_only_suffix = Some(input.item_hashes.split_off(count));
         }
     });
 }
@@ -145,6 +151,7 @@ fn capture_request_input(
             format: format.to_owned(),
             model: model.to_string(),
             item_hashes,
+            responses_request_only_suffix: None,
             system_hash: fingerprints.system.map(|(hash, _)| hash),
             tools_hash: fingerprints.tools.map(|(hash, _)| hash),
             request_options_hash: None,

@@ -56,11 +56,170 @@ async fn prefix_test_complete(provider: &OpenAIProvider, messages: &[ChatMessage
 }
 
 async fn prefix_test_provider() -> OpenAIProvider {
-    let provider = OpenAIProvider::new(prewarm_test_credentials());
-    *provider.credentials.write().await = prewarm_test_credentials();
-    provider.set_model("gpt-5.6-sol").unwrap();
+    let credentials = prewarm_test_credentials();
+    let scope = OpenAIProvider::catalog_scope_for(&credentials);
+    let model = "gpt-5.6-sol";
+    // Each loopback endpoint serves only Responses, not the model catalog.
+    jcode_base::provider::populate_account_models_for_scope(&scope, vec![model.into()]);
+    let provider = OpenAIProvider::new(credentials.clone());
+    *provider.credentials.write().await = credentials;
+    provider.set_model(model).unwrap();
     provider.set_transport("websocket").unwrap();
     provider
+}
+
+#[tokio::test]
+async fn request_only_tail_replays_full_wire_input_and_reports_low_read() {
+    use jcode_base::kv_cache_monitor::{
+        KvCacheMonitor, MissReason, RequestRoute, RequestSignature,
+    };
+    use jcode_provider_core::fingerprint::capture_canonical_input;
+    use serde_json::json;
+
+    let _lock = jcode_base::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", home.path());
+    let _test_session = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _base = EnvVarGuard::set("JCODE_OPENAI_API_BASE", &format!("http://{addr}/v1"));
+    let _transport = EnvVarGuard::set("JCODE_OPENAI_TRANSPORT", "websocket");
+    let _prewarm = EnvVarGuard::set("JCODE_OPENAI_PREWARM", "0");
+    let _key = EnvVarGuard::set("JCODE_OPENAI_PROMPT_CACHE_KEY", "fixture-stable-key");
+    let usages = [(142_275, 4_352), (142_566, 19_968)];
+    let server = tokio::spawn(async move {
+        let mut previous = None::<Value>;
+        for (index, (total, cached)) in usages.into_iter().enumerate() {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp)
+                .await
+                .unwrap_or_else(|error| panic!("request {index}: {error}"));
+            let request = prefix_test_request(&mut ws).await;
+            assert_eq!(request["prompt_cache_key"], "fixture-stable-key");
+            assert!(request.get("previous_response_id").is_none());
+            let text = |s: &str| json!({"type":"input_text", "text":s});
+            if let Some(old) = previous.as_ref() {
+                let old_input = old["input"].as_array().unwrap();
+                let new_input = request["input"].as_array().unwrap();
+                let common = old_input
+                    .iter()
+                    .zip(new_input)
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                assert_eq!(common + 1, old_input.len());
+                assert_eq!(new_input.len(), old_input.len() + 1);
+                assert_eq!(old_input[common]["content"][0], text("one-shot nudge"));
+                assert_eq!(new_input[common]["content"][0], text("next user"));
+                for field in ["instructions", "tools", "model", "prompt_cache_key"] {
+                    assert_eq!(old[field], request[field]);
+                }
+            }
+            previous = Some(request);
+            let id = format!("resp_tail_{index}");
+            ws.send(WsMessage::Text(
+                json!({
+                    "type":"response.created", "response":{"id":id}
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            ws.send(WsMessage::Text(
+                json!({
+                    "type":"response.output_text.delta", "delta":"fixture reply"
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            ws.send(WsMessage::Text(json!({
+                "type":"response.completed",
+                "response":{"id":id, "status":"completed", "output":[],
+                    "usage":{"input_tokens":total, "input_tokens_details":{"cached_tokens":cached}, "output_tokens":1}}
+            }).to_string())).await.unwrap();
+            if index == 0 {
+                while let Some(frame) = ws.next().await {
+                    match frame {
+                        Ok(WsMessage::Ping(payload)) => {
+                            ws.send(WsMessage::Pong(payload)).await.unwrap()
+                        }
+                        Ok(WsMessage::Close(_)) | Err(_) => break,
+                        other => panic!("changed input must not continue the old chain: {other:?}"),
+                    }
+                }
+            }
+        }
+    });
+
+    let provider = prefix_test_provider().await;
+    let mut monitor = KvCacheMonitor::new();
+    let route = RequestRoute {
+        provider: "openai-api".into(),
+        model: provider.model(),
+        ..RequestRoute::default()
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for (index, (total, cached)) in usages.into_iter().enumerate() {
+            let mut messages = vec![ChatMessage::user("stable prior user")];
+            if index == 0 {
+                messages.push(ChatMessage::user("one-shot nudge").into_request_only());
+            } else {
+                messages.push(ChatMessage::user("next user"));
+                messages.push(ChatMessage::user("new tail"));
+            }
+            monitor.begin_request(
+                route.clone(),
+                RequestSignature {
+                    system_static_hash: 1,
+                    tools_hash: 2,
+                    message_count: index + 1,
+                    message_hashes: vec![10; index + 1],
+                    ..RequestSignature::default()
+                },
+            );
+            let (events, canonical) = capture_canonical_input(provider.complete(
+                &messages,
+                &[],
+                "stable instructions",
+                None,
+            ))
+            .await;
+            monitor.note_canonical_input(canonical.expect("captured Responses input"));
+            let mut events = events.unwrap();
+            let mut usage = None;
+            while let Some(event) = events.next().await {
+                if let StreamEvent::TokenUsage {
+                    input_tokens,
+                    cache_read_input_tokens,
+                    ..
+                } = event.unwrap()
+                {
+                    usage = input_tokens.zip(cache_read_input_tokens);
+                }
+            }
+            let (input, read) = usage.expect("terminal usage");
+            assert_eq!((input, read), (total, cached));
+            let miss = monitor.finish_request_with_prefix(input, Some(input), Some(read));
+            if index == 0 {
+                assert!(miss.is_none());
+            } else {
+                let miss = miss.expect("large low read is still visible");
+                assert_eq!(
+                    (miss.reason, miss.missed_tokens),
+                    (MissReason::LowRead, 122_307)
+                );
+                assert!(
+                    miss.message().contains("[wire suffix changed]"),
+                    "{}",
+                    miss.message()
+                );
+            }
+        }
+        server.await.unwrap();
+    })
+    .await
+    .expect("two isolated provider requests must finish");
 }
 
 async fn persistent_prefix_changed_output_case(had_real_output: bool) {
@@ -201,8 +360,14 @@ async fn persistent_changed_options_replay_full_input() {
     });
     let provider = prefix_test_provider().await;
     let mut messages = vec![ChatMessage::user("first")];
-    for (system, expected) in [("first settings", "resp_old"), ("changed settings", "resp_new")] {
-        let mut stream = provider.complete(&messages, &[], system, None).await.unwrap();
+    for (system, expected) in [
+        ("first settings", "resp_old"),
+        ("changed settings", "resp_new"),
+    ] {
+        let mut stream = provider
+            .complete(&messages, &[], system, None)
+            .await
+            .unwrap();
         let mut text = String::new();
         while let Some(event) = stream.next().await {
             match event.unwrap() {
