@@ -1,5 +1,14 @@
 #[tokio::test]
 async fn await_all_settles_after_both_workers_are_stopped() {
+    assert_await_settles_after_both_workers_are_stopped(vec!["wolf".into(), "koala-id".into()]).await;
+}
+
+#[tokio::test]
+async fn await_whole_swarm_settles_after_both_workers_are_stopped() {
+    assert_await_settles_after_both_workers_are_stopped(vec![]).await;
+}
+
+async fn assert_await_settles_after_both_workers_are_stopped(requested: Vec<String>) {
     let (_env, _dir) = RuntimeEnvGuard::new();
     let swarm = "await-stopped-swarm";
     let owner = "owner";
@@ -28,7 +37,6 @@ async fn await_all_settles_after_both_workers_are_stopped() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let runtime = AwaitMembersRuntime::default();
     let (background_tx, mut background_rx) = mpsc::unbounded_channel();
-    let requested = vec!["wolf".into(), "koala-id".into()];
     let targets = crate::protocol::default_comm_await_target_statuses();
     for (id, sender, background) in [(1, &tx, false), (2, &background_tx, true)] {
         handle_comm_await_members(
