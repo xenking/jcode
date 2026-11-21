@@ -3,14 +3,14 @@
 
 import argparse
 import base64
-from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, ExitStack
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
 import re
 import select
-import shutil
 import socket
 import subprocess
 import sys
@@ -93,6 +93,7 @@ class Session:
         self.reader = sock.makefile("rb")
         self.provider = provider
         self.sequence = 1
+        self.executor_pid = None
         self.send(type="subscribe", id=1, working_dir=str(root))
         self.session_id = None
         for event in self.events(1):
@@ -103,11 +104,11 @@ class Session:
     def send(self, **request):
         self.sock.sendall(json.dumps(request).encode() + b"\n")
 
-    def events(self, request_id):
-        deadline = time.monotonic() + 35
+    def events(self, request_id, timeout=35):
+        deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
-            require(remaining > 0, f"request {request_id} exceeded 35 seconds")
+            require(remaining > 0, f"request {request_id} exceeded {timeout} seconds")
             self.sock.settimeout(remaining)
             line = self.reader.readline()
             require(line, "daemon disconnected before turn completed")
@@ -118,27 +119,17 @@ class Session:
                 return
             yield event
 
-    def tool(self, action, *, consent=None, **arguments):
+    def tool(self, action, *, timeout=35, **arguments):
         self.sequence += 2
         request_id = self.sequence
-        call_id = f"call_fixture_{request_id}"
+        call_id = f"call_fixture_{self.session_id[-8:]}_{request_id}"
         self.provider.pending = (call_id, {"action": action, **arguments})
         self.send(type="message", id=request_id, content=f"Run fixture check {request_id}.")
-        result, images, asked = None, [], False
-        for event in self.events(request_id):
+        result, images = None, []
+        for event in self.events(request_id, timeout):
             kind = event["type"]
             if kind == "ask_user_request":
-                require(not asked and consent in {"Deny", "Allow for this session"},
-                        "unexpected question in synthetic session")
-                questions = event["questions"]
-                require(event["request_id"] == f"ask-computer-{call_id}"
-                        and event["tool_call_id"] == call_id
-                        and len(questions) == 1 and questions[0].get("header") == "Computer use"
-                        and [o["label"] for o in questions[0]["options"]]
-                        == ["Deny", "Allow for this session"], "not the fixture's Jcode consent")
-                asked = True
-                self.send(type="ask_user_response", id=request_id + 1,
-                          request_id=event["request_id"], response={"answers": [{"selected": [consent]}]})
+                raise RuntimeError("daemon asked for consent instead of deferring to the local Desktop")
             elif kind == "tool_done" and event["id"] == call_id:
                 require(result is None and event["name"] == TOOL, f"unexpected {action} tool result")
                 require(not event.get("error"), f"{action} failed: {event.get('output')}")
@@ -148,13 +139,21 @@ class Session:
                     if image.get("anchor") == {"kind": "tool_call", "id": call_id}:
                         images.append(image)
         require(result is not None, f"missing {action} tool result")
-        require(asked == (consent is not None), f"unexpected Jcode consent count for {action}")
         return result, images
 
     def receipt(self, action, **arguments):
         output, images = self.tool(action, **arguments)
         require(not images, f"unexpected image from {action}")
-        return json.loads(output)
+        receipt = json.loads(output)
+        if self.executor_pid is not None and receipt.get("reason") not in {
+            "consent_denied", "consent_required", "desktop_unavailable",
+        }:
+            self.check_executor(receipt, action)
+        return receipt
+
+    def check_executor(self, receipt, action):
+        require(receipt.get("executor_pid") == self.executor_pid,
+                f"{action} did not run in Desktop PID {self.executor_pid}: {receipt}")
 
 
 @contextmanager
@@ -183,8 +182,8 @@ def fixture_line(fixture):
     return line
 
 
-def state(fixture):
-    fixture.stdin.write("state\n")
+def state(fixture, command="state"):
+    fixture.stdin.write(command + "\n")
     fixture.stdin.flush()
     return fixture_line(fixture).split("|")
 
@@ -204,7 +203,7 @@ def check_snapshot(snapshot, fixture_pid, window, value):
 
 
 def status(active):
-    output, images = active.tool("check_permissions", consent="Allow for this session")
+    output, images = active.tool("check_permissions")
     require(not images, "permission status must not capture an image")
     fields = {}
     for line in output.splitlines():
@@ -219,13 +218,10 @@ def status(active):
     return fields["Accessibility"], fields["Screen Recording"]
 
 
-def live(active, fixture, binary, root, ax, screen):
-    window, decoy = map(int, fixture_line(fixture).split("|"))
-    require(window > 0 and decoy > 0 and window != decoy, "fixture windows lack distinct WindowServer IDs")
-    scope = {"app": f"pid:{fixture.pid}", "window_id": window}
+def live(active, fixture, binary, root, scope, snapshot, ax, screen):
+    window = scope["window_id"]
     original = [ORIGINAL, DECOY, "false"]
     require(state(fixture) == original, "fixture must start in the background with original values")
-    snapshot = active.receipt("observe", view="ax", **scope)
     for _ in range(5):
         if snapshot.get("reason") not in {"window_not_found", "window_changed"}:
             break
@@ -241,7 +237,7 @@ def live(active, fixture, binary, root, ax, screen):
                 f"AX refusal did not prevent dispatch: {action}")
         require(state(fixture) == original, "AX refusal changed the fixture")
         print("PASS AX permission refusal: observe and act blocked, no image, fixture unchanged.")
-        print("BLOCKED: grant Accessibility to the macOS TCC identity of the fixture daemon.")
+        print("BLOCKED: grant Accessibility to the isolated Desktop's macOS TCC identity.")
         return BLOCKED
 
     ref = check_snapshot(snapshot, fixture.pid, window, ORIGINAL)
@@ -263,11 +259,12 @@ def live(active, fixture, binary, root, ax, screen):
 
     output, images = active.tool("observe", view="image", **scope)
     capture, _ = json.JSONDecoder().raw_decode(output)
+    active.check_executor(capture, "image observe")
     if not screen:
         require(capture.get("reason") == "screen_recording_permission_required" and not images,
                 f"Screen Recording status disagrees with capture refusal: {capture}")
         print("PASS Screen Recording refusal: no image was returned.")
-        print("BLOCKED: grant Screen & System Audio Recording to the macOS TCC identity of the fixture daemon.")
+        print("BLOCKED: grant Screen & System Audio Recording to the isolated Desktop's TCC identity.")
         return BLOCKED
 
     frame = capture.get("frame") or {}
@@ -284,7 +281,84 @@ def live(active, fixture, binary, root, ax, screen):
             "captured window OCR did not contain the current fixture text, or included the decoy")
     require(state(fixture) == after, "window capture activated or changed the fixture")
     print("PASS window-scoped screenshot and Vision OCR on the returned image only.")
+    require(state(fixture, "focus-input") == ["ready"], "fixture could not focus its input")
+    try:
+        active.tool("type", text=" JCODE KEYBOARD")
+        expected = UPDATED + " JCODE KEYBOARD"
+        require(state(fixture) == [expected, DECOY, "true"], "native keyboard input did not reach the fixture")
+        check_snapshot(active.receipt("observe", view="ax", **scope), fixture.pid, window, expected)
+    finally:
+        state(fixture, "hide")
+    print(f"PASS keyboard input and AX readback, Desktop executor PID {active.executor_pid}.")
     return 0
+
+
+def until(probe, label, process, timeout=20):
+    deadline = time.monotonic() + timeout
+    while process.poll() is None and time.monotonic() < deadline:
+        value = probe()
+        if value:
+            return value
+        time.sleep(0.15)
+    raise RuntimeError(f"timed out waiting for {label} (process status: {process.poll()})")
+
+
+def desktop_request(endpoint, **request):
+    try:
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.settimeout(0.75)
+            sock.connect(str(endpoint))
+            sock.sendall(json.dumps({"v": 1, **request}).encode() + b"\n")
+            with sock.makefile("rb") as reader:
+                return json.loads(reader.readline())
+    except (OSError, ValueError):
+        return {}
+
+
+def desktop_target(control, session_id, pid):
+    targets = []
+    for endpoint in control.glob("*.sock"):
+        reply = desktop_request(endpoint, action="computer_target", session_id=session_id)
+        if reply.get("status") == "ok":
+            target = reply["result"]
+            require(target["session_id"] == session_id and target["window_id"].startswith(f"{pid}:"),
+                    f"target is not the isolated Desktop session: {target}")
+            targets.append((endpoint, target))
+    require(len(targets) <= 1, f"multiple Desktop windows matched {session_id}")
+    return targets[0] if targets else None
+
+
+def decide(active, fixture, binary, desktop, route, button, action, **arguments):
+    endpoint, target = route
+    focus = {"action": "focus", "target": target, "allow_user_window": True}
+    reply = desktop_request(endpoint, **focus)
+    require(reply.get("status") == "ok", f"could not focus test window: {reply}")
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        result = worker.submit(active.receipt, action, timeout=170, **arguments)
+        try:
+            def dialog_active():
+                if result.done():
+                    raise RuntimeError(f"request completed before Desktop consent: {result.result()}")
+                return desktop_request(endpoint, **focus).get("code") == "window_busy"
+
+            until(dialog_active, "AppKit modal dialog on the test window", desktop)
+            for _ in range(8):
+                if result.done():
+                    raise RuntimeError(f"request completed before Desktop consent: {result.result()}")
+                probe = subprocess.run([binary, "sheet", str(desktop.pid), active.session_id],
+                                       capture_output=True, text=True, timeout=3)
+                if probe.returncode in (0, BLOCKED):
+                    break
+                time.sleep(0.25)
+            require(state(fixture) == [ORIGINAL, DECOY, "false"], "fixture changed before consent")
+            if probe.stdout.strip():
+                print(probe.stdout.strip(), flush=True)
+            print(f"PENDING session {active.session_id}, Desktop PID {desktop.pid}; fixture unchanged. "
+                  f"Click '{button}' only on the 'Computer use' sheet with that session ID.", flush=True)
+            return result.result()
+        except BaseException:
+            active.sock.shutdown(socket.SHUT_RDWR)
+            raise
 
 
 def run(args, root, log):
@@ -292,41 +366,91 @@ def run(args, root, log):
     running_user = os.environ.get("USER", "")
     version = subprocess.check_output([path, "--version"], text=True, timeout=5).strip()
     print(f"Jcode: {version} ({path}); uid={os.getuid()}", flush=True)
-    jcode, home, runtime = (root / p for p in ("jcode", "home", "run"))
-    for directory in (jcode, home, runtime):
-        directory.mkdir()
+    jcode, home, runtime, control, xdg = (root / p for p in ("jcode", "home", "run", "c", "xdg"))
+    for directory in (jcode, home, runtime, control, xdg):
+        directory.mkdir(mode=0o700)
     socket_path = root / "j.sock"
+    api_socket = root / "a.sock"
+    config = root / "desktop.toml"
+    config.write_text("[workspace]\nsession_refresh_seconds = 5\ncoaching_hints = false\n")
     with ThreadingHTTPServer(("127.0.0.1", 0), Provider) as provider:
         thread = threading.Thread(target=provider.serve_forever, daemon=True)
         thread.start()
         try:
             env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "USER": running_user,
                    "JCODE_HOME": str(jcode), "JCODE_RUNTIME_DIR": str(runtime), "TMPDIR": str(runtime),
+                   "XDG_RUNTIME_DIR": str(xdg), "JCODE_SOCKET": str(socket_path), "JCODE_API_SOCKET": str(api_socket),
+                   "JCODE_DESKTOP_CONTROL_DIR": str(control), "JCODE_DESKTOP_CONFIG": str(config),
+                   "JCODE_DESKTOP_WORKING_DIR": str(root), "JCODE_DESKTOP_MUTE_SOUNDS": "1",
                    "JCODE_TEST_SESSION": "1", "JCODE_NO_TELEMETRY": "1", "JCODE_TELEMETRY": "off",
                    "JCODE_NO_AUTO_UPDATE": "1", "OPENAI_COMPAT_API_KEY": "fixture-only",
                    "JCODE_OPENAI_COMPAT_DEFAULT_MODEL": MODEL,
                    "JCODE_OPENAI_COMPAT_API_BASE": f"http://127.0.0.1:{provider.server_port}/v1"}
             command = [path, "--no-update", "--no-selfdev", "--provider", "openai-compatible", "--model", MODEL,
                        "--tools", TOOL, "--socket", socket_path, "serve"]
-            with child(command, cwd=root, env=env, stdout=log, stderr=log) as daemon:
-                print(f"Isolated executor PID: {daemon.pid}", flush=True)
-                with session(socket_path, provider, root, daemon) as denied:
-                    receipt = denied.receipt("check_permissions", consent="Deny")
-                    require(receipt.get("reason") == "consent_denied", f"Jcode consent was not honored: {receipt}")
-                    require(denied.receipt("check_permissions").get("reason") == "consent_denied",
-                            "Jcode denial did not persist in the same session")
-                    print("PASS session consent denied before any permission probe.")
-                if not args.allow_fixture:
-                    print("BLOCKED: positive path needs --allow-fixture for a new synthetic session.")
+            with ExitStack() as stack:
+                def spawn(command, **kwargs):
+                    return stack.enter_context(child(command, cwd=root, env=env, stderr=log, **kwargs))
+
+                daemon = spawn(command, stdout=log)
+                allowed = stack.enter_context(session(socket_path, provider, root, daemon))
+                missing = allowed.receipt("observe", view="ax", app="pid:2147483647")
+                require(missing.get("reason") == "desktop_unavailable" and "executor_pid" not in missing,
+                        f"a session without Desktop did not fail closed: {missing}")
+                print(f"PASS no Desktop, no execution (daemon PID {daemon.pid}).", flush=True)
+                if args.no_desktop:
+                    return 0
+
+                binary = root / "jcode-ax-fixture"
+                swift = Path(__file__).resolve().parent / "fixtures/macos-computer-acceptance.swift"
+                subprocess.run(["/usr/bin/swiftc", swift, "-o", binary], check=True, timeout=90)
+                if subprocess.run([binary, "--check-aqua"], timeout=5).returncode == BLOCKED:
+                    print("BLOCKED: unlock the macOS Aqua session before showing the consent sheets.", flush=True)
                     return BLOCKED
-                with session(socket_path, provider, root, daemon) as allowed:
-                    ax, screen = status(allowed)
-                    binary = root / "jcode-ax-fixture"
-                    swift = Path(__file__).resolve().parent / "fixtures/macos-computer-acceptance.swift"
-                    subprocess.run(["/usr/bin/swiftc", swift, "-o", binary], check=True, timeout=90)
-                    with child([binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                               stderr=log, text=True) as fixture:
-                        return live(allowed, fixture, binary, root, ax, screen)
+                denied = stack.enter_context(session(socket_path, provider, root, daemon))
+                denied.tool("discover")  # Persist a second real session for the Desktop catalog.
+                require(allowed.session_id != denied.session_id, "sessions must be distinct")
+                bridge = spawn([Path(args.bridge).resolve(strict=True)], stdout=log)
+                until(lambda: api_socket.is_socket(), "private harness API", bridge)
+                desktop_path = Path(args.desktop).resolve(strict=True)
+                desktop = spawn([desktop_path, "--single-panel", "--no-hot-reload",
+                                 f"--session={allowed.session_id}"], stdout=log)
+                print(f"Isolated Desktop: {desktop_path}; PID {desktop.pid} != daemon {daemon.pid}", flush=True)
+                require(desktop.pid != daemon.pid, "Desktop must have its own process")
+                endpoint, target = until(lambda: desktop_target(control, allowed.session_id, desktop.pid),
+                                         "Desktop window attached to allowed session", desktop)
+                allowed.executor_pid = denied.executor_pid = desktop.pid
+
+                fixture = spawn([binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+                window, decoy = map(int, fixture_line(fixture).split("|"))
+                require(window > 0 and decoy > 0 and window != decoy, "invalid fixture WindowServer IDs")
+                scope = {"app": f"pid:{fixture.pid}", "window_id": window}
+
+                snapshot = decide(allowed, fixture, binary, desktop, (endpoint, target),
+                                  "Allow for this session", "observe", view="ax", **scope)
+                allowed.check_executor(snapshot, "approved observe")
+                ax, screen = status(allowed)
+                until(lambda: desktop_request(endpoint, action="open_session", session_id=denied.session_id,
+                                              destination="new_window").get("status") == "ok",
+                      "new session in the private Desktop catalog", desktop)
+                denied_endpoint, denied_target = until(
+                    lambda: desktop_target(control, denied.session_id, desktop.pid),
+                    "second session attached to the same Desktop", desktop)
+                require(target != denied_target, "both session targets were identical")
+                receipt = decide(denied, fixture, binary, desktop, (denied_endpoint, denied_target),
+                                 "Deny", "act", verb="set_value",
+                                 snapshot_id=snapshot.get("snapshot_id", "none"),
+                                 element_ref="none", value="DO NOT WRITE")
+                require(receipt.get("reason") == "consent_denied" and "executor_pid" not in receipt,
+                        f"Desktop denied but executed the operation: {receipt}")
+                require(denied.receipt("observe", view="ax", **scope).get("reason") == "consent_denied",
+                        "the second session did not remember its denial")
+                direct = desktop_request(denied_endpoint, action="computer_use", target=denied_target,
+                                         input={"action": "observe", "view": "ax", **scope})
+                require(direct.get("code") == "consent_denied", f"direct socket bypassed the denial: {direct}")
+                require(state(fixture) == [ORIGINAL, DECOY, "false"], "denial changed the fixture")
+                print("PASS second session asked independently, denied before dispatch, no second prompt.", flush=True)
+                return live(allowed, fixture, binary, root, scope, snapshot, ax, screen)
         finally:
             provider.shutdown()
             thread.join()
@@ -334,12 +458,15 @@ def run(args, root, log):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--jcode", default=shutil.which("jcode"), help="installed/pinned Jcode executable")
-    parser.add_argument("--allow-fixture", action="store_true",
-                        help="allow the synthetic session to target only its two fixture windows")
+    parser.add_argument("--jcode", required=True, help="pinned Jcode executable")
+    parser.add_argument("--desktop", help="pinned Jcode Desktop executable (not an app bundle)")
+    parser.add_argument("--bridge", help="pinned jcode-harness-api-bridge executable")
+    parser.add_argument("--no-desktop", action="store_true", help="only assert the missing broker fails closed")
     args = parser.parse_args()
-    if sys.platform != "darwin" or not args.jcode:
-        print("BLOCKED: macOS and a Jcode executable are required.", file=sys.stderr)
+    if not args.no_desktop and not (args.desktop and args.bridge):
+        parser.error("--desktop and --bridge are required for the interactive test")
+    if sys.platform != "darwin":
+        print("BLOCKED: macOS is required.", file=sys.stderr)
         return BLOCKED
     with tempfile.TemporaryDirectory(prefix="jcode-ax-", dir="/tmp") as temp:
         root = Path(temp).resolve()

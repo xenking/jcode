@@ -5,6 +5,13 @@ func reply(_ line: String) {
     FileHandle.standardOutput.write(Data((line + "\n").utf8))
 }
 
+if CommandLine.arguments == [CommandLine.arguments[0], "--check-aqua"] {
+    let session = CGSessionCopyCurrentDictionary() as? [String: Any] ?? [:]
+    guard session["kCGSessionLoginDoneKey"] as? Bool == true,
+          session["CGSSessionScreenIsLocked"] as? Bool != true else { exit(77) }
+    exit(0)
+}
+
 if CommandLine.arguments.count == 2 {
     let image = URL(fileURLWithPath: CommandLine.arguments[1])
     let request = VNRecognizeTextRequest()
@@ -13,6 +20,36 @@ if CommandLine.arguments.count == 2 {
     for line in request.results ?? [] {
         if let text = line.topCandidates(1).first?.string { reply(text) }
     }
+    exit(0)
+}
+
+if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "sheet" {
+    guard AXIsProcessTrusted(), let pid = pid_t(CommandLine.arguments[2]) else { exit(77) }
+    func contents(_ element: AXUIElement, _ depth: Int) -> [String] {
+        guard depth > 0 else { return [] }
+        var strings: [String] = []
+        for name in [kAXRoleAttribute, kAXTitleAttribute, kAXValueAttribute, kAXDescriptionAttribute] {
+            var value: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success,
+               let text = value as? String { strings.append(text) }
+        }
+        for name in [kAXWindowsAttribute, "AXSheets", kAXChildrenAttribute] {
+            var value: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success,
+               let children = value as? [AXUIElement] {
+                for child in children { strings += contents(child, depth - 1) }
+            }
+        }
+        return strings
+    }
+    let strings = contents(AXUIElementCreateApplication(pid), 6)
+    guard strings.contains("Computer use"), strings.contains("Allow for this session"), strings.contains("Deny"),
+          strings.contains(where: { $0.contains("for session " + CommandLine.arguments[3]) }) else {
+        reply("AX roles: \(Set(strings.filter { $0.hasPrefix("AX") }).sorted()); " +
+              "dialog labels: \(strings.filter { $0.contains("Computer use") || $0.contains("this session") })")
+        exit(1)
+    }
+    reply("Computer use sheet for \(CommandLine.arguments[3]) in Desktop PID \(pid)")
     exit(0)
 }
 
@@ -77,6 +114,17 @@ FileHandle.standardInput.readabilityHandler = { handle in
         for command in String(decoding: data, as: UTF8.self).split(separator: "\n") {
             switch command {
             case "state": reply("\(input.stringValue)|\(decoyInput.stringValue)|\(app.isActive)")
+            case "focus-input":
+                app.activate(ignoringOtherApps: true)
+                target.makeKeyAndOrderFront(nil)
+                target.makeFirstResponder(input)
+                if let editor = input.currentEditor() {
+                    editor.selectedRange = NSRange(location: (input.stringValue as NSString).length, length: 0)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) {
+                    reply(app.isActive && target.isKeyWindow && input.currentEditor() != nil ? "ready" : "not ready")
+                }
+            case "hide": app.hide(nil); reply("hidden")
             default: reply("unknown command")
             }
         }
