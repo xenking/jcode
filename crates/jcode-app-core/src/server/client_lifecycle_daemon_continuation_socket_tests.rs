@@ -72,6 +72,102 @@ async fn second_socket_can_disable_auto_poke_during_a_continuation() {
     continuation_socket_workflow(true).await;
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_compact_acknowledges_before_active_turn_releases_agent() {
+    use crate::server::runtime::ServerRuntime;
+    use jcode_sdk::{ApiEvent, ConnectOptions, JcodeClient};
+
+    let _lock = crate::storage::lock_test_env();
+    let home = IsolatedReloadRecoveryEnv::new();
+    let provider = ContinuationProvider {
+        calls: Arc::new(AtomicUsize::new(0)),
+        continuation_started: Arc::new(tokio::sync::Notify::new()),
+        release_continuation: Arc::new(tokio::sync::Notify::new()),
+    };
+    let daemon_socket = home._runtime.path().join("compact-daemon.sock");
+    let api_socket = home._runtime.path().join("compact-api.sock");
+    let server = crate::server::Server::new_with_paths(
+        Arc::new(provider.clone()),
+        daemon_socket.clone(),
+        home._runtime.path().join("compact-debug.sock"),
+    );
+    let runtime = ServerRuntime::from_server(&server);
+    let daemon =
+        runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&daemon_socket).unwrap());
+    let bridge = tokio::spawn(jcode_harness_api_server::run_bridge(
+        api_socket.clone(),
+        daemon_socket,
+    ));
+    let wait = Duration::from_secs(5);
+    tokio::time::timeout(wait, async {
+        while !api_socket.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("bridge did not start");
+
+    let project = home._home.path().to_string_lossy().into_owned();
+    let worker = tokio::task::spawn_blocking(move || {
+        let client = JcodeClient::connect(ConnectOptions {
+            socket_path: Some(api_socket),
+            client_name: "desktop-compact-test".into(),
+            request_timeout: Some(wait),
+            ensure_runtime: false,
+            ..Default::default()
+        })
+        .unwrap();
+        let session = client.create_session(Some(project)).unwrap();
+        let events = client.events(Some(&session.session_id));
+        client
+            .send_message(&session.session_id, "first turn", vec![], None)
+            .unwrap();
+        while !matches!(
+            events.next_timeout(wait).expect("first turn timeout"),
+            ApiEvent::TurnDone { .. }
+        ) {}
+        client
+            .send_message(&session.session_id, "held turn", vec![], None)
+            .unwrap();
+        tokio::runtime::Handle::current().block_on(async {
+            tokio::time::timeout(wait, provider.continuation_started.notified())
+                .await
+                .expect("held turn did not start");
+        });
+
+        let ack = client.compact(&session.session_id);
+        provider.release_continuation.notify_one();
+        assert_eq!(
+            ack.expect("/compact must acknowledge while the turn is still held"),
+            "Context compaction queued."
+        );
+        loop {
+            if let ApiEvent::BackgroundProgress {
+                task_id,
+                summary,
+                done: true,
+                ..
+            } = events
+                .next_timeout(wait)
+                .expect("compaction failure event timeout")
+                && task_id == "context-compaction"
+            {
+                assert!(
+                    summary.contains("Manual compaction is not available"),
+                    "{summary}"
+                );
+                break;
+            }
+        }
+    })
+    .await;
+    bridge.abort();
+    runtime.shutdown().await;
+    daemon.await.unwrap();
+    worker.unwrap();
+}
+
 async fn continuation_socket_workflow(disable_from_observer: bool) {
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
