@@ -294,6 +294,9 @@ export interface BackgroundTaskSummary {
   can_cancel: boolean;
   progress?: BackgroundTaskProgress;
   error?: string;
+  exit_code?: number;
+  cancelled?: boolean;
+  last_output_line?: string;
 }
 
 export interface BackgroundTaskOutput {
