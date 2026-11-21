@@ -3,7 +3,7 @@ use jcode_tool_core::{ToolContext, ToolExecutionMode};
 
 fn ctx() -> ToolContext {
     ToolContext {
-        session_id: "test".into(),
+        session_id: uuid::Uuid::new_v4().to_string(),
         message_id: "test".into(),
         tool_call_id: "test".into(),
         working_dir: None,
@@ -13,43 +13,15 @@ fn ctx() -> ToolContext {
     }
 }
 
-pub(super) fn approved_ctx() -> ToolContext {
-    let mut ctx = ctx();
-    ctx.session_id = uuid::Uuid::new_v4().to_string();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::tool::StdinInputRequest>();
-    ctx.stdin_request_tx = Some(tx);
-    tokio::spawn(async move {
-        if let Some(request) = rx.recv().await {
-            assert!(
-                request.ask_questions.unwrap()[0]["question"]
-                    .as_str()
-                    .unwrap()
-                    .contains("control this Mac")
-            );
-            request
-                .response_tx
-                .send(json!({"answers":[{"selected":["Allow for this session"]}]}).to_string())
-                .unwrap();
-            while let Some(request) = rx.recv().await {
-                request
-                    .response_tx
-                    .send(json!({"answers":null}).to_string())
-                    .unwrap();
-            }
-        }
-    });
-    ctx
-}
-
 // ---- pure logic ----
 
 #[tokio::test]
-async fn native_observe_fails_closed_without_a_user() {
+async fn native_observe_never_falls_back_without_an_open_desktop_session() {
     let out = ComputerTool::new()
         .execute(json!({"action":"observe", "app":"pid:1"}), ctx())
         .await
         .unwrap();
-    assert_eq!(out.metadata.unwrap()["reason"], "consent_required");
+    assert_eq!(out.metadata.unwrap()["reason"], "desktop_unavailable");
 }
 
 #[test]
@@ -125,24 +97,7 @@ fn schema_is_compact() {
 }
 
 #[tokio::test]
-async fn computer_consent_is_cached_but_not_shared_with_another_session() {
-    let tool = ComputerTool::new();
-    let mut approved = approved_ctx();
-    let request = json!({"action":"observe", "app":"pid:1"});
-    let out = tool
-        .execute(request.clone(), approved.clone())
-        .await
-        .unwrap();
-    assert_ne!(out.metadata.unwrap()["reason"], "consent_required");
-    approved.stdin_request_tx = None;
-    let out = tool.execute(request.clone(), approved).await.unwrap();
-    assert_ne!(out.metadata.unwrap()["reason"], "consent_required");
-    let out = tool.execute(request, ctx()).await.unwrap();
-    assert_eq!(out.metadata.unwrap()["reason"], "consent_required");
-}
-
-#[tokio::test]
-async fn a_model_field_cannot_bypass_consent_on_legacy_script() {
+async fn a_model_field_cannot_bypass_the_broker_on_legacy_script() {
     let out = ComputerTool::new()
         .execute(
             json!({"action":"run_applescript", "script":"return 4", "consent":true}),
@@ -150,5 +105,5 @@ async fn a_model_field_cannot_bypass_consent_on_legacy_script() {
         )
         .await
         .unwrap();
-    assert_eq!(out.metadata.unwrap()["reason"], "consent_required");
+    assert_eq!(out.metadata.unwrap()["reason"], "desktop_unavailable");
 }

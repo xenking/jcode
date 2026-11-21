@@ -40,7 +40,8 @@ pub(super) fn handoff_budget(
 pub(super) fn auto_background_allowed(name: &str, input: &serde_json::Value) -> bool {
     // Human decisions belong to the live turn that owns the response channel.
     // `ask` is the registered tool name; `ask_user` is the legacy spelling.
-    !(matches!(name, "ask" | "ask_user") || is_reload_replayable_wait(name, input))
+    !(matches!(name, "ask" | "ask_user" | "macos_computer_use")
+        || is_reload_replayable_wait(name, input))
 }
 
 pub(in crate::agent) fn is_reload_replayable_wait(name: &str, input: &serde_json::Value) -> bool {

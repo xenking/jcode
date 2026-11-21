@@ -1,4 +1,4 @@
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolOutput {
     pub output: String,
     pub title: Option<String>,
@@ -6,7 +6,7 @@ pub struct ToolOutput {
     pub images: Vec<ToolImage>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolImage {
     pub media_type: String,
     pub data: String,

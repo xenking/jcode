@@ -40,6 +40,12 @@ impl Tool for DesktopTool {
         object.retain(|_, value| !value.is_null());
         let action: DesktopAction =
             serde_json::from_value(input).context("invalid desktop action")?;
+        if matches!(
+            action,
+            DesktopAction::ComputerTarget { .. } | DesktopAction::ComputerUse { .. }
+        ) {
+            bail!("use macos_computer_use for native computer use in this session");
+        }
         if matches!(&action, DesktopAction::Click { selector, .. } if selector.starts_with("ask:ask-cold-wake-"))
         {
             bail!("answer the cold-session wake confirmation directly in the chat");
@@ -158,6 +164,9 @@ fn execute_with_paths(action: DesktopAction, paths: Vec<std::path::PathBuf>) -> 
         | DesktopAction::ExpandTool { target, .. }
         | DesktopAction::Render { target, .. }
         | DesktopAction::WaitFor { target, .. } => &target.window_id,
+        DesktopAction::ComputerTarget { .. } | DesktopAction::ComputerUse { .. } => {
+            bail!("use macos_computer_use for native computer use in this session");
+        }
         DesktopAction::List {} => unreachable!(),
     };
     let mut matches = windows

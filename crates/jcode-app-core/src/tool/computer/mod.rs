@@ -30,7 +30,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 #[cfg(target_os = "macos")]
-mod consent;
+mod broker;
 
 #[derive(Default)]
 pub struct ComputerTool;
@@ -48,7 +48,7 @@ impl Tool for ComputerTool {
     }
 
     fn description(&self) -> &str {
-        "Control the macOS desktop: screenshot, ocr, ui tree, click, type, keys, background \
+        "Control macOS through the open local Jcode Desktop session with user consent: screenshot, ocr, ui tree, click, type, keys, background \
          Accessibility actions, apps, windows, clipboard, AppleScript. Coordinates are in points. \
          Prefer background AX over moving the cursor, and act only on the requested task."
     }
@@ -117,15 +117,9 @@ impl Tool for ComputerTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         #[cfg(target_os = "macos")]
         {
-            match jcode_computer::Request::parse(input)? {
+            match jcode_computer::Request::parse(input.clone())? {
                 jcode_computer::Request::Local(output) => Ok(output),
-                jcode_computer::Request::Desktop(operation) => {
-                    let session = match consent::authorize(&ctx).await {
-                        Ok(session) => session,
-                        Err(denial) => return Ok(denial.output()),
-                    };
-                    tokio::task::spawn_blocking(move || session.engine.execute(operation)).await?
-                }
+                jcode_computer::Request::Desktop(_) => broker::execute(ctx, input).await,
             }
         }
         #[cfg(not(target_os = "macos"))]

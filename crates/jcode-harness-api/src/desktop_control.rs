@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const DESKTOP_CONTROL_VERSION: u32 = 1;
+pub const COMPUTER_USE_TIMEOUT_SECS: u64 = 180;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DesktopRequest {
@@ -16,6 +17,13 @@ pub struct DesktopRequest {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DesktopAction {
     List {},
+    ComputerTarget {
+        session_id: String,
+    },
+    ComputerUse {
+        target: DesktopTarget,
+        input: serde_json::Value,
+    },
     OpenSession {
         session_id: String,
         destination: OpenDestination,
