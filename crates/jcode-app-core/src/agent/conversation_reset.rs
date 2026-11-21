@@ -65,7 +65,7 @@ impl Agent {
                 message_index, message_count
             ));
         }
-        self.rewind_stored_prefix(targets[message_index - 1] + 1, message_count);
+        self.rewind_stored_prefix(targets[message_index - 1] + 1, message_count)?;
         Ok(message_count - message_index)
     }
 
@@ -95,18 +95,55 @@ impl Agent {
             .iter()
             .filter(|&&index| index > stored_index)
             .count();
-        self.rewind_stored_prefix(stored_index + 1, visible_count);
+        self.rewind_stored_prefix(stored_index + 1, visible_count)?;
         Ok(removed)
     }
 
-    fn rewind_stored_prefix(&mut self, stored_len: usize, message_count: usize) {
-        self.rewind_undo_snapshot = Some(RewindUndoSnapshot {
+    fn rewind_stored_prefix(
+        &mut self,
+        stored_len: usize,
+        message_count: usize,
+    ) -> Result<(), String> {
+        let compaction = self.registry.compaction();
+        let mut manager = compaction
+            .try_write()
+            .map_err(|_| "Compaction state is busy. Try rewinding again.")?;
+        let mut snapshot = RewindUndoSnapshot {
             messages: self.session.messages.clone(),
+            compaction: self.session.compaction.clone(),
+            removed_compaction_events: Vec::new(),
             provider_session_id: self.provider_session_id.clone(),
             session_provider_session_id: self.session.provider_session_id.clone(),
             visible_message_count: message_count,
-        });
-        self.session.truncate_messages(stored_len);
+        };
+        if let Some(first_discarded) = self.session.messages.get(stored_len) {
+            if snapshot
+                .compaction
+                .as_ref()
+                .is_some_and(|state| state.compacted_count > stored_len)
+            {
+                self.session.compaction = None;
+            }
+            // A later compaction can display a discarded summary or occupancy.
+            let cutoff = first_discarded.timestamp;
+            let mut index = 0;
+            self.session.replay_events.retain(|event| {
+                let discard = matches!(
+                    event.kind,
+                    crate::session::StoredReplayEventKind::Compaction { .. }
+                ) && cutoff.is_none_or(|cutoff| event.timestamp >= cutoff);
+                if discard {
+                    snapshot
+                        .removed_compaction_events
+                        .push((index, event.clone()));
+                }
+                index += 1;
+                !discard
+            });
+            // Truncation forces a full snapshot, including the pruned replay.
+            self.session.truncate_messages(stored_len);
+        }
+        self.rewind_undo_snapshot = Some(snapshot);
         self.session.updated_at = chrono::Utc::now();
         self.provider_session_id = None;
         self.session.provider_session_id = None;
@@ -114,16 +151,27 @@ impl Agent {
         self.kv_cache_monitor.reset();
         self.locked_tools = None;
         self.reset_tool_output_tracking();
+        self.reset_compaction_manager_from_session(&mut manager);
+        drop(manager);
         self.persist_session_best_effort("conversation rewind");
+        Ok(())
     }
 
     pub fn undo_rewind(&mut self) -> Result<usize, String> {
+        let compaction = self.registry.compaction();
+        let mut manager = compaction
+            .try_write()
+            .map_err(|_| "Compaction state is busy. Try undoing again.")?;
         let Some(snapshot) = self.rewind_undo_snapshot.take() else {
             return Err("No rewind to undo.".to_string());
         };
 
         let current_count = self.session.rewind_target_count();
         let restored = snapshot.visible_message_count.saturating_sub(current_count);
+        self.session.compaction = snapshot.compaction;
+        for (index, event) in snapshot.removed_compaction_events {
+            self.session.replay_events.insert(index, event);
+        }
         self.session.replace_messages(snapshot.messages);
         self.provider_session_id = snapshot.provider_session_id;
         self.session.provider_session_id = snapshot.session_provider_session_id;
@@ -132,6 +180,8 @@ impl Agent {
         self.kv_cache_monitor.reset();
         self.locked_tools = None;
         self.reset_tool_output_tracking();
+        self.reset_compaction_manager_from_session(&mut manager);
+        drop(manager);
         self.persist_session_best_effort("conversation rewind undo");
         Ok(restored)
     }

@@ -315,6 +315,98 @@ mod durable_error_tests {
     }
 
     #[test]
+    fn rewind_inside_compacted_prefix_removes_the_future_summary_until_undo() {
+        use jcode_session_types::{RewindAnchor, RewindMessageKey};
+
+        let _lock = crate::storage::lock_test_env();
+        let _home = TestHome::new();
+        let mut agent = Agent::new(Arc::new(NoNetworkProvider), Registry::empty());
+        agent.add_message(Role::User, Message::user("keep this prompt").content);
+        agent.add_message(
+            Role::Assistant,
+            Message::user("discard this answer").content,
+        );
+        let summary_text = "summary of the discarded answer";
+        let folded_count = agent.session.messages.len();
+        agent.session.compaction = Some(Arc::new(crate::session::StoredCompactionState {
+            summary_text: summary_text.into(),
+            plan_context: None,
+            openai_encrypted_content: None,
+            snapcompact: None,
+            covers_up_to_turn: 1,
+            original_turn_count: 1,
+            compacted_count: folded_count,
+        }));
+        agent.seed_compaction_from_session();
+        agent.session.record_compaction_event(
+            &CompactionEvent {
+                trigger: "manual".into(),
+                method: Some("summary".into()),
+                pre_tokens: Some(5000),
+                post_tokens: Some(4321),
+                tokens_saved: Some(679),
+                duration_ms: None,
+                messages_dropped: None,
+                messages_compacted: Some(folded_count),
+                summary_chars: Some(summary_text.len()),
+                active_messages: None,
+            },
+            Some("summary"),
+            Some(summary_text),
+        );
+        agent
+            .session
+            .record_replay_display_message("system", None, "unrelated notice");
+        agent.persist_session_best_effort("compacted rewind fixture");
+        let session_id = agent.session_id().to_owned();
+        agent
+            .rewind_transcript(&RewindAnchor {
+                selected: RewindMessageKey::new("user", "keep this prompt").unwrap(),
+                before: None,
+                after: None,
+            })
+            .unwrap();
+
+        let saved = Session::load(&session_id).unwrap();
+        assert!(
+            saved.compaction.is_none(),
+            "rewind retained a summary of discarded turns"
+        );
+        assert_eq!(saved.messages.len(), folded_count - 1);
+        assert_eq!(saved.context_occupancy_tokens(), None);
+        assert_eq!(
+            saved.replay_events.len(),
+            1,
+            "unrelated replay events survive"
+        );
+        assert!(
+            agent
+                .registry
+                .compaction()
+                .try_read()
+                .unwrap()
+                .persisted_state_matches(None)
+        );
+        agent.undo_rewind().unwrap();
+        let saved = Session::load(&session_id).unwrap();
+        assert_eq!(saved.messages.len(), folded_count);
+        assert_eq!(
+            saved.compaction.as_ref().unwrap().summary_text,
+            summary_text
+        );
+        assert_eq!(saved.context_occupancy_tokens(), Some(4321));
+        assert_eq!(saved.replay_events.len(), 2);
+        assert!(
+            agent
+                .registry
+                .compaction()
+                .try_read()
+                .unwrap()
+                .persisted_state_matches(saved.compaction.as_deref())
+        );
+    }
+
+    #[test]
     fn failed_wake_error_is_saved_without_an_assistant_message() {
         let _lock = crate::storage::lock_test_env();
         let _home = TestHome::new();

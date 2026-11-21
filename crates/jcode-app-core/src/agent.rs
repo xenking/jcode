@@ -323,6 +323,8 @@ pub struct TokenUsage {
 #[derive(Debug, Clone)]
 struct RewindUndoSnapshot {
     messages: Vec<StoredMessage>,
+    compaction: Option<Arc<crate::session::StoredCompactionState>>,
+    removed_compaction_events: Vec<(usize, crate::session::StoredReplayEvent)>,
     provider_session_id: Option<String>,
     session_provider_session_id: Option<String>,
     visible_message_count: usize,
@@ -789,20 +791,7 @@ impl Agent {
                 return;
             }
         };
-        manager.reset();
-        manager.set_context_cap_override(self.session.context_cap);
-        manager.set_active_model(Some(self.provider.name()), Some(&self.provider.model()));
-        let budget = self.provider.context_window();
-        manager.set_budget(budget);
-        // The cold-cache clock must survive the reload that created this
-        // manager; otherwise every restored session looks like it never made a
-        // request and the cache-expiry shake is skipped on a fully cold prompt.
-        manager.seed_last_provider_request_at(self.persisted_last_provider_request_at());
-        if let Some(state) = self.session.compaction.as_ref() {
-            manager.restore_persisted_stored_state_with(state, &self.session.messages);
-        } else {
-            manager.seed_restored_stored_messages_with(&self.session.messages);
-        }
+        self.reset_compaction_manager_from_session(&mut manager);
         let sanitized_state = if manager.discard_oversized_openai_native_compaction() {
             Some(manager.persisted_state())
         } else {
@@ -816,6 +805,25 @@ impl Agent {
         if let Some(state) = sanitized_state {
             self.session.compaction = state.map(Arc::new);
             self.persist_session_best_effort("sanitized oversized OpenAI native compaction");
+        }
+    }
+
+    fn reset_compaction_manager_from_session(
+        &self,
+        manager: &mut crate::compaction::CompactionManager,
+    ) {
+        manager.reset();
+        manager.set_context_cap_override(self.session.context_cap);
+        manager.set_active_model(Some(self.provider.name()), Some(&self.provider.model()));
+        manager.set_budget(self.provider.context_window());
+        // The cold-cache clock must survive the reload that created this
+        // manager; otherwise every restored session looks like it never made a
+        // request and the cache-expiry shake is skipped on a fully cold prompt.
+        manager.seed_last_provider_request_at(self.persisted_last_provider_request_at());
+        if let Some(state) = self.session.compaction.as_ref() {
+            manager.restore_persisted_stored_state_with(state, &self.session.messages);
+        } else {
+            manager.seed_restored_stored_messages_with(&self.session.messages);
         }
     }
 

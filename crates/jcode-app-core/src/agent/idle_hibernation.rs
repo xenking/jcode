@@ -179,6 +179,8 @@ mod tests {
             messages: agent.session.messages.clone(),
             provider_session_id: Some("undo-provider".into()),
             session_provider_session_id: None,
+            compaction: None,
+            removed_compaction_events: Vec::new(),
             visible_message_count: 2,
         });
         let released = agent.hibernate_idle_caches().unwrap();
