@@ -104,6 +104,26 @@ pub struct StaticPromptSnapshot {
     /// Latest versions reflected either in the frozen text or in the transcript.
     /// `None` when a custom system prompt replaces the normal instructions.
     pub file_versions: Option<PromptFileVersions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills_chars: Option<usize>,
+}
+
+impl StaticPromptSnapshot {
+    pub fn skills_chars(&self, skills: &[SkillInfo]) -> Option<usize> {
+        self.skills_chars.or_else(|| {
+            if self.file_versions.is_none() {
+                return Some(0);
+            }
+            let Some(section) = build_available_skills_section(skills) else {
+                return Some(0);
+            };
+            // Legacy snapshots did not record the boundary. Attribute it only
+            // if the frozen prompt contains the captured list as a section.
+            self.text
+                .contains(&format!("\n\n{section}"))
+                .then_some(section.len())
+        })
+    }
 }
 
 pub struct PromptFiles {

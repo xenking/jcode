@@ -45,7 +45,8 @@ pub use events::*;
 pub use jcode_applet_types;
 pub use jcode_selfdev_types::ServingIdentity;
 pub use jcode_session_types::{
-    AskAnswer, AskOption, AskQuestion, AskResponse, SessionCatalogContext,
+    AskAnswer, AskOption, AskQuestion, AskResponse, CONTEXT_BREAKDOWN_CAPABILITY, ContextBreakdown,
+    ContextBreakdownCategory, ContextBreakdownKind, SessionCatalogContext,
 };
 pub use jcode_session_types::{
     Attachment, FILE_ATTACHMENTS_CAPABILITY, RewindAnchor, RewindMessageKey, StoredAttachment,

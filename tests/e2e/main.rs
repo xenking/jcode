@@ -9,6 +9,7 @@ mod test_support;
 mod ambient;
 mod binary_integration;
 mod burst_spawn;
+mod context_breakdown;
 mod disconnect;
 mod idle_precompact;
 mod peer_prompt;

@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 mod ask;
+mod context_breakdown;
+pub use context_breakdown::{
+    CONTEXT_BREAKDOWN_CAPABILITY, ContextBreakdown, ContextBreakdownCategory, ContextBreakdownKind,
+};
 mod memory;
 mod rewind;
 pub use rewind::{RewindAnchor, RewindMessageKey};

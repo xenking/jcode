@@ -63,6 +63,7 @@ pub fn request_is_heavy(request: &serde_json::Value) -> bool {
                 | "create_session"
                 | "get_history"
                 | "peek_session"
+                | "session_context_breakdown"
                 | "read_file"
                 | "find_files"
                 | "search_text"

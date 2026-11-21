@@ -277,7 +277,12 @@ pub(super) async fn handle_client(
                     ));
                 }
                 if request.is_lightweight_control_request() {
-                    let keep_connection_open = matches!(request, Request::Ping { .. } | Request::OpenrigHostIdentity { .. });
+                    let keep_connection_open = matches!(
+                        request,
+                        Request::Ping { .. }
+                            | Request::OpenrigHostIdentity { .. }
+                            | Request::SessionContextBreakdown { .. }
+                    );
                     handle_lightweight_control_request(
                         request,
                         Arc::clone(&writer),
@@ -1163,6 +1168,14 @@ pub(super) async fn handle_client(
             continue;
         }
 
+        if let Request::SessionContextBreakdown { id, session_id, model, cwd } = request {
+            let event = super::context_breakdown::reply(
+                id, session_id, model.as_deref(), cwd.as_deref(), &sessions, &provider_template,
+            ).await;
+            let _ = client_event_tx.send(event);
+            continue;
+        }
+
         // Passive screen controls must not acquire the Agent mutex or enter
         // ordinary dispatch: idle observations never start a provider turn.
         if let Request::ScreenContext { id, session_id, action } = request {
@@ -1452,6 +1465,7 @@ pub(super) async fn handle_client(
             Request::ForceStopTurn { .. } => unreachable!("force stop is dispatched before reconciliation"),
             Request::QueuePrompt { .. } | Request::SetQueuedPromptMode { .. } | Request::InterruptQueuedPrompt { .. } | Request::InterruptQueuedPrompts { .. } | Request::GetQueuedPrompts { .. } | Request::RemoveQueuedPrompt { .. } | Request::ReorderQueuedPrompts { .. } | Request::SetQueuedPromptEditing { .. } | Request::EditQueuedPrompt { .. } => unreachable!("queue controls dispatched before acknowledgment"),
             Request::ScreenContext { .. } => unreachable!("Passive screen control dispatched before acknowledgment"),
+            Request::SessionContextBreakdown { .. } => unreachable!("Context inspection dispatched before acknowledgment"),
             Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. } => unreachable!("SDK controls dispatched before acknowledgment"),
             Request::Message {
                 id,

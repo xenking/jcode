@@ -1054,7 +1054,7 @@ impl Agent {
     /// The registry keeps the implementation available for self-dev sessions,
     /// but regular agents should not spend tool-list context on an internal
     /// development surface.
-    fn apply_selfdev_tool_surface(
+    pub(super) fn apply_selfdev_tool_surface(
         tools: &mut Vec<ToolDefinition>,
         is_canary: bool,
         is_desktop: bool,
@@ -1108,8 +1108,8 @@ impl Agent {
         if fresh.is_empty() {
             return;
         }
-        let mut text = String::from(
-            "<system-reminder>\nNew MCP tools are available. They are not in your tool list; \
+        let mut text = format!(
+            "<system-reminder>\n{LATE_MCP_ANNOUNCEMENT_MARKER} They are not in your tool list; \
              call them with mcp action=call (server, tool, arguments matching input_schema).\n",
         );
         for tool in fresh.iter().take(MAX_ANNOUNCED_MCP_TOOLS) {
@@ -1357,6 +1357,32 @@ impl Agent {
             self.registry.register_selfdev_tools().await;
         }
         self.build_filtered_tool_definitions().await
+    }
+
+    pub(super) async fn inspect_tool_definitions(
+        &self,
+        messages: &[Message],
+    ) -> Vec<ToolDefinition> {
+        let native = self.native_deferred_mcp();
+        let locked = self
+            .locked_tools
+            .as_ref()
+            .filter(|_| self.locked_tools_native_deferred == native);
+        if !native
+            && let Some(locked) = locked
+            && (self.mcp_tools_mode != crate::config::McpToolsMode::Eager
+                || self.mcp_late_register_resolved
+                || !self.registry_has_new_mcp_tools(locked).await)
+        {
+            return locked.clone();
+        }
+        let mut tools = self.build_filtered_tool_definitions().await;
+        if native && let Some(locked) = locked {
+            let names: HashSet<_> = locked.iter().map(|tool| tool.name.as_str()).collect();
+            tools.retain(|tool| tool.defer_loading && !names.contains(tool.name.as_str()));
+            tools.splice(..0, locked.iter().cloned());
+        }
+        self.inspect_revealed_tools(tools, messages)
     }
 
     pub async fn execute_tool(
@@ -1801,11 +1827,11 @@ fn split_mcp_dispatch_name(name: &str) -> (&str, &str) {
 
 /// Stable header of the late-MCP transcript announcement; used to recognize
 /// earlier announcements when a session is restored.
-const LATE_MCP_ANNOUNCEMENT_MARKER: &str = "New MCP tools are available.";
+pub(super) const LATE_MCP_ANNOUNCEMENT_MARKER: &str = "New MCP tools are available.";
 
 /// Stable header of the late-skill transcript announcement; used to recognize
 /// earlier announcements when a session is restored.
-const LATE_SKILL_ANNOUNCEMENT_MARKER: &str = "New skills were installed.";
+pub(super) const LATE_SKILL_ANNOUNCEMENT_MARKER: &str = "New skills were installed.";
 
 #[cfg(test)]
 #[path = "turn_token_usage_tests.rs"]

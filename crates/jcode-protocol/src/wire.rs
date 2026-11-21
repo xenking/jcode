@@ -410,6 +410,14 @@ pub enum Request {
     #[serde(rename = "list_session_images")]
     ListSessionImages { id: u64, session_id: String },
 
+    #[serde(rename = "session_context_breakdown")]
+    SessionContextBreakdown {
+        id: u64,
+        session_id: Option<String>,
+        model: Option<String>,
+        cwd: Option<String>,
+    },
+
     /// Retrieve a bounded chunk of one session image by its stable ID.
     #[serde(rename = "get_session_image")]
     GetSessionImage {

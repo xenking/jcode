@@ -946,6 +946,25 @@ impl BridgeState {
                     json!({"type":"get_session_image", "id":id, "session_id":request["session_id"], "image_id":request["image_id"], "offset":request["offset"]}),
                 )]
             }
+            "session_context_breakdown" => {
+                if ["session_id", "model", "cwd"]
+                    .into_iter()
+                    .any(|key| !request[key].is_null() && !request[key].is_string())
+                {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "session_id, model, and cwd must be strings or null",
+                    );
+                }
+                let id = self.legacy_id();
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::ContextBreakdown));
+                vec![Outbound::Legacy(json!({
+                    "type": "session_context_breakdown", "id": id,
+                    "session_id": request["session_id"], "model": request["model"], "cwd": request["cwd"],
+                }))]
+            }
             "get_compacted_history" => {
                 let id = self.legacy_id();
                 self.pending_simple
@@ -2749,6 +2768,29 @@ impl BridgeState {
                         total: event["total"].as_u64().unwrap_or(0) as usize,
                         data: event["data"].as_str().unwrap_or("").to_owned(),
                     },
+                )]
+            }
+            "context_breakdown" => {
+                let Some(api_id) = self.take_simple(
+                    event["id"].as_u64().unwrap_or(0),
+                    SimpleKind::ContextBreakdown,
+                ) else {
+                    return vec![];
+                };
+                let breakdown = match serde_json::from_value::<jcode_harness_api::ContextBreakdown>(
+                    event.clone(),
+                ) {
+                    Ok(breakdown) => breakdown,
+                    Err(_) => {
+                        return Self::invalid_daemon_event(
+                            Some(api_id),
+                            "invalid context breakdown".into(),
+                        );
+                    }
+                };
+                vec![ServerFrame::reply(
+                    api_id,
+                    ApiEvent::ContextBreakdown { breakdown },
                 )]
             }
             "history" => {

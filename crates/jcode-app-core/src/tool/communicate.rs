@@ -598,16 +598,32 @@ impl CommunicateTool {
     }
 
     fn new_for_working_dir(working_dir: Option<&std::path::Path>) -> Self {
-        const BASE_DESCRIPTION: &str =
-            "Coordinate agents: spawn todo-lane workers and exchange messages.";
         let swarm_prompt = crate::prompt::load_swarm_prompt(working_dir);
         let description = if swarm_prompt.is_empty() {
-            BASE_DESCRIPTION.to_string()
+            SWARM_DESCRIPTION.to_string()
         } else {
-            format!("{BASE_DESCRIPTION}\n\nSwarm prompt:\n{swarm_prompt}")
+            format!("{SWARM_DESCRIPTION}{SWARM_PROMPT_SEPARATOR}{swarm_prompt}")
         };
         Self { description }
     }
+}
+
+const SWARM_DESCRIPTION: &str = "Coordinate agents: spawn todo-lane workers and exchange messages.";
+const SWARM_PROMPT_SEPARATOR: &str = "\n\nSwarm prompt:\n";
+
+pub(crate) fn swarm_instruction_tokens(tool: &crate::message::ToolDefinition) -> usize {
+    if tool.name != "swarm"
+        || !tool
+            .description
+            .strip_prefix(SWARM_DESCRIPTION)
+            .is_some_and(|tail| tail.starts_with(SWARM_PROMPT_SEPARATOR))
+    {
+        return 0;
+    }
+    let mut schema_only = tool.clone();
+    schema_only.description = SWARM_DESCRIPTION.to_string();
+    tool.prompt_token_estimate()
+        .saturating_sub(schema_only.prompt_token_estimate())
 }
 
 /// Swarm actions advertised to models. Real usage is dominated by messaging,

@@ -18,6 +18,7 @@ pub(super) enum SimpleKind {
     HistoryImageChunk,
     SessionImages,
     SessionImage,
+    ContextBreakdown,
     CompactedHistory,
     /// Receipt-only controls: cancel, soft interrupts, auth/usage invalidation,
     /// and the legacy background-tool fallback. Their handlers do not reject
@@ -70,6 +71,7 @@ impl BridgeState {
                             | SimpleKind::HistoryImageChunk
                             | SimpleKind::SessionImages
                             | SimpleKind::SessionImage
+                            | SimpleKind::ContextBreakdown
                     )
             })?;
         let (_, api_id, _) = self.pending_simple.remove(index);

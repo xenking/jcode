@@ -311,6 +311,15 @@ pub enum ApiRequest {
         offset: usize,
     },
 
+    /// Inspect context without attaching. No session ID means a new draft.
+    SessionContextBreakdown {
+        session_id: Option<String>,
+        /// Draft model spec. Existing sessions always use their own route.
+        model: Option<String>,
+        /// Draft working directory. Ignored for existing sessions.
+        cwd: Option<String>,
+    },
+
     /// Expand the archived portion of an attached session's transcript.
     GetCompactedHistory {
         session_id: String,

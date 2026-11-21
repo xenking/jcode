@@ -931,6 +931,13 @@ pub enum ServerEvent {
         data: String,
     },
 
+    #[serde(rename = "context_breakdown")]
+    ContextBreakdown {
+        id: u64,
+        #[serde(flatten)]
+        breakdown: jcode_session_types::ContextBreakdown,
+    },
+
     /// Expanded compacted-history window (response to GetCompactedHistory).
     #[serde(rename = "compacted_history")]
     CompactedHistory {

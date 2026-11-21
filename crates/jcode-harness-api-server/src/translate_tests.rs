@@ -2010,6 +2010,33 @@ fn browsing_requests_work_without_attaching() {
     }
 }
 
+#[test]
+fn context_breakdown_round_trip_without_attaching() {
+    let mut bridge = BridgeState::default();
+    let out = bridge.api_request_to_legacy(&json!({
+        "req": "session_context_breakdown", "id": 27, "session_id": "session_saved"
+    }));
+    let Outbound::Legacy(request) = &out[0] else {
+        panic!("context inspection must reach the daemon without attaching");
+    };
+    assert_eq!(request["type"], "session_context_breakdown");
+    assert_eq!(request["session_id"], "session_saved");
+    let replies = bridge.legacy_event_to_api(&json!({
+        "type": "context_breakdown", "id": request["id"],
+        "session_id": "session_saved", "model": null,
+        "total_tokens": null, "limit_tokens": null, "estimated": true,
+        "categories": [{"kind": "conversation", "tokens": 0}, {"kind": "dynamic_tools", "tokens": null}]
+    }));
+    assert_eq!(replies.len(), 1);
+    let reply = serde_json::to_value(&replies[0]).unwrap();
+    assert_eq!(reply["reply_to"], 27);
+    assert_eq!(reply["ev"], "context_breakdown");
+    assert_eq!(reply["session_id"], "session_saved");
+    assert_eq!(reply["categories"][0]["tokens"], 0);
+    assert_eq!(reply["categories"][1]["tokens"], serde_json::Value::Null);
+    assert_eq!(reply["total_tokens"], serde_json::Value::Null);
+}
+
 /// A client may pipeline: `create_session` then `send_message` without
 /// awaiting the attach. The subscribe is already on the wire, so the daemon
 /// will have a session by the time the message lands. Refusing here would

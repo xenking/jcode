@@ -4,6 +4,7 @@ mod ask_recovery;
 #[cfg(test)]
 mod cache_monitor_tests;
 mod compaction;
+pub(crate) mod context_breakdown;
 mod conversation_reset;
 mod environment;
 mod idle_hibernation;
@@ -491,7 +492,11 @@ impl Agent {
     }
 
     fn current_prompt_skill_infos(&self) -> Vec<crate::prompt::SkillInfo> {
-        self.current_skills_snapshot()
+        Self::prompt_skill_infos(&self.current_skills_snapshot())
+    }
+
+    fn prompt_skill_infos(skills: &SkillRegistry) -> Vec<crate::prompt::SkillInfo> {
+        skills
             .list()
             .iter()
             .map(|skill| crate::prompt::SkillInfo {

@@ -100,6 +100,27 @@ impl Agent {
         self.sent_tool_surface = Some(surface);
         Ok(tools)
     }
+
+    pub(super) fn inspect_revealed_tools(
+        &self,
+        mut tools: Vec<ToolDefinition>,
+        messages: &[Message],
+    ) -> Vec<ToolDefinition> {
+        if let Some(scope) = self.tool_surface_scope()
+            && scope.native_deferred
+            && let Some(saved) = self.sent_tool_surface.as_ref().filter(|s| s.scope == scope)
+        {
+            retain_revealed_deferred(&mut tools, &saved.tools, messages);
+        }
+        tools
+    }
+}
+
+pub(super) fn saved_context_tools(session: &Session) -> Option<Vec<ToolDefinition>> {
+    let path = tool_surface_path(&session.id).ok()?;
+    let saved = crate::storage::read_json::<ToolSurface>(&path).ok()?;
+    (saved.scope.working_dir == session.working_dir && saved.scope.canary == session.is_canary)
+        .then_some(saved.tools)
 }
 
 fn tool_surface_path(session_id: &str) -> Result<std::path::PathBuf> {

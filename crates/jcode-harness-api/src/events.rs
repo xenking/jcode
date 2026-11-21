@@ -100,6 +100,11 @@ pub enum ApiEvent {
         data: String,
     },
 
+    ContextBreakdown {
+        #[serde(flatten)]
+        breakdown: crate::ContextBreakdown,
+    },
+
     /// Expanded archived transcript window and its remaining history.
     CompactedHistory {
         session_id: String,

@@ -2336,6 +2336,20 @@ impl CompactionManager {
         }
     }
 
+    /// Assemble the current checkpoint without advancing compaction, reading a
+    /// pending plan, or rewriting session state.
+    pub fn inspect_provider_messages(
+        &self,
+        session: &crate::session::Session,
+        all_messages: &[Message],
+        supports_image_input: bool,
+        accepts_native: bool,
+    ) -> Vec<Message> {
+        let retained =
+            replay::retained_checkpoint_messages(&session.messages, self.compacted_count);
+        self.project_messages(all_messages, supports_image_input, accepts_native, retained)
+    }
+
     fn prepare_checkpoint(
         &mut self,
         session_id: &str,

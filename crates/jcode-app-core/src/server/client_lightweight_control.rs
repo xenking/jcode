@@ -338,6 +338,24 @@ pub(super) async fn handle_lightweight_control_request(
     if let Request::UpgradeRuntime { id, ref candidate } = request {
         return super::runtime_upgrade::handle(id, candidate, &writer, sessions).await;
     }
+    if let Request::SessionContextBreakdown {
+        id,
+        session_id,
+        model,
+        cwd,
+    } = request
+    {
+        let event = super::context_breakdown::reply(
+            id,
+            session_id,
+            model.as_deref(),
+            cwd.as_deref(),
+            sessions,
+            provider_template,
+        )
+        .await;
+        return write_direct_event(&writer, &event).await;
+    }
     // Ping only snapshots connection presence. Reserving mutation admission here
     // races the next group-transfer RPC even after the caller receives Pong.
     // It must also remain available while a transfer owns exclusive admission.

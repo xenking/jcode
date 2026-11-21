@@ -32,6 +32,7 @@ mod comm_plan;
 mod comm_session;
 mod comm_sync;
 mod configured_name;
+mod context_breakdown;
 use configured_name::normalize_configured_server_name;
 mod debug;
 mod debug_ambient;

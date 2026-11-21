@@ -1,6 +1,7 @@
 use super::Agent;
 use crate::logging;
 use crate::message::{Message, ToolDefinition};
+use crate::prompt::SplitSystemPrompt;
 
 pub(super) enum StaticPromptState {
     Bootstrap(crate::prompt::StaticPromptSources),
@@ -211,37 +212,62 @@ impl Agent {
     pub(super) fn build_system_prompt_split(
         &self,
         memory_prompt: Option<&str>,
-    ) -> crate::prompt::SplitSystemPrompt {
-        let (static_part, custom_prompt) = match &self.static_prompt {
-            StaticPromptState::Frozen(snapshot) => {
-                (snapshot.text.clone(), snapshot.file_versions.is_none())
-            }
-            StaticPromptState::Bootstrap(sources) => (
-                self.render_static_prompt(sources),
-                self.session.system_prompt.is_some(),
+    ) -> SplitSystemPrompt {
+        self.system_prompt_with_accounting(memory_prompt, false).0
+    }
+
+    pub(super) fn system_prompt_with_accounting(
+        &self,
+        memory_prompt: Option<&str>,
+        account_skills: bool,
+    ) -> (SplitSystemPrompt, Option<usize>) {
+        let (static_part, custom_prompt, skills_chars) = match &self.static_prompt {
+            StaticPromptState::Frozen(snapshot) => (
+                snapshot.text.clone(),
+                snapshot.file_versions.is_none(),
+                account_skills
+                    .then(|| snapshot.skills_chars(&self.prompt_skills_snapshot))
+                    .flatten(),
             ),
+            StaticPromptState::Bootstrap(sources) => {
+                let (text, skills_chars) = self.render_static_prompt(sources);
+                (
+                    text,
+                    self.session.system_prompt.is_some(),
+                    Some(skills_chars),
+                )
+            }
         };
         let mut dynamic_part = match (custom_prompt, memory_prompt) {
             (false, Some(memory)) => memory.to_owned(),
             _ => String::new(),
         };
         dynamic_part.push_str(&crate::screen_context::dynamic_prompt(self.session_id()));
-        crate::prompt::SplitSystemPrompt {
-            static_part,
-            dynamic_part,
-        }
+        (
+            SplitSystemPrompt {
+                static_part,
+                dynamic_part,
+            },
+            skills_chars,
+        )
     }
 
-    fn render_static_prompt(&self, sources: &crate::prompt::StaticPromptSources) -> String {
+    fn render_static_prompt(
+        &self,
+        sources: &crate::prompt::StaticPromptSources,
+    ) -> (String, usize) {
         if let Some(ref override_prompt) = self.session.system_prompt {
-            return self.append_session_system_prompt(override_prompt.clone());
+            return (
+                self.append_session_system_prompt(override_prompt.clone()),
+                0,
+            );
         }
         let working_dir = self
             .session
             .working_dir
             .as_deref()
             .map(std::path::Path::new);
-        let (split, _) = crate::prompt::build_system_prompt_split_with_sources(
+        let (split, info) = crate::prompt::build_system_prompt_split_with_sources(
             None,
             &self.prompt_skills_snapshot,
             self.session.is_canary,
@@ -250,7 +276,10 @@ impl Agent {
             sources,
             self.agents_md_snapshot.clone(),
         );
-        self.append_session_system_prompt(split.static_part)
+        (
+            self.append_session_system_prompt(split.static_part),
+            info.skills_chars,
+        )
     }
 
     /// Finalize at the first real request, after the SDK has had a chance to
@@ -258,13 +287,15 @@ impl Agent {
     /// commit the prefix.
     pub(super) fn freeze_static_prompt(&mut self) {
         if let StaticPromptState::Bootstrap(sources) = &self.static_prompt {
+            let (text, skills_chars) = self.render_static_prompt(sources);
             self.static_prompt = StaticPromptState::Frozen(crate::prompt::StaticPromptSnapshot {
-                text: self.render_static_prompt(sources),
+                text,
                 file_versions: self
                     .session
                     .system_prompt
                     .is_none()
                     .then(|| sources.files.versions()),
+                skills_chars: Some(skills_chars),
             });
         }
     }

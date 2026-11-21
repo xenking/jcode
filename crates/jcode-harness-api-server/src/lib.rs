@@ -603,6 +603,9 @@ where
     let user_connections_supported = daemon_caps.iter().any(|cap| cap == "session_connections");
     let runtime_commands_supported = daemon_caps.iter().any(|cap| cap == "runtime_commands");
     let session_tools_supported = daemon_caps.iter().any(|cap| cap == "session_tools");
+    let context_breakdown_supported = daemon_caps
+        .iter()
+        .any(|cap| cap == jcode_harness_api::CONTEXT_BREAKDOWN_CAPABILITY);
     let force_stop_turn_supported = daemon_caps.iter().any(|cap| cap == "force_stop_turn_v1");
     let soft_interrupt_ids_supported = daemon_caps.iter().any(|cap| cap == "soft_interrupt_ids");
     let queued_prompts_supported = daemon_caps.iter().any(|cap| cap == "queued_prompts");
@@ -661,6 +664,10 @@ where
             .chain(runtime_commands_supported.then(|| "runtime_commands".to_string()))
             .chain(runtime_commands_supported.then(|| "skill_message_v1".to_string()))
             .chain(session_tools_supported.then(|| "session_tools".to_string()))
+            .chain(
+                context_breakdown_supported
+                    .then(|| jcode_harness_api::CONTEXT_BREAKDOWN_CAPABILITY.to_string()),
+            )
             .chain(force_stop_turn_supported.then(|| "force_stop_turn_v1".to_string()))
             .chain(queued_prompts_supported.then(|| "queued_prompts".to_string()))
             .chain(
@@ -784,6 +791,16 @@ where
                             continue;
                         }
                     }
+                }
+                if request["req"] == "session_context_breakdown" && !context_breakdown_supported {
+                    write_json_line(&mut write_half, &ServerFrame::reply(
+                        request["id"].as_u64().unwrap_or(0),
+                        ApiEvent::Error {
+                            code: ErrorCode::UnknownRequest,
+                            message: "This runtime does not support context breakdown.".into(),
+                        },
+                    )).await?;
+                    continue;
                 }
                 if request["req"] == "list_sessions" {
                     state.user_connected_sessions = if user_connections_supported {

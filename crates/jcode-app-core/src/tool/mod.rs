@@ -22,6 +22,7 @@ mod browser;
 mod calendar;
 mod codemode;
 mod communicate;
+pub(crate) use communicate::swarm_instruction_tokens;
 #[cfg(target_os = "macos")]
 mod computer;
 mod config_edit_notice;
