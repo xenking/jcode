@@ -1,6 +1,106 @@
 use super::*;
 
 #[test]
+fn cloud_move_restores_working_content_but_not_source_index() {
+    let (root, _stage, _) = repository();
+    std::fs::write(root.path().join("file.txt"), "staged\n").unwrap();
+    git(root.path(), &["add", "file.txt"]).unwrap();
+    std::fs::write(root.path().join("file.txt"), "unstaged\n").unwrap();
+    let stage = tempfile::tempdir().unwrap();
+    let repo = snapshot_repo(root.path(), "index-semantics", stage.path())
+        .unwrap()
+        .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mapped = portable_repo(&repo, "source", home.path()).unwrap();
+    reserve_portable_repo(&mapped).unwrap();
+    restore_repo(
+        &mapped,
+        &stage.path().join("repo.bundle"),
+        &stage.path().join("ignored.tar"),
+        "index-semantics",
+    )
+    .unwrap();
+    let destination = Path::new(&mapped.root);
+    assert_eq!(
+        git(destination, &["show", ":file.txt"]).unwrap(),
+        "original"
+    );
+    assert_eq!(
+        std::fs::read_to_string(destination.join("file.txt")).unwrap(),
+        "unstaged\n"
+    );
+    assert_eq!(git(root.path(), &["show", ":file.txt"]).unwrap(), "staged");
+}
+
+#[test]
+fn cloud_return_refuses_fast_forward_over_conflicting_staged_index() {
+    let (root, _stage, _) = repository();
+    let old_head = git(root.path(), &["rev-parse", "HEAD"]).unwrap();
+    std::fs::write(root.path().join("file.txt"), "cloud\n").unwrap();
+    git(root.path(), &["add", "file.txt"]).unwrap();
+    git(root.path(), &["commit", "--quiet", "-m", "cloud"]).unwrap();
+    let new_head = git(root.path(), &["rev-parse", "HEAD"]).unwrap();
+    git(root.path(), &["reset", "--quiet", "--hard", &old_head]).unwrap();
+    std::fs::write(root.path().join("file.txt"), "staged\n").unwrap();
+    git(root.path(), &["add", "file.txt"]).unwrap();
+    std::fs::write(root.path().join("file.txt"), "unstaged\n").unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let ours = snapshot_worktree_tree(root.path(), scratch.path()).unwrap();
+    let plan = CheckoutMerge {
+        local_head: old_head.clone(),
+        new_head,
+        branch: git(root.path(), &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok(),
+        ours: ours.clone(),
+        tree: ours,
+    };
+    assert!(apply_checkout_merge(root.path(), &plan).is_err());
+    assert_eq!(git(root.path(), &["rev-parse", "HEAD"]).unwrap(), old_head);
+    assert_eq!(git(root.path(), &["show", ":file.txt"]).unwrap(), "staged");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("file.txt")).unwrap(),
+        "unstaged\n"
+    );
+}
+
+#[test]
+fn cloud_return_preserves_staged_and_unstaged_on_fast_forward() {
+    let (root, _stage, _) = repository();
+    let old_head = git(root.path(), &["rev-parse", "HEAD"]).unwrap();
+    std::fs::write(root.path().join("cloud-commit.txt"), "cloud commit\n").unwrap();
+    git(root.path(), &["add", "cloud-commit.txt"]).unwrap();
+    git(root.path(), &["commit", "--quiet", "-m", "cloud"]).unwrap();
+    let new_head = git(root.path(), &["rev-parse", "HEAD"]).unwrap();
+    git(root.path(), &["reset", "--quiet", "--hard", &old_head]).unwrap();
+    std::fs::write(root.path().join("file.txt"), "staged\n").unwrap();
+    git(root.path(), &["add", "file.txt"]).unwrap();
+    std::fs::write(root.path().join("file.txt"), "unstaged\n").unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let ours = snapshot_worktree_tree(root.path(), scratch.path()).unwrap();
+    std::fs::write(root.path().join("cloud-commit.txt"), "cloud commit\n").unwrap();
+    let tree = snapshot_worktree_tree(root.path(), scratch.path()).unwrap();
+    std::fs::remove_file(root.path().join("cloud-commit.txt")).unwrap();
+    let plan = CheckoutMerge {
+        local_head: old_head,
+        new_head: new_head.clone(),
+        branch: git(root.path(), &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok(),
+        ours,
+        tree,
+    };
+    apply_checkout_merge(root.path(), &plan).unwrap();
+    apply_checkout_merge(root.path(), &plan).unwrap();
+    assert_eq!(git(root.path(), &["rev-parse", "HEAD"]).unwrap(), new_head);
+    assert_eq!(git(root.path(), &["show", ":file.txt"]).unwrap(), "staged");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("file.txt")).unwrap(),
+        "unstaged\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("cloud-commit.txt")).unwrap(),
+        "cloud commit\n"
+    );
+}
+
+#[test]
 fn cloud_return_preserves_local_staged_changes_without_head_move() {
     let (root, _stage, _) = repository();
     std::fs::write(root.path().join("file.txt"), "staged\n").unwrap();

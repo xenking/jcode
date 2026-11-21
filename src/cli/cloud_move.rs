@@ -2389,6 +2389,27 @@ fn apply_checkout_merge(root: &Path, plan: &CheckoutMerge) -> Result<()> {
             "local HEAD or branch changed during cloud return; the cloud work is still in the rescue refs"
         );
     }
+    if plan.new_head != plan.local_head {
+        let git_dir = git(root, &["rev-parse", "--absolute-git-dir"])?;
+        let index = staging.path().join("preserve.index");
+        match std::fs::copy(Path::new(&git_dir).join("index"), &index) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let env = [("GIT_INDEX_FILE", index.as_os_str())];
+                git_env(root, &["read-tree", &plan.local_head], &env)?;
+            }
+            Err(error) => return Err(error).context("copy index before cloud return"),
+        }
+        let env = [("GIT_INDEX_FILE", index.as_os_str())];
+        git_env(
+            root,
+            &["read-tree", "-m", &plan.local_head, &plan.new_head],
+            &env,
+        )
+        .context(
+            "cloud commits conflict with the local staged index; no working files were changed",
+        )?;
+    }
     let current = snapshot_worktree_tree(root, staging.path())?;
     if current != plan.ours && current != plan.tree {
         // On restart, each file may be in its original or merged state, but a
@@ -2408,6 +2429,11 @@ fn apply_checkout_merge(root: &Path, plan: &CheckoutMerge) -> Result<()> {
         let _ = git_env(root, &["update-index", "-q", "--refresh"], &env);
         git_env(root, &["read-tree", "-m", "-u", &current, &plan.tree], &env)?;
     }
+    if plan.new_head != plan.local_head {
+        git(root, &["read-tree", "-m", &plan.local_head, &plan.new_head]).context(
+            "local staged index changed during cloud return; cloud work remains in rescue refs",
+        )?;
+    }
     if plan.new_head != head
         && let Some(branch) = &plan.branch
     {
@@ -2420,9 +2446,6 @@ fn apply_checkout_merge(root: &Path, plan: &CheckoutMerge) -> Result<()> {
                 &head,
             ],
         )?;
-    }
-    if plan.new_head != plan.local_head {
-        git(root, &["reset", "--quiet", "--mixed", &plan.new_head])?;
     }
     Ok(())
 }

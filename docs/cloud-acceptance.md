@@ -32,6 +32,23 @@ Imported workers stay paused until the coordinator finishes shared setup and
 resumes their existing IDs. Only the initiating terminal attaches automatically;
 other terminals must reconnect to their migrated sessions.
 
+## Repository and index semantics
+
+An updated sender and receiver place a migrated repository in a managed,
+user-owned workspace on the destination. The session retains its relative
+working directory. Return uses the original local repository and working
+directory. Older senders require the same absolute path on the destination.
+An older receiver may also require that path; update both CLIs for portable
+workspaces.
+
+Move transfers the working file contents, including untracked files, but not
+the source Git index. At the destination, changes are unstaged relative to the
+transferred HEAD, even when they were staged locally. Return retains the local
+staged and unstaged split when it can safely advance the local index to a cloud
+commit. If that index conflicts, return fails instead of discarding staged work;
+the cloud snapshot remains available in the cloud rescue ref. This is not index
+parity between machines.
+
 ## What runs
 
 | Layer | Mechanism and assertions |
