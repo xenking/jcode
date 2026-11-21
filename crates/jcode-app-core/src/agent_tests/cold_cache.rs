@@ -168,7 +168,7 @@ fn compaction_dividers(agent: &Agent) -> Vec<String> {
 
 #[tokio::test]
 async fn manual_shake_requires_a_current_preview_and_records_only_one_reduction() {
-    use jcode_session_types::{ShakeToolsAction, ShakeToolsResult};
+    use jcode_session_types::{ContextActionSavings, ShakeToolsAction, ShakeToolsResult};
 
     let _guard = crate::storage::lock_test_env();
     let (_home, mut agent, _) = fixture(300, 1_000, 20_000).await;
@@ -194,6 +194,19 @@ async fn manual_shake_requires_a_current_preview_and_records_only_one_reduction(
         panic!("expected a warm preview, got {preview:?}");
     };
     assert!(event.is_none() && stats.estimated_tokens_saved > 0);
+    let breakdown = agent.inspect_context_breakdown().await;
+    let forecast = breakdown.action_forecast.unwrap();
+    assert_eq!(
+        forecast.shake,
+        Some(ContextActionSavings::Estimate {
+            tokens: stats.estimated_tokens_saved
+        })
+    );
+    assert!(
+        forecast
+            .current_tokens
+            .is_some_and(|tokens| tokens > stats.estimated_tokens_saved)
+    );
 
     let cold = now + Duration::from_secs(300);
     let stale = agent
@@ -218,8 +231,19 @@ async fn manual_shake_requires_a_current_preview_and_records_only_one_reduction(
     assert_eq!(stats, cold_stats);
     let apply = ShakeToolsAction::Apply { confirmation };
     let (applied, event) = agent.shake_tools(apply.clone(), cold).unwrap();
-    assert_eq!(applied, ShakeToolsResult::Applied { stats });
-    assert_eq!(event.unwrap().trigger, "shake_manual");
+    let ShakeToolsResult::Applied {
+        stats: applied_stats,
+        measurement: Some(measurement),
+    } = applied
+    else {
+        panic!("expected measured Shake result, got {applied:?}");
+    };
+    assert_eq!(applied_stats, stats);
+    assert!(measurement.before_tokens > measurement.after_tokens);
+    let event = event.unwrap();
+    assert_eq!(event.trigger, "shake_manual");
+    assert_eq!(event.pre_tokens, Some(measurement.before_tokens));
+    assert_eq!(event.post_tokens, Some(measurement.after_tokens));
     agent.session = Session::load(agent.session_id()).unwrap();
     assert_ne!(
         serde_json::to_value(agent.session.provider_messages()).unwrap(),

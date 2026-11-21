@@ -6,7 +6,8 @@ use std::collections::HashSet;
 mod ask;
 mod context_breakdown;
 pub use context_breakdown::{
-    CONTEXT_BREAKDOWN_CAPABILITY, ContextBreakdown, ContextBreakdownCategory, ContextBreakdownKind,
+    CONTEXT_BREAKDOWN_CAPABILITY, ContextActionForecast, ContextActionMeasurement,
+    ContextActionSavings, ContextBreakdown, ContextBreakdownCategory, ContextBreakdownKind,
 };
 mod memory;
 mod shake_tools;

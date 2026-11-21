@@ -1,7 +1,9 @@
 use super::*;
 use crate::compaction::{ShakeOutcome, ShakeReason};
 use anyhow::Context as _;
-use jcode_session_types::{ShakeToolsAction, ShakeToolsResult, ShakeToolsStats};
+use jcode_session_types::{
+    ContextActionMeasurement, ShakeToolsAction, ShakeToolsResult, ShakeToolsStats,
+};
 use std::hash::{BuildHasher, RandomState};
 use std::sync::LazyLock;
 use std::time::SystemTime;
@@ -82,21 +84,20 @@ impl Agent {
         }
 
         let started = Instant::now();
-        let pre = self.session.context_occupancy_tokens().unwrap_or_else(|| {
-            manager.effective_token_count_with(self.session.provider_messages()) as u64
-        });
+        let pre = manager.measure_token_estimate_with(self.session.provider_messages()) as u64;
         let mut staged = self.session.clone();
         anyhow::ensure!(
             staged.shake_stored_messages(start, &config) == outcome,
             "The Shake plan changed before it could be saved."
         );
+        let post = manager.measure_token_estimate_with(staged.provider_messages()) as u64;
         let reason = ShakeReason::Manual;
         let event = CompactionEvent {
             trigger: reason.label().into(),
             method: Some("shake".into()),
             pre_tokens: Some(pre),
-            post_tokens: Some(pre.saturating_sub(stats.estimated_tokens_saved)),
-            tokens_saved: Some(stats.estimated_tokens_saved),
+            post_tokens: Some(post),
+            tokens_saved: Some(pre.saturating_sub(post)),
             duration_ms: Some(started.elapsed().as_millis() as u64),
             messages_dropped: None,
             messages_compacted: Some(regions_elided),
@@ -112,6 +113,15 @@ impl Agent {
         manager.record_shake(reason, outcome);
         drop(manager);
         self.note_compaction_applied();
-        Ok((ShakeToolsResult::Applied { stats }, Some(event)))
+        Ok((
+            ShakeToolsResult::Applied {
+                stats,
+                measurement: Some(ContextActionMeasurement {
+                    before_tokens: pre,
+                    after_tokens: post,
+                }),
+            },
+            Some(event),
+        ))
     }
 }

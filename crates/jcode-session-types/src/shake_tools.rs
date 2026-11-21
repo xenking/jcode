@@ -26,5 +26,7 @@ pub enum ShakeToolsResult {
     },
     Applied {
         stats: ShakeToolsStats,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        measurement: Option<crate::ContextActionMeasurement>,
     },
 }

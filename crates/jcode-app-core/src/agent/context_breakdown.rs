@@ -7,7 +7,8 @@ use crate::provider::models::{
 };
 use crate::util::APPROX_CHARS_PER_TOKEN;
 use jcode_session_types::{
-    ContextBreakdown, ContextBreakdownCategory, ContextBreakdownKind as Kind,
+    ContextActionForecast, ContextActionSavings, ContextBreakdown, ContextBreakdownCategory,
+    ContextBreakdownKind as Kind,
 };
 use std::path::Path;
 
@@ -15,8 +16,11 @@ impl Agent {
     pub(crate) async fn inspect_context_breakdown(&self) -> ContextBreakdown {
         let model = self.provider_model();
         let provider = self.provider.name();
+        let source = self.session.messages_for_provider_uncached();
+        let action_forecast = self.forecast_context_actions(&source);
         let messages = inspect_messages(
             &self.session,
+            source,
             compaction::snapcompact_pages_usable(self.provider.supports_image_input(), &model),
             compaction::openai_native_replay_route(provider, &model),
         );
@@ -28,6 +32,7 @@ impl Agent {
         counts.tools(&tools, &messages, |name| {
             crate::tool::sdk::custom(self.session_id(), name)
         });
+        counts.action_forecast = action_forecast;
         counts.finish(
             Some(self.session.id.clone()),
             Some(model.clone()),
@@ -39,6 +44,40 @@ impl Agent {
             ),
             self.session.context_occupancy_tokens(),
         )
+    }
+}
+
+impl Agent {
+    fn forecast_context_actions(&self, messages: &[Message]) -> Option<ContextActionForecast> {
+        let compaction = self.registry.compaction();
+        let manager = compaction.try_read().ok()?;
+        if manager.is_compacting() {
+            return None;
+        }
+        let compact =
+            (!self.is_swarm_worker() && self.provider.supports_compaction()).then(|| match manager
+                .manual_compaction_upper_bound(messages)
+            {
+                Ok(tokens) if tokens > 0 => ContextActionSavings::UpperBound {
+                    tokens: tokens as u64,
+                },
+                _ => ContextActionSavings::NoChange,
+            });
+        let start = manager.active_start(messages);
+        let config = manager.manual_tool_shake_config();
+        let shake = match self.session.preview_shake_stored_messages(start, &config) {
+            compaction::ShakeOutcome::Shaken { tokens_saved, .. } => {
+                ContextActionSavings::Estimate {
+                    tokens: tokens_saved as u64,
+                }
+            }
+            compaction::ShakeOutcome::NoChange => ContextActionSavings::NoChange,
+        };
+        Some(ContextActionForecast {
+            current_tokens: None,
+            compact,
+            shake: Some(shake),
+        })
     }
 }
 
@@ -78,7 +117,12 @@ pub(crate) fn inspect_saved(session: &Session) -> ContextBreakdown {
         .is_some_and(|(provider, model)| compaction::openai_native_replay_route(provider, model));
     // The saved route may not have a restored image capability. The index-only
     // projection is an estimate, without inventing a number of image pages.
-    let messages = inspect_messages(session, false, native);
+    let messages = inspect_messages(
+        session,
+        session.messages_for_provider_uncached(),
+        false,
+        native,
+    );
     counts.messages(session, &messages);
     if let Some(tools) = super::tool_replay::saved_context_tools(session) {
         counts.tools(&tools, &messages, |_| false);
@@ -190,8 +234,12 @@ fn effective_limit(
     Some(compaction.token_budget() as u64)
 }
 
-fn inspect_messages(session: &Session, archive: bool, native: bool) -> Vec<Message> {
-    let mut messages = session.messages_for_provider_uncached();
+fn inspect_messages(
+    session: &Session,
+    mut messages: Vec<Message>,
+    archive: bool,
+    native: bool,
+) -> Vec<Message> {
     if let Some(state) = session.compaction.as_deref() {
         let mut manager = CompactionManager::new();
         manager.restore_persisted_state(state, messages.len());
@@ -211,6 +259,7 @@ struct Counts {
     conversation_chars: Option<usize>,
     dynamic_reminder_chars: usize,
     unattributed_chars: usize,
+    action_forecast: Option<ContextActionForecast>,
 }
 
 impl Counts {
@@ -338,16 +387,15 @@ impl Counts {
         );
         let attributed_total = counts.iter().filter_map(|(_, tokens)| *tokens).sum::<u64>();
         let lower_bound = attributed_total + not_attributed;
+        let local_total = (self.prompt_present
+            && self.conversation_chars.is_some()
+            && self.builtin_tokens.is_some())
+        .then_some(lower_bound);
         // Last observed occupancy includes the prefix. Do not add it to the
         // categories. A smaller report may predate the current material.
         let total_tokens = reported
             .filter(|reported| *reported >= lower_bound)
-            .or_else(|| {
-                (self.prompt_present
-                    && self.conversation_chars.is_some()
-                    && self.builtin_tokens.is_some())
-                .then_some(lower_bound)
-            });
+            .or(local_total);
         let unattributed = total_tokens
             .map(|total| total - attributed_total)
             .filter(|&tokens| tokens > 0 || !unknown)
@@ -364,6 +412,10 @@ impl Counts {
             limit_tokens,
             estimated: true,
             categories,
+            action_forecast: self.action_forecast.map(|mut forecast| {
+                forecast.current_tokens = local_total;
+                forecast
+            }),
         }
     }
 }

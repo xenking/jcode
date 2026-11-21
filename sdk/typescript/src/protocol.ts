@@ -479,6 +479,22 @@ export interface ContextBreakdownCategory {
   tokens: number | null;
 }
 
+export type ContextActionSavings =
+  | { kind: "no_change" }
+  | { kind: "estimate"; tokens: number }
+  | { kind: "upper_bound"; tokens: number };
+
+export interface ContextActionForecast {
+  current_tokens: number | null;
+  compact: ContextActionSavings | null;
+  shake: ContextActionSavings | null;
+}
+
+export interface ContextActionMeasurement {
+  before_tokens: number;
+  after_tokens: number;
+}
+
 export type ShakeToolsAction =
   | { kind: "preview" }
   | { kind: "apply"; confirmation: string };
@@ -491,7 +507,7 @@ export interface ShakeToolsStats {
 export type ShakeToolsResult =
   | { kind: "no_change" }
   | { kind: "preview"; confirmation: string; cache_at_risk: boolean; stats: ShakeToolsStats }
-  | { kind: "applied"; stats: ShakeToolsStats };
+  | { kind: "applied"; stats: ShakeToolsStats; measurement?: ContextActionMeasurement };
 
 export type ApiEvent =
   | { ev: "draft_models"; current: string | null; routes: ModelRouteInfo[] }
@@ -531,6 +547,7 @@ export type ApiEvent =
       limit_tokens: number | null;
       estimated: boolean;
       categories: ContextBreakdownCategory[];
+      action_forecast?: ContextActionForecast;
     }
   | { ev: "shake_tools"; session_id: string; result: ShakeToolsResult }
   | { ev: "user_image_ids"; session_id: string; original_content: string; content: string; image_ids: string[] }

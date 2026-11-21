@@ -647,19 +647,42 @@ fn typescript_context_breakdown_matches_flattened_wire_payload() {
             total_tokens: None,
             limit_tokens: None,
             estimated: true,
-            categories: [SystemPrompt, BuiltinTools, SkillsModes, DynamicTools, Agents, Conversation, Unattributed]
-                .into_iter()
-                .map(|kind| ContextBreakdownCategory { kind, tokens: None })
-                .collect(),
+            categories: [
+                SystemPrompt,
+                BuiltinTools,
+                SkillsModes,
+                DynamicTools,
+                Agents,
+                Conversation,
+                Unattributed,
+            ]
+            .into_iter()
+            .map(|kind| ContextBreakdownCategory { kind, tokens: None })
+            .collect(),
+            action_forecast: Some(ContextActionForecast {
+                current_tokens: Some(40_000),
+                compact: Some(ContextActionSavings::UpperBound { tokens: 8_000 }),
+                shake: Some(ContextActionSavings::NoChange),
+            }),
         },
     };
     let wire = serde_json::to_value(event).unwrap();
     let block = sdk_variant_block(&sdk, "ev", "context_breakdown").unwrap();
     for key in wire.as_object().unwrap().keys() {
-        assert!(block.contains(&format!("{key}:")), "missing wire field {key}");
+        assert!(
+            block.contains(&format!("{key}:")) || block.contains(&format!("{key}?:")),
+            "missing wire field {key}"
+        );
     }
+    assert_eq!(
+        wire["action_forecast"]["compact"],
+        serde_json::json!({"kind":"upper_bound","tokens":8_000})
+    );
     assert!(!block.contains("breakdown:"));
-    let kinds = sdk.split_once("export type ContextBreakdownKind =").unwrap().1;
+    let kinds = sdk
+        .split_once("export type ContextBreakdownKind =")
+        .unwrap()
+        .1;
     let kinds = kinds.split_once(';').unwrap().0;
     for category in wire["categories"].as_array().unwrap() {
         let kind = &category["kind"];

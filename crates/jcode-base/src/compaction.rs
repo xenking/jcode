@@ -1164,6 +1164,18 @@ impl CompactionManager {
         )
     }
 
+    /// Recount an arbitrary snapshot directly, without trusting the live cache.
+    pub fn measure_token_estimate_with(&self, all_messages: &[Message]) -> usize {
+        estimate_compaction_tokens(
+            self.active_summary.as_ref(),
+            self.active_messages(all_messages)
+                .iter()
+                .map(message_char_count)
+                .sum(),
+            self.token_budget,
+        )
+    }
+
     /// Get current token estimate (backward compat — uses 0 messages, only summary + observed)
     pub fn token_estimate(&self) -> usize {
         estimate_compaction_tokens(self.active_summary.as_ref(), 0, self.token_budget)
@@ -1959,12 +1971,7 @@ impl CompactionManager {
         }
     }
 
-    /// Force immediate compaction (for manual /compact command).
-    pub fn force_compact_with(
-        &mut self,
-        all_messages: &[Message],
-        provider: Arc<dyn Provider>,
-    ) -> Result<(), String> {
+    fn manual_compaction_cutoff(&self, all_messages: &[Message]) -> Result<usize, String> {
         if self.pending_task.is_some() {
             return Err("Compaction already in progress".to_string());
         }
@@ -1996,6 +2003,31 @@ impl CompactionManager {
             return Err("Cannot compact - would split tool call/result pairs".to_string());
         }
 
+        Ok(cutoff)
+    }
+
+    /// Optimistic local bound: keep the protected tail and assume the new
+    /// summary takes zero space. Never run the provider during preflight.
+    pub fn manual_compaction_upper_bound(&self, all_messages: &[Message]) -> Result<usize, String> {
+        let cutoff = self.manual_compaction_cutoff(all_messages)?;
+        let tail_chars = self.active_messages(all_messages)[cutoff..]
+            .iter()
+            .map(message_char_count)
+            .sum();
+        let floor = estimate_compaction_tokens(None, tail_chars, self.token_budget);
+        Ok(self
+            .measure_token_estimate_with(all_messages)
+            .saturating_sub(floor))
+    }
+
+    /// Force immediate compaction (for manual /compact command).
+    pub fn force_compact_with(
+        &mut self,
+        all_messages: &[Message],
+        provider: Arc<dyn Provider>,
+    ) -> Result<(), String> {
+        let cutoff = self.manual_compaction_cutoff(all_messages)?;
+        let active = self.active_messages(all_messages);
         let messages_to_summarize: Vec<Message> = active[..cutoff].to_vec();
         let archive_history =
             all_messages[..self.compacted_count.min(all_messages.len()) + cutoff].to_vec();
@@ -2111,11 +2143,14 @@ impl CompactionManager {
                     return;
                 }
 
-                // The UI context pill displays the last provider-observed input,
-                // not the conservative max of observed and estimated tokens.
-                let pre_tokens = self
-                    .observed_input_tokens
-                    .unwrap_or_else(|| self.token_estimate_with(all_messages) as u64);
+                // Manual action results compare the same estimator on both sides
+                // of the rewrite. Other dividers retain their usage anchor.
+                let pre_tokens = if trigger == "manual" {
+                    self.measure_token_estimate_with(all_messages) as u64
+                } else {
+                    self.observed_input_tokens
+                        .unwrap_or_else(|| self.token_estimate_with(all_messages) as u64)
+                };
                 let compacted_chars: usize = self
                     .active_messages(all_messages)
                     .iter()
@@ -2175,7 +2210,11 @@ impl CompactionManager {
                 self.discard_oversized_openai_native_compaction();
                 self.observed_input_tokens = None;
                 self.observed_estimate_tokens = None;
-                let post_tokens = self.effective_token_count_with(all_messages) as u64;
+                let post_tokens = if trigger == "manual" {
+                    self.measure_token_estimate_with(all_messages) as u64
+                } else {
+                    self.effective_token_count_with(all_messages) as u64
+                };
                 self.last_compaction = Some(CompactionEvent {
                     trigger: trigger.clone(),
                     method: Some(method.to_string()),

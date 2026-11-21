@@ -45,7 +45,8 @@ pub use events::*;
 pub use jcode_applet_types;
 pub use jcode_selfdev_types::ServingIdentity;
 pub use jcode_session_types::{
-    AskAnswer, AskOption, AskQuestion, AskResponse, CONTEXT_BREAKDOWN_CAPABILITY, ContextBreakdown,
+    AskAnswer, AskOption, AskQuestion, AskResponse, CONTEXT_BREAKDOWN_CAPABILITY,
+    ContextActionForecast, ContextActionMeasurement, ContextActionSavings, ContextBreakdown,
     ContextBreakdownCategory, ContextBreakdownKind, SHAKE_TOOLS_CAPABILITY, SessionCatalogContext,
     ShakeToolsAction, ShakeToolsResult, ShakeToolsStats,
 };
