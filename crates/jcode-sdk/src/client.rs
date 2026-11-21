@@ -1817,8 +1817,9 @@ impl JcodeClient {
         .map(drop)
     }
 
-    /// Schedule compaction of the transcript so far, freeing context. Not
-    /// synchronous: returning means the request was accepted.
+    /// Queue compaction without waiting for an active turn to finish. The
+    /// reply acknowledges the request. Progress and outcome arrive separately
+    /// as compaction divider or background progress events.
     pub fn compact(&self, session_id: &str) -> Result<String> {
         match self
             .request_ok(ApiRequest::Compact {

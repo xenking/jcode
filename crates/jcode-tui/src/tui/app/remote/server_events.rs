@@ -3544,13 +3544,16 @@ fn handle_server_event_inner(
         ServerEvent::CompactResult {
             message, success, ..
         } => {
-            if success {
-                app.push_display_message(DisplayMessage::system(message));
-                app.set_status_notice("Compacting context");
-            } else {
-                app.push_display_message(DisplayMessage::system(message));
-                app.set_status_notice("Compaction failed");
+            if !success {
+                app.display_messages
+                    .retain(|message| !message.compaction_is_running());
             }
+            app.push_display_message(DisplayMessage::system(message));
+            app.set_status_notice(if success {
+                "Context compaction queued"
+            } else {
+                "Compaction failed"
+            });
             false
         }
         ServerEvent::ResumeAllResult {

@@ -672,11 +672,12 @@ pub enum ApiEvent {
     ///
     /// Compaction is not synchronous. The daemon summarizes at the next safe
     /// point rather than interrupting a turn mid-flight, so this confirms the
-    /// request was accepted, not that the transcript has already shrunk. A
-    /// client that wants the result should re-read the history afterwards.
+    /// request was accepted, not that the transcript has already shrunk.
+    /// `CompactionDivider` reports start and successful completion.
+    /// A terminal `BackgroundProgress` for `context-compaction` reports failure.
     Compacted {
         session_id: String,
-        /// Human-readable status, e.g. why compaction was refused.
+        /// Human-readable scheduling status.
         message: String,
     },
 

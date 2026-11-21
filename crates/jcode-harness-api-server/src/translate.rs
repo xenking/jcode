@@ -3044,8 +3044,9 @@ impl BridgeState {
                     post_tokens: None,
                 })]
             }
-            // Compaction is scheduled asynchronously. Refusal is a request
-            // error; id zero is an unsolicited background failure.
+            // Correlated results acknowledge scheduling. Older daemons may
+            // also reply with a refusal. Uncorrelated results report failure
+            // after acceptance.
             "compact_result" => {
                 let id = event["id"].as_u64().unwrap_or(0);
                 if id == 0 && event["success"].as_bool() == Some(false) {

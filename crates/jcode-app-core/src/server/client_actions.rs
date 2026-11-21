@@ -1104,12 +1104,26 @@ pub(super) fn handle_compact(
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
+    // An active turn can hold the agent for longer than the client's RPC
+    // deadline. Acknowledge queuing, not the eventual compaction outcome.
+    let _ = client_event_tx.send(ServerEvent::CompactResult {
+        id,
+        message: "Context compaction queued.".into(),
+        success: true,
+    });
     let agent = Arc::clone(agent);
     let tx = client_event_tx.clone();
     crate::runtime_activity::spawn(async move {
         let mut agent_guard = agent.lock().await;
         let session_id = agent_guard.session_id().to_string();
         let (message, success) = agent_guard.request_manual_compaction();
+        // Send start before releasing the agent, so completion cannot overtake it.
+        if success {
+            let _ = tx.send(ServerEvent::CompactionStarted {
+                trigger: "manual".into(),
+                pre_tokens: 0,
+            });
+        }
         drop(agent_guard);
 
         if success {
@@ -1121,14 +1135,13 @@ pub(super) fn handle_compact(
                 .with_session_id(session_id)
                 .force_attribution(),
             );
+        } else {
+            let _ = tx.send(ServerEvent::CompactResult {
+                id: 0,
+                message,
+                success: false,
+            });
         }
-
-        let result = ServerEvent::CompactResult {
-            id,
-            message,
-            success,
-        };
-        let _ = tx.send(result);
     });
 }
 
