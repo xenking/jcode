@@ -52,12 +52,19 @@ pub(crate) fn ssh_config_path() -> Result<PathBuf> {
 
 /// Prepare only local SSH files. Do not provision, wake, authorize, or connect.
 pub(crate) fn prepare_ssh() -> Result<()> {
-    ssh_args().map(|_| ())
+    write_ssh_files(false).map(|_| ())
 }
 
 /// Ensure the client key and private SSH config exist. Returns `-F <config>`
 /// arguments for an `ssh` invocation targeting [`HOST`].
 pub(crate) fn ssh_args() -> Result<Vec<String>> {
+    write_ssh_files(true)
+}
+
+/// `learn_login` asks the control plane once per account which user the
+/// machine logs in as, without waking it. Callers that are about to connect
+/// need it, because SSH reads the login from the config before the proxy runs.
+fn write_ssh_files(learn_login: bool) -> Result<Vec<String>> {
     let dir = dir()?;
     create_private_dir(&dir)?;
     let key = key_path()?;
@@ -88,7 +95,25 @@ pub(crate) fn ssh_args() -> Result<Vec<String>> {
     let namespace = account()
         .ok()
         .and_then(|account| control_namespace(&account.key, &account.base));
-    let config = managed_ssh_config(&dir, &key, &known_hosts_path()?, &exe, namespace.as_deref());
+    if learn_login
+        && let Some(namespace) = namespace.as_deref()
+        && remembered_user(namespace).is_none()
+    {
+        // Remembers the login as a side effect. Offline, the default stands.
+        let _ = status();
+    }
+    let user = namespace
+        .as_deref()
+        .map(login_user)
+        .unwrap_or_else(|| DEFAULT_USER.to_string());
+    let config = managed_ssh_config(
+        &dir,
+        &key,
+        &known_hosts_path()?,
+        &exe,
+        namespace.as_deref(),
+        &user,
+    );
     let path = ssh_config_path()?;
     if std::fs::read_to_string(&path).ok().as_deref() != Some(config.as_str()) {
         write_private(&path, &config)?;
@@ -136,12 +161,57 @@ fn control_namespace(key: &str, base: &str) -> Option<String> {
     Some(format!("{:x}", hash.finalize())[..16].to_string())
 }
 
+/// The login on Jcode's own managed machines. A self-hosted control plane
+/// names the login of the machine the account registered instead.
+const DEFAULT_USER: &str = "ec2-user";
+
+fn valid_user(user: &str) -> bool {
+    !user.is_empty()
+        && user.len() <= 32
+        && !user.starts_with('-')
+        && user
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+}
+
+fn user_path(namespace: &str) -> Result<PathBuf> {
+    Ok(dir()?.join(format!("user-{namespace}")))
+}
+
+/// Remember the login the control plane reported for this account's machine.
+/// SSH reads its config before the proxy runs, so the name has to be on disk.
+/// A reply that names no user means Jcode's managed default.
+fn remember_user(namespace: &str, reply: &Reply) {
+    let user = reply.user.as_deref().unwrap_or(DEFAULT_USER);
+    if !valid_user(user) {
+        return;
+    }
+    if let Ok(path) = user_path(namespace)
+        && std::fs::read_to_string(&path).ok().as_deref() != Some(user)
+    {
+        let _ = write_private(&path, user);
+    }
+}
+
+fn remembered_user(namespace: &str) -> Option<String> {
+    std::fs::read_to_string(user_path(namespace).ok()?)
+        .ok()
+        .filter(|user| valid_user(user))
+}
+
+/// The machine's login as last reported by the control plane, else Jcode's
+/// managed default. Reads local state only.
+fn login_user(namespace: &str) -> String {
+    remembered_user(namespace).unwrap_or_else(|| DEFAULT_USER.to_string())
+}
+
 fn managed_ssh_config(
     dir: &std::path::Path,
     key: &std::path::Path,
     known: &std::path::Path,
     exe: &std::path::Path,
     namespace: Option<&str>,
+    user: &str,
 ) -> String {
     // Keep the socket in the mode-0700 managed directory, never a shared temp
     // directory. %C keeps its name short and keys it to the SSH destination.
@@ -163,7 +233,7 @@ fn managed_ssh_config(
         "# Managed by jcode. Rewritten on every use.\n\
          Host {HOST}\n\
          \x20 HostName {HOST}\n\
-         \x20 User ec2-user\n\
+         \x20 User {user}\n\
          \x20 IdentityFile {key}\n\
          \x20 IdentitiesOnly yes\n\
          \x20 IdentityAgent none\n\
@@ -208,6 +278,9 @@ pub(crate) struct Reply {
     pub address: Option<String>,
     #[serde(default)]
     pub port: Option<u16>,
+    /// Sent by a self-hosted control plane. Jcode's own machines omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
     #[serde(default)]
     pub host_keys: Vec<String>,
     #[serde(default)]
@@ -334,7 +407,11 @@ fn public_key() -> Result<String> {
 }
 
 pub(crate) fn status() -> Result<Reply> {
-    request("GET", "cloud/host", None)
+    let reply = request("GET", "cloud/host", None)?;
+    if let Ok(namespace) = preparation_namespace() {
+        remember_user(&namespace, &reply);
+    }
+    Ok(reply)
 }
 
 pub(crate) fn stop() -> Result<Reply> {
@@ -373,6 +450,10 @@ fn connect_unless(progress: &mut dyn FnMut(&str), abandoned: &dyn Fn() -> bool) 
             )
         })?;
         if reply.ready {
+            // A later connection must log in as the machine's current user.
+            if let Ok(namespace) = preparation_namespace() {
+                remember_user(&namespace, &reply);
+            }
             return Ok(reply);
         }
         let message = reply
@@ -421,10 +502,29 @@ fn validated_host_keys(reply: &Reply) -> Result<Vec<String>> {
 /// go to stderr only, since stdout is the SSH wire.
 pub(crate) fn run_proxy() -> Result<()> {
     let abandoned = ssh_parent_watch();
+    // SSH already chose its login from the config it read before starting this.
+    let assumed = std::fs::read_to_string(ssh_config_path()?)
+        .ok()
+        .and_then(|config| {
+            config
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("User ").map(str::to_owned))
+        });
     let reply = connect_unless(
         &mut |message| eprintln!("[jcode cloud] {message}"),
         &abandoned,
     )?;
+    let actual = reply.user.as_deref().unwrap_or(DEFAULT_USER);
+    if let Some(assumed) = assumed
+        && assumed != actual
+        && valid_user(actual)
+    {
+        // Rewrite the config so the retry logs in as the right user.
+        prepare_ssh()?;
+        bail!(
+            "Jcode Cloud machine logs in as `{actual}`, not `{assumed}`. That is saved now: run the command again."
+        );
+    }
     relay_proxy(&reply, HOST, &known_hosts_path()?)
 }
 
@@ -1115,7 +1215,9 @@ mod tests {
             &dir.join("known_hosts"),
             std::path::Path::new("/opt/jcode"),
             Some("0123456789abcdef"),
+            "root",
         );
+        assert!(config.contains("  User root\n"));
         assert!(config.contains("  ControlMaster auto\n"));
         assert!(
             config.contains("  ControlPath \"/home/test user/100%%/cloud/0123456789abcdef-%C\"\n")
@@ -1148,11 +1250,29 @@ mod tests {
     #[test]
     fn managed_config_disables_multiplexing_without_account() {
         let path = std::path::Path::new("/private/cloud");
-        let config = managed_ssh_config(path, path, path, path, None);
+        let config = managed_ssh_config(path, path, path, path, None, DEFAULT_USER);
+        assert!(config.contains("  User ec2-user\n"));
         assert!(config.contains("  ControlMaster no\n"));
         assert!(config.contains("  ControlPath none\n"));
         assert!(config.contains("  ControlPersist no\n"));
         assert!(!config.contains("%C"));
+    }
+
+    #[test]
+    fn only_a_plain_login_name_reaches_the_ssh_config() {
+        for user in ["root", "ec2-user", "dev_1"] {
+            assert!(valid_user(user), "{user}");
+        }
+        for user in [
+            "",
+            "-oProxyCommand=x",
+            "a b",
+            "a\nHost *",
+            "u@h",
+            &"x".repeat(33),
+        ] {
+            assert!(!valid_user(user), "{user:?}");
+        }
     }
 
     #[test]
