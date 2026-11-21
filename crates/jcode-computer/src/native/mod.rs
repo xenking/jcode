@@ -223,7 +223,8 @@ impl Snapshots {
     }
 }
 
-fn receipt(data: Value) -> ToolOutput {
+fn receipt(mut data: Value) -> ToolOutput {
+    data["executor_pid"] = json!(std::process::id());
     ToolOutput::new(data.to_string()).with_metadata(data)
 }
 
