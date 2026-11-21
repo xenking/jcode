@@ -582,6 +582,14 @@ pub enum ServerEvent {
         message: String,
     },
 
+    /// The provider stopped a request, but jcode is retrying within the same turn.
+    #[serde(rename = "provider_guardrail_retry")]
+    ProviderGuardrailRetry {
+        turn_id: String,
+        attempt: u32,
+        max_attempts: u32,
+    },
+
     /// Relevant memory was injected into the conversation
     #[serde(rename = "memory_injected")]
     MemoryInjected {

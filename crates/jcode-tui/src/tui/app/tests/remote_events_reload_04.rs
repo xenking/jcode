@@ -559,6 +559,35 @@ fn test_provider_guardrail_event_offers_opus_reroute_with_resend_payload() {
     );
 }
 
+#[test]
+fn provider_guardrail_retry_updates_one_system_line_without_ending_the_turn() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.is_processing = true;
+    for attempt in 1..=3 {
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ProviderGuardrailRetry {
+                turn_id: "turn-1".into(),
+                attempt,
+                max_attempts: 3,
+            },
+            &mut remote,
+        );
+    }
+    let rows: Vec<_> = app
+        .display_messages()
+        .iter()
+        .filter(|message| message.content.contains("Jcode retried the request"))
+        .collect();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].role, "system");
+    assert!(rows[0].content.contains("attempt 3 of 3"));
+    assert!(app.is_processing && !app.turn_guardrail_stopped);
+    assert!(app.pending_fallback_offer.is_none());
+}
+
 /// The reroute offer must prefer native Anthropic auth over aggregator routes
 /// that also expose claude-opus-4-8.
 #[test]

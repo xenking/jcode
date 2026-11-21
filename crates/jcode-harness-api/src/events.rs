@@ -317,6 +317,15 @@ pub enum ApiEvent {
         provider_stop_reason: Option<String>,
     },
 
+    /// A provider stopped a request and jcode is retrying. Update the same
+    /// status row for a turn_id without marking the turn as stopped.
+    ProviderGuardrailRetry {
+        session_id: String,
+        turn_id: String,
+        attempt: u32,
+        max_attempts: u32,
+    },
+
     /// The turn finished; the agent is idle.
     TurnDone {
         session_id: String,

@@ -3067,13 +3067,27 @@ async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
         .expect("turn should recover from the guardrail");
 
     let mut text = String::new();
+    let mut retry_notices = Vec::new();
     while let Ok(event) = rx.try_recv() {
-        if let ServerEvent::TextDelta { text: delta } = event {
-            text.push_str(&delta);
+        match event {
+            ServerEvent::TextDelta { text: delta } => text.push_str(&delta),
+            ServerEvent::ProviderGuardrailRetry {
+                turn_id,
+                attempt,
+                max_attempts,
+            } => retry_notices.push((turn_id, attempt, max_attempts)),
+            ServerEvent::ProviderGuardrail { .. } => panic!("successful retry is not a stop"),
+            _ => {}
         }
     }
 
     assert_eq!(*calls.lock().unwrap(), 4);
+    assert_eq!(retry_notices.len(), 3);
+    for (index, (turn_id, attempt, max_attempts)) in retry_notices.iter().enumerate() {
+        assert_eq!(turn_id, &retry_notices[0].0);
+        assert_eq!(*attempt, u32::try_from(index).unwrap() + 1);
+        assert_eq!(*max_attempts, 3);
+    }
     let prompts = prompts_seen.lock().unwrap();
     assert_eq!(prompts.len(), 3);
     assert!(prompts[0].contains("concrete harmful action"));

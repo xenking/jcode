@@ -34,6 +34,7 @@ impl Agent {
         let mut incomplete_continuations = 0u32;
         let mut empty_post_tool_continuations = 0u32;
         let mut fable_guardrail_reconsiderations = 0u32;
+        let mut guardrail_retry_prompt = None;
         let mut sequential_single_tool_rounds = 0u32;
         let mut batch_nudge_pending = false;
         let mut turn_tool_calls = 0usize;
@@ -169,6 +170,7 @@ impl Agent {
             // Request-only messages follow every durable block. A reload nudge
             // only makes this particular continuation valid on the wire.
             messages_with_memory.extend(ephemeral_memory);
+            messages_with_memory.extend(guardrail_retry_prompt.take());
             if let Some(mut nudge) =
                 super::reload_resume::trailing_assistant_nudge(&messages_with_memory)
             {
@@ -1016,10 +1018,11 @@ impl Agent {
 
             // If no tool calls, we're done
             if tool_calls.is_empty() {
-                if self.maybe_reconsider_fable_guardrail(
+                if let Some(prompt) = self.fable_guardrail_retry_prompt(
                     stop_reason.as_deref(),
                     &mut fable_guardrail_reconsiderations,
-                )? {
+                ) {
+                    guardrail_retry_prompt = Some(prompt);
                     continue;
                 }
                 if self.maybe_continue_empty_post_tool_response(

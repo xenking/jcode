@@ -2459,6 +2459,31 @@ impl BridgeState {
                     vec![]
                 }
             }
+            "provider_guardrail_retry" => {
+                let Some(session_id) = self.session_id.clone() else {
+                    return vec![];
+                };
+                let (Some(turn_id), Some(attempt), Some(max_attempts)) = (
+                    event["turn_id"].as_str(),
+                    event["attempt"]
+                        .as_u64()
+                        .and_then(|n| u32::try_from(n).ok()),
+                    event["max_attempts"]
+                        .as_u64()
+                        .and_then(|n| u32::try_from(n).ok()),
+                ) else {
+                    return vec![];
+                };
+                if turn_id.is_empty() || attempt == 0 || attempt > max_attempts {
+                    return vec![];
+                }
+                vec![ServerFrame::event(ApiEvent::ProviderGuardrailRetry {
+                    session_id,
+                    turn_id: turn_id.to_string(),
+                    attempt,
+                    max_attempts,
+                })]
+            }
             "turn_stopped" | "provider_guardrail" => {
                 if self.session_id.is_none() || self.turn_stop_reported {
                     return vec![];

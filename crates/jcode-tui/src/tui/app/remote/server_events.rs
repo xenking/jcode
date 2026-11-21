@@ -991,6 +991,26 @@ fn handle_server_event_inner(
             }
             auto_poked
         }
+        ServerEvent::ProviderGuardrailRetry {
+            turn_id,
+            attempt,
+            max_attempts,
+        } => {
+            let title = format!("guardrail-retry:{turn_id}");
+            let content = format!(
+                "Provider stopped the response. Jcode retried the request (attempt {attempt} of {max_attempts})."
+            );
+            if let Some(index) = app.display_messages.iter().rposition(|message| {
+                message.role == "system" && message.title.as_deref() == Some(&title)
+            }) {
+                app.replace_display_message_content(index, content);
+            } else {
+                let mut message = DisplayMessage::system(content);
+                message.title = Some(title);
+                app.push_display_message(message);
+            }
+            true
+        }
         ServerEvent::ProviderGuardrail {
             stop_reason,
             message,

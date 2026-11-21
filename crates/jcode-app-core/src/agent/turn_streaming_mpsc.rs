@@ -57,6 +57,7 @@ impl Agent {
         let mut incomplete_continuations = 0u32;
         let mut empty_post_tool_continuations = 0u32;
         let mut fable_guardrail_reconsiderations = 0u32;
+        let mut guardrail_retry_prompt = None;
         let mut consecutive_malformed_tool_rounds = 0u32;
 
         loop {
@@ -150,6 +151,7 @@ impl Agent {
             // Request-only messages follow every durable block.
             let durable_message_count = messages_with_memory.len();
             messages_with_memory.extend(ephemeral_memory);
+            messages_with_memory.extend(guardrail_retry_prompt.take());
             if let Some(mut nudge) =
                 super::reload_resume::trailing_assistant_nudge(&messages_with_memory)
             {
@@ -1409,11 +1411,17 @@ impl Agent {
             if tool_calls.is_empty() {
                 if saw_message_end
                     && !self.is_graceful_shutdown()
-                    && self.maybe_reconsider_fable_guardrail(
+                    && let Some(prompt) = self.fable_guardrail_retry_prompt(
                         stop_reason.as_deref(),
                         &mut fable_guardrail_reconsiderations,
-                    )?
+                    )
                 {
+                    guardrail_retry_prompt = Some(prompt);
+                    let _ = event_tx.send(ServerEvent::ProviderGuardrailRetry {
+                        turn_id: usage_turn_id.clone(),
+                        attempt: fable_guardrail_reconsiderations,
+                        max_attempts: Self::FABLE_GUARDRAIL_RECONSIDERATION_PROMPTS.len() as u32,
+                    });
                     continue;
                 }
                 // Retry transient empty responses (dropped/empty upstream
