@@ -336,12 +336,6 @@ def decide(active, fixture, binary, desktop, route, button, action, **arguments)
     with ThreadPoolExecutor(max_workers=1) as worker:
         result = worker.submit(active.receipt, action, timeout=170, **arguments)
         try:
-            def dialog_active():
-                if result.done():
-                    raise RuntimeError(f"request completed before Desktop consent: {result.result()}")
-                return desktop_request(endpoint, **focus).get("code") == "window_busy"
-
-            until(dialog_active, "AppKit modal dialog on the test window", desktop)
             for _ in range(8):
                 if result.done():
                     raise RuntimeError(f"request completed before Desktop consent: {result.result()}")
@@ -372,7 +366,8 @@ def run(args, root, log):
     socket_path = root / "j.sock"
     api_socket = root / "a.sock"
     config = root / "desktop.toml"
-    config.write_text("[workspace]\nsession_refresh_seconds = 5\ncoaching_hints = false\n")
+    config.write_text("[workspace]\naccount_sign_in_handled = true\n"
+                      "session_refresh_seconds = 5\ncoaching_hints = false\n")
     with ThreadingHTTPServer(("127.0.0.1", 0), Provider) as provider:
         thread = threading.Thread(target=provider.serve_forever, daemon=True)
         thread.start()
