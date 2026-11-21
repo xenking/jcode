@@ -1,3 +1,5 @@
+use super::{AwaitedMemberStatus, format_comm_awaited_members_with_reports};
+
 fn awaited_member(session_id: &str, done: bool) -> AwaitedMemberStatus {
     AwaitedMemberStatus {
         session_id: session_id.to_string(),

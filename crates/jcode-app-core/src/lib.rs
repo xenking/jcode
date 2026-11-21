@@ -23,6 +23,13 @@
 // paths resolve here exactly as they did before the split.
 pub use jcode_base::*;
 
+mod comm_format;
+
+pub mod protocol {
+    pub use crate::comm_format::*;
+    pub use jcode_base::protocol::*;
+}
+
 // Upper layer (server / tool / agent and supporting leaves).
 pub mod agent;
 pub mod ambient;

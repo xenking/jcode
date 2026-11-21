@@ -42,10 +42,8 @@ impl std::fmt::Debug for ProviderOAuthEmail {
 
 mod screen;
 pub use screen::*;
-mod comm_format;
 mod notifications;
 
-pub use comm_format::*;
 pub use jcode_session_types::TurnStopReason;
 pub use jcode_session_types::{
     ASK_DECLINED_MESSAGE, ASK_MAX_OPTIONS, ASK_MAX_QUESTIONS, ASK_MIN_OPTIONS, AskAnswer,

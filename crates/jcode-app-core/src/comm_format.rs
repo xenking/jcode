@@ -1,9 +1,11 @@
-use std::collections::{HashMap, HashSet};
-
-use super::{
+use jcode_base::protocol::{
     AgentInfo, AgentStatusSnapshot, AwaitedMemberStatus, ContextEntry, HistoryMessage,
     PlanGraphStatus, SwarmChannelInfo, ToolCallSummary,
 };
+use std::collections::{HashMap, HashSet};
+
+#[cfg(test)]
+mod awaited_tests;
 
 pub fn format_comm_plan_followup(summary: &PlanGraphStatus) -> String {
     let mut parts = Vec::new();
