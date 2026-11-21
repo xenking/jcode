@@ -5,6 +5,8 @@ use std::collections::HashSet;
 
 mod ask;
 mod memory;
+mod rewind;
+pub use rewind::{RewindAnchor, RewindMessageKey};
 mod title;
 pub use ask::*;
 pub use memory::{memory_injection_content, memory_injection_label};

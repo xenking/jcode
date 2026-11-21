@@ -268,6 +268,9 @@ pub enum Request {
     #[serde(rename = "rewind")]
     Rewind { id: u64, message_index: usize },
 
+    #[serde(rename = "rewind_transcript")]
+    RewindTranscript { id: u64, target: jcode_session_types::RewindAnchor },
+
     /// Undo the most recent rewind, if one is available.
     #[serde(rename = "rewind_undo")]
     RewindUndo { id: u64 },

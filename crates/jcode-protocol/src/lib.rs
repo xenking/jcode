@@ -899,6 +899,7 @@ impl Request {
             Request::CancelSoftInterrupts { id, .. } => *id,
             Request::Clear { id } => *id,
             Request::Rewind { id, .. } => *id,
+            Request::RewindTranscript { id, .. } => *id,
             Request::RewindUndo { id } => *id,
             Request::Ping { id } => *id,
             Request::GetState { id } => *id,

@@ -243,21 +243,81 @@ mod durable_error_tests {
         );
     }
 
+    struct TestHome {
+        previous: Option<std::ffi::OsString>,
+        _directory: tempfile::TempDir,
+    }
+
+    impl TestHome {
+        fn new() -> Self {
+            let home = tempfile::tempdir().unwrap();
+            let old = std::env::var_os("JCODE_HOME");
+            crate::env::set_var("JCODE_HOME", home.path());
+            Self {
+                previous: old,
+                _directory: home,
+            }
+        }
+    }
+
+    impl Drop for TestHome {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => crate::env::set_var("JCODE_HOME", value),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn rewind_transcript_keeps_selected_assistant_and_undo_restores_suffix() {
+        use jcode_session_types::{RewindAnchor, RewindMessageKey};
+
+        let _lock = crate::storage::lock_test_env();
+        let _home = TestHome::new();
+        let mut agent = Agent::new(Arc::new(NoNetworkProvider), Registry::empty());
+        for (role, text) in [
+            (Role::User, "first question"),
+            (Role::Assistant, "repeated answer"),
+            (Role::User, "second question"),
+            (Role::Assistant, "repeated answer"),
+        ] {
+            agent.add_message(role, Message::user(text).content);
+        }
+        let selected = RewindMessageKey::new("assistant", "repeated answer").unwrap();
+        let mut target = RewindAnchor {
+            selected,
+            before: None,
+            after: None,
+        };
+        assert!(agent.rewind_transcript(&target).is_err());
+        target.after = RewindMessageKey::new("user", "second question");
+        assert_eq!(agent.rewind_transcript(&target), Ok(2));
+        let session_id = agent.session_id().to_owned();
+        let load_conversation = || {
+            crate::session::render_messages(&Session::load(&session_id).unwrap())
+                .into_iter()
+                .filter(|row| matches!(row.role.as_str(), "user" | "assistant"))
+                .map(|row| row.content)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(load_conversation(), ["first question", "repeated answer"]);
+        assert_eq!(agent.undo_rewind(), Ok(2));
+        assert_eq!(
+            load_conversation(),
+            [
+                "first question",
+                "repeated answer",
+                "second question",
+                "repeated answer"
+            ]
+        );
+    }
+
     #[test]
     fn failed_wake_error_is_saved_without_an_assistant_message() {
         let _lock = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().unwrap();
-        struct RestoreHome(Option<std::ffi::OsString>);
-        impl Drop for RestoreHome {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(value) => crate::env::set_var("JCODE_HOME", value),
-                    None => crate::env::remove_var("JCODE_HOME"),
-                }
-            }
-        }
-        let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
-        crate::env::set_var("JCODE_HOME", home.path());
+        let _home = TestHome::new();
         let mut agent = Agent::new(Arc::new(NoNetworkProvider), Registry::empty());
         agent.add_message_with_display_role(
             Role::User,

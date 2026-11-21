@@ -28,6 +28,7 @@ import {
   type AskResponse,
   type Attachment,
   type HistoryMessage,
+  type RewindAnchor,
   type ImageAttachment,
   type ModelRouteInfo,
   type PermissionDecision,
@@ -1209,7 +1210,12 @@ export class JcodeClient extends EventEmitter {
     await this.requestOk({ req: "close_applet", session_id: sessionId, instance });
   }
 
-  /** Restore the history the last `rewind` removed. */
+  /** Rewind to an identified transcript row, retaining its stored message. */
+  async rewindTranscript(sessionId: string, target: RewindAnchor): Promise<void> {
+    await this.requestOk({ req: "rewind_transcript", session_id: sessionId, target });
+  }
+
+  /** Restore the history the last rewind removed. */
   async rewindUndo(sessionId: string): Promise<void> {
     await this.requestOk({ req: "rewind_undo", session_id: sessionId });
   }

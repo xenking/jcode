@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 20;
+export const API_VERSION_MINOR = 21;
 
 export type RuntimeCommand = "mode" | "skills" | "context" | "info" | "cache" | "memory" | "swarm" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout" | "background_output";
 
@@ -161,6 +161,13 @@ export interface ResponseStats {
 }
 
 export interface HistoryFragment { index: number; start: number; total: number; text: string }
+
+/** SHA-256 bytes of the row's role, a zero byte, and its trimmed UTF-8 text. */
+export interface RewindAnchor {
+  selected: readonly number[];
+  before?: readonly number[] | null;
+  after?: readonly number[] | null;
+}
 
 export interface HistoryMessage {
   /** Only on the final assistant row. Preview/old-server history may omit it. */
@@ -342,6 +349,7 @@ export type ApiRequest =
   | { req: "peek_session"; session_id: string; limit?: number }
   | { req: "clear"; session_id: string }
   | { req: "rewind"; session_id: string; message_index: number }
+  | { req: "rewind_transcript"; session_id: string; target: RewindAnchor }
   | {
       req: "ask_response";
       session_id: string;
@@ -802,6 +810,7 @@ export const KNOWN_REQUEST_KINDS = [
   "peek_session",
   "clear",
   "rewind",
+  "rewind_transcript",
   "ask_response",
   "permission_response",
   "list_models",

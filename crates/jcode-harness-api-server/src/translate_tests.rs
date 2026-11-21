@@ -282,6 +282,11 @@ fn fallible_controls_wait_for_terminal_reply_without_settling_concurrent_turn() 
                 "Cannot rewind while a turn is processing.",
             ),
             (
+                json!({"req":"rewind_transcript","target":{"selected": vec![1; 32]}}),
+                "history",
+                "Cannot rewind while a turn is processing.",
+            ),
+            (
                 json!({"req":"rewind_undo"}),
                 "history",
                 "Cannot undo rewind while a turn is processing.",
@@ -1896,6 +1901,7 @@ fn stateful_requests_before_attach_are_refused_locally() {
         "soft_interrupt",
         "clear",
         "rewind",
+        "rewind_transcript",
         "get_history",
     ] {
         let mut state = BridgeState::default();

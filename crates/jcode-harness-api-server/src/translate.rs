@@ -11,7 +11,8 @@ mod turn_identity_tests;
 use crate::background_progress::parse_background_notification;
 use control_replies::SimpleKind;
 use jcode_harness_api::{
-    ApiEvent, ErrorCode, HistoryMessage, ModelRouteInfo, ServerFrame, SessionInfo, TextMatch,
+    ApiEvent, ErrorCode, HistoryMessage, ModelRouteInfo, RewindAnchor, ServerFrame, SessionInfo,
+    TextMatch,
 };
 use rusqlite::{Connection, params};
 use serde::Deserialize;
@@ -62,6 +63,7 @@ const REQUIRES_ATTACH: &[&str] = &[
     "background_tool",
     "clear",
     "rewind",
+    "rewind_transcript",
     "rewind_undo",
     "get_history",
     "get_history_page",
@@ -894,6 +896,17 @@ impl BridgeState {
                     "id": id,
                     "message_index": request["message_index"].as_u64().unwrap_or(1),
                 }))]
+            }
+            "rewind_transcript" => {
+                let target = match RewindAnchor::deserialize(&request["target"]) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        return Self::error_reply(api_id, ErrorCode::InvalidRequest, &error.to_string());
+                    }
+                };
+                let id = self.legacy_id();
+                self.pending_simple.push((id, api_id, SimpleKind::OkOnHistory));
+                vec![Outbound::Legacy(json!({"type": "rewind_transcript", "id": id, "target": target}))]
             }
             "get_history" => {
                 let id = self.legacy_id();

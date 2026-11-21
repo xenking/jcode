@@ -343,6 +343,12 @@ pub enum ApiRequest {
         message_index: usize,
     },
 
+    /// Rewind through a rendered transcript row. Reject a missing or ambiguous target.
+    RewindTranscript {
+        session_id: String,
+        target: crate::RewindAnchor,
+    },
+
     /// Reply to an `AskRequest` event.
     AskResponse {
         session_id: String,

@@ -1756,7 +1756,7 @@ pub(super) async fn handle_client(
                 .await;
             }
 
-            Request::Rewind { id, message_index } => {
+            request @ (Request::Rewind { id, .. } | Request::RewindTranscript { id, .. }) => {
                 if client_is_processing {
                     send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                         id,
@@ -1768,14 +1768,18 @@ pub(super) async fn handle_client(
 
                 let rewind_result = {
                     let mut agent_guard = agent.lock().await;
-                    agent_guard.rewind_to_message(message_index)
+                    match request {
+                        Request::Rewind { message_index, .. } => agent_guard.rewind_to_message(message_index),
+                        Request::RewindTranscript { target, .. } => agent_guard.rewind_transcript(&target),
+                        _ => unreachable!(),
+                    }
                 };
 
                 match rewind_result {
                     Ok(removed) => {
                         crate::logging::info(&format!(
-                            "Rewound session {} to message {} (removed {})",
-                            client_session_id, message_index, removed
+                            "Rewound session {} (removed {})",
+                            client_session_id, removed
                         ));
                         if handle_get_history(
                             id,

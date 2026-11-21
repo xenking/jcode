@@ -65,9 +65,41 @@ impl Agent {
                 message_index, message_count
             ));
         }
-        let stored_len = targets[message_index - 1] + 1;
+        self.rewind_stored_prefix(targets[message_index - 1] + 1, message_count);
+        Ok(message_count - message_index)
+    }
 
-        let removed = message_count - message_index;
+    pub fn rewind_transcript(
+        &mut self,
+        anchor: &jcode_session_types::RewindAnchor,
+    ) -> Result<usize, String> {
+        let (messages, _, _) = crate::session::render_messages_and_images_with_compacted_history(
+            &self.session,
+            usize::MAX,
+        );
+        let (keys, stored_indices): (Vec<_>, Vec<_>) = messages
+            .into_iter()
+            .filter_map(|message| {
+                Some((
+                    jcode_session_types::RewindMessageKey::new(&message.role, &message.content)?,
+                    message.stored_index?,
+                ))
+            })
+            .unzip();
+        let target = anchor.resolve(&keys).ok_or_else(|| {
+            "This rewind point no longer matches the session history or is ambiguous.".to_string()
+        })?;
+        let stored_index = stored_indices[target];
+        let visible_count = self.session.rewind_target_count();
+        let removed = stored_indices
+            .iter()
+            .filter(|&&index| index > stored_index)
+            .count();
+        self.rewind_stored_prefix(stored_index + 1, visible_count);
+        Ok(removed)
+    }
+
+    fn rewind_stored_prefix(&mut self, stored_len: usize, message_count: usize) {
         self.rewind_undo_snapshot = Some(RewindUndoSnapshot {
             messages: self.session.messages.clone(),
             provider_session_id: self.provider_session_id.clone(),
@@ -83,7 +115,6 @@ impl Agent {
         self.locked_tools = None;
         self.reset_tool_output_tracking();
         self.persist_session_best_effort("conversation rewind");
-        Ok(removed)
     }
 
     pub fn undo_rewind(&mut self) -> Result<usize, String> {
