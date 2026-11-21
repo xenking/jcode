@@ -59,8 +59,11 @@ pub fn exchange_paths(left: &Path, right: &Path) -> Result<()> {
         #[cfg(target_os = "macos")]
         let result = unsafe { libc::renamex_np(left.as_ptr(), right.as_ptr(), libc::RENAME_SWAP) };
         #[cfg(target_os = "linux")]
+        // The raw syscall: glibc gained the `renameat2` wrapper in 2.28, and
+        // the portable Linux release links against 2.17.
         let result = unsafe {
-            libc::renameat2(
+            libc::syscall(
+                libc::SYS_renameat2,
                 libc::AT_FDCWD,
                 left.as_ptr(),
                 libc::AT_FDCWD,
