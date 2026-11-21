@@ -135,6 +135,44 @@ use request_watchdog::{
 mod client_event_control;
 use client_event_control::*;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn is_local_jcode_peer(stream: &Stream) -> bool {
+    if !stream
+        .peer_cred()
+        .is_ok_and(|cred| cred.uid() == unsafe { libc::geteuid() })
+    {
+        return false;
+    }
+    let Ok((_, peer)) = crate::tool::peer_process(stream) else {
+        return false;
+    };
+    let Ok(peer) = peer.canonicalize() else {
+        return false;
+    };
+    if std::env::current_exe()
+        .and_then(|path| path.canonicalize())
+        .is_ok_and(|path| path == peer)
+    {
+        return true;
+    }
+    // A shared daemon and its TUI can run different installed revisions.
+    let Ok(home) = crate::storage::jcode_dir() else {
+        return false;
+    };
+    let Ok(versions) = home.join("builds/versions").canonicalize() else {
+        return false;
+    };
+    peer.strip_prefix(versions).is_ok_and(|relative| {
+        relative.components().count() == 2
+            && relative.file_name().is_some_and(|name| name == "jcode")
+    })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn is_local_jcode_peer(_: &Stream) -> bool {
+    false
+}
+
 fn queued_skill_working_dir(session_id: &str, initial_working_dir: &str) -> anyhow::Result<String> {
     match crate::session::Session::load(session_id) {
         Ok(session) => Ok(session
@@ -188,6 +226,7 @@ pub(super) async fn handle_client(
     swarm_mutation_runtime: SwarmMutationRuntime,
 ) -> Result<()> {
     let handler_start = Instant::now();
+    let local_jcode_peer = is_local_jcode_peer(&stream);
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let writer = Arc::new(Mutex::new(writer));
@@ -2705,6 +2744,12 @@ pub(super) async fn handle_client(
                 request_id,
                 input,
             } => {
+                if crate::tool::interactive::is_owner_approval(&request_id) {
+                    send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
+                        id, message: "Owner approval requires an interactive structured response".into(), retry_after_secs: None,
+                    }, "client_lifecycle: owner approval");
+                    continue;
+                }
                 handle_stdin_response(id, request_id, input, &stdin_responses, &client_event_tx)
                     .await;
             }
@@ -2714,6 +2759,14 @@ pub(super) async fn handle_client(
                 request_id,
                 response,
             } => {
+                if crate::tool::interactive::is_owner_approval(&request_id)
+                    && !(local_jcode_peer && connection_client_name.as_deref() == Some("jcode-tui"))
+                {
+                    send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
+                        id, message: "This client cannot answer owner approvals".into(), retry_after_secs: None,
+                    }, "client_lifecycle: owner approval");
+                    continue;
+                }
                 let input = match serde_json::to_string(&response) {
                     Ok(input) => input,
                     Err(error) => {
@@ -3300,6 +3353,24 @@ pub(super) async fn handle_client(
                     Some(spawn_mode) => spawn_mode,
                     None => return Ok(()),
                 };
+                let client_event_tx = client_event_tx.clone();
+                let sessions = sessions.clone();
+                let global_session_id = global_session_id.clone();
+                let provider_template = provider_template.clone();
+                let swarm_members = swarm_members.clone();
+                let swarms_by_id = swarms_by_id.clone();
+                let swarm_coordinators = swarm_coordinators.clone();
+                let swarm_plans = swarm_plans.clone();
+                let channel_subscriptions = channel_subscriptions.clone();
+                let channel_subscriptions_by_session = channel_subscriptions_by_session.clone();
+                let event_history = event_history.clone();
+                let event_counter = event_counter.clone();
+                let swarm_event_tx = swarm_event_tx.clone();
+                let mcp_pool = mcp_pool.clone();
+                let soft_interrupt_queues = soft_interrupt_queues.clone();
+                let swarm_mutation_runtime = swarm_mutation_runtime.clone();
+                let client_connections = client_connections.clone();
+                crate::runtime_activity::spawn(async move {
                 handle_comm_spawn(
                     id,
                     req_session_id,
@@ -3330,6 +3401,7 @@ pub(super) async fn handle_client(
                     &client_connections,
                 )
                 .await;
+                });
             }
 
             Request::CommListModels {
@@ -3595,6 +3667,22 @@ pub(super) async fn handle_client(
                 model,
                 effort,
             } => {
+                let client_event_tx = client_event_tx.clone();
+                let sessions = sessions.clone();
+                let global_session_id = global_session_id.clone();
+                let provider_template = provider_template.clone();
+                let soft_interrupt_queues = soft_interrupt_queues.clone();
+                let client_connections = client_connections.clone();
+                let swarm_members = swarm_members.clone();
+                let swarms_by_id = swarms_by_id.clone();
+                let swarm_plans = swarm_plans.clone();
+                let swarm_coordinators = swarm_coordinators.clone();
+                let event_history = event_history.clone();
+                let event_counter = event_counter.clone();
+                let swarm_event_tx = swarm_event_tx.clone();
+                let mcp_pool = mcp_pool.clone();
+                let swarm_mutation_runtime = swarm_mutation_runtime.clone();
+                crate::runtime_activity::spawn(async move {
                 handle_comm_assign_next(
                     id,
                     req_session_id,
@@ -3622,6 +3710,7 @@ pub(super) async fn handle_client(
                     &swarm_mutation_runtime,
                 )
                 .await;
+                });
             }
 
             Request::CommTaskControl {
@@ -3738,7 +3827,11 @@ pub(super) async fn handle_client(
         if client_subscribed
             && stdin_attachment.as_ref().is_none_or(|route| !route.session_is(&client_session_id))
         {
-            stdin_attachment = Some(crate::tool::interactive::attach(&client_session_id, stdin_req_tx.clone()));
+            stdin_attachment = Some(crate::tool::interactive::attach_client(
+                &client_session_id,
+                stdin_req_tx.clone(),
+                local_jcode_peer && connection_client_name.as_deref() == Some("jcode-tui"),
+            ));
         }
         if let Some(name) = connection_client_name.as_deref() {
             crate::mobile_push::note_client_attached(&client_session_id, name);

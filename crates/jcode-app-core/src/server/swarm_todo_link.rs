@@ -331,6 +331,20 @@ pub(crate) fn seed_spawn_lane(
     Ok(lane_brief(&seeded))
 }
 
+pub(crate) fn open_spawn_lane_owner(
+    coordinator_session: &str,
+    lane_id: &str,
+) -> anyhow::Result<Option<String>> {
+    Ok(crate::todo::load_todos(coordinator_session)?
+        .into_iter()
+        .find(|todo| {
+            is_open(todo)
+                && crate::todo::stages::lane_id(todo) == lane_id
+                && todo.assigned_to.is_some()
+        })
+        .and_then(|todo| todo.assigned_to))
+}
+
 pub(crate) fn spawn_lane_message(initial_message: Option<&str>, brief: &str) -> String {
     match initial_message.filter(|message| !message.trim().is_empty()) {
         Some(message) => format!("{message}\n\nAuthoritative assigned todo lane:\n{brief}"),

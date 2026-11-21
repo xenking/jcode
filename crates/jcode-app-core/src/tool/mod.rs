@@ -4,7 +4,7 @@ mod agentgrep;
 pub mod ambient;
 mod apply_patch;
 mod ask;
-pub(crate) use ask::ask_for_real_answer;
+pub(crate) use ask::{ask_client, ask_for_real_answer};
 mod bash;
 pub(crate) use bash::{BASH_HANDOFF, BashHandoff};
 #[cfg(unix)]
@@ -29,6 +29,8 @@ mod conversation_search;
 mod debug_socket;
 mod desktop;
 mod desktop_selfdev;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use desktop_selfdev::peer_process;
 mod edit;
 mod edit_stats;
 mod feedback;

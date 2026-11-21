@@ -541,7 +541,10 @@ impl AnthropicProvider {
         is_oauth: bool,
         selected_model: String,
     ) -> String {
-        if !is_oauth || !selected_model.to_ascii_lowercase().contains("fable") {
+        if jcode_provider_core::worker_request_is_pinned()
+            || !is_oauth
+            || !selected_model.to_ascii_lowercase().contains("fable")
+        {
             return selected_model;
         }
         let Ok(usage) = jcode_base::usage::fetch_usage_for_access_token(token).await else {
@@ -984,7 +987,8 @@ impl AnthropicProvider {
         Option<ApiOutputConfig>,
         Option<Value>,
     ) {
-        let supported = (is_oauth || self.first_party_api())
+        let supported = !jcode_provider_core::worker_request_is_pinned()
+            && (is_oauth || self.first_party_api())
             && thinking.is_some()
             && jcode_provider_core::anthropic_per_message_effort(model);
         let plan = supported

@@ -543,7 +543,7 @@ impl RemoteConnection {
             } else {
                 crate::terminal_launch::snapshot_client_terminal_env()
             },
-            client_name: None,
+            client_name: Some("jcode-tui".into()),
         })
         .await?;
         let subscribe_ms = subscribe_start.elapsed().as_millis();
@@ -1036,7 +1036,7 @@ impl RemoteConnection {
             client_instance_id: self.client_instance_id.clone(),
             client_has_local_history: false,
             allow_session_takeover: false,
-            client_name: None,
+            client_name: Some("jcode-tui".into()),
         };
         self.next_request_id += 1;
         self.send_request(request).await?;

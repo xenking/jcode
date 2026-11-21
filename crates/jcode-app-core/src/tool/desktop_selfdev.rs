@@ -306,7 +306,7 @@ async fn connect_host(root: &Path, path: &Path) -> Result<Host> {
 }
 
 #[cfg(target_os = "linux")]
-fn peer_process(stream: &tokio::net::UnixStream) -> Result<(u32, PathBuf)> {
+pub(crate) fn peer_process(stream: &tokio::net::UnixStream) -> Result<(u32, PathBuf)> {
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     let pid = stream
         .peer_cred()?
@@ -325,7 +325,7 @@ fn peer_process(stream: &tokio::net::UnixStream) -> Result<(u32, PathBuf)> {
 }
 
 #[cfg(target_os = "macos")]
-fn peer_process(stream: &tokio::net::UnixStream) -> Result<(u32, PathBuf)> {
+pub(crate) fn peer_process(stream: &tokio::net::UnixStream) -> Result<(u32, PathBuf)> {
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStringExt;
     let mut pid: libc::pid_t = 0;

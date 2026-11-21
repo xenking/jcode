@@ -20,6 +20,26 @@ pub mod service_tier;
 pub mod transport;
 pub mod ws_deflate;
 
+tokio::task_local! {
+    static PIN_WORKER_REQUEST: ();
+}
+
+/// Model and effort have already passed the swarm admission policy for this request.
+pub async fn with_pinned_worker_request<F: std::future::Future>(
+    pin: bool,
+    request: F,
+) -> F::Output {
+    if pin {
+        PIN_WORKER_REQUEST.scope((), request).await
+    } else {
+        request.await
+    }
+}
+
+pub fn worker_request_is_pinned() -> bool {
+    PIN_WORKER_REQUEST.try_with(|_| ()).is_ok()
+}
+
 pub use jcode_usage_types::{ModelUsage, compare_model_usage};
 pub use transport::is_transient_transport_error;
 

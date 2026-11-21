@@ -1478,7 +1478,8 @@ impl Agent {
                 // A completed cold reduction covers the old prefix. A large
                 // new user message is handled by the normal context cap, not
                 // by paying for a second reduction of the same cold cache.
-                if self.provider.uses_jcode_compaction()
+                if !self.is_swarm_worker()
+                    && self.provider.uses_jcode_compaction()
                     && !self.cache_expiry_already_compacted(&manager, now, ttl)
                 {
                     let cold_tokens_before =
@@ -1574,26 +1575,20 @@ impl Agent {
                         }
                     }
                 }
-                {
+                if !self.is_swarm_worker() && self.provider.uses_jcode_compaction() {
                     let all_messages = self.session.provider_messages();
-                    if self.provider.uses_jcode_compaction() {
-                        let action =
-                            manager.ensure_context_fits(all_messages, self.provider.clone());
-                        match action {
-                            crate::compaction::CompactionAction::BackgroundStarted { trigger } => {
-                                logging::info(&format!(
-                                    "Background compaction started ({})",
-                                    trigger
-                                ));
-                            }
-                            crate::compaction::CompactionAction::HardCompacted(dropped) => {
-                                logging::warn(&format!(
-                                    "Emergency hard compact: dropped {} messages (context was critical)",
-                                    dropped
-                                ));
-                            }
-                            crate::compaction::CompactionAction::None => {}
+                    let action = manager.ensure_context_fits(all_messages, self.provider.clone());
+                    match action {
+                        crate::compaction::CompactionAction::BackgroundStarted { trigger } => {
+                            logging::info(&format!("Background compaction started ({})", trigger));
                         }
+                        crate::compaction::CompactionAction::HardCompacted(dropped) => {
+                            logging::warn(&format!(
+                                "Emergency hard compact: dropped {} messages (context was critical)",
+                                dropped
+                            ));
+                        }
+                        crate::compaction::CompactionAction::None => {}
                     }
                 }
                 let replay = manager.messages_for_api_session(

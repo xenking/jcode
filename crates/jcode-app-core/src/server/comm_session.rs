@@ -29,7 +29,7 @@ type ClientConnections = Arc<RwLock<HashMap<String, ClientConnectionInfo>>>;
 /// Without a reservation or lock, many recursive agents can all observe the same
 /// free slot and burst past the configured limit before any child is registered.
 /// Weak entries avoid retaining locks for swarms that are no longer active.
-fn spawn_admission_lock(swarm_id: &str) -> Arc<Mutex<()>> {
+pub(super) fn spawn_admission_lock(swarm_id: &str) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<StdMutex<HashMap<String, Weak<Mutex<()>>>>> = OnceLock::new();
     let locks = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
     let mut locks = locks
@@ -67,6 +67,7 @@ fn create_visible_spawn_session(
     provider_key_override: Option<&str>,
     route_api_method_override: Option<&str>,
     effort_override: Option<&str>,
+    approval: Option<crate::session::WorkerModelApproval>,
     selfdev_requested: bool,
 ) -> anyhow::Result<(String, PathBuf)> {
     let cwd = match working_dir {
@@ -76,6 +77,7 @@ fn create_visible_spawn_session(
 
     let mut session = Session::create(None, None);
     session.is_swarm_worker = true;
+    session.set_worker_model_approval(approval);
     session.working_dir = Some(cwd.display().to_string());
     if let Some(model) = model_override {
         session.model = Some(model.to_string());
@@ -268,6 +270,7 @@ fn prepare_visible_spawn_session<F>(
     provider_key_override: Option<&str>,
     route_api_method_override: Option<&str>,
     effort_override: Option<&str>,
+    approval: Option<crate::session::WorkerModelApproval>,
     selfdev_requested: bool,
     startup_message: Option<&str>,
     launch_visible: F,
@@ -282,6 +285,7 @@ where
         provider_key.as_deref(),
         route_api_method_override,
         effort_override,
+        approval,
         selfdev_requested,
     )?;
 
@@ -412,6 +416,7 @@ pub(super) async fn spawn_swarm_agent(
     requested_model: Option<String>,
     requested_effort: Option<String>,
     label: Option<String>,
+    spawn_key: &str,
     sessions: &SessionAgents,
     global_session_id: &Arc<RwLock<String>>,
     provider_template: &Arc<dyn Provider>,
@@ -427,11 +432,23 @@ pub(super) async fn spawn_swarm_agent(
     client_connections: &ClientConnections,
 ) -> anyhow::Result<String> {
     let parent_lock = spawn_admission_lock(&format!("stop-tree:{req_session_id}"));
-    let _parent_guard = parent_lock.lock().await;
+    let parent_guard = parent_lock.lock().await;
     anyhow::ensure!(
         !crate::turn_activity::session_is_stopped(req_session_id),
         "Stopped sessions cannot spawn workers"
     );
+    // Check before resolving a mutable default route. A replay must never start
+    // another worker, even if the configured default changed after the first run.
+    let (replay, existing_worker) = super::premium_spawn::SpawnReplay::load(spawn_key)?;
+    if let Some(worker) = existing_worker {
+        return Ok(worker);
+    }
+    if let Some(lane_id) = lane_id.as_deref()
+        && let Some(worker) =
+            super::swarm_todo_link::open_spawn_lane_owner(req_session_id, lane_id)?
+    {
+        return Ok(worker);
+    }
     let agents_config = &crate::config::config().agents;
     agents_config
         .validate_swarm_model_request(requested_model.as_deref())
@@ -495,26 +512,17 @@ pub(super) async fn spawn_swarm_agent(
         configured_swarm_model.clone(),
         &coordinator,
     );
-    let spawn_model = selection.model.clone();
-    let spawn_provider_key = selection.provider_key.clone();
-    let spawn_route_api_method = selection.route_api_method.clone();
     let spawn_effort = resolve_swarm_spawn_effort(
         requested_effort.as_deref(),
         agents_config.swarm_effort.as_deref(),
     );
-    crate::logging::info(&format!(
-        "Swarm spawn model resolution: requested_model={:?} requested_effort={:?} configured_swarm_effort={:?} configured_swarm_model={:?} coordinator_model={:?} coordinator_provider_key={:?} coordinator_route={:?} -> spawn_model={:?} spawn_provider_key={:?} spawn_route={:?}",
-        requested_model,
-        requested_effort,
-        agents_config.swarm_effort,
-        configured_swarm_model,
-        coordinator.model,
-        coordinator.provider_key,
-        coordinator.route_api_method,
-        spawn_model,
-        spawn_provider_key,
-        spawn_route_api_method,
-    ));
+    let mut prepared = super::premium_spawn::PreparedSwarmWorker::resolve(
+        provider_template.as_ref(),
+        selection,
+        spawn_effort
+            .as_deref()
+            .unwrap_or(spawn_policy::DEFAULT_SWARM_WORKER_EFFORT),
+    )?;
 
     // Validate the explicit lane before allocating or launching a worker.
     let mut startup_message = if let Some(lane_id) = lane_id.as_deref() {
@@ -528,18 +536,45 @@ pub(super) async fn spawn_swarm_agent(
         initial_message.clone()
     };
 
+    // Stopping the coordinator must not wait on its approval dialog.
+    drop(parent_guard);
+    prepared
+        .authorize(
+            req_session_id,
+            swarm_members,
+            lane_id.as_deref().or(label.as_deref()),
+        )
+        .await?;
+    let _parent_guard = parent_lock.lock().await;
+    anyhow::ensure!(
+        !crate::turn_activity::session_is_stopped(req_session_id),
+        "Stopped sessions cannot spawn workers"
+    );
+    if let Some(lane_id) = lane_id.as_deref()
+        && let Some(worker) =
+            super::swarm_todo_link::open_spawn_lane_owner(req_session_id, lane_id)?
+    {
+        return Ok(worker);
+    }
+    let replay = if prepared.approval.is_some() {
+        prepared.recheck_approved_route()?;
+        replay.start()?;
+        Some(replay)
+    } else {
+        None
+    };
+
     let visible_spawn = match resolved_spawn_mode {
         // Inline workers run in-process like headless ones; the difference is
         // purely how the coordinator renders them (a live inline gallery).
-        SwarmSpawnMode::Headless | SwarmSpawnMode::Inline => {
-            Err(anyhow::anyhow!("headless spawn requested"))
-        }
-        SwarmSpawnMode::Visible | SwarmSpawnMode::Auto => prepare_visible_spawn_session(
+        SwarmSpawnMode::Headless | SwarmSpawnMode::Inline => None,
+        SwarmSpawnMode::Visible | SwarmSpawnMode::Auto => Some(prepare_visible_spawn_session(
             resolved_working_dir.as_deref(),
-            spawn_model.as_deref(),
-            spawn_provider_key.as_deref(),
-            spawn_route_api_method.as_deref(),
-            spawn_effort.as_deref(),
+            Some(&prepared.model),
+            prepared.provider_key.as_deref(),
+            prepared.route_api_method.as_deref(),
+            prepared.effort.as_deref(),
+            prepared.approval.clone(),
             coordinator_is_canary,
             startup_message.as_deref(),
             |session_id, cwd, selfdev_requested, provider_key| {
@@ -571,12 +606,15 @@ pub(super) async fn spawn_swarm_agent(
                     &context,
                 )
             },
-        ),
+        )),
     };
 
     let (new_session_id, is_headless_fallback) = match visible_spawn {
-        Ok((new_session_id, true)) => Ok((new_session_id, false)),
-        Ok((_, false)) | Err(_) => {
+        Some(Ok((new_session_id, true))) => Ok((new_session_id, false)),
+        Some(Err(error)) if replay.is_some() => {
+            return Err(error.context("Premium window launch failed and will not be retried"));
+        }
+        None | Some(Ok((_, false)) | Err(_)) => {
             let cmd = if let Some(ref dir) = resolved_working_dir {
                 format!("create_session:{dir}")
             } else {
@@ -593,10 +631,7 @@ pub(super) async fn spawn_swarm_agent(
                 swarm_plans,
                 soft_interrupt_queues,
                 coordinator_is_canary,
-                spawn_model.clone(),
-                spawn_provider_key.clone(),
-                spawn_route_api_method.clone(),
-                spawn_effort.clone(),
+                Some(prepared),
                 Some(Arc::clone(mcp_pool)),
                 Some(req_session_id.to_string()),
                 startup_message.is_some(),
@@ -680,6 +715,9 @@ pub(super) async fn spawn_swarm_agent(
         coordinators: Arc::clone(swarm_coordinators),
     };
     persist_swarm_state_for(swarm_id, &swarm_state).await;
+    if let Some(replay) = replay {
+        replay.register(&new_session_id)?;
+    }
 
     if let Some(initial_msg) = startup_message
         && is_headless_fallback
@@ -877,6 +915,7 @@ pub(super) async fn handle_comm_spawn(
         model,
         effort,
         label,
+        &mutation_key,
         sessions,
         global_session_id,
         provider_template,
@@ -1191,7 +1230,7 @@ fn swarm_member_status_is_stale_for_coordination(status: &str) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn ensure_spawn_coordinator_swarm(
+pub(super) async fn ensure_spawn_coordinator_swarm(
     id: u64,
     req_session_id: &str,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,

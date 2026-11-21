@@ -159,7 +159,7 @@ pub(crate) async fn ask_for_real_answer(
     ask_client(tx, questions, request_id).await.ok()
 }
 
-async fn ask_client(
+pub(crate) async fn ask_client(
     tx: tokio::sync::mpsc::UnboundedSender<StdinInputRequest>,
     questions: &[AskQuestion],
     tool_call_id: &str,

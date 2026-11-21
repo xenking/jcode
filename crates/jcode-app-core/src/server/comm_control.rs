@@ -1574,7 +1574,29 @@ pub(super) async fn handle_comm_assign_next(
             if let Ok(unused_target) = &preferred_target {
                 release_auto_assign_claim(&swarm_id, unused_target);
             }
-            match super::comm_session::spawn_swarm_agent(
+            let admission = super::comm_session::spawn_admission_lock(&swarm_id);
+            let guard = admission.lock().await;
+            if super::comm_session::ensure_spawn_coordinator_swarm(
+                id,
+                &req_session_id,
+                client_event_tx,
+                swarm_members,
+                swarms_by_id,
+                swarm_coordinators,
+                swarm_plans,
+                crate::config::config().agents.swarm_max_concurrent_agents,
+            )
+            .await
+            .is_none()
+            {
+                return;
+            }
+            let spawn_key = swarm_mutation_request_key(
+                &req_session_id,
+                "assign-next-spawn",
+                &[swarm_id.clone(), selected_task_id.clone()],
+            );
+            let result = super::comm_session::spawn_swarm_agent(
                 &req_session_id,
                 &swarm_id,
                 None,
@@ -1584,6 +1606,7 @@ pub(super) async fn handle_comm_assign_next(
                 model.clone(),
                 effort.clone(),
                 None,
+                &spawn_key,
                 sessions,
                 global_session_id,
                 provider_template,
@@ -1598,8 +1621,9 @@ pub(super) async fn handle_comm_assign_next(
                 soft_interrupt_queues,
                 client_connections,
             )
-            .await
-            {
+            .await;
+            drop(guard);
+            match result {
                 Ok(spawned_session) => {
                     handle_comm_assign_task(
                         id,

@@ -8,6 +8,9 @@ impl Agent {
     /// customization can therefore still change the foreground tool snapshot;
     /// the provider is responsible for discarding an incompatible warmup.
     pub(crate) async fn prewarm_provider_idle(&self) {
+        if self.is_swarm_worker() {
+            return;
+        }
         self.provider.set_session_id(&self.session.id);
         let tools = self.tool_definitions_for_debug().await;
         let split_prompt = self.build_system_prompt_split(None);

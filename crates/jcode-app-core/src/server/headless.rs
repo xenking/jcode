@@ -45,10 +45,7 @@ pub(super) async fn create_headless_session(
     _swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
     soft_interrupt_queues: &SessionInterruptQueues,
     selfdev_requested: bool,
-    model_override: Option<String>,
-    provider_key_override: Option<String>,
-    route_api_method_override: Option<String>,
-    effort_override: Option<String>,
+    prepared: Option<super::premium_spawn::PreparedSwarmWorker>,
     mcp_pool: Option<Arc<crate::mcp::SharedMcpPool>>,
     report_back_to_session_id: Option<String>,
     has_initial_turn: bool,
@@ -69,7 +66,10 @@ pub(super) async fn create_headless_session(
         None
     };
 
-    let provider = provider_template.fork();
+    let provider = prepared.as_ref().map_or_else(
+        || provider_template.fork(),
+        |worker| Arc::clone(&worker.provider),
+    );
     let registry = Registry::new(provider.clone()).await;
 
     if memory_scope == HeadlessMemoryScope::IsolatedTest {
@@ -98,7 +98,13 @@ pub(super) async fn create_headless_session(
         working_dir_string.as_deref(),
         report_back_to_session_id.clone(),
     );
-    if report_back_to_session_id.is_some() {
+    if let Some(worker) = prepared {
+        new_agent.prepare_swarm_worker(
+            worker.provider_key,
+            worker.route_api_method,
+            worker.approval,
+        )?;
+    } else if report_back_to_session_id.is_some() {
         new_agent.mark_swarm_worker()?;
     }
     new_agent.set_memory_enabled(memory_enabled);
@@ -111,75 +117,7 @@ pub(super) async fn create_headless_session(
     ) {
         new_agent.set_inline_output_tap(true);
     }
-    if provider_key_override.is_some() {
-        new_agent.set_session_provider_key(provider_key_override.clone());
-    }
     let client_session_id = new_agent.session_id().to_string();
-
-    if let Some(model) = model_override {
-        // Build a model-switch request that preserves the coordinator's auth
-        // route (e.g. claude-api vs claude-oauth, or an openai-compatible
-        // profile) so the spawned headless agent reconstructs the exact
-        // provider/auth the coordinator was using instead of a config default.
-        let model_request = crate::provider::MultiProvider::model_switch_request_for_session_route(
-            &model,
-            provider_key_override.as_deref(),
-            route_api_method_override.as_deref(),
-        );
-        // A worker that silently runs a model other than the requested one burns
-        // the wrong quota and produces results the caller attributes to the wrong
-        // model, with only a log line to explain it (#512, #514, #519). So check
-        // the *outcome*, not whether `set_model` returned Ok: a provider that
-        // cannot switch is fine as long as it already serves the requested model,
-        // and a switch that "succeeds" onto a different model is not.
-        let mut switch_error = new_agent.set_model(&model_request).err();
-        // The inherited route can name a credential this process no longer
-        // has (the coordinator's session predates a credential-type change).
-        // Keep the requested model on the credential that does exist instead
-        // of refusing the spawn; the outcome check below still guards the model.
-        if let Some(error) = switch_error.as_ref()
-            && let Some((fallback, _)) =
-                crate::provider::stale_credential_route_fallback(&model_request)
-        {
-            crate::logging::warn(&format!(
-                "Headless session route '{model_request}' is not usable ({error}); retrying via '{fallback}'"
-            ));
-            if new_agent.set_model(&fallback).is_ok() {
-                switch_error = None;
-            }
-        }
-        if let Some(error) = switch_error.as_ref() {
-            crate::logging::warn(&format!(
-                "Failed to set headless session model override '{model}' (request '{model_request}'): {error}"
-            ));
-        }
-        let resolved = new_agent.provider_model();
-        if !models_are_equivalent(&resolved, &model) {
-            let detail = switch_error
-                .map(|error| format!(": {error}"))
-                .unwrap_or_else(|| " (the switch reported success)".to_string());
-            anyhow::bail!(
-                "Cannot spawn session on model '{model}' (request '{model_request}'){detail}. \
-                 It would run '{resolved}' instead; refusing to silently use a different \
-                 model. Check the model id and that its provider is authenticated."
-            );
-        }
-    }
-
-    if let Some(effort) = effort_override
-        .as_deref()
-        .map(str::trim)
-        .filter(|effort| !effort.is_empty())
-        && let Err(e) = new_agent.set_reasoning_effort(effort)
-    {
-        if new_agent.has_worker_effort_cap() {
-            return Err(e.context("Failed to apply swarm worker reasoning effort"));
-        }
-        crate::logging::warn(&format!(
-            "Failed to set headless session reasoning effort override '{}': {}",
-            effort, e
-        ));
-    }
 
     new_agent.set_debug(true);
 
@@ -369,7 +307,7 @@ pub(super) async fn create_headless_session(
 /// and vendor prefixes like `anthropic/`), so compare on a normalized form and
 /// allow either side to be a prefix of the other. This exists only to decide
 /// whether to log a mismatch, so it errs toward staying quiet.
-fn models_are_equivalent(resolved: &str, requested: &str) -> bool {
+pub(super) fn models_are_equivalent(resolved: &str, requested: &str) -> bool {
     fn normalize(model: &str) -> String {
         let model = model.trim().to_ascii_lowercase();
         let bare = model.rsplit('/').next().unwrap_or(&model);

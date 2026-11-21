@@ -2,8 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    EnvSnapshot, SessionImproveMode, SessionStatus, StoredCompactionState, StoredMemoryInjection,
-    StoredMessage, StoredReplayEvent,
+    AuthorizedWorkerModel, EnvSnapshot, SessionImproveMode, SessionStatus, StoredCompactionState,
+    StoredMemoryInjection, StoredMessage, StoredReplayEvent,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -42,6 +42,8 @@ pub(super) struct SessionJournalMeta {
     pub(super) reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) is_swarm_worker: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) worker_model_approval: Option<AuthorizedWorkerModel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) context_cap: Option<usize>,
     pub(super) subagent_model: Option<String>,
@@ -124,6 +126,7 @@ pub(super) fn metadata_requires_snapshot(
         || prev.route_api_method != current.route_api_method
         || prev.reasoning_effort != current.reasoning_effort
         || prev.is_swarm_worker != current.is_swarm_worker
+        || prev.worker_model_approval != current.worker_model_approval
         || prev.context_cap != current.context_cap
         || prev.subagent_model != current.subagent_model
         || prev.agent_model_overrides != current.agent_model_overrides

@@ -46,7 +46,7 @@ pub(super) struct CoordinatorSpawnIdentity {
 /// with, after reconciling `agents.swarm_model` config against the
 /// coordinator's identity.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct SwarmSpawnSelection {
+pub(in crate::server) struct SwarmSpawnSelection {
     pub model: Option<String>,
     pub provider_key: Option<String>,
     pub route_api_method: Option<String>,

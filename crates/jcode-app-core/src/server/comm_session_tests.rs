@@ -22,7 +22,23 @@ use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 struct MockProvider;
 
-struct RoutingProvider(std::sync::Mutex<String>);
+type FakeRequests = Arc<std::sync::Mutex<Vec<(String, String)>>>;
+
+struct RoutingProvider {
+    model: std::sync::Mutex<String>,
+    effort: std::sync::Mutex<String>,
+    requests: Option<FakeRequests>,
+}
+
+impl RoutingProvider {
+    fn new(model: &str) -> Self {
+        Self {
+            model: std::sync::Mutex::new(model.into()),
+            effort: std::sync::Mutex::new("medium".into()),
+            requests: None,
+        }
+    }
+}
 
 #[async_trait]
 impl Provider for RoutingProvider {
@@ -33,24 +49,52 @@ impl Provider for RoutingProvider {
         _: &str,
         _: Option<&str>,
     ) -> Result<EventStream> {
-        anyhow::bail!("routing regression must not make model calls")
+        let Some(requests) = &self.requests else {
+            anyhow::bail!("routing regression must not make model calls");
+        };
+        assert!(jcode_provider_core::worker_request_is_pinned());
+        requests
+            .lock()
+            .unwrap()
+            .push((self.model(), self.reasoning_effort().unwrap()));
+        use crate::message::StreamEvent;
+        Ok(Box::pin(futures::stream::iter([
+            Ok(StreamEvent::TextDelta("fake response".into())),
+            Ok(StreamEvent::MessageEnd {
+                stop_reason: Some("end_turn".into()),
+            }),
+        ])))
     }
     fn name(&self) -> &str {
         "mock"
     }
     fn model(&self) -> String {
-        self.0.lock().unwrap().clone()
+        self.model.lock().unwrap().clone()
     }
     fn set_model(&self, model: &str) -> Result<()> {
-        *self.0.lock().unwrap() = model
+        *self.model.lock().unwrap() = model
             .rsplit_once(':')
             .map(|(_, model)| model)
             .unwrap_or(model)
             .to_string();
         Ok(())
     }
+    fn reasoning_effort(&self) -> Option<String> {
+        Some(self.effort.lock().unwrap().clone())
+    }
+    fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+        *self.effort.lock().unwrap() = effort.into();
+        Ok(())
+    }
+    fn available_efforts(&self) -> Vec<&'static str> {
+        vec!["low", "medium", "high", "xhigh"]
+    }
     fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(Self(std::sync::Mutex::new(self.model())))
+        Arc::new(Self {
+            model: std::sync::Mutex::new(self.model()),
+            effort: std::sync::Mutex::new(self.reasoning_effort().unwrap()),
+            requests: self.requests.clone(),
+        })
     }
 }
 
@@ -149,9 +193,6 @@ async fn assert_headless_initial_status(has_initial_turn: bool, expected: &str) 
         &Arc::new(RwLock::new(HashMap::new())),
         &Arc::new(RwLock::new(HashMap::new())),
         false,
-        None,
-        None,
-        None,
         None,
         None,
         Some("owner".into()),
@@ -398,6 +439,7 @@ fn prepare_visible_spawn_session_persists_startup_before_launch() {
         None,
         None,
         None,
+        None,
         false,
         Some(startup),
         |session_id, _cwd: &std::path::Path, _selfdev, provider_key| {
@@ -441,6 +483,7 @@ fn prepare_visible_spawn_session_cleans_startup_when_launch_not_started() {
 
     let (session_id, launched) = prepare_visible_spawn_session(
         Some(worktree.path().to_str().expect("utf8 worktree path")),
+        None,
         None,
         None,
         None,
@@ -489,6 +532,7 @@ fn prepare_visible_spawn_session_cleans_session_when_launch_errors() {
         None,
         None,
         None,
+        None,
         false,
         Some("Do the thing."),
         |_session_id, _cwd: &std::path::Path, _selfdev, _provider_key| {
@@ -525,6 +569,7 @@ fn prepare_visible_spawn_session_persists_and_launches_provider_key_for_openrout
         None,
         None,
         None,
+        None,
         false,
         None,
         |_session_id, _cwd: &std::path::Path, _selfdev, provider_key| {
@@ -556,6 +601,7 @@ fn visible_selfdev_spawn_inherits_session_model_overrides_before_launch() {
     parent.save_prepared().unwrap();
     let (id, launched) = prepare_visible_spawn_session(
         Some(home.path().to_str().unwrap()),
+        None,
         None,
         None,
         None,
@@ -606,6 +652,7 @@ fn prepare_visible_spawn_session_persists_requested_effort() {
         None,
         None,
         Some("low"),
+        None,
         false,
         None,
         |_session_id, _cwd: &std::path::Path, _selfdev, _provider_key| Ok(true),
@@ -636,6 +683,7 @@ fn prepare_visible_spawn_session_prefers_parent_provider_key_over_model_guess() 
         Some(worktree.path().to_str().expect("utf8 worktree path")),
         Some("gpt-5.4"),
         Some("ollama"),
+        None,
         None,
         None,
         false,
@@ -1063,6 +1111,226 @@ async fn global_agent_model_request_updates_server_config_not_session() {
 }
 
 #[tokio::test]
+async fn premium_worker_requires_owner_before_allocation_and_only_runs_approved_pair() {
+    assert_premium_worker_approval("gpt-6.2-astra", false).await;
+}
+
+#[tokio::test]
+async fn premium_worker_requires_owner_for_an_auto_todo_lane_on_capped_fable() {
+    assert_premium_worker_approval("claude-fable-5-2", true).await;
+}
+
+async fn assert_premium_worker_approval(model: &str, auto_lane: bool) {
+    let _env = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!("[agents]\nswarm_effort_caps = {{ \"{model}\" = \"high\" }}\n"),
+    )
+    .unwrap();
+    crate::config::invalidate_config_cache();
+    let coordinator = "session_lead_1_test";
+    let lane = auto_lane.then(|| {
+        let task = crate::todo::TodoItem {
+            id: "premium-task".into(),
+            content: "Exercise premium automatic lane".into(),
+            status: "pending".into(),
+            stage: Some(1),
+            group: Some("premium-lane".into()),
+            lane_owner: Some("worker".into()),
+            ..Default::default()
+        };
+        let lane = crate::todo::stages::lane_id(&task);
+        crate::todo::save_todos(coordinator, &[task]).unwrap();
+        lane
+    });
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
+    let requests = FakeRequests::default();
+    let provider: Arc<dyn Provider> = Arc::new(RoutingProvider {
+        requests: Some(requests.clone()),
+        ..RoutingProvider::new(model)
+    });
+    let (parent, _receiver) = member(coordinator, Some("swarm"), "coordinator");
+    let state = crate::server::SwarmState::new(
+        HashMap::from([(coordinator.into(), parent)]),
+        HashMap::from([("swarm".into(), HashSet::from([coordinator.into()]))]),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let pool = Arc::new(crate::mcp::SharedMcpPool::new(Default::default()));
+    let global = Arc::new(RwLock::new(String::new()));
+    let history = Arc::new(RwLock::new(VecDeque::new()));
+    let counter = Arc::new(AtomicU64::new(0));
+    let events = broadcast::channel(16).0;
+    let queues = Arc::new(RwLock::new(HashMap::new()));
+    let clients = Arc::new(RwLock::new(HashMap::new()));
+    let (automation, mut automation_rx) = mpsc::unbounded_channel();
+    let _automation = crate::tool::interactive::attach_client(coordinator, automation, false);
+    let spawn = |key: &'static str| {
+        super::spawn_swarm_agent(
+            coordinator,
+            "swarm",
+            lane.clone(),
+            Some(home.path().to_string_lossy().into_owned()),
+            Some("Execute isolated fake turn".into()),
+            Some(crate::config::SwarmSpawnMode::Headless),
+            None,
+            Some("xhigh".into()),
+            None,
+            key,
+            &sessions,
+            &global,
+            &provider,
+            &state.members,
+            &state.swarms_by_id,
+            &state.coordinators,
+            &state.plans,
+            &history,
+            &counter,
+            &events,
+            &pool,
+            &queues,
+            &clients,
+        )
+    };
+    let unattended = spawn("premium-fake-test").await.unwrap_err();
+    assert!(
+        unattended.to_string().contains("explicit owner approval"),
+        "{unattended:#}"
+    );
+    for choice in ["Deny", "Allow this worker"] {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let attachment = crate::tool::interactive::attach_client(coordinator, tx, true);
+        let reply = async {
+            let ask = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let question = ask.ask_questions.unwrap().to_string();
+            assert!(question.contains(model), "{question}");
+            assert!(question.contains("effort high"), "{question}");
+            assert!(sessions.read().await.is_empty());
+            assert_eq!(state.members.read().await.len(), 1);
+            assert!(requests.lock().unwrap().is_empty());
+            assert!(
+                automation_rx.try_recv().is_err(),
+                "automation must not receive owner approval"
+            );
+            assert!(!crate::tool::interactive::answer_with_text(
+                coordinator,
+                "Allow this worker",
+                vec![]
+            ));
+            ask.response_tx
+                .send(
+                    serde_json::json!({
+                        "answers": [{"selected": [choice]}]
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+        };
+        let (result, ()) = tokio::join!(spawn("premium-fake-test"), reply);
+        drop(attachment);
+        if choice == "Deny" {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("explicit owner approval")
+            );
+            continue;
+        }
+        let sid = result.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(4), async {
+            while requests.lock().unwrap().is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let agent = sessions.read().await.get(&sid).cloned().unwrap();
+            drop(agent.lock().await);
+        })
+        .await
+        .unwrap();
+        let expected = (model.into(), "high".into());
+        let startup_count = requests.lock().unwrap().len();
+        assert!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|observed| observed == &expected)
+        );
+        if !auto_lane {
+            assert_eq!(startup_count, 1);
+        }
+        let saved = crate::session::Session::load(&sid).unwrap();
+        assert!(saved.is_worker_model_approved(model, "mock", Some("high")));
+        assert!(!saved.is_worker_model_approved(model, "mock", Some("xhigh")));
+        assert!(!saved.is_worker_model_approved("gpt-5.4", "mock", Some("high")));
+        assert_eq!(
+            spawn("premium-fake-test").await.unwrap(),
+            sid,
+            "same spawn after UI detaches"
+        );
+        if auto_lane {
+            assert_eq!(spawn("new-dispatch-nonce").await.unwrap(), sid);
+        }
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            startup_count,
+            "no replayed startup request"
+        );
+        let runtime = provider.fork();
+        runtime.set_reasoning_effort("medium").unwrap();
+        let registry = Registry::new(runtime.clone()).await;
+        let mut resumed = Agent::new_with_session(runtime.clone(), registry, saved, None);
+        runtime.set_reasoning_effort("medium").unwrap();
+        assert!(
+            resumed
+                .run_once_capture("Unapproved effort")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("matching owner approval")
+        );
+        runtime.set_reasoning_effort("high").unwrap();
+        assert!(
+            resumed
+                .run_once_capture("Approved continuation")
+                .await
+                .unwrap()
+                .contains("fake response")
+        );
+        assert_eq!(requests.lock().unwrap().len(), startup_count + 1);
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[agents]\nspawn_allowed_models = [\"gpt-5.4\"]\n",
+        )
+        .unwrap();
+        crate::config::invalidate_config_cache();
+        let denied = resumed
+            .run_once_capture("Route removed from allowlist")
+            .await
+            .unwrap_err();
+        assert!(
+            denied.to_string().contains("spawn_allowed_models"),
+            "{denied:#}"
+        );
+        assert_eq!(requests.lock().unwrap().len(), startup_count + 1);
+    }
+    if let Some(previous) = previous {
+        crate::env::set_var("JCODE_HOME", previous);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+#[tokio::test]
 async fn auto_lane_worker_publishes_a_task_label_without_a_spawn_prompt() {
     let _env = crate::storage::lock_test_env();
     let home = tempfile::tempdir().unwrap();
@@ -1083,8 +1351,7 @@ async fn auto_lane_worker_publishes_a_task_label_without_a_spawn_prompt() {
     let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
         HashMap::new(),
     ));
-    let provider: Arc<dyn Provider> =
-        Arc::new(RoutingProvider(std::sync::Mutex::new("mock".into())));
+    let provider: Arc<dyn Provider> = Arc::new(RoutingProvider::new("mock"));
     let (parent, _receiver) = member(coordinator, Some("swarm"), "coordinator");
     let state = crate::server::SwarmState::new(
         HashMap::from([(coordinator.into(), parent)]),
@@ -1103,6 +1370,7 @@ async fn auto_lane_worker_publishes_a_task_label_without_a_spawn_prompt() {
         None,
         None,
         None,
+        "auto-lane-test",
         &sessions,
         &Arc::new(RwLock::new(String::new())),
         &provider,
@@ -1178,9 +1446,7 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
     let selection = resolve_swarm_spawn_selection(None, configured, &coordinator);
     assert_eq!(selection.model.as_deref(), Some("gpt-5.5"));
     assert_eq!(selection.provider_key.as_deref(), Some("openai-api-key"));
-    let provider: Arc<dyn Provider> = Arc::new(RoutingProvider(std::sync::Mutex::new(
-        "initial-model".into(),
-    )));
+    let provider: Arc<dyn Provider> = Arc::new(RoutingProvider::new("initial-model"));
     let state = crate::server::SwarmState::new(
         HashMap::new(),
         HashMap::new(),
@@ -1202,6 +1468,7 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
             None,
             None,
             Some("routing test".into()),
+            "coordinator-route-test",
             &sessions,
             &Arc::new(RwLock::new(String::new())),
             &provider,

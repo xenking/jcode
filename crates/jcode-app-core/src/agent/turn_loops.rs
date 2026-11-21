@@ -198,18 +198,20 @@ impl Agent {
                 .then(|| Message::with_timestamps(&messages_with_memory));
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
+            self.enforce_worker_request()?;
             self.last_status_detail = None;
             self.provider.set_session_id(&self.session.id);
-            let completion = self
-                .provider
-                .complete_split(
+            let completion = jcode_provider_core::with_pinned_worker_request(
+                self.session.is_swarm_worker,
+                self.provider.complete_split(
                     send_messages,
                     &tools,
                     &split_prompt.static_part,
                     &split_prompt.dynamic_part,
                     self.provider_session_id.as_deref(),
-                )
-                .await;
+                ),
+            )
+            .await;
             self.sync_bound_account_route();
             let mut stream = match completion {
                 Ok(stream) => stream,

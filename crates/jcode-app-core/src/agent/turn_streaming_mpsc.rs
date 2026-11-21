@@ -172,6 +172,7 @@ impl Agent {
                 .then(|| Message::with_timestamps(&messages_with_memory));
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
+            self.enforce_worker_request()?;
             let provider = Arc::clone(&self.provider);
             // Capture the model id the request was issued with. A provider may
             // transparently switch models mid-request (e.g. Anthropic's retired
@@ -224,15 +225,19 @@ impl Agent {
             let mut keepalive = stream_keepalive_ticker();
             let (mut stream, mut canonical_input) = {
                 provider.set_session_id(&self.session.id);
-                let mut complete_future = std::pin::pin!(
-                    super::cache_request::capture_canonical_input(provider.complete_split(
-                        send_messages,
-                        &tools,
-                        &split_prompt.static_part,
-                        &split_prompt.dynamic_part,
-                        resume_session_id.as_deref(),
-                    ))
-                );
+                let mut complete_future =
+                    std::pin::pin!(super::cache_request::capture_canonical_input(
+                        jcode_provider_core::with_pinned_worker_request(
+                            self.session.is_swarm_worker,
+                            provider.complete_split(
+                                send_messages,
+                                &tools,
+                                &split_prompt.static_part,
+                                &split_prompt.dynamic_part,
+                                resume_session_id.as_deref(),
+                            ),
+                        )
+                    ));
                 loop {
                     tokio::select! {
                         _ = keepalive.tick() => {

@@ -156,7 +156,8 @@ pub(super) async fn run_stream_with_retries(
                 // eligible model so the in-flight request can complete, and
                 // persist the switch for later turns. Server recommendations and
                 // the curated quality order both honor failover exclusions.
-                if is_model_not_found_error(&error_str)
+                if !retry_settings.worker_request_is_pinned
+                    && is_model_not_found_error(&error_str)
                     && !saw_output
                     && let Some(fallback) = anthropic_fallback_model(&tried_models, &error_str)
                 {
@@ -194,7 +195,8 @@ pub(super) async fn run_stream_with_retries(
                 // Anthropic OAuth can reject Fable with a model-scoped weekly
                 // quota error before the usage cache observes the exhausted
                 // window. This is terminal for Fable, not a transient 429.
-                if is_oauth
+                if !retry_settings.worker_request_is_pinned
+                    && is_oauth
                     && !saw_output
                     && is_fable_scoped_limit_error(&model_name, &error_str)
                     && let Some(fallback) =
@@ -239,7 +241,8 @@ pub(super) async fn run_stream_with_retries(
                 // only drop effort, preserving summarized adaptive thinking and
                 // binding controls. If those fields are rejected too, surface
                 // the error rather than silently changing conversation semantics.
-                if (request.thinking.is_some() || request.output_config.is_some())
+                if !retry_settings.worker_request_is_pinned
+                    && (request.thinking.is_some() || request.output_config.is_some())
                     && !saw_output
                     && is_reasoning_unsupported_error(&error_str)
                     && reasoning_request::recover_rejected_reasoning(

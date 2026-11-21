@@ -628,6 +628,10 @@ async fn retry_turn_with_model_fallbacks(
             // candidate that reaches it again must still get its chance.
             continue;
         }
+        if let Err(error) = agent.enforce_worker_request() {
+            crate::logging::warn(&format!("Swarm fallback {fallback} refused: {error:#}"));
+            continue;
+        }
         if let Some(event) = limit_event {
             let _ = event_tx.send(event);
         }

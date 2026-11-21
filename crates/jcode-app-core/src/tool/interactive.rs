@@ -21,6 +21,10 @@ struct PendingAsk {
 static PENDING: LazyLock<Mutex<HashMap<String, HashMap<String, PendingAsk>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+pub(crate) fn is_owner_approval(request_id: &str) -> bool {
+    request_id.starts_with("ask-premium-spawn-")
+}
+
 fn dispatch_ask(
     session_id: &str,
     pending: &PendingAsk,
@@ -98,13 +102,13 @@ fn register_ask(
         .map(|routes| {
             routes
                 .iter()
-                .filter(|(_, _, target)| !target.is_closed())
-                .map(|(_, _, target)| target.clone())
+                .filter(|route| !route.target.is_closed() && route.can_answer(&request_id))
+                .map(|route| route.target.clone())
                 .collect()
         })
         // No attachments is an ordinary state while the originating client reconnects.
         .unwrap_or_default();
-    if destinations.is_empty() {
+    if destinations.is_empty() && !is_owner_approval(&request_id) {
         dispatch_ask(session_id, &pending, target);
     } else {
         for destination in destinations {
@@ -148,11 +152,18 @@ fn register_ask(
     });
 }
 
-type Route = (
-    u64,
-    UnboundedSender<StdinInputRequest>,
-    UnboundedSender<StdinInputRequest>,
-);
+struct Route {
+    id: u64,
+    sender: UnboundedSender<StdinInputRequest>,
+    target: UnboundedSender<StdinInputRequest>,
+    owner_ui: bool,
+}
+
+impl Route {
+    fn can_answer(&self, request_id: &str) -> bool {
+        self.owner_ui || !is_owner_approval(request_id)
+    }
+}
 static ROUTES: LazyLock<Mutex<HashMap<String, Vec<Route>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static ROUTES_CHANGED: LazyLock<tokio::sync::Notify> = LazyLock::new(tokio::sync::Notify::new);
@@ -169,7 +180,16 @@ impl Attachment {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn attach(session_id: &str, sender: UnboundedSender<StdinInputRequest>) -> Attachment {
+    attach_client(session_id, sender, false)
+}
+
+pub(crate) fn attach_client(
+    session_id: &str,
+    sender: UnboundedSender<StdinInputRequest>,
+    owner_ui: bool,
+) -> Attachment {
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
     let (route_tx, mut route_rx) = mpsc::unbounded_channel::<StdinInputRequest>();
     let session = session_id.to_owned();
@@ -199,10 +219,18 @@ pub(crate) fn attach(session_id: &str, sender: UnboundedSender<StdinInputRequest
         .unwrap_or_else(|e| e.into_inner())
         .entry(session_id.to_owned())
         .or_default()
-        .push((id, route_tx, sender.clone()));
+        .push(Route {
+            id,
+            sender: route_tx,
+            target: sender.clone(),
+            owner_ui,
+        });
     ROUTES_CHANGED.notify_waiters();
     if let Some(requests) = all.get(session_id) {
-        for pending in requests.values() {
+        for pending in requests
+            .values()
+            .filter(|pending| owner_ui || !is_owner_approval(&pending.request_id))
+        {
             dispatch_ask(session_id, pending, &sender);
         }
     }
@@ -213,14 +241,26 @@ pub(crate) fn attach(session_id: &str, sender: UnboundedSender<StdinInputRequest
 }
 
 pub(crate) fn sender(session_id: &str) -> Option<UnboundedSender<StdinInputRequest>> {
+    sender_for(session_id, false)
+}
+
+pub(crate) fn owner_sender(session_id: &str) -> Option<UnboundedSender<StdinInputRequest>> {
+    sender_for(session_id, true)
+}
+
+fn sender_for(session_id: &str, owner_only: bool) -> Option<UnboundedSender<StdinInputRequest>> {
     ROUTES
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(session_id)?
         .iter()
         .rev()
-        .find(|(_, sender, target)| !sender.is_closed() && !target.is_closed())
-        .map(|(_, sender, _)| sender.clone())
+        .find(|route| {
+            (!owner_only || route.owner_ui)
+                && !route.sender.is_closed()
+                && !route.target.is_closed()
+        })
+        .map(|route| route.sender.clone())
 }
 
 pub(crate) fn answer_with_text(
@@ -253,6 +293,7 @@ pub(crate) fn answer_with_text(
     };
     let Some(request_id) = requests
         .values()
+        .filter(|pending| !is_owner_approval(&pending.request_id))
         .min_by_key(|pending| pending.generation)
         .map(|pending| pending.request_id.clone())
     else {
@@ -284,7 +325,7 @@ impl Drop for Attachment {
     fn drop(&mut self) {
         let mut routes = ROUTES.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entries) = routes.get_mut(&self.session_id) {
-            entries.retain(|(id, _, _)| *id != self.id);
+            entries.retain(|route| route.id != self.id);
             if entries.is_empty() {
                 routes.remove(&self.session_id);
             }

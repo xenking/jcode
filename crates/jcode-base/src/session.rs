@@ -16,6 +16,33 @@ use std::path::Path;
 pub use streaming::StreamingGuard;
 pub use window_closures::{clear_window_closed, recent_window_closures, record_window_closed};
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkerModelApproval {
+    pub model: String,
+    pub provider: String,
+    pub effort: String,
+}
+
+impl WorkerModelApproval {
+    pub fn required_for(model: &str) -> bool {
+        let model = model.to_ascii_lowercase();
+        model.split([':', '/']).any(|id| {
+            let id = id.split(['@', '[']).next().unwrap_or_default().trim();
+            id == "fable"
+                || id == "astra"
+                || id == "claude-fable"
+                || id.starts_with("claude-fable-")
+                || (id.starts_with("gpt-") && id.split('-').any(|part| part == "astra"))
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct AuthorizedWorkerModel {
+    worker_id: String,
+    selection: WorkerModelApproval,
+}
+
 mod agent_models;
 mod crash;
 pub use agent_models::AgentModelOverrides;
@@ -116,6 +143,9 @@ pub struct Session {
     /// This session was spawned as a swarm worker, not a user-started session.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_swarm_worker: bool,
+    /// Owner approval for one effective model and effort on this worker only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worker_model_approval: Option<AuthorizedWorkerModel>,
     /// Per-session context ceiling. Missing values follow the global cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_cap: Option<usize>,
@@ -250,6 +280,8 @@ struct SessionStartupStub {
     #[serde(default)]
     is_swarm_worker: bool,
     #[serde(default)]
+    worker_model_approval: Option<AuthorizedWorkerModel>,
+    #[serde(default)]
     context_cap: Option<usize>,
     #[serde(default)]
     subagent_model: Option<String>,
@@ -318,6 +350,27 @@ fn is_zero_u64(value: &u64) -> bool {
 }
 
 impl Session {
+    pub fn set_worker_model_approval(&mut self, approval: Option<WorkerModelApproval>) {
+        self.worker_model_approval = approval.map(|selection| AuthorizedWorkerModel {
+            worker_id: self.id.clone(),
+            selection,
+        });
+    }
+
+    pub fn is_worker_model_approved(
+        &self,
+        model: &str,
+        provider: &str,
+        effort: Option<&str>,
+    ) -> bool {
+        self.worker_model_approval.as_ref().is_some_and(|approved| {
+            approved.worker_id == self.id
+                && approved.selection.model == model
+                && approved.selection.provider == provider
+                && Some(approved.selection.effort.as_str()) == effort
+        })
+    }
+
     fn session_from_startup_stub(stub: SessionStartupStub) -> Self {
         let mut session = Self::create_with_id(stub.id, stub.parent_id, stub.title);
         session.custom_title = stub.custom_title;
@@ -333,6 +386,7 @@ impl Session {
         session.route_api_method = stub.route_api_method;
         session.reasoning_effort = stub.reasoning_effort;
         session.is_swarm_worker = stub.is_swarm_worker;
+        session.worker_model_approval = stub.worker_model_approval;
         session.context_cap = stub.context_cap;
         session.subagent_model = stub.subagent_model;
         session.agent_model_overrides = stub.agent_model_overrides;
@@ -378,6 +432,7 @@ impl Session {
         session.route_api_method = snapshot.route_api_method;
         session.reasoning_effort = snapshot.reasoning_effort;
         session.is_swarm_worker = snapshot.is_swarm_worker;
+        session.worker_model_approval = snapshot.worker_model_approval;
         session.context_cap = snapshot.context_cap;
         session.subagent_model = snapshot.subagent_model;
         session.agent_model_overrides = snapshot.agent_model_overrides;
@@ -624,6 +679,7 @@ impl Session {
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
             is_swarm_worker: self.is_swarm_worker,
+            worker_model_approval: self.worker_model_approval.clone(),
             context_cap: self.context_cap,
             subagent_model: self.subagent_model.clone(),
             agent_model_overrides: self.agent_model_overrides.clone(),
@@ -839,6 +895,7 @@ impl Session {
         self.normalize_placeholder_model();
         self.reasoning_effort = meta.reasoning_effort;
         self.is_swarm_worker = meta.is_swarm_worker;
+        self.worker_model_approval = meta.worker_model_approval;
         self.context_cap = meta.context_cap;
         self.subagent_model = meta.subagent_model;
         self.agent_model_overrides = meta.agent_model_overrides;
@@ -895,6 +952,7 @@ impl Session {
             route_api_method: None,
             reasoning_effort: None,
             is_swarm_worker: false,
+            worker_model_approval: None,
             context_cap: None,
             subagent_model: None,
             agent_model_overrides: AgentModelOverrides::new(),
@@ -961,6 +1019,7 @@ impl Session {
             route_api_method: None,
             reasoning_effort: None,
             is_swarm_worker: false,
+            worker_model_approval: None,
             context_cap: None,
             subagent_model: None,
             agent_model_overrides: AgentModelOverrides::new(),
@@ -2012,6 +2071,8 @@ struct RemoteStartupSessionSnapshot {
     reasoning_effort: Option<String>,
     #[serde(default)]
     is_swarm_worker: bool,
+    #[serde(default)]
+    worker_model_approval: Option<AuthorizedWorkerModel>,
     #[serde(default)]
     context_cap: Option<usize>,
     #[serde(default)]

@@ -1408,6 +1408,9 @@ impl OpenAIProvider {
 
     async fn model_id(&self) -> String {
         let current = self.model.read().await.clone();
+        if jcode_provider_core::worker_request_is_pinned() {
+            return current.strip_suffix("[1m]").unwrap_or(&current).to_string();
+        }
         let scope = self.catalog_scope_async().await;
         let availability = jcode_base::provider::model_availability_for_scope(&scope, &current);
 

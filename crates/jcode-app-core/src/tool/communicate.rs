@@ -24,14 +24,6 @@ const REQUEST_ID: u64 = 1;
 mod transport;
 use transport::{send_request, send_request_with_timeout};
 
-fn fresh_spawn_request_nonce(ctx: &ToolContext) -> String {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    format!("{}-{}-{}", ctx.session_id, ctx.message_id, now_ms)
-}
-
 fn check_error(response: &ServerEvent) -> Option<&str> {
     if let ServerEvent::Error { message, .. } = response {
         Some(message)
@@ -306,7 +298,7 @@ async fn spawn_assignment_session(ctx: &ToolContext, params: &CommunicateInput) 
         session_id: ctx.session_id.clone(),
         working_dir: params.working_dir.clone(),
         initial_message: None,
-        request_nonce: Some(fresh_spawn_request_nonce(ctx)),
+        request_nonce: Some(ctx.tool_call_id.clone()),
         spawn_mode: params.spawn_mode.clone(),
         model: params.model.clone(),
         // Worker effort is not agent-controlled: the server applies
@@ -1500,7 +1492,7 @@ impl Tool for CommunicateTool {
                     session_id: ctx.session_id.clone(),
                     working_dir: params.working_dir.clone(),
                     initial_message: params.spawn_initial_message(),
-                    request_nonce: None,
+                    request_nonce: Some(ctx.tool_call_id.clone()),
                     spawn_mode: params.spawn_mode.clone(),
                     model: params.model.clone(),
                     // Worker effort is not agent-controlled: the server applies

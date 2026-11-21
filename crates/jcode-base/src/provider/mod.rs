@@ -353,7 +353,9 @@ impl MultiProvider {
         tools: &[ToolDefinition],
         mode: CompletionMode<'_>,
     ) -> Result<bool> {
-        if !self.provider_uses_oauth_accounts(provider) {
+        if jcode_provider_core::worker_request_is_pinned()
+            || !self.provider_uses_oauth_accounts(provider)
+        {
             return Ok(false);
         }
         let config = crate::config::Config::load().provider;

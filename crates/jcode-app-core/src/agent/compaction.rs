@@ -82,7 +82,7 @@ impl Agent {
         &mut self,
         now: std::time::SystemTime,
     ) -> (bool, Option<CompactionEvent>) {
-        if !self.provider.uses_jcode_compaction() {
+        if self.is_swarm_worker() || !self.provider.uses_jcode_compaction() {
             return (false, None);
         }
         let compaction = self.registry.compaction();
@@ -125,7 +125,7 @@ impl Agent {
     /// user message finds a compacted transcript instead of triggering a
     /// compaction in the middle of its own turn.
     pub fn maybe_idle_precompact(&mut self) -> bool {
-        if !self.provider.uses_jcode_compaction() {
+        if self.is_swarm_worker() || !self.provider.uses_jcode_compaction() {
             return false;
         }
         let now = std::time::SystemTime::now();
@@ -184,6 +184,12 @@ impl Agent {
     }
 
     pub fn request_manual_compaction(&mut self) -> (String, bool) {
+        if self.is_swarm_worker() {
+            return (
+                "Separate model-assisted compaction is not available for swarm workers.".into(),
+                false,
+            );
+        }
         if !self.provider.supports_compaction() {
             return (
                 "Manual compaction is not available for this provider.".to_string(),

@@ -7,19 +7,22 @@ fn worker_effort_cap<'a>(
     model: &str,
 ) -> Option<&'a String> {
     let unpinned = model.split_once('@').map_or(model, |(model, _)| model);
-    [model, unpinned].into_iter().find_map(|model| {
-        let route = provider_key.map(|key| format!("{key}:{model}"));
-        let provider_route = format!("{}:{model}", provider_name.to_ascii_lowercase());
-        agents
-            .swarm_effort_caps
-            .get(model)
-            .or_else(|| {
+    [model, unpinned]
+        .into_iter()
+        .flat_map(|model| {
+            let route = provider_key.map(|key| format!("{key}:{model}"));
+            let provider_route = format!("{}:{model}", provider_name.to_ascii_lowercase());
+            [
+                agents.swarm_effort_caps.get(model),
                 route
                     .as_ref()
-                    .and_then(|route| agents.swarm_effort_caps.get(route))
-            })
-            .or_else(|| agents.swarm_effort_caps.get(&provider_route))
-    })
+                    .and_then(|key| agents.swarm_effort_caps.get(key)),
+                agents.swarm_effort_caps.get(&provider_route),
+            ]
+            .into_iter()
+            .flatten()
+        })
+        .min_by_key(|cap| jcode_provider_core::reasoning_effort_rank(cap))
 }
 
 /// Whether a worker on `provider_key`/`model` is inside the allowlist. An entry
@@ -78,18 +81,23 @@ fn capped_worker_effort(
     let Some(pool) = agents.swarm_pool_efforts(&pool_key, model) else {
         return Ok(capped);
     };
-    if jcode_provider_core::reasoning_effort_rank(&capped).is_none() {
-        return Ok(capped);
-    }
-    pool_effort(pool, &capped, available).ok_or_else(|| {
-        anyhow::anyhow!("No effort in agents.swarm_pool {pool:?} is supported by {model}")
+    let capped = crate::prompt::swarm_root_reasoning_effort(&capped).unwrap_or(&capped);
+    let cap = worker_effort_cap(agents, provider_key, provider_name, model)
+        .and_then(|cap| jcode_provider_core::reasoning_effort_rank(cap));
+    pool_effort(pool, capped, available, cap).ok_or_else(|| {
+        anyhow::anyhow!("No effort in agents.swarm_pool {pool:?} is supported by {model} within its swarm effort cap")
     })
 }
 
 /// Nearest effort the pool allows for `requested`: the request itself, else the
 /// closest allowed level above it, else the closest below. Levels the model does
 /// not support are skipped.
-fn pool_effort(pool: &[String], requested: &str, available: &[&str]) -> Option<String> {
+fn pool_effort(
+    pool: &[String],
+    requested: &str,
+    available: &[&str],
+    cap: Option<u8>,
+) -> Option<String> {
     let supported = |level: &str| {
         available.is_empty() || available.iter().any(|a| a.eq_ignore_ascii_case(level))
     };
@@ -98,6 +106,7 @@ fn pool_effort(pool: &[String], requested: &str, available: &[&str]) -> Option<S
         .map(|level| level.trim().to_ascii_lowercase())
         .filter(|level| supported(level))
         .filter_map(|level| jcode_provider_core::reasoning_effort_rank(&level).map(|r| (r, level)))
+        .filter(|(rank, _)| cap.is_none_or(|cap| *rank <= cap))
         .collect();
     let wanted = jcode_provider_core::reasoning_effort_rank(requested)?;
     allowed
@@ -175,6 +184,25 @@ impl Agent {
         self.session.save_prepared()
     }
 
+    pub(crate) fn prepare_swarm_worker(
+        &mut self,
+        provider_key: Option<String>,
+        route_api_method: Option<String>,
+        approval: Option<crate::session::WorkerModelApproval>,
+    ) -> Result<()> {
+        if provider_key.is_some() {
+            self.session.provider_key = provider_key;
+        }
+        self.session.route_api_method = route_api_method;
+        self.session.reasoning_effort = self.provider.reasoning_effort();
+        self.session.set_worker_model_approval(approval);
+        crate::session_effort::record_session_effort(
+            &self.session.id,
+            self.session.reasoning_effort.as_deref(),
+        );
+        self.mark_swarm_worker()
+    }
+
     /// Whether this session was created as a swarm worker. Persisted with the
     /// session, so a resumed or pre-existing worker is still recognized.
     pub(crate) fn is_swarm_worker(&self) -> bool {
@@ -182,23 +210,29 @@ impl Agent {
     }
 
     pub(crate) fn has_worker_effort_cap(&self) -> bool {
-        let agents = &crate::config::config().agents;
-        let provider_key = self
-            .session
-            .provider_key
-            .clone()
-            .unwrap_or_else(|| self.provider.name().to_ascii_lowercase());
         self.session.is_swarm_worker
-            && (worker_effort_cap(
-                agents,
+            && Self::worker_effort_is_constrained(
+                self.provider.as_ref(),
                 self.session.provider_key.as_deref(),
-                self.provider.name(),
                 &self.provider_model(),
             )
-            .is_some()
-                || agents
-                    .swarm_pool_efforts(&provider_key, &self.provider_model())
-                    .is_some())
+    }
+
+    pub(crate) fn worker_effort_is_constrained(
+        provider: &dyn Provider,
+        provider_key: Option<&str>,
+        model: &str,
+    ) -> bool {
+        let agents = &crate::config::config().agents;
+        worker_effort_cap(agents, provider_key, provider.name(), model).is_some()
+            || agents
+                .swarm_pool_efforts(
+                    &provider_key
+                        .unwrap_or_else(|| provider.name())
+                        .to_ascii_lowercase(),
+                    model,
+                )
+                .is_some()
     }
 
     fn worker_effort(&self, requested: &str) -> Result<String> {
@@ -223,16 +257,43 @@ impl Agent {
         if !self.session.is_swarm_worker {
             return Ok(());
         }
+        let provider_key = self
+            .session
+            .provider_key
+            .as_deref()
+            .unwrap_or(self.provider.name());
+        Self::validate_worker_route(provider_key, &self.provider_model())
+    }
+
+    pub(crate) fn validate_worker_route(provider_key: &str, model: &str) -> Result<()> {
         let allowed = &crate::config::config().agents.spawn_allowed_models;
-        let provider_key = self.session.provider_key.as_deref().unwrap_or_default();
-        let model = self.provider_model();
-        if worker_route_allowed(allowed, provider_key, &model) {
+        if worker_route_allowed(allowed, provider_key, model) {
             return Ok(());
         }
         anyhow::bail!(
             "Swarm worker refused to run on {provider_key}:{model}: not in agents.spawn_allowed_models ({})",
             allowed.join(", ")
         )
+    }
+
+    pub(crate) fn enforce_worker_request(&self) -> Result<()> {
+        if !self.session.is_swarm_worker {
+            return Ok(());
+        }
+        self.enforce_worker_model()?;
+        self.enforce_worker_effort()?;
+        let model = self.provider_model();
+        if !crate::session::WorkerModelApproval::required_for(&model) {
+            return Ok(());
+        }
+        let effort = self.provider.reasoning_effort();
+        anyhow::ensure!(
+            self.session
+                .is_worker_model_approved(&model, self.provider.name(), effort.as_deref()),
+            "Swarm worker refused to run {model} at {} without matching owner approval",
+            effort.as_deref().unwrap_or("unknown effort")
+        );
+        Ok(())
     }
 
     pub(super) fn enforce_worker_effort(&self) -> Result<()> {
@@ -243,8 +304,17 @@ impl Agent {
             let clamped = self.worker_effort(&current)?;
             if clamped != current {
                 self.provider.set_reasoning_effort(&clamped)?;
+                anyhow::ensure!(
+                    self.provider.reasoning_effort().as_deref() == Some(clamped.as_str()),
+                    "Provider did not apply the required swarm effort {clamped}"
+                );
                 crate::session_effort::record_session_effort(&self.session.id, Some(&clamped));
             }
+        } else {
+            anyhow::ensure!(
+                !self.has_worker_effort_cap(),
+                "Provider did not report its effort, so the swarm effort cap cannot be enforced"
+            );
         }
         Ok(())
     }
@@ -903,22 +973,34 @@ mod worker_effort_cap_tests {
         let pool = |levels: &[&str]| levels.iter().map(|l| l.to_string()).collect::<Vec<_>>();
         let all = ["low", "medium", "high", "xhigh", "max"];
         let sonnet = pool(&["high", "xhigh"]);
-        assert_eq!(pool_effort(&sonnet, "low", &all).as_deref(), Some("high"));
         assert_eq!(
-            pool_effort(&sonnet, "xhigh", &all).as_deref(),
-            Some("xhigh")
-        );
-        assert_eq!(pool_effort(&sonnet, "max", &all).as_deref(), Some("xhigh"));
-        let opus = pool(&["medium", "high", "xhigh"]);
-        assert_eq!(pool_effort(&opus, "max", &all).as_deref(), Some("xhigh"));
-        assert_eq!(pool_effort(&opus, "low", &all).as_deref(), Some("medium"));
-        // A level the model cannot serve is skipped.
-        assert_eq!(
-            pool_effort(&sonnet, "low", &["low", "medium", "high"]).as_deref(),
+            pool_effort(&sonnet, "low", &all, None).as_deref(),
             Some("high")
         );
         assert_eq!(
-            pool_effort(&pool(&["xhigh"]), "low", &["low", "high"]),
+            pool_effort(&sonnet, "xhigh", &all, None).as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            pool_effort(&sonnet, "max", &all, None).as_deref(),
+            Some("xhigh")
+        );
+        let opus = pool(&["medium", "high", "xhigh"]);
+        assert_eq!(
+            pool_effort(&opus, "max", &all, None).as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            pool_effort(&opus, "low", &all, None).as_deref(),
+            Some("medium")
+        );
+        // A level the model cannot serve is skipped.
+        assert_eq!(
+            pool_effort(&sonnet, "low", &["low", "medium", "high"], None).as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            pool_effort(&pool(&["xhigh"]), "low", &["low", "high"], None),
             None
         );
     }
