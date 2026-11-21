@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 include!("cloud_group_run.rs");
 include!("cloud_group_receive.rs");
 include!("cloud_group_daemon.rs");
+include!("cloud_group_return.rs");
 
 #[cfg(test)]
 #[path = "cloud_group_tests.rs"]
@@ -84,7 +85,7 @@ fn member_marker(id: &str) -> Result<PathBuf> {
 pub(super) fn reject_member_return(id: &str) -> Result<()> {
     if member_marker(id)?.exists() {
         bail!(
-            "session {id} belongs to a coordinated cloud migration; single-session move/return is unsafe and group return is not implemented"
+            "session {id} belongs to a coordinated cloud migration; single-session operations are unsafe. Run `jcode cloud return --session {id}` on the original machine to return the entire group"
         );
     }
     Ok(())
@@ -307,7 +308,7 @@ fn verify_preview_repo(group: &Group, stage: &Path) -> Result<()> {
 
 fn group_arrival_notice(manifest: &MoveManifest, coordinator: &str, members: &[String]) -> String {
     let mut lines = arrival_context(manifest);
-    lines.push(format!("Coordinated migration members: {}. Swarm ownership, task assignments and todos came along. Group return is not implemented; do not return individual members.", members.join(", ")));
+    lines.push(format!("Coordinated migration members: {}. Swarm ownership, task assignments and todos came along. Run `jcode cloud return --session {coordinator}` on the original machine to return the whole group.", members.join(", ")));
     lines.push(crate::cloud_environment::group_migration_guidance(
         &manifest.session_id,
         coordinator,

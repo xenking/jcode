@@ -12,7 +12,7 @@
 use super::swarm_persistence::{self, PersistedSwarmState};
 use super::{SessionAgents, SwarmState};
 use crate::storage::{self, SessionLease};
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashSet};
 use std::sync::LazyLock;
@@ -575,7 +575,7 @@ pub(super) fn read_transfer_lease(id: &str) -> Result<Option<SessionLease>> {
     if !path.exists() {
         return Ok(None);
     }
-    let lease: SessionLease = storage::read_json(&path)?;
+    let lease = storage::read_session_lease(id).context("invalid transfer lease")?;
     ensure!(lease.session_id == id, "session lease identity mismatch");
     Ok(Some(lease))
 }

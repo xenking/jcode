@@ -957,9 +957,10 @@ pub(crate) enum CloudCommand {
         json: bool,
     },
 
-    /// Bring a moved session back: pull the cloud transcript and merge its git
-    /// work into your local checkout with a normal 3-way merge.
+    /// Bring back a moved session or its whole migrated group. Import the
+    /// transcripts and merge cloud Git work into the local checkout once.
     Return {
+        /// Session ID or name. Any member of a migrated group selects the entire group.
         #[arg(long)]
         session: Option<String>,
         #[command(flatten)]
@@ -1153,6 +1154,28 @@ pub(crate) enum CloudCommand {
         session: String,
         #[arg(long)]
         epoch: u64,
+    },
+
+    /// Internal: fence and export an entire coordinated migration.
+    #[command(hide = true)]
+    GroupExport {
+        #[arg(long)]
+        coordinator: String,
+        #[arg(long)]
+        epoch: u64,
+        #[arg(long)]
+        transfer: String,
+    },
+
+    /// Internal: acknowledge a durable local group return.
+    #[command(hide = true)]
+    GroupCompleteReturn {
+        #[arg(long)]
+        coordinator: String,
+        #[arg(long)]
+        epoch: u64,
+        #[arg(long)]
+        transfer: String,
     },
 
     /// Internal: restore cloud ownership after a rejected credential return.
