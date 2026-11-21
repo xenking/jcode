@@ -322,6 +322,17 @@ trait BridgeRetirement {
 }
 
 #[cfg(target_os = "macos")]
+fn wait_for_bridge_exit(ops: &mut impl BridgeRetirement) -> Result<bool> {
+    for _ in 0..50 {
+        if !ops.alive()? {
+            return Ok(true);
+        }
+        ops.wait(Duration::from_millis(100));
+    }
+    Ok(!ops.alive()?)
+}
+
+#[cfg(target_os = "macos")]
 fn retire_with_fallback(process: &BridgeProcess, ops: &mut impl BridgeRetirement) -> Result<()> {
     let result = (|| -> Result<()> {
         match ops.request() {
@@ -330,14 +341,19 @@ fn retire_with_fallback(process: &BridgeProcess, ops: &mut impl BridgeRetirement
                 kind: jcode_sdk::ErrorKind::Timeout,
                 ..
             }) => {
-                for _ in 0..50 {
-                    if !ops.alive()? {
-                        return Ok(());
-                    }
-                    ops.wait(Duration::from_millis(100));
+                if wait_for_bridge_exit(ops)? {
+                    return Ok(());
                 }
             }
             Err(error) if error.kind == jcode_sdk::ErrorKind::UnsupportedCapability => {}
+            Err(error) if error.kind == jcode_sdk::ErrorKind::Transport => {
+                // A draining bridge can unlink its listener before exiting. A
+                // transport failure is not proof the PID is gone or safe to signal.
+                if wait_for_bridge_exit(ops)? {
+                    return Ok(());
+                }
+                return Err(error.into());
+            }
             Err(error) => return Err(error.into()),
         }
         if !ops.alive()? {
@@ -415,9 +431,17 @@ impl BridgeRetirement for SystemBridgeRetirement<'_> {
             }
             return Err(error.into());
         }
-        if process_start(self.process.pid)? != self.start
-            || !executable_of(self.process.pid)
-                .is_some_and(|exe| same_path(&exe, &self.process.executable))
+        let start = match process_start(self.process.pid) {
+            Ok(start) => start,
+            Err(_) if !process_exists(self.process.pid) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let executable = executable_of(self.process.pid);
+        if executable.is_none() && !process_exists(self.process.pid) {
+            return Ok(false);
+        }
+        if start != self.start
+            || !executable.is_some_and(|exe| same_path(&exe, &self.process.executable))
         {
             bail!("bridge process identity changed");
         }
@@ -567,7 +591,11 @@ pub(super) async fn retire_stale_bridges(app: &Path, target_app: &Path) -> Resul
             };
             #[cfg(target_os = "macos")]
             {
-                let start = process_start(process.pid).with_context(context)?;
+                let start = match process_start(process.pid) {
+                    Ok(start) => start,
+                    Err(_) if !process_exists(process.pid) => return Ok(()),
+                    Err(error) => return Err(error).with_context(context),
+                };
                 retire_with_fallback(
                     process,
                     &mut SystemBridgeRetirement {
@@ -920,13 +948,14 @@ mod tests {
         elapsed: Duration,
         alive: bool,
         exit_on_term: bool,
-        request: Option<jcode_sdk::ErrorKind>,
+        exit_at: Option<Duration>,
+        request: Option<jcode_sdk::Error>,
     }
 
     impl BridgeRetirement for FakeBridge {
         fn request(&mut self) -> jcode_sdk::Result<()> {
-            match self.request.clone() {
-                Some(kind) => Err(jcode_sdk::Error::new(kind, "fixture")),
+            match &self.request {
+                Some(error) => Err(error.clone()),
                 None => Ok(()),
             }
         }
@@ -953,6 +982,9 @@ mod tests {
         }
         fn wait(&mut self, duration: Duration) {
             self.elapsed += duration;
+            if self.exit_at.is_some_and(|exit_at| self.elapsed >= exit_at) {
+                self.alive = false;
+            }
         }
     }
 
@@ -974,7 +1006,11 @@ mod tests {
                 elapsed: Duration::ZERO,
                 alive: true,
                 exit_on_term,
-                request: Some(jcode_sdk::ErrorKind::UnsupportedCapability),
+                exit_at: None,
+                request: Some(jcode_sdk::Error::new(
+                    jcode_sdk::ErrorKind::UnsupportedCapability,
+                    "fixture",
+                )),
             },
         )
     }
@@ -1047,6 +1083,51 @@ mod tests {
                     && error.contains("lsof -nP -a -p 77 -U"),
                 "{error}"
             );
+            assert!(fake.signals.is_empty());
+        }
+    }
+
+    #[test]
+    fn vanished_listener_only_allows_rollout_after_bridge_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("jcode-api.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let (mut process, _) = fake_bridge(&[], false);
+        process.executable = "/Applications/Jcode.app/Contents/MacOS/jcode".into();
+        process.sockets = vec![socket.clone()];
+
+        // Bridge discovery saw the listener. Shutdown withdraws the socket
+        // before draining clients, so the PID can still be live at connect.
+        drop(listener);
+        std::fs::remove_file(&socket).unwrap();
+        let error = jcode_sdk::bundle_bridge::retire_bridge_if_pid(
+            &socket,
+            process.pid,
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, jcode_sdk::ErrorKind::Transport);
+
+        for exit_at in [None, Some(Duration::from_millis(200))] {
+            let mut fake = FakeBridge {
+                request: Some(error.clone()),
+                exit_at,
+                ..fake_bridge(&[], false).1
+            };
+            let result = retire_foreign_bridges(
+                std::slice::from_ref(&process),
+                Path::new("/Applications/.Jcode.incoming.app/Contents/MacOS/jcode"),
+                |bridge| retire_with_fallback(bridge, &mut fake),
+            );
+            if exit_at.is_some() {
+                result.unwrap();
+                assert!(!fake.alive);
+            } else {
+                let failure = format!("{:#}", result.unwrap_err());
+                assert!(failure.contains("foreign bridge 77"), "{failure}");
+                assert!(failure.contains(&error.to_string()), "{failure}");
+                assert!(fake.alive);
+            }
             assert!(fake.signals.is_empty());
         }
     }
