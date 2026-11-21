@@ -148,6 +148,33 @@ async fn daemon_ping_reports_own_process_and_build_without_creating_session() {
 }
 
 #[tokio::test]
+async fn openrig_probe_is_read_only_and_keeps_daemon_connection_usable() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("jcode.sock");
+    let provider: Arc<dyn Provider> = Arc::new(TestProvider);
+    let server = Server::new_with_paths(provider, socket.clone(), temp.path().join("debug.sock"));
+    let runtime = ServerRuntime::from_server(&server);
+    let accept = runtime.spawn_main_accept_loop(Listener::bind(&socket).unwrap());
+    tokio::time::timeout(Duration::from_secs(4), async {
+        let stream = crate::transport::Stream::connect(&socket).await.unwrap();
+        let mut stream = BufReader::new(stream);
+        stream.get_mut().write_all(b"{\"type\":\"openrig_host_identity\",\"id\":7}\n").await.unwrap();
+        let mut line = String::new();
+        stream.read_line(&mut line).await.unwrap();
+        assert!(matches!(serde_json::from_str::<crate::protocol::ServerEvent>(&line).unwrap(), crate::protocol::ServerEvent::Pong { id: 7, .. }));
+        stream.get_mut().write_all(b"{\"type\":\"ping\",\"id\":8}\n").await.unwrap();
+        line.clear();
+        stream.read_line(&mut line).await.unwrap();
+        assert!(matches!(serde_json::from_str::<crate::protocol::ServerEvent>(&line).unwrap(), crate::protocol::ServerEvent::Pong { id: 8, .. }));
+    }).await.unwrap();
+    runtime.shutdown().await;
+    accept.await.unwrap();
+    assert!(server.sessions.read().await.is_empty());
+}
+
+#[tokio::test]
 async fn readiness_probes_do_not_contend_with_group_transfer_admission() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");

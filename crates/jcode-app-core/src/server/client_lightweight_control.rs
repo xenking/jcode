@@ -39,6 +39,66 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
+pub(super) async fn openrig_host_identity() -> Option<String> {
+    openrig_host_identity_at("http://127.0.0.1:7433/healthz").await
+}
+
+async fn openrig_host_identity_at(url: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_millis(750))
+        .build()
+        .ok()?;
+    let mut response = client.get(url).send().await.ok()?.error_for_status().ok()?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if bytes.len() + chunk.len() > 16384 {
+            return None;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let body: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let id = body.get("selfHostId")?.as_str()?;
+    if id.is_empty() || id.trim() != id || id.chars().any(char::is_control) {
+        return None;
+    }
+    Some(id.to_owned())
+}
+
+#[cfg(test)]
+mod openrig_identity_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn probe(body: &str) -> Option<String> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = body.to_owned();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 4096];
+            let n = stream.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]);
+            assert!(request.starts_with("GET /healthz HTTP/1.1\r\n"));
+            assert!(!request.to_ascii_lowercase().contains("authorization:"));
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let result = openrig_host_identity_at(&format!("http://{address}/healthz")).await;
+        server.await.unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn real_read_only_health_requires_authoritative_id() {
+        assert_eq!(probe(r#"{"selfHostId":"host-a"}"#).await.as_deref(), Some("host-a"));
+        assert_eq!(probe(r#"{"name":"same-name"}"#).await, None);
+        assert_eq!(probe(r#"{"selfHostId":""}"#).await, None);
+        assert_eq!(probe("broken").await, None);
+    }
+}
+
 pub(super) fn parse_swarm_spawn_mode(
     id: u64,
     spawn_mode: Option<String>,
@@ -287,6 +347,20 @@ pub(super) async fn handle_lightweight_control_request(
             client_connections,
             swarm_members,
         );
+        write_direct_event(&writer, &event).await?;
+        return Ok(());
+    }
+    if let Request::OpenrigHostIdentity { id } = request {
+        let mut event = super::session_connections::connection_presence_pong(
+            id,
+            client_connections,
+            swarm_members,
+        );
+        if let Some(host_id) = openrig_host_identity().await
+            && let ServerEvent::Pong { capabilities, .. } = &mut event
+        {
+            capabilities.push(format!("openrig_self_host_id={host_id}"));
+        }
         write_direct_event(&writer, &event).await?;
         return Ok(());
     }

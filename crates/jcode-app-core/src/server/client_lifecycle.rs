@@ -277,7 +277,7 @@ pub(super) async fn handle_client(
                     ));
                 }
                 if request.is_lightweight_control_request() {
-                    let keep_connection_open = matches!(request, Request::Ping { .. });
+                    let keep_connection_open = matches!(request, Request::Ping { .. } | Request::OpenrigHostIdentity { .. });
                     handle_lightweight_control_request(
                         request,
                         Arc::clone(&writer),
@@ -1945,6 +1945,18 @@ pub(super) async fn handle_client(
                 if w.write_all(json.as_bytes()).await.is_err() {
                     break;
                 }
+            }
+
+            Request::OpenrigHostIdentity { id } => {
+                let mut event = super::session_connections::connection_presence_pong(id, &client_connections, &swarm_members);
+                if let Some(host_id) = super::client_lightweight_control::openrig_host_identity().await
+                    && let ServerEvent::Pong { capabilities, .. } = &mut event
+                {
+                    capabilities.push(format!("openrig_self_host_id={host_id}"));
+                }
+                let json = encode_event(&event);
+                let mut w = writer.lock().await;
+                if w.write_all(json.as_bytes()).await.is_err() { break; }
             }
 
             Request::PrepareDisconnect { id } => {

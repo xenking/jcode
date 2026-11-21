@@ -278,6 +278,9 @@ pub enum Request {
     /// Health check
     #[serde(rename = "ping")]
     Ping { id: u64 },
+    /// Read the local OpenRig identity from the serving daemon, if available.
+    #[serde(rename = "openrig_host_identity")]
+    OpenrigHostIdentity { id: u64 },
 
     /// Get current state (debug)
     #[serde(rename = "state")]

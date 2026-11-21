@@ -391,6 +391,23 @@ impl Drop for JcodeClient {
 }
 
 impl JcodeClient {
+    /// OpenRig identity reported by the connected daemon, absent for older peers.
+    pub fn openrig_self_host_id(&self) -> Option<&str> {
+        let mut ids = self
+            .capabilities
+            .iter()
+            .filter_map(|cap| cap.strip_prefix("openrig_self_host_id="));
+        let id = ids.next()?;
+        if ids.next().is_some()
+            || id.is_empty()
+            || id.trim() != id
+            || id.chars().any(char::is_control)
+        {
+            return None;
+        }
+        Some(id)
+    }
+
     /// Retain this client's shared SSH master for reconnecting independent API
     /// channels. Returns None for isolated or already closed SSH channels.
     #[cfg(unix)]

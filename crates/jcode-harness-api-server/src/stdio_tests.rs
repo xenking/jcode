@@ -4,6 +4,38 @@ use jcode_harness_api::{ApiRequest, ClientFrame};
 use tokio::io::{AsyncWriteExt, BufReader};
 
 #[tokio::test(flavor = "multi_thread")]
+async fn openrig_identity_comes_from_session_stream_not_capability_probe() {
+    use serde_json::json;
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("daemon.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    for host in ["host-a", "host-b"] {
+        let (client, bridge) = tokio::io::duplex(8192);
+        let (bridge_read, bridge_write) = tokio::io::split(bridge);
+        let task = tokio::spawn(run_bridge_stream(bridge_read, bridge_write, socket.clone()));
+        let (read, mut write) = tokio::io::split(client);
+        let mut read = BufReader::new(read);
+        write_json_line(&mut write, &json!({"v":1,"id":1,"req":"hello","min_version":1,"max_version":1})).await.unwrap();
+        let (daemon, _) = listener.accept().await.unwrap();
+        let mut daemon = BufReader::new(daemon);
+        let (mut probe, _) = listener.accept().await.unwrap();
+        write_json_line(&mut probe, &json!({"type":"pong","id":0,"capabilities":["openrig_host_identity_v1", "openrig_self_host_id=wrong"]})).await.unwrap();
+        let mut line = String::new();
+        read_frame(&mut daemon, &mut line).await.unwrap();
+        let request: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["type"], "openrig_host_identity");
+        write_json_line(daemon.get_mut(), &json!({"type":"pong","id":0,"capabilities":[format!("openrig_self_host_id={host}")]})).await.unwrap();
+        read_frame(&mut read, &mut line).await.unwrap();
+        let hello: Value = serde_json::from_str(&line).unwrap();
+        let caps = hello["capabilities"].as_array().unwrap();
+        assert!(caps.contains(&json!(format!("openrig_self_host_id={host}"))));
+        assert!(!caps.contains(&json!("openrig_self_host_id=wrong")));
+        write.shutdown().await.unwrap();
+        task.await.unwrap().unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn background_task_watch_reopens_with_authoritative_state() {
     use serde_json::json;
     let root = tempfile::tempdir().unwrap();

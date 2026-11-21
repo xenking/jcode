@@ -212,6 +212,8 @@ const RUST_ONLY: &[&str] = &[
     "connect_ssh",
     // Rust-only shared OpenSSH ownership lease for independent reconnects.
     "shared_ssh_transport",
+    // TypeScript can inspect the handshake capabilities directly.
+    "openrig_self_host_id",
     // `connect_with` is the explicit transport seam Rust tests use; TypeScript
     // accepts its transport through the options passed to `connect`.
     "connect_with",

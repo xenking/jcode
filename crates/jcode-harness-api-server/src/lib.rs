@@ -565,13 +565,35 @@ where
     }
     let hello_at = std::time::Instant::now();
     // Do not claim a usable connection before the native daemon is reachable.
-    let legacy = Stream::connect(&legacy_socket)
+    let mut legacy = Stream::connect(&legacy_socket)
         .await
         .with_context(|| format!("connect legacy socket {}", legacy_socket.display()))?;
     let daemon_connected = hello_at.elapsed();
     let daemon_caps = daemon_capabilities(&legacy_socket)
         .await
         .unwrap_or_default();
+    let mut openrig_host_cap = None;
+    if daemon_caps.iter().any(|cap| cap == "openrig_host_identity_v1") {
+        let probe = async {
+            write_json_line(&mut legacy, &serde_json::json!({"type":"openrig_host_identity", "id":0})).await?;
+            let mut reader = BufReader::new(legacy);
+            let mut line = String::new();
+            read_frame(&mut reader, &mut line).await?;
+            let reply: Value = serde_json::from_str(&line)?;
+            if reply["type"] != "pong" || reply["id"] != 0 {
+                anyhow::bail!("invalid OpenRig identity reply");
+            }
+            let host = reply["capabilities"].as_array().and_then(|caps| {
+                let mut claims = caps.iter().filter_map(Value::as_str).filter(|cap| cap.starts_with("openrig_self_host_id="));
+                let claim = claims.next()?;
+                claims.next().is_none().then(|| claim.to_owned())
+            });
+            Ok::<_, anyhow::Error>((reader.into_inner(), host))
+        };
+        let (stream, host) = tokio::time::timeout(std::time::Duration::from_secs(2), probe).await??;
+        legacy = stream;
+        openrig_host_cap = host;
+    }
     timing::log(&format!(
         "hello client={client_name} first_frame={:.1}ms daemon_connect={:.1}ms daemon_caps={:.1}ms",
         timing::ms(pending.connection_age() - hello_at.elapsed()),
@@ -634,6 +656,7 @@ where
             ]
             .into_iter()
             .map(str::to_string)
+            .chain(openrig_host_cap)
             .chain(user_connections_supported.then(|| "session_connections".to_string()))
             .chain(runtime_commands_supported.then(|| "runtime_commands".to_string()))
             .chain(runtime_commands_supported.then(|| "skill_message_v1".to_string()))

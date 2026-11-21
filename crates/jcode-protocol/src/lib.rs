@@ -900,6 +900,7 @@ impl Request {
             Request::RewindTranscript { id, .. } => *id,
             Request::RewindUndo { id } => *id,
             Request::Ping { id } => *id,
+            Request::OpenrigHostIdentity { id } => *id,
             Request::GetState { id } => *id,
             Request::GetTodos { id } => *id,
             Request::ClientFocus { id, .. } => *id,
@@ -993,6 +994,7 @@ impl Request {
         matches!(
             self,
             Request::Ping { .. }
+                | Request::OpenrigHostIdentity { .. }
                 | Request::UpgradeRuntime { .. }
                 // Usage invalidation only touches process-wide caches, so a
                 // one-shot client can send it without subscribing to a session.

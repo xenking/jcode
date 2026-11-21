@@ -54,6 +54,7 @@ pub(super) fn connection_presence_pong(
             "ask_response_images".into(),
             "runtime_commands".into(),
             "session_connections".into(),
+            "openrig_host_identity_v1".into(),
             crate::protocol::CLIENT_FOCUS_CAPABILITY.into(),
         ],
         user_connected_session_ids,
