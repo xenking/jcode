@@ -1,5 +1,68 @@
 use super::*;
 
+#[test]
+fn portable_workspace_preserves_subdirectory_and_is_stable() {
+    let (_root, _stage, mut repo) = repository();
+    repo.root = "/private/tmp/project".into();
+    repo.working_dir = "/private/tmp/project/nested".into();
+    let home = tempfile::tempdir().unwrap();
+    let mapped = portable_repo(&repo, "source", home.path()).unwrap();
+    assert!(Path::new(&mapped.root).starts_with(home.path()));
+    assert_eq!(
+        Path::new(&mapped.working_dir),
+        Path::new(&mapped.root).join("nested")
+    );
+    assert_eq!(
+        mapped.root,
+        portable_repo(&repo, "source", home.path()).unwrap().root
+    );
+    assert_ne!(
+        mapped.root,
+        portable_repo(&repo, "other", home.path()).unwrap().root
+    );
+    repo.working_dir = "/private/tmp/project/../other".into();
+    assert!(portable_repo(&repo, "source", home.path()).is_err());
+}
+
+#[test]
+fn portable_workspace_restores_bundle_and_refuses_foreign_checkout() {
+    let (_root, stage, repo) = repository();
+    let home = tempfile::tempdir().unwrap();
+    let mapped = portable_repo(&repo, "source", home.path()).unwrap();
+    reserve_portable_repo(&mapped).unwrap();
+    restore_repo(
+        &mapped,
+        &stage.path().join("repo.bundle"),
+        &stage.path().join("ignored.tar"),
+        "earlier-session",
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&mapped.root).join("file.txt")).unwrap(),
+        "original\n"
+    );
+    validate_staged_workspace(&mapped, &["earlier-session".into()]).unwrap();
+    std::fs::write(Path::new(&mapped.root).join("file.txt"), "other transfer\n").unwrap();
+    assert!(validate_staged_workspace(&mapped, &["earlier-session".into()]).is_err());
+    std::fs::write(Path::new(&mapped.root).join("file.txt"), "original\n").unwrap();
+    reserve_portable_repo(&mapped).unwrap();
+    restore_repo(
+        &mapped,
+        &stage.path().join("repo.bundle"),
+        &stage.path().join("ignored.tar"),
+        "earlier-session",
+    )
+    .unwrap();
+    let other = portable_repo(&repo, "other", home.path()).unwrap();
+    std::fs::create_dir_all(&other.root).unwrap();
+    std::fs::write(Path::new(&other.root).join("valuable"), b"keep").unwrap();
+    assert!(reserve_portable_repo(&other).is_err());
+    assert_eq!(
+        std::fs::read(Path::new(&other.root).join("valuable")).unwrap(),
+        b"keep"
+    );
+}
+
 pub(super) fn repository() -> (tempfile::TempDir, tempfile::TempDir, RepoManifest) {
     let root = tempfile::tempdir().unwrap();
     let stage = tempfile::tempdir().unwrap();

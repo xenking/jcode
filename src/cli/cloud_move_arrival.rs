@@ -67,7 +67,7 @@ pub(super) fn arrival_context(manifest: &MoveManifest) -> Vec<String> {
     )];
     if let Some(repo) = &manifest.repo {
         lines.push(format!(
-            "The repository is restored at the same path `{}` on branch `{}` at {}{}. Paths in earlier messages are still valid.",
+            "The source repository was at `{}` on branch `{}` at {}{}. Its destination path may differ; use the current working directory on this host.",
             repo.root,
             repo.branch.as_deref().unwrap_or("(detached)"),
             &repo.head[..repo.head.len().min(12)],

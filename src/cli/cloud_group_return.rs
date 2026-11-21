@@ -269,7 +269,13 @@ pub(super) fn export_group(coordinator: String, epoch: u64, transfer: String) ->
         return Ok(std::fs::read(archive_path)?);
     }
     let original_repo = group_repo(&group)?;
-    let repo_root = Path::new(&original_repo.root);
+    let mapping = group_dir(&departure.coordinator)?.join("mapped-repo.json");
+    let mapped: Option<RepoManifest> = if mapping.is_file() {
+        Some(read_json(&mapping)?)
+    } else {
+        None
+    };
+    let repo_root = Path::new(mapped.as_ref().unwrap_or(original_repo).root.as_str());
     require_repo(repo_root)?;
     let bundle = fence_cloud_group(&group, &departure)?;
     if cloud_fences(&group, false)?.len() != ids.len() {
@@ -277,7 +283,7 @@ pub(super) fn export_group(coordinator: String, epoch: u64, transfer: String) ->
     }
     let temporary = tempfile::tempdir()?;
     let stage = temporary.path();
-    let repo = prepare_repo_snapshot(repo_root, &departure.coordinator, stage)?
+    let mut repo = prepare_repo_snapshot(repo_root, &departure.coordinator, stage)?
         .context("cloud group repository disappeared")?;
     create_repo_bundle(
         &repo,
@@ -285,6 +291,8 @@ pub(super) fn export_group(coordinator: String, epoch: u64, transfer: String) ->
         stage,
         Some(&original_repo.snapshot),
     )?;
+    repo.root = original_repo.root.clone();
+    repo.working_dir = original_repo.working_dir.clone();
     let mut members = Vec::new();
     for transfer in &bundle.sessions {
         let stage = stage.join("members").join(&transfer.session_id);

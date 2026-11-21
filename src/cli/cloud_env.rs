@@ -354,18 +354,28 @@ fn validate_payload(payload: &Payload) -> Result<(PathBuf, Vec<Vec<u8>>)> {
         payload.version == 1 && payload.requirements.len() <= 128 && payload.entries.len() <= 256,
         "invalid payload"
     );
-    let root = repository_root(Path::new(&payload.root))?;
-    anyhow::ensure!(root.to_str() == Some(&payload.root), "noncanonical root");
-    if let Source::Handoff { session, epoch } = &payload.source {
+    let destination = if let Source::Handoff { session, epoch } = &payload.source {
         let lease = storage::read_session_lease(session).context("no receiving lease")?;
         anyhow::ensure!(
-            lease.is_here()
-                && lease.epoch == *epoch
-                && *epoch > 0
-                && lease.repo_root.as_deref() == Some(&payload.root),
+            lease.is_here() && lease.epoch == *epoch && *epoch > 0,
             "wrong receiving lease"
         );
-    }
+        let destination = lease.repo_root.context("no receiving repository")?;
+        if destination != payload.root {
+            let mapping: WorkspaceMapping = read_json(&workspace_mapping_path(session)?)?;
+            anyhow::ensure!(
+                mapping.epoch == *epoch
+                    && mapping.source_root == payload.root
+                    && mapping.destination_root == destination,
+                "wrong workspace mapping"
+            );
+        }
+        destination
+    } else {
+        payload.root.clone()
+    };
+    let root = repository_root(Path::new(&destination))?;
+    anyhow::ensure!(root.to_str() == Some(&destination), "noncanonical root");
     // Validate every entry, every decoded value and every destination before any
     // filesystem writes, including metadata writes.
     let mut decoded = Vec::new();
@@ -521,6 +531,30 @@ pub(super) fn sync_saved(root: &Path, target: &super::Target) -> Result<()> {
     }
     let status = send(&root, target, &Request::Sync, Source::LocalPush {})
         .map_err(|_| anyhow::anyhow!("saved environment sync unavailable"))?;
+    anyhow::ensure!(status.ok, "saved environment sync unavailable");
+    Ok(())
+}
+
+pub(super) fn sync_saved_handoff(
+    root: &Path,
+    target: &super::Target,
+    session: &str,
+    epoch: u64,
+) -> Result<()> {
+    let root = repository_root(root)?;
+    if env::load_manifest(&root)?.requirements.is_empty() {
+        return Ok(());
+    }
+    let status = send(
+        &root,
+        target,
+        &Request::Sync,
+        Source::Handoff {
+            session: session.into(),
+            epoch,
+        },
+    )
+    .map_err(|_| anyhow::anyhow!("saved environment sync unavailable"))?;
     anyhow::ensure!(status.ok, "saved environment sync unavailable");
     Ok(())
 }

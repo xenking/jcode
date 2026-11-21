@@ -198,12 +198,7 @@ pub(crate) fn run_migrate(
         let working_dir = repo_root.as_ref().context("group requires a repository")?;
         let repo = prepare_repo_snapshot(working_dir, &journal.group.coordinator, &stage)?
             .context("group requires a repository")?;
-        create_repo_bundle(
-            &repo,
-            &journal.group.coordinator,
-            &stage,
-            common_remote_commit(target, &host, &repo).as_deref(),
-        )?;
+        create_repo_bundle(&repo, &journal.group.coordinator, &stage, None)?;
         for (sess, member) in sessions.iter_mut().zip(&mut journal.group.members) {
             let mut member_repo = repo.clone();
             member_repo.working_dir = sess
@@ -243,6 +238,7 @@ pub(crate) fn run_migrate(
             crate::usage::export_limits_snapshot(),
         )?;
         durable_json(&stage.join("group.json"), &journal.group)?;
+        std::fs::write(stage.join("portable-workspace-v1"), b"1")?;
         validate(&journal.group, &stage)?;
         tar_dir(
             &stage,
@@ -253,6 +249,7 @@ pub(crate) fn run_migrate(
                 "limits.json",
                 "repo.bundle",
                 "ignored.tar",
+                "portable-workspace-v1",
             ],
         )?;
         if !dry_run {
@@ -358,7 +355,12 @@ fn finish_activation(
     journal.phase = Phase::Complete;
     save_journal(directory, &journal)?;
     if let Some(repo) = &root(&journal.group)?.manifest.repo
-        && let Err(error) = environment::sync_saved(Path::new(&repo.root), target)
+        && let Err(error) = environment::sync_saved_handoff(
+            Path::new(&repo.root),
+            target,
+            &journal.group.coordinator,
+            root(&journal.group)?.manifest.epoch,
+        )
     {
         step(
             "environment",

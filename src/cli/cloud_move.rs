@@ -10,7 +10,7 @@
 //!   lease says the session moved.
 //! - **Code: git.** The move ships the exact local state (HEAD, branch,
 //!   uncommitted and untracked work) as a git bundle plus a *snapshot commit*.
-//!   The cloud continues from that snapshot at the same absolute path. Return
+//!   The cloud continues from that snapshot in a managed workspace. Return
 //!   brings the cloud snapshot back as refs and 3-way merges it into whatever
 //!   the local checkout looks like now, so local edits made meanwhile survive.
 //!   Conflicts are ordinary git conflicts.
@@ -333,8 +333,7 @@ fn run_credentials(provider: &str, account: &str, export: bool) -> Result<()> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RepoManifest {
-    /// Absolute repo root. Restored at the same path so every path in the
-    /// transcript stays valid.
+    /// Absolute source repository root.
     pub root: String,
     /// Session working directory (may be a subdirectory of `root`).
     pub working_dir: String,
@@ -347,6 +346,214 @@ pub(crate) struct RepoManifest {
     pub git_user_name: Option<String>,
     pub git_user_email: Option<String>,
     pub ignored_files: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WorkspaceMapping {
+    epoch: u64,
+    source_root: String,
+    destination_root: String,
+}
+
+fn workspace_mapping_path(session_id: &str) -> Result<PathBuf> {
+    baseline_path(session_id)?;
+    Ok(storage::jcode_dir()?
+        .join("cloud_workspace_mappings")
+        .join(format!("{session_id}.json")))
+}
+
+fn save_workspace_mapping(
+    session_id: &str,
+    epoch: u64,
+    original: &RepoManifest,
+    mapped: &RepoManifest,
+) -> Result<()> {
+    storage::write_json_secret(
+        &workspace_mapping_path(session_id)?,
+        &WorkspaceMapping {
+            epoch,
+            source_root: original.root.clone(),
+            destination_root: mapped.root.clone(),
+        },
+    )?;
+    Ok(())
+}
+
+fn portable_repo(repo: &RepoManifest, source_host: &str, home: &Path) -> Result<RepoManifest> {
+    let root = Path::new(&repo.root);
+    let working = Path::new(&repo.working_dir);
+    let relative = working
+        .strip_prefix(root)
+        .context("session cwd is outside its repository")?;
+    if !root.is_absolute()
+        || relative
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        bail!("repository or working directory is not a portable absolute path");
+    }
+    let key = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&(source_host, &repo.root))?)
+    );
+    let destination = home.join("cloud_workspaces").join(key).join("repo");
+    let mut mapped = repo.clone();
+    mapped.root = destination.to_string_lossy().into_owned();
+    mapped.working_dir = destination.join(relative).to_string_lossy().into_owned();
+    Ok(mapped)
+}
+
+fn reserve_portable_repo(repo: &RepoManifest) -> Result<()> {
+    let root = Path::new(&repo.root);
+    let container = root.parent().context("invalid workspace destination")?;
+    std::fs::create_dir_all(container.parent().context("invalid workspace parent")?)?;
+    match std::fs::create_dir(container) {
+        Ok(()) => {
+            std::fs::create_dir(root)?;
+            git(root, &["init", "--quiet"])?;
+            std::fs::write(root.join(".git/jcode-cloud-workspace"), b"1")?;
+            if let Some(url) = &repo.origin_url {
+                git(root, &["remote", "add", "origin", url])?;
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            if std::fs::symlink_metadata(container)?
+                .file_type()
+                .is_symlink()
+                || std::fs::symlink_metadata(root)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(true)
+                || std::fs::symlink_metadata(root.join(".git"))
+                    .map(|m| !m.file_type().is_dir())
+                    .unwrap_or(true)
+                || !root.join(".git/jcode-cloud-workspace").is_file()
+            {
+                bail!(
+                    "workspace destination is not a jcode-owned repository: {}",
+                    root.display()
+                );
+            }
+        }
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+
+fn ensure_portable_cwd(repo: &RepoManifest) -> Result<()> {
+    let root = Path::new(&repo.root);
+    let relative = Path::new(&repo.working_dir).strip_prefix(root)?;
+    let mut path = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            bail!("invalid workspace subdirectory")
+        };
+        path.push(name);
+        match std::fs::create_dir(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !std::fs::symlink_metadata(&path)?.file_type().is_dir() {
+                    bail!(
+                        "workspace subdirectory is not a real directory: {}",
+                        path.display()
+                    );
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn check_portable_repo_available(repo: &RepoManifest) -> Result<()> {
+    let root = Path::new(&repo.root);
+    if let Some(directory) = storage::session_leases_dir()
+        && directory.exists()
+    {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            if entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                let lease: storage::SessionLease = read_json(&entry.path())?;
+                if lease.is_here() && lease.repo_root.as_deref() == Some(&repo.root) {
+                    bail!(
+                        "workspace is in use by session {}; return it before moving another session here",
+                        lease.session_id
+                    );
+                }
+            }
+        }
+    }
+    let scratch = tempfile::tempdir()?;
+    let tree = snapshot_worktree_tree(root, scratch.path())?;
+    let empty = git(root, &["hash-object", "-t", "tree", "/dev/null"])?;
+    if tree == empty {
+        return Ok(());
+    }
+    let refs = git(
+        root,
+        &["for-each-ref", "--format=%(refname)", SNAPSHOT_REF_PREFIX],
+    )?;
+    for reference in refs
+        .lines()
+        .filter(|r| r.ends_with("/base") || r.ends_with("/outgoing"))
+    {
+        if git(root, &["rev-parse", &format!("{reference}^{{tree}}")])
+            .ok()
+            .as_deref()
+            == Some(&tree)
+        {
+            return Ok(());
+        }
+    }
+    bail!(
+        "workspace contains unreturned changes; refusing to overwrite {}",
+        root.display()
+    )
+}
+
+fn lock_portable_repo(repo: &RepoManifest) -> Result<std::fs::File> {
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(Path::new(&repo.root).join(".git/jcode-cloud-lock"))?;
+    lock.try_lock()
+        .context("another migration is using this workspace")?;
+    Ok(lock)
+}
+
+fn validate_staged_workspace(repo: &RepoManifest, members: &[String]) -> Result<()> {
+    let mut already_active = false;
+    if let Some(directory) = storage::session_leases_dir()
+        && directory.exists()
+    {
+        for entry in std::fs::read_dir(directory)? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                let lease: storage::SessionLease = read_json(&path)?;
+                if lease.is_here() && lease.repo_root.as_deref() == Some(&repo.root) {
+                    if !members.contains(&lease.session_id) {
+                        bail!("workspace is in use by session {}", lease.session_id);
+                    }
+                    already_active = true;
+                }
+            }
+        }
+    }
+    if !already_active {
+        let root = Path::new(&repo.root);
+        let scratch = tempfile::tempdir()?;
+        let actual = snapshot_worktree_tree(root, scratch.path())?;
+        let expected = git(root, &["rev-parse", &format!("{}^{{tree}}", repo.snapshot)])?;
+        if actual != expected {
+            bail!("staged cloud workspace changed before activation; retry the move");
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -525,6 +732,7 @@ pub(crate) fn run_move(
                 stage.join("manifest.json"),
                 serde_json::to_vec_pretty(&manifest)?,
             )?;
+            std::fs::write(stage.join("portable-workspace-v1"), b"1")?;
             copy_if_exists(&todo_file(&session_id)?, &stage.join("todos.json"))?;
             // Last known account limits, so the cloud UI shows them instantly
             // instead of waiting on fresh usage probes.
@@ -579,7 +787,8 @@ pub(crate) fn run_move(
     })?;
     if let Some(repo) = &repo {
         timed_move_stage("repository bundle", || {
-            create_repo_bundle(repo, &session_id, staging.path(), base.as_deref())
+            let _ = base;
+            create_repo_bundle(repo, &session_id, staging.path(), None)
         })?;
     }
     let tarball = staging.path().join("move.tar");
@@ -595,6 +804,7 @@ pub(crate) fn run_move(
                 "limits.json",
                 "repo.bundle",
                 "ignored.tar",
+                "portable-workspace-v1",
             ],
         )
     })?;
@@ -672,7 +882,9 @@ pub(crate) fn run_move(
                 .map_err(|_| anyhow::anyhow!("router transfer thread panicked"))
                 .and_then(|result| result)
         });
-        let out = out?;
+        let out = out.context(
+            "cloud receive failed; an older cloud jcode may require the original absolute path, update it for portable workspaces",
+        )?;
         let baselines = baselines?;
         if let Some(result) = router_result {
             result?;
@@ -786,7 +998,9 @@ pub(crate) fn run_move(
     if let Some(repo) = &repo {
         // Ownership has moved. Environment hydration must not turn a successful
         // migration into an apparent failure that invites a second migration.
-        if environment::sync_saved(Path::new(&repo.root), target).is_err() {
+        if environment::sync_saved_handoff(Path::new(&repo.root), target, &session_id, epoch)
+            .is_err()
+        {
             step(
                 "environment",
                 "saved environment requirements need attention on the cloud host; the agent can retry through cloud_environment",
@@ -857,6 +1071,9 @@ pub(crate) fn run_return(
         (Some(away), _) => away.clone(),
         (None, _) => bail!("session {session_id} already lives here"),
     };
+    let local_working_dir = session::Session::load(&session_id)
+        .context("local session is missing; cannot safely restore its original working directory")?
+        .working_dir;
     let epoch = lease.epoch + 1;
 
     // ---- export (cloud stops owning at `epoch`) --------------------------
@@ -977,6 +1194,7 @@ pub(crate) fn run_return(
     step("session", "installing the cloud transcript locally");
     let mut sess: session::Session = read_json(&stage.join("session.json"))?;
     sess.migration_epoch = epoch;
+    sess.working_dir = local_working_dir;
     let merge_note = match &merge {
         MergeOutcome::Conflicts { files, .. } => format!(
             " Git merge of the cloud work into the local checkout left conflicts in: {}. Resolve them (the cloud side is `{SNAPSHOT_REF_PREFIX}/{session_id}/cloud`) before continuing.",
@@ -993,7 +1211,7 @@ pub(crate) fn run_return(
     append_system_notice(
         &mut sess,
         &format!(
-            "Session returned from cloud host `{host}` to local machine `{}` at {}. Same repo path.{merge_note} Processes you started on the cloud host (dev servers, background tasks, terminals) did not come back. Restart anything you still need.",
+            "Session returned from cloud host `{host}` to local machine `{}` at {}. The original local working directory is restored.{merge_note} Processes you started on the cloud host (dev servers, background tasks, terminals) did not come back. Restart anything you still need.",
             local_host_label(),
             chrono::Utc::now().to_rfc3339(),
         ),
@@ -1148,16 +1366,42 @@ pub(crate) fn run_receive() -> Result<()> {
     }
     let sess: session::Session = read_json(&stage.join("session.json"))?;
 
-    // Restore the repo at the same absolute path.
-    let snapshot = match &manifest.repo {
+    let mapped = if stage.join("portable-workspace-v1").is_file() {
+        manifest
+            .repo
+            .as_ref()
+            .map(|repo| portable_repo(repo, &manifest.source_host, &storage::jcode_dir()?))
+            .transpose()?
+    } else {
+        manifest.repo.clone()
+    };
+    let mut _workspace_lock = None;
+    if stage.join("portable-workspace-v1").is_file()
+        && let Some(repo) = &mapped
+    {
+        reserve_portable_repo(repo)?;
+        _workspace_lock = Some(lock_portable_repo(repo)?);
+        check_portable_repo_available(repo)?;
+        std::fs::write(stage.join("mapped-repo.json"), serde_json::to_vec(repo)?)?;
+    }
+    let snapshot = match &mapped {
         Some(repo) => Some(restore_repo(
             repo,
             &stage.join("repo.bundle"),
             &stage.join("ignored.tar"),
             &manifest.session_id,
-        )?),
+        ).with_context(|| if stage.join("portable-workspace-v1").is_file() {
+            "restore managed cloud workspace"
+        } else {
+            "legacy sender requires the original absolute path; update the sending jcode for portable workspaces"
+        })?),
         None => None,
     };
+    if stage.join("portable-workspace-v1").is_file()
+        && let Some(repo) = &mapped
+    {
+        ensure_portable_cwd(repo)?;
+    }
 
     let dest = inbox.join(format!("{}.{}", manifest.session_id, manifest.epoch));
     let _ = std::fs::remove_dir_all(&dest);
@@ -1168,7 +1412,7 @@ pub(crate) fn run_receive() -> Result<()> {
         epoch: manifest.epoch,
         messages: sess.messages.len(),
         snapshot,
-        repo_root: manifest.repo.map(|r| r.root),
+        repo_root: mapped.map(|r| r.root),
     };
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
@@ -1199,7 +1443,38 @@ pub(crate) fn run_activate(session_id: &str, epoch: u64) -> Result<()> {
         bail!("no staged move for {session_id} at epoch {epoch}");
     }
     let manifest: MoveManifest = read_json(&dir.join("manifest.json"))?;
-    let sess: session::Session = read_json(&dir.join("session.json"))?;
+    let mut sess: session::Session = read_json(&dir.join("session.json"))?;
+    let mut _workspace_lock = None;
+    let mapped = if dir.join("mapped-repo.json").is_file() {
+        let repo: RepoManifest = read_json(&dir.join("mapped-repo.json"))?;
+        _workspace_lock = Some(lock_portable_repo(&repo)?);
+        validate_staged_workspace(&repo, &[session_id.to_owned()])?;
+        sess.working_dir = Some(repo.working_dir.clone());
+        save_workspace_mapping(
+            session_id,
+            epoch,
+            manifest
+                .repo
+                .as_ref()
+                .context("missing original repository")?,
+            &repo,
+        )?;
+        append_system_notice(
+            &mut sess,
+            &format!(
+                "Cloud workspace is at {}. The original local repository is at {} and will be restored on return.",
+                repo.root,
+                manifest
+                    .repo
+                    .as_ref()
+                    .map(|r| r.root.as_str())
+                    .unwrap_or("unknown")
+            ),
+        );
+        Some(repo)
+    } else {
+        manifest.repo.clone()
+    };
     if sess.migration_epoch != epoch {
         bail!("staged transcript epoch mismatch");
     }
@@ -1219,7 +1494,7 @@ pub(crate) fn run_activate(session_id: &str, epoch: u64) -> Result<()> {
         session_id: session_id.to_string(),
         epoch,
         away_host: None,
-        repo_root: manifest.repo.as_ref().map(|r| r.root.clone()),
+        repo_root: mapped.as_ref().map(|r| r.root.clone()),
         last_sync_snapshot: manifest.repo.as_ref().map(|r| r.snapshot.clone()),
         last_sync_head: manifest.repo.as_ref().map(|r| r.head.clone()),
         updated_at: chrono::Utc::now().to_rfc3339(),
