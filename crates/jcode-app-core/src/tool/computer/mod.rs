@@ -36,11 +36,15 @@ use serde_json::{Value, json};
 #[cfg(target_os = "macos")]
 mod ax;
 #[cfg(target_os = "macos")]
+mod consent;
+#[cfg(target_os = "macos")]
 mod discover;
 #[cfg(target_os = "macos")]
 mod input;
 #[cfg(target_os = "macos")]
 mod keys;
+#[cfg(target_os = "macos")]
+mod native;
 #[cfg(target_os = "macos")]
 mod osa;
 #[cfg(target_os = "macos")]
@@ -52,6 +56,7 @@ mod sys;
 #[cfg(target_os = "macos")]
 mod win;
 
+#[derive(Default)]
 pub struct ComputerTool;
 
 impl ComputerTool {
@@ -62,6 +67,7 @@ impl ComputerTool {
 
 #[derive(Debug, Deserialize)]
 struct ComputerInput {
+    #[serde(alias = "op")]
     action: String,
     // discovery
     #[serde(default)]
@@ -145,7 +151,9 @@ fn cap_output(mut out: ToolOutput, max_chars: usize) -> ToolOutput {
 fn is_mutating(action: &str) -> bool {
     matches!(
         action,
-        "move"
+        "act"
+            | "setup"
+            | "move"
             | "click"
             | "double_click"
             | "right_click"
@@ -198,8 +206,7 @@ impl Tool for ComputerTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "description": "Common: screenshot ocr ui click type key press set_value \
-                        find_element setup; discover for the rest."
+                    "description": "Prefer observe, act, wait (discover category=ax). Legacy: screenshot, ui, click, type, setup."
                 },
                 "category": {
                     "type": "string",
@@ -230,7 +237,14 @@ impl Tool for ComputerTool {
                 "dy": { "type": "integer" },
                 "w": { "type": "number" },
                 "h": { "type": "number" },
-                "window_id": { "type": "integer", "description": "window_screenshot id (from list_windows)." },
+                "window_id": { "type": "integer", "description": "Window id (from list_windows)." },
+                "view": { "type": "string", "enum": ["ax","image","ax_image"] },
+                "query": { "type": "string" },
+                "budget": { "type": "integer" },
+                "snapshot_id": { "type": "string" },
+                "element_ref": { "type": "string" },
+                "verb": { "type": "string", "enum": ["press","set_value","type","menu_path"] },
+                "predicate": { "type": "string", "enum": ["exists","value_changed","focused","window_closed"] },
                 "menu_path": { "type": "array", "items": { "type": "string" }, "description": "select_menu path, e.g. [\"File\",\"Save\"]." },
                 "ax_action": { "type": "string", "description": "perform_action AX action, e.g. AXShowMenu." },
                 "contains": { "type": "string", "description": "wait_for: substring to await." },
@@ -242,9 +256,32 @@ impl Tool for ComputerTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
-        let parsed: ComputerInput =
-            serde_json::from_value(input).context("invalid `macos_computer_use` tool input")?;
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        let parsed: ComputerInput = serde_json::from_value(input.clone())
+            .context("invalid `macos_computer_use` tool input")?;
+        #[cfg(target_os = "macos")]
+        {
+            if parsed.dry_run == Some(true) && is_mutating(&parsed.action) {
+                return run(parsed);
+            }
+            let request = native::Request::parse(&parsed.action, input)?;
+            if let Some(request) = request {
+                let session = match consent::authorize(&ctx).await {
+                    Ok(session) => session,
+                    Err(denial) => return Ok(denial.output()),
+                };
+                return tokio::task::spawn_blocking(move || request.execute(&session))
+                    .await
+                    .context("native computer use task panicked");
+            }
+            if parsed.action != "discover"
+                && let Err(denial) = consent::authorize(&ctx).await
+            {
+                return Ok(denial.output());
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = ctx;
         tokio::task::spawn_blocking(move || run(parsed))
             .await
             .context("macos_computer_use tool task panicked")?

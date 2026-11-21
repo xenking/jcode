@@ -21,26 +21,18 @@ pub fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 }
 
 fn capture_to_temp(extra_args: &[&str]) -> Result<Vec<u8>> {
-    let tmp = std::env::temp_dir().join(format!(
-        "jcode_computer_{}_{}.png",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    ));
-    let tmp_str = tmp.to_string_lossy().to_string();
+    let directory = tempfile::tempdir().context("failed to create private screenshot directory")?;
+    let path = directory.path().join("capture.png");
+    let path_arg = path.to_str().context("screenshot path is not UTF-8")?;
     let mut args: Vec<&str> = vec!["-x"];
     args.extend_from_slice(extra_args);
-    args.push(&tmp_str);
+    args.push(path_arg);
     let (ok, _out, err) =
         osa::run_command_timed("/usr/sbin/screencapture", &args, Duration::from_secs(15))?;
     if !ok {
-        let _ = std::fs::remove_file(&tmp);
         bail!("screencapture failed: {}", err.trim());
     }
-    let bytes = std::fs::read(&tmp).context("failed to read screenshot file")?;
-    let _ = std::fs::remove_file(&tmp);
+    let bytes = std::fs::read(path).context("failed to read screenshot file")?;
     if bytes.is_empty() {
         bail!(
             "screenshot was empty. Grant Screen Recording permission (run the `setup` action), or \

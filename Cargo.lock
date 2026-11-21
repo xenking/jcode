@@ -3753,6 +3753,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
+ "core-foundation 0.9.4",
  "core-graphics",
  "dirs",
  "flate2",

@@ -29,7 +29,21 @@ observe actions (see the screen):
 - ui                {app?, depth?}     dump the Accessibility tree; element paths shown as #a.b.c";
 
 const AX: &str = "\
-accessibility actions (BACKGROUND control; no cursor movement, app need not be frontmost).
+accessibility actions. Prefer native AX, which never falls back to shared input:
+- observe {app?: owner name or 'pid:123', window_id?, view?:ax|image|ax_image, query?, budget?}
+  Select one window and return snapshot_id, target, focus_ref and compact rows. The first field
+  in each row is an element_ref for that snapshot. Query matches role/label/value (keeps ancestors).
+  Budget is encoded tree bytes, default 4500. Use ax (default) unless you need an image.
+- act {snapshot_id, element_ref, verb:press|set_value|type|menu_path, value?, text?, menu_path?}
+  type replaces the AX selection; it does not send keys. For menu_path use a window row and
+  exact menu titles. Menus are supported only when that window is the app's sole focused window.
+  Read delivery/effect. A stale_ref has not acted. Observe or use next_state and choose again.
+  An unknown delivery or an unverified effect is not a reason to repeat an action.
+- wait {snapshot_id, predicate:exists|value_changed|focused|window_closed, query?, element_ref?, timeout_ms?}
+  exists needs query; value_changed and focused need element_ref. Timeout differs from ax_error.
+  References expire after 2 minutes or the next snapshot. All desktop access needs session consent.
+
+Legacy Accessibility actions:
 Element handle = {app:\"AppName\", path:[child indices from the front window]} from find_element/ui:
 - find_element   {app, role?, title?, value?, depth?}  -> matching elements with paths
 - element_at     {app, x, y}                            -> deepest element at a point
@@ -114,9 +128,8 @@ pub fn discover(category: Option<&str>) -> Result<ToolOutput> {
     Ok(ToolOutput::new(format!(
         "macos_computer_use actions — category '{cat}'. All actions are fields on the same `macos_computer_use` tool.\n\n{body}\n\n\
          Default policy: this is the user's own live machine, so stay out of their way. \
-         Prefer background AX/scripting actions over visible coordinate input when the target \
-         element is resolvable; only fall back to click/type (which move your cursor and steal \
-         focus) when AX can't reach it. Do not move the cursor, change the frontmost app, or \
+         Prefer window-scoped observe/act/wait. Never fall back to shared keyboard or pointer \
+         input automatically. Do not move the cursor, change the frontmost app, or \
          move/resize/activate windows unless the user asked or the task strictly requires it. \
          Act only on the task you were given — never take proactive control of the desktop \
          upfront. When a visible action is unavoidable, do the minimum and restore focus."

@@ -17,10 +17,56 @@ fn ctx() -> ToolContext {
 }
 
 async fn run_action(v: Value) -> Result<ToolOutput> {
-    ComputerTool::new().execute(v, ctx()).await
+    ComputerTool::new().execute(v, approved_ctx()).await
+}
+
+pub(super) fn approved_ctx() -> ToolContext {
+    let mut ctx = ctx();
+    ctx.session_id = uuid::Uuid::new_v4().to_string();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::tool::StdinInputRequest>();
+    ctx.stdin_request_tx = Some(tx);
+    tokio::spawn(async move {
+        if let Some(request) = rx.recv().await {
+            assert!(
+                request.ask_questions.unwrap()[0]["question"]
+                    .as_str()
+                    .unwrap()
+                    .contains("control this Mac")
+            );
+            request
+                .response_tx
+                .send(json!({"answers":[{"selected":["Allow for this session"]}]}).to_string())
+                .unwrap();
+            while let Some(request) = rx.recv().await {
+                request
+                    .response_tx
+                    .send(json!({"answers":null}).to_string())
+                    .unwrap();
+            }
+        }
+    });
+    ctx
 }
 
 // ---- pure logic ----
+
+#[tokio::test]
+async fn native_observe_fails_closed_without_a_user() {
+    let out = ComputerTool::new()
+        .execute(json!({"action":"observe", "app":"pid:1"}), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.metadata.unwrap()["reason"], "consent_required");
+}
+
+#[tokio::test]
+async fn native_action_dry_run_never_requests_consent() {
+    let out =
+        run_action(json!({"action":"act", "verb":"press", "element_ref":"e1", "dry_run":true}))
+            .await
+            .unwrap();
+    assert!(out.output.contains("dry_run"));
+}
 
 #[tokio::test]
 async fn rejects_bad_action() {
@@ -136,6 +182,13 @@ fn schema_declares_every_input_field() {
         "ax_action",
         "menu_path",
         "window_id",
+        "view",
+        "query",
+        "budget",
+        "snapshot_id",
+        "element_ref",
+        "verb",
+        "predicate",
         "script",
         "contains",
         "timeout_ms",
@@ -169,6 +222,35 @@ fn schema_is_compact() {
         "macos_computer_use tool always-on size grew to {total} chars (~{} tokens)",
         total / 4
     );
+}
+
+#[tokio::test]
+async fn computer_consent_is_cached_but_not_shared_with_another_session() {
+    let tool = ComputerTool::new();
+    let mut approved = approved_ctx();
+    let request = json!({"action":"observe", "app":"pid:1"});
+    let out = tool
+        .execute(request.clone(), approved.clone())
+        .await
+        .unwrap();
+    assert_ne!(out.metadata.unwrap()["reason"], "consent_required");
+    approved.stdin_request_tx = None;
+    let out = tool.execute(request.clone(), approved).await.unwrap();
+    assert_ne!(out.metadata.unwrap()["reason"], "consent_required");
+    let out = tool.execute(request, ctx()).await.unwrap();
+    assert_eq!(out.metadata.unwrap()["reason"], "consent_required");
+}
+
+#[tokio::test]
+async fn a_model_field_cannot_bypass_consent_on_legacy_script() {
+    let out = ComputerTool::new()
+        .execute(
+            json!({"action":"run_applescript", "script":"return 4", "consent":true}),
+            ctx(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.metadata.unwrap()["reason"], "consent_required");
 }
 
 // ---- live (need GUI + permissions); run with --ignored ----
