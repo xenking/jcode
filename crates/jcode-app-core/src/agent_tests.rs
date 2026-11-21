@@ -2971,6 +2971,7 @@ mod system_prompt_reminder;
 struct FableGuardrailProvider {
     calls: Arc<std::sync::Mutex<usize>>,
     prompts_seen: Arc<std::sync::Mutex<Vec<String>>>,
+    reusable_inputs: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
 }
 
 #[async_trait]
@@ -2987,6 +2988,21 @@ impl Provider for FableGuardrailProvider {
             *calls += 1;
             *calls
         };
+        let (input, (item_count, block_count)) =
+            jcode_provider_anthropic::format_messages_for_request_with_boundary(
+                messages,
+                false,
+                &[],
+                true,
+                "",
+                true,
+            );
+        let mut input = serde_json::to_value(&input[..item_count]).unwrap();
+        input[item_count - 1]["content"]
+            .as_array_mut()
+            .unwrap()
+            .truncate(block_count);
+        self.reusable_inputs.lock().unwrap().push(input);
         if call > 1 {
             let prompt = messages
                 .last()
@@ -3039,6 +3055,7 @@ async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
     let fable = FableGuardrailProvider::default();
     let calls = fable.calls.clone();
     let prompts_seen = fable.prompts_seen.clone();
+    let reusable_inputs = fable.reusable_inputs.clone();
     let provider: Arc<dyn Provider> = Arc::new(fable);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
@@ -3065,6 +3082,21 @@ async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
     assert!(
         text.contains("Reconsidered and completed safely"),
         "{text:?}"
+    );
+    let reusable_inputs = reusable_inputs.lock().unwrap();
+    assert!(
+        reusable_inputs.windows(2).all(|pair| pair[0] == pair[1]),
+        "the guardrail prompt must not rewrite the already cached wire blocks"
+    );
+    let session = crate::session::Session::load(agent.session_id()).unwrap();
+    assert!(
+        !session
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .any(
+                |block| matches!(block, ContentBlock::Text { text, .. } if prompts.contains(text))
+            )
     );
 }
 
