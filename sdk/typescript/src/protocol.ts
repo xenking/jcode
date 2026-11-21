@@ -358,6 +358,7 @@ export type ApiRequest =
   | { req: "get_history_image_chunk"; session_id: string; key: string; offset: number }
   | { req: "list_session_images"; session_id: string }
   | { req: "get_session_image"; session_id: string; image_id: string; offset: number }
+  | { req: "session_context_breakdown"; session_id?: string | null; model?: string | null; cwd?: string | null }
   | { req: "peek_session"; session_id: string; limit?: number }
   | { req: "clear"; session_id: string }
   | { req: "rewind"; session_id: string; message_index: number }
@@ -462,6 +463,21 @@ export interface SidePanelSnapshot {
   pages?: SidePanelPage[];
 }
 
+export type ContextBreakdownKind =
+  | "system_prompt"
+  | "builtin_tools"
+  | "skills_modes"
+  | "dynamic_tools"
+  | "agents"
+  | "conversation"
+  | "unattributed";
+
+export interface ContextBreakdownCategory {
+  kind: ContextBreakdownKind;
+  /** null means unavailable, not empty. */
+  tokens: number | null;
+}
+
 export type ApiEvent =
   | { ev: "draft_models"; current: string | null; routes: ModelRouteInfo[] }
   | { ev: "hello_ok"; version: number; server: string; capabilities?: string[]; runtime_identity?: { pid: number; binary_path: string; git_hash: string; version_label?: string; reload_id?: string; generation: number } }
@@ -492,6 +508,15 @@ export type ApiEvent =
   | { ev: "queued_prompt_edited"; session_id: string; prompt_id: string; outcome: QueuedPromptEditOutcome }
   | { ev: "session_images"; session_id: string; images: unknown[] }
   | { ev: "session_image"; session_id: string; image_id: string; media_type: string; offset: number; total: number; data: string }
+  | {
+      ev: "context_breakdown";
+      session_id: string | null;
+      model: string | null;
+      total_tokens: number | null;
+      limit_tokens: number | null;
+      estimated: boolean;
+      categories: ContextBreakdownCategory[];
+    }
   | { ev: "user_image_ids"; session_id: string; original_content: string; content: string; image_ids: string[] }
   | { ev: "usage_limit"; session_id: string; provider: string; model: string; account: string | null; window: string; reset: string; action: string; target: string | null; message: string }
   | { ev: "tools"; session_id: string; tools: SessionToolDefinition[] }
@@ -543,7 +568,9 @@ export type ApiEvent =
       message: string;
     }
   | { ev: "turn_stopped"; session_id: string; reason: TurnStopReason; message: string; provider_stop_reason?: string }
+  | { ev: "provider_guardrail_retry"; session_id: string; turn_id: string; attempt: number; max_attempts: number }
   | { ev: "peer_user_message"; session_id: string; content: string }
+  | { ev: "agent_message"; session_id: string; from_session: string; from_name: string | null; message: string }
   /** `pending_soft_interrupts`: queued messages this turn never saw (only when nonzero). */
   | { ev: "turn_done"; session_id: string; pending_soft_interrupts?: number }
   /**
@@ -725,6 +752,7 @@ export const KNOWN_EVENT_KINDS = [
   "queued_prompt_edited",
   "session_images",
   "session_image",
+  "context_breakdown",
   "user_image_ids",
   "usage_limit",
   "side_pane_images",
@@ -750,7 +778,9 @@ export const KNOWN_EVENT_KINDS = [
   "memory_injected",
   "memory_activity",
   "peer_user_message",
+  "agent_message",
   "turn_done",
+  "provider_guardrail_retry",
   "soft_interrupt_injected",
   "soft_interrupts_cancelled",
   "background_tool_result",
@@ -815,6 +845,7 @@ export const KNOWN_REQUEST_KINDS = [
   "reorder_queued_prompts",
   "list_session_images",
   "get_session_image",
+  "session_context_breakdown",
   "get_history",
   "get_compacted_history",
   "get_history_page",

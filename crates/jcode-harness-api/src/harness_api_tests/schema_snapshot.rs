@@ -634,6 +634,39 @@ fn typescript_sdk_lists_every_field() {
     }
 }
 
+#[test]
+fn typescript_context_breakdown_matches_flattened_wire_payload() {
+    let Some(sdk) = sdk_protocol_source() else {
+        return;
+    };
+    use ContextBreakdownKind::*;
+    let event = ApiEvent::ContextBreakdown {
+        breakdown: ContextBreakdown {
+            session_id: None,
+            model: None,
+            total_tokens: None,
+            limit_tokens: None,
+            estimated: true,
+            categories: [SystemPrompt, BuiltinTools, SkillsModes, DynamicTools, Agents, Conversation, Unattributed]
+                .into_iter()
+                .map(|kind| ContextBreakdownCategory { kind, tokens: None })
+                .collect(),
+        },
+    };
+    let wire = serde_json::to_value(event).unwrap();
+    let block = sdk_variant_block(&sdk, "ev", "context_breakdown").unwrap();
+    for key in wire.as_object().unwrap().keys() {
+        assert!(block.contains(&format!("{key}:")), "missing wire field {key}");
+    }
+    assert!(!block.contains("breakdown:"));
+    let kinds = sdk.split_once("export type ContextBreakdownKind =").unwrap().1;
+    let kinds = kinds.split_once(';').unwrap().0;
+    for category in wire["categories"].as_array().unwrap() {
+        let kind = &category["kind"];
+        assert!(kinds.contains(&kind.to_string()), "missing category {kind}");
+    }
+}
+
 /// The `{ ev: "tag"; ... }` object literal for one variant, braces balanced.
 fn sdk_variant_block(sdk: &str, tag: &str, variant: &str) -> Option<String> {
     let needle = format!("{tag}: \"{variant}\"");
@@ -659,16 +692,24 @@ fn sdk_variant_block(sdk: &str, tag: &str, variant: &str) -> Option<String> {
 fn enum_variant_fields(file: &str, enum_name: &str) -> Vec<(String, Vec<String>)> {
     let body = enum_body(file, enum_name);
     let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    let mut flattened = false;
     for line in body.lines() {
         let Some(rest) = line.strip_prefix("    ") else {
             continue;
         };
         if rest.starts_with(' ') {
+            if rest.trim() == "#[serde(flatten)]" {
+                flattened = true;
+                continue;
+            }
             // A field line inside the variant currently being collected.
             if let Some((_, fields)) = out.last_mut()
                 && let Some(name) = field_name(rest)
             {
-                fields.push(name);
+                // Serde serializes the inner fields, not the Rust wrapper name.
+                if !std::mem::take(&mut flattened) {
+                    fields.push(name);
+                }
             }
             continue;
         }
