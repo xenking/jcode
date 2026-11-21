@@ -1638,7 +1638,9 @@ impl BridgeState {
             }
             "ask_response" => {
                 let id = self.legacy_id();
-                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                // The daemon acks receipt, then reports done or error once it
+                // knows whether a waiting question took the answer.
+                self.pending_simple.push((id, api_id, SimpleKind::OkOnDone));
                 vec![Outbound::Legacy(json!({
                     "type": "ask_user_response",
                     "id": id,

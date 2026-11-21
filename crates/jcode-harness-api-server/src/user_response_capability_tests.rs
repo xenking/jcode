@@ -95,3 +95,55 @@ fn ask_request_and_response_bridge_both_ways() {
     assert_eq!(legacy["request_id"], "ask-c1");
     assert_eq!(legacy["response"]["answers"][0]["selected"][0], "A");
 }
+
+#[test]
+fn rejected_ask_answer_reaches_the_client_as_an_error() {
+    let mut state = BridgeState {
+        session_id: Some("s1".into()),
+        ..Default::default()
+    };
+    let legacy_id = |out: &[Outbound]| {
+        out.iter()
+            .find_map(|o| match o {
+                Outbound::Legacy(v) if v["type"] == "ask_user_response" => v["id"].as_u64(),
+                _ => None,
+            })
+            .expect("ask_user_response forwarded")
+    };
+    let answer = |state: &mut BridgeState, api_id: u64| {
+        state.api_request_to_legacy(&json!({
+            "req": "ask_response", "id": api_id, "session_id": "s1", "request_id": "ask-c1",
+            "response": {"answers": [{"selected": ["A"]}]}
+        }))
+    };
+
+    let rejected = legacy_id(&answer(&mut state, 9));
+    assert!(
+        state
+            .legacy_event_to_api(&json!({"type": "ack", "id": rejected}))
+            .is_empty(),
+        "receipt is not acceptance: the daemon may still reject the answer"
+    );
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "error", "id": rejected,
+        "message": "The input request is no longer pending on this connection; your answer was not accepted"
+    }));
+    assert!(
+        matches!(&frames[..], [frame] if frame.reply_to == Some(9)
+            && matches!(&frame.event, jcode_harness_api::ApiEvent::Error { message, .. } if message.contains("not accepted"))),
+        "a rejected answer must reply with an error, got {frames:?}"
+    );
+
+    let accepted = legacy_id(&answer(&mut state, 10));
+    assert!(
+        state
+            .legacy_event_to_api(&json!({"type": "ack", "id": accepted}))
+            .is_empty()
+    );
+    let frames = state.legacy_event_to_api(&json!({"type": "done", "id": accepted}));
+    assert!(
+        matches!(&frames[..], [frame] if frame.reply_to == Some(10)
+            && matches!(frame.event, jcode_harness_api::ApiEvent::Ok)),
+        "an accepted answer replies Ok once the daemon delivers it, got {frames:?}"
+    );
+}

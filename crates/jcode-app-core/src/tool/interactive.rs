@@ -227,10 +227,15 @@ pub(crate) fn attach_client(
         });
     ROUTES_CHANGED.notify_waiters();
     if let Some(requests) = all.get(session_id) {
-        for pending in requests
+        // Clients stack questions in arrival order. Replay them in the order
+        // they were asked, not in hash order, so a reattached client shows the
+        // same question on top as before the disconnect.
+        let mut replay: Vec<_> = requests
             .values()
             .filter(|pending| owner_ui || !is_owner_approval(&pending.request_id))
-        {
+            .collect();
+        replay.sort_by_key(|pending| pending.generation);
+        for pending in replay {
             dispatch_ask(session_id, pending, &sender);
         }
     }
@@ -402,6 +407,50 @@ mod tests {
         .await
         .expect("peer response must close");
         assert!(second_request.response_tx.send("late".into()).is_err());
+    }
+
+    #[tokio::test]
+    async fn reattached_client_receives_every_pending_ask_in_creation_order() {
+        let session = "replay-order-test";
+        let (first, mut first_rx) = mpsc::unbounded_channel();
+        let attachment = attach(session, first);
+        let ids: Vec<String> = (0..12).map(|i| format!("ask-call-{i}")).collect();
+        let mut waiting = Vec::new();
+        for id in &ids {
+            let (reply, response) = oneshot::channel();
+            sender(session)
+                .unwrap()
+                .send(StdinInputRequest {
+                    request_id: id.clone(),
+                    prompt: id.clone(),
+                    is_password: false,
+                    ask_questions: Some(serde_json::json!([{}])),
+                    response_tx: reply,
+                })
+                .unwrap();
+            first_rx.recv().await.unwrap();
+            waiting.push(response);
+        }
+        drop(first_rx);
+        drop(attachment);
+
+        let (second, mut second_rx) = mpsc::unbounded_channel();
+        let _second = attach(session, second);
+        let mut replayed = Vec::new();
+        while let Ok(request) = second_rx.try_recv() {
+            replayed.push(request);
+        }
+        assert_eq!(
+            replayed
+                .iter()
+                .map(|r| r.request_id.as_str())
+                .collect::<Vec<_>>(),
+            ids.iter().map(String::as_str).collect::<Vec<_>>(),
+            "a client shows one question at a time, so replay must keep the order the questions were asked"
+        );
+        let last = replayed.pop().unwrap();
+        last.response_tx.send("answer".into()).unwrap();
+        assert_eq!(waiting.pop().unwrap().await.unwrap(), "answer");
     }
 
     #[tokio::test]
