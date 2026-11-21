@@ -4,12 +4,21 @@ use super::{ApiEvent, BridgeState, ErrorCode, ServerFrame, Value};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum SimpleKind {
+    QueueControl,
+    QueueSnapshot,
+    QueueRemoval,
+    QueueEdit,
     RuntimeCommand,
     Detach,
     Tools,
     ToolControl,
     Ping,
     History,
+    HistoryPage,
+    HistoryImageChunk,
+    SessionImages,
+    SessionImage,
+    CompactedHistory,
     /// Receipt-only controls: cancel, soft interrupts, auth/usage invalidation,
     /// and the legacy background-tool fallback. Their handlers do not reject
     /// the control after ack (an idle interrupt can separately fail its turn).
@@ -49,10 +58,18 @@ impl BridgeState {
                 *pending_id == id
                     && matches!(
                         kind,
-                        SimpleKind::Tools
+                        SimpleKind::QueueControl
+                            | SimpleKind::QueueSnapshot
+                            | SimpleKind::QueueRemoval
+                            | SimpleKind::Tools
                             | SimpleKind::ToolControl
                             | SimpleKind::OkOnDone
                             | SimpleKind::OkOnHistory
+                            | SimpleKind::CompactedHistory
+                            | SimpleKind::HistoryPage
+                            | SimpleKind::HistoryImageChunk
+                            | SimpleKind::SessionImages
+                            | SimpleKind::SessionImage
                     )
             })?;
         let (_, api_id, _) = self.pending_simple.remove(index);

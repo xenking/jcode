@@ -5,13 +5,18 @@
 //! account's reset for the week.
 
 use super::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const API_BASE: &str = "https://api.anthropic.com";
 const STATUS_PATH: &str = "/api/oauth/usage?at_wall=1&skip_spend=1";
 const PROFILE_PATH: &str = "/api/oauth/profile";
 /// Server-side program name of the weekly session-limit reset.
 const PROGRAM: &str = "juniper_tide";
+
+#[derive(Serialize)]
+struct ResetRequest {
+    program: &'static str,
+}
 
 pub use jcode_usage_types::AnthropicLimitResetOffer;
 
@@ -35,7 +40,7 @@ struct StatusBlock {
 
 /// Parse the status block from an at-wall usage response. `None` means the
 /// account is not offered resets at all, so no reset control should appear.
-fn offer_from_status(
+pub(super) fn offer_from_status(
     value: &serde_json::Value,
     account_label: Option<&str>,
 ) -> Option<AnthropicLimitResetOffer> {
@@ -142,9 +147,13 @@ pub(super) fn cached_limit_reset_offer(
 // remain unknown and must not be displayed as a confirmed empty balance.
 fn explicitly_ineligible(value: &serde_json::Value) -> bool {
     value
-        .pointer("/juniper_tide/eligible")
-        .and_then(|v| v.as_bool())
-        == Some(false)
+        .pointer("/juniper_tide/ineligible_reason")
+        .and_then(|v| v.as_str())
+        != Some("surface")
+        && value
+            .pointer("/juniper_tide/eligible")
+            .and_then(|v| v.as_bool())
+            == Some(false)
 }
 
 /// A confirmation pins the login, organization and token, so switching the
@@ -392,7 +401,7 @@ async fn consume_with_client(
     );
     let result = async {
         let response = authorize(client.post(url), &pending.access_token)
-            .json(&serde_json::json!({ "program": PROGRAM }))
+            .json(&ResetRequest { program: PROGRAM })
             .send()
             .await
             .context("Could not receive the Claude reset result")?;
@@ -416,12 +425,24 @@ async fn consume_with_client(
 /// reset. Only local state changes, so this is safe to repeat.
 pub fn invalidate_anthropic_usage_reset_state(account_label: Option<&str>) {
     super::cache::invalidate_anthropic_usage_after_reset(account_label);
-    if let Some(label) = account_label {
-        super::banked::record_anthropic_offer(label, None);
-    }
     crate::provider::clear_claude_provider_unavailability_for_account_label(account_label);
 }
 
 #[cfg(test)]
 #[path = "anthropic_reset_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod request_serialization_tests {
+    use super::*;
+
+    #[test]
+    fn reset_request_matches_legacy_bytes_without_sending() {
+        let expected = serde_json::to_vec(&serde_json::json!({ "program": PROGRAM })).unwrap();
+        let builder = reqwest::Client::new()
+            .post("https://example.invalid/reset")
+            .json(&ResetRequest { program: PROGRAM });
+        let request = builder.build().unwrap();
+        assert_eq!(request.body().unwrap().as_bytes().unwrap(), expected);
+    }
+}

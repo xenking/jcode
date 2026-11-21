@@ -1,16 +1,37 @@
 use std::sync::Arc;
 
-/// A soft interrupt message queued for injection at the next safe point.
+/// Delivery phase for a user message in the existing interrupt queue.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum QueuedMessageMode {
+    #[default]
+    Steer,
+    AfterYield,
+    /// Reserved by a turn but still durable until its input is saved.
+    InFlight,
+}
+
+/// A message queued for delivery at a safe point or after the active turn.
 #[derive(Debug, Clone)]
 pub struct SoftInterruptMessage {
+    pub attachments: Vec<jcode_session_types::Attachment>,
     pub content: String,
+    /// Hidden instruction delivered when this prompt starts its own turn.
+    pub system_reminder: Option<String>,
+    /// Skill resolved by the daemon for this queued message.
+    pub active_skill: Option<String>,
     pub images: Vec<(String, String)>,
     /// If true, can skip remaining tools when injected at point C.
     pub urgent: bool,
     pub source: SoftInterruptSource,
+    pub mode: QueuedMessageMode,
     /// Opaque caller-supplied id. Echoed in the injection event and used to
     /// cancel this one message while it is still queued.
     pub client_id: Option<String>,
+    /// Connection token of the client that holds this prompt open for editing.
+    /// A held prompt stays at its queue position (mode included) but is never
+    /// drained. Cleared when the edit is saved or cancelled, or when the
+    /// holding connection goes away.
+    pub editing_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +39,9 @@ pub enum SoftInterruptSource {
     User,
     System,
     BackgroundTask,
+    /// A swarm peer changed a file this agent edited. Typed so clients can
+    /// render it without the notice text carrying an identifying prefix.
+    FileActivity,
 }
 
 /// Thread-safe soft interrupt queue that can be accessed without holding the agent lock.

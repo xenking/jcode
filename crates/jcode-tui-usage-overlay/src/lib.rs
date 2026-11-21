@@ -366,10 +366,8 @@ impl UsageOverlay {
             KeyCode::End | KeyCode::Char('G') => {
                 self.selected = self.filtered.len().saturating_sub(1);
             }
-            KeyCode::Backspace => {
-                if self.filter.pop().is_some() {
-                    self.apply_filter();
-                }
+            KeyCode::Backspace if self.filter.pop().is_some() => {
+                self.apply_filter();
             }
             KeyCode::Char(c)
                 if !modifiers.contains(KeyModifiers::CONTROL)
@@ -917,8 +915,10 @@ mod tests {
                 }],
                 extra_info: vec![("plan".to_string(), "max".to_string())],
                 hard_limit_reached: false,
+                openai_credit_overage: false,
                 openai_reset_credits: None,
                 anthropic_limit_reset: None,
+                anthropic_banked_resets: None,
                 error: None,
                 last_used_unix_secs: None,
             }],

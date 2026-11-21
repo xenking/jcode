@@ -66,6 +66,7 @@ impl Provider for TestEffortProvider {
     }
 
     fn set_model(&self, model: &str) -> anyhow::Result<()> {
+        let model = model.split_once(':').map_or(model, |(_, model)| model);
         *self.model.lock().expect("model lock") = Some(model.to_string());
         Ok(())
     }
@@ -89,6 +90,10 @@ impl Provider for TestEffortProvider {
     fn set_reasoning_effort(&self, effort: &str) -> anyhow::Result<()> {
         *self.effort.lock().expect("effort lock") = Some(effort.to_string());
         Ok(())
+    }
+
+    fn available_efforts(&self) -> Vec<&'static str> {
+        vec!["low", "medium", "high", "xhigh", "max"]
     }
 
     fn service_tier(&self) -> Option<String> {
@@ -117,6 +122,118 @@ impl Provider for TestEffortProvider {
             transport: StdMutex::new(self.transport()),
         })
     }
+}
+
+#[tokio::test]
+async fn worker_effort_caps_apply_to_spawn_control_failover_and_resume() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[agents]\nswarm_effort_caps = { \"test-effort:test-model-b\" = \"medium\" }\n",
+    )
+    .unwrap();
+    crate::config::Config::invalidate_cache();
+
+    let (provider, worker, tx, mut rx) = test_agent("session_effort_cap_worker").await;
+    {
+        let mut agent = worker.lock().await;
+        agent.mark_swarm_worker().unwrap();
+        agent.set_model("test-model-b").unwrap();
+        assert_eq!(
+            agent.set_reasoning_effort("max").unwrap().as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            agent.set_reasoning_effort("low").unwrap().as_deref(),
+            Some("low")
+        );
+        agent.set_model("test-model-a").unwrap();
+        assert_eq!(
+            agent.set_reasoning_effort("max").unwrap().as_deref(),
+            Some("max")
+        );
+        agent.set_model("test-model-b").unwrap();
+        assert_eq!(provider.reasoning_effort().as_deref(), Some("medium"));
+    }
+    handle_set_reasoning_effort(
+        71,
+        "xhigh".into(),
+        true,
+        &worker,
+        "session_worker",
+        None,
+        &tx,
+    )
+    .await;
+    let event = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(event, ServerEvent::ReasoningEffortChanged { effort: Some(ref effort), error: None, .. } if effort == "medium")
+    );
+    let busy_worker = worker.lock().await;
+    handle_set_reasoning_effort(
+        72,
+        "max".into(),
+        true,
+        &worker,
+        "session_effort_cap_worker",
+        Some(provider.clone()),
+        &tx,
+    )
+    .await;
+    let event = timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("busy worker must respond")
+        .unwrap();
+    assert!(
+        matches!(event, ServerEvent::ReasoningEffortChanged { effort: Some(ref effort), error: None, .. } if effort == "medium")
+    );
+    drop(busy_worker);
+    let mut saved = crate::session::Session::load("session_effort_cap_worker").unwrap();
+    assert!(saved.is_swarm_worker);
+    saved.model = Some("test-model-b".into());
+    saved.provider_key = None;
+    saved.route_api_method = None;
+    saved.reasoning_effort = Some("max".into());
+    let resumed_provider = Arc::new(TestEffortProvider {
+        model: StdMutex::new(Some("test-model-b".into())),
+        ..Default::default()
+    });
+    let dyn_provider: Arc<dyn Provider> = resumed_provider.clone();
+    let registry = crate::tool::Registry::new(dyn_provider.clone()).await;
+    let resumed = Agent::new_with_session(dyn_provider, registry, saved, None);
+    assert!(
+        resumed.has_worker_effort_cap(),
+        "resumed model {:?}",
+        resumed.provider_model()
+    );
+    assert_eq!(
+        resumed_provider.reasoning_effort().as_deref(),
+        Some("medium")
+    );
+    let (_, root, _, _) = test_agent("session_effort_cap_root").await;
+    let mut root = root.lock().await;
+    root.set_model("test-model-b").unwrap();
+    assert_eq!(
+        root.set_reasoning_effort("max").unwrap().as_deref(),
+        Some("max")
+    );
 }
 
 async fn test_agent(
@@ -228,6 +345,9 @@ async fn set_context_cap_is_deferred_isolated_and_persisted() {
 #[tokio::test]
 async fn set_reasoning_effort_does_not_wait_for_busy_agent_lock() {
     let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
     let _runtime = IsolatedRuntimeDir::new();
 
     let (provider, agent, client_event_tx, mut client_event_rx) =
@@ -236,18 +356,22 @@ async fn set_reasoning_effort_does_not_wait_for_busy_agent_lock() {
 
     timeout(
         Duration::from_millis(100),
-        handle_set_reasoning_effort(7, "low".to_string(), &agent, &client_event_tx),
+        handle_set_reasoning_effort(
+            7,
+            "low".to_string(),
+            false,
+            &agent,
+            "session_busy_reasoning_effort",
+            Some(provider.clone()),
+            &client_event_tx,
+        ),
     )
     .await
     .expect("reasoning effort changes must not wait for a busy agent mutex");
 
-    assert!(client_event_rx.try_recv().is_err());
-
-    drop(busy_agent_lock);
-
     let event = timeout(Duration::from_secs(1), client_event_rx.recv())
         .await
-        .expect("deferred reasoning effort change should finish after agent is idle");
+        .expect("reasoning effort change must be confirmed while the turn is active");
     assert_eq!(provider.reasoning_effort().as_deref(), Some("low"));
     assert!(matches!(
         event,
@@ -257,6 +381,179 @@ async fn set_reasoning_effort_does_not_wait_for_busy_agent_lock() {
             error: None,
         }) if effort == "low"
     ));
+    drop(busy_agent_lock);
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if crate::session::Session::load("session_busy_reasoning_effort")
+                .ok()
+                .and_then(|session| session.reasoning_effort)
+                .as_deref()
+                == Some("low")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("applied effort must be saved after the agent unlocks");
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+/// 2026-11-19: the live provider took "high" at once, but the session file
+/// still said "xhigh" because the busy turn never released the agent before
+/// the daemon reloaded, and the restored session went back to xhigh.
+#[tokio::test]
+async fn effort_applied_to_a_busy_turn_survives_a_restart_before_it_ends() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    let _runtime = IsolatedRuntimeDir::new();
+    let session_id = "session_busy_effort_restart";
+
+    let (provider, agent, client_event_tx, _rx) = test_agent(session_id).await;
+    {
+        let mut agent = agent.lock().await;
+        agent.set_reasoning_effort("xhigh").unwrap();
+    }
+    let busy_agent_lock = agent.lock().await;
+    handle_set_reasoning_effort(
+        11,
+        "high".to_string(),
+        false,
+        &agent,
+        session_id,
+        Some(provider.clone()),
+        &client_event_tx,
+    )
+    .await;
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("high"));
+
+    // The daemon dies while the turn still holds the agent.
+    std::mem::forget(busy_agent_lock);
+    crate::session_effort::forget_pending_efforts_in_memory();
+    let restored_provider = Arc::new(TestEffortProvider::default());
+    let dyn_provider: Arc<dyn Provider> = restored_provider.clone();
+    let registry = crate::tool::Registry::new(dyn_provider.clone()).await;
+    let restored = Agent::new_with_session(
+        dyn_provider,
+        registry,
+        crate::session::Session::load(session_id).unwrap(),
+        None,
+    );
+
+    assert_eq!(
+        restored_provider.reasoning_effort().as_deref(),
+        Some("high")
+    );
+    drop(restored);
+    assert_eq!(
+        crate::session::Session::load(session_id)
+            .unwrap()
+            .reasoning_effort
+            .as_deref(),
+        Some("high"),
+        "the restored session must store the effort the turn was using"
+    );
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+/// The live provider registration is a weak reference that can fail to
+/// upgrade while a turn owns the agent. That must queue the change for the
+/// next turn, not reject it as "live provider unavailable".
+#[tokio::test]
+async fn set_reasoning_effort_without_provider_queues_for_next_turn() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    let _runtime = IsolatedRuntimeDir::new();
+
+    let (provider, agent, client_event_tx, mut client_event_rx) =
+        test_agent("session_busy_reasoning_effort_without_provider").await;
+    let busy_agent_lock = agent.lock().await;
+
+    timeout(
+        Duration::from_millis(100),
+        handle_set_reasoning_effort(
+            8,
+            "high".to_string(),
+            false,
+            &agent,
+            "session_busy_reasoning_effort_without_provider",
+            None,
+            &client_event_tx,
+        ),
+    )
+    .await
+    .expect("a busy turn must acknowledge the effort change without the agent lock");
+
+    let event = timeout(Duration::from_secs(1), client_event_rx.recv())
+        .await
+        .expect("a busy turn must confirm the queued effort change");
+    assert!(
+        matches!(
+            event,
+            Some(ServerEvent::ReasoningEffortChanged {
+                id: 8,
+                effort: Some(ref effort),
+                error: None,
+            }) if effort == "high"
+        ),
+        "unexpected event: {event:?}"
+    );
+    assert_eq!(
+        crate::session_effort::session_effort("session_busy_reasoning_effort_without_provider")
+            .as_deref(),
+        Some("high"),
+        "the requested effort must be visible while the turn is still running"
+    );
+    assert_eq!(
+        provider.reasoning_effort(),
+        None,
+        "the in-flight provider must not be mutated before the agent is free"
+    );
+
+    drop(busy_agent_lock);
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if provider.reasoning_effort().as_deref() == Some("high") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("queued effort must reach the provider after the agent unlocks");
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if crate::session::Session::load("session_busy_reasoning_effort_without_provider")
+                .ok()
+                .and_then(|session| session.reasoning_effort)
+                .as_deref()
+                == Some("high")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("queued effort must persist after the agent unlocks");
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
 }
 
 #[tokio::test]

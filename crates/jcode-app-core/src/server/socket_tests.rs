@@ -617,8 +617,30 @@ fn publish_reload_socket_ready_clears_marker_for_foreign_pid() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
-async fn inspect_reload_wait_status_reports_ready_for_socket_ready_marker() {
+async fn live_old_listener_without_reload_confirmation_is_not_ready() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let previous = std::env::var_os("JCODE_RUNTIME_DIR");
+    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+    let socket = temp.path().join("old.sock");
+    let _listener = Listener::bind(&socket).expect("old listener");
+    let status = inspect_reload_wait_status(&socket, Duration::from_secs(30), None).await;
+    if let Some(previous) = previous {
+        crate::env::set_var("JCODE_RUNTIME_DIR", previous);
+    } else {
+        crate::env::remove_var("JCODE_RUNTIME_DIR");
+    }
+    assert_ne!(
+        status,
+        ReloadWaitStatus::Ready,
+        "socket liveness is not reload confirmation"
+    );
+}
+
+#[tokio::test]
+async fn socket_ready_marker_alone_does_not_confirm_serving_generation() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
@@ -628,7 +650,12 @@ async fn inspect_reload_wait_status_reports_ready_for_socket_ready_marker() {
 
     let socket_path = temp.path().join("missing.sock");
     let status = inspect_reload_wait_status(&socket_path, Duration::from_secs(30), None).await;
-    assert_eq!(status, ReloadWaitStatus::Ready);
+    assert_eq!(
+        status,
+        ReloadWaitStatus::Waiting {
+            pid: Some(std::process::id())
+        }
+    );
 
     clear_reload_marker();
     if let Some(prev_runtime) = prev_runtime {
@@ -661,12 +688,10 @@ async fn inspect_reload_wait_status_keeps_waiting_while_starting_marker_is_activ
     let _listener = Listener::bind(&socket_path).expect("bind listener");
 
     let status = inspect_reload_wait_status(&socket_path, Duration::from_secs(30), None).await;
-    assert_eq!(
+    assert!(matches!(
         status,
-        ReloadWaitStatus::Waiting {
-            pid: Some(std::process::id())
-        }
-    );
+        ReloadWaitStatus::Waiting { .. } | ReloadWaitStatus::Unknown { .. }
+    ));
 
     clear_reload_marker();
     if let Some(prev_runtime) = prev_runtime {
@@ -762,8 +787,50 @@ async fn inspect_reload_wait_status_reports_failed_when_reload_pid_is_dead() {
     }
 }
 
+#[cfg(unix)]
+fn identity_listener(
+    socket: &std::path::Path,
+    reload_id: tokio::sync::watch::Receiver<Option<String>>,
+) -> tokio::task::JoinHandle<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let listener = Listener::bind(socket).expect("bind identity listener");
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.expect("accept identity probe");
+            let mut reload_id = reload_id.clone();
+            tokio::spawn(async move {
+                let (reader, mut writer) = stream.into_split();
+                let mut line = String::new();
+                if BufReader::new(reader)
+                    .read_line(&mut line)
+                    .await
+                    .unwrap_or(0)
+                    == 0
+                {
+                    return;
+                }
+                let request: crate::protocol::Request = serde_json::from_str(&line).unwrap();
+                let crate::protocol::Request::Ping { id } = request else {
+                    return;
+                };
+                let identity = crate::protocol::DaemonIdentity {
+                    pid: std::process::id(),
+                    binary_path: "/fixture/versions/new/jcode".into(),
+                    git_hash: "abcdef123".into(),
+                    version_label: Some("new".into()),
+                    reload_id: reload_id.borrow_and_update().clone(),
+                    generation: 2,
+                };
+                let reply = serde_json::json!({"type":"pong", "id":id,"daemon_identity":identity});
+                let _ = writer.write_all(format!("{reply}\n").as_bytes()).await;
+            });
+        }
+    })
+}
+
+#[cfg(unix)]
 #[tokio::test]
-async fn await_reload_handoff_returns_ready_after_marker_transition() {
+async fn await_reload_handoff_requires_listener_confirmation_after_marker_transition() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
@@ -779,12 +846,18 @@ async fn await_reload_handoff_returns_ready_after_marker_transition() {
     }
     .write();
 
-    tokio::spawn(async {
+    let socket_path = temp.path().join("identity.sock");
+    let (confirm, reload_id) = tokio::sync::watch::channel(Some("old-request".to_owned()));
+    let listener = identity_listener(&socket_path, reload_id);
+    tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(50)).await;
         write_reload_state("test-request", "test-hash", ReloadPhase::SocketReady, None);
+        // Marker says ready while the OLD image still answers. It is not Ready.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        confirm.send(Some("test-request".to_owned())).unwrap();
     });
 
-    let socket_path = temp.path().join("missing.sock");
+    let started = std::time::Instant::now();
     let status = tokio::time::timeout(
         Duration::from_secs(2),
         await_reload_handoff(&socket_path, Duration::from_secs(30)),
@@ -792,6 +865,8 @@ async fn await_reload_handoff_returns_ready_after_marker_transition() {
     .await
     .expect("await reload handoff should finish");
     assert_eq!(status, ReloadWaitStatus::Ready);
+    assert!(started.elapsed() >= Duration::from_millis(200));
+    listener.abort();
 
     clear_reload_marker();
     if let Some(prev_runtime) = prev_runtime {
@@ -838,6 +913,89 @@ async fn await_reload_handoff_returns_failed_after_marker_transition() {
     assert_eq!(status, ReloadWaitStatus::Failed(Some("boom".to_string())));
 
     clear_reload_marker();
+    if let Some(prev_runtime) = prev_runtime {
+        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+    } else {
+        crate::env::remove_var("JCODE_RUNTIME_DIR");
+    }
+}
+
+/// A reload that never finished leaves clients holding its request id (or none)
+/// after the marker is gone. With no live reload evidence, the daemon that is
+/// actually serving is the only truth: waiting for a confirmation that can never
+/// arrive hung every client in "Waiting for reload handoff" indefinitely.
+#[cfg(unix)]
+#[tokio::test]
+async fn live_listener_without_reload_marker_is_ready_even_for_an_abandoned_reload() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+    clear_reload_marker();
+
+    let socket_path = temp.path().join("identity.sock");
+    let (_confirm, reload_id) = tokio::sync::watch::channel(Some("earlier-reload".to_owned()));
+    let listener = identity_listener(&socket_path, reload_id);
+
+    for remembered in [Some("abandoned-reload"), None] {
+        let status = tokio::time::timeout(
+            Duration::from_secs(2),
+            crate::server::inspect_reload_wait_status_for(
+                &socket_path,
+                Duration::from_secs(30),
+                Some(std::process::id()),
+                remembered,
+                None,
+            ),
+        )
+        .await
+        .expect("inspect must not block");
+        assert_eq!(
+            status,
+            ReloadWaitStatus::Ready,
+            "remembered reload {remembered:?} with no marker must attach to the live daemon"
+        );
+    }
+    listener.abort();
+
+    if let Some(prev_runtime) = prev_runtime {
+        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+    } else {
+        crate::env::remove_var("JCODE_RUNTIME_DIR");
+    }
+}
+
+/// An older build can see the shared socket as custom (it resolved the runtime
+/// dir from `$TMPDIR`) and lock only `jcode.sock.daemon.lock`. A newer build
+/// that locked only `jcode-daemon.lock` then started a second daemon on the
+/// same path, replaced the live daemon's socket, idled out, and left nothing
+/// listening. A shared-socket server must contend for both names.
+#[cfg(unix)]
+#[test]
+fn shared_socket_contends_with_a_socket_scoped_lock_holder() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+    let runtime_dir = std::fs::canonicalize(temp.path()).expect("canonicalize tempdir");
+    crate::env::set_var("JCODE_RUNTIME_DIR", &runtime_dir);
+
+    let shared = runtime_dir.join("jcode.sock");
+    let older_build_lock = try_acquire_daemon_lock(&runtime_dir.join("jcode.sock.daemon.lock"))
+        .expect("acquire socket-scoped lock")
+        .expect("socket-scoped lock should be free");
+
+    assert!(
+        super::socket::acquire_daemon_lock_for(&shared).is_err(),
+        "a daemon holding the socket-scoped lock must block a second shared daemon"
+    );
+    assert!(
+        try_acquire_daemon_lock(&runtime_dir.join("jcode-daemon.lock"))
+            .expect("probe runtime lock")
+            .is_some(),
+        "a refused start must release the locks it took"
+    );
+
+    drop(older_build_lock);
     if let Some(prev_runtime) = prev_runtime {
         crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
     } else {

@@ -1,12 +1,5 @@
-//! Buffer-level (terminal cell) verification for the inline swarm strip and
-//! the notification line.
-//!
-//! Prior swarm-strip/notification tests only checked `Line` construction
-//! (span widths). These tests close that gap: they render through ratatui's
-//! `TestBackend` so actual cell writes are exercised, including the full
-//! `ui::draw` layout path (ui.rs strip Paragraph at chunk 2, notification at
-//! chunk 4) and direct widget draws into sub-areas, asserting no panics and
-//! that nothing is written outside the target area even with wide glyphs.
+//! Buffer-level verification for the retired bottom swarm strip and notifications.
+//! Full draws must leave worker status to pinned todos or the dedicated page.
 
 use super::*;
 use crate::protocol::SwarmMemberStatus;
@@ -87,13 +80,12 @@ fn fact_test_state(input: String, scheduled: bool) -> TestState {
 }
 
 #[test]
-fn swarm_strip_full_draw_writes_chips_row_above_status_line() {
+fn swarm_full_draw_has_no_bottom_worker_strip_even_when_focused_without_todos() {
     let _lock = viewport_snapshot_test_lock();
     clear_flicker_frame_history_for_tests();
-    // Placement state is process-global; a dock placed by another test would
-    // make the strip stand down. Clear it so this frame is self-contained.
+    // Clear process-global placement state so this frame is self-contained.
     crate::tui::info_widget::clear_widget_placements_for_tests();
-    let state = TestState {
+    let mut state = TestState {
         display_messages: vec![DisplayMessage::assistant("hello from the coordinator")],
         messages_version: 1,
         swarm_members: vec![
@@ -103,40 +95,26 @@ fn swarm_strip_full_draw_writes_chips_row_above_status_line() {
         ..Default::default()
     };
 
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-    terminal
-        .draw(|frame| crate::tui::ui::draw(frame, &state))
-        .expect("full draw with inline swarm strip should not panic");
-
-    let status_area = crate::tui::ui::last_status_area().expect("status area recorded");
-    assert!(status_area.y > 0, "status line should not be the top row");
-    let rows = buffer_rows(&terminal);
-    // Vertical strip (default layout): one agent per row directly above the
-    // status line, first row carrying the 🐝 marker.
-    let strip_rows = rows[..status_area.y as usize]
-        .iter()
-        .rev()
-        .take(2)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        strip_rows.contains("🐝"),
-        "expected the swarm marker above the status line, got: {strip_rows:?}"
-    );
-    assert!(
-        strip_rows.contains("researcher"),
-        "expected member row in strip cells, got: {strip_rows:?}"
-    );
-    assert!(
-        strip_rows.contains("2/5"),
-        "expected todo progress counter in strip cells, got: {strip_rows:?}"
-    );
+    assert!(state.pinned_todos_payload.is_none());
+    for focused in [false, true] {
+        state.swarm_panel_focused = focused;
+        clear_flicker_frame_history_for_tests();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &state))
+            .expect("full draw without bottom swarm strip should not panic");
+        let rows = buffer_rows(&terminal).join("\n");
+        for retired_content in ["🐝", "researcher", "reviewer", "2/5"] {
+            assert!(
+                !rows.contains(retired_content),
+                "bottom worker strip must stay absent focused={focused}: {rows:?}"
+            );
+        }
+    }
 }
 
 #[test]
-fn swarm_strip_full_draw_survives_narrow_width_sweep() {
+fn swarm_chat_full_draw_survives_narrow_width_sweep() {
     let _lock = viewport_snapshot_test_lock();
     crate::tui::info_widget::clear_widget_placements_for_tests();
     let state = TestState {
@@ -165,7 +143,7 @@ fn swarm_strip_full_draw_survives_narrow_width_sweep() {
 }
 
 #[test]
-fn swarm_strip_full_draw_handles_wide_glyph_member_names() {
+fn swarm_chat_full_draw_handles_wide_glyph_member_names() {
     let _lock = viewport_snapshot_test_lock();
     crate::tui::info_widget::clear_widget_placements_for_tests();
     let mut coordinator = strip_member("s0", "調整役エージェント", "running");
@@ -178,8 +156,7 @@ fn swarm_strip_full_draw_handles_wide_glyph_member_names() {
         strip_member("s2", "🦊🦊🦊 fox-agent 🦊🦊🦊", "completed"),
     ];
 
-    // Unfocused (1 line) and focused (chips + preview + hints) variants both
-    // must survive cell-level rendering with wide glyphs at every width.
+    // Chat remains safe with stale focus state and wide-glyph worker data.
     for focused in [false, true] {
         let state = TestState {
             display_messages: vec![DisplayMessage::assistant("wide glyph check")],
@@ -203,52 +180,23 @@ fn swarm_strip_full_draw_handles_wide_glyph_member_names() {
 }
 
 #[test]
-fn swarm_strip_paragraph_never_writes_outside_target_area() {
-    // Mirror the exact ui.rs render path (Paragraph::new(lines) into a chunk),
-    // but deliberately render lines built for a wider area into a narrow Rect
-    // to prove clipping happens at the cell level, including wide glyphs.
-    let members = vec![
-        strip_member("s1", "深度搜索エージェント", "running"),
-        strip_member("s2", "reviewer-with-a-long-name", "completed"),
-    ];
-    let gallery_lines = crate::tui::info_widget::swarm_gallery::render_swarm_strip_lines(
-        &members, 0, true, "ctrl+t", 3, 80, 16,
-    );
-    assert!(!gallery_lines.is_empty(), "expected focused strip lines");
-
-    let backend = TestBackend::new(40, 6);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-    let area = Rect::new(2, 1, 20, gallery_lines.len() as u16);
+fn swarm_full_page_still_renders_worker_status() {
+    let _lock = viewport_snapshot_test_lock();
+    clear_flicker_frame_history_for_tests();
+    let state = TestState {
+        swarm_members: vec![strip_member("s1", "researcher", "running")],
+        swarm_panel_focused: true,
+        swarm_panel_full_page: true,
+        ..Default::default()
+    };
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
     terminal
-        .draw(|frame| {
-            frame.render_widget(Paragraph::new(gallery_lines.clone()), area);
-        })
-        .expect("over-wide strip paragraph should clip, not panic");
-
-    let rows = buffer_rows(&terminal);
-    for (y, row) in rows.iter().enumerate() {
-        let cells: Vec<char> = row.chars().collect();
-        let inside_rows = (area.y as usize)..(area.y + area.height) as usize;
-        if !inside_rows.contains(&y) {
-            assert!(
-                row.trim().is_empty(),
-                "row {y} outside strip area should be untouched, got: {row:?}"
-            );
-            continue;
-        }
-        for (x, ch) in cells.iter().enumerate() {
-            if x < area.x as usize || x >= (area.x + area.width) as usize {
-                assert_eq!(
-                    *ch, ' ',
-                    "cell ({x},{y}) outside strip area must stay blank, got {ch:?} in row {row:?}"
-                );
-            }
-        }
-    }
-    let first_row = &rows[area.y as usize];
+        .draw(|frame| crate::tui::ui::draw(frame, &state))
+        .expect("dedicated swarm page should render");
+    let rows = buffer_rows(&terminal).join("\n");
     assert!(
-        !first_row.trim().is_empty(),
-        "strip content should be written inside the area"
+        rows.contains("researcher"),
+        "worker page remains available: {rows:?}"
     );
 }
 
@@ -430,6 +378,33 @@ fn overscroll_line_row(state: &TestState, width: u16) -> String {
 }
 
 #[test]
+fn overscroll_line_compact_percentages_at_120_and_200_columns() {
+    let mut state = overscroll_line_state();
+    state.info_widget_data.auth_method = info_widget::AuthMethod::OpenAIOAuth;
+    state.info_widget_data.usage_info = Some(info_widget::UsageInfo {
+        provider: info_widget::UsageProvider::OpenAI,
+        available: true,
+        primary_limit_label: Some("5h".into()),
+        secondary_limit_label: Some("7-day".into()),
+        five_hour: 0.27,
+        seven_day: 0.88,
+        ..Default::default()
+    });
+    for width in [120, 200] {
+        let row = overscroll_line_row(&state, width);
+        eprintln!("{width}: {row}");
+        for forbidden in ["used", "left", "OAuth", "7-day", "74k/256k", "▰", "▱"] {
+            assert!(!row.contains(forbidden), "{width}: {row}");
+        }
+        assert!(
+            row.contains("29%") && row.contains("27%") && row.contains("88%"),
+            "{width}: {row}"
+        );
+        assert!(row.contains('\u{ec81}'), "{width}: {row}");
+    }
+}
+
+#[test]
 fn overscroll_line_orders_dir_git_context_then_model_on_the_right() {
     let row = overscroll_line_row(&overscroll_line_state(), 200);
     let dir = row.find("~/jcode").expect("dir shown");
@@ -438,16 +413,15 @@ fn overscroll_line_orders_dir_git_context_then_model_on_the_right() {
     let context = row
         .find("29%")
         .expect("context percentage shown when roomy");
-    let model = row.find("GPT-5.6 Sol high").expect("model shown");
+    let model = row
+        .find("GPT-5.6 Sol ◒")
+        .expect("model shown with effort glyph");
     assert!(
         dir < branch && branch < git && git < context && context < model,
         "{row}"
     );
-    assert!(
-        row.contains("74k/256k ▰▱▱▱ 29% used"),
-        "token counts and small context bar: {row}"
-    );
-    assert!(row.contains("OAuth") && row.contains("OpenAI"), "{row}");
+    assert!(row.contains("󰍛 29%"), "compact context: {row}");
+    assert!(!row.contains("OAuth") && !row.contains("OpenAI"), "{row}");
     assert!(
         !row.contains("(overscroll"),
         "no countdown on the pinned line: {row}"
@@ -500,8 +474,8 @@ fn overscroll_line_shows_remaining_account_allowance_after_provider() {
         ..Default::default()
     });
     let row = overscroll_line_row(&state, 200);
-    assert!(row.contains("OpenAI ▰▰▱▱ 40% left"), "{row}");
-    assert!(row.contains("74k/256k ▰▱▱▱ 29% used"), "{row}");
+    assert!(row.contains("\u{ec81} 60%"), "{row}");
+    assert!(row.contains("󰍛 29%"), "{row}");
     state
         .info_widget_data
         .usage_info
@@ -509,7 +483,7 @@ fn overscroll_line_shows_remaining_account_allowance_after_provider() {
         .unwrap()
         .available = false;
     let row = overscroll_line_row(&state, 200);
-    assert!(row.contains("OpenAI"), "{row}");
+    assert!(!row.contains('\u{ec81}'), "{row}");
     assert!(!row.contains("% left"), "{row}");
     for width in [20, 40, 63, 80] {
         let row = overscroll_line_row(&state, width);
@@ -621,7 +595,11 @@ fn widgets_render_detail_layer_without_repeating_status_line_facts() {
         .rev()
         .find(|r| r.contains("~/jcode"))
         .expect("status line");
-    for owned in ["GPT-5.6 Sol", "74k/256k", "29%", "OAuth", "main"] {
+    for owned in ["GPT-5.6 Sol", "󰍛 29%", "◒", "main"] {
         assert!(line.contains(owned), "line owns {owned:?}: {line}");
     }
+    assert!(
+        !line.contains("74k/256k") && !line.contains("OAuth"),
+        "{line}"
+    );
 }

@@ -1,6 +1,66 @@
 use super::*;
 
 #[test]
+fn claude_banked_card_shows_usable_total_and_expiry() {
+    let mut app = create_test_app();
+    app.handle_usage_report(vec![crate::usage::ProviderUsage {
+        provider_name: "Anthropic (Claude)".into(),
+        anthropic_banked_resets: Some(crate::usage::AnthropicBankedResets {
+            account_label: Some("fixture".into()),
+            available_count: 2,
+            usable_count: 1,
+            cached_source: Some("OMP".into()),
+            expires_at: Some("2099-01-01T00:00:00Z".into()),
+        }),
+        ..Default::default()
+    }]);
+    let content = &app.display_messages().last().unwrap().content;
+    assert!(content.contains("1 usable / 2"), "{content}");
+    assert!(content.contains("expires"), "{content}");
+    assert!(content.contains("cached OMP"), "{content}");
+}
+
+#[test]
+fn test_usage_card_shows_every_opencode_go_quota_window() {
+    let mut app = create_test_app();
+    app.handle_usage_report(vec![crate::usage::ProviderUsage {
+        provider_name: "OpenCode Go (API key)".into(),
+        limits: vec![
+            crate::usage::UsageLimit {
+                name: "Rolling window".into(),
+                usage_percent: 23.0,
+                resets_at: Some("2026-11-15T11:08:23Z".into()),
+            },
+            crate::usage::UsageLimit {
+                name: "Weekly window".into(),
+                usage_percent: 9.0,
+                resets_at: Some("2026-11-16T00:00:00Z".into()),
+            },
+            crate::usage::UsageLimit {
+                name: "Monthly window".into(),
+                usage_percent: 4.0,
+                resets_at: Some("2026-12-15T05:54:05Z".into()),
+            },
+        ],
+        extra_info: vec![("Key status".into(), "valid".into())],
+        ..Default::default()
+    }]);
+    let content = &app.display_messages().last().unwrap().content;
+    // The card header reports the tightest window, and each window is a gauge.
+    assert!(content.contains("*%\t23"), "{content}");
+    for (window, percent) in [
+        ("Rolling window", 23),
+        ("Weekly window", 9),
+        ("Monthly window", 4),
+    ] {
+        assert!(
+            content.contains(&format!("= {window}\t{percent}%")),
+            "{window} missing: {content}"
+        );
+    }
+}
+
+#[test]
 fn test_usage_card_reset_balances() {
     let mut app = create_test_app();
     for count in [0, 3] {
@@ -35,7 +95,10 @@ fn test_usage_card_reset_balances() {
         }]);
         let content = &app.display_messages().last().unwrap().content;
         assert!(
-            content.contains(&format!("Session resets\t{} available", u64::from(available))),
+            content.contains(&format!(
+                "Session resets\t{} available",
+                u64::from(available)
+            )),
             "{content}"
         );
         assert_eq!(content.contains("next in"), !available, "{content}");
@@ -193,8 +256,10 @@ fn test_usage_report_updates_display_only_card_without_system_message() {
         }],
         extra_info: vec![("plan".to_string(), "pro".to_string())],
         hard_limit_reached: false,
+        openai_credit_overage: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
     }]);
@@ -231,8 +296,10 @@ fn test_usage_progress_updates_card_incrementally() {
             }],
             extra_info: Vec::new(),
             hard_limit_reached: false,
+            openai_credit_overage: false,
             openai_reset_credits: None,
             anthropic_limit_reset: None,
+            anthropic_banked_resets: None,
             error: None,
             last_used_unix_secs: None,
         }],

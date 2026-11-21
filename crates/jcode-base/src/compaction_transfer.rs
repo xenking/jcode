@@ -24,14 +24,22 @@ pub async fn build_transfer_compaction_state(
         .as_ref()
         .map(|state| state.original_turn_count.max(state.covers_up_to_turn))
         .unwrap_or(0);
-    let result =
-        generate_compaction_artifact(provider, messages.clone(), existing_summary, false).await?;
+    let result = generate_compaction_artifact(
+        provider,
+        messages.clone(),
+        existing_summary,
+        false,
+        None,
+        None,
+    )
+    .await?;
     let total_turns = prior_turns + messages.len();
 
     Ok(Some(crate::session::StoredCompactionState {
         summary_text: result.summary_text,
-        openai_encrypted_content: result.openai_encrypted_content,
-        snapcompact: result.snapcompact,
+        plan_context: None,
+        openai_encrypted_content: result.openai_encrypted_content.map(Into::into),
+        snapcompact: None,
         covers_up_to_turn: total_turns,
         original_turn_count: total_turns,
         compacted_count: 0,

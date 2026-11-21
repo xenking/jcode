@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::client_writer::send_client_event_best_effort;
 
 /// Retire finished turns before interpreting a request against client-local state.
 /// The task publishes completion before its terminal event, and never waits on
@@ -11,7 +12,8 @@ pub(super) async fn reconcile_processing_completions(
     connection_id: &str,
     connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     swarm: &SwarmStatusRefs<'_>,
-) {
+) -> Option<bool> {
+    let mut succeeded = None;
     while let Some((done_id, result, completion_report, owner, _finalization)) =
         completion.take().or_else(|| match receiver.try_recv() {
             Ok(completion) => Some(completion),
@@ -50,10 +52,12 @@ pub(super) async fn reconcile_processing_completions(
                 info.current_tool_name = None;
             }
         }
+        succeeded = Some(result.is_ok());
         let done_session = state.session_id.take();
         record_processing_completion(done_session.as_deref(), result, completion_report, swarm)
             .await;
     }
+    succeeded
 }
 
 pub(super) async fn record_processing_completion(
@@ -121,10 +125,131 @@ pub(super) async fn record_processing_completion(
     }
 }
 
+/// Restore a reservation if its task is cancelled before recording the input.
+struct QueuedPromptClaimGuard {
+    queue: jcode_agent_runtime::SoftInterruptQueue,
+    client_ids: Vec<String>,
+}
+
+impl Drop for QueuedPromptClaimGuard {
+    fn drop(&mut self) {
+        if let Ok(mut queue) = self.queue.lock() {
+            for item in queue.iter_mut().filter(|item| {
+                item.client_id
+                    .as_ref()
+                    .is_some_and(|id| self.client_ids.contains(id))
+                    && item.mode == jcode_agent_runtime::QueuedMessageMode::InFlight
+            }) {
+                item.mode = jcode_agent_runtime::QueuedMessageMode::AfterYield;
+            }
+        }
+    }
+}
+
+/// Dispatch a daemon-owned prompt after the preceding turn has retired.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn start_next_queued_prompt(
+    session_id: &str,
+    state: &mut ProcessingState<'_>,
+    control: &SessionControlHandle,
+    agent: &Arc<Mutex<Agent>>,
+    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    done_tx: &mpsc::UnboundedSender<ProcessingCompletion>,
+    terminal_env: Vec<(String, String)>,
+    swarm: &SwarmStatusRefs<'_>,
+    connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
+    connection_id: &str,
+    interrupted_only: bool,
+    server_failover: bool,
+) {
+    if *state.client_is_processing || crate::turn_cancel_registry::has_active_turn(session_id) {
+        return;
+    }
+    let prompts = match control.take_user_prompt_batch(interrupted_only) {
+        Ok(prompts) if !prompts.is_empty() => prompts,
+        Ok(_) => return,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Failed to claim queued prompt for {session_id}: {error}"
+            ));
+            return;
+        }
+    };
+    let client_ids: Vec<String> = prompts.iter().filter_map(|p| p.client_id.clone()).collect();
+    let mut content_parts = Vec::new();
+    let mut images = Vec::new();
+    let mut reminders = Vec::new();
+    for prompt in &prompts {
+        let mut content = prompt.content.clone();
+        let offset = images.len();
+        if offset != 0 {
+            for n in (1..=prompt.images.len()).rev() {
+                content = content.replace(
+                    &format!("[#image {n}]"),
+                    &format!("[#image {}]", n + offset),
+                );
+                content =
+                    content.replace(&format!("[image {n}]"), &format!("[image {}]", n + offset));
+            }
+        }
+        content_parts.push(content);
+        images.extend(prompt.images.clone());
+        reminders.extend(prompt.system_reminder.clone());
+    }
+    {
+        let mut connections = connections.write().await;
+        if let Some(info) = connections.get_mut(connection_id) {
+            info.is_processing = true;
+            info.current_tool_name = None;
+        }
+    }
+    // Internal requests have no transport request to correlate. Their stable
+    // caller id is carried on the turn-start pickup event instead.
+    const QUEUED_TURN_REQUEST_ID: u64 = 0;
+    start_processing_message(
+        ProcessingMessage {
+            attachment_data: None,
+            id: QUEUED_TURN_REQUEST_ID,
+            queued_client_id: Some(client_ids),
+            content: content_parts.join("\n\n"),
+            images,
+            system_reminder: (!reminders.is_empty()).then(|| reminders.join("\n\n")),
+            active_skill: None,
+            server_failover,
+        },
+        session_id,
+        state,
+        agent,
+        event_tx,
+        done_tx,
+        terminal_env,
+        swarm,
+    )
+    .await;
+    if *state.message_id != Some(QUEUED_TURN_REQUEST_ID) {
+        for prompt in prompts {
+            if let Err(error) = control.restore_user_prompt(prompt) {
+                crate::logging::error(&format!(
+                    "Failed to restore queued prompt for {session_id}: {error}"
+                ));
+            }
+        }
+        let mut connections = connections.write().await;
+        if let Some(info) = connections.get_mut(connection_id) {
+            info.is_processing = false;
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep request data and client state separate"
+)]
 pub(super) async fn append_context_message(
     id: u64,
     content: &str,
     images: Vec<(String, String)>,
+    attachment_data: Option<jcode_session_types::MessageAttachments>,
     client_session_id: &str,
     client_is_processing: bool,
     agent: &Arc<Mutex<Agent>>,
@@ -140,7 +265,7 @@ pub(super) async fn append_context_message(
         );
         return;
     };
-    let result = agent.append_user_context_message(content, images);
+    let result = agent.append_user_context_message(content, images, attachment_data);
     let event = match result {
         Ok(()) => ServerEvent::ContextMessageAdded { id },
         Err(error) => ServerEvent::Error {
@@ -163,26 +288,6 @@ fn delivered_replay_is_reminder_only(content: &str, image_count: usize) -> bool 
     content.trim().is_empty() && image_count == 0
 }
 
-#[cfg(test)]
-mod delivered_replay_tests {
-    use super::delivered_replay_is_reminder_only;
-
-    #[test]
-    fn reminder_only_replay_is_suppressed() {
-        assert!(delivered_replay_is_reminder_only("", 0));
-        assert!(delivered_replay_is_reminder_only("  \n", 0));
-    }
-
-    #[test]
-    fn queued_followup_with_delivered_reminder_is_not_suppressed() {
-        assert!(!delivered_replay_is_reminder_only(
-            "please also fix the tests",
-            0
-        ));
-        assert!(!delivered_replay_is_reminder_only("", 1));
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn start_processing_message(
     message: ProcessingMessage,
@@ -195,7 +300,9 @@ pub(super) async fn start_processing_message(
     swarm: &SwarmStatusRefs<'_>,
 ) {
     let ProcessingMessage {
+        attachment_data,
         id,
+        queued_client_id,
         content,
         images,
         mut system_reminder,
@@ -207,33 +314,18 @@ pub(super) async fn start_processing_message(
             "Rejecting new message for session {} because server reload is starting",
             client_session_id
         ));
-        let _ = client_event_tx.send(ServerEvent::Reloading { new_socket: None });
+        send_client_event_best_effort(
+            client_event_tx,
+            ServerEvent::Reloading {
+                new_socket: None,
+                reload_id: crate::server::recent_reload_state(std::time::Duration::from_secs(30))
+                    .map(|state| state.request_id),
+            },
+            "client_processing: Reloading",
+        );
         return;
     }
 
-    if *state.client_is_processing {
-        let _ = client_event_tx.send(ServerEvent::Error {
-            id,
-            message: "Already processing a message".to_string(),
-            retry_after_secs: None,
-        });
-        return;
-    }
-
-    // Serialize recovery acceptance with the agent lock across connections.
-    // A stale History frame may submit the same reminder after its first turn.
-    let mut agent_guard = agent.lock().await;
-    let turn_lease = match agent_guard.claim_server_turn() {
-        Ok(lease) => lease,
-        Err(error) => {
-            let _ = client_event_tx.send(ServerEvent::Error {
-                id,
-                message: error.to_string(),
-                retry_after_secs: None,
-            });
-            return;
-        }
-    };
     let reminder_already_delivered = match system_reminder.as_deref() {
         Some(reminder) => {
             match super::super::reload_recovery::is_delivered_continuation(
@@ -258,7 +350,11 @@ pub(super) async fn start_processing_message(
                 "Suppressing delivered reload recovery replay session={} id={}",
                 client_session_id, id
             ));
-            let _ = client_event_tx.send(ServerEvent::Done { id });
+            send_client_event_best_effort(
+                client_event_tx,
+                ServerEvent::Done { id },
+                "client_processing: Done",
+            );
             return;
         }
         // After a reload the client combines a queued user follow-up with the
@@ -274,30 +370,112 @@ pub(super) async fn start_processing_message(
         ));
         system_reminder = None;
     }
+    if (!content.trim().is_empty() || !images.is_empty())
+        && let Err(error) = super::super::reload_recovery::supersede(client_session_id)
+    {
+        send_client_event_best_effort(
+            client_event_tx,
+            ServerEvent::Error {
+                id,
+                message: format!("Cannot supersede recovery: {error}"),
+                retry_after_secs: None,
+            },
+            "client_processing: Error",
+        );
+        return;
+    }
+    if super::super::reload_recovery::wait_for_retired_attempt(client_session_id).await
+        && state.task.is_none()
+    {
+        *state.client_is_processing = false;
+    }
+    if *state.client_is_processing {
+        send_client_event_best_effort(
+            client_event_tx,
+            ServerEvent::Error {
+                id,
+                message: "Already processing a message".into(),
+                retry_after_secs: None,
+            },
+            "client_processing: Error",
+        );
+        return;
+    }
+    let mut agent_guard = agent.lock().await;
+    let turn_lease = match agent_guard.claim_server_turn() {
+        Ok(lease) => lease,
+        Err(error) => {
+            send_client_event_best_effort(
+                client_event_tx,
+                ServerEvent::Error {
+                    id,
+                    message: error.to_string(),
+                    retry_after_secs: None,
+                },
+                "client_processing: Error",
+            );
+            return;
+        }
+    };
     if !agent_guard.set_remote_active_skill(active_skill.clone()) {
         let skill_name = active_skill.as_deref().unwrap_or_default();
-        let _ = client_event_tx.send(ServerEvent::Error {
-            id,
-            message: format!("Skill '{skill_name}' is not installed on the server"),
-            retry_after_secs: None,
-        });
+        send_client_event_best_effort(
+            client_event_tx,
+            ServerEvent::Error {
+                id,
+                message: crate::skill::unknown_skill_message(skill_name),
+                retry_after_secs: None,
+            },
+            "client_processing: Error",
+        );
         return;
     }
 
-    if let Some(reminder) = system_reminder.as_deref()
-        && let Err(error) = super::super::reload_recovery::mark_delivered_if_matching_continuation(
-            client_session_id,
-            reminder,
-            "client_message_accepted",
-        )
+    let deferred = if !content.trim().is_empty() || !images.is_empty() {
+        super::super::cold_agent_wake::pending_for_user_turn(client_session_id)
+    } else {
+        Vec::new()
+    };
+    for message in &deferred {
+        agent_guard.add_message_with_display_role(
+            crate::message::Role::User,
+            vec![crate::message::ContentBlock::Text {
+                text: message.text.clone(),
+                cache_control: None,
+            }],
+            Some(jcode_session_types::StoredDisplayRole::System),
+        );
+    }
+    if !deferred.is_empty()
+        && let Err(error) = agent_guard
+            .persist_session_now()
+            .and_then(|()| super::super::cold_agent_wake::mark_stored(client_session_id, &deferred))
     {
         crate::logging::warn(&format!(
-            "Failed to mark reload recovery intent delivered for accepted message session={} id={}: {}",
-            client_session_id, id, error
+            "Could not persist deferred agent messages for {client_session_id}: {error}"
         ));
     }
+
     let status_title = agent_guard.session_display_title_or_name();
     drop(agent_guard);
+
+    for message in deferred {
+        super::super::fanout_session_event(
+            swarm.members,
+            client_session_id,
+            ServerEvent::Notification {
+                from_session: message.from_session,
+                from_name: message.from_name,
+                notification_type: crate::protocol::NotificationType::Message {
+                    scope: Some("dm".into()),
+                    channel: None,
+                    tldr: None,
+                },
+                message: message.text,
+            },
+        )
+        .await;
+    }
 
     *state.client_is_processing = true;
     crate::agents_status::turn_started(client_session_id, &status_title);
@@ -322,6 +500,11 @@ pub(super) async fn start_processing_message(
         .await
         .get(client_session_id)
         .is_some_and(|member| member.report_back_to_session_id.is_some());
+    if owned_worker {
+        crate::agents_status::mark_worker(client_session_id);
+    } else {
+        crate::agents_status::load_plan_from_disk(client_session_id);
+    }
     let (start_message_index, pending_queue) = {
         let mut agent_guard = agent.lock().await;
         if owned_worker {
@@ -346,25 +529,60 @@ pub(super) async fn start_processing_message(
     crate::mobile_push::clear_cancelled(&push_session_id);
     let turn_started = Instant::now();
     crate::logging::info(&format!("Processing message id={} spawning task", id));
+    let queued_claim = QueuedPromptClaimGuard {
+        queue: pending_queue.clone(),
+        client_ids: queued_client_id.clone().unwrap_or_default(),
+    };
+    let (force_handle, force_registration) = futures::future::AbortHandle::new_pair();
+    let force_guard =
+        crate::turn_cancel_registry::register_force_stop(client_session_id, force_handle);
     *state.task = crate::runtime_activity::spawn_session(client_session_id, async move {
+        let _force_guard = force_guard;
+        let _queued_claim = queued_claim;
         let event_tx = tx.clone();
         let mut stop_reason = crate::protocol::TurnStopReason::Failure;
-        let result = match std::panic::AssertUnwindSafe(crate::hooks::with_client_terminal_env(
-            client_terminal_env,
-            super::super::turn_failover::process_reserved_message_with_server_failover(
-                agent,
-                &turn_lease,
-                &content,
-                images,
-                system_reminder,
-                event_tx,
-                server_failover,
+        let outcome = std::panic::AssertUnwindSafe(futures::future::Abortable::new(
+            crate::hooks::with_client_terminal_env(
+                client_terminal_env,
+                super::super::turn_failover::process_reserved_message_with_server_failover(
+                    agent,
+                    &turn_lease,
+                    &content,
+                    images,
+                    system_reminder,
+                    event_tx,
+                    server_failover,
+                    queued_client_id,
+                    attachment_data,
+                ),
             ),
+            force_registration,
         ))
         .catch_unwind()
-        .await
-        {
-            Ok(result) => result,
+        .await;
+        let result = match outcome {
+            Ok(Ok(result)) => result,
+            Ok(Err(_aborted)) => {
+                let stopped_tools = report_agent
+                    .lock()
+                    .await
+                    .repair_force_stopped_tools(start_message_index);
+                for (id, name) in stopped_tools {
+                    let _ = tx.send(ServerEvent::ToolDone {
+                        id,
+                        name,
+                        output: "[Tool stopped by user]".into(),
+                        error: Some("stopped by user".into()),
+                    });
+                }
+                let _ = tx.send(ServerEvent::TurnStopped {
+                    reason: crate::protocol::TurnStopReason::Interrupted,
+                    message: "Turn force stopped by user".into(),
+                    provider_stop_reason: None,
+                });
+                let _ = tx.send(ServerEvent::Interrupted);
+                Ok(())
+            }
             Err(panic_payload) => {
                 stop_reason = crate::protocol::TurnStopReason::Crash;
                 let msg = if let Some(text) = panic_payload.downcast_ref::<&str>() {
@@ -448,6 +666,17 @@ pub(super) async fn start_processing_message(
                 ),
             }
         }
+        if server_failover && let Err(error) = &result {
+            let agent = report_agent.lock().await;
+            if let Some(event) = super::super::turn_failover::usage_limit_event(
+                &agent,
+                &crate::util::format_error_chain(error),
+                "stopped",
+                None,
+            ) {
+                let _ = tx.send(event);
+            }
+        }
         // Keep the terminal event on the same ordered fanout channel as the
         // stream. Sending it later from the owning client's event loop could
         // race ahead of the final MessageEnd for newly attached clients.
@@ -507,6 +736,12 @@ pub(super) async fn cancel_processing_message(
     request_decoded_at: Option<Instant>,
     sessions: Option<&SessionAgents>,
 ) {
+    if let Err(error) = super::super::reload_recovery::cancel(&session_control.session_id) {
+        crate::logging::warn(&format!(
+            "Cannot persist recovery Stop for {}: {error}",
+            session_control.session_id
+        ));
+    }
     // Capture before cancellation releases the reservation. Modern clients
     // reject unscoped terminal events to protect newer turns from stale ones.
     let identity = sessions
@@ -567,19 +802,6 @@ pub(super) async fn cancel_processing_message(
             *state.task = Some(handle);
             return;
         }
-        let stopped = ServerEvent::TurnStopped {
-            reason: crate::protocol::TurnStopReason::Interrupted,
-            message: "The turn was interrupted by a cancellation request.".into(),
-            provider_stop_reason: None,
-        };
-        // Publish before signalling: the worker can finish cooperatively and
-        // emit Done immediately after request_cancel.
-        if super::super::state::fanout_session_event(swarm.members, &session_label, stopped.clone())
-            .await
-            == 0
-        {
-            let _ = client_event_tx.send(stopped);
-        }
         let cancel_epoch = session_control.request_cancel();
         crate::logging::info(&format!(
             "SERVER_INTERRUPT_CANCEL_SIGNALLED request_id={:?} session={} message_id={:?} wait_ms=500",
@@ -603,20 +825,21 @@ pub(super) async fn cancel_processing_message(
                     *state.message_id,
                     cancel_start.elapsed().as_millis()
                 ));
-                handle.abort();
-                match tokio::time::timeout(std::time::Duration::from_millis(2000), handle).await {
+                // Keep the supervisor alive to repair and persist tool calls.
+                crate::turn_cancel_registry::force_stop(&session_label);
+                match tokio::time::timeout(std::time::Duration::from_millis(500), &mut handle).await
+                {
                     Ok(_) => crate::logging::info(&format!(
                         "SERVER_INTERRUPT_CANCEL_ABORT_RELEASED request_id={:?} session={} elapsed_ms={}",
                         request_id,
                         session_label,
                         cancel_start.elapsed().as_millis()
                     )),
-                    Err(_) => crate::logging::warn(&format!(
-                        "SERVER_INTERRUPT_CANCEL_ABORT_RELEASE_TIMEOUT request_id={:?} session={} elapsed_ms={} wait_ms=2000",
-                        request_id,
-                        session_label,
-                        cancel_start.elapsed().as_millis()
-                    )),
+                    Err(_) => {
+                        // Do not report a stop while the turn is still running.
+                        *state.task = Some(handle);
+                        return;
+                    }
                 }
             }
         }
@@ -640,8 +863,16 @@ pub(super) async fn cancel_processing_message(
             .await;
         }
         if let Some(message_id) = state.message_id.take() {
-            let _ = client_event_tx.send(scoped(ServerEvent::Interrupted));
-            let _ = client_event_tx.send(scoped(ServerEvent::Done { id: message_id }));
+            send_client_event_best_effort(
+                client_event_tx,
+                scoped(ServerEvent::Interrupted),
+                "client_processing: Interrupted",
+            );
+            send_client_event_best_effort(
+                client_event_tx,
+                scoped(ServerEvent::Done { id: message_id }),
+                "client_processing: Done",
+            );
             crate::logging::info(&format!(
                 "SERVER_INTERRUPT_CANCEL_EVENTS_EMITTED request_id={:?} session={} interrupted=true done_id={} total_ms={}",
                 request_id,
@@ -672,24 +903,19 @@ pub(super) async fn cancel_processing_message(
                 request_id, session_label
             ));
             *state.client_is_processing = false;
-            let _ = client_event_tx.send(scoped(ServerEvent::Interrupted));
+            send_client_event_best_effort(
+                client_event_tx,
+                scoped(ServerEvent::Interrupted),
+                "client_processing: Interrupted",
+            );
             if let Some(message_id) = state.message_id.take() {
-                let _ = client_event_tx.send(scoped(ServerEvent::Done { id: message_id }));
+                send_client_event_best_effort(
+                    client_event_tx,
+                    scoped(ServerEvent::Done { id: message_id }),
+                    "client_processing: Done",
+                );
             }
             return;
-        }
-        let stopped = ServerEvent::TurnStopped {
-            reason: crate::protocol::TurnStopReason::Interrupted,
-            message: "The turn was interrupted by a cancellation request.".into(),
-            provider_stop_reason: None,
-        };
-        // Publish before signalling: the worker can finish cooperatively and
-        // emit Done immediately after request_cancel.
-        if super::super::state::fanout_session_event(swarm.members, &session_label, stopped.clone())
-            .await
-            == 0
-        {
-            let _ = client_event_tx.send(stopped);
         }
         let cancel_epoch = session_control.request_cancel();
         let reset_control = session_control.clone();
@@ -701,42 +927,22 @@ pub(super) async fn cancel_processing_message(
             // an unconditional reset here used to erase rapid repeated Esc
             // cancels before the busy turn observed them (issue #428).
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            reset_control.reset_cancel_if_epoch(cancel_epoch);
+            // A reattached client may share the actual active turn's signal.
+            // Clearing it here can erase an unobserved cancellation while a
+            // long-running tool is still returning. The active-turn guard
+            // resets that signal when the turn really exits. Detached signals
+            // still need the bounded reset to avoid poisoning the next turn.
+            let control_signal = reset_control.stop_current_turn_signal();
+            let owned_by_active_turn =
+                crate::turn_cancel_registry::active_turn_signals(&reset_control.session_id)
+                    .iter()
+                    .any(|signal| signal.same_instance(&control_signal));
+            if !owned_by_active_turn {
+                reset_control.reset_cancel_if_epoch(cancel_epoch);
+            }
         });
-        *state.client_is_processing = false;
-        let status_session_id = state
-            .session_id
-            .take()
-            .unwrap_or_else(|| session_control.session_id.clone());
-        update_member_status(
-            &status_session_id,
-            "stopped",
-            Some("cancelled".to_string()),
-            swarm.members,
-            swarm.swarms_by_id,
-            Some(swarm.event_history),
-            Some(swarm.event_counter),
-            Some(swarm.event_tx),
-        )
-        .await;
-        let _ = client_event_tx.send(scoped(ServerEvent::Interrupted));
-        if let Some(message_id) = state.message_id.take() {
-            let _ = client_event_tx.send(scoped(ServerEvent::Done { id: message_id }));
-            crate::logging::info(&format!(
-                "SERVER_INTERRUPT_CANCEL_EVENTS_EMITTED request_id={:?} session={} interrupted=true done_id={} total_ms={}",
-                request_id,
-                session_label,
-                message_id,
-                cancel_start.elapsed().as_millis()
-            ));
-        } else {
-            crate::logging::info(&format!(
-                "SERVER_INTERRUPT_CANCEL_EVENTS_EMITTED request_id={:?} session={} interrupted=true done_id=None total_ms={}",
-                request_id,
-                session_label,
-                cancel_start.elapsed().as_millis()
-            ));
-        }
+        // The owning connection publishes terminal events when the turn
+        // actually exits. Do not report a detached cancellation as confirmed.
     }
 }
 
@@ -781,32 +987,21 @@ pub(super) fn queue_soft_interrupt(
 
 pub(super) fn cancel_soft_interrupts_by_id(
     id: u64,
-    session_id: &str,
+    _session_id: &str,
     client_ids: &[String],
     session_control: &SessionControlHandle,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
-    let (mut cancelled, mut not_queued) = session_control.cancel_soft_interrupts_by_id(client_ids);
-    // An interrupt sent while no live queue was reachable is parked on disk
-    // until the session restores it. It is just as cancellable.
-    if !not_queued.is_empty() {
-        match crate::soft_interrupt_store::remove_by_client_ids(session_id, &not_queued) {
-            Ok(removed) if !removed.is_empty() => {
-                not_queued.retain(|id| !removed.contains(id));
-                cancelled.extend(removed);
-            }
-            Ok(_) => {}
-            Err(err) => crate::logging::warn(&format!(
-                "SERVER_SOFT_INTERRUPT_CANCEL_BY_ID_PERSISTED_FAILED id={} session={} error={}",
-                id, session_id, err
-            )),
-        }
-    }
-    let _ = client_event_tx.send(ServerEvent::SoftInterruptsCancelled {
-        id,
-        cancelled,
-        not_queued,
-    });
+    let (cancelled, not_queued) = session_control.cancel_soft_interrupts_by_id(client_ids);
+    send_client_event_best_effort(
+        client_event_tx,
+        ServerEvent::SoftInterruptsCancelled {
+            id,
+            cancelled,
+            not_queued,
+        },
+        "client_processing: SoftInterruptsCancelled",
+    );
 }
 
 pub(super) fn clear_soft_interrupts(
@@ -857,14 +1052,38 @@ pub(super) fn move_tool_to_background(
         Some(tool) => (Some(tool.call_id), Some(tool.name)),
         None => (None, None),
     };
-    let _ = client_event_tx.send(ServerEvent::BackgroundToolResult {
-        id,
-        moved,
-        tool_call_id,
-        tool_name,
-    });
+    send_client_event_best_effort(
+        client_event_tx,
+        ServerEvent::BackgroundToolResult {
+            id,
+            moved,
+            tool_call_id,
+            tool_name,
+        },
+        "client_processing: BackgroundToolResult",
+    );
     crate::logging::info(&format!(
         "SERVER_BACKGROUND_TOOL_RESULT id={} session={} signalled={} ack_queued={}",
         id, session_control.session_id, signalled, ack_queued
     ));
+}
+
+#[cfg(test)]
+mod delivered_replay_tests {
+    use super::delivered_replay_is_reminder_only;
+
+    #[test]
+    fn reminder_only_replay_is_suppressed() {
+        assert!(delivered_replay_is_reminder_only("", 0));
+        assert!(delivered_replay_is_reminder_only("  \n", 0));
+    }
+
+    #[test]
+    fn queued_followup_with_delivered_reminder_is_not_suppressed() {
+        assert!(!delivered_replay_is_reminder_only(
+            "please also fix the tests",
+            0
+        ));
+        assert!(!delivered_replay_is_reminder_only("", 1));
+    }
 }

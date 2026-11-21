@@ -7,6 +7,8 @@ use std::ffi::OsString;
 
 struct TestEnvGuard {
     prev_home: Option<OsString>,
+    prev_socket: Option<OsString>,
+    prev_runtime: Option<OsString>,
     _temp_home: tempfile::TempDir,
     _lock: std::sync::MutexGuard<'static, ()>,
 }
@@ -18,9 +20,15 @@ impl TestEnvGuard {
             .prefix("jcode-cli-restart-test-home-")
             .tempdir()?;
         let prev_home = std::env::var_os("JCODE_HOME");
+        let prev_socket = std::env::var_os("JCODE_SOCKET");
+        let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
         crate::env::set_var("JCODE_HOME", temp_home.path());
+        crate::env::set_var("JCODE_SOCKET", temp_home.path().join("jcode.sock"));
+        crate::env::set_var("JCODE_RUNTIME_DIR", temp_home.path());
         Ok(Self {
             prev_home,
+            prev_socket,
+            prev_runtime,
             _temp_home: temp_home,
             _lock: lock,
         })
@@ -29,12 +37,25 @@ impl TestEnvGuard {
 
 impl Drop for TestEnvGuard {
     fn drop(&mut self) {
-        if let Some(prev_home) = &self.prev_home {
-            crate::env::set_var("JCODE_HOME", prev_home);
-        } else {
-            crate::env::remove_var("JCODE_HOME");
+        for (key, value) in [
+            ("JCODE_HOME", &self.prev_home),
+            ("JCODE_SOCKET", &self.prev_socket),
+            ("JCODE_RUNTIME_DIR", &self.prev_runtime),
+        ] {
+            if let Some(value) = value {
+                crate::env::set_var(key, value);
+            } else {
+                crate::env::remove_var(key);
+            }
         }
     }
+}
+
+#[test]
+fn restart_fixture_isolates_socket_and_runtime_with_its_home() {
+    let guard = TestEnvGuard::new().expect("setup test env");
+    assert!(crate::server::socket_path().starts_with(guard._temp_home.path()));
+    assert!(crate::storage::runtime_dir().starts_with(guard._temp_home.path()));
 }
 
 #[tokio::test]

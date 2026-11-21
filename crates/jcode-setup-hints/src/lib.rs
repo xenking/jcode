@@ -27,7 +27,7 @@ use std::path::PathBuf;
 
 pub mod keymap;
 
-mod cli_launch_hints;
+mod legacy_cli_hooks;
 
 #[cfg(any(test, target_os = "macos", target_os = "linux", windows))]
 mod launch_hotkeys;
@@ -47,8 +47,6 @@ mod windows_setup;
 use macos_launcher::{install_macos_app_launcher, should_refresh_macos_app_launcher};
 #[cfg(target_os = "macos")]
 use macos_terminal::launch_script_for_macos_terminal;
-#[cfg(target_os = "macos")]
-use macos_terminal::load_preferred_macos_terminal;
 #[cfg(test)]
 use macos_terminal::paused_jcode_shell_command;
 #[cfg(target_os = "macos")]
@@ -110,16 +108,10 @@ pub struct SetupHintsState {
     /// showing already-learned repo hotkey hints.
     #[serde(default)]
     pub launch_hotkey_usage: HashMap<String, u64>,
-    /// Last time a launch-shortcut reminder was shown for each external CLI.
-    /// Keys are stable source ids such as `claude` and `codex`; values are Unix
-    /// timestamps in seconds.
+    /// Set once the one-time removal of the retired Claude/Codex `SessionStart`
+    /// launch-shortcut hooks has run.
     #[serde(default)]
-    pub cli_launch_hint_last_shown: HashMap<String, u64>,
-    /// Lifetime reminder count per external CLI. The native SessionStart hooks
-    /// may fire on every launch, but the reminder intentionally stops after a
-    /// small number of spaced repetitions.
-    #[serde(default)]
-    pub cli_launch_hint_shown_count: HashMap<String, u64>,
+    pub legacy_cli_hooks_cleaned: bool,
     /// Set once the first-run onboarding start choice ("Find bugs in my most
     /// active repo" / "Start a new session") has been shown. Onboarding never
     /// auto-starts again after this.
@@ -152,8 +144,7 @@ impl Default for SetupHintsState {
             keymap_conflict_signature: String::new(),
             glyph_safe_notice_shown: false,
             launch_hotkey_usage: HashMap::new(),
-            cli_launch_hint_last_shown: HashMap::new(),
-            cli_launch_hint_shown_count: HashMap::new(),
+            legacy_cli_hooks_cleaned: false,
             onboarding_start_choice_shown: false,
         }
     }
@@ -414,55 +405,16 @@ fn should_record_last_dir(dir: &std::path::Path, home: Option<&std::path::Path>)
     home != Some(dir)
 }
 
-#[cfg(target_os = "macos")]
-fn mac_hotkey_launch_agent_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("Could not find home directory")?;
-    Ok(home
-        .join("Library")
-        .join("LaunchAgents")
-        .join("com.jcode.hotkey.plist"))
-}
-
 #[cfg(any(test, target_os = "macos"))]
-fn mac_hotkey_launch_agent_plist(
-    exe: &str,
-    stdout_path: &str,
-    stderr_path: &str,
-    terminal: &str,
-) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.jcode.hotkey</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{exe}</string>
-        <string>setup-hotkey</string>
-        <string>--listen-macos-hotkey</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>LimitLoadToSessionType</key>
-    <string>Aqua</string>
-    <key>StandardOutPath</key>
-    <string>{stdout_path}</string>
-    <key>StandardErrorPath</key>
-    <string>{stderr_path}</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>JCODE_PREFERRED_TERMINAL</key>
-        <string>{terminal}</string>
-    </dict>
-</dict>
-</plist>
-"#,
-    )
-}
+mod macos_hotkey_guard;
+#[cfg(any(test, target_os = "macos"))]
+use macos_hotkey_guard::mac_hotkey_launch_agent_plist;
+#[cfg(all(test, target_os = "macos"))]
+use macos_hotkey_guard::real_macos_home;
+#[cfg(test)]
+use macos_hotkey_guard::with_macos_hotkey_authorization;
+#[cfg(target_os = "macos")]
+use macos_hotkey_guard::{mac_hotkey_launch_agent_path, with_current_macos_hotkey_authorization};
 
 /// Launch a new jcode window in the user's preferred macOS terminal, passing
 /// `extra_args` (e.g. `["--resume", "<session-id>"]`) to the jcode invocation.
@@ -554,6 +506,15 @@ fn write_hotkey_launch_scripts(
 
 #[cfg(target_os = "macos")]
 fn install_macos_hotkey_listener(
+    preferred_terminal: Option<MacTerminalKind>,
+) -> Result<MacTerminalKind> {
+    with_current_macos_hotkey_authorization(|| {
+        install_macos_hotkey_listener_inner(preferred_terminal)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn install_macos_hotkey_listener_inner(
     preferred_terminal: Option<MacTerminalKind>,
 ) -> Result<MacTerminalKind> {
     let terminal = preferred_terminal.unwrap_or_else(effective_macos_terminal);
@@ -690,12 +651,7 @@ pub fn run_setup_hotkey(
     _listen_macos_hotkey: bool,
     _listen_windows_hotkey: bool,
     _uninstall: bool,
-    notify_cli_launch: Option<&str>,
 ) -> Result<()> {
-    if let Some(source) = notify_cli_launch {
-        cli_launch_hints::maybe_notify(source)?;
-        return Ok(());
-    }
     #[cfg(target_os = "macos")]
     {
         // The background listener (`--listen-macos-hotkey`) is intercepted earlier,
@@ -735,7 +691,6 @@ pub fn run_setup_hotkey(
                 eprintln!(
                     "    \x1b[1mCmd+Shift+'\x1b[0m new jcode self-dev session (last jcode repo)"
                 );
-                install_cli_launch_hints_notice();
                 Ok(())
             }
             Err(e) => {
@@ -787,8 +742,7 @@ pub fn run_setup_hotkey(
                             );
                         }
                     }
-                    install_cli_launch_hints_notice();
-                    return Ok(());
+                        return Ok(());
                 }
                 Err(e) => {
                     eprintln!("  \x1b[31m✗\x1b[0m Failed: {}", e);
@@ -830,89 +784,11 @@ pub fn run_setup_hotkey(
     }
 }
 
-/// Install event-driven launch reminders into CLIs that are already present.
-/// This is best-effort because the global hotkey itself is the primary feature;
-/// a malformed third-party config must not turn successful hotkey setup into a
-/// failure. Both integrations use the CLIs' native `SessionStart` lifecycle
-/// event and never inspect command arguments, prompts, or process lists.
-pub(crate) fn install_cli_launch_hints_notice() {
-    match cli_launch_hints::install_available() {
-        Ok(installed) if !installed.is_empty() => {
-            eprintln!();
-            eprintln!(
-                "  \x1b[32m✓\x1b[0m Added launch-shortcut reminders to {}.",
-                installed.join(" and ")
-            );
-            eprintln!("    Uses native SessionStart hooks; no prompts or commands are read.");
-            if installed.iter().any(|name| name == "Codex CLI") {
-                eprintln!(
-                    "    Codex will ask you to review and trust the user hook once via /hooks."
-                );
-            }
-        }
-        Ok(_) => {}
-        Err(err) => jcode_logging::warn(&format!(
-            "could not install external CLI launch-shortcut reminders: {err}"
-        )),
-    }
-}
-
-/// Return the installed primary global launch shortcut as `(canonical, display)`.
-/// A reminder is suppressed unless the shortcut is known to be active.
-pub(crate) fn active_primary_launch_hotkey() -> Option<(String, String)> {
-    let config = load_launch_hotkeys_config();
-    if config.enabled == Some(false) {
-        return None;
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let state = SetupHintsState::load();
-        if !state.hotkey_configured {
-            return None;
-        }
-        let exe_path = std::env::current_exe()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| "jcode".to_string());
-        let last_dir = mac_hotkey_last_dir_file()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let last_repo = mac_hotkey_last_repo_file()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        return launch_hotkeys::resolve_launch_hotkeys(&config, &exe_path, &last_dir, &last_repo)
-            .into_iter()
-            .find(|entry| !entry.args.iter().any(|arg| arg == "self-dev"))
-            .map(|entry| {
-                let display = keymap::KeyChord::parse(&entry.chord)
-                    .map(|chord| chord.display_symbols())
-                    .unwrap_or_else(|| entry.chord.clone());
-                (entry.chord, display)
-            });
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let comp = detect_linux_compositor()?;
-        if !linux_hotkeys_installed(comp) {
-            return None;
-        }
-        return resolve_linux_hotkeys()
-            .into_iter()
-            .find(|entry| !entry.self_dev && linux_chord_expressible(comp, &entry.chord))
-            .map(|entry| (entry.chord.canonical(), entry.chord.display_super()));
-    }
-
-    #[cfg(windows)]
-    {
-        if !SetupHintsState::load().hotkey_configured {
-            return None;
-        }
-        return windows_setup::primary_hotkey_display();
-    }
-
-    #[allow(unreachable_code)]
-    None
+/// Remove the retired Claude Code / Codex `SessionStart` launch-shortcut hooks
+/// that older jcode versions installed. Idempotent and silent; safe to call from
+/// a stale hook invocation (`setup-hotkey --notify-cli-launch <cli>`).
+pub fn remove_legacy_cli_launch_hooks() -> bool {
+    legacy_cli_hooks::remove_legacy_hooks()
 }
 
 /// Run the macOS global-hotkey listener on the current (main) thread.
@@ -1197,43 +1073,6 @@ fn macos_hotkey_log(message: &str) {
     eprintln!("[jcode hotkey] {message}");
 }
 
-/// Decide what macOS hotkey listener action a launch should take, given the
-/// persisted setup state. Extracted as a pure function so the upgrade/install
-/// gating can be unit-tested without touching launchd.
-#[cfg(any(test, target_os = "macos"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MacHotkeyAction {
-    /// First-time install (never configured, never dismissed).
-    Install,
-    /// Reinstall because the configured listener predates the current version.
-    Migrate,
-    /// Config opted out (`[launch_hotkeys] enabled = false`): unload and
-    /// remove any installed LaunchAgent instead of (re)installing it.
-    Disable,
-    /// Nothing to do.
-    None,
-}
-
-#[cfg(any(test, target_os = "macos"))]
-fn mac_hotkey_action_for_state(
-    state: &SetupHintsState,
-    hotkeys_enabled: Option<bool>,
-) -> MacHotkeyAction {
-    // `enabled = false` must win on macOS too, not just Linux/Windows
-    // (issue #670): otherwise the LaunchAgent keeps the chord registered
-    // until the user manually runs `launchctl unload`.
-    if hotkeys_enabled == Some(false) {
-        return MacHotkeyAction::Disable;
-    }
-    if !state.hotkey_configured && !state.hotkey_dismissed {
-        MacHotkeyAction::Install
-    } else if state.hotkey_configured && state.hotkey_listener_version < HOTKEY_LISTENER_VERSION {
-        MacHotkeyAction::Migrate
-    } else {
-        MacHotkeyAction::None
-    }
-}
-
 /// Main entry point: check if we should show setup hints.
 ///
 /// Called early in startup, before the TUI is initialized.
@@ -1251,6 +1090,11 @@ pub fn maybe_show_setup_hints() -> Option<StartupHints> {
     state.launch_count += 1;
     let _ = state.save();
 
+    if !state.legacy_cli_hooks_cleaned && remove_legacy_cli_launch_hooks() {
+        state.legacy_cli_hooks_cleaned = true;
+        let _ = state.save();
+    }
+
     #[cfg(any(test, target_os = "macos"))]
     {
         if should_refresh_macos_app_launcher(&state) {
@@ -1260,70 +1104,15 @@ pub fn maybe_show_setup_hints() -> Option<StartupHints> {
 
     #[cfg(target_os = "macos")]
     {
-        match mac_hotkey_action_for_state(&state, load_launch_hotkeys_config().enabled) {
-            MacHotkeyAction::Install => {
-                if let Err(err) = auto_install_macos_hotkey_listener(&mut state) {
-                    jcode_logging::warn(&format!(
-                        "failed to auto-install macOS Cmd+; hotkey listener: {err}"
-                    ));
-                }
-            }
-            MacHotkeyAction::Migrate => {
-                // Already-configured user on an older listener: reinstall so the
-                // updated listener (and current binary path) takes effect on
-                // update without requiring them to re-run setup.
-                if let Err(err) = migrate_macos_hotkey_listener(&mut state) {
-                    jcode_logging::warn(&format!(
-                        "failed to migrate macOS Cmd+; hotkey listener: {err}"
-                    ));
-                }
-            }
-            MacHotkeyAction::Disable => {
-                if let Err(err) = uninstall_macos_hotkey_listener() {
-                    jcode_logging::warn(&format!(
-                        "failed to remove disabled macOS hotkey listener: {err}"
-                    ));
-                }
-            }
-            MacHotkeyAction::None => {}
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(comp) = detect_linux_compositor() {
-            let action = linux_hotkey_setup_action(
-                load_launch_hotkeys_config().enabled,
-                linux_hotkeys_installed(comp),
-                state.launch_hotkey_tracking_version,
-            );
-
-            if action != LinuxHotkeySetupAction::None {
-                match install_linux_launch_hotkeys(comp) {
-                    Ok(_) => {
-                        state.hotkey_configured = true;
-                        state.hotkey_dismissed = true;
-                        state.launch_hotkey_tracking_version = LAUNCH_HOTKEY_TRACKING_VERSION;
-                        let _ = state.save();
-                        if action == LinuxHotkeySetupAction::Install {
-                            jcode_logging::info(&format!(
-                                "Automatically installed {} launch hotkeys on first launch",
-                                comp.name()
-                            ));
-                        } else {
-                            jcode_logging::info(&format!(
-                                "Migrated {} launch hotkeys to usage tracking v{}",
-                                comp.name(),
-                                LAUNCH_HOTKEY_TRACKING_VERSION
-                            ));
-                        }
-                    }
-                    Err(err) => jcode_logging::warn(&format!(
-                        "failed to automatically configure {} launch hotkeys: {err}",
-                        comp.name()
-                    )),
-                }
-            }
+        // Hotkeys are explicit-only (`jcode setup-hotkey`); startup never installs
+        // or refreshes them. The one thing it still does is honor an explicit
+        // opt-out by unloading a previously installed LaunchAgent (issue #670).
+        if load_launch_hotkeys_config().enabled == Some(false)
+            && let Err(err) = uninstall_macos_hotkey_listener()
+        {
+            jcode_logging::warn(&format!(
+                "failed to remove disabled macOS hotkey listener: {err}"
+            ));
         }
     }
 
@@ -1569,31 +1358,6 @@ fn linux_hotkeys_installed(comp: linux_env::LinuxCompositor) -> bool {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .map(|text| text.contains(linux_hotkey_sentinel(other)))
             .unwrap_or(false),
-    }
-}
-
-#[cfg(any(test, target_os = "linux"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LinuxHotkeySetupAction {
-    None,
-    Install,
-    Refresh,
-}
-
-#[cfg(any(test, target_os = "linux"))]
-fn linux_hotkey_setup_action(
-    enabled: Option<bool>,
-    installed: bool,
-    tracking_version: u32,
-) -> LinuxHotkeySetupAction {
-    if enabled == Some(false) {
-        LinuxHotkeySetupAction::None
-    } else if !installed {
-        LinuxHotkeySetupAction::Install
-    } else if tracking_version < LAUNCH_HOTKEY_TRACKING_VERSION {
-        LinuxHotkeySetupAction::Refresh
-    } else {
-        LinuxHotkeySetupAction::None
     }
 }
 
@@ -2234,9 +1998,7 @@ fn linux_launch_hotkeys_notice(state: &SetupHintsState) -> Option<StartupHints> 
 
     let lines = launch_hotkey_notice_lines(&rows, &state.launch_hotkey_usage, state.launch_count)?;
 
-    // Installation and first launch both configure Linux bindings
-    // automatically. If that best-effort setup failed, avoid showing a stale
-    // instruction that asks the user to repeat setup manually.
+    // Only advertise bindings that are actually installed (setup is explicit).
     if !linux_hotkeys_installed(comp) {
         return None;
     }
@@ -2545,6 +2307,11 @@ fn create_desktop_shortcut(state: &mut SetupHintsState) -> Result<()> {
 /// Idempotent: a missing plist is treated as already-uninstalled.
 #[cfg(target_os = "macos")]
 fn uninstall_macos_hotkey_listener() -> Result<()> {
+    with_current_macos_hotkey_authorization(uninstall_macos_hotkey_listener_inner)
+}
+
+#[cfg(target_os = "macos")]
+fn uninstall_macos_hotkey_listener_inner() -> Result<()> {
     let plist_path = mac_hotkey_launch_agent_path()?;
     if !plist_path.exists() {
         return Ok(());
@@ -2555,104 +2322,6 @@ fn uninstall_macos_hotkey_listener() -> Result<()> {
     std::fs::remove_file(&plist_path).context("failed to remove jcode hotkey LaunchAgent plist")?;
     jcode_logging::info("Removed macOS launch-hotkey LaunchAgent (launch_hotkeys.enabled = false)");
     Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn auto_install_macos_hotkey_listener(state: &mut SetupHintsState) -> Result<()> {
-    let terminal = install_macos_hotkey_listener(None)?;
-    state.hotkey_configured = true;
-    state.hotkey_dismissed = true;
-    state.hotkey_listener_version = HOTKEY_LISTENER_VERSION;
-    state.launch_hotkey_tracking_version = LAUNCH_HOTKEY_TRACKING_VERSION;
-    state.save()?;
-    jcode_logging::info(&format!(
-        "Installed macOS Cmd+; hotkey listener for {}",
-        terminal.label()
-    ));
-    Ok(())
-}
-
-/// Reinstall the macOS hotkey LaunchAgent for an already-configured user after
-/// an update that changed the listener implementation.
-///
-/// The LaunchAgent pins the binary path captured at setup time and the listener
-/// process keeps running the old code until reloaded. Reinstalling re-points it
-/// at the current binary and restarts it so the fixed listener takes effect
-/// without the user re-running setup. The user's previously chosen terminal is
-/// preserved.
-#[cfg(target_os = "macos")]
-fn migrate_macos_hotkey_listener(state: &mut SetupHintsState) -> Result<()> {
-    let preferred = load_preferred_macos_terminal();
-    let terminal = install_macos_hotkey_listener(preferred)?;
-    state.hotkey_listener_version = HOTKEY_LISTENER_VERSION;
-    state.launch_hotkey_tracking_version = LAUNCH_HOTKEY_TRACKING_VERSION;
-    state.save()?;
-    jcode_logging::info(&format!(
-        "Migrated macOS Cmd+; hotkey listener to v{} for {}",
-        HOTKEY_LISTENER_VERSION,
-        terminal.label()
-    ));
-    Ok(())
-}
-
-/// Reinstall the launch hotkeys after the `[launch_hotkeys]` config changed
-/// (e.g. auto-import baked a per-repo mapping).
-///
-/// Re-resolves config into platform launch bindings so new chords take effect
-/// immediately. An explicit `enabled = false` remains an opt-out. Best-effort:
-/// errors are logged, never propagated, so this is safe on the startup path.
-pub fn reinstall_launch_hotkeys_after_config_change() {
-    #[cfg(target_os = "macos")]
-    {
-        let state = SetupHintsState::load();
-        if !state.hotkey_configured {
-            return;
-        }
-        if load_launch_hotkeys_config().enabled == Some(false) {
-            // Explicit opt-out: tear the LaunchAgent down instead of
-            // rewriting it (issue #670).
-            if let Err(err) = uninstall_macos_hotkey_listener() {
-                jcode_logging::warn(&format!(
-                    "failed to remove disabled macOS hotkey listener: {err}"
-                ));
-            }
-            return;
-        }
-        let preferred = load_preferred_macos_terminal();
-        match install_macos_hotkey_listener(preferred) {
-            Ok(terminal) => jcode_logging::info(&format!(
-                "Reinstalled launch hotkeys after config change for {}",
-                terminal.label()
-            )),
-            Err(err) => jcode_logging::warn(&format!("failed to reinstall launch hotkeys: {err}")),
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        windows_setup::reinstall_windows_launch_hotkeys();
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let Some(comp) = detect_linux_compositor() else {
-            return;
-        };
-        if load_launch_hotkeys_config().enabled == Some(false) {
-            return;
-        }
-        match install_linux_launch_hotkeys(comp) {
-            Ok(true) => jcode_logging::info(&format!(
-                "Refreshed {} launch hotkeys after config change",
-                comp.name()
-            )),
-            Ok(false) => {}
-            Err(err) => jcode_logging::warn(&format!(
-                "failed to refresh {} launch hotkeys: {err}",
-                comp.name()
-            )),
-        }
-    }
 }
 
 #[cfg(test)]

@@ -26,6 +26,20 @@ use std::sync::{
 use std::time::Duration;
 
 const AGENTGREP_FOREGROUND_BUDGET: Duration = Duration::from_secs(5);
+const GREP_EXAMPLE: &str = "await tools.agentgrep({mode: 'grep', query: 'TODO'})";
+const FIND_EXAMPLE: &str = "await tools.agentgrep({mode: 'find', query: 'Cargo.toml'})";
+const OUTLINE_EXAMPLE: &str = "await tools.agentgrep({mode: 'outline', file: 'src/main.rs'})";
+const TRACE_EXAMPLE: &str =
+    "await tools.agentgrep({mode: 'trace', terms: ['subject:auth_status', 'relation:rendered']})";
+
+fn example_for_mode(mode: &str) -> &'static str {
+    match mode {
+        "find" => FIND_EXAMPLE,
+        "outline" => OUTLINE_EXAMPLE,
+        "trace" | "smart" => TRACE_EXAMPLE,
+        _ => GREP_EXAMPLE,
+    }
+}
 
 struct CancelSearchOnDrop(Arc<AtomicBool>);
 
@@ -230,7 +244,7 @@ impl Tool for AgentGrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search code and file names. Defaults to grep mode when mode is omitted."
+        "Search code/files: grep, find, outline, trace. Use read for contents."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -272,6 +286,14 @@ impl Tool for AgentGrepTool {
                     "type": "string",
                     "description": "ripgrep file type, e.g. rs, py, md."
                 },
+                "hidden": {
+                    "type": "boolean",
+                    "description": "Include hidden files."
+                },
+                "no_ignore": {
+                    "type": "boolean",
+                    "description": "Include files normally excluded by ignore rules."
+                },
                 "max_files": {
                     "type": "integer",
                     "description": "Max files for find/trace."
@@ -289,7 +311,15 @@ impl Tool for AgentGrepTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
-        let params: AgentGrepInput = serde_json::from_value(input)?;
+        #[cfg(unix)]
+        let detached = super::background_worker::available().then(|| {
+            super::background_worker::Job::AgentGrep {
+                params: input.clone(),
+                context: (&ctx).into(),
+            }
+        });
+        let example = example_for_mode(input["mode"].as_str().unwrap_or_default());
+        let params: AgentGrepInput = super::parse_tool_args(input, example)?;
         let display_name = summarize_background_search(&params);
         let session_id = ctx.session_id.clone();
         // The search shells out to ripgrep and walks/reads files (and for
@@ -307,6 +337,8 @@ impl Tool for AgentGrepTool {
             AGENTGREP_FOREGROUND_BUDGET,
             display_name,
             session_id,
+            #[cfg(unix)]
+            detached,
         )
         .await
     }
@@ -317,6 +349,7 @@ async fn await_or_background_search(
     foreground_budget: Duration,
     display_name: String,
     session_id: String,
+    #[cfg(unix)] detached: Option<super::background_worker::Job>,
 ) -> Result<ToolOutput> {
     let mut owner = SearchTaskOwner(Some(work_handle));
     let work_handle = owner
@@ -328,7 +361,30 @@ async fn await_or_background_search(
             joined.map_err(|err| anyhow::anyhow!("agentgrep task failed to join: {err}"))?
         }
         Err(_) => {
-            let info = crate::background::global()
+            let manager = crate::background::global();
+            #[cfg(unix)]
+            if let Some(job) = detached {
+                // Searching is read-only. Stop the time-limited foreground
+                // attempt, then run that same request in the detached worker.
+                drop(owner);
+                let info = manager.reserve_task_info();
+                super::background_worker::start(
+                    &info,
+                    "agentgrep",
+                    display_name.clone(),
+                    &session_id,
+                    true,
+                    false,
+                    job,
+                )
+                .await?;
+                return Ok(background_search_output(
+                    info,
+                    display_name,
+                    foreground_budget,
+                ));
+            }
+            let info = manager
                 .adopt_with_options(
                     "agentgrep",
                     Some(display_name.clone()),
@@ -343,27 +399,45 @@ async fn await_or_background_search(
                         .ok_or_else(|| anyhow::anyhow!("agentgrep task owner is missing"))?,
                 )
                 .await;
-            Ok(ToolOutput::new(format!(
-                "Search is still running after 5s and is continuing in background.\n\n\
+            Ok(background_search_output(
+                info,
+                display_name,
+                foreground_budget,
+            ))
+        }
+    }
+}
+
+fn background_search_output(
+    info: crate::background::BackgroundTaskInfo,
+    display_name: String,
+    foreground_budget: Duration,
+) -> ToolOutput {
+    ToolOutput::new(format!(
+        "Search is still running after 5s and is continuing in background.\n\n\
                      Task ID: {}\n\
                      Name: {}\n\n\
                      {}",
-                info.task_id,
-                display_name,
-                super::BACKGROUND_WAIT_GUIDANCE,
-            ))
-            .with_title(display_name.clone())
-            .with_metadata(json!({
-                "background": true,
-                "task_id": info.task_id,
-                "display_name": display_name,
-                "output_file": info.output_file.to_string_lossy(),
-                "status_file": info.status_file.to_string_lossy(),
-                "timeout_promoted": true,
-                "foreground_timeout_ms": foreground_budget.as_millis(),
-            })))
-        }
-    }
+        info.task_id,
+        display_name,
+        super::BACKGROUND_WAIT_GUIDANCE,
+    ))
+    .with_title(display_name.clone())
+    .with_metadata(json!({
+        "background": true,
+        "task_id": info.task_id,
+        "display_name": display_name,
+        "output_file": info.output_file.to_string_lossy(),
+        "status_file": info.status_file.to_string_lossy(),
+        "timeout_promoted": true,
+        "foreground_timeout_ms": foreground_budget.as_millis(),
+    }))
+}
+
+#[cfg(unix)]
+pub(super) fn run_detached_search(input: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+    let params = serde_json::from_value(input)?;
+    run_agentgrep_blocking(&params, ctx)
 }
 
 fn summarize_background_search(params: &AgentGrepInput) -> String {
@@ -484,7 +558,7 @@ fn execute_linked_agentgrep(
                 .with_title(format!("agentgrep {}", params.mode)))
         }
         _ => Err(anyhow::anyhow!(
-            "Unsupported agentgrep mode: {}. Use grep, find, outline, or trace.",
+            "Invalid parameter `mode`: {}. Use grep, find, outline, or trace. Example: {GREP_EXAMPLE}",
             params.mode
         )),
     }

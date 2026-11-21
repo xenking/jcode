@@ -9,7 +9,10 @@ use super::client_comm::{
     handle_comm_read, handle_comm_share, handle_comm_subscribe_channel,
     handle_comm_unsubscribe_channel,
 };
-use super::client_comm_swarms::{handle_comm_list_swarms, handle_comm_set_swarm_label};
+use super::client_comm_swarms::{
+    handle_comm_focus_session, handle_comm_list_sessions, handle_comm_list_swarms,
+    handle_comm_set_swarm_label,
+};
 use super::client_disconnect_cleanup::{cleanup_client_connection, detach_client_attachment};
 use super::client_lifecycle_logging::{
     ServerRequestLifecycleFields, interrupt_request_log_fields, request_payload_summary,
@@ -23,8 +26,11 @@ use super::client_session::{
 };
 use super::client_state::{
     handle_get_compacted_history, handle_get_history, handle_get_model_catalog, handle_get_state,
+    handle_history_image_chunk, handle_history_page, handle_session_images,
 };
-use super::client_writer::write_direct_event;
+use super::client_writer::{
+    event_for_transport, send_client_event_best_effort, write_direct_event,
+};
 use super::comm_await::{CommAwaitMembersContext, handle_comm_await_members};
 use super::comm_control::{
     handle_client_debug_command, handle_client_debug_response, handle_comm_assign_next,
@@ -77,29 +83,16 @@ use super::SessionAgents;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 const RELOAD_STARTING_GUARD_MAX_AGE: Duration = Duration::from_secs(30);
 const REQUEST_HANDLER_STALL_THRESHOLDS_MS: [u64; 3] = [2_000, 10_000, 60_000];
+const FIRST_SUBSCRIBE_RESERVATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[path = "client_subscribe_context.rs"]
 mod subscribe_context;
 use subscribe_context::*;
 
-fn event_for_transport(
-    mut event: ServerEvent,
-    supports_turn_identity: bool,
-) -> Option<ServerEvent> {
-    if supports_turn_identity {
-        return Some(event);
-    }
-    loop {
-        event = match event {
-            ServerEvent::TurnEvent { event, .. } => *event,
-            ServerEvent::TurnStarted { .. } | ServerEvent::TurnState { .. } => return None,
-            event => return Some(event),
-        };
-    }
-}
-
 struct ProcessingMessage {
+    attachment_data: Option<jcode_session_types::MessageAttachments>,
     id: u64,
+    queued_client_id: Option<Vec<String>>,
     content: String,
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
@@ -138,119 +131,64 @@ use request_watchdog::{
     RequestHandlerWatchdog, RequestHandlerWatchdogContext, log_request_lifecycle_handled,
     reject_if_agent_busy_for_request, send_agent_busy_error, should_start_idle_soft_interrupt,
 };
-/// Session and payload of a todo snapshot, for skipping identical resends.
-fn todos_event_key(event: &ServerEvent) -> Option<(String, String)> {
-    match event {
-        ServerEvent::Todos {
-            session_id,
-            payload,
-            ..
-        } => Some((session_id.clone(), payload.clone())),
-        _ => None,
+#[path = "client_event_control.rs"]
+mod client_event_control;
+use client_event_control::*;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn is_local_jcode_peer(stream: &Stream) -> bool {
+    if !stream
+        .peer_cred()
+        .is_ok_and(|cred| cred.uid() == unsafe { libc::geteuid() })
+    {
+        return false;
     }
-}
-
-fn server_reload_starting() -> bool {
-    matches!(
-        crate::server::recent_reload_state(RELOAD_STARTING_GUARD_MAX_AGE),
-        Some(state) if state.phase == crate::server::ReloadPhase::Starting
-    )
-}
-
-fn compaction_server_event(event: crate::compaction::CompactionEvent) -> ServerEvent {
-    ServerEvent::Compaction {
-        trigger: event.trigger,
-        pre_tokens: event.pre_tokens,
-        post_tokens: event.post_tokens,
-        tokens_saved: event.tokens_saved,
-        duration_ms: event.duration_ms,
-        messages_dropped: event.messages_dropped,
-        messages_compacted: event.messages_compacted,
-        summary_chars: event.summary_chars,
-        active_messages: event.active_messages,
-    }
-}
-
-async fn poll_agent_compaction_completion(agent: Arc<Mutex<Agent>>) -> Option<ServerEvent> {
-    // CompactionFinished is published from inside the worker, just before its
-    // JoinHandle becomes finished. The first poll can therefore be too early.
-    loop {
-        let (event, error, pending) = agent.lock().await.poll_compaction_status();
-        if let Some(event) = event {
-            return Some(compaction_server_event(event));
-        }
-        if let Some(error) = error {
-            return Some(ServerEvent::CompactResult {
-                id: 0,
-                success: false,
-                message: format!("Compaction failed: {error}"),
-            });
-        }
-        if !pending {
-            return None;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-}
-
-async fn refresh_session_control_handle(
-    session_id: &str,
-    agent: &Arc<Mutex<Agent>>,
-    shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
-    soft_interrupt_queues: &SessionInterruptQueues,
-) -> SessionControlHandle {
-    let started = Instant::now();
-    let agent_guard = match agent.try_lock() {
-        Ok(agent_guard) => agent_guard,
-        Err(_) => {
-            crate::logging::warn(&format!(
-                "refresh_session_control_handle: waiting for busy agent lock for session {}; cancel/control requests on this connection may be delayed",
-                session_id
-            ));
-            let fallback_stop_signal = shutdown_signals.read().await.get(session_id).cloned();
-            let fallback_soft_interrupt_queue =
-                soft_interrupt_queues.read().await.get(session_id).cloned();
-            if let Some(soft_interrupt_queue) = fallback_soft_interrupt_queue {
-                // A missing shutdown-signal registration (e.g. a session created
-                // through the headless spawn path) must not force this connection
-                // to block on the busy agent mutex: cancels fired through the
-                // handle fan out to the running turn's own signal via the
-                // turn-cancel registry (issue #428), so a detached signal is a
-                // safe stand-in.
-                let stop_signal = fallback_stop_signal.unwrap_or_else(|| {
-                    crate::logging::warn(&format!(
-                        "refresh_session_control_handle: no registered shutdown signal for busy session {}; using detached signal (cancels reach the running turn via the turn cancel registry)",
-                        session_id
-                    ));
-                    InterruptSignal::new()
-                });
-                crate::logging::warn(&format!(
-                    "refresh_session_control_handle: using lock-free cancel-only control handle for busy session {} after {}ms",
-                    session_id,
-                    started.elapsed().as_millis()
-                ));
-                return SessionControlHandle::cancel_only(
-                    session_id,
-                    soft_interrupt_queue,
-                    stop_signal,
-                );
-            }
-            let agent_guard = agent.lock().await;
-            crate::logging::warn(&format!(
-                "refresh_session_control_handle: acquired agent lock for session {} after {}ms",
-                session_id,
-                started.elapsed().as_millis()
-            ));
-            agent_guard
-        }
+    let Ok((_, peer)) = crate::tool::peer_process(stream) else {
+        return false;
     };
-    SessionControlHandle::new(
-        session_id,
-        agent_guard.soft_interrupt_queue(),
-        agent_guard.background_tool_signal(),
-        agent_guard.graceful_shutdown_signal(),
-    )
-    .with_provider(agent_guard.provider_handle())
+    let Ok(peer) = peer.canonicalize() else {
+        return false;
+    };
+    if std::env::current_exe()
+        .and_then(|path| path.canonicalize())
+        .is_ok_and(|path| path == peer)
+    {
+        return true;
+    }
+    // A shared daemon and its TUI can run different installed revisions.
+    let Ok(home) = crate::storage::jcode_dir() else {
+        return false;
+    };
+    let Ok(versions) = home.join("builds/versions").canonicalize() else {
+        return false;
+    };
+    peer.strip_prefix(versions).is_ok_and(|relative| {
+        relative.components().count() == 2
+            && relative.file_name().is_some_and(|name| name == "jcode")
+    })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn is_local_jcode_peer(_: &Stream) -> bool {
+    false
+}
+
+fn queued_skill_working_dir(session_id: &str, initial_working_dir: &str) -> anyhow::Result<String> {
+    match crate::session::Session::load(session_id) {
+        Ok(session) => Ok(session
+            .working_dir
+            .unwrap_or_else(|| initial_working_dir.to_owned())),
+        // An untouched, newly attached session has no snapshot yet. Its validated
+        // connection working directory remains authoritative until first save.
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Ok(initial_working_dir.to_owned())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[expect(
@@ -288,6 +226,7 @@ pub(super) async fn handle_client(
     swarm_mutation_runtime: SwarmMutationRuntime,
 ) -> Result<()> {
     let handler_start = Instant::now();
+    let local_jcode_peer = is_local_jcode_peer(&stream);
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let writer = Arc::new(Mutex::new(writer));
@@ -314,6 +253,22 @@ pub(super) async fn handle_client(
 
         match decode_request(&line) {
             Ok(request) => {
+                if let Request::BackgroundTasks {
+                    id,
+                    session_id,
+                    task_id,
+                    cancel,
+                } = request
+                {
+                    let reply = super::background_task_inspection::handle(
+                        id,
+                        &session_id,
+                        task_id.as_deref(),
+                        cancel,
+                    )
+                    .await;
+                    return write_direct_event(&writer, &reply).await;
+                }
                 if !request.is_lightweight_control_request() {
                     crate::logging::info(&format!(
                         "[TIMING] handle_client initial request read: bytes={}, handler_to_read={}ms",
@@ -400,6 +355,34 @@ pub(super) async fn handle_client(
                 return Ok(());
             }
         };
+    // Wait before publishing a provisional client or agent. Cancellation here
+    // only drops a reservation waiter, never a partially attached session.
+    let first_resume_slot = match &initial_request {
+        Request::Subscribe {
+            target_session_id: Some(target),
+            ..
+        } => {
+            let reserve = tokio::time::timeout(
+                FIRST_SUBSCRIBE_RESERVATION_TIMEOUT,
+                sessions.reserve(target),
+            );
+            tokio::pin!(reserve);
+            let slot = tokio::select! {
+                biased;
+                next = reader.fill_buf() => {
+                    if next?.is_empty() {
+                        return Ok(());
+                    }
+                    // Preserve pipelined input. With unread bytes, EOF is not
+                    // observable here, so the reservation deadline bounds the wait.
+                    reserve.await
+                }
+                slot = &mut reserve => slot,
+            };
+            Some(slot.map_err(|_| anyhow::anyhow!("Timed out waiting to subscribe to {target}"))?)
+        }
+        _ => None,
+    };
     let mut active_terminal_env = initial_subscribe_terminal_env(&initial_request);
 
     // Per-client state
@@ -447,6 +430,7 @@ pub(super) async fn handle_client(
 
     let mut swarm_enabled = crate::config::config().features.swarm;
     let mut last_available_models_snapshot: Option<Arc<str>> = None;
+    let mut model_catalog_retry = ModelCatalogRetry::default();
 
     // Create a new session for this client
     let t0 = std::time::Instant::now();
@@ -634,18 +618,23 @@ pub(super) async fn handle_client(
         tokio::spawn(async move {
             while let Some(req) = stdin_req_rx.recv().await {
                 let request_id = req.request_id.clone();
-                stdin_responses
-                    .lock()
-                    .await
-                    .insert(request_id.clone(), req.response_tx);
+                {
+                    let mut responses = stdin_responses.lock().await;
+                    responses.retain(|_, sender| !sender.is_closed());
+                    responses.insert(request_id.clone(), req.response_tx);
+                }
                 if let Some(questions) = req.ask_questions {
                     match serde_json::from_value(questions) {
                         Ok(questions) => {
-                            let _ = client_event_tx.send(ServerEvent::AskUserRequest {
-                                request_id,
-                                questions,
-                                tool_call_id: req.prompt,
-                            });
+                            send_client_event_best_effort(
+                                &client_event_tx,
+                                ServerEvent::AskUserRequest {
+                                    request_id,
+                                    questions,
+                                    tool_call_id: req.prompt,
+                                },
+                                "client_lifecycle: AskUserRequest",
+                            );
                         }
                         // Dropping the sender fails the waiting tool call.
                         Err(_) => {
@@ -654,12 +643,16 @@ pub(super) async fn handle_client(
                     }
                     continue;
                 }
-                let _ = client_event_tx.send(ServerEvent::StdinRequest {
-                    request_id,
-                    prompt: req.prompt,
-                    is_password: req.is_password,
-                    tool_call_id: tool_call_id.clone(),
-                });
+                send_client_event_best_effort(
+                    &client_event_tx,
+                    ServerEvent::StdinRequest {
+                        request_id,
+                        prompt: req.prompt,
+                        is_password: req.is_password,
+                        tool_call_id: tool_call_id.clone(),
+                    },
+                    "client_lifecycle: StdinRequest",
+                );
             }
         })
     };
@@ -668,14 +661,54 @@ pub(super) async fn handle_client(
     // subscribe. Under heavy swarm file-activity load, ignored bus frames can
     // otherwise monopolize the select loop before the initial subscribe/read.
     let mut client_subscribed = false;
+    let mut stdin_attachment: Option<crate::tool::interactive::Attachment> = None;
+    // A waiting session produces no requests, so nothing else would ever trigger
+    // an opportunistic compaction. Slow on purpose: the check reads persisted
+    // await state and the background registry.
+    let mut idle_precompact_tick = tokio::time::interval(IDLE_PRECOMPACT_TICK);
+    idle_precompact_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    idle_precompact_tick.reset();
     // Session and payload of the last todo snapshot sent on this connection.
     let mut last_pushed_todos: Option<(String, String)> = None;
     let mut provisional_session = true;
-    let mut pending_request = Some(initial_request);
+    let mut pending_request = Some((initial_request, first_resume_slot));
+
+    macro_rules! dispatch_queued_prompt {
+        ($interrupted_only:expr) => {
+            start_next_queued_prompt(
+                &client_session_id,
+                &mut ProcessingState {
+                    client_is_processing: &mut client_is_processing,
+                    message_id: &mut processing_message_id,
+                    session_id: &mut processing_session_id,
+                    task: &mut processing_task,
+                },
+                &session_control,
+                &agent,
+                &client_event_tx,
+                &processing_done_tx,
+                active_terminal_env.clone(),
+                &SwarmStatusRefs {
+                    members: &swarm_members,
+                    swarms_by_id: &swarms_by_id,
+                    event_history: &event_history,
+                    event_counter: &event_counter,
+                    event_tx: &swarm_event_tx,
+                },
+                &client_connections,
+                &client_connection_id,
+                $interrupted_only,
+                supports_server_failover,
+            )
+            .await
+        };
+    }
 
     let connection_result: Result<()> = async {
     loop {
-        let mut request = if let Some(request) = pending_request.take() {
+        let mut resume_slot = None;
+        let mut request = if let Some((request, slot)) = pending_request.take() {
+            resume_slot = slot;
             request
         } else {
             line.clear();
@@ -701,7 +734,7 @@ pub(super) async fn handle_client(
             }
             done = processing_done_rx.recv() => {
                 if let Some(done) = done {
-                    reconcile_processing_completions(
+                    let completion = reconcile_processing_completions(
                         Some(done), &mut processing_done_rx,
                         &mut ProcessingState {
                             client_is_processing: &mut client_is_processing,
@@ -718,6 +751,9 @@ pub(super) async fn handle_client(
                             event_tx: &swarm_event_tx,
                         },
                     ).await;
+                    if let Some(success) = completion {
+                        dispatch_queued_prompt!(!success);
+                    }
                 } else {
                     break;
                 }
@@ -733,36 +769,33 @@ pub(super) async fn handle_client(
                 }
                 continue;
             }
+            _ = async {
+                match model_catalog_retry.deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            }, if client_subscribed => {
+                if publish_available_models_for_client(
+                    &agent, &client_event_tx, &mut last_available_models_snapshot, &client_connection_id,
+                ).await {
+                    model_catalog_retry.complete();
+                } else {
+                    model_catalog_retry.busy();
+                }
+                continue;
+            }
             // Forward bus events to this client
             bus_event = bus_rx.recv(), if client_subscribed => {
                 match bus_event {
                     Ok(BusEvent::ModelUsageUpdated(route)) => {
                         if model_usage_updates_enabled {
-                            let _ = client_event_tx.send(ServerEvent::ModelUsageUpdated { route });
+                            send_client_event_best_effort(&client_event_tx, ServerEvent::ModelUsageUpdated { route }, "client_lifecycle: ModelUsageUpdated");
                         }
                     }
                     Ok(BusEvent::ModelsUpdated) => {
-                        let Some(catalog) = try_available_models_catalog_offloaded(&agent).await else {
-                            continue;
-                        };
-                        // Equivalent clients share the snapshot, normalized key,
-                        // and size/downgrade decision. Pointer equality makes an
-                        // unchanged shared catalog a constant-time fast path.
-                        if last_available_models_snapshot.as_ref().is_some_and(|previous| {
-                            Arc::ptr_eq(previous, &catalog.dedup_key)
-                                || previous.as_ref() == catalog.dedup_key.as_ref()
-                        }) {
-                            continue;
-                        }
-                        if let Some(event) = catalog.live_event() {
-                            let _ = client_event_tx.send(event.clone());
-                        } else {
-                            crate::logging::warn(&format!(
-                                "Skipping oversized catalog for connection {} ({} bytes)",
-                                client_connection_id, catalog.encoded_len
-                            ));
-                        }
-                        last_available_models_snapshot = Some(Arc::clone(&catalog.dedup_key));
+                        // One pending refresh per connection. Repeated events must
+                        // not reset the busy backoff or allocate waiting tasks.
+                        model_catalog_retry.queue();
                     }
                     // Push the todo card to windows showing this session, so
                     // they do not each poll for it. One todo-tool call writes
@@ -774,53 +807,94 @@ pub(super) async fn handle_client(
                             let key = todos_event_key(&event);
                             if key != last_pushed_todos {
                                 last_pushed_todos = key;
-                                let _ = client_event_tx.send(event);
+                                send_client_event_best_effort(&client_event_tx, event, "client_lifecycle: forwarded event");
                             }
                         }
                     }
                     // Missed bus events may include a todo write. The client no
                     // longer polls, so resend the snapshot rather than guess.
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // A catalog update may also have been lost.
+                        model_catalog_retry.queue();
+                        // So may a turn release: dispatch anything now due.
+                        if !client_is_processing && !crate::turn_cancel_registry::has_active_turn(&client_session_id) {
+                            dispatch_queued_prompt!(!super::state::turn_stop_log::last_turn_yielded(&client_session_id));
+                        }
                         let event = super::client_writer::todos_snapshot_event(&client_session_id);
                         let key = todos_event_key(&event);
                         if key != last_pushed_todos {
                             last_pushed_todos = key;
-                            let _ = client_event_tx.send(event);
+                            send_client_event_best_effort(&client_event_tx, event, "client_lifecycle: forwarded event");
+                        }
+                    }
+                    Ok(BusEvent::TurnReleased(session_id)) => {
+                        // Turns the daemon starts itself (swarm reports,
+                        // background completions) have no processing task on
+                        // this connection, so their end is only seen here.
+                        // Without this, held after-yield prompts waited until
+                        // an unrelated request swept them into the wrong turn.
+                        if session_id == client_session_id && !client_is_processing {
+                            dispatch_queued_prompt!(!super::state::turn_stop_log::last_turn_yielded(&client_session_id));
                         }
                     }
                     Ok(BusEvent::BatchProgress(progress)) => {
                         if progress.session_id == client_session_id {
-                            let _ = client_event_tx.send(ServerEvent::BatchProgress { progress });
+                            send_client_event_best_effort(&client_event_tx, ServerEvent::BatchProgress { progress }, "client_lifecycle: BatchProgress");
                         }
                     }
                     Ok(BusEvent::SidePanelUpdated(update)) => {
                         if update.session_id == client_session_id {
-                            let _ = client_event_tx.send(ServerEvent::SidePanelState {
+                            send_client_event_best_effort(&client_event_tx, ServerEvent::SidePanelState {
                                 snapshot: super::client_writer::side_panel_for_client(
                                     update.snapshot, supports_pdf_panels,
                                 ),
-                            });
+                            }, "client_lifecycle: SidePanelState");
                         }
                     }
                     Ok(BusEvent::AppletsUpdated(update)) => {
                         if update.session_id == client_session_id {
-                            let _ = client_event_tx.send(ServerEvent::AppletState {
+                            send_client_event_best_effort(&client_event_tx, ServerEvent::AppletState {
                                 session_id: update.session_id,
                                 snapshot: update.snapshot,
-                            });
+                            }, "client_lifecycle: AppletState");
                         }
                     }
                     Ok(BusEvent::CompactionFinished) => {
                         let agent = Arc::clone(&agent);
-                        let tx = client_event_tx.clone();
+                        let session_id = client_session_id.clone();
                         tokio::spawn(async move {
                             if let Some(event) = poll_agent_compaction_completion(agent).await {
-                                let _ = tx.send(event);
+                                publish_compaction_completion(Bus::global(), &session_id, event);
                             }
                         });
                     }
+                    Ok(event @ BusEvent::CompactionApplied { .. }) => {
+                        forward_compaction_completion(&event, &client_session_id, &client_event_tx);
+                    }
+                    Ok(BusEvent::CompactionStarted {
+                        trigger,
+                        pre_tokens,
+                    }) => {
+                        // The bus is process-global, so only forward the start
+                        // when it belongs to this connection's agent: otherwise
+                        // one compacting session would paint a running divider
+                        // in every other session's transcript.
+                        // This process-wide event can belong to a different
+                        // session. Never wait for the turn's Agent lock here:
+                        // it may be held by a tool awaiting this very socket.
+                        let ours = agent.try_lock().is_ok_and(|agent| agent.is_compacting_now());
+                        if ours {
+                            send_client_event_best_effort(&client_event_tx, ServerEvent::CompactionStarted { trigger, pre_tokens }, "client_lifecycle: CompactionStarted");
+                        }
+                    }
                     _ => {}
                 }
+                continue;
+            }
+            // Only an attached client can initiate paid compaction. Run before
+            // the next prompt, not as part of its foreground request.
+            _ = idle_precompact_tick.tick(), if client_subscribed => {
+                maybe_idle_compact(&agent, &client_session_id, client_is_processing).await;
                 continue;
             }
             // Handle client debug commands from debug socket
@@ -873,13 +947,53 @@ pub(super) async fn handle_client(
             );
             continue;
         }
+        if let Request::ForceStopTurn { id, session_id } = &request {
+            if !client_subscribed || session_id != &client_session_id {
+                send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
+                    id: *id,
+                    message: "Force stop requires the matching attached session".into(),
+                    retry_after_secs: None,
+                }, "client_lifecycle: Error");
+            } else if !crate::turn_cancel_registry::force_stop(session_id)
+                && crate::turn_cancel_registry::has_active_turn(session_id)
+            {
+                send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
+                    id: *id,
+                    message: "This active turn does not support force stop".into(),
+                    retry_after_secs: None,
+                }, "client_lifecycle: Error");
+            } else {
+                send_client_event_best_effort(&client_event_tx, ServerEvent::Ack { id: *id }, "client_lifecycle: Ack");
+            }
+            continue;
+        }
+        // An ACK means the abort was requested, not that the supervisor has
+        // finished releasing the reservation. Let an immediately-following
+        // message wait briefly for that cleanup before reconciling the turn.
+        // The wait is bounded so this socket can still service another stop.
+        if matches!(&request, Request::Message { no_reply: false, .. }) {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
+            while crate::turn_cancel_registry::force_stop_in_progress(&client_session_id)
+                && tokio::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        }
+        if session_control.needs_queue_refresh() && let Ok(agent_guard) = agent.try_lock() {
+            session_control = SessionControlHandle::new(
+                &client_session_id,
+                agent_guard.soft_interrupt_queue(),
+                agent_guard.background_tool_signal(),
+                agent_guard.graceful_shutdown_signal(),
+            ).with_provider(agent_guard.provider_handle());
+        }
         let request_decoded_at = Instant::now();
         // Direct input wins the biased select above. A client may already have
         // observed Done/Error while this actor still holds the finished turn's
         // state. Completion is enqueued before the terminal event, so drain it
         // before any request (especially Message/SoftInterrupt) inspects that
         // state. Keep streaming terminal events on their ordered fanout channel.
-        reconcile_processing_completions(
+        let completion = reconcile_processing_completions(
             None, &mut processing_done_rx,
             &mut ProcessingState {
                 client_is_processing: &mut client_is_processing,
@@ -896,6 +1010,9 @@ pub(super) async fn handle_client(
                 event_tx: &swarm_event_tx,
             },
         ).await;
+        if let Some(success) = completion {
+            dispatch_queued_prompt!(!success);
+        }
         // Reserve before Ack or any session mutation, not just when the turn
         // eventually polls. Upgrade requests themselves must not reserve work.
         let _request_activity = if matches!(&request, Request::UpgradeRuntime { .. }) {
@@ -921,9 +1038,9 @@ pub(super) async fn handle_client(
             match activity {
                 Ok(activity) => Some(activity),
                 Err(error) => {
-                    let _ = client_event_tx.send(ServerEvent::Error {
+                    send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                         id: request.id(), message: error.to_string(), retry_after_secs: None,
-                    });
+                    }, "client_lifecycle: Error");
                     continue;
                 }
             }
@@ -1046,6 +1163,26 @@ pub(super) async fn handle_client(
             continue;
         }
 
+        // Passive screen controls must not acquire the Agent mutex or enter
+        // ordinary dispatch: idle observations never start a provider turn.
+        if let Request::ScreenContext { id, session_id, action } = request {
+            let result = if session_id != client_session_id {
+                Err(anyhow::anyhow!("Screen update belongs to a different session attachment"))
+            } else if matches!(action, crate::protocol::ScreenContextAction::Disable)
+                || crate::tool::sdk::owns_jarvis(&client_session_id, &client_connection_id)
+            {
+                crate::screen_context::apply(&client_session_id, &client_connection_id, action)
+            } else {
+                Err(anyhow::anyhow!("Screen context requires the live Jarvis client owner"))
+            };
+            let event = match result {
+                Ok(()) => ServerEvent::Ack { id },
+                Err(error) => ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None },
+            };
+            let _ = client_event_tx.send(event);
+            continue;
+        }
+
         // SDK controls reply only after validation. Callback results must never
         // wait for the Agent mutex held by the turn awaiting that callback.
         if matches!(&request, Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. }) {
@@ -1057,17 +1194,25 @@ pub(super) async fn handle_client(
                 }
                 Request::ConfigureTools { tools, .. } => {
                     if client_is_processing || crate::turn_cancel_registry::has_active_turn(&client_session_id) { Err(anyhow::anyhow!("Session is busy")) }
-                    else if let Ok(mut locked) = agent.try_lock() {
-                        let result = crate::tool::sdk::configure(locked.session_id(), &client_connection_id, tools, client_event_tx.clone());
-                        if result.is_ok() {
-                            locked.invalidate_sdk_tools();
-                            // Queue the acknowledgment before releasing the session lock,
-                            // so a second client cannot start a new-policy call first.
-                            let _ = client_event_tx.send(ServerEvent::Ack { id });
-                            continue;
+                    else {
+                        // Startup/catalog prewarming briefly owns this mutex too.
+                        // That is not an active turn and must not reject client
+                        // capabilities before the first user message.
+                        let mut locked = agent.lock().await;
+                        if crate::turn_cancel_registry::has_active_turn(&client_session_id) {
+                            Err(anyhow::anyhow!("Session is busy"))
+                        } else {
+                            let result = crate::tool::sdk::configure(locked.session_id(), &client_connection_id, tools, client_event_tx.clone());
+                            if result.is_ok() {
+                                locked.invalidate_sdk_tools();
+                                // Queue the acknowledgment before releasing the session lock,
+                                // so a second client cannot start a new-policy call first.
+                                let _ = client_event_tx.send(ServerEvent::Ack { id });
+                                continue;
+                            }
+                            result.map(|()| ServerEvent::Ack { id })
                         }
-                        result.map(|()| ServerEvent::Ack { id })
-                    } else { Err(anyhow::anyhow!("Session is busy")) }
+                    }
                 }
                 Request::ListTools { .. } => {
                     if let Ok(locked) = agent.try_lock() {
@@ -1079,6 +1224,144 @@ pub(super) async fn handle_client(
             let event = response.unwrap_or_else(|error| ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None });
             if let Err(error) = client_event_tx.send(event) {
                 crate::logging::debug(&format!("Client disconnected before event delivery: {error}"));
+            }
+            continue;
+        }
+
+        // Queue controls are acknowledged after their durable mutation, not
+        // by the generic pre-dispatch Ack below.
+        if matches!(&request, Request::QueuePrompt { .. } | Request::SetQueuedPromptMode { .. } | Request::InterruptQueuedPrompt { .. } | Request::InterruptQueuedPrompts { .. } | Request::GetQueuedPrompts { .. } | Request::RemoveQueuedPrompt { .. } | Request::ReorderQueuedPrompts { .. } | Request::SetQueuedPromptEditing { .. } | Request::EditQueuedPrompt { .. }) {
+            let mut interrupt = false;
+            let mut dispatch_if_idle = false;
+            let mut already_delivered = None;
+            let mut removal = None;
+            let mut edit_outcome = None;
+            let (id, result) = match request {
+                Request::QueuePrompt { id, client_id, content, images, attachments, mode, system_reminder, active_skill } => {
+                    let attachments = match super::attachment::normalize(attachments) {
+                        Ok(attachments) => attachments,
+                        Err(error) => {
+                            send_client_event_best_effort(&client_event_tx, ServerEvent::Error { id, message: format!("Invalid attachment: {error:#}"), retry_after_secs: None }, "client_lifecycle: Error");
+                            continue;
+                        }
+                    };
+                    if let Some(name) = active_skill.as_deref() {
+                        let working_dir = match queued_skill_working_dir(&client_session_id, &initial_working_dir) {
+                            Ok(working_dir) => working_dir,
+                            Err(error) => {
+                                if let Err(delivery_error) = client_event_tx.send(ServerEvent::Error { id, message: format!("Cannot validate queued skill: {error}"), retry_after_secs: None }) {
+                                    crate::logging::debug(&format!("Queue validation error receiver closed: {delivery_error}"));
+                                }
+                                continue;
+                            }
+                        };
+                        let skills = registry.skills();
+                        let global = skills.read().await;
+                        let effective = crate::skill::SkillRegistry::effective_for_working_dir(
+                            &global, Some(std::path::Path::new(&working_dir)),
+                        );
+                        if effective.get(name).is_none() {
+                            send_client_event_best_effort(&client_event_tx, ServerEvent::QueuedPromptRejected {
+                                id,
+                                reason: crate::protocol::QueuedPromptRejection::UnknownSkill,
+                                skill: name.to_owned(),
+                            }, "client_lifecycle: QueuedPromptRejected");
+                            continue;
+                        }
+                    }
+                    let mode = match mode {
+                        crate::protocol::QueuedPromptMode::Steer => jcode_agent_runtime::QueuedMessageMode::Steer,
+                        crate::protocol::QueuedPromptMode::AfterYield => jcode_agent_runtime::QueuedMessageMode::AfterYield,
+                    };
+                    dispatch_if_idle = true;
+                    let result = session_control.enqueue_user_prompt_with_skill(client_id.clone(), content.clone(), images, mode, system_reminder, active_skill, attachments).map(|delivered| {
+                        if delivered { already_delivered = Some((client_id, content)); }
+                    });
+                    (id, result)
+                }
+                Request::SetQueuedPromptMode { id, client_id, mode } => {
+                    let mode = match mode {
+                        crate::protocol::QueuedPromptMode::Steer => jcode_agent_runtime::QueuedMessageMode::Steer,
+                        crate::protocol::QueuedPromptMode::AfterYield => jcode_agent_runtime::QueuedMessageMode::AfterYield,
+                    };
+                    dispatch_if_idle = true;
+                    (id, session_control.set_user_prompt_mode(&client_id, mode, false))
+                }
+                Request::InterruptQueuedPrompt { id, client_id } => {
+                    interrupt = true;
+                    (id, session_control.set_user_prompt_mode(&client_id, jcode_agent_runtime::QueuedMessageMode::AfterYield, true))
+                }
+                Request::InterruptQueuedPrompts { id, ids } => {
+                    interrupt = true;
+                    (id, session_control.interrupt_user_prompts(&ids))
+                }
+                Request::GetQueuedPrompts { id } => { dispatch_if_idle = true; (id, Ok(())) },
+                Request::RemoveQueuedPrompt { id, client_id: _, prompt_id } => {
+                    let result = session_control.remove_user_prompt(&prompt_id).map(|outcome| { removal = Some((prompt_id, outcome)); });
+                    (id, result)
+                }
+                Request::ReorderQueuedPrompts { id, client_id: _, order } => (id, session_control.reorder_user_prompts(&order)),
+                Request::SetQueuedPromptEditing { id, client_id: _, prompt_id, editing } => {
+                    (id, session_control.set_user_prompt_editing(&prompt_id, &client_connection_id, editing))
+                }
+                Request::EditQueuedPrompt { id, client_id: _, prompt_id, content, images, attachments } => {
+                    let attachments = match super::attachment::normalize(attachments) {
+                        Ok(attachments) => attachments,
+                        Err(error) => {
+                            send_client_event_best_effort(&client_event_tx, ServerEvent::Error { id, message: format!("Invalid attachment: {error:#}"), retry_after_secs: None }, "client_lifecycle: Error");
+                            continue;
+                        }
+                    };
+                    // A saved edit is an ordinary queued prompt again: if the
+                    // turn that was running has already ended, deliver it now.
+                    dispatch_if_idle = true;
+                    let result = session_control
+                        .edit_user_prompt(&prompt_id, content, images, attachments)
+                        .map(|outcome| edit_outcome = Some((prompt_id, outcome)));
+                    (id, result)
+                }
+                _ => unreachable!(),
+            };
+            match result {
+                Ok(()) => {
+                    if let Some((prompt_id, outcome)) = removal {
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::QueuedPromptRemoved { id, prompt_id, outcome }, "client_lifecycle: QueuedPromptRemoved");
+                    } else if let Some((prompt_id, outcome)) = edit_outcome {
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::QueuedPromptEdited { id, prompt_id, outcome }, "client_lifecycle: QueuedPromptEdited");
+                    } else {
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::Ack { id }, "client_lifecycle: Ack");
+                    }
+                    if let Some((client_id, content)) = already_delivered {
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::SoftInterruptInjected { content, display_role: None, point: "already_delivered".into(), tools_skipped: None, client_ids: vec![client_id] }, "client_lifecycle: SoftInterruptInjected");
+                    }
+                    if let Ok(prompts) = session_control.queued_user_prompts() {
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::QueuedPrompts { id, prompts: prompts.clone() }, "client_lifecycle: QueuedPrompts");
+                        super::state::fanout_peer_client_event(&swarm_members, &client_session_id, &client_connection_id, ServerEvent::QueuedPrompts { id: 0, prompts }).await;
+                    }
+                    if interrupt {
+                        cancel_processing_message(
+                            &mut ProcessingState { client_is_processing: &mut client_is_processing, message_id: &mut processing_message_id, session_id: &mut processing_session_id, task: &mut processing_task },
+                            &session_control, &client_event_tx,
+                            &SwarmStatusRefs { members: &swarm_members, swarms_by_id: &swarms_by_id, event_history: &event_history, event_counter: &event_counter, event_tx: &swarm_event_tx },
+                            Some(id), Some(request_decoded_at), Some(&sessions),
+                        ).await;
+                        // A cooperatively cancelled task may have published a
+                        // completion retaining the turn reservation. Release it
+                        // before attempting to start the selected prompt.
+                        reconcile_processing_completions(
+                            None, &mut processing_done_rx,
+                            &mut ProcessingState { client_is_processing: &mut client_is_processing, message_id: &mut processing_message_id, session_id: &mut processing_session_id, task: &mut processing_task },
+                            &client_connection_id, &client_connections,
+                            &SwarmStatusRefs { members: &swarm_members, swarms_by_id: &swarms_by_id, event_history: &event_history, event_counter: &event_counter, event_tx: &swarm_event_tx },
+                        ).await;
+                        dispatch_queued_prompt!(true);
+                    } else if dispatch_if_idle {
+                        // After a Stop or failure the queue stays held: only
+                        // prompts the user explicitly sends now may start.
+                        dispatch_queued_prompt!(!super::state::turn_stop_log::last_turn_yielded(&client_session_id));
+                    }
+                }
+                Err(error) => { send_client_event_best_effort(&client_event_tx, ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None }, "client_lifecycle: Error"); }
             }
             continue;
         }
@@ -1154,9 +1437,9 @@ pub(super) async fn handle_client(
         if let Err(message) = resolve_target_subscribe_working_dir(
             &mut request, &sessions, &swarm_members,
         ).await {
-            let _ = client_event_tx.send(ServerEvent::Error {
+            send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                 id: request.id(), message, retry_after_secs: None,
-            });
+            }, "client_lifecycle: Error");
             continue;
         }
         let sdk_session_before_request = client_session_id.clone();
@@ -1166,26 +1449,65 @@ pub(super) async fn handle_client(
             connection_client_name = Some(name.clone());
         }
         match request {
+            Request::ForceStopTurn { .. } => unreachable!("force stop is dispatched before reconciliation"),
+            Request::QueuePrompt { .. } | Request::SetQueuedPromptMode { .. } | Request::InterruptQueuedPrompt { .. } | Request::InterruptQueuedPrompts { .. } | Request::GetQueuedPrompts { .. } | Request::RemoveQueuedPrompt { .. } | Request::ReorderQueuedPrompts { .. } | Request::SetQueuedPromptEditing { .. } | Request::EditQueuedPrompt { .. } => unreachable!("queue controls dispatched before acknowledgment"),
+            Request::ScreenContext { .. } => unreachable!("Passive screen control dispatched before acknowledgment"),
             Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. } => unreachable!("SDK controls dispatched before acknowledgment"),
             Request::Message {
                 id,
-                content,
-                images,
+                mut content,
+                mut images,
+                attachments,
                 system_reminder,
                 active_skill,
                 no_reply,
             } => {
+                let mut attachment_data = None;
+                if !attachments.is_empty() {
+                    let prepared = crate::session::session_path(&client_session_id)
+                        .and_then(|path| super::attachment::prepare(&path.with_extension("attachments"), attachments));
+                    match prepared {
+                        Ok(prepared) => {
+                            if !prepared.items.is_empty() {
+                                attachment_data = Some(jcode_session_types::MessageAttachments {
+                                    display_content: content.clone(),
+                                    items: prepared.items,
+                                });
+                            }
+                            content.push_str(&prepared.text);
+                            images.extend(prepared.images);
+                        }
+                        Err(error) => {
+                            send_client_event_best_effort(&client_event_tx, ServerEvent::Error { id, message: format!("Invalid attachment: {error:#}"), retry_after_secs: None }, "client_lifecycle: Error");
+                            continue;
+                        }
+                    }
+                }
+                if !no_reply
+                    && crate::tool::interactive::answer_with_text(&client_session_id, &content, images.clone())
+                {
+                    send_client_event_best_effort(&client_event_tx, ServerEvent::Done { id }, "client_lifecycle: Done");
+                    continue;
+                }
                 if no_reply {
                     append_context_message(
                         id,
                         &content,
                         images,
+                        attachment_data,
                         &client_session_id,
                         client_is_processing,
                         &agent,
                         &client_event_tx,
                     )
                     .await;
+                    continue;
+                }
+                if (!content.trim().is_empty() || !images.is_empty())
+                    && !crate::todo::is_auto_poke_message(&content)
+                    && let Err(error) = crate::turn_activity::global().resume(&client_session_id)
+                {
+                    send_client_event_best_effort(&client_event_tx, ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None }, "client_lifecycle: Error");
                     continue;
                 }
                 if !client_is_processing {
@@ -1201,10 +1523,26 @@ pub(super) async fn handle_client(
                         info.current_tool_name = None;
                     }
                 }
-                let peer_content = content.clone();
+                let peer_content = if let Some(data) = &attachment_data {
+                    let mut display = data.display_content.clone();
+                    for item in &data.items {
+                        let label = match item {
+                            jcode_session_types::StoredAttachment::File { name, .. } => format!("[{name}]"),
+                            jcode_session_types::StoredAttachment::PastedText { text } => format!("[Pasted text, {} lines]", text.lines().count().max(1)),
+                            jcode_session_types::StoredAttachment::Unknown => continue,
+                        };
+                        if !display.is_empty() { display.push('\n'); }
+                        display.push_str(&label);
+                    }
+                    display
+                } else {
+                    content.clone()
+                };
                 start_processing_message(
                     ProcessingMessage {
+                        attachment_data,
                         id,
+                        queued_client_id: None,
                         content,
                         images,
                         system_reminder,
@@ -1285,6 +1623,23 @@ pub(super) async fn handle_client(
                 urgent,
                 client_id,
             } => {
+                if (!content.trim().is_empty() || !images.is_empty())
+                    && !crate::todo::is_auto_poke_message(&content)
+                    && let Err(error) = crate::turn_activity::global().resume(&client_session_id)
+                {
+                    send_client_event_best_effort(&client_event_tx, ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None }, "client_lifecycle: Error");
+                    continue;
+                }
+                if crate::tool::interactive::answer_with_text(&client_session_id, &content, images.clone()) {
+                    send_client_event_best_effort(&client_event_tx, ServerEvent::SoftInterruptInjected {
+                        content,
+                        display_role: None,
+                        point: "ask_answer".to_string(),
+                        tools_skipped: None,
+                        client_ids: client_id.into_iter().collect(),
+                    }, "client_lifecycle: SoftInterruptInjected");
+                    continue;
+                }
                 // A soft interrupt has somewhere to go only while a turn is
                 // active. When the session is idle, queueing it would strand
                 // the user's prompt until an unrelated future message starts
@@ -1314,7 +1669,9 @@ pub(super) async fn handle_client(
                     let accepted_content = content.clone();
                     start_processing_message(
                         ProcessingMessage {
+                            attachment_data: None,
                             id,
+                            queued_client_id: None,
                             content,
                             images,
                             system_reminder: None,
@@ -1346,13 +1703,13 @@ pub(super) async fn handle_client(
                     // until this pickup event. Publish only after acceptance:
                     // a rejected prompt must remain recoverable by its caller.
                     if processing_message_id == Some(id) {
-                        let _ = client_event_tx.send(ServerEvent::SoftInterruptInjected {
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::SoftInterruptInjected {
                             content: accepted_content,
                             display_role: None,
                             point: "turn_start".to_string(),
                             tools_skipped: None,
                             client_ids: client_id.into_iter().collect(),
-                        });
+                        }, "client_lifecycle: SoftInterruptInjected");
                     }
                     if !client_is_processing {
                         let mut connections = client_connections.write().await;
@@ -1373,6 +1730,13 @@ pub(super) async fn handle_client(
                 }
             }
 
+            Request::CancelSoftInterrupts { id, .. } if session_control.needs_queue_refresh() => {
+                send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
+                    id,
+                    message: "Session queue unavailable while reconnecting".into(),
+                    retry_after_secs: None,
+                }, "client_lifecycle: Error");
+            }
             Request::CancelSoftInterrupts { id, client_ids } => match client_ids {
                 Some(client_ids) => cancel_soft_interrupts_by_id(
                     id,
@@ -1386,6 +1750,14 @@ pub(super) async fn handle_client(
                 }
             },
 
+            Request::BackgroundTasks { id, .. } => {
+                let reply = ServerEvent::Error {
+                    id,
+                    message: "Background task inspection requires a separate connection".into(),
+                    retry_after_secs: None,
+                };
+                send_client_event_best_effort(&client_event_tx, reply, "background tasks");
+            }
             Request::BackgroundTool { id } => {
                 move_tool_to_background(id, &session_control, &client_event_tx);
             }
@@ -1437,26 +1809,30 @@ pub(super) async fn handle_client(
                 .await;
             }
 
-            Request::Rewind { id, message_index } => {
+            request @ (Request::Rewind { id, .. } | Request::RewindTranscript { id, .. }) => {
                 if client_is_processing {
-                    let _ = client_event_tx.send(ServerEvent::Error {
+                    send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                         id,
                         message: "Cannot rewind while a turn is processing.".to_string(),
                         retry_after_secs: None,
-                    });
+                    }, "client_lifecycle: Error");
                     continue;
                 }
 
                 let rewind_result = {
                     let mut agent_guard = agent.lock().await;
-                    agent_guard.rewind_to_message(message_index)
+                    match request {
+                        Request::Rewind { message_index, .. } => agent_guard.rewind_to_message(message_index),
+                        Request::RewindTranscript { target, .. } => agent_guard.rewind_transcript(&target),
+                        _ => unreachable!(),
+                    }
                 };
 
                 match rewind_result {
                     Ok(removed) => {
                         crate::logging::info(&format!(
-                            "Rewound session {} to message {} (removed {})",
-                            client_session_id, message_index, removed
+                            "Rewound session {} (removed {})",
+                            client_session_id, removed
                         ));
                         if handle_get_history(
                             id,
@@ -1491,22 +1867,22 @@ pub(super) async fn handle_client(
                         .await;
                     }
                     Err(message) => {
-                        let _ = client_event_tx.send(ServerEvent::Error {
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                             id,
                             message,
                             retry_after_secs: None,
-                        });
+                        }, "client_lifecycle: Error");
                     }
                 }
             }
 
             Request::RewindUndo { id } => {
                 if client_is_processing {
-                    let _ = client_event_tx.send(ServerEvent::Error {
+                    send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                         id,
                         message: "Cannot undo rewind while a turn is processing.".to_string(),
                         retry_after_secs: None,
-                    });
+                    }, "client_lifecycle: Error");
                     continue;
                 }
 
@@ -1553,17 +1929,17 @@ pub(super) async fn handle_client(
                         .await;
                     }
                     Err(message) => {
-                        let _ = client_event_tx.send(ServerEvent::Error {
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                             id,
                             message,
                             retry_after_secs: None,
-                        });
+                        }, "client_lifecycle: Error");
                     }
                 }
             }
 
             Request::Ping { id } => {
-                let event = super::session_connections::connection_presence_pong(id, &client_connections, &swarm_members).await;
+                let event = super::session_connections::connection_presence_pong(id, &client_connections, &swarm_members);
                 let json = encode_event(&event);
                 let mut w = writer.lock().await;
                 if w.write_all(json.as_bytes()).await.is_err() {
@@ -1585,7 +1961,7 @@ pub(super) async fn handle_client(
             Request::GetTodos { .. } => {
                 let event = super::client_writer::todos_snapshot_event(&client_session_id);
                 last_pushed_todos = todos_event_key(&event);
-                let _ = client_event_tx.send(event);
+                send_client_event_best_effort(&client_event_tx, event, "client_lifecycle: forwarded event");
             }
 
             Request::GetState { id } => {
@@ -1628,11 +2004,11 @@ pub(super) async fn handle_client(
                         subscribe_working_dir.as_deref(), requested_continuation,
                     )
                 {
-                    let _ = client_event_tx.send(ServerEvent::Error {
+                    send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                         id,
                         message,
                         retry_after_secs: None,
-                    });
+                    }, "client_lifecycle: Error");
                     continue;
                 }
                 // Overrides are creation-only. In particular, never apply one to
@@ -1678,6 +2054,7 @@ pub(super) async fn handle_client(
                             handle_resume_session(
                                 id,
                                 target_session_id.clone(),
+                                resume_slot,
                                 subscribe_working_dir.as_deref(),
                                 client_instance_id.as_deref(),
                                 client_has_local_history,
@@ -1761,6 +2138,7 @@ pub(super) async fn handle_client(
                             break;
                         }
                     } else {
+                        drop(resume_slot);
                         if provisional_session {
                             agent.lock().await.activate_concurrency_tracking();
                         }
@@ -1843,6 +2221,7 @@ pub(super) async fn handle_client(
                 }
                 client_subscribed = true;
                 provisional_session = false;
+                super::background_tasks::schedule_detached_completion_replay(&client_session_id);
             }
 
             Request::GetHistory { id } => {
@@ -1892,6 +2271,20 @@ pub(super) async fn handle_client(
                 }
             }
 
+            Request::GetHistoryPage { id, before, limit } => {
+                if handle_history_page(id, &client_session_id, &agent, &writer, before, limit).await.is_err() { break; }
+            }
+            Request::GetHistoryImageChunk { id, key, offset } => {
+                if handle_history_image_chunk(id, &client_session_id, &agent, &writer, key, offset).await.is_err() { break; }
+            }
+
+            Request::ListSessionImages { id, session_id } => {
+                if handle_session_images(id, &session_id, &client_session_id, &agent, &writer, None).await.is_err() { break; }
+            }
+            Request::GetSessionImage { id, session_id, image_id, offset } => {
+                if handle_session_images(id, &session_id, &client_session_id, &agent, &writer, Some((image_id, offset))).await.is_err() { break; }
+            }
+
             Request::GetCompactedHistory {
                 id,
                 visible_messages,
@@ -1913,11 +2306,11 @@ pub(super) async fn handle_client(
             }
 
             Request::DebugCommand { id, .. } => {
-                let _ = client_event_tx.send(ServerEvent::Error {
+                send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                     id,
                     message: "debug_command is only supported on the debug socket".to_string(),
                     retry_after_secs: None,
-                });
+                }, "client_lifecycle: Error");
             }
 
             Request::UpgradeRuntime { id, candidate } => {
@@ -1961,6 +2354,7 @@ pub(super) async fn handle_client(
                     handle_resume_session(
                         id,
                         session_id,
+                        None,
                         resume_working_dir.as_deref(),
                         client_instance_id.as_deref(),
                         client_has_local_history,
@@ -2016,6 +2410,7 @@ pub(super) async fn handle_client(
                 if let Some(snapshot) = try_available_models_snapshot(&agent).await {
                     last_available_models_snapshot = Some(snapshot);
                 }
+                super::background_tasks::schedule_detached_completion_replay(&client_session_id);
             }
 
             Request::ResumeAllSessions { id } => {
@@ -2112,11 +2507,11 @@ pub(super) async fn handle_client(
                 if let Some(target_agent) = target_agent {
                     handle_set_context_cap(id, session_id, max_context_tokens, &target_agent, &client_event_tx).await;
                 } else {
-                    let _ = client_event_tx.send(ServerEvent::Error {
+                    send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                         id,
                         message: "target session not found".to_string(),
                         retry_after_secs: None,
-                    });
+                    }, "client_lifecycle: Error");
                 }
             }
 
@@ -2125,20 +2520,23 @@ pub(super) async fn handle_client(
                 effort,
                 target_session_id,
             } => {
+                let effective_target = target_session_id.as_deref().unwrap_or(&client_session_id);
+                let is_swarm_worker = swarm_members.read().await.get(effective_target)
+                    .is_some_and(|member| member.report_back_to_session_id.is_some());
                 if let Some(target_session_id) = target_session_id {
                     let target_agent = { sessions.read().await.get(&target_session_id).cloned() };
                     if let Some(target_agent) = target_agent {
-                        handle_set_reasoning_effort(id, effort, &target_agent, &client_event_tx)
+                        handle_set_reasoning_effort(id, effort, is_swarm_worker, &target_agent, &target_session_id, SessionControlHandle::provider_for_session(&target_session_id), &client_event_tx)
                             .await;
                     } else {
-                        let _ = client_event_tx.send(ServerEvent::ReasoningEffortChanged {
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::ReasoningEffortChanged {
                             id,
                             effort: None,
                             error: Some(format!("target session not found: {target_session_id}")),
-                        });
+                        }, "client_lifecycle: ReasoningEffortChanged");
                     }
                 } else {
-                    handle_set_reasoning_effort(id, effort, &agent, &client_event_tx).await;
+                    handle_set_reasoning_effort(id, effort, is_swarm_worker, &agent, &client_session_id, session_control.provider_handle(), &client_event_tx).await;
                 }
             }
 
@@ -2156,14 +2554,14 @@ pub(super) async fn handle_client(
 
             Request::SetSessionEnv { id, env } => {
                 let result = super::set_live_session_env(&sessions, &client_session_id, env).await;
-                let _ = client_event_tx.send(match result {
+                send_client_event_best_effort(&client_event_tx, match result {
                     Ok(()) => ServerEvent::Done { id },
                     Err(_) => ServerEvent::Error {
                         id,
                         message: "Invalid session environment".to_string(),
                         retry_after_secs: None,
                     },
-                });
+                }, "client_lifecycle: reply result");
             }
 
             Request::SetSessionSaved { id, saved, label } => {
@@ -2193,14 +2591,14 @@ pub(super) async fn handle_client(
                 // Wait for the lock instead of rejecting: this runs at an idle
                 // turn boundary and must not fail spuriously.
                 let result = agent.lock().await.persist_session_now();
-                let _ = client_event_tx.send(match result {
+                send_client_event_best_effort(&client_event_tx, match result {
                     Ok(()) => ServerEvent::Done { id },
                     Err(error) => ServerEvent::Error {
                         id,
                         message: crate::util::format_error_chain(&error),
                         retry_after_secs: None,
                     },
-                });
+                }, "client_lifecycle: reply result");
             }
 
             Request::RenameSession { id, title } => {
@@ -2338,7 +2736,7 @@ pub(super) async fn handle_client(
 
             // Agent-to-agent communication
             Request::AgentRegister { id, .. } => {
-                let _ = client_event_tx.send(ServerEvent::Done { id });
+                send_client_event_best_effort(&client_event_tx, ServerEvent::Done { id }, "client_lifecycle: Done");
             }
 
             Request::StdinResponse {
@@ -2346,6 +2744,12 @@ pub(super) async fn handle_client(
                 request_id,
                 input,
             } => {
+                if crate::tool::interactive::is_owner_approval(&request_id) {
+                    send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
+                        id, message: "Owner approval requires an interactive structured response".into(), retry_after_secs: None,
+                    }, "client_lifecycle: owner approval");
+                    continue;
+                }
                 handle_stdin_response(id, request_id, input, &stdin_responses, &client_event_tx)
                     .await;
             }
@@ -2355,7 +2759,25 @@ pub(super) async fn handle_client(
                 request_id,
                 response,
             } => {
-                let input = serde_json::to_string(&response).unwrap_or_default();
+                if crate::tool::interactive::is_owner_approval(&request_id)
+                    && !(local_jcode_peer && connection_client_name.as_deref() == Some("jcode-tui"))
+                {
+                    send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
+                        id, message: "This client cannot answer owner approvals".into(), retry_after_secs: None,
+                    }, "client_lifecycle: owner approval");
+                    continue;
+                }
+                let input = match serde_json::to_string(&response) {
+                    Ok(input) => input,
+                    Err(error) => {
+                        if let Err(delivery_error) = client_event_tx.send(ServerEvent::Error {
+                            id, message: format!("Cannot encode ask response: {error}"), retry_after_secs: None,
+                        }) {
+                            crate::logging::debug(&format!("Ask response error receiver closed: {delivery_error}"));
+                        }
+                        continue;
+                    }
+                };
                 handle_stdin_response(id, request_id, input, &stdin_responses, &client_event_tx)
                     .await;
             }
@@ -2379,7 +2801,7 @@ pub(super) async fn handle_client(
             }
 
             Request::AgentCapabilities { id } => {
-                let _ = client_event_tx.send(ServerEvent::Done { id });
+                send_client_event_best_effort(&client_event_tx, ServerEvent::Done { id }, "client_lifecycle: Done");
             }
 
             Request::RuntimeCommand { id, command, args } => {
@@ -2413,11 +2835,14 @@ pub(super) async fn handle_client(
                         return super::runtime_ssh_host::execute(&mut guard, &command, &args).await;
                     }
                     let parsed: jcode_harness_api::RuntimeCommand = serde_json::from_value(serde_json::json!(command))?;
+                    if parsed == jcode_harness_api::RuntimeCommand::BackgroundOutput {
+                        return super::runtime_commands::background_output(crate::background::global(), &client_session_id, &args).await;
+                    }
                     if parsed == jcode_harness_api::RuntimeCommand::ServerReload {
                         if !args.is_empty() { anyhow::bail!("Server reload accepts no arguments. Forced reload is intentionally not exposed."); }
-                        let _ = client_event_tx.send(ServerEvent::RuntimeCommandResult { id, command: command.clone(),
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::RuntimeCommandResult { id, command: command.clone(),
                             data: serde_json::json!({"requested": true, "force": false}),
-                            message: "Requested a state-preserving server upgrade if a newer binary is available. Watch reload progress for completion.".into() });
+                            message: "Requested a state-preserving server upgrade if a newer binary is available. Watch reload progress for completion.".into() }, "client_lifecycle: RuntimeCommandResult");
                         handle_reload(id, false, &client_session_id, &agent, &swarm_members, &client_event_tx).await;
                         return Ok((serde_json::Value::Null, String::new()));
                     }
@@ -2480,7 +2905,7 @@ pub(super) async fn handle_client(
                                 .and_then(|value| value.as_str().map(str::to_owned))
                         } else { None };
                         if next_prompt.is_some() { data["started"] = serde_json::json!(true); }
-                        let _ = client_event_tx.send(ServerEvent::RuntimeCommandResult { id, command, data, message });
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::RuntimeCommandResult { id, command, data, message }, "client_lifecycle: RuntimeCommandResult");
                         if let Some(content) = next_prompt {
                             // The execute closure has returned and dropped its
                             // Agent guard. Reuse the actual message lifecycle:
@@ -2502,7 +2927,8 @@ pub(super) async fn handle_client(
                             }
                             start_processing_message(
                                 ProcessingMessage {
-                                    id, content, images: Vec::new(), system_reminder: None,
+                                    attachment_data: None,
+                                    id, queued_client_id: None, content, images: Vec::new(), system_reminder: None,
                                     active_skill: None, server_failover: true,
                                 },
                                 &client_session_id,
@@ -2523,11 +2949,11 @@ pub(super) async fn handle_client(
                         }
                     },
                     Ok(_) => {},
-                    Err(error) => { let _ = client_event_tx.send(ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None }); },
+                    Err(error) => { send_client_event_best_effort(&client_event_tx, ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None }, "client_lifecycle: Error"); },
                 }
             }
             Request::AgentContext { id } => {
-                let _ = client_event_tx.send(ServerEvent::Done { id });
+                send_client_event_best_effort(&client_event_tx, ServerEvent::Done { id }, "client_lifecycle: Done");
             }
 
             Request::NotifySession {
@@ -2542,7 +2968,6 @@ pub(super) async fn handle_client(
                     NotifySessionContext {
                         sessions: &sessions,
                         soft_interrupt_queues: &soft_interrupt_queues,
-                        client_connections: &client_connections,
                         swarm_members: &swarm_members,
                         swarms_by_id: &swarms_by_id,
                         event_history: &event_history,
@@ -2572,7 +2997,6 @@ pub(super) async fn handle_client(
                     NotifySessionContext {
                         sessions: &sessions,
                         soft_interrupt_queues: &soft_interrupt_queues,
-                        client_connections: &client_connections,
                         swarm_members: &swarm_members,
                         swarms_by_id: &swarms_by_id,
                         event_history: &event_history,
@@ -2620,11 +3044,11 @@ pub(super) async fn handle_client(
             }
                     }
                     Err(error) => {
-                        let _ = client_event_tx.send(ServerEvent::Error {
+                        send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
                             id,
                             message: error.to_string(),
                             retry_after_secs: None,
-                        });
+                        }, "client_lifecycle: Error");
                     }
                 }
             }
@@ -2741,6 +3165,34 @@ pub(super) async fn handle_client(
                     &file_touch,
                     &sessions,
                     &client_connections,
+                )
+                .await;
+            }
+
+            Request::CommListSessions {
+                id,
+                session_id: req_session_id,
+            } => {
+                handle_comm_list_sessions(
+                    id,
+                    req_session_id,
+                    &client_event_tx,
+                    &swarm_members,
+                )
+                .await;
+            }
+
+            Request::CommFocusSession {
+                id,
+                session_id: req_session_id,
+                target_session,
+            } => {
+                handle_comm_focus_session(
+                    id,
+                    req_session_id,
+                    target_session,
+                    &client_event_tx,
+                    &swarm_members,
                 )
                 .await;
             }
@@ -2901,6 +3353,24 @@ pub(super) async fn handle_client(
                     Some(spawn_mode) => spawn_mode,
                     None => return Ok(()),
                 };
+                let client_event_tx = client_event_tx.clone();
+                let sessions = sessions.clone();
+                let global_session_id = global_session_id.clone();
+                let provider_template = provider_template.clone();
+                let swarm_members = swarm_members.clone();
+                let swarms_by_id = swarms_by_id.clone();
+                let swarm_coordinators = swarm_coordinators.clone();
+                let swarm_plans = swarm_plans.clone();
+                let channel_subscriptions = channel_subscriptions.clone();
+                let channel_subscriptions_by_session = channel_subscriptions_by_session.clone();
+                let event_history = event_history.clone();
+                let event_counter = event_counter.clone();
+                let swarm_event_tx = swarm_event_tx.clone();
+                let mcp_pool = mcp_pool.clone();
+                let soft_interrupt_queues = soft_interrupt_queues.clone();
+                let swarm_mutation_runtime = swarm_mutation_runtime.clone();
+                let client_connections = client_connections.clone();
+                crate::runtime_activity::spawn(async move {
                 handle_comm_spawn(
                     id,
                     req_session_id,
@@ -2931,6 +3401,7 @@ pub(super) async fn handle_client(
                     &client_connections,
                 )
                 .await;
+                });
             }
 
             Request::CommListModels {
@@ -2974,7 +3445,26 @@ pub(super) async fn handle_client(
                     &event_counter,
                     &swarm_event_tx,
                     &soft_interrupt_queues,
-                    &swarm_mutation_runtime,
+                    &await_members_runtime,
+                )
+                .await;
+            }
+
+            Request::CommAnswerEscalatedAsk {
+                id,
+                session_id: req_session_id,
+                worker_session_id,
+                request_id,
+                answers,
+            } => {
+                super::ask_escalation::handle_answer_request(
+                    id,
+                    &req_session_id,
+                    &worker_session_id,
+                    request_id,
+                    answers,
+                    &client_event_tx,
+                    &swarm_members,
                 )
                 .await;
             }
@@ -3078,12 +3568,12 @@ pub(super) async fn handle_client(
                     &swarm_coordinators,
                 )
                 .await;
-                let _ = client_event_tx.send(ServerEvent::CommReportResponse {
+                send_client_event_best_effort(&client_event_tx, ServerEvent::CommReportResponse {
                     id,
                     status,
                     message: "Report recorded and delivered to the coordinator when applicable."
                         .to_string(),
-                });
+                }, "client_lifecycle: CommReportResponse");
             }
 
             Request::CommPlanStatus {
@@ -3177,6 +3667,22 @@ pub(super) async fn handle_client(
                 model,
                 effort,
             } => {
+                let client_event_tx = client_event_tx.clone();
+                let sessions = sessions.clone();
+                let global_session_id = global_session_id.clone();
+                let provider_template = provider_template.clone();
+                let soft_interrupt_queues = soft_interrupt_queues.clone();
+                let client_connections = client_connections.clone();
+                let swarm_members = swarm_members.clone();
+                let swarms_by_id = swarms_by_id.clone();
+                let swarm_plans = swarm_plans.clone();
+                let swarm_coordinators = swarm_coordinators.clone();
+                let event_history = event_history.clone();
+                let event_counter = event_counter.clone();
+                let swarm_event_tx = swarm_event_tx.clone();
+                let mcp_pool = mcp_pool.clone();
+                let swarm_mutation_runtime = swarm_mutation_runtime.clone();
+                crate::runtime_activity::spawn(async move {
                 handle_comm_assign_next(
                     id,
                     req_session_id,
@@ -3204,6 +3710,7 @@ pub(super) async fn handle_client(
                     &swarm_mutation_runtime,
                 )
                 .await;
+                });
             }
 
             Request::CommTaskControl {
@@ -3317,6 +3824,15 @@ pub(super) async fn handle_client(
                 handle_client_debug_response(id, output, &client_debug_response_tx);
             }
         }
+        if client_subscribed
+            && stdin_attachment.as_ref().is_none_or(|route| !route.session_is(&client_session_id))
+        {
+            stdin_attachment = Some(crate::tool::interactive::attach_client(
+                &client_session_id,
+                stdin_req_tx.clone(),
+                local_jcode_peer && connection_client_name.as_deref() == Some("jcode-tui"),
+            ));
+        }
         if let Some(name) = connection_client_name.as_deref() {
             crate::mobile_push::note_client_attached(&client_session_id, name);
         }
@@ -3346,6 +3862,7 @@ pub(super) async fn handle_client(
     Ok(())
     }.await;
 
+    drop(stdin_attachment);
     drop(_sdk_connection_guard);
 
     super::client_disconnect_cleanup::record_transport_closed(
@@ -3423,35 +3940,44 @@ pub(super) async fn handle_client(
             crate::logging::warn(&format!("Client stdin forwarder failed: {error}"));
         }
         stdin_responses.lock().await.clear();
-        if let Some(handle) = processing_task.take() {
-            crate::logging::info(&format!(
-                "Retaining disconnected turn for session {}",
-                client_session_id
-            ));
-            let owner_id = handle.id();
-            if let Err(error) = handle.await {
-                crate::logging::warn(&format!("Disconnected turn task failed: {error}"));
-            }
-            while let Ok((done_id, result, report, owner, _finalization)) =
-                processing_done_rx.try_recv()
-            {
-                if Some(done_id) == processing_message_id && owner == owner_id {
-                    record_processing_completion(
-                        processing_session_id.as_deref(),
-                        result,
-                        report,
-                        &SwarmStatusRefs {
-                            members: &swarm_members,
-                            swarms_by_id: &swarms_by_id,
-                            event_history: &event_history,
-                            event_counter: &event_counter,
-                            event_tx: &swarm_event_tx,
-                        },
-                    )
-                    .await;
+        if processing_task.is_some() {
+            while let Some(handle) = processing_task.take() {
+                crate::logging::info(&format!(
+                    "Retaining disconnected turn for session {}",
+                    client_session_id
+                ));
+                let owner_id = handle.id();
+                if let Err(error) = handle.await {
+                    crate::logging::warn(&format!("Disconnected turn task failed: {error}"));
+                }
+                let mut completion = None;
+                while let Ok((done_id, result, report, owner, _finalization)) =
+                    processing_done_rx.try_recv()
+                {
+                    if Some(done_id) == processing_message_id && owner == owner_id {
+                        completion = Some(result.is_ok());
+                        record_processing_completion(
+                            processing_session_id.as_deref(),
+                            result,
+                            report,
+                            &SwarmStatusRefs {
+                                members: &swarm_members,
+                                swarms_by_id: &swarms_by_id,
+                                event_history: &event_history,
+                                event_counter: &event_counter,
+                                event_tx: &swarm_event_tx,
+                            },
+                        )
+                        .await;
+                    }
+                }
+                client_is_processing = false;
+                processing_message_id = None;
+                processing_session_id = None;
+                if let Some(success) = completion {
+                    dispatch_queued_prompt!(!success);
                 }
             }
-            client_is_processing = false;
         } else {
             // A reattached remote connection may disconnect again while the
             // original lifecycle owns the task. Wait for its active-turn lease
@@ -3498,13 +4024,134 @@ pub(super) async fn handle_client(
     connection_result
 }
 
+/// A single coalesced refresh, with bounded polling while a turn holds the agent.
+/// Keep retrying until idle rather than losing the last catalog update of a turn.
+#[derive(Default)]
+struct ModelCatalogRetry {
+    deadline: Option<tokio::time::Instant>,
+    attempts: u32,
+}
+
+impl ModelCatalogRetry {
+    fn queue(&mut self) {
+        self.deadline.get_or_insert_with(tokio::time::Instant::now);
+    }
+
+    fn busy(&mut self) {
+        let millis = 100u64 << self.attempts.min(4);
+        self.attempts = self.attempts.saturating_add(1);
+        self.deadline = Some(tokio::time::Instant::now() + Duration::from_millis(millis));
+    }
+
+    fn complete(&mut self) {
+        *self = Self::default();
+    }
+}
+
+#[cfg(test)]
+mod model_catalog_retry_tests {
+    use super::*;
+
+    struct TestProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for TestProvider {
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            anyhow::bail!("catalog test must not call complete")
+        }
+
+        fn name(&self) -> &str {
+            "catalog-retry-test"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self)
+        }
+    }
+
+    #[tokio::test]
+    #[expect(clippy::await_holding_lock, reason = "isolated test home")]
+    async fn queued_catalog_retry_recovers_after_agent_unlocks() {
+        let _env = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => crate::env::set_var("JCODE_HOME", value),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+            }
+        }
+        let _restore = RestoreHome(previous_home);
+        crate::env::set_var("JCODE_HOME", home.path());
+        let agent = Arc::new(Mutex::new(Agent::new(
+            Arc::new(TestProvider),
+            Registry::empty(),
+        )));
+        let busy = agent.lock().await;
+        let mut retry = ModelCatalogRetry::default();
+        retry.queue();
+        assert!(
+            try_available_models_catalog_offloaded(&agent)
+                .await
+                .is_none()
+        );
+        retry.busy();
+        let deadline = retry.deadline.unwrap();
+        retry.queue();
+        assert_eq!(retry.deadline, Some(deadline));
+        drop(busy);
+        tokio::time::sleep_until(deadline).await;
+        let catalog = try_available_models_catalog_offloaded(&agent)
+            .await
+            .unwrap();
+        assert!(catalog.live_event().is_some());
+        retry.complete();
+        assert!(retry.deadline.is_none());
+    }
+
+    #[tokio::test]
+    async fn busy_model_catalog_updates_coalesce_and_retry_until_idle() {
+        let mut retry = ModelCatalogRetry::default();
+        assert!(retry.deadline.is_none());
+        retry.queue();
+        for _ in 0..32 {
+            retry.busy();
+            let deadline = retry.deadline.unwrap();
+            for _ in 0..100 {
+                retry.queue();
+            }
+            assert_eq!(retry.deadline, Some(deadline));
+            let delay = deadline.saturating_duration_since(tokio::time::Instant::now());
+            assert!(delay <= Duration::from_millis(1600));
+            assert!(delay > Duration::ZERO);
+        }
+        // No new bus event is needed when the busy turn ends.
+        assert!(retry.deadline.is_some());
+        retry.complete();
+        assert!(retry.deadline.is_none());
+        assert_eq!(retry.attempts, 0);
+        retry.queue();
+        retry.busy();
+        assert_eq!(retry.attempts, 1);
+    }
+}
+
 #[path = "client_processing.rs"]
 mod client_processing;
 use client_processing::{
     append_context_message, cancel_processing_message, cancel_soft_interrupts_by_id,
     clear_soft_interrupts, move_tool_to_background, queue_soft_interrupt,
-    reconcile_processing_completions, record_processing_completion, start_processing_message,
-    try_available_models_snapshot,
+    reconcile_processing_completions, record_processing_completion, start_next_queued_prompt,
+    start_processing_message, try_available_models_snapshot,
 };
 
 /// Process a message and stream events (mpsc channel - per-client)
@@ -3540,11 +4187,17 @@ pub(super) async fn process_locked_message_streaming_mpsc(
         images,
         system_reminder,
         event_tx,
+        None,
+        None,
     )
     .await
 }
 
 /// Execute only with this runtime's non-cloneable turn reservation.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Carry message payload and turn lease through the streaming boundary"
+)]
 pub(super) async fn process_reserved_message_streaming_mpsc(
     agent: &mut Agent,
     lease: &crate::agent::TurnLease,
@@ -3552,11 +4205,22 @@ pub(super) async fn process_reserved_message_streaming_mpsc(
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
+    queued_client_id: Option<Vec<String>>,
+    attachment_data: Option<jcode_session_types::MessageAttachments>,
 ) -> Result<()> {
     agent.validate_server_turn(lease)?;
     let session_id = agent.session_id().to_string();
     let result = agent
-        .run_reserved_streaming_mpsc(lease, content, images, system_reminder, event_tx, None)
+        .run_reserved_streaming_mpsc(
+            lease,
+            content,
+            images,
+            system_reminder,
+            event_tx,
+            None,
+            queued_client_id,
+            attachment_data,
+        )
         .await;
     if result.is_ok() {
         crate::runtime_memory_log::emit_event(
@@ -3575,64 +4239,40 @@ pub(super) async fn process_reserved_message_streaming_mpsc(
     result
 }
 
+/// Returns false when a busy agent or failed build requires another attempt.
+async fn publish_available_models_for_client(
+    agent: &Arc<Mutex<Agent>>,
+    tx: &mpsc::UnboundedSender<ServerEvent>,
+    last: &mut Option<Arc<str>>,
+    connection_id: &str,
+) -> bool {
+    let Some(catalog) = try_available_models_catalog_offloaded(agent).await else {
+        return false;
+    };
+    if last.as_ref().is_some_and(|previous| {
+        Arc::ptr_eq(previous, &catalog.dedup_key) || previous.as_ref() == catalog.dedup_key.as_ref()
+    }) {
+        return true;
+    }
+    if let Some(event) = catalog.live_event() {
+        let _ = tx.send(event.clone());
+    } else {
+        crate::logging::warn(&format!(
+            "Skipping oversized catalog for connection {} ({} bytes)",
+            connection_id, catalog.encoded_len
+        ));
+    }
+    *last = Some(Arc::clone(&catalog.dedup_key));
+    true
+}
+
 #[cfg(test)]
 #[path = "client_lifecycle_tests.rs"]
 mod tests;
 
-/// Only metadata-changing events need the shared connection write lock.
-/// Borrow tool names until the lock is held, avoiding allocations for lookup misses.
-enum ConnectionMetadataUpdate<'a> {
-    TurnStarted,
-    ToolStarted(&'a str),
-    ToolDone,
-    TurnEnded,
-}
-
-fn release_large_event_buffer(buffer: &mut Vec<u8>) {
-    // Keep ordinary streaming allocations, but do not pin a large History or
-    // tool-result payload for the rest of a long-lived connection.
-    if buffer.capacity() > 64 * 1024 {
-        *buffer = Vec::new();
-    }
-}
-
-impl<'a> ConnectionMetadataUpdate<'a> {
-    fn from_event(event: &'a ServerEvent) -> Option<Self> {
-        // Deliberately unwrap exactly one level, matching the forwarder's original
-        // behavior. Nested wrappers are not metadata transitions.
-        let observed = match event {
-            ServerEvent::TurnEvent { event, .. } => event.as_ref(),
-            event => event,
-        };
-        match observed {
-            ServerEvent::TurnStarted { .. } => Some(Self::TurnStarted),
-            ServerEvent::ToolStart { name, .. } => Some(Self::ToolStarted(name)),
-            ServerEvent::ToolDone { .. } => Some(Self::ToolDone),
-            ServerEvent::Done { .. } | ServerEvent::Error { .. } | ServerEvent::Interrupted => {
-                Some(Self::TurnEnded)
-            }
-            _ => None,
-        }
-    }
-
-    fn apply(self, is_processing: &mut bool, current_tool_name: &mut Option<String>) {
-        match self {
-            Self::TurnStarted => {
-                *is_processing = true;
-                *current_tool_name = None;
-            }
-            Self::ToolStarted(name) => {
-                *is_processing = true;
-                *current_tool_name = Some(name.to_owned());
-            }
-            Self::ToolDone => *current_tool_name = None,
-            Self::TurnEnded => {
-                *is_processing = false;
-                *current_tool_name = None;
-            }
-        }
-    }
-}
+#[path = "connection_metadata.rs"]
+mod connection_metadata;
+use connection_metadata::*;
 
 #[cfg(test)]
 #[path = "client_lifecycle_metadata_tests.rs"]

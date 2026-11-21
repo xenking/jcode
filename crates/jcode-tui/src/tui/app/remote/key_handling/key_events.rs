@@ -26,12 +26,25 @@ pub(super) async fn handle_remote_key_internal(
     let mut code = code;
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
+    input::reset_preferred_input_column(app, code, modifiers);
 
     if app.ask_picker.is_some() {
         if let Some((request_id, response)) = app.handle_ask_picker_key(code) {
             remote.send_ask_response(&request_id, response).await?;
         }
         return Ok(());
+    }
+
+    // A `/btw` card owns Esc and Ctrl+P, the same as an in-process session.
+    if app.btw_open() {
+        if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('p') {
+            app.promote_btw();
+            return Ok(());
+        }
+        if code == KeyCode::Esc && app.input.trim().is_empty() {
+            app.close_btw();
+            return Ok(());
+        }
     }
 
     if app.handle_key_during_provider_failover(code) {
@@ -183,6 +196,73 @@ pub(super) async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    // Queue focus takes precedence over global Alt-arrow shortcuts, but not modals.
+    if modifiers == KeyModifiers::ALT
+        && matches!(code, KeyCode::Up | KeyCode::Down)
+        && !app.server_queued_prompts.is_empty()
+    {
+        let last = app.server_queued_prompts.len() - 1;
+        app.selected_queued_prompt = Some(match (app.selected_queued_prompt, code) {
+            (None, KeyCode::Up) => last,
+            (None, _) => 0,
+            (Some(index), KeyCode::Up) => index.saturating_sub(1),
+            (Some(index), _) => (index + 1).min(last),
+        });
+        app.set_status_notice("Queue: Alt+↑/↓ select · m mode · Enter interrupt · Esc unfocus");
+        return Ok(());
+    }
+    if let Some(index) = app.selected_queued_prompt
+        && modifiers.is_empty()
+    {
+        match code {
+            KeyCode::Esc => {
+                app.selected_queued_prompt = None;
+                return Ok(());
+            }
+            KeyCode::Char('m') => {
+                if let Some(prompt) = app.server_queued_prompts.get(index) {
+                    let mode = match prompt.mode {
+                        crate::protocol::QueuedPromptMode::Steer => {
+                            crate::protocol::QueuedPromptMode::AfterYield
+                        }
+                        crate::protocol::QueuedPromptMode::AfterYield => {
+                            crate::protocol::QueuedPromptMode::Steer
+                        }
+                    };
+                    match remote
+                        .set_queued_prompt_mode(prompt.client_id.clone(), mode)
+                        .await
+                    {
+                        Ok(id) => app.pending_queue_requests.push((id, None)),
+                        Err(error) => app.push_display_message(DisplayMessage::error(format!(
+                            "Failed to change queued prompt mode: {error}"
+                        ))),
+                    }
+                }
+                return Ok(());
+            }
+            KeyCode::Enter => {
+                if let Some(prompt) = app.server_queued_prompts.get(index) {
+                    match remote
+                        .interrupt_queued_prompt(prompt.client_id.clone())
+                        .await
+                    {
+                        Ok(id) => {
+                            app.pending_queue_requests.push((id, None));
+                            app.selected_queued_prompt = None;
+                            app.set_status_notice("Interrupting for selected queued prompt");
+                        }
+                        Err(error) => app.push_display_message(DisplayMessage::error(format!(
+                            "Failed to interrupt for queued prompt: {error}"
+                        ))),
+                    }
+                }
+                return Ok(());
+            }
+            _ => app.selected_queued_prompt = None,
+        }
+    }
+
     // Inline hotkey feedback: when a known-but-rarely-used chord is pressed,
     // show "you just pressed X → does Y". Placed after the overlay handlers so
     // overlay-local keys stay silent. Unknown chords are reported at the
@@ -255,50 +335,17 @@ pub(super) async fn handle_remote_key_internal(
     }
 
     if app.toggle_keys.auto_poke.matches(code, modifiers) {
-        if crate::tui::is_ssh_remote() {
-            let args = if app.auto_poke_incomplete_todos {
-                vec!["off".to_string()]
-            } else if app.is_processing {
-                vec!["on".to_string()]
-            } else {
-                Vec::new()
-            };
-            remote.runtime_command("poke", args).await?;
-            app.set_status_notice("Requested remote poke toggle");
-            return Ok(());
-        }
-        if app.auto_poke_incomplete_todos {
-            let cleared = app_mod::commands::disable_auto_poke(app);
-            app.set_status_notice("Poke: OFF");
-            app.push_display_message(DisplayMessage::system(
-                app_mod::commands::poke_disabled_message(cleared),
-            ));
+        // The daemon owns the policy even when its socket is local. Mirror
+        // state only on RuntimeCommandResult, not optimistically on keypress.
+        let args = if app.auto_poke_incomplete_todos {
+            vec!["off".to_string()]
+        } else if app.is_processing {
+            vec!["on".to_string()]
         } else {
-            match app_mod::commands::activate_auto_poke(app) {
-                app_mod::commands::PokeActivation::EnabledNoIncomplete => {
-                    app.push_display_message(DisplayMessage::system(
-                        app_mod::commands::poke_enabled_without_incomplete_message(),
-                    ));
-                }
-                app_mod::commands::PokeActivation::Queued => {
-                    app.push_display_message(DisplayMessage::system(
-                        app_mod::commands::poke_queued_display_message(),
-                    ));
-                }
-                app_mod::commands::PokeActivation::SendNow {
-                    incomplete_count,
-                    poke_msg,
-                } => {
-                    app.push_display_message(DisplayMessage::system(
-                        app_mod::commands::poke_triggered_display_message(incomplete_count),
-                    ));
-
-                    let _ =
-                        begin_remote_send(app, remote, poke_msg, vec![], true, None, true, 0).await;
-                    app.visible_turn_started = Some(Instant::now());
-                }
-            }
-        }
+            Vec::new()
+        };
+        remote.runtime_command("poke", args).await?;
+        app.set_status_notice("Requested remote poke toggle");
         return Ok(());
     }
 
@@ -332,16 +379,12 @@ pub(super) async fn handle_remote_key_internal(
         return Ok(());
     }
 
-    // Swarm views: Alt+N cycles chat → inline controls → full live page → chat.
-    // Selection/open/prompt controls stay available in both active views, while
-    // plain typing continues to flow to the chat input.
+    // Alt+N toggles the dedicated swarm page. Passive worker status lives in
+    // pinned todos rather than a separate inline controls strip.
     if app.toggle_keys.swarm_panel_focus.matches(code, modifiers) {
         match app.cycle_swarm_panel_view() {
             app_mod::tui_state::SwarmPanelView::Chat => {
                 app.set_status_notice("Swarm view closed");
-            }
-            app_mod::tui_state::SwarmPanelView::Controls => {
-                app.set_status_notice(crate::tui::keybind::swarm_view_hint("full page"));
             }
             app_mod::tui_state::SwarmPanelView::FullPage => {
                 app.set_status_notice(crate::tui::keybind::swarm_page_hint());
@@ -591,9 +634,23 @@ pub(super) async fn handle_remote_key_internal(
             }
             KeyCode::Char('c') | KeyCode::Char('d') => {
                 if app.is_processing {
-                    remote.cancel_with_reason("keyboard_ctrl_c_or_d").await?;
-                    app.set_status_notice("Interrupting...");
+                    // The runtime can fail to confirm a stop (a tool that
+                    // ignores cancellation), which used to trap the user in a
+                    // turn that could never be interrupted and a client that
+                    // could never be closed. A third press always detaches.
+                    app.note_processing_interrupt();
+                    if app.processing_interrupt_presses() >= 3 {
+                        app.quit_client_now();
+                        return Ok(());
+                    }
+                    let forced = remote.keyboard_cancel("keyboard_ctrl_c_or_d").await?;
+                    app.set_status_notice(if forced {
+                        "Force stopping..."
+                    } else {
+                        "Interrupting..."
+                    });
                 } else {
+                    app.reset_processing_interrupts();
                     app.handle_quit_request();
                 }
                 return Ok(());
@@ -668,18 +725,39 @@ pub(super) async fn handle_remote_key_internal(
             KeyCode::Tab | KeyCode::Char('t') => {
                 app.queue_mode = !app.queue_mode;
                 let mode_str = if app.queue_mode {
-                    "Queue mode: messages wait until response completes"
+                    "Default send mode: after yield"
                 } else {
-                    "Immediate mode: messages send next (no interrupt)"
+                    "Default send mode: steer at the next safe point"
                 };
                 app.set_status_notice(mode_str);
                 return Ok(());
             }
             KeyCode::Up => {
+                if app.queued_prompt_edit_active() {
+                    // Up owns queue walking while an edit is open; do not let a
+                    // modifier chord replace the text being edited.
+                    return Ok(());
+                }
                 let had_server_interrupts = !app.pending_soft_interrupts.is_empty();
-                let had_pending = app.retrieve_pending_message_for_edit();
+                let legacy_ids = app.pending_soft_interrupt_client_ids();
+                if had_server_interrupts
+                    && legacy_ids.is_none()
+                    && (remote.supports_queued_prompts() || !app.server_queued_prompts.is_empty())
+                {
+                    app.set_status_notice(
+                        "Cannot recall legacy follow-ups while server queue is nonempty",
+                    );
+                    return Ok(());
+                }
+                let had_pending =
+                    !app.queued_prompt_edit_active() && app.retrieve_pending_message_for_edit();
                 if had_pending && had_server_interrupts {
-                    if let Err(error) = remote.cancel_soft_interrupts().await {
+                    let cancellation = if let Some(ids) = legacy_ids {
+                        remote.cancel_soft_interrupts_by_id(ids).await.map(|_| ())
+                    } else {
+                        remote.cancel_soft_interrupts().await
+                    };
+                    if let Err(error) = cancellation {
                         app.push_display_message(DisplayMessage::error(format!(
                             "Recalled draft retained, but server interrupt cancellation failed: {error}"
                         )));
@@ -696,6 +774,11 @@ pub(super) async fn handle_remote_key_internal(
             }
             _ => {}
         }
+    }
+
+    if input::is_alternate_enter(code, modifiers) && app.queued_prompt_edit_active() {
+        app.save_queued_prompt_edit(remote).await;
+        return Ok(());
     }
 
     if input::is_alternate_enter(code, modifiers) && input::try_queue_command(app) {
@@ -718,11 +801,22 @@ pub(super) async fn handle_remote_key_internal(
             match app.send_action(true) {
                 SendAction::Submit => submit_prepared_remote_input(app, remote, prepared).await?,
                 SendAction::Queue => {
-                    app.queued_messages.push(prepared.expanded);
+                    super::update::send_prepared_queued_prompt(
+                        app,
+                        prepared,
+                        crate::protocol::QueuedPromptMode::AfterYield,
+                        remote,
+                    )
+                    .await;
                 }
                 SendAction::Interleave => {
-                    app.send_interleave_now(prepared.expanded, prepared.images, remote)
-                        .await;
+                    super::update::send_prepared_queued_prompt(
+                        app,
+                        prepared,
+                        crate::protocol::QueuedPromptMode::Steer,
+                        remote,
+                    )
+                    .await;
                 }
             }
         }
@@ -731,6 +825,36 @@ pub(super) async fn handle_remote_key_internal(
 
     if crate::tui::app::input::newline::enter_inserts_newline(app, code, modifiers) {
         return Ok(());
+    }
+
+    // A queued prompt open for editing owns Up/Down (walk the queue), Esc
+    // (cancel) and Enter (save in place). With an empty composer, Up recalls
+    // the newest queued prompt before falling back to prompt history.
+    if modifiers.is_empty() {
+        match code {
+            KeyCode::Up => {
+                if app.queued_prompt_edit_active() {
+                    if app.handle_queued_prompt_edit_nav(KeyCode::Up, remote).await {
+                        return Ok(());
+                    }
+                } else if app.recall_last_queued_prompt(remote).await {
+                    return Ok(());
+                }
+            }
+            KeyCode::Down if app.queued_prompt_edit_active() => {
+                if app
+                    .handle_queued_prompt_edit_nav(KeyCode::Down, remote)
+                    .await
+                {
+                    return Ok(());
+                }
+            }
+            KeyCode::Esc if app.queued_prompt_edit_active() => {
+                app.cancel_queued_prompt_edit(remote).await;
+                return Ok(());
+            }
+            _ => {}
+        }
     }
 
     if input::handle_multiline_input_navigation(app, code, modifiers)
@@ -816,7 +940,9 @@ pub(super) async fn handle_remote_key_internal(
             app.autocomplete();
         }
         KeyCode::Enter => {
-            submit_remote_enter_input(app, remote).await?;
+            if !app.save_queued_prompt_edit(remote).await {
+                submit_remote_enter_input(app, remote).await?;
+            }
         }
         KeyCode::Up | KeyCode::PageUp => {
             let inc = if code == KeyCode::PageUp { 10 } else { 1 };
@@ -841,9 +967,7 @@ pub(super) async fn handle_remote_key_internal(
                 // leaves an unsent soft interrupt queued on cancel, and the
                 // follow-up recovery path sends it as the next turn. Auto-poke
                 // stays on: this is a redirect, not "stop everything".
-                remote
-                    .cancel_with_reason("keyboard_escape_redirect")
-                    .await?;
+                remote.keyboard_cancel("keyboard_escape_redirect").await?;
                 app.remote_interrupt_ack_deadline =
                     Some(Instant::now() + std::time::Duration::from_secs(3));
                 app.set_status_notice("Interrupting... sending your next prompt");
@@ -853,8 +977,13 @@ pub(super) async fn handle_remote_key_internal(
                         .queued_messages
                         .iter()
                         .any(|message| app_mod::commands::is_poke_message(message));
-                remote.cancel_with_reason("keyboard_escape").await?;
-                if disabled_auto_poke {
+                // Esc without a redirect stops daemon-owned continuation too.
+                // Send the control before cancellation reaches a turn boundary.
+                remote.runtime_command("poke", vec!["off".into()]).await?;
+                let forced = remote.keyboard_cancel("keyboard_escape").await?;
+                if forced {
+                    app.set_status_notice("Force stopping...");
+                } else if disabled_auto_poke {
                     app_mod::commands::disable_auto_poke(app);
                     app.set_status_notice("Interrupting... Auto-poke OFF");
                 } else {

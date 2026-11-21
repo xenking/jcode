@@ -239,62 +239,9 @@ pub(super) async fn handle_cycle_model(
     }
 }
 
-fn premium_mode_label(mode: crate::provider::copilot::PremiumMode) -> &'static str {
-    use crate::provider::copilot::PremiumMode;
-    match mode {
-        PremiumMode::Zero => "zero premium requests",
-        PremiumMode::OnePerSession => "one premium per session",
-        PremiumMode::Normal => "normal",
-    }
-}
-
-fn apply_set_premium_mode(
-    id: u64,
-    mode: u8,
-    premium_mode: crate::provider::copilot::PremiumMode,
-    agent: &Agent,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
-) {
-    agent.set_premium_mode(premium_mode);
-    crate::logging::info(&format!(
-        "Server: premium mode set to {} ({})",
-        mode,
-        premium_mode_label(premium_mode)
-    ));
-    if let Err(error) = client_event_tx.send(ServerEvent::Ack { id }) {
-        crate::logging::debug(&format!(
-            "Model change acknowledgement client disconnected: {error}"
-        ));
-    }
-}
-
-pub(super) async fn handle_set_premium_mode(
-    id: u64,
-    mode: u8,
-    agent: &Arc<Mutex<Agent>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
-) {
-    use crate::provider::copilot::PremiumMode;
-
-    let premium_mode = match mode {
-        2 => PremiumMode::Zero,
-        1 => PremiumMode::OnePerSession,
-        _ => PremiumMode::Normal,
-    };
-    if let Ok(agent_guard) = agent.try_lock() {
-        apply_set_premium_mode(id, mode, premium_mode, &agent_guard, client_event_tx);
-    } else {
-        spawn_deferred_agent_mutation(
-            "set_premium_mode",
-            id,
-            Arc::clone(agent),
-            client_event_tx.clone(),
-            move |agent_guard, client_event_tx| {
-                apply_set_premium_mode(id, mode, premium_mode, agent_guard, client_event_tx);
-            },
-        );
-    }
-}
+#[path = "premium_mode_control.rs"]
+mod premium_mode_control;
+pub(super) use premium_mode_control::handle_set_premium_mode;
 
 fn apply_set_model(
     id: u64,
@@ -657,22 +604,106 @@ pub(super) async fn handle_set_context_cap(
 pub(super) async fn handle_set_reasoning_effort(
     id: u64,
     effort: String,
+    is_swarm_worker: bool,
     agent: &Arc<Mutex<Agent>>,
+    session_id: &str,
+    provider: Option<Arc<dyn Provider>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     let result = if let Ok(mut agent_guard) = agent.try_lock() {
-        agent_guard.set_reasoning_effort(&effort)
+        apply_reasoning_effort(&mut agent_guard, &effort, is_swarm_worker)
+    } else if let Some(provider) = provider.filter(|provider| {
+        !is_swarm_worker || !crate::session::WorkerModelApproval::required_for(&provider.model())
+    }) {
+        let requested = if is_swarm_worker {
+            let session_id = session_id.to_owned();
+            let provider = Arc::clone(&provider);
+            let effort = effort.clone();
+            tokio::task::spawn_blocking(move || {
+                let session = crate::session::Session::load_for_remote_startup(&session_id)
+                    .or_else(|_| crate::session::Session::load_startup_stub(&session_id))?;
+                Agent::worker_effort_for_provider(
+                    provider.as_ref(),
+                    session.provider_key.as_deref(),
+                    &effort,
+                )
+            })
+            .await
+            .unwrap_or_else(|error| Err(error.into()))
+        } else {
+            Ok(effort)
+        };
+        let result = requested
+            .and_then(|requested| provider.set_reasoning_effort(&requested))
+            .map(|()| provider.reasoning_effort());
+        if let Ok(current) = &result {
+            // The provider already uses it, but the session file is only written
+            // once the turn frees the agent, and a reload before that would
+            // restore the old effort. The durable pending slot carries it: the
+            // next request boundary or a restored agent saves it. This also
+            // replaces any older unapplied choice.
+            match current.as_deref() {
+                Some(current) => crate::session_effort::queue_pending_effort(session_id, current),
+                None => crate::session_effort::clear_pending_effort(session_id),
+            }
+            crate::session_effort::record_session_effort(session_id, current.as_deref());
+            let agent = Arc::clone(agent);
+            crate::runtime_activity::spawn(async move {
+                let mut agent = agent.lock().await;
+                let result = if is_swarm_worker {
+                    agent.mark_swarm_worker()
+                } else {
+                    Ok(())
+                }
+                .and_then(|()| {
+                    agent.apply_pending_reasoning_effort();
+                    agent.persist_current_reasoning_effort()
+                });
+                if let Err(error) = result {
+                    crate::logging::warn(&format!("Could not persist reasoning effort: {error}"));
+                }
+            });
+        }
+        send_reasoning_effort_result(id, result, client_event_tx);
+        return;
     } else {
-        spawn_deferred_reasoning_effort_change(
+        // The running turn holds the agent lock, and the out-of-band provider
+        // registration can be a stale weak reference that no longer upgrades.
+        // A long agentic turn can hold the lock for many requests, and a daemon
+        // reload can end the process first, so the choice goes to the durable
+        // pending slot: the turn applies it before its next provider request,
+        // and a restored agent adopts it. The lock-waiting task below covers an
+        // idle-after-turn agent; whichever runs first takes the slot.
+        crate::session_effort::record_session_effort(session_id, Some(&effort));
+        crate::session_effort::queue_pending_effort(session_id, &effort);
+        spawn_deferred_agent_mutation(
+            "set_reasoning_effort",
             id,
-            effort,
             Arc::clone(agent),
             client_event_tx.clone(),
+            move |agent_guard, _| {
+                if is_swarm_worker && let Err(error) = agent_guard.mark_swarm_worker() {
+                    crate::logging::warn(&format!("Could not mark swarm worker: {error}"));
+                }
+                agent_guard.apply_pending_reasoning_effort();
+            },
         );
+        send_reasoning_effort_result(id, Ok(Some(effort)), client_event_tx);
         return;
     };
 
     send_reasoning_effort_result(id, result, client_event_tx);
+}
+
+fn apply_reasoning_effort(
+    agent: &mut Agent,
+    effort: &str,
+    is_swarm_worker: bool,
+) -> anyhow::Result<Option<String>> {
+    if is_swarm_worker {
+        agent.mark_swarm_worker()?;
+    }
+    agent.set_reasoning_effort(effort)
 }
 
 fn send_reasoning_effort_result(
@@ -696,28 +727,6 @@ fn send_reasoning_effort_result(
             });
         }
     }
-}
-
-fn spawn_deferred_reasoning_effort_change(
-    id: u64,
-    effort: String,
-    agent: Arc<Mutex<Agent>>,
-    client_event_tx: mpsc::UnboundedSender<ServerEvent>,
-) {
-    let queued_at = log_provider_control_deferred("set_reasoning_effort", id);
-    crate::runtime_activity::spawn(async move {
-        let mut agent_guard = agent.lock().await;
-        log_provider_control_lock_acquired("set_reasoning_effort", id, queued_at);
-        let result = agent_guard.set_reasoning_effort(&effort);
-        crate::logging::info(&format!(
-            "Deferred reasoning effort change completed request_id={} requested={} success={}",
-            id,
-            effort,
-            result.is_ok()
-        ));
-        send_reasoning_effort_result(id, result, &client_event_tx);
-        log_provider_control_completed("set_reasoning_effort", id, queued_at);
-    });
 }
 
 pub(super) async fn handle_set_service_tier(
@@ -1023,6 +1032,13 @@ pub(super) async fn handle_notify_auth_changed(
                         let _ = client_event_tx_clone.send(available_models_snapshot_into_event(latest_snapshot.clone()));
                     }
                 }
+                // ModelsUpdated is a catalog-change hint, not a completion wake:
+                // MultiProvider's PendingGuard clears pending without publishing
+                // on failure, and success publishes before the guard drops. An
+                // event-only wait could therefore stall until the 10 s ceiling,
+                // even after successful work. Keep polling until providers expose
+                // a completion notification ordered after clearing pending on
+                // every exit path (including failures and cancellation).
                 _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
             }
         }

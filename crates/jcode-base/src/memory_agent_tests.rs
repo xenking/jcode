@@ -66,7 +66,7 @@ fn manager_without_working_dir_does_not_infer_process_project() {
 /// Decisions adapter, local stores, selection, and pending-injection boundary.
 /// No provider calls or credentials leave this loopback fixture.
 #[tokio::test]
-async fn retained_recall_pipeline_uses_jev_http_without_embeddings_or_sidecar() {
+async fn successive_jev_recalls_keep_distinct_memories_and_do_not_repeat_recent_ones() {
     use std::io::{Read, Write};
     let _lock = crate::storage::lock_test_env();
     let dir = tempfile::tempdir().unwrap();
@@ -79,10 +79,16 @@ async fn retained_recall_pipeline_uses_jev_http_without_embeddings_or_sidecar() 
         ("JCODE_API_KEY", "jcode_test_only_never_a_real_key"),
         ("JCODE_API_BASE", &base),
     ]);
+    std::fs::write(
+        dir.path().join("config.toml"),
+        "[agents]\nmemory_auto_recall = true\nmemory_sidecar_enabled = false\n",
+    )
+    .unwrap();
+    crate::config::invalidate_config_cache();
     let server = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(10);
-        let mut decisions_seen = false;
-        while !decisions_seen && Instant::now() < deadline {
+        let mut decisions_seen = 0;
+        while decisions_seen < 3 && Instant::now() < deadline {
             let (mut stream, _) = match listener.accept() {
                 Ok(value) => value,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -131,6 +137,7 @@ async fn retained_recall_pipeline_uses_jev_http_without_embeddings_or_sidecar() 
                 assert_eq!(body["model"], "typesafe/jev-1.13");
                 let state: serde_json::Value =
                     serde_json::from_str(body["state"].as_str().unwrap()).unwrap();
+                let preferred = ["cargo test", "blue notebook", "cargo test"][decisions_seen];
                 let mut answers = serde_json::Map::new();
                 for (id, question) in body["questions"].as_object().unwrap() {
                     assert_eq!(question["type"], "noul");
@@ -138,26 +145,32 @@ async fn retained_recall_pipeline_uses_jev_http_without_embeddings_or_sidecar() 
                     let relevant = state["candidates"][id]["content"]
                         .as_str()
                         .unwrap()
-                        .contains("cargo test");
+                        .contains(preferred);
                     answers.insert(
                         id.clone(),
                         serde_json::json!({"type":"noul","noul":if relevant {0.98} else {0.01}}),
                     );
                 }
-                decisions_seen = true;
+                decisions_seen += 1;
                 serde_json::json!({"answers":answers})
             };
             let body = serde_json::to_vec(&response).unwrap();
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
             stream.write_all(&body).unwrap();
         }
-        assert!(decisions_seen, "no Decisions request reached fixture");
+        assert_eq!(decisions_seen, 3, "Decisions requests reaching fixture");
     });
     let manager = MemoryManager::new().with_project_dir("/jev-project");
-    let id = manager
+    let first_id = manager
         .remember_project(MemoryEntry::new(
             MemoryCategory::Fact,
             "Run cargo test to test this Rust project.",
+        ))
+        .unwrap();
+    let second_id = manager
+        .remember_project(MemoryEntry::new(
+            MemoryCategory::Fact,
+            "Record this project's test results in the blue notebook.",
         ))
         .unwrap();
     manager
@@ -183,41 +196,38 @@ async fn retained_recall_pipeline_uses_jev_http_without_embeddings_or_sidecar() 
             ..Default::default()
         },
     );
-    let disabled = agent
-        .process_context(
+    let mut recalls = Vec::new();
+    for query in [
+        "How do I test this Rust project?",
+        "Where should I record the test results?",
+        "Which command should I use to rerun the tests?",
+    ] {
+        agent
+            .process_context(sid, &[crate::message::Message::user(query)])
+            .await
+            .unwrap();
+        recalls.push(memory::take_pending_memory_for_project(
             sid,
-            &[crate::message::Message::user(
-                "How do I test this Rust project?",
-            )],
-        )
-        .await;
-    disabled.unwrap();
-    assert!(memory::take_pending_memory_for_project(sid, Some("/jev-project")).is_none());
-    let result = manager
-        .get_relevant_parallel_enabled(
-            sid,
-            &[crate::message::Message::user(
-                "How do I test this Rust project?",
-            )],
-            None,
-        )
-        .await
-        .unwrap();
+            Some("/jev-project"),
+        ));
+    }
     server.join().unwrap();
-    memory::set_pending_memory_for_project_with_selection(
-        sid,
-        result.prompt.unwrap(),
-        result.selected_entries.len(),
-        &result.selected_entries,
-        result.display_prompt,
-        Some("/jev-project"),
-    );
-    let pending = memory::take_pending_memory_for_project(sid, Some("/jev-project"))
-        .expect("judged memory ready for next turn");
-    assert_eq!(pending.memory_ids, vec![id]);
-    assert!(pending.prompt.contains("cargo test"));
-    assert!(!pending.prompt.contains("red flowers"));
-    assert!(!dir.path().join("embeddings").exists());
     memory::clear_pending_memory(sid);
-    memory::clear_injected_memories(sid);
+    let observed: Vec<_> = recalls
+        .iter()
+        .map(|result| result.as_ref().map(|pending| pending.memory_ids.clone()))
+        .collect();
+    assert_eq!(
+        observed,
+        vec![Some(vec![first_id]), Some(vec![second_id]), None]
+    );
+    assert!(recalls[0].as_ref().unwrap().prompt.contains("cargo test"));
+    assert!(
+        recalls[1]
+            .as_ref()
+            .unwrap()
+            .prompt
+            .contains("blue notebook")
+    );
+    assert!(!dir.path().join("embeddings").exists());
 }

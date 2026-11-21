@@ -62,6 +62,19 @@ pub fn is_anthropic_server_tool_block(block_type: &str) -> bool {
     ANTHROPIC_SERVER_TOOL_BLOCK_TYPES.contains(&block_type)
 }
 
+/// `type` of the hidden Anthropic item that records the reasoning effort a
+/// request ran at. The Anthropic provider replays it as a mid-conversation
+/// effort control so the top-level `output_config` (part of the prompt-cache
+/// key) never changes mid-session. It has no display form, so transcripts,
+/// compaction summaries and other providers drop it.
+pub const ANTHROPIC_EFFORT_CONTROL_TYPE: &str = "jcode_effort_control";
+
+/// True for provider-native items that only carry request bookkeeping and are
+/// never shown or replayed as content.
+pub fn is_hidden_control_item(item: &Value) -> bool {
+    str_field(item, "type") == Some(ANTHROPIC_EFFORT_CONTROL_TYPE)
+}
+
 /// True when a tool call id belongs to a provider-executed tool (Anthropic
 /// `srvtoolu_*`, OpenAI `ws_*`). Such rows are streamed mid-response, so a
 /// retry rollback must discard them along with the attempt's text.
@@ -71,6 +84,25 @@ pub fn is_provider_native_tool_id(id: &str) -> bool {
 
 fn str_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
+}
+
+fn openai_search_query(action: &Value) -> String {
+    str_field(action, "query")
+        .map(str::to_string)
+        .or_else(|| {
+            action
+                .get("queries")
+                .and_then(Value::as_array)
+                .map(|queries| {
+                    queries
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+        })
+        .or_else(|| str_field(action, "url").map(str::to_string))
+        .unwrap_or_default()
 }
 
 /// Describe a provider-native item for display. Returns `None` for items that
@@ -106,22 +138,7 @@ pub fn provider_native_display(provider: &str, item: &Value) -> Option<ProviderN
         }
         (PROVIDER_NATIVE_OPENAI, "web_search_call") => {
             let action = item.get("action").unwrap_or(&Value::Null);
-            let query = str_field(action, "query")
-                .map(str::to_string)
-                .or_else(|| {
-                    action
-                        .get("queries")
-                        .and_then(Value::as_array)
-                        .map(|queries| {
-                            queries
-                                .iter()
-                                .filter_map(Value::as_str)
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        })
-                })
-                .or_else(|| str_field(action, "url").map(str::to_string))
-                .unwrap_or_default();
+            let query = openai_search_query(action);
             let status = str_field(item, "status").unwrap_or("completed");
             let is_error = status == "failed";
             let mut output = if is_error {
@@ -164,7 +181,15 @@ pub fn provider_native_text_fallback(
     call_input: Option<&Value>,
 ) -> Option<String> {
     let display = provider_native_display(provider, item)?;
-    let output = display.output?;
+    provider_native_display_text_fallback(&display, call_input)
+}
+
+/// Render an already decoded native display without decoding its raw item again.
+pub fn provider_native_display_text_fallback(
+    display: &ProviderNativeDisplay,
+    call_input: Option<&Value>,
+) -> Option<String> {
+    let output = display.output.as_ref()?;
     let query = display
         .input
         .as_ref()
@@ -312,12 +337,36 @@ impl ProviderNativeItems {
     }
 
     /// Input of the recorded call start with this id, for rendering its result.
+    #[inline]
     pub fn call_input(&self, id: &str) -> Value {
+        if self.items.is_empty() {
+            return Value::Null;
+        }
+        // Match call starts on borrowed fields before cloning the selected input.
+        // Completed items can have expensive display summaries we never consume.
         self.items
             .iter()
-            .filter_map(|(_, provider, item)| provider_native_display(provider, item))
-            .find(|display| display.id == id && display.output.is_none())
-            .and_then(|display| display.input)
+            .find_map(
+                |(_, provider, item)| match (provider.as_str(), str_field(item, "type")) {
+                    (PROVIDER_NATIVE_ANTHROPIC, Some("server_tool_use"))
+                        if str_field(item, "id") == Some(id) =>
+                    {
+                        Some(item.get("input").cloned().unwrap_or(Value::Null))
+                    }
+                    (PROVIDER_NATIVE_OPENAI, Some("web_search_call"))
+                        if str_field(item, "id").unwrap_or("") == id
+                            && matches!(
+                                str_field(item, "status"),
+                                Some("in_progress" | "searching")
+                            ) =>
+                    {
+                        let action = item.get("action").unwrap_or(&Value::Null);
+                        let query = openai_search_query(action);
+                        Some(serde_json::json!({ "query": query }))
+                    }
+                    _ => None,
+                },
+            )
             .unwrap_or(Value::Null)
     }
 
@@ -327,6 +376,19 @@ impl ProviderNativeItems {
     /// skipped. With no items this is just the single text block (if any).
     pub fn interleave(&self, text: &str) -> Vec<crate::ContentBlock> {
         let mut blocks = Vec::new();
+        // Hidden bookkeeping items have no position in the response. Keep
+        // them first so checks on the last block (a paused server tool turn)
+        // still see the real response tail.
+        for (_, provider, item) in self
+            .items
+            .iter()
+            .filter(|(_, _, item)| is_hidden_control_item(item))
+        {
+            blocks.push(crate::ContentBlock::ProviderNative {
+                provider: provider.clone(),
+                item: item.clone(),
+            });
+        }
         let mut cursor = 0usize;
         let push_text = |blocks: &mut Vec<crate::ContentBlock>, segment: &str| {
             if !segment.trim().is_empty() {
@@ -337,6 +399,9 @@ impl ProviderNativeItems {
             }
         };
         for (offset, provider, item) in &self.items {
+            if is_hidden_control_item(item) {
+                continue;
+            }
             let mut at = (*offset).clamp(cursor, text.len());
             while !text.is_char_boundary(at) {
                 at += 1;
@@ -380,6 +445,10 @@ fn format_results<'a>(results: impl Iterator<Item = &'a Value>) -> String {
     }
     out.trim_end().to_string()
 }
+
+#[cfg(test)]
+#[path = "provider_native_lookup_tests.rs"]
+mod lookup_tests;
 
 #[cfg(test)]
 mod tests {

@@ -16,18 +16,16 @@
 //! silence while a tool executes is expected.
 //!
 //! Stall state lives in a process-global registry rather than on
-//! `SwarmMember`, so it never touches swarm persistence and stays cheap to
-//! query from status paths.
+//! `SwarmMember`. Fresh observations are mirrored into swarm snapshots for
+//! external clients, with a bounded freshness window on the reader side.
 
 use super::state::fanout_session_event;
 use super::{SessionAgents, SessionInterruptQueues, SwarmMember, queue_soft_interrupt_for_session};
 use crate::protocol::{NotificationType, ServerEvent};
 use jcode_agent_runtime::SoftInterruptSource;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::{LazyLock, Mutex as StdMutex};
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
 
 /// Upper bound on how often the watchdog sweeps.
 const MAX_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
@@ -203,8 +201,7 @@ pub(super) fn nudge_message(silent_secs: u64) -> String {
 /// One watchdog pass: detect new stalls, notify their owner once, and
 /// optionally nudge the worker.
 pub(super) async fn sweep_stalled_workers(
-    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-    swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
+    swarm_state: &super::SwarmState,
     sessions: &SessionAgents,
     soft_interrupt_queues: &SessionInterruptQueues,
 ) {
@@ -214,17 +211,37 @@ pub(super) async fn sweep_stalled_workers(
         }
         return;
     };
-    let fresh = {
+    let swarm_members = &swarm_state.members;
+    let (fresh, affected_swarms) = {
         let members = swarm_members.read().await;
-        let coordinators = swarm_coordinators.read().await;
-        update_stalls(
+        let coordinators = swarm_state.coordinators.read().await;
+        let before: Vec<String> = STALLED
+            .lock()
+            .map(|map| map.keys().cloned().collect())
+            .unwrap_or_default();
+        let fresh = update_stalls(
             &members,
             &coordinators,
             stall_after,
             crate::session_metrics::last_activity_age_secs,
             |sid| crate::running_tool_registry::current(sid).is_some(),
-        )
+        );
+        let after: Vec<String> = STALLED
+            .lock()
+            .map(|map| map.keys().cloned().collect())
+            .unwrap_or_default();
+        let affected = before
+            .into_iter()
+            .chain(after)
+            .filter_map(|id| members.get(&id).and_then(|member| member.swarm_id.clone()))
+            .collect::<std::collections::HashSet<_>>();
+        (fresh, affected)
     };
+    // Refresh while stalled and once on recovery. Snapshot readers reject old
+    // observations, so a dead/restarted daemon cannot leave a permanent stall.
+    for swarm_id in affected_swarms {
+        super::persist_swarm_state_for(&swarm_id, swarm_state).await;
+    }
     let nudge = crate::config::config().agents.swarm_stall_nudge;
     for stall in fresh {
         crate::logging::warn(&format!(

@@ -122,7 +122,7 @@ impl Tool for ReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read a file. Supports text files, image files, and PDFs."
+        "Read text, images or PDFs, including session-image://<image_id>."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -133,7 +133,7 @@ impl Tool for ReadTool {
                 "intent": super::intent_schema_property(),
                 "file_path": {
                     "type": "string",
-                    "description": "Path to a file."
+                    "description": "Path to a file, or session-image://<image_id> for an image in this session."
                 },
                 "start_line": {
                     "type": "integer",
@@ -148,7 +148,23 @@ impl Tool for ReadTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
-        let params: ReadInput = serde_json::from_value(input)?;
+        let params: ReadInput = super::parse_tool_args(
+            input,
+            "await tools.read({file_path: 'Cargo.toml', start_line: 1, limit: 10})",
+        )?;
+        if let Some(id) = params.file_path.strip_prefix("session-image://") {
+            let session = crate::session::Session::load_for_remote_startup(&ctx.session_id)?;
+            let image = session
+                .session_image(id)
+                .ok_or_else(|| anyhow::anyhow!("Session image not found: {id}"))?;
+            return Ok(
+                ToolOutput::new(format!("Session image [#{id}]")).with_labeled_image(
+                    image.info.media_type,
+                    image.data,
+                    format!("[#{id}]"),
+                ),
+            );
+        }
         let range = normalize_read_range(&params)?;
 
         let path = ctx.resolve_path(Path::new(&params.file_path));
@@ -228,6 +244,8 @@ impl Tool for ReadTool {
             path: path.to_path_buf(),
             op: FileOp::Read,
             intent: None,
+            added: 0,
+            removed: 0,
             summary: Some(format!(
                 "read lines {}-{} of {}",
                 range.offset + 1,
@@ -373,11 +391,21 @@ fn handle_image_file(path: &Path, file_path: &str) -> Result<ToolOutput> {
                     .converted_from
                     .map(|format| format!("Converted from {format} to PNG. "))
                     .unwrap_or_default();
+                // The session resends this image on every later request, so it
+                // is stored at the size the model reads, not the file's.
+                let fitted = crate::image_normalize::fit_image_for_model(image);
+                let scaled_note = fitted
+                    .scaled
+                    .map(|(_, (width, height))| {
+                        format!("Scaled to {width}x{height} for the model; the file is unchanged. ")
+                    })
+                    .unwrap_or_default();
+                let image = fitted.image;
                 let b64 =
                     base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &image.data);
                 ToolOutput::new(format!(
-                    "Image: {} ({})\nDimensions: {}\n{}Image sent to model for vision analysis.",
-                    file_path, size_str, dim_str, converted_note
+                    "Image: {} ({})\nDimensions: {}\n{}{}Image sent to model for vision analysis.",
+                    file_path, size_str, dim_str, converted_note, scaled_note
                 ))
                 .with_labeled_image(image.media_type, b64, file_path.to_string())
             }

@@ -30,11 +30,14 @@ fn compacted_prompt_marker_hydrates_remote_stub_and_composer_numbering() {
         ]
         .into_iter()
         .map(|message| crate::protocol::HistoryMessage {
+            tool_duration_ms: None,
+            attachments: Vec::new(),
             role: message.role,
             content: message.content,
             tool_calls: None,
             tool_data: None,
             response_stats: None,
+            timestamp_ms: None,
         })
         .collect();
         assert!(app.handle_server_event(
@@ -80,12 +83,14 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
     );
     session.model = Some("gpt-5.4".to_string());
     session.append_stored_message(crate::session::StoredMessage {
+        attachment_data: None,
         id: "msg-fast-resume".to_string(),
         role: crate::message::Role::Assistant,
         content: vec![crate::message::ContentBlock::Text {
             text: "restored locally before connect".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -109,6 +114,8 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
             provider_name: Some("openai".to_string()),
             provider_model: Some("gpt-5.4".to_string()),
             subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -184,7 +191,10 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
             id: 1,
             session_id: "ses_fast_path".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
+                tool_duration_ms: None,
+                attachments: Vec::new(),
                 response_stats: None,
+                timestamp_ms: None,
                 role: "assistant".to_string(),
                 content: "server history replay".to_string(),
                 tool_calls: None,
@@ -194,6 +204,8 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -238,12 +250,11 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
     assert_eq!(assistant_messages[0].content, "local restored state");
     assert_eq!(app.connection_type.as_deref(), Some("websocket"));
     assert!(app.queued_messages().is_empty());
-    assert_eq!(app.hidden_queued_system_messages.len(), 1);
-    assert!(app.hidden_queued_system_messages[0].contains("interrupted by a server reload"));
+    assert!(app.hidden_queued_system_messages.is_empty());
     assert!(
-        app.display_messages()
-            .iter()
-            .any(|m| m.role == "system" && m.content.starts_with("Reload complete - continuing"))
+        app.status_notice
+            .as_ref()
+            .is_some_and(|(text, _)| text.starts_with("Reload complete - continuing"))
     );
 }
 
@@ -303,14 +314,18 @@ fn test_local_compacted_history_marker_scroll_expands_from_session() {
             cache_control: None,
         }],
     );
-    app.session.compaction = Some(crate::session::StoredCompactionState {
-        summary_text: "old prompts and responses".to_string(),
-        openai_encrypted_content: None,
-        snapcompact: None,
-        covers_up_to_turn: TURNS,
-        original_turn_count: TURNS,
-        compacted_count,
-    });
+    app.session.compaction = Some(
+        crate::session::StoredCompactionState {
+            summary_text: "old prompts and responses".to_string(),
+            plan_context: None,
+            openai_encrypted_content: None,
+            snapcompact: None,
+            covers_up_to_turn: TURNS,
+            original_turn_count: TURNS,
+            compacted_count,
+        }
+        .into(),
+    );
 
     let (rendered_messages, _images, _compacted_info) =
         crate::session::render_messages_and_images_with_compacted_history(&app.session, 0);
@@ -377,6 +392,7 @@ fn test_compacted_history_event_applies_expanded_window() {
     app.remote_session_id = Some("session_lazy_history".to_string());
     app.push_display_message(DisplayMessage::assistant("existing tail"));
     app.scroll_offset = 12;
+    // This unsolicited page does not come from a scroll-up request.
     app.auto_scroll_paused = false;
 
     let needs_redraw = app.handle_server_event(
@@ -385,21 +401,27 @@ fn test_compacted_history_event_applies_expanded_window() {
             session_id: "session_lazy_history".to_string(),
             messages: vec![
                 crate::protocol::HistoryMessage {
-                    response_stats: None,
+                    tool_duration_ms: None,
+                    attachments: Vec::new(),
+                    response_stats: None, timestamp_ms: None,
                     role: "system".to_string(),
                     content: "Earlier conversation compacted - 64 older historical messages hidden. Showing 64 of 128 compacted messages. Scroll to the top to load more.".to_string(),
                     tool_calls: None,
                     tool_data: None,
                 },
                 crate::protocol::HistoryMessage {
-                    response_stats: None,
+                    tool_duration_ms: None,
+                    attachments: Vec::new(),
+                    response_stats: None, timestamp_ms: None,
                     role: "assistant".to_string(),
                     content: "older response".to_string(),
                     tool_calls: None,
                     tool_data: None,
                 },
                 crate::protocol::HistoryMessage {
-                    response_stats: None,
+                    tool_duration_ms: None,
+                    attachments: Vec::new(),
+                    response_stats: None, timestamp_ms: None,
                     role: "user".to_string(),
                     content: "current prompt".to_string(),
                     tool_calls: None,
@@ -419,7 +441,8 @@ fn test_compacted_history_event_applies_expanded_window() {
     assert_eq!(app.display_messages().len(), 3);
     assert_eq!(app.display_messages()[1].content, "older response");
     assert_eq!(app.display_messages()[2].content, "current prompt");
-    assert!(app.auto_scroll_paused);
+    // An unsolicited or prompt-history backfill must keep following the tail.
+    assert!(!app.auto_scroll_paused);
     assert_eq!(app.scroll_offset, 0);
     let state = app.compacted_history_lazy_state();
     assert_eq!(state.total_messages, 128);
@@ -500,10 +523,7 @@ fn test_service_tier_reported_deduplicates_and_does_not_confirm_old_request() {
     assert_eq!(app.display_messages().len(), before + 1);
     assert_eq!(app.remote_service_tier.as_deref(), Some("ultrafast"));
     let badge = app.info_widget_data().service_tier.unwrap();
-    assert_eq!(
-        badge,
-        "default ← Ultrafast"
-    );
+    assert_eq!(badge, "default ← Ultrafast");
     assert!(!badge.contains("applied"));
     assert!(!badge.split_whitespace().any(|word| word == "confirmed"));
     assert!(
@@ -579,33 +599,42 @@ fn test_service_tier_reported_fast_alias_matches_and_badge_tracks_reports() {
     app.is_remote = true;
     app.remote_service_tier = Some("fast".into());
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    assert_eq!(app.info_widget_data().service_tier.as_deref(), Some("Fast ?"));
+    assert_eq!(
+        app.info_widget_data().service_tier.as_deref(),
+        Some("Fast ?")
+    );
     app.handle_server_event(
         crate::protocol::ServerEvent::ServiceTierReported {
-            requested: Some("priority".into()), tier: "default".into(),
-        }, &mut remote,
+            requested: Some("priority".into()),
+            tier: "default".into(),
+        },
+        &mut remote,
     );
     let badge = app.info_widget_data().service_tier.unwrap();
-    assert_eq!(
-        badge,
-        "default ← Fast"
-    );
+    assert_eq!(badge, "default ← Fast");
     assert!(!badge.contains("applied"));
     assert!(!badge.split_whitespace().any(|word| word == "confirmed"));
     app.handle_server_event(
         crate::protocol::ServerEvent::ServiceTierReported {
-            requested: Some("priority".into()), tier: "priority".into(),
-        }, &mut remote,
+            requested: Some("priority".into()),
+            tier: "priority".into(),
+        },
+        &mut remote,
     );
     assert_eq!(app.info_widget_data().service_tier.as_deref(), Some("fast"));
     app.remote_service_tier = None;
     app.remote_reported_service_tier = None;
     app.remote_service_tier_confirmation_pending = true;
-    assert_eq!(app.info_widget_data().service_tier.as_deref(), Some("Standard ?"));
+    assert_eq!(
+        app.info_widget_data().service_tier.as_deref(),
+        Some("Standard ?")
+    );
     app.handle_server_event(
         crate::protocol::ServerEvent::ServiceTierReported {
-            requested: None, tier: "default".into(),
-        }, &mut remote,
+            requested: None,
+            tier: "default".into(),
+        },
+        &mut remote,
     );
     assert_eq!(app.info_widget_data().service_tier, None);
 }
@@ -657,7 +686,8 @@ fn check_history_panel_snapshot(authoritative: bool, session_changed: bool) {
         provider_model,
         available_models,
         ..
-    } = &mut event {
+    } = &mut event
+    {
         // False still counts as a present identity field on full History.
         *is_canary = authoritative.then_some(false);
         *provider_name = Some("openai".to_string());
@@ -706,6 +736,8 @@ fn delta_history_event(
         provider_name: None,
         provider_model: None,
         subagent_model: None,
+        pinned_skill: None,
+        pinned_skills: None,
         agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,
@@ -769,7 +801,10 @@ fn test_delta_history_rebuilds_transcript_from_advertised_prefix() {
         }]),
     });
     let tail = vec![crate::protocol::HistoryMessage {
+        tool_duration_ms: None,
+        attachments: Vec::new(),
         response_stats: None,
+        timestamp_ms: None,
         role: "assistant".to_string(),
         content: "new since reload".to_string(),
         tool_calls: None,
@@ -802,7 +837,10 @@ fn test_delta_history_without_prefix_requests_full_history() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    app.handle_server_event(delta_history_event("ses_delta", vec![], Some(5)), &mut remote);
+    app.handle_server_event(
+        delta_history_event("ses_delta", vec![], Some(5)),
+        &mut remote,
+    );
     assert!(app.idle_hibernation.history_reload_needed);
     assert!(!remote.has_loaded_history());
 }

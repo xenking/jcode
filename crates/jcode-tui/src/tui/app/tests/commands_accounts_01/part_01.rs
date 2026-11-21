@@ -486,7 +486,16 @@ fn test_help_topic_shows_btw_command_details() {
         .expect("missing help response");
     assert_eq!(msg.role, "system");
     assert!(msg.content.contains("/btw <question>"));
-    assert!(msg.content.contains("Forks (splits) the session"));
+    assert!(
+        msg.content.contains("side question"),
+        "the help explains that /btw asks in place: {}",
+        msg.content
+    );
+    assert!(
+        msg.content.contains("ctrl+p"),
+        "the help lists the key that opens the answer as a fork: {}",
+        msg.content
+    );
 }
 
 #[test]
@@ -1026,42 +1035,46 @@ fn test_btw_command_requires_question() {
 }
 
 #[test]
-fn test_btw_command_forks_session_with_question() {
+fn test_btw_command_asks_in_a_side_card_instead_of_forking() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let prev_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp.path());
+    let sessions_before = crate::tui::session_picker::load_sessions()
+        .unwrap_or_default()
+        .len();
+    let messages_before = app_message_count(&create_test_app());
 
     let mut app = create_test_app();
     app.input = "/btw what did we decide about config?".to_string();
     app.submit_input();
 
-    // Terminal spawning is disabled under cfg(test), so the fork reports the
-    // created session with a manual resume hint.
-    let msg = app
-        .display_messages()
-        .last()
-        .expect("missing btw fork message");
-    assert_eq!(msg.role, "system");
-    assert!(msg.content.contains("created for the next prompt"));
-    let session_id = msg
-        .content
-        .split("jcode --resume ")
-        .nth(1)
-        .expect("missing resume hint")
-        .trim()
-        .to_string();
-    let restored =
-        App::restore_input_for_reload(&session_id).expect("forked session should stage question");
-    assert_eq!(restored.input, "what did we decide about config?");
-    assert!(restored.submit_on_restore);
-    assert!(restored.pending_images.is_empty());
+    // No fork window, no staged prompt: the question is answered in place.
+    assert!(app.btw_card().is_some(), "the side card opens");
+    assert!(app.pending_btw_turn, "the ephemeral turn is queued");
+    assert_eq!(
+        crate::tui::session_picker::load_sessions()
+            .unwrap_or_default()
+            .len(),
+        sessions_before,
+        "a side question creates no session"
+    );
+    assert_eq!(app_message_count(&app), messages_before);
+    assert!(
+        !app.display_messages()
+            .iter()
+            .any(|msg| msg.content.contains("created for the next prompt"))
+    );
 
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);
     } else {
         crate::env::remove_var("JCODE_HOME");
     }
+}
+
+fn app_message_count(app: &App) -> usize {
+    app.session.messages.len() + app.display_messages().len()
 }
 
 #[test]

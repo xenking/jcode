@@ -132,6 +132,7 @@ async fn restored_resume_with_history_backpressure(recovery_turn: bool) -> Resul
                 target_session_id.to_string(),
                 None,
                 None,
+                None,
                 false,
                 None,
                 false,

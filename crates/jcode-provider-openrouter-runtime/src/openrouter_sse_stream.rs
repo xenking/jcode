@@ -34,6 +34,9 @@ fn http_status_hint(status: u16, api_base: &str, model: &str) -> &'static str {
         402 => {
             "Hint: this is a billing limit, not a network problem. The key's balance or token allowance is used up: raise the limit or top up in the provider's dashboard, use another key, or switch to another provider with /model."
         }
+        429 => {
+            "Hint: the provider rate limit or usage allowance was reached. Check the reset time or switch to another model or provider with /model."
+        }
         // Local servers (Ollama, LM Studio) answer 404 for a model that is
         // not installed or loaded, which their own hint already explains.
         404 if !is_local => {
@@ -84,7 +87,11 @@ pub(super) async fn run_stream_with_retries(
                 next_retry_delay.take(),
             )
             .min(retry_backoff_cap);
-            tokio::time::sleep(delay).await;
+            tokio::select! {
+                biased;
+                _ = tx.closed() => return,
+                _ = tokio::time::sleep(delay) => {}
+            }
             jcode_base::logging::info(&format!(
                 "Retrying API request using {} (attempt {}/{})",
                 auth.label(),
@@ -119,21 +126,25 @@ pub(super) async fn run_stream_with_retries(
             jcode_provider_core::fresh_transport_client()
         };
 
-        match stream_response(
+        let response = stream_response(
             attempt_client,
             api_base.clone(),
             auth.clone(),
             send_openrouter_headers,
             &conversation_id,
-            request.clone(),
+            &request,
             azure_responses,
             attempt_tx,
             Arc::clone(&provider_pin),
             model.clone(),
             responses_api,
-        )
-        .await
-        {
+        );
+        let result = tokio::select! {
+            biased;
+            _ = tx.closed() => return,
+            result = response => result,
+        };
+        match result {
             Ok(()) => {
                 let _ = attempt_guard.finish().await;
                 return;
@@ -142,6 +153,13 @@ pub(super) async fn run_stream_with_retries(
                 let saw_output = attempt_guard.finish().await;
                 // Full anyhow chain ({:#}) so a `.context(...)`-wrapped transport
                 // cause (e.g. TLS BadRecordMac) is visible to the classifier.
+                let server_delay = jcode_provider_core::retry_after::retry_after_from_error(&e);
+                if jcode_provider_core::retry_after::retry_after_exceeds_max(&e)
+                    || server_delay.is_some_and(|delay| delay > retry_backoff_cap)
+                {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
                 if retryable_stream_failure(&e) && attempt + 1 < max_retries {
                     if saw_output {
                         // Partial output already reached the consumer; tell it
@@ -163,7 +181,7 @@ pub(super) async fn run_stream_with_retries(
                             e
                         ));
                     }
-                    next_retry_delay = jcode_provider_core::retry_after::retry_after_from_error(&e);
+                    next_retry_delay = server_delay;
                     last_error = Some(e);
                     continue;
                 }
@@ -195,7 +213,7 @@ async fn stream_response(
     auth: ProviderAuth,
     send_openrouter_headers: bool,
     conversation_id: &str,
-    request: Value,
+    request: &Value,
     azure_responses: bool,
     tx: mpsc::Sender<Result<StreamEvent>>,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
@@ -243,7 +261,7 @@ async fn stream_response(
     req = apply_grok_cli_turn_headers(req, &auth, &model, conversation_id);
 
     let response = jcode_provider_core::transport::send_with_initial_response_timeout(
-        req.json(&request),
+        req.json(request),
         stream_idle_timeout,
     )
     .await
@@ -487,6 +505,23 @@ fn parsed_http_status(error_str: &str) -> Option<u16> {
     }
 }
 
+/// Whether a (lowercased) 429 body says the account's allowance is used up,
+/// as opposed to asking the client to slow down.
+fn is_exhausted_quota_error(error_str: &str) -> bool {
+    [
+        "freeusagelimiterror",
+        "gousagelimiterror",
+        "opencode go usage limit",
+        "free usage limit",
+        "insufficient_quota",
+        "insufficient quota",
+        "exceeded your current quota",
+        "billing",
+    ]
+    .iter()
+    .any(|marker| error_str.contains(marker))
+}
+
 fn is_retryable_error(error_str: &str) -> bool {
     // Explicit non-retryable HTTP statuses take precedence over the loose
     // substring heuristics below. These are deterministic client-side failures
@@ -498,6 +533,10 @@ fn is_retryable_error(error_str: &str) -> bool {
         // 429 rate limit, and every 5xx: the server answered but is overloaded
         // or failing on its side. This includes non-standard codes such as the
         // 529 "overloaded" some OpenAI-compatible providers send (#1596).
+        // A 429 that reports an exhausted allowance is not a rate limit: the
+        // same request fails identically until the plan changes. Retrying it
+        // left `jcode run` silent for minutes on a free-tier limit.
+        Some(429) if is_exhausted_quota_error(error_str) => return false,
         Some(429 | 500..=599) => return true,
         _ => {}
     }
@@ -517,6 +556,14 @@ fn is_retryable_error(error_str: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opencode_go_exhausted_five_hour_allowance_does_not_retry() {
+        let error = r#"openai-compatible chat request failed
+  status: 429 too many requests
+  response: {"type":"error","error":{"type":"gousagelimiterror","message":"opencode go usage limit reached (5-hour, resets in 3h 40m)."}}"#;
+        assert!(!is_retryable_error(error));
+    }
 
     #[test]
     fn local_endpoint_hint_mentions_ollama_actions() {
@@ -581,6 +628,19 @@ mod tests {
             {\"error\":{\"message\":\"this request requires more credits, or fewer \
             max_tokens. you requested up to 65536 tokens, but can only afford 34424\"}}";
         assert!(!is_retryable_error(err));
+    }
+
+    /// Field report: OpenCode Zen free models answer 429 FreeUsageLimitError.
+    /// That was retried 8 times with backoff, so `jcode run` printed nothing.
+    #[test]
+    fn exhausted_quota_429_fails_fast_but_rate_limit_429_retries() {
+        let quota = "openai-compatible chat request failed\n  status: 429 Too Many Requests\n  response: {\"type\":\"error\",\"error\":{\"type\":\"FreeUsageLimitError\",\"message\":\"Free usage limit reached.\"}}"
+            .to_lowercase();
+        assert!(!is_retryable_error(&quota));
+        let openai = "status: 429 too many requests\n  response: {\"error\":{\"code\":\"insufficient_quota\"}}";
+        assert!(!is_retryable_error(openai));
+        let rate = "status: 429 too many requests\n  response: {\"error\":{\"message\":\"rate limit exceeded, retry in 2s\"}}";
+        assert!(is_retryable_error(rate));
     }
 
     #[test]

@@ -20,6 +20,8 @@ const PROTECTED_CREDENTIAL_SUBPATHS: &[&str] = &[".ssh", ".gnupg", ".aws", ".kub
 const PROTECTED_HOME_SUBPATHS: &[&str] = &[
     ".config",
     ".jcode",
+    // The transcript store: deleting it loses every conversation record.
+    ".jcode/sessions",
     ".claude",
     ".local",
     ".local/share",
@@ -209,7 +211,10 @@ pub fn classify_target(
         {
             return Some(RiskFinding {
                 level: RiskLevel::Catastrophic,
-                reason: "would destroy the entire contents of a protected directory".to_string(),
+                reason: format!(
+                    "`{raw}` would destroy the entire contents of a protected directory; \
+                     name a narrower path instead"
+                ),
                 target: Some(raw.to_string()),
             });
         }
@@ -223,19 +228,22 @@ pub fn classify_target(
                 .working_dir
                 .as_ref()
                 .is_some_and(|cwd| parent.starts_with(normalize(cwd)));
-            if inside_cwd || is_temp_path(parent) {
+            if inside_cwd || is_disposable_path(parent, ctx) {
                 return Some(RiskFinding {
                     level: RiskLevel::Low,
-                    reason: "glob is bounded to the working or temporary directory".to_string(),
+                    reason: format!(
+                        "`{raw}` is a glob bounded to the working or temporary directory"
+                    ),
                     target: Some(raw.to_string()),
                 });
             }
         }
         return Some(RiskFinding {
             level: RiskLevel::Confirm,
-            reason: "target contains a glob, so the exact set of affected files \
-                     is not known before execution"
-                .to_string(),
+            reason: format!(
+                "`{raw}` contains a glob, so the exact set of affected files is not known \
+                 before execution; list the paths explicitly or use a literal path instead"
+            ),
             target: Some(raw.to_string()),
         });
     }
@@ -246,9 +254,24 @@ pub fn classify_target(
     if is_catastrophic_target(expanded, ctx) {
         return Some(RiskFinding {
             level: RiskLevel::Catastrophic,
-            reason: "targets a protected system or home path that must never be \
-                     destroyed"
-                .to_string(),
+            reason: format!(
+                "`{raw}` resolves to `{}`, a protected system or home path that must never be \
+                 destroyed; target a narrower path instead",
+                expanded.display()
+            ),
+            target: Some(expanded.display().to_string()),
+        });
+    }
+
+    // Deleting a repository's object store loses committed history that no
+    // working-tree copy can restore.
+    if recursive && expanded.file_name().is_some_and(|name| name == ".git") {
+        return Some(RiskFinding {
+            level: RiskLevel::Confirm,
+            reason: format!(
+                "`{raw}` deletes a repository's `.git` directory, discarding its committed \
+                 history; delete the working tree instead, or clean tracked files with git"
+            ),
             target: Some(expanded.display().to_string()),
         });
     }
@@ -256,9 +279,11 @@ pub fn classify_target(
     if expand_known_prefix(raw, ctx).contains(['$', '`']) {
         return Some(RiskFinding {
             level: RiskLevel::Confirm,
-            reason: "target is computed at runtime (variable or command \
-                     substitution), so its value cannot be checked in advance"
-                .to_string(),
+            reason: format!(
+                "`{raw}` is computed at runtime (variable or command substitution), so its \
+                 value cannot be checked in advance; use a literal path, or write under \
+                 $JCODE_SCRATCH_DIR instead"
+            ),
             target: Some(raw.to_string()),
         });
     }
@@ -271,9 +296,10 @@ pub fn classify_target(
     {
         return Some(RiskFinding {
             level: RiskLevel::Catastrophic,
-            reason: "writes directly to a device node, which can destroy a \
-                     filesystem or disk"
-                .to_string(),
+            reason: format!(
+                "`{raw}` writes directly to a device node, which can destroy a filesystem or \
+                 disk; write to a regular file instead"
+            ),
             target: Some(expanded.display().to_string()),
         });
     }
@@ -292,7 +318,7 @@ pub fn classify_target(
         });
     }
 
-    if is_temp_path(expanded) {
+    if is_disposable_path(expanded, ctx) {
         return None;
     }
 
@@ -302,16 +328,56 @@ pub fn classify_target(
     // visible in risk logs without requiring a justification retry.
     Some(RiskFinding {
         level: RiskLevel::Low,
-        reason: "destructive operation targets a concrete path outside the working directory"
-            .to_string(),
+        reason: format!(
+            "`{raw}` is a concrete path outside the working directory: {}",
+            expanded.display()
+        ),
         target: Some(expanded.display().to_string()),
     })
 }
 
+/// Directories that exist to be thrown away: the session scratch directory, a
+/// worktree's build output, and the platform temp directory.
+fn is_disposable_path(path: &Path, ctx: &RiskContext) -> bool {
+    if is_temp_path(path, ctx) {
+        return true;
+    }
+    if let Some(scratch) = &ctx.scratch_dir
+        && path.starts_with(normalize(scratch))
+    {
+        return true;
+    }
+    let Some(home) = &ctx.home_dir else {
+        return false;
+    };
+    let home = normalize(home);
+    // The conventional scratch location, whether or not the caller passed it.
+    if path.starts_with(home.join(".jcode").join("scratch")) {
+        return true;
+    }
+    // `~/.jcode/wt/<name>/target`: a worktree's own build directory. The
+    // worktree itself is not disposable this way, only its build output.
+    if let Ok(rest) = path.strip_prefix(home.join(".jcode").join("wt")) {
+        let mut components = rest.components();
+        if let (Some(_name), Some(Component::Normal(second))) =
+            (components.next(), components.next())
+            && second == "target"
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Temp directories are conventionally disposable, so deleting inside them is
 /// not worth a reflection turn.
-fn is_temp_path(path: &Path) -> bool {
-    ["/tmp", "/var/tmp", "/private/tmp"]
+fn is_temp_path(path: &Path, ctx: &RiskContext) -> bool {
+    if let Some(temp) = &ctx.temp_dir
+        && path.starts_with(normalize(temp))
+    {
+        return true;
+    }
+    ["/tmp", "/var/tmp", "/private/tmp", "/var/folders"]
         .iter()
         .any(|prefix| path.starts_with(prefix))
 }

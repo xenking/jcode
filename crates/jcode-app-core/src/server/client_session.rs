@@ -12,7 +12,7 @@ use super::{
     rename_session_interrupt_queue, send_swarm_plan_to_session, swarm_id_for_session,
     unregister_session_event_sender, update_member_status,
 };
-use crate::agent::Agent;
+use crate::agent::{Agent, last_turn_message_for_recovery};
 use crate::message::ContentBlock;
 use crate::protocol::{NotificationType, ServerEvent};
 use crate::provider::Provider;
@@ -43,12 +43,11 @@ pub(super) fn last_message_has_pending_tool(session: &crate::session::StoredMess
 }
 
 pub(super) fn session_was_interrupted_by_reload(agent: &Agent) -> bool {
-    let messages = agent.messages();
-    let Some(last) = messages.last() else {
-        return false;
-    };
+    last_turn_message_for_recovery(agent.messages()).is_some_and(message_has_reload_interruption)
+}
 
-    last.content.iter().any(|block| match block {
+pub(super) fn message_has_reload_interruption(message: &crate::session::StoredMessage) -> bool {
+    message.content.iter().any(|block| match block {
         ContentBlock::Text { text, .. } => {
             text.ends_with("[generation interrupted - server reloading]")
         }
@@ -69,17 +68,11 @@ pub(super) fn restored_session_was_interrupted(
     previous_status: &crate::session::SessionStatus,
     agent: &Agent,
 ) -> bool {
-    let last_is_user = agent
-        .last_message_role()
-        .as_ref()
-        .map(|role| *role == crate::message::Role::User)
-        .unwrap_or(false);
-    let last_is_reload_interrupted = session_was_interrupted_by_reload(agent);
-    let pending_turn = last_is_user
-        || agent
-            .messages()
-            .last()
-            .is_some_and(last_message_has_pending_tool);
+    let last = last_turn_message_for_recovery(agent.messages());
+    let last_is_reload_interrupted = last.is_some_and(message_has_reload_interruption);
+    let pending_turn = last.is_some_and(|message| {
+        message.role == crate::message::Role::User || last_message_has_pending_tool(message)
+    });
     let closed_pending_turn_during_reload =
         matches!(previous_status, crate::session::SessionStatus::Closed)
             && pending_turn
@@ -114,36 +107,52 @@ pub(super) fn restored_session_was_interrupted(
         || closed_pending_turn_during_reload
 }
 
-fn mark_remote_reload_started(request_id: &str) {
-    crate::server::write_reload_state(
-        request_id,
-        jcode_build_meta::version(),
-        crate::server::ReloadPhase::Starting,
-        None,
-    );
-}
+#[path = "session_reload_signals.rs"]
+mod session_reload_signals;
+use session_reload_signals::*;
 
-async fn rename_shutdown_signal(
-    shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
-    old_session_id: &str,
-    new_session_id: &str,
-) {
-    if old_session_id == new_session_id {
+/// A restore found a turn the previous daemon never finished (it was killed,
+/// crashed, or its host slept away). Clients only observe recovery and the
+/// daemon only admits persisted intents, so without one the turn waits for a
+/// human forever. Record the obligation; the recovery owner resumes it.
+///
+/// A live record is authoritative: pending/claimed means recovery is already
+/// scheduled, and a user Stop or newer input tombstone must stay respected
+/// for the turn it was written for. A consumed record belongs to an earlier
+/// recovery and does not cover this turn.
+fn schedule_recovery_for_interrupted_restore(session_id: &str) {
+    let existing = match super::reload_recovery::peek_for_session(session_id) {
+        Ok(existing) => existing,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Cannot read recovery intent for interrupted restore {session_id}: {error}"
+            ));
+            return;
+        }
+    };
+    if existing.is_some_and(|record| !record.status.is_consumed()) {
         return;
     }
-
-    let mut signals = shutdown_signals.write().await;
-    if let Some(signal) = signals.remove(old_session_id) {
-        signals.insert(new_session_id.to_string(), signal);
+    let reload_id = format!("restore-{}", uuid::Uuid::new_v4());
+    let directive = crate::tool::selfdev::ReloadRecoveryDirective {
+        continuation_message:
+            crate::tool::selfdev::ReloadContext::interrupted_session_continuation_message(),
+        reconnect_notice: Some("Resumed after the daemon restarted".into()),
+    };
+    match super::reload_recovery::persist_intent(
+        &reload_id,
+        session_id,
+        super::reload_recovery::ReloadRecoveryRole::InterruptedPeer,
+        directive,
+        "restored session had an unfinished turn",
+    ) {
+        Ok(()) => crate::logging::info(&format!(
+            "Scheduled recovery for {session_id}: restore found an unfinished turn"
+        )),
+        Err(error) => crate::logging::warn(&format!(
+            "Cannot schedule recovery for interrupted restore {session_id}: {error}"
+        )),
     }
-    drop(signals);
-    rename_background_tool_signal(old_session_id, new_session_id);
-    // In-flight turns are registered in the process-global cancel registry by
-    // session id. Attaching to / resuming a session renames it underneath a
-    // still-streaming turn, so the registration must follow, or a later Esc
-    // finds no active-turn signal for the new id and the model keeps
-    // generating (issue #732, regression of issue #428).
-    crate::turn_cancel_registry::rename_active_turns(old_session_id, new_session_id);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -455,7 +464,9 @@ async fn ensure_client_swarm_member(
                 .event_txs
                 .insert(client_connection_id.to_string(), client_event_tx.clone());
             member.swarm_enabled = swarm_enabled;
-            member.is_headless = false;
+            // A viewer attaching to a headless worker does not take it over:
+            // the server keeps driving it, and the viewer's disconnect must
+            // not tear it down. `is_headless` therefore stays as spawned.
             if member_name.is_some() {
                 member.friendly_name = member_name.clone();
             }
@@ -1137,12 +1148,18 @@ pub(super) async fn handle_reload(
         delivered += fanout_live_client_event(
             swarm_members,
             session_id,
-            ServerEvent::Reloading { new_socket: None },
+            ServerEvent::Reloading {
+                new_socket: None,
+                reload_id: None,
+            },
         )
         .await;
     }
     if delivered == 0 {
-        let _ = client_event_tx.send(ServerEvent::Reloading { new_socket: None });
+        let _ = client_event_tx.send(ServerEvent::Reloading {
+            new_socket: None,
+            reload_id: None,
+        });
     }
 
     let hash = jcode_build_meta::git_hash().to_string();
@@ -1285,6 +1302,7 @@ async fn claim_live_target_agent(
 pub(super) async fn handle_resume_session(
     id: u64,
     session_id: String,
+    resume_slot: Option<super::session_manager::SessionReservation<'_>>,
     working_dir_override: Option<&str>,
     client_instance_id: Option<&str>,
     client_has_local_history: bool,
@@ -1346,7 +1364,10 @@ pub(super) async fn handle_resume_session(
     // Serialize the check as well as restoration: a waiter must re-check the
     // published target instead of restoring a second runtime into its source.
     // Never hold a sessions/connections/agent guard while acquiring this gate.
-    let resume_guard = sessions.reserve(&session_id).await;
+    let resume_guard = match resume_slot {
+        Some(slot) => slot,
+        None => sessions.reserve(&session_id).await,
+    };
     // Migration may replace the transcript on disk, but not runtime ownership.
     // Refresh the canonical idle owner in place instead of restoring a second
     // Agent into this connection's temporary placeholder.
@@ -1479,6 +1500,10 @@ pub(super) async fn handle_resume_session(
             }
         }
 
+        if old_session_id != session_id {
+            // Revoke old SDK callbacks before publishing the new attachment.
+            crate::tool::sdk::release_other_sessions(client_connection_id, &session_id);
+        }
         register_session_event_sender(
             swarm_members,
             &session_id,
@@ -1735,6 +1760,9 @@ pub(super) async fn handle_resume_session(
         }
         Err(_) => false,
     };
+    if was_interrupted {
+        schedule_recovery_for_interrupted_restore(&session_id);
+    }
 
     if result.is_ok() && is_canary {
         *client_selfdev = true;
@@ -1770,6 +1798,9 @@ pub(super) async fn handle_resume_session(
                 )
             };
             let old_session_id = client_session_id.clone();
+            if old_session_id != session_id {
+                crate::tool::sdk::release_other_sessions(client_connection_id, &session_id);
+            }
             *client_session_id = session_id.clone();
             let attach_start = Instant::now();
             let mut attach_laps: Vec<(&'static str, u128)> = Vec::new();
@@ -1887,12 +1918,13 @@ pub(super) async fn handle_resume_session(
                 )
                 .await;
                 lap("member_status");
-                if let Some(swarm_id) = {
+                let resumed_swarm_id = {
                     let members = swarm_members.read().await;
                     members
                         .get(&session_id)
                         .and_then(|member| member.swarm_id.clone())
-                } {
+                };
+                if let Some(swarm_id) = resumed_swarm_id {
                     rename_plan_participant(&swarm_id, &old_session_id, &session_id, swarm_plans)
                         .await;
                     reclaim_coordinator_slot_on_resume(

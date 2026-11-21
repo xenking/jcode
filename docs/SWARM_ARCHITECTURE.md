@@ -327,3 +327,44 @@ This design emphasizes parallelism, explicit communication, and optional worktre
 isolation. The coordinator is responsible for planning and plan updates; worktree
 managers are responsible for integration; agents collaborate directly to resolve
 conflicts.
+
+## Escalated `ask`
+
+A spawned worker runs its turns on the daemon with no attached client, so the
+`ask` tool cannot prompt a human. Instead of failing, it escalates:
+
+1. The worker's tool call parks on an answer channel. Nothing runs the model, so
+   a parked worker spends no tokens. Its member row shows
+   `waiting for the coordinator to answer ask`.
+2. The swarm root of the spawn chain (`report_back_to_session_id` ancestry)
+   receives two deliveries:
+   - `ServerEvent::AskEscalated` on the root daemon subscription (wire
+     `type: "ask_escalated"`), for example:
+
+     ```json
+     {"type":"ask_escalated","request_id":"ask-esc-…","worker_session_id":"session_worker","worker_name":"rabbit","lane":"parser","questions":[{"question":"Which parser?","header":"Parser","options":[{"label":"Enums (Recommended)","description":"Smallest diff"},{"label":"Trait objects"}],"multi_select":false,"allow_other":false}],"timeout_secs":1800}
+     ```
+
+     `worker_name`, `lane`, `questions[].header`, and each option's
+     `description` can be omitted. `request_id` identifies this delivery, not
+     the original tool call. The recommendation marker is part of the label;
+   - a `BusEvent::SwarmAskEscalated` wake, so an idle coordinator starts a turn
+     with the rendered question (a busy one gets it as a system interrupt).
+3. The coordinator answers with `swarm action="answer"`,
+   `to_session=<worker>`, `answers` in `AskResponse` shape
+   (`answers: [{selected, other, comments}]`, one object per question), and
+   optionally `request_id` when the worker has several pending asks. The answer
+   is delivered as the ordinary `ask` tool result (`format_ask_answers`), so the
+   worker continues as if a human had answered. If the owner must decide, the
+   coordinator calls `ask` itself first and passes that answer on.
+4. `{"type":"ask_escalation_closed","request_id":"…","worker_session_id":"…","reason":"answered"}`
+   lets clients clear the escalation card. `reason` is `answered` (including
+   decline), `withdrawn`, or `timed_out`. External wake mode additionally emits
+   `wake_requested` with `reason: "swarm_ask_escalated"` and rendered text.
+
+Fallbacks: if no interactive client exists anywhere in the chain, the
+recommended options are assumed and the tool result says so. The same happens
+after a 30 minute timeout. Stopping or removing the worker withdraws the parked
+ask and fails its tool call as cancelled. A daemon reload interrupts the worker
+turn. Recovery allows up to 30 seconds for the root to reconnect, then either
+replays the ask with a fresh request ID or uses the no-client fallback.

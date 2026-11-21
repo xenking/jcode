@@ -1,10 +1,14 @@
 use super::*;
 use crate::{terminal_eprintln as eprintln, terminal_println as println};
 
+#[path = "session_restore.rs"]
+mod session_restore;
+
 impl Agent {
     /// Refuse to run a model turn when this session moved to another machine
     /// or this in-memory copy is older than the transcript on disk.
     pub(crate) fn ensure_session_lease(&self) -> Result<()> {
+        self.enforce_worker_request()?;
         let account_route = self
             .session
             .route_api_method
@@ -68,6 +72,9 @@ impl Agent {
         // `jcode run` uses this path, so headless turns fire the same
         // lifecycle hooks as streaming turns (docs/HOOKS.md).
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
+        if result.is_ok() {
+            self.refresh_session_title(None).await;
+        }
         result
     }
 
@@ -104,7 +111,11 @@ impl Agent {
         if trace_enabled() {
             eprintln!("[trace] session_id {}", self.session.id);
         }
-        self.run_turn(false).await
+        let result = self.run_turn(false).await;
+        if result.is_ok() {
+            self.refresh_session_title(None).await;
+        }
+        result
     }
 
     /// Run one conversation turn with streaming events via mpsc channel (per-client)
@@ -141,6 +152,8 @@ impl Agent {
             system_reminder,
             event_tx,
             display_role,
+            None,
+            None,
         )
         .await
     }
@@ -154,6 +167,8 @@ impl Agent {
         system_reminder: Option<String>,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
         display_role: Option<crate::session::StoredDisplayRole>,
+        queued_client_id: Option<Vec<String>>,
+        attachment_data: Option<jcode_session_types::MessageAttachments>,
     ) -> Result<()> {
         self.validate_server_turn(lease)?;
         let _runtime_activity =
@@ -177,6 +192,12 @@ impl Agent {
         self.emit_context_messages_since(alert_start, &event_tx);
 
         let system_reminder = system_reminder.filter(|value| !value.trim().is_empty());
+        // A reload continuation for an interrupted ask resumes the existing turn.
+        // It is only a control signal, not another prompt for the model.
+        let resuming_ask = system_reminder.is_some()
+            && user_message.trim().is_empty()
+            && images.is_empty()
+            && self.has_interrupted_ask();
         // A reminder-only turn (e.g. reload recovery) used to persist an empty
         // user message, so the model saw a blank prompt and asked about it.
         // Carry the reminder as the turn's message instead.
@@ -199,12 +220,133 @@ impl Agent {
         self.announce_late_skills();
         self.emit_context_messages_since(announcement_start, &event_tx);
         let input_start = self.session.messages.len();
-        self.append_user_context_message_with_display_role(
-            &user_message,
-            images,
-            display_role,
-            continues_turn,
-        )?;
+        if !resuming_ask {
+            let queued_items = queued_client_id
+                .as_ref()
+                .map(|ids| {
+                    let queue = self
+                        .soft_interrupt_queue
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    ids.iter()
+                        .filter_map(|id| {
+                            queue
+                                .iter()
+                                .find(|item| item.client_id.as_ref() == Some(id))
+                                .cloned()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let has_queued_skills = queued_items
+                .iter()
+                .any(|item| item.active_skill.is_some() || !item.attachments.is_empty());
+            let session_id = self.session.id.clone();
+            if !crate::server::reload_recovery::admit_input(
+                &session_id,
+                lease.identity(),
+                queued_client_id.as_deref(),
+                || {
+                    if has_queued_skills {
+                        let previous_count = self.session.messages.len();
+                        let previous_skill = self.active_skill.clone();
+                        let previous_pinned_skills = self.session.pinned_skill_names().to_vec();
+                        let result = (|| {
+                            for mut item in queued_items {
+                                if let Some(skill) = item.active_skill {
+                                    anyhow::ensure!(
+                                        self.set_queued_active_skill(Some(skill)),
+                                        "Queued skill no longer installed"
+                                    );
+                                } else {
+                                    self.set_queued_active_skill(None);
+                                }
+                                let ids: Vec<String> = item.client_id.into_iter().collect();
+                                let attachment_data = if item.attachments.is_empty() {
+                                    None
+                                } else {
+                                    let display_content = item.content.clone();
+                                    let dir = crate::session::session_path(&session_id)?
+                                        .with_extension("attachments");
+                                    let prepared =
+                                        crate::server::attachment::prepare(&dir, item.attachments)?;
+                                    item.content.push_str(&prepared.text);
+                                    item.images.extend(prepared.images);
+                                    (!prepared.items.is_empty()).then_some(
+                                        jcode_session_types::MessageAttachments {
+                                            display_content,
+                                            items: prepared.items,
+                                        },
+                                    )
+                                };
+                                self.append_user_context_message_unpersisted(
+                                    &item.content,
+                                    item.images,
+                                    display_role,
+                                    continues_turn,
+                                    Some(&ids),
+                                    attachment_data,
+                                )?;
+                            }
+                            self.session.save()
+                        })();
+                        if result.is_err() {
+                            self.session.truncate_messages(previous_count);
+                            self.active_skill = previous_skill;
+                            self.session.set_pinned_skill_names(previous_pinned_skills);
+                        }
+                        result
+                    } else {
+                        self.append_user_context_message_with_display_role(
+                            &user_message,
+                            images,
+                            display_role,
+                            continues_turn,
+                            queued_client_id.as_deref(),
+                            attachment_data,
+                        )
+                    }
+                },
+            )? {
+                return Ok(());
+            }
+        }
+        if let Some(client_ids) = queued_client_id {
+            let mut queue = self
+                .soft_interrupt_queue
+                .lock()
+                .map_err(|_| anyhow::anyhow!("queue lock poisoned"))?;
+            queue.retain(|item| {
+                !item
+                    .client_id
+                    .as_ref()
+                    .is_some_and(|id| client_ids.contains(id))
+            });
+            crate::soft_interrupt_store::overwrite(self.session_id(), &queue)?;
+            drop(queue);
+            let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
+                content: user_message.to_string(),
+                // System-role context (reload/swarm reminders) must stay a
+                // status line in clients, never a prompt attributed to the user.
+                display_role: display_role.map(|role| {
+                    match role {
+                        crate::session::StoredDisplayRole::FileActivity => "file_activity",
+                        crate::session::StoredDisplayRole::BackgroundTask => "background_task",
+                        crate::session::StoredDisplayRole::System => "system",
+                    }
+                    .to_string()
+                }),
+                point: "turn_start".into(),
+                tools_skipped: None,
+                client_ids,
+            });
+        }
+        if !continues_turn
+            && display_role.is_none()
+            && let Some(event) = self.user_image_ids_event(input_start, &user_message)
+        {
+            let _ = event_tx.send(event);
+        }
         if continues_turn || display_role.is_some() {
             self.emit_context_messages_since(input_start, &event_tx);
         }
@@ -222,9 +364,62 @@ impl Agent {
         let turn_started_at = Instant::now();
         let start_message_index = self.message_count();
         self.fire_turn_start_hook("chat");
+        let title_event_tx = event_tx.clone();
         let result = self.run_turn_streaming_mpsc(event_tx).await;
+        if self.session.migration_lease_block().is_none()
+            && crate::turn_activity::global()
+                .snapshot()
+                .session(&self.session.id)
+                .is_some_and(|activity| activity.checkpoint_pending)
+        {
+            self.persist_session_now()?;
+            crate::turn_activity::global().checkpointed(&self.session.id);
+        }
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
+        if result.is_ok() {
+            self.refresh_session_title(Some(&title_event_tx)).await;
+        }
         result
+    }
+
+    pub(super) fn user_image_ids_event(&self, index: usize, original: &str) -> Option<ServerEvent> {
+        if let Some(message) = self.session.messages.get(index) {
+            let image_ids: Vec<_> = message
+                .content
+                .iter()
+                .filter(|block| matches!(block, ContentBlock::Image { .. }))
+                .enumerate()
+                .map(|(ordinal, _)| {
+                    crate::session::image_id(&self.session.id, &message.id, ordinal)
+                })
+                .collect();
+            if !image_ids.is_empty() {
+                let mut content = original.to_string();
+                let mut missing = Vec::new();
+                for (index, id) in image_ids.iter().enumerate() {
+                    let hash = format!("[#image {}]", index + 1);
+                    let plain = format!("[image {}]", index + 1);
+                    let marker = format!("[#{id}]");
+                    if content.contains(&hash) || content.contains(&plain) {
+                        content = content.replace(&hash, &marker).replace(&plain, &marker);
+                    } else {
+                        missing.push(marker);
+                    }
+                }
+                if !missing.is_empty() {
+                    if !content.is_empty() {
+                        content.push(' ');
+                    }
+                    content.push_str(&missing.join(" "));
+                }
+                return Some(ServerEvent::UserImageIds {
+                    original_content: original.to_string(),
+                    content,
+                    image_ids,
+                });
+            }
+        }
+        None
     }
 
     /// Re-run the model loop for the turn already in history, without
@@ -247,8 +442,21 @@ impl Agent {
         let turn_started_at = Instant::now();
         let start_message_index = self.message_count();
         self.fire_turn_start_hook("failover");
+        let title_event_tx = event_tx.clone();
         let result = self.run_turn_streaming_mpsc(event_tx).await;
+        if self.session.migration_lease_block().is_none()
+            && crate::turn_activity::global()
+                .snapshot()
+                .session(&self.session.id)
+                .is_some_and(|activity| activity.checkpoint_pending)
+        {
+            self.persist_session_now()?;
+            crate::turn_activity::global().checkpointed(&self.session.id);
+        }
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
+        if result.is_ok() {
+            self.refresh_session_title(Some(&title_event_tx)).await;
+        }
         result
     }
 
@@ -270,21 +478,33 @@ impl Agent {
                 })
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
-                content,
-                display_role: Some(
-                    match message.display_role {
-                        Some(crate::session::StoredDisplayRole::BackgroundTask) => {
-                            "background_task"
+            if event_tx
+                .send(ServerEvent::SoftInterruptInjected {
+                    content,
+                    display_role: Some(
+                        match message.display_role {
+                            Some(crate::session::StoredDisplayRole::FileActivity) => {
+                                "file_activity"
+                            }
+                            Some(crate::session::StoredDisplayRole::BackgroundTask) => {
+                                "background_task"
+                            }
+                            _ => "system",
                         }
-                        _ => "system",
-                    }
-                    .to_string(),
-                ),
-                point: "context".to_string(),
-                tools_skipped: None,
-                client_ids: Vec::new(),
-            });
+                        .to_string(),
+                    ),
+                    point: "context".to_string(),
+                    tools_skipped: None,
+                    client_ids: Vec::new(),
+                })
+                .is_err()
+            {
+                logging::debug(&format!(
+                    "Context message receiver disconnected for session {}",
+                    self.session.id
+                ));
+                break;
+            }
         }
     }
 
@@ -311,8 +531,16 @@ impl Agent {
         &mut self,
         user_message: &str,
         images: Vec<(String, String)>,
+        attachment_data: Option<jcode_session_types::MessageAttachments>,
     ) -> Result<()> {
-        self.append_user_context_message_with_display_role(user_message, images, None, false)
+        self.append_user_context_message_with_display_role(
+            user_message,
+            images,
+            None,
+            false,
+            None,
+            attachment_data,
+        )
     }
 
     fn append_user_context_message_with_display_role(
@@ -323,6 +551,28 @@ impl Agent {
         // A synthetic continuation (reload recovery) resumes the previous
         // turn, so it must not start a new model-usage turn.
         continues_turn: bool,
+        queued_client_id: Option<&[String]>,
+        attachment_data: Option<jcode_session_types::MessageAttachments>,
+    ) -> Result<()> {
+        self.append_user_context_message_unpersisted(
+            user_message,
+            images,
+            display_role,
+            continues_turn,
+            queued_client_id,
+            attachment_data,
+        )?;
+        self.session.save()
+    }
+
+    fn append_user_context_message_unpersisted(
+        &mut self,
+        user_message: &str,
+        images: Vec<(String, String)>,
+        display_role: Option<crate::session::StoredDisplayRole>,
+        continues_turn: bool,
+        queued_client_id: Option<&[String]>,
+        attachment_data: Option<jcode_session_types::MessageAttachments>,
     ) -> Result<()> {
         let mut blocks: Vec<ContentBlock> = images
             .into_iter()
@@ -349,11 +599,18 @@ impl Agent {
         }
 
         let starts_turn = !continues_turn && (blocks.len() > 1 || !user_message.trim().is_empty());
-        let input_id = self.add_message_with_display_role(Role::User, blocks, display_role);
+        let mut input_id = self.add_message_with_display_role(Role::User, blocks, display_role);
+        if let Some(attachment_data) = attachment_data {
+            self.session.set_last_message_attachments(attachment_data);
+        }
+        if let Some(client_ids) = queued_client_id {
+            input_id = format!("queued:{}", serde_json::to_string(client_ids)?);
+            self.session.rename_last_message(input_id.clone());
+        }
         if starts_turn {
             self.begin_model_usage_turn(&input_id);
         }
-        self.session.save()
+        Ok(())
     }
 
     /// Fire the `turn_start` observer hook when a turn begins, before the model
@@ -362,7 +619,7 @@ impl Agent {
     /// is actively working during the otherwise-invisible window between prompt
     /// submission and the first tool call. No-op (without building the payload)
     /// when the hook is not configured.
-    fn fire_turn_start_hook(&self, source: &str) {
+    pub(super) fn fire_turn_start_hook(&self, source: &str) {
         if !crate::hooks::hook_configured("turn_start") {
             return;
         }
@@ -378,7 +635,7 @@ impl Agent {
 
     /// Fire the `turn_end` observer hook with turn outcome metadata.
     /// No-op (without building the payload) when the hook is not configured.
-    fn fire_turn_end_hook(
+    pub(super) fn fire_turn_end_hook(
         &self,
         result: &Result<()>,
         started_at: Instant,
@@ -747,9 +1004,9 @@ impl Agent {
         // An SDK tool that reuses a built-in name is the caller's own and stays.
         let loader = crate::tool::load_tools::LOAD_TOOLS_NAME;
         let sdk_disabled: HashSet<String> = sdk
-            .as_ref()
-            .map(|config| config.disabled.iter().cloned().collect())
-            .unwrap_or_default();
+            .iter()
+            .flat_map(|config| config.disabled.iter().cloned())
+            .collect();
         let loader_allowed = allowed.is_none_or(|set| self.registry.tool_is_allowed(set, loader))
             && !self.registry.tool_is_disabled(&self.disabled_tools, loader)
             && !self.registry.tool_is_disabled(&sdk_disabled, loader);
@@ -1234,171 +1491,15 @@ impl Agent {
         Ok(())
     }
 
-    /// Restore a session by ID (loads from disk)
-    pub fn restore_session(&mut self, session_id: &str) -> Result<SessionStatus> {
-        self.restore_session_with_working_dir(session_id, None)
-    }
-
-    pub(crate) fn restore_session_with_working_dir(
-        &mut self,
-        session_id: &str,
-        working_dir: Option<&str>,
-    ) -> Result<SessionStatus> {
-        self.restore_session_inner(session_id, working_dir, true)
-    }
-
-    /// Restore without persisting. The caller must call
-    /// [`Self::persist_restored_session`] once it is off the latency-critical
-    /// path: for sessions with multi-MB compaction state that save is a full
-    /// snapshot rewrite (0.4-1.6s), and it used to delay the History reply.
-    pub(crate) fn restore_session_deferring_save(
-        &mut self,
-        session_id: &str,
-        working_dir: Option<&str>,
-    ) -> Result<SessionStatus> {
-        self.restore_session_inner(session_id, working_dir, false)
-    }
-
-    /// Persist state recorded by [`Self::restore_session_deferring_save`].
-    pub(crate) fn persist_restored_session(&mut self) {
-        let start = Instant::now();
-        if let Err(err) = self.session.save() {
-            logging::error(&format!(
-                "Failed to persist resumed session state for {}: {}",
-                self.session.id, err
-            ));
-        }
-        logging::info(&format!(
-            "[TIMING] restore_session deferred save: session={}, save={}ms",
-            self.session.id,
-            start.elapsed().as_millis()
-        ));
-    }
-
-    fn restore_session_inner(
-        &mut self,
-        session_id: &str,
-        working_dir: Option<&str>,
-        persist: bool,
-    ) -> Result<SessionStatus> {
-        let restore_start = Instant::now();
-        let restore_cpu_start = crate::server::thread_cpu_ms();
-        let load_start = Instant::now();
-        let mut session = Session::load_for_resume(session_id)?;
-        if let Some(working_dir) = working_dir {
-            session.working_dir = Some(working_dir.to_string());
-            session.refresh_initial_session_context_message();
-        }
-        let load_ms = load_start.elapsed().as_millis();
-        logging::info(&format!(
-            "Restoring session '{}' with {} messages, provider_session_id: {:?}, status: {}",
-            session_id,
-            session.messages.len(),
-            session.provider_session_id,
-            session.status.display()
-        ));
-        let previous_status = session.status.clone();
-
-        let assign_start = Instant::now();
-        // A failed load must leave the current Agent and its concurrency lease
-        // alive. Close it only after the replacement is ready to install.
-        self.mark_closed_for_replacement();
-        let close_ms = assign_start.elapsed().as_millis();
-        // Restore provider_session_id for Claude CLI session resume
-        self.provider_session_id = session.provider_session_id.clone();
-        let replaced_session = std::mem::replace(&mut self.session, session);
-        drop(replaced_session);
-        let swap_ms = assign_start.elapsed().as_millis() - close_ms;
-        let lap = Instant::now();
-        self.provider.set_session_id(&self.session.id);
-        let provider_ms = lap.elapsed().as_millis();
-        let lap = Instant::now();
-        self.refresh_agents_md_snapshot();
-        let agents_md_ms = lap.elapsed().as_millis();
-        let lap = Instant::now();
-        self._tool_policy_registration = crate::tool::register_session_tool_policy(
-            &self.session.id,
-            self.allowed_tools.clone(),
-            self.disabled_tools.clone(),
-        );
-        let policy_ms = lap.elapsed().as_millis();
-        let assign_ms = assign_start.elapsed().as_millis();
-        if assign_ms >= 50 {
-            logging::info(&format!(
-                "[TIMING] restore_session assign parts: session={session_id}, close={close_ms}ms, swap={swap_ms}ms, provider={provider_ms}ms, agents_md={agents_md_ms}ms, policy={policy_ms}ms"
-            ));
-        }
-
-        let reset_start = Instant::now();
-        self.reset_runtime_state_for_session_change();
-        let restored_soft_interrupts = self.restore_persisted_soft_interrupts();
-        let reset_ms = reset_start.elapsed().as_millis();
-
-        let model_start = Instant::now();
-        self.restore_session_model_from_session();
-        self.restore_reasoning_effort_from_session();
-        let model_ms = model_start.elapsed().as_millis();
-
-        let mark_active_start = Instant::now();
-        // begin_concurrency_tracking writes the presence markers.
-        self.session.mark_active_unregistered();
-        self.begin_concurrency_tracking();
-        let mark_active_ms = mark_active_start.elapsed().as_millis();
-        self.sync_memory_dedup_state_from_session();
-
-        logging::info(&format!(
-            "restore_session: loaded session {} with {} messages, calling seed_compaction",
-            session_id,
-            self.session.messages.len()
-        ));
-        let compaction_start = Instant::now();
-        self.seed_compaction_from_session();
-        let compaction_ms = compaction_start.elapsed().as_millis();
-
-        let env_snapshot_start = Instant::now();
-        // The save just below persists this snapshot too.
-        self.log_env_snapshot_unsaved("resume");
-        let env_snapshot_ms = env_snapshot_start.elapsed().as_millis();
-        self.fire_session_lifecycle_hook("session_start", "resume");
-
-        let save_start = Instant::now();
-        if persist && let Err(err) = self.session.save() {
-            logging::error(&format!(
-                "Failed to persist resumed session state for {}: {}",
-                session_id, err
-            ));
-        }
-        let save_ms = save_start.elapsed().as_millis();
-
-        logging::info(&format!(
-            "[TIMING] restore_session: session={}, messages={}, restored_soft_interrupts={}, load={}ms, assign={}ms, reset={}ms, model={}ms, mark_active={}ms, compaction={}ms, env_snapshot={}ms, save={}ms, total={}ms, cpu={:.0}ms",
-            session_id,
-            self.session.messages.len(),
-            restored_soft_interrupts,
-            load_ms,
-            assign_ms,
-            reset_ms,
-            model_ms,
-            mark_active_ms,
-            compaction_ms,
-            env_snapshot_ms,
-            save_ms,
-            restore_start.elapsed().as_millis(),
-            crate::server::thread_cpu_ms() - restore_cpu_start,
-        ));
-        logging::info(&format!(
-            "Session restored: {} messages in session",
-            self.session.messages.len()
-        ));
-        Ok(previous_status)
-    }
-
     /// Get conversation history for sync
     pub fn get_history(&self) -> Vec<HistoryMessage> {
         crate::session::render_messages(&self.session)
             .into_iter()
             .map(|msg| HistoryMessage {
+                attachments: msg.attachments,
                 response_stats: msg.response_stats,
+                timestamp_ms: msg.timestamp_ms,
+                tool_duration_ms: msg.tool_duration_ms,
                 role: msg.role,
                 content: msg.content,
                 tool_calls: if msg.tool_calls.is_empty() {
@@ -1424,7 +1525,10 @@ impl Agent {
         let history = messages
             .into_iter()
             .map(|msg| HistoryMessage {
+                attachments: msg.attachments,
                 response_stats: msg.response_stats,
+                timestamp_ms: msg.timestamp_ms,
+                tool_duration_ms: msg.tool_duration_ms,
                 role: msg.role,
                 content: msg.content,
                 tool_calls: if msg.tool_calls.is_empty() {
@@ -1454,7 +1558,10 @@ impl Agent {
         let history = messages
             .into_iter()
             .map(|msg| HistoryMessage {
+                attachments: msg.attachments,
                 response_stats: msg.response_stats,
+                timestamp_ms: msg.timestamp_ms,
+                tool_duration_ms: msg.tool_duration_ms,
                 role: msg.role,
                 content: msg.content,
                 tool_calls: if msg.tool_calls.is_empty() {
@@ -1514,6 +1621,14 @@ impl Agent {
                 continue;
             }
 
+            if input.split_whitespace().next() == Some("/mode") {
+                match self.mode_command(input.strip_prefix("/mode").unwrap_or_default()) {
+                    Ok(message) => println!("{message}"),
+                    Err(error) => eprintln!("{error}"),
+                }
+                continue;
+            }
+
             // Check for skill invocation. Resolve against the registry (not
             // the bare tokenizer) so a `SKILL.md` `name:` field containing
             // spaces, e.g. "My Custom Skill", can still be matched: the
@@ -1522,8 +1637,7 @@ impl Agent {
                 if let Some(skill) = skills.get(invocation.name) {
                     println!("Activating skill: {}", skill.name);
                     println!("{}\n", skill.description);
-                    self.active_skill = Some(invocation.name.to_string());
-                    self.announce_active_skill();
+                    self.set_pinned_skill(Some(invocation.name))?;
                     if let Some(prompt) = invocation.prompt {
                         if let Err(e) = self.run_once(prompt).await {
                             eprintln!("\nError: {}\n", e);
@@ -1609,7 +1723,8 @@ impl Agent {
                     | ContentBlock::AnthropicThinking { .. }
                     | ContentBlock::OpenAIReasoning { .. }
                     | ContentBlock::ToolReference { .. }
-                    | ContentBlock::ProviderNative { .. } => {}
+                    | ContentBlock::ProviderNative { .. }
+                    | ContentBlock::Unknown => {}
                     ContentBlock::Image { .. } => {
                         transcript.push_str("[Image]\n");
                     }

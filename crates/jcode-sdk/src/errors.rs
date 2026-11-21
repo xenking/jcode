@@ -37,6 +37,8 @@ pub enum ErrorKind {
     InvalidInstanceHome,
     /// An option was outside its documented range.
     InvalidOption,
+    /// The connected runtime does not advertise a required capability.
+    UnsupportedCapability,
     /// An operation requires a reconnectable native socket or SSH transport.
     UnsupportedTransport,
     /// A global event consumer fell behind its bounded queue.
@@ -69,6 +71,7 @@ impl ErrorKind {
             Self::StartupTimeout => "startup_timeout",
             Self::InvalidInstanceHome => "invalid_instance_home",
             Self::InvalidOption => "invalid_option",
+            Self::UnsupportedCapability => "unsupported",
             Self::UnsupportedTransport => "unsupported_transport",
             Self::EventBufferOverflow => "event_buffer_overflow",
             Self::Cancelled => "cancelled",
@@ -79,6 +82,7 @@ impl ErrorKind {
                 jcode_harness_api::ErrorCode::UnsupportedVersion => "unsupported_version",
                 jcode_harness_api::ErrorCode::UnknownRequest => "unknown_request",
                 jcode_harness_api::ErrorCode::UnknownSession => "unknown_session",
+                jcode_harness_api::ErrorCode::UnknownSkill => "unknown_skill",
                 jcode_harness_api::ErrorCode::InvalidRequest => "invalid_request",
                 jcode_harness_api::ErrorCode::Internal => "internal",
             },

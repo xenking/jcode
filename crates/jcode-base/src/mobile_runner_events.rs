@@ -115,7 +115,14 @@ fn spawn_with(source: Source, retry: Duration) -> Wakeups {
                 let mut timing = super::StageTimer::new("event_connect");
                 let connection = tokio::time::timeout(
                     Duration::from_secs(2),
-                    tokio_tungstenite::connect_async_with_config(request, Some(config), true),
+                    tokio_tungstenite::connect_async_tls_with_config(
+                        request,
+                        Some(config),
+                        true,
+                        Some(tokio_tungstenite::Connector::Rustls(
+                            jcode_provider_core::websocket_tls_config(),
+                        )),
+                    ),
                 )
                 .await;
                 match connection {

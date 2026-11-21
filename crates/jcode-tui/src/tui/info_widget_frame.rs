@@ -16,6 +16,7 @@
 use crate::tui::color_support::rgb;
 use ratatui::prelude::*;
 use ratatui::widgets::Block;
+#[cfg(test)]
 use unicode_width::UnicodeWidthStr;
 
 /// Widget name on the border: brighter than the border, still quiet.
@@ -173,8 +174,7 @@ fn place<'a>(
     block
 }
 
-/// Cut `line` to `max` display columns, keeping the closing pad. No ellipsis:
-/// in a narrow margin every cell is better spent on text.
+/// Cut `line` to `max` display columns, keeping the closing pad and ellipsis.
 /// Returns `None` when there is no room for anything meaningful.
 pub(crate) fn fit(line: &Line<'static>, max: usize) -> Option<Line<'static>> {
     if line.width() <= max {
@@ -183,26 +183,9 @@ pub(crate) fn fit(line: &Line<'static>, max: usize) -> Option<Line<'static>> {
     if max < 4 {
         return None;
     }
-    let budget = max - 1; // room for the closing pad
-    let mut used = 0usize;
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    'outer: for span in &line.spans {
-        let mut kept = String::new();
-        for ch in span.content.chars() {
-            let w = UnicodeWidthStr::width(ch.encode_utf8(&mut [0u8; 4]) as &str);
-            if used + w > budget {
-                if !kept.is_empty() {
-                    spans.push(Span::styled(kept, span.style));
-                }
-                break 'outer;
-            }
-            used += w;
-            kept.push(ch);
-        }
-        spans.push(Span::styled(kept, span.style));
-    }
-    spans.push(Span::raw(" "));
-    Some(Line::from(spans))
+    let mut fitted = jcode_tui_render::truncate_line_with_ellipsis_to_width(line, max - 1);
+    fitted.spans.push(Span::raw(" "));
+    Some(fitted)
 }
 
 #[cfg(test)]
@@ -210,6 +193,16 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::widgets::{BorderType, Borders};
+
+    #[test]
+    fn truncated_border_text_uses_cell_aware_ellipsis() {
+        let line = Line::from(" 工作😀long ");
+        for width in [4, 5, 8] {
+            let fitted = fit(&line, width).unwrap();
+            assert!(fitted.width() <= width);
+            assert!(fitted.to_string().trim_end().ends_with('…'));
+        }
+    }
 
     fn render(framed: &Framed, width: u16) -> Vec<String> {
         let backend = TestBackend::new(width, 3);
@@ -256,10 +249,10 @@ mod tests {
     }
 
     #[test]
-    fn left_slot_is_cut_at_the_edge_without_ellipsis() {
+    fn left_slot_is_cut_with_ellipsis() {
         let f = Framed::body(vec![Line::from("x")]).title("abcdefghijklmnopqrstuvwxyz");
         let rows = render(&f, 12);
-        assert_eq!(rows[0], "╭ abcdefgh ╮");
+        assert_eq!(rows[0], "╭ abcdefg… ╮");
         assert_eq!(rows[0].chars().count(), 12);
         assert!(rows[0].ends_with('╮'), "{}", rows[0]);
     }
@@ -307,11 +300,10 @@ mod tests {
     }
 
     #[test]
-    fn lone_right_footer_is_cut_at_the_edge_without_ellipsis() {
+    fn lone_right_footer_is_cut_with_ellipsis() {
         let f = Framed::body(vec![Line::from("x")]).footer_right("abcdefghijklmnopqrstuvwxyz");
         let rows = render(&f, 12);
-        assert!(!rows[2].contains('…'), "{}", rows[2]);
-        assert!(rows[2].contains("abcdefgh"), "{}", rows[2]);
+        assert!(rows[2].contains("abcdefg…"), "{}", rows[2]);
         assert_eq!(rows[2].chars().count(), 12);
         assert!(rows[2].ends_with('╯'), "{}", rows[2]);
     }

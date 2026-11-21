@@ -22,7 +22,7 @@ pub struct DisplayConfig {
     pub auto_server_reload: bool,
     /// Capture mouse events (default: true). Enables scroll wheel but disables terminal selection.
     pub mouse_capture: bool,
-    /// Enable debug socket for external control (default: false)
+    /// Enable debug socket for external control (default: true)
     pub debug_socket: bool,
     /// Render emoji in terminal-facing TUI and CLI output (default: true)
     pub emoji: bool,
@@ -216,7 +216,7 @@ impl Default for DisplayConfig {
             queue_mode: false,
             auto_server_reload: true,
             mouse_capture: true,
-            debug_socket: false,
+            debug_socket: true,
             emoji: true,
             centered: false,
             show_thinking: true,
@@ -319,6 +319,15 @@ mod tests {
                 serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
             assert_eq!(roundtrip.show_link_urls, value);
         }
+    }
+
+    #[test]
+    fn debug_socket_is_enabled_by_default() {
+        assert!(DisplayConfig::default().debug_socket);
+        let missing: DisplayConfig = serde_json::from_str("{}").unwrap();
+        assert!(missing.debug_socket);
+        let disabled: DisplayConfig = serde_json::from_str(r#"{"debug_socket":false}"#).unwrap();
+        assert!(!disabled.debug_socket);
     }
 
     #[test]

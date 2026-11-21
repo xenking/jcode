@@ -272,7 +272,15 @@ pub(crate) fn assignment_brief(
     task_id: &str,
     content: &str,
 ) -> Option<String> {
-    let mut todos = crate::todo::load_todos(coordinator_session).ok()?;
+    let mut todos = match crate::todo::load_todos(coordinator_session) {
+        Ok(todos) => todos,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Cannot build worker assignment from coordinator {coordinator_session} todos: {error:#}"
+            ));
+            return None;
+        }
+    };
     if !is_lane_task(task_id) {
         return details_for(&mut todos, task_id, content);
     }
@@ -323,10 +331,24 @@ pub(crate) fn seed_spawn_lane(
     Ok(lane_brief(&seeded))
 }
 
+pub(crate) fn open_spawn_lane_owner(
+    coordinator_session: &str,
+    lane_id: &str,
+) -> anyhow::Result<Option<String>> {
+    Ok(crate::todo::load_todos(coordinator_session)?
+        .into_iter()
+        .find(|todo| {
+            is_open(todo)
+                && crate::todo::stages::lane_id(todo) == lane_id
+                && todo.assigned_to.is_some()
+        })
+        .and_then(|todo| todo.assigned_to))
+}
+
 pub(crate) fn spawn_lane_message(initial_message: Option<&str>, brief: &str) -> String {
     match initial_message.filter(|message| !message.trim().is_empty()) {
         Some(message) => format!("{message}\n\nAuthoritative assigned todo lane:\n{brief}"),
-        None => format!("Begin your assigned todo lane.\n\n{brief}"),
+        None => format!("{}\n\n{brief}", jcode_session_types::AUTO_LANE_START),
     }
 }
 

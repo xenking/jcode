@@ -13,12 +13,21 @@ async fn synthetic_reload_preserves_manifest(override_home: bool, mode: ToolExec
         EnvVarGuard::remove("JCODE_HOME")
     };
     let _test = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
-    let expected = if override_home {
-        isolated
+    let expected = storage::jcode_dir().unwrap();
+    if override_home {
+        assert_eq!(expected, isolated);
     } else {
-        home.path().join(".jcode")
-    };
-    assert_eq!(storage::jcode_dir().unwrap(), expected);
+        // Never probe the real production home, not even through a derived path:
+        // with JCODE_HOME unset a test build isolates its home away from it.
+        let production = dirs::home_dir().map(|home| home.join(".jcode"));
+        assert!(
+            production
+                .as_ref()
+                .is_none_or(|production| !expected.starts_with(production)),
+            "default home must not be the real one: {}",
+            expected.display()
+        );
+    }
     let manifest = expected.join("builds/manifest.json");
     std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
     let original = br#"{"stable":"real-build","canary":"real-canary","canary_status":"testing","pending_activation":{"session_id":"synthetic-manifest-regression","new_version":"real-pending","requested_at":"2026-10-29T00:00:00Z"}}"#;

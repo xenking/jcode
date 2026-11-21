@@ -104,7 +104,8 @@ impl Agent {
                     | ContentBlock::AnthropicThinking { .. }
                     | ContentBlock::OpenAIReasoning { .. }
                     | ContentBlock::ToolReference { .. }
-                    | ContentBlock::ProviderNative { .. } => {}
+                    | ContentBlock::ProviderNative { .. }
+                    | ContentBlock::Unknown => {}
                     ContentBlock::Image { .. } => {
                         transcript.push_str("[Image]\n");
                     }

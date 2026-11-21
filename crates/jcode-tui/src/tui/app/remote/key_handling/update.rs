@@ -10,20 +10,103 @@ pub(in crate::tui::app) async fn send_interleave_now(
     images: Vec<(String, String)>,
     remote: &mut RemoteConnection,
 ) {
-    if content.trim().is_empty() {
+    send_queued_prompt(
+        app,
+        content,
+        images,
+        crate::protocol::QueuedPromptMode::Steer,
+        remote,
+    )
+    .await;
+}
+
+pub(in crate::tui::app) async fn send_queued_prompt(
+    app: &mut App,
+    content: String,
+    images: Vec<(String, String)>,
+    mode: crate::protocol::QueuedPromptMode,
+    remote: &mut RemoteConnection,
+) {
+    send_queued_prompt_with_attachments(
+        app,
+        content.clone(),
+        images,
+        Vec::new(),
+        content,
+        mode,
+        remote,
+    )
+    .await;
+}
+
+pub(in crate::tui::app) async fn send_prepared_queued_prompt(
+    app: &mut App,
+    prepared: input::PreparedInput,
+    mode: crate::protocol::QueuedPromptMode,
+    remote: &mut RemoteConnection,
+) {
+    let (content, attachments) = input::paste_attachment_payload(
+        &prepared.raw_input,
+        &prepared.expanded,
+        &prepared.pasted_contents,
+        remote.supports_file_attachments(),
+    );
+    send_queued_prompt_with_attachments(
+        app,
+        content,
+        prepared.images,
+        attachments,
+        prepared.expanded,
+        mode,
+        remote,
+    )
+    .await;
+}
+
+async fn send_queued_prompt_with_attachments(
+    app: &mut App,
+    content: String,
+    images: Vec<(String, String)>,
+    attachments: Vec<jcode_session_types::Attachment>,
+    fallback_content: String,
+    mode: crate::protocol::QueuedPromptMode,
+    remote: &mut RemoteConnection,
+) {
+    if content.trim().is_empty() && images.is_empty() && attachments.is_empty() {
         return;
     }
-    let msg_clone = content.clone();
-    match remote.soft_interrupt(content, images, false).await {
+    let prompt = crate::protocol::QueuedPrompt {
+        client_id: crate::id::new_id("prompt"),
+        content: content.clone(),
+        images: images.clone(),
+        attachments,
+        active_skill: None,
+        mode,
+        editing: false,
+    };
+    match remote.queue_prompt(prompt.clone()).await {
         Err(e) => {
+            app.restore_failover_payload(app_mod::FallbackResendPayload {
+                content: fallback_content,
+                images,
+                is_system: false,
+                system_reminder: None,
+                auto_retry: false,
+                retry_attempts: 0,
+                raw_input: None,
+            });
             app.push_display_message(DisplayMessage::error(format!(
-                "Failed to send interleave: {}",
+                "Failed to queue prompt: {}",
                 e
             )));
         }
-        Ok(request_id) => {
-            app.track_pending_soft_interrupt(request_id, msg_clone);
-            app.set_status_notice("⏭ Interleave sent");
+        Ok(id) => {
+            app.pending_queue_requests.push((id, Some(prompt)));
+            app.set_status_notice(match mode {
+                crate::protocol::QueuedPromptMode::Steer => "Queued: steer",
+                crate::protocol::QueuedPromptMode::AfterYield => "Queued: after yield",
+            });
+            app.restore_stash_after_send();
         }
     }
 }

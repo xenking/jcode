@@ -45,6 +45,21 @@ fn user_response_hello_defaults_off_for_older_clients() {
 }
 
 #[test]
+fn pending_ask_replay_uses_the_requested_attachment_identity() {
+    let mut state = BridgeState::default();
+    state.api_request_to_legacy(
+        &json!({"req":"attach_session", "id": 7, "session_id":"pending-session"}),
+    );
+    let frames = state.legacy_event_to_api(&json!({
+        "type":"ask_user_request", "request_id":"ask-c1", "tool_call_id":"c1",
+        "questions":[{"question":"Choose?", "options":[{"label":"A"}]}]
+    }));
+    assert!(
+        matches!(&frames[0].event, jcode_harness_api::ApiEvent::AskRequest { session_id, .. } if session_id == "pending-session")
+    );
+}
+
+#[test]
 fn ask_request_and_response_bridge_both_ways() {
     let mut state = BridgeState {
         session_id: Some("s1".into()),

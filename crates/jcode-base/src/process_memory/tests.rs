@@ -34,6 +34,30 @@ fn windows_native_snapshot_reports_working_set_and_records_history() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_snapshot_reports_resident_virtual_and_footprint_metrics() {
+    let source = "macos_native_memory_smoke";
+    let snapshot = snapshot_with_source(source);
+    let rss = snapshot.rss_bytes.expect("resident size");
+    assert!(rss > 0);
+    assert!(snapshot.peak_rss_bytes.expect("peak resident size") >= rss);
+    assert!(snapshot.virtual_bytes.expect("virtual size") >= rss);
+
+    let json = serde_json::to_value(&snapshot).unwrap();
+    let footprint = json["os"]["phys_footprint_bytes"]
+        .as_u64()
+        .expect("physical footprint");
+    let peak = json["os"]["peak_phys_footprint_bytes"]
+        .as_u64()
+        .expect("peak physical footprint");
+    assert!(footprint > 0);
+    assert!(peak >= footprint);
+    assert!(history(MAX_HISTORY_SAMPLES).iter().any(|entry| {
+        entry.source == source && serde_json::to_value(&entry.snapshot).unwrap() == json
+    }));
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_snapshot_preserves_resident_virtual_and_history_metrics() {

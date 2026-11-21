@@ -635,23 +635,18 @@ pub fn clear_all_injected_memories() {
     }
 }
 
-/// Clear any pending memory result for a session.
-pub fn clear_pending_memory(session_id: &str) {
+/// Discard an unused result without forgetting what the session has seen.
+pub(crate) fn discard_pending_memory(session_id: &str) {
     if let Ok(mut guard) = PENDING_MEMORY.lock()
         && let Some(map) = guard.as_mut()
     {
         map.remove(session_id);
     }
-    if let Ok(mut guard) = LAST_INJECTED_PROMPT_SIGNATURE.lock()
-        && let Some(map) = guard.as_mut()
-    {
-        map.remove(session_id);
-    }
-    if let Ok(mut guard) = LAST_INJECTED_MEMORY_SET.lock()
-        && let Some(map) = guard.as_mut()
-    {
-        map.remove(session_id);
-    }
+}
+
+/// Reset pending recall and its deduplication state for a session.
+pub fn clear_pending_memory(session_id: &str) {
+    discard_pending_memory(session_id);
     clear_injected_memories(session_id);
 }
 
@@ -1037,18 +1032,20 @@ mod scoped_tests {
     }
 
     #[test]
-    fn publication_and_validation_preserve_selected_id_order() {
+    fn publication_preserves_selected_id_order_and_canonicalizes_prompt_order() {
         fixture(|| {
-            let first = fact("First selected fact");
-            let second = fact("Second selected fact");
+            let mut first = fact("First selected fact");
+            first.id = "a".into();
+            let mut second = fact("Second selected fact");
+            second.id = "b".into();
             let entries = [second.clone(), first.clone()];
             save(None, true, &entries);
             publish("ordered", None, &entries);
             let pending = take_pending_memory_for_project("ordered", None).unwrap();
             assert_eq!(pending.memory_ids, [second.id, first.id]);
             assert!(
-                pending.prompt.find("Second selected").unwrap()
-                    < pending.prompt.find("First selected").unwrap()
+                pending.prompt.find("First selected").unwrap()
+                    < pending.prompt.find("Second selected").unwrap()
             );
         });
     }

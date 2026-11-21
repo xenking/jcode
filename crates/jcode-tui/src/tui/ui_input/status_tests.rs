@@ -2,6 +2,42 @@ use super::*;
 use ratatui::style::Modifier;
 
 #[test]
+fn overscroll_window_percentages_use_shared_usage_wording() {
+    let account = crate::usage::AccountUsageSnapshot {
+        additional_windows: vec![],
+        label: "account".into(),
+        email: None,
+        exhausted: false,
+        primary_label: Some("5h".into()),
+        five_hour_ratio: Some(0.27),
+        secondary_label: None,
+        seven_day_ratio: None,
+        resets_at: None,
+        error: None,
+    };
+    let line = overscroll_multi_usage_windows(&[("Claude", account)]).unwrap();
+    assert_eq!(line, "\u{ec82} 27%");
+}
+
+#[test]
+fn overscroll_local_window_uses_shared_usage_wording() {
+    use crate::tui::info_widget::{AuthMethod, InfoWidgetData, UsageInfo, UsageProvider};
+    let data = InfoWidgetData {
+        auth_method: AuthMethod::OpenAIOAuth,
+        usage_info: Some(UsageInfo {
+            provider: UsageProvider::OpenAI,
+            available: true,
+            primary_limit_label: Some("5h".into()),
+            five_hour: 0.27,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let local = overscroll_usage_windows(&data).unwrap();
+    assert_eq!(local, "\u{ec81} 27%");
+}
+
+#[test]
 fn overscroll_multi_provider_windows_ignore_unknown_values() {
     let make = |primary, secondary| crate::usage::AccountUsageSnapshot {
         additional_windows: vec![],
@@ -20,9 +56,51 @@ fn overscroll_multi_provider_windows_ignore_unknown_values() {
         ("Codex", make(None, Some(0.95))),
     ];
     assert_eq!(
-        overscroll_multi_usage_windows(&accounts).as_deref(),
-        Some("Claude 7d 27% · Codex 7d 95%")
+        overscroll_multi_usage_windows(&accounts),
+        Some(format!(
+            "\u{ec82} {} · \u{ec81} {}",
+            overscroll_usage_percentage(27),
+            overscroll_usage_percentage(95)
+        ))
     );
+}
+
+#[test]
+fn status_usage_colors_and_reset_visibility() {
+    let facts = OverscrollFacts {
+        machine: None,
+        dir: None,
+        branch: None,
+        git: None,
+        context: Some((50, 100)),
+        cache: None,
+        account_remaining: None,
+        account_windows: Some("\u{ec82} 49% 6d 80% 10h · \u{ec81} 50% 12m".into()),
+        auth: None,
+        provider: None,
+        model: Some("Opus".into()),
+        effort: None,
+    };
+    for width in [119, 120, 200] {
+        let (spans, fits) = overscroll_fit_facts(&facts, width);
+        assert!(fits);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text.contains("6d"), width >= 120, "{text}");
+        assert_eq!(text.contains("10h"), width >= 120, "{text}");
+        assert_eq!(text.contains("12m"), width >= 120, "{text}");
+        for (value, color) in [
+            ("49%", rgb(140, 140, 150)),
+            ("50%", rgb(255, 200, 100)),
+            ("80%", rgb(255, 100, 100)),
+        ] {
+            assert!(
+                spans
+                    .iter()
+                    .any(|s| s.content == value && s.style.fg == Some(color)),
+                "{text}: {value}"
+            );
+        }
+    }
 }
 
 fn background_row(
@@ -252,6 +330,7 @@ fn overscroll_merges_cloud_machine_with_dir_and_fits_narrow() {
         branch: None,
         git: None,
         context: None,
+        cache: None,
         account_remaining: None,
         account_windows: None,
         auth: None,
@@ -281,6 +360,7 @@ fn overscroll_context_shows_small_bar_and_counts_and_compacts_when_narrow() {
         branch: None,
         git: None,
         context: Some((74_000, 256_000)),
+        cache: None,
         account_remaining: None,
         account_windows: None,
         auth: None,
@@ -288,20 +368,16 @@ fn overscroll_context_shows_small_bar_and_counts_and_compacts_when_narrow() {
         model: Some("Opus".into()),
         effort: None,
     };
-    for width in [16, 40, 200] {
+    for width in [20, 40, 200] {
         let (spans, fits) = overscroll_fit_facts(&facts, width);
         let text: String = spans.iter().map(|span| span.content.as_ref()).collect();
         assert!(fits, "{width}: {text}");
         assert!(text.contains("29%"), "{width}: {text}");
-        if width >= 40 {
-            assert!(text.contains("74k/256k ▰▱▱▱ 29% used"), "{width}: {text}");
-        } else {
-            assert!(!text.contains("74k"), "{width}: {text}");
-            assert!(!text.contains('▰') && !text.contains('▱'));
-        }
+        assert!(text.contains("󰍛 29%"), "{width}: {text}");
+        assert!(!text.contains("74k") && !text.contains('▰') && !text.contains('▱'));
     }
     for (used, limit, expected, color) in [
-        (0, 0, "0%", rgb(100, 200, 100)),
+        (0, 0, "0%", rgb(140, 140, 150)),
         (50, 100, "50%", rgb(255, 200, 100)),
         (80, 100, "80%", rgb(255, 100, 100)),
         (200, 100, "100%", rgb(255, 100, 100)),
@@ -309,6 +385,18 @@ fn overscroll_context_shows_small_bar_and_counts_and_compacts_when_narrow() {
         let span = overscroll_context_percentage(used, limit);
         assert_eq!(span.content, expected);
         assert_eq!(span.style.fg, Some(color));
+    }
+}
+
+#[test]
+fn overscroll_context_uses_the_shared_usage_palette() {
+    for used in [0, 49, 50, 79, 80, 100] {
+        let span = overscroll_context_percentage(used, 100);
+        assert_eq!(
+            span.style.fg,
+            Some(overscroll_usage_color(used as u8)),
+            "{used}% used"
+        );
     }
 }
 
@@ -328,21 +416,22 @@ fn overscroll_window_labels_show_reported_usage_without_inventing_windows() {
         }),
         ..Default::default()
     };
-    assert_eq!(overscroll_usage_windows(&data), Some("7-day 94%".into()));
+    let expected = format!("\u{ec81} {}", overscroll_usage_percentage(94));
+    assert_eq!(overscroll_usage_windows(&data), Some(expected.clone()));
     let line = preview_overscroll_line(&data, 160);
     let text: String = line
         .spans
         .iter()
         .map(|span| span.content.as_ref())
         .collect();
-    assert!(text.contains("7-day 94%"), "{text}");
+    assert!(text.contains(&expected), "{text}");
     let line = preview_overscroll_line(&data, 16);
     let text: String = line
         .spans
         .iter()
         .map(|span| span.content.as_ref())
         .collect();
-    assert!(!text.contains("7-day 94%"), "{text}");
+    assert!(text.contains(&expected), "{text}");
 }
 
 #[test]
@@ -483,8 +572,19 @@ fn swarm_effort_model_status_uses_shared_label() {
         overscroll_short_reasoning("swarm"),
         Some(crate::tui::app::effort_display_label("swarm"))
     );
-    assert_eq!(overscroll_short_reasoning(" high "), Some("high"));
+    // Rungs are glyphs on the pinned line; the name lives in /effort and /model.
+    assert_eq!(overscroll_short_reasoning(" high "), Some("◒"));
+    assert_eq!(overscroll_short_reasoning("max"), Some("◉"));
+    assert_eq!(overscroll_short_reasoning("future"), Some("future"));
     assert_eq!(overscroll_short_reasoning(" "), None);
+}
+
+#[test]
+fn effort_glyph_ink_ramps_with_the_ladder() {
+    assert_eq!(effort_ink("none"), effort_ramp(0.0));
+    assert_eq!(effort_ink("max"), effort_ramp(1.0));
+    assert_eq!(effort_ink("swarm"), effort_ramp(0.0));
+    assert_ne!(effort_ink("high"), effort_ink("low"));
 }
 
 #[test]
@@ -508,21 +608,44 @@ fn visual_line_move_follows_soft_wrapped_rows() {
     // 20 chars, width 10 => two visual rows, no newline in the input.
     let input = "abcdefghijklmnopqrst";
     // Cursor at col 3 of row 1 (char 13) moving up lands on col 3 of row 0.
-    assert_eq!(visual_line_move(input, 13, 10, -1), Some(3));
+    assert_eq!(visual_line_move(input, 13, 10, -1, None), Some((3, 3)));
     // And back down again.
-    assert_eq!(visual_line_move(input, 3, 10, 1), Some(13));
+    assert_eq!(visual_line_move(input, 3, 10, 1, None), Some((13, 3)));
     // Already on the first/last row => None so history recall can take over.
-    assert_eq!(visual_line_move(input, 3, 10, -1), None);
-    assert_eq!(visual_line_move(input, 13, 10, 1), None);
+    assert_eq!(visual_line_move(input, 3, 10, -1, None), None);
+    assert_eq!(visual_line_move(input, 13, 10, 1, None), None);
 }
 
 #[test]
 fn visual_line_move_clamps_to_shorter_target_row() {
     let input = "abcdefghij\nxy";
     // Cursor at end of the short second row, up goes to col 2 of row 0.
-    assert_eq!(visual_line_move(input, input.len(), 10, -1), Some(2));
+    assert_eq!(
+        visual_line_move(input, input.len(), 10, -1, None),
+        Some((2, 2))
+    );
     // From far along row 0, down clamps to the end of the short row.
-    assert_eq!(visual_line_move(input, 8, 10, 1), Some(input.len()));
+    assert_eq!(
+        visual_line_move(input, 8, 10, 1, None),
+        Some((input.len(), 8))
+    );
+}
+
+#[test]
+fn soft_wrap_keeps_combined_emoji_whole_at_one_cell_width() {
+    let input = "я👩‍💻界";
+    let cursor = "я👩‍💻".len();
+    let (lines, row, col) = wrap_input_text(input, cursor, 1, "1", "> ", Color::White, 3);
+    let rendered: Vec<_> = lines
+        .iter()
+        .map(|line| line.spans.last().unwrap().content.as_ref())
+        .collect();
+    assert_eq!(rendered, ["я", "👩‍💻", "界"]);
+    assert_eq!((row, col), (2, 0));
+    assert_eq!(
+        visual_line_move(input, cursor, 1, -1, None),
+        Some(("я".len(), 0))
+    );
 }
 
 #[test]
@@ -956,4 +1079,84 @@ fn voice_ghost_text_wraps_after_input_without_moving_cursor() {
     let ghost = lines[0].spans.last().unwrap();
     assert_eq!(ghost.content.as_ref(), " the bug");
     assert!(ghost.style.add_modifier.contains(Modifier::ITALIC));
+}
+
+fn cache_info(remaining_secs: u64) -> crate::tui::CacheTtlInfo {
+    crate::tui::CacheTtlInfo {
+        is_estimate: false,
+        remaining_secs,
+        ttl_secs: 3600,
+        is_cold: remaining_secs == 0,
+        cold_for_secs: 0,
+        cached_tokens: Some(18_200),
+    }
+}
+
+/// The pinned line counts the prompt cache down in minutes the whole time it
+/// is warm, warms itself as the window closes, and dims once it has lapsed.
+#[test]
+fn the_status_line_counts_the_prompt_cache_down() {
+    let warm = cache_info(47 * 60 + 12);
+    let spans = overscroll_cache_spans(&warm).expect("warm cache has a countdown");
+    assert_eq!(spans[0].content, "󰆼 48m");
+    assert_eq!(spans[0].style.fg, Some(rgb(140, 140, 150)), "warm is quiet");
+
+    let expiring = cache_info(2 * 60);
+    let spans = overscroll_cache_spans(&expiring).unwrap();
+    assert_eq!(spans[0].content, "󰆼 2m");
+    assert_eq!(
+        spans[0].style.fg,
+        Some(rgb(255, 193, 7)),
+        "a closing window warns"
+    );
+
+    let mut estimate = cache_info(47 * 60);
+    estimate.is_estimate = true;
+    let spans = overscroll_cache_spans(&estimate).unwrap();
+    assert_eq!(spans[0].content, "󰆼 ~47m", "estimates are marked");
+
+    let mut cold = cache_info(0);
+    cold.cold_for_secs = 600;
+    let spans = overscroll_cache_spans(&cold).unwrap();
+    assert_eq!(spans[0].content, "󰆼 0s");
+    assert_eq!(spans[0].style.fg, Some(rgb(100, 100, 110)), "cold is dim");
+}
+
+/// Effort ink is a heat scale: cool low rungs, a neutral middle, hot top, and
+/// no two neighbouring rungs share an ink.
+#[test]
+fn effort_ink_is_a_heat_scale() {
+    let levels = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+    for pair in levels.windows(2) {
+        assert_ne!(
+            effort_ink(pair[0]),
+            effort_ink(pair[1]),
+            "{} and {} share an ink",
+            pair[0],
+            pair[1]
+        );
+    }
+    let channel = |effort: &str| match effort_ink(effort) {
+        Color::Rgb(r, g, b) => (r, g, b),
+        other => panic!("{effort} is {other:?}"),
+    };
+    let (low_r, _, low_b) = channel("low");
+    assert!(low_b > low_r, "low is cool");
+    let (high_r, _, high_b) = channel("high");
+    assert!(high_r > high_b, "high is warm");
+    let (max_r, max_g, max_b) = channel("max");
+    assert!(max_r > max_g && max_r > max_b, "max is hot");
+}
+#[test]
+fn compact_labels_fit_cells_and_status_never_contains_newlines() {
+    use unicode_width::UnicodeWidthStr;
+    for width in [1, 2, 20, 40, 80] {
+        let label = "工作😀\n".repeat(30);
+        let fitted = overscroll_truncate_label(&label, width);
+        assert!(fitted.width() <= width, "{width}: {fitted:?}");
+        assert!(!fitted.contains('\n'));
+        let line = status_with_background_tasks(Line::from(label), &[], width, true);
+        assert!(line.width() <= width);
+        assert!(!line.to_string().contains('\n'));
+    }
 }

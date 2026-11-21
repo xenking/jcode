@@ -136,6 +136,8 @@ fn test_initial_history_bootstrap_preserves_restored_interleave_state() {
                 provider_name: Some("claude".to_string()),
                 provider_model: Some("claude-sonnet-4-20250514".to_string()),
                 subagent_model: None,
+                pinned_skill: None,
+                pinned_skills: None,
                 agent_model_overrides: Default::default(),
                 autoreview_enabled: None,
                 autojudge_enabled: None,
@@ -225,7 +227,10 @@ fn test_initial_history_bootstrap_skips_resubmit_when_prompt_already_in_history(
                 id: 1,
                 session_id: session_id.to_string(),
                 messages: vec![crate::protocol::HistoryMessage {
+                    tool_duration_ms: None,
+                    attachments: Vec::new(),
                     response_stats: None,
+                    timestamp_ms: None,
                     role: "user".to_string(),
                     content: "continue implementing the fix".to_string(),
                     tool_calls: None,
@@ -235,6 +240,8 @@ fn test_initial_history_bootstrap_skips_resubmit_when_prompt_already_in_history(
                 provider_name: Some("claude".to_string()),
                 provider_model: Some("claude-sonnet-4-20250514".to_string()),
                 subagent_model: None,
+                pinned_skill: None,
+                pinned_skills: None,
                 agent_model_overrides: Default::default(),
                 autoreview_enabled: None,
                 autojudge_enabled: None,
@@ -274,9 +281,9 @@ fn test_initial_history_bootstrap_skips_resubmit_when_prompt_already_in_history(
         assert!(restored.input.is_empty());
         assert!(
             restored
-                .display_messages()
-                .iter()
-                .any(|message| message.content.starts_with("Reload complete - continuing")),
+                .status_notice
+                .as_ref()
+                .is_some_and(|(text, _)| text.starts_with("Reload complete - continuing")),
             "server interruption recovery should continue using the restored server-side prompt"
         );
     });
@@ -290,7 +297,10 @@ fn test_reload_progress_coalesces_into_single_message() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     app.handle_server_event(
-        crate::protocol::ServerEvent::Reloading { new_socket: None },
+        crate::protocol::ServerEvent::Reloading {
+            new_socket: None,
+            reload_id: None,
+        },
         &mut remote,
     );
     app.handle_server_event(

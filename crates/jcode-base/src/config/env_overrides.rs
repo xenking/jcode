@@ -7,6 +7,11 @@ impl Config {
         reason = "Environment override parsing is intentionally explicit and grouped by config area"
     )]
     pub(crate) fn apply_env_overrides(&mut self) {
+        if let Ok(endpoint) = std::env::var("JCODE_JARVIS_SPEECH_ENDPOINT") {
+            // Preserve an explicitly empty value so endpoint validation fails
+            // rather than silently changing the selected voice to eSpeak.
+            self.jarvis.speech.endpoint = Some(endpoint);
+        }
         if let Ok(value) = std::env::var("JCODE_BROWSER_HANDOFF") {
             self.tools.browser_handoff = value == "1" || value.eq_ignore_ascii_case("true");
         }
@@ -444,11 +449,6 @@ impl Config {
                 self.agents.swarm_spawn_mode = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_SWARM_STRIP_LAYOUT") {
-            if let Some(parsed) = SwarmStripLayout::parse(&v) {
-                self.agents.swarm_strip_layout = parsed;
-            }
-        }
         if let Ok(v) = std::env::var("JCODE_SWARM_MAX_CONCURRENT_AGENTS") {
             if let Ok(parsed) = v.trim().parse::<usize>() {
                 self.agents.swarm_max_concurrent_agents = parsed;
@@ -469,6 +469,11 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_PROVIDER") {
             self.agents.memory_jev_provider = v.trim().to_ascii_lowercase();
         }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_AUTO_RECALL") {
+            if let Ok(enabled) = v.trim().parse::<bool>() {
+                self.agents.memory_auto_recall = enabled;
+            }
+        }
         for (key, target) in [
             ("JCODE_MEMORY_JEV_MODEL", &mut self.agents.memory_jev_model),
             (
@@ -485,6 +490,14 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_MEMORY_MODEL") {
             let trimmed = v.trim();
             self.agents.memory_model = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Ok(v) = std::env::var("JCODE_TITLE_MODEL") {
+            let trimmed = v.trim();
+            self.agents.title_model = if trimmed.is_empty() {
                 None
             } else {
                 Some(trimmed.to_string())

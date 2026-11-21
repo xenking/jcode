@@ -17,6 +17,11 @@ same_provider_account_failover = true
 # "manual" disables automatic cross-provider resends entirely.
 cross_provider_failover = "countdown"
 
+# Case-insensitive model-ID substrings, optionally using * as a wildcard.
+# Applies to automatic model, account, provider, and worker failovers.
+# Defaults to ["opus"] when omitted. [] disables the exclusion.
+failover_excluded_models = ["opus", "fable", "astra"]
+
 # Skip the TUI's three-second countdown for definitive usage exhaustion.
 # false retains the cancelable countdown even for exhausted usage.
 exhausted_usage_immediate_failover = true
@@ -43,6 +48,9 @@ anthropic_retry_recoverable_rate_limits = true
 - No setting enrolls new accounts, enables API billing, purchases credits, or
   bypasses the auto-switch pool. If no approved route remains, Jcode reports the
   failure instead of switching to an arbitrary provider.
+- Excluded models remain available via explicit `/model` or `spawn model=…`.
+  If no eligible fallback remains, the original turn fails rather than silently
+  switching to an excluded model.
 
 The immediate-exhaustion preference controls the TUI countdown. API clients
 that opt into server-side failover retain their existing server-side routing

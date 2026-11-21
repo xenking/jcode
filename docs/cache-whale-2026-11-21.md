@@ -1,0 +1,18 @@
+# Whale prompt cache reads, November 21, 2026
+
+Local server time UTC+11. Investigated only the requested whale session, using the daemon journal, Responses fingerprints and terminal usage. No prompts, cache keys, account identifiers or response IDs are reproduced here. The recorded requests ran `2aaf1392e`.
+
+| Time | Local evidence |
+| --- | --- |
+| 19:40:38.874 | Last Claude terminal usage: 146 uncached input, 203,137 read, 2,757 written. The reusable boundary is 205,894 by Claude's split accounting. |
+| 19:40:51.832 | The attached client sent `SetModel` (request 95). The server handled it and saved this session's route with reason `set_model`. This was an explicit client route selection, not the automatic failover `SetRoute` path. |
+| 19:40:58.806 → 19:41:15.992 | First OpenAI OAuth call: fresh WebSocket, full Responses input (123 items), 142,275 inclusive input tokens and 4,352 cached. This gives 137,923 uncached input tokens from the new provider's own usage. The old 201,542 estimate subtracted OpenAI tokens from the Claude boundary and does not describe either request. |
+| 19:42:08.869 → 19:42:20.747 | Next OAuth call, 52s after the previous completion. 122 of 123 previous full input items matched (new length 124). First divergence was zero-based item 122, after the stable message history. Instructions, tools, model, OAuth account, request-options fingerprint and prompt-cache-key fingerprint were unchanged. The old WebSocket answered the ping in 45ms. The client then logged `input_prefix_changed` and sent a fresh full request without `previous_response_id`. |
+| 19:42:20.747 | Terminal Responses usage: 142,566 inclusive input, 19,968 cached, no native cache-miss count or comparison boundary. Therefore 122,598 current input tokens were uncached. `142,275 − 19,968 = 122,307` is a diagnostic shortfall against the previous inclusive input, not measured wire bytes or avoidable tokens. |
+| 19:42:30.738 | First subsequent same-connection delta succeeded and reported 142,464 cached out of 145,805 inclusive input. |
+
+The Responses formatter excludes a verified request-only tail from stable-history attribution but still sends it. An append using the previous response ID would implicitly retain an item absent from the new input. Forcing a delta would change the effective prompt. Resetting the chain is correct, and the trace establishes why Jcode chose a full replay. It does not establish why the new server request reused only 19,968 tokens. The OAuth WebSocket handshake uses the same cache-routing key as the JSON body. Stable client routing inputs do not prove backend placement, residency or reuse boundaries. A connection change may matter, but the trace cannot establish a counterfactual cache hit. No routing or prompt-semantics change is included.
+
+The fix reports the new provider's own uncached input at the switch and preserves separate hash-only evidence of a changed Responses wire suffix without classifying it as a stable-history bug. The prior-input shortfall still produces a low-read event. The existing stable item list in checkpoints retains its old meaning for rollback.
+
+Rollout check: for a provider switch, expect the new provider's reported total minus its cached count. For a low read with a changed request-only tail, expect `wire suffix changed`, a prior-cache-baseline estimate, and only one TUI notice. A test sends synthetic requests through the public Responses provider to a loopback WebSocket server and verifies wire layout, stable routing fields, inclusive usage and classification. It does not model provider-side cache allocation.

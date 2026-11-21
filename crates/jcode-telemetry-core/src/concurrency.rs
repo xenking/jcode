@@ -148,6 +148,7 @@ impl Drop for FileLock {
 /// threads that may wait as long as the current holder needs: `lock_path`
 /// retries every 2ms, which costs hundreds of wakeups per second in every
 /// process that queues behind one slow holder.
+#[cfg_attr(not(test), allow(dead_code))] // delivery is compiled out in this fork
 pub(super) fn lock_path_blocking(path: &Path) -> io::Result<FileLock> {
     let file = private_file(path, false)?;
     file.lock()?;
@@ -540,6 +541,7 @@ impl Drop for ConcurrencySession {
 /// Legacy lifecycle events cannot attribute logical Agent ownership because
 /// their accumulator is a process singleton. Preserve the event, not the old
 /// mtime-derived numbers. Dedicated guard events are the v2 source of truth.
+#[cfg_attr(not(test), allow(dead_code))] // delivery is compiled out in this fork
 pub(super) fn mark_legacy_concurrency_unavailable(payload: &mut Value) {
     if !matches!(
         payload["event"].as_str(),

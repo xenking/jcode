@@ -42,6 +42,22 @@ fn fallback_models_skip_current_model() {
 }
 
 #[test]
+fn automatic_fallback_honors_model_exclusions() {
+    let config = jcode_base::config::ProviderConfig {
+        failover_excluded_models: vec!["pro".into(), "flash".into()],
+        ..Default::default()
+    };
+    assert!(eligible_gemini_fallback_models("gemini-2.5-flash", &config).is_empty());
+    let config = jcode_base::config::ProviderConfig {
+        failover_excluded_models: vec!["3.1".into()],
+        ..Default::default()
+    };
+    let candidates = eligible_gemini_fallback_models("gemini-2.5-flash", &config);
+    assert!(!candidates.iter().any(|candidate| candidate.contains("3.1")));
+    assert!(!candidates.is_empty());
+}
+
+#[test]
 fn extract_gemini_model_ids_discovers_nested_models() {
     let response = json!({
         "routing": {
@@ -124,6 +140,38 @@ fn available_models_display_seeds_from_persisted_catalog() {
 }
 
 #[test]
+fn persisted_catalog_is_isolated_by_endpoint_and_retains_each_last_good() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _oauth = EnvVarGuard::set_value("JCODE_GEMINI_FORCE_OAUTH", "1");
+    let first = EnvVarGuard::set_value("CODE_ASSIST_ENDPOINT", "https://fixture-a.invalid");
+    GeminiProvider::persist_catalog(&["gemini-future-only-a".into()]);
+    {
+        let _second = EnvVarGuard::set_value("CODE_ASSIST_ENDPOINT", "https://fixture-b.invalid");
+        let b = GeminiProvider::new();
+        assert!(
+            !b.available_models_display()
+                .iter()
+                .any(|m| m == "gemini-future-only-a")
+        );
+        GeminiProvider::persist_catalog(&["gemini-future-only-b".into()]);
+    }
+    let a = GeminiProvider::new();
+    assert!(
+        a.available_models_display()
+            .iter()
+            .any(|m| m == "gemini-future-only-a")
+    );
+    assert!(
+        !a.available_models_display()
+            .iter()
+            .any(|m| m == "gemini-future-only-b")
+    );
+    drop(first);
+}
+
+#[test]
 fn developer_catalog_paginates_and_preserves_cache_on_failure() {
     use std::io::{BufRead, Write};
     let _lock = jcode_base::storage::lock_test_env();
@@ -134,6 +182,10 @@ fn developer_catalog_paginates_and_preserves_cache_on_failure() {
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let _endpoint = EnvVarGuard::set_value("GEMINI_API_ENDPOINT", &endpoint);
     let _version = EnvVarGuard::set_value("GEMINI_API_VERSION", "v1beta");
+    let _key = EnvVarGuard::set_value("GEMINI_API_KEY", "local-key");
+    let _force_oauth = EnvVarGuard::set_value("JCODE_GEMINI_FORCE_OAUTH", "0");
+    jcode_base::config::Config::invalidate_cache();
+    GeminiProvider::persist_catalog(&["gemini-old-fresh-cached".into()]);
     let server = std::thread::spawn(move || {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let responses = [
@@ -216,27 +268,32 @@ fn developer_catalog_paginates_and_preserves_cache_on_failure() {
             .timeout(Duration::from_secs(2))
             .build()
             .unwrap();
-        let models = provider
-            .refresh_available_models_api_key("local-key")
-            .await
-            .unwrap();
+        assert!(
+            provider
+                .available_models_display()
+                .contains(&"gemini-old-fresh-cached".to_string())
+        );
+        provider.refresh_model_catalog().await.unwrap();
+        let models = provider.fetched_models.read().unwrap().clone();
+        assert!(
+            provider
+                .available_models_for_switching()
+                .contains(&"gemini-new-pro".to_string())
+        );
+        assert!(
+            provider
+                .model_routes()
+                .iter()
+                .any(|route| route.model == "gemini-new-pro" && route.available)
+        );
         assert!(models.contains(&"gemini-new-pro".to_string()));
         assert!(models.contains(&"gemini-new-flash".to_string()));
         assert!(!models.contains(&"gemini-embedding-only".to_string()));
-        assert!(
-            provider
-                .refresh_available_models_api_key("local-key")
-                .await
-                .is_err()
-        );
+        assert!(provider.refresh_model_catalog().await.is_err());
         assert_eq!(*provider.fetched_models.read().unwrap(), models);
-        assert!(
-            provider
-                .refresh_available_models_api_key("local-key")
-                .await
-                .is_err()
-        );
+        assert!(provider.refresh_model_catalog().await.is_err());
         assert_eq!(*provider.fetched_models.read().unwrap(), models);
     });
     server.join().unwrap();
+    jcode_base::config::Config::invalidate_cache();
 }

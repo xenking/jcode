@@ -165,7 +165,7 @@ fn test_websocket_continuation_request_excludes_transport_fields() {
 }
 
 #[test]
-fn test_websocket_continuation_delta_skips_reasoning_items() {
+fn test_websocket_continuation_delta_preserves_new_reasoning_items() {
     let input = vec![
         serde_json::json!({
             "type": "message",
@@ -194,18 +194,13 @@ fn test_websocket_continuation_delta_skips_reasoning_items() {
         }),
     ];
 
-    let (delta, skipped_reasoning) = persistent_ws_incremental_items(&input, 2, &[]);
+    let (delta, skipped_reasoning) = persistent_ws_incremental_items(&input, 2, vec![]);
 
-    assert_eq!(skipped_reasoning, 1);
-    assert_eq!(delta.len(), 2);
-    assert!(
-        delta
-            .iter()
-            .all(|item| item.get("type").and_then(|value| value.as_str()) != Some("reasoning")),
-        "previous_response_id deltas must not replay rs_* reasoning items"
-    );
-    assert_eq!(delta[0]["type"], "function_call_output");
-    assert_eq!(delta[1]["type"], "message");
+    assert_eq!(skipped_reasoning, 0);
+    assert_eq!(delta.len(), 3);
+    assert_eq!(delta[0]["type"], "reasoning");
+    assert_eq!(delta[1]["type"], "function_call_output");
+    assert_eq!(delta[2]["type"], "message");
 }
 
 #[test]
@@ -231,14 +226,18 @@ fn websocket_delta_removes_only_matched_previous_response_output() {
         replay_text.clone(),
         user.clone(),
     ];
-    let (delta, skipped) = persistent_ws_incremental_items(&input, 1, &output);
+    let (delta, skipped) = persistent_ws_incremental_items(
+        &input,
+        1,
+        persistent_ws_replay_positions(&input, 1, &output).unwrap(),
+    );
     assert_eq!(skipped, 2);
     assert_eq!(
         delta,
         vec![callback, injected, injected_call, replay_text, user]
     );
     assert_eq!(input.len(), 8, "full canonical history must not be mutated");
-    let (without_output, skipped) = persistent_ws_incremental_items(&input, 1, &[]);
+    let (without_output, skipped) = persistent_ws_incremental_items(&input, 1, vec![]);
     assert_eq!(without_output, input[1..]);
     assert_eq!(skipped, 0);
 }
@@ -247,10 +246,13 @@ fn websocket_delta_removes_only_matched_previous_response_output() {
 fn websocket_delta_preserves_unmatched_nontext_assistant_content() {
     let previous = serde_json::json!({"type":"message", "role":"assistant", "content":[{"type":"refusal", "refusal":"previous"}]});
     let injected = serde_json::json!({"type":"message", "role":"assistant", "content":[{"type":"refusal", "refusal":"different"}]});
-    let (delta, skipped) =
-        persistent_ws_incremental_items(std::slice::from_ref(&injected), 0, &[previous]);
-    assert_eq!(delta, vec![injected]);
-    assert_eq!(skipped, 0);
+    let diff = persistent_ws_replay_positions(
+        std::slice::from_ref(&injected),
+        0,
+        std::slice::from_ref(&previous),
+    )
+    .unwrap_err();
+    assert_eq!((diff.input_index, diff.output_index), (0, 0));
 }
 
 #[test]
@@ -270,8 +272,9 @@ fn websocket_delta_does_not_replay_custom_tool_calls_as_functions() {
         let callback = serde_json::json!({
             "type":"function_call_output", "call_id":"call_1", "output":"done",
         });
-        let (delta, skipped) =
-            persistent_ws_incremental_items(&[replay, callback.clone()], 0, &[output]);
+        let input = [replay, callback.clone()];
+        let positions = persistent_ws_replay_positions(&input, 0, &[output]).unwrap();
+        let (delta, skipped) = persistent_ws_incremental_items(&input, 0, positions);
         assert_eq!(delta, vec![callback]);
         assert_eq!(skipped, 1);
     }
@@ -288,7 +291,9 @@ fn websocket_delta_matches_normalized_empty_tool_arguments() {
             "type":"function_call", "call_id":"call_1", "name":"read",
             "arguments":"{}",
         });
-        let (delta, skipped) = persistent_ws_incremental_items(&[replay], 0, &[output]);
+        let input = [replay];
+        let positions = persistent_ws_replay_positions(&input, 0, &[output]).unwrap();
+        let (delta, skipped) = persistent_ws_incremental_items(&input, 0, positions);
         assert!(delta.is_empty());
         assert_eq!(skipped, 1);
     }
@@ -308,13 +313,13 @@ fn websocket_delta_preserves_modified_custom_tool_calls() {
         let replay = serde_json::json!({
             "type":"function_call", "call_id":id, "name":name, "arguments":arguments,
         });
-        let (delta, skipped) = persistent_ws_incremental_items(
+        let diff = persistent_ws_replay_positions(
             std::slice::from_ref(&replay),
             0,
             std::slice::from_ref(&output),
-        );
-        assert_eq!(delta, vec![replay]);
-        assert_eq!(skipped, 0);
+        )
+        .unwrap_err();
+        assert_eq!((diff.input_index, diff.output_index), (0, 0));
     }
 }
 
@@ -363,7 +368,9 @@ fn websocket_empty_terminal_output_preserves_calls_for_next_delta() {
     let callback = serde_json::json!({
         "type":"function_call_output", "call_id":"call_1", "output":"spawned",
     });
-    let (delta, skipped) = persistent_ws_incremental_items(&[call, callback.clone()], 0, &output);
+    let input = [call, callback.clone()];
+    let positions = persistent_ws_replay_positions(&input, 0, &output).unwrap();
+    let (delta, skipped) = persistent_ws_incremental_items(&input, 0, positions);
     assert_eq!(
         delta,
         vec![callback],
@@ -510,6 +517,57 @@ fn gpt_5_6_sol_defaults_to_low_reasoning_effort() {
     assert_eq!(request["reasoning"]["effort"], serde_json::json!("low"));
 }
 
+#[test]
+fn response_request_places_instructions_by_model() {
+    use serde_json::json;
+
+    let system = "Base instructions\n\nProject-specific overlay";
+    let history = [
+        json!({"role": "user", "content": "first turn"}),
+        json!({"role": "assistant", "content": "first reply"}),
+        json!({"role": "user", "content": "follow-up"}),
+    ];
+    for (model, developer_first) in [
+        ("gpt-6.2-astra", true),
+        ("gpt-6.2-sol", true),
+        ("gpt-6.1-astra", false),
+        ("gpt-6.1-sol", false),
+        ("gpt-5.4", false),
+    ] {
+        for oauth in [false, true] {
+            let request = OpenAIProvider::build_response_request(
+                model,
+                system.into(),
+                &history,
+                &[],
+                oauth,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            let input = request["input"].as_array().unwrap();
+            if developer_first {
+                assert_eq!(request["instructions"], "", "{model}, oauth={oauth}");
+                let (first, rest) = input.split_first().unwrap();
+                assert_eq!(first["role"], "developer", "{model}, oauth={oauth}");
+                let content = &first["content"];
+                assert!(
+                    content == system
+                        || content == &json!([{"type": "input_text", "text": system}]),
+                    "unexpected developer content for {model}, oauth={oauth}: {content}"
+                );
+                assert_eq!(rest, &history, "{model}, oauth={oauth}");
+            } else {
+                assert_eq!(request["instructions"], system, "{model}, oauth={oauth}");
+                assert_eq!(input.as_slice(), &history, "{model}, oauth={oauth}");
+            }
+        }
+    }
+}
+
 /// Regression guard for issue #203: prompt overlays (`AGENTS.md`,
 /// `.jcode/prompt-overlay.md`) were silently dropped in ChatGPT/Codex OAuth
 /// mode because the provider replaced the caller's fully-built system prompt
@@ -540,6 +598,30 @@ fn test_build_response_request_passes_system_prompt_through_verbatim() {
             serde_json::json!(system),
             "system prompt must not be rewritten (is_chatgpt_mode={is_chatgpt_mode})"
         );
+    }
+}
+
+#[test]
+fn gpt_6_2_places_stable_instructions_before_conversation() {
+    for chatgpt in [true, false] {
+        let input = vec![serde_json::json!({"role":"user", "content":"hello"})];
+        let request = OpenAIProvider::build_response_request(
+            "gpt-6.2-sol",
+            "system marker".into(),
+            &input,
+            &[],
+            chatgpt,
+            None,
+            None,
+            None,
+            Some("session"),
+            None,
+            None,
+        );
+        assert!(request.get("instructions").is_none() || request["instructions"] == "");
+        assert_eq!(request["input"][0]["role"], "developer");
+        assert_eq!(request["input"][0]["content"], "system marker");
+        assert_eq!(request["input"][1], input[0]);
     }
 }
 
@@ -666,4 +748,38 @@ fn configured_swarm_root_effort_reads_real_config() {
         assert_eq!(request["reasoning"]["effort"], expected);
         assert_eq!(provider.reasoning_effort().as_deref(), Some(mode));
     }
+}
+
+#[test]
+fn reasoning_effort_change_keeps_the_cacheable_prefix() {
+    // OpenAI keys its prompt cache on the prefix and `prompt_cache_key`. An
+    // effort change may only touch the `reasoning` field, never the routing
+    // key, instructions, tools or input that make up the cached prefix.
+    let input = [
+        serde_json::json!({"role": "user", "content": "hello"}),
+        serde_json::json!({"role": "assistant", "content": "hi"}),
+    ];
+    let tools = [serde_json::json!({"type": "function", "name": "bash"})];
+    let build = |effort| {
+        OpenAIProvider::build_response_request(
+            "gpt-5.4",
+            "system".to_string(),
+            &input[..],
+            &tools,
+            false,
+            Some(DEFAULT_MAX_OUTPUT_TOKENS),
+            Some(effort),
+            None,
+            Some("session-a"),
+            None,
+            None,
+        )
+    };
+    let mut low = build("low");
+    let mut high = build("high");
+    assert_ne!(low["reasoning"], high["reasoning"], "effort must be sent");
+    low.as_object_mut().unwrap().remove("reasoning");
+    high.as_object_mut().unwrap().remove("reasoning");
+    assert_eq!(low, high, "only `reasoning` may differ between efforts");
+    assert_eq!(high["prompt_cache_key"], "session-a");
 }

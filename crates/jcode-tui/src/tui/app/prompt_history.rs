@@ -202,7 +202,7 @@ impl App {
         combined.extend(
             self.display_messages
                 .iter()
-                .filter(|message| message.role == "user")
+                .filter(|message| message.role == "user" || message.is_answered_ask())
                 .map(|message| message.content.trim().to_string())
                 .filter(|content| !content.is_empty()),
         );

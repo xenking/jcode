@@ -109,8 +109,14 @@ static FONT_6X12: LazyLock<Font> =
     LazyLock::new(|| parse_bdf(include_str!("fonts/6x12.bdf"), 6, 12));
 static FONT_8X13: LazyLock<Font> =
     LazyLock::new(|| parse_bdf(include_str!("fonts/8x13.bdf"), 8, 13));
-static FONT_SILVER: LazyLock<TtfFont> =
+static FONT_SILVER: LazyLock<Result<TtfFont, SnapcompactError>> =
     LazyLock::new(|| parse_ttf(include_bytes!("fonts/Silver.ttf"), 16.0, 16, 16));
+
+fn silver_font() -> Result<&'static TtfFont, SnapcompactError> {
+    FONT_SILVER
+        .as_ref()
+        .map_err(|error| SnapcompactError::Render(error.to_string()))
+}
 
 struct Glyph {
     /// Glyph width in pixels (≤ 8 for the bundled fonts).
@@ -159,6 +165,8 @@ fn parse_bdf(text: &str, cell_w: usize, cell_h: usize) -> Font {
         } else if let Some(rest) = line.strip_prefix("ENCODING") {
             enc = rest.trim().parse().unwrap_or(-1);
         } else if let Some(rest) = line.strip_prefix("BBX") {
+            // BDF's absent/invalid metrics mean zero extent. Only bundled
+            // assets use this permissive reader, not runtime font downloads.
             let mut parts = rest.split_ascii_whitespace();
             for slot in &mut bbx {
                 *slot = parts.next().and_then(|part| part.parse().ok()).unwrap_or(0);
@@ -231,21 +239,26 @@ fn parse_hex(text: &str) -> Font {
     }
 }
 
-fn parse_ttf(data: &'static [u8], px: f32, cell_w: usize, cell_h: usize) -> TtfFont {
-    let face =
-        TtfFace::from_bytes(data, FontSettings::default()).expect("bundled Silver.ttf must parse");
+fn parse_ttf(
+    data: &'static [u8],
+    px: f32,
+    cell_w: usize,
+    cell_h: usize,
+) -> Result<TtfFont, SnapcompactError> {
+    let face = TtfFace::from_bytes(data, FontSettings::default())
+        .map_err(|error| SnapcompactError::Render(format!("parse bundled Silver.ttf: {error}")))?;
     let supported = face.chars().keys().copied().collect();
     let ascent = face
         .horizontal_line_metrics(px)
         .map_or(px * 0.8, |metrics| metrics.ascent);
-    TtfFont {
+    Ok(TtfFont {
         face,
         supported,
         px,
         ascent,
         cell_w,
         cell_h,
-    }
+    })
 }
 
 enum RenderFont<'a> {
@@ -279,14 +292,16 @@ impl RenderFont<'_> {
     }
 }
 
-fn resolve_font(name: &str) -> Option<RenderFont<'static>> {
+fn resolve_font(name: &str) -> Result<RenderFont<'static>, SnapcompactError> {
     match name {
-        "5x8" => Some(RenderFont::Bitmap(&FONT_5X8)),
-        "8x8" => Some(RenderFont::Bitmap(&FONT_8X8)),
-        "6x12" => Some(RenderFont::Bitmap(&FONT_6X12)),
-        "8x13" => Some(RenderFont::Bitmap(&FONT_8X13)),
-        "silver" => Some(RenderFont::Ttf(&FONT_SILVER)),
-        _ => None,
+        "5x8" => Ok(RenderFont::Bitmap(&FONT_5X8)),
+        "8x8" => Ok(RenderFont::Bitmap(&FONT_8X8)),
+        "6x12" => Ok(RenderFont::Bitmap(&FONT_6X12)),
+        "8x13" => Ok(RenderFont::Bitmap(&FONT_8X13)),
+        "silver" => Ok(RenderFont::Ttf(silver_font()?)),
+        _ => Err(SnapcompactError::Render(format!(
+            "Unknown snapcompact font {name:?}: expected \"5x8\", \"8x8\", \"6x12\", \"8x13\", or \"silver\""
+        ))),
     }
 }
 
@@ -457,7 +472,10 @@ fn fill_repeat_bands_rgb(pixels: &mut [u8], width: usize, height: usize, grid: &
         for copy in 1..grid.repeat {
             let band_top = (row * grid.repeat + copy) * grid.cell_h;
             for y in band_top..(band_top + grid.cell_h).min(height) {
-                for px in pixels[y * width * 3..(y + 1) * width * 3].chunks_exact_mut(3) {
+                for px in pixels[y * width * 3..(y + 1) * width * 3]
+                    .as_chunks_mut::<3>()
+                    .0
+                {
                     px.copy_from_slice(&band);
                 }
             }
@@ -635,6 +653,7 @@ fn render_bitmap(
     font: &Font,
     grid: &Grid,
     black_ink: bool,
+    fallback: &TtfFont,
 ) -> Vec<u8> {
     let mut pixels = vec![0u8; width * height]; // 0 = white background
     let capacity = grid.cols * grid.rows;
@@ -643,8 +662,8 @@ fn render_bitmap(
     }
     fill_repeat_bands(&mut pixels, width, height, grid);
     let codes: Vec<u32> = text.chars().map(|ch| ch as u32).collect();
-    let narrow_px = ttf_pixel_size(&FONT_SILVER, grid);
-    let wide_px = ttf_wide_pixel_size(&FONT_SILVER, grid);
+    let narrow_px = ttf_pixel_size(fallback, grid);
+    let wide_px = ttf_wide_pixel_size(fallback, grid);
     let mut fallback_cache = HashMap::new();
     let mut sentence = 0usize;
     let mut dim = false;
@@ -710,7 +729,7 @@ fn render_bitmap(
             }
         } else if let Some(ch) = char::from_u32(code) {
             let px = if units == 2 { wide_px } else { narrow_px };
-            let Some(glyph) = cached_ttf_glyph(&mut fallback_cache, &FONT_SILVER, ch, px) else {
+            let Some(glyph) = cached_ttf_glyph(&mut fallback_cache, fallback, ch, px) else {
                 continue;
             };
             let span = units * grid.cell_w;
@@ -826,6 +845,7 @@ fn render_doc_bitmap(
     font: &Font,
     grid: &Grid,
     black_ink: bool,
+    fallback: &TtfFont,
 ) -> Vec<u8> {
     let mut pixels = vec![0u8; width * height]; // 0 = white background
     let col_w = grid.cols.saturating_sub(GUTTER) / 2;
@@ -834,8 +854,8 @@ fn render_doc_bitmap(
     }
     fill_repeat_bands(&mut pixels, width, height, grid);
     let codes: Vec<u32> = text.chars().map(|ch| ch as u32).collect();
-    let narrow_px = ttf_pixel_size(&FONT_SILVER, grid);
-    let wide_px = ttf_wide_pixel_size(&FONT_SILVER, grid);
+    let narrow_px = ttf_pixel_size(fallback, grid);
+    let wide_px = ttf_wide_pixel_size(fallback, grid);
     let mut fallback_cache = HashMap::new();
     let mut sentence = 0usize;
     let mut dim = false;
@@ -910,7 +930,7 @@ fn render_doc_bitmap(
             }
         } else if let Some(ch) = char::from_u32(code) {
             let px = if units == 2 { wide_px } else { narrow_px };
-            let Some(glyph) = cached_ttf_glyph(&mut fallback_cache, &FONT_SILVER, ch, px) else {
+            let Some(glyph) = cached_ttf_glyph(&mut fallback_cache, fallback, ch, px) else {
                 continue;
             };
             let span = units * grid.cell_w;
@@ -1237,12 +1257,7 @@ pub fn snapcompact_supported_chars(
     font: String,
     chars: String,
 ) -> Result<String, SnapcompactError> {
-    let font = resolve_font(&font).ok_or_else(|| {
-        SnapcompactError::Render(format!(
-            "Unknown snapcompact font {font:?}: expected \"5x8\", \"8x8\", \"6x12\", \"8x13\", or \
-			 \"silver\""
-        ))
-    })?;
+    let font = resolve_font(&font)?;
     let mut supported = String::new();
     for ch in chars.chars() {
         if matches!(ch as u32, DIM_ON | DIM_OFF | FULL_BLOCK | 0x0a) || font.supports(ch as u32) {
@@ -1276,10 +1291,44 @@ pub fn render_snapcompact_png(
     render_snapcompact_png_sync(text, options)
 }
 
+/// CPU phase durations for a single page, excluding pagination and cache lookup.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RenderTimings {
+    pub font: std::time::Duration,
+    pub raster: std::time::Duration,
+    pub encode: std::time::Duration,
+}
+
+/// The same renderer with phase measurements for compaction diagnostics.
+pub fn render_snapcompact_png_measured(
+    text: String,
+    options: SnapcompactRenderOptions,
+) -> Result<(Vec<u8>, RenderTimings), SnapcompactError> {
+    let mut timings = RenderTimings::default();
+    let bytes =
+        render_snapcompact_png_profiled(text, options, &mut timings, png::Compression::Best)?;
+    Ok((bytes, timings))
+}
+
 fn render_snapcompact_png_sync(
     text: String,
     options: SnapcompactRenderOptions,
 ) -> Result<Vec<u8>, SnapcompactError> {
+    render_snapcompact_png_profiled(
+        text,
+        options,
+        &mut RenderTimings::default(),
+        png::Compression::Best,
+    )
+}
+
+fn render_snapcompact_png_profiled(
+    text: String,
+    options: SnapcompactRenderOptions,
+    timings: &mut RenderTimings,
+    compression: png::Compression,
+) -> Result<Vec<u8>, SnapcompactError> {
+    let phase = std::time::Instant::now();
     let size = options.size;
     if size == 0 || size > MAX_FRAME_SIZE {
         return Err(SnapcompactError::Render(format!(
@@ -1287,12 +1336,7 @@ fn render_snapcompact_png_sync(
         )));
     }
     let font_name = options.font.as_deref().unwrap_or("5x8");
-    let font = resolve_font(font_name).ok_or_else(|| {
-		SnapcompactError::Render(format!(
-			"Unknown snapcompact font {font_name:?}: expected \"5x8\", \"8x8\", \"6x12\", \"8x13\", \
-			 or \"silver\""
-		))
-	})?;
+    let font = resolve_font(font_name)?;
     let black_ink = match options.variant.as_deref().unwrap_or("sent") {
         "sent" => false,
         "bw" => true,
@@ -1334,6 +1378,8 @@ fn render_snapcompact_png_sync(
     let wide_cells = matches!(font, RenderFont::Bitmap(_));
     let used = used_rows(&text, &grid, doc, wide_cells);
     let height = used * grid.repeat * grid.cell_h;
+    timings.font = phase.elapsed();
+    let phase = std::time::Instant::now();
 
     match font {
         RenderFont::Ttf(font) => {
@@ -1342,14 +1388,14 @@ fn render_snapcompact_png_sync(
             } else {
                 render_ttf_rgb(&text, size, height, font, &grid, black_ink)
             };
-            Ok(encode_rgb_png(
-                &pixels,
-                size,
-                height,
-                png::Compression::Best,
-            )?)
+            timings.raster = phase.elapsed();
+            let phase = std::time::Instant::now();
+            let bytes = encode_rgb_png(&pixels, size, height, compression)?;
+            timings.encode = phase.elapsed();
+            Ok(bytes)
         }
         RenderFont::Bitmap(font) => {
+            let fallback = silver_font()?;
             let stretch =
                 options.stretch != Some(false) && (target_w, target_h) != (natural_w, natural_h);
             if !stretch {
@@ -1357,11 +1403,15 @@ fn render_snapcompact_png_sync(
                 // cell box (the natural cell, or natural glyphs on a padded pitch
                 // when `stretch: false`).
                 let pixels = if doc {
-                    render_doc_bitmap(&text, size, height, font, &grid, black_ink)
+                    render_doc_bitmap(&text, size, height, font, &grid, black_ink, fallback)
                 } else {
-                    render_bitmap(&text, size, height, font, &grid, black_ink)
+                    render_bitmap(&text, size, height, font, &grid, black_ink, fallback)
                 };
-                return encode_indexed_png(&pixels, size, height, png::Compression::Best);
+                timings.raster = phase.elapsed();
+                let phase = std::time::Instant::now();
+                let bytes = encode_indexed_png(&pixels, size, height, compression)?;
+                timings.encode = phase.elapsed();
+                return Ok(bytes);
             }
 
             // Stretch shape: rasterize at the font's natural cell on a tight canvas
@@ -1377,12 +1427,12 @@ fn render_snapcompact_png_sync(
             let dst_w = grid.cols * target_w;
             let dst_h = used * grid.repeat * target_h;
             let indexed = if doc {
-                render_doc_bitmap(&text, src_w, src_h, font, &native, black_ink)
+                render_doc_bitmap(&text, src_w, src_h, font, &native, black_ink, fallback)
             } else {
-                render_bitmap(&text, src_w, src_h, font, &native, black_ink)
+                render_bitmap(&text, src_w, src_h, font, &native, black_ink, fallback)
             };
             let mut rgb = vec![0f32; src_w * src_h * 3];
-            for (dst, &idx) in rgb.chunks_exact_mut(3).zip(&indexed) {
+            for (dst, &idx) in rgb.as_chunks_mut::<3>().0.iter_mut().zip(&indexed) {
                 let [r, g, b] = PALETTE[idx as usize];
                 dst[0] = f32::from(r);
                 dst[1] = f32::from(g);
@@ -1397,7 +1447,11 @@ fn render_snapcompact_png_sync(
                     *d = s.round().clamp(0.0, 255.0) as u8;
                 }
             }
-            Ok(encode_rgb_png(&frame, size, dst_h, png::Compression::Best)?)
+            timings.raster = phase.elapsed();
+            let phase = std::time::Instant::now();
+            let bytes = encode_rgb_png(&frame, size, dst_h, compression)?;
+            timings.encode = phase.elapsed();
+            Ok(bytes)
         }
     }
 }
@@ -1405,6 +1459,136 @@ fn render_snapcompact_png_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decoded_pixels(bytes: &[u8]) -> (u32, u32, png::ColorType, Vec<u8>) {
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        decoder.set_transformations(png::Transformations::EXPAND);
+        let mut reader = decoder.read_info().unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut pixels).unwrap();
+        pixels.truncate(info.buffer_size());
+        (info.width, info.height, info.color_type, pixels)
+    }
+
+    #[test]
+    fn measured_png_has_identical_pixels_for_every_shape() {
+        for shape in crate::snapcompact::SHAPES {
+            let mut shape = shape.clone();
+            shape.frame_size = 128;
+            let options = crate::snapcompact::shape_to_render_options(&shape);
+            let text = "¶user:Never delete.█Русский 世界\u{e} tool output\u{f} done.";
+            let fast = render_snapcompact_png(text.into(), options.clone()).unwrap();
+            let best = render_snapcompact_png_profiled(
+                text.into(),
+                options,
+                &mut RenderTimings::default(),
+                png::Compression::Best,
+            )
+            .unwrap();
+            assert_eq!(
+                decoded_pixels(&fast),
+                decoded_pixels(&best),
+                "{}",
+                shape.name
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires JCODE_SNAPCOMPACT_FIXTURE copied session"]
+    fn copied_archive_parallel_png_pixels_match_serial() {
+        use crate::snapcompact::*;
+        let path = std::env::var("JCODE_SNAPCOMPACT_FIXTURE").unwrap();
+        let fixture: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let source = fixture["compaction"]["snapcompact"]["source"]
+            .as_str()
+            .unwrap();
+        let prep = CompactPreparation {
+            text: source.into(),
+            bounded_text: source.into(),
+            remaining_text: String::new(),
+            included_previous_summary: false,
+        };
+        let result = compact(
+            &prep,
+            &CompactOptions {
+                model_id: "claude-opus-5-5".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let options = shape_to_render_options(&result.shape);
+        let mut dim = false;
+        let mut best_bytes = 0;
+        for frame in &result.frames {
+            let text: String = result
+                .source_text
+                .chars()
+                .skip(frame.source_start)
+                .take(frame.source_end - frame.source_start)
+                .collect();
+            let text = finish_frame_text(&text, &mut dim);
+            let best = render_snapcompact_png_profiled(
+                text,
+                options.clone(),
+                &mut RenderTimings::default(),
+                png::Compression::Best,
+            )
+            .unwrap();
+            best_bytes += best.len();
+            assert_eq!(
+                decoded_pixels(&frame.bytes),
+                decoded_pixels(&best),
+                "page {}",
+                frame.index
+            );
+        }
+        eprintln!(
+            "PNG_EQUIVALENCE pages={} identical_pixels=true best_bytes={} parallel_bytes={}",
+            result.frames.len(),
+            best_bytes,
+            result.frames.iter().map(|f| f.bytes.len()).sum::<usize>()
+        );
+    }
+
+    fn render_bitmap(
+        text: &str,
+        width: usize,
+        height: usize,
+        font: &Font,
+        grid: &Grid,
+        black_ink: bool,
+    ) -> Vec<u8> {
+        super::render_bitmap(
+            text,
+            width,
+            height,
+            font,
+            grid,
+            black_ink,
+            silver_font().unwrap(),
+        )
+    }
+
+    fn render_doc_bitmap(
+        text: &str,
+        width: usize,
+        height: usize,
+        font: &Font,
+        grid: &Grid,
+        black_ink: bool,
+    ) -> Vec<u8> {
+        super::render_doc_bitmap(
+            text,
+            width,
+            height,
+            font,
+            grid,
+            black_ink,
+            silver_font().unwrap(),
+        )
+    }
 
     fn opts(size: u32) -> SnapcompactRenderOptions {
         SnapcompactRenderOptions {
@@ -1428,17 +1612,25 @@ mod tests {
     }
 
     #[test]
+    fn invalid_ttf_returns_without_panicking() {
+        assert!(matches!(
+            parse_ttf(b"broken font", 16.0, 16, 16),
+            Err(SnapcompactError::Render(message)) if message.contains("Silver.ttf")
+        ));
+    }
+
+    #[test]
     fn silver_font_covers_cjk_scripts() {
         assert!(
-            FONT_SILVER.supported.contains(&'こ'),
+            silver_font().unwrap().supported.contains(&'こ'),
             "Silver must cover Japanese kana"
         );
         assert!(
-            FONT_SILVER.supported.contains(&'你'),
+            silver_font().unwrap().supported.contains(&'你'),
             "Silver must cover Han text"
         );
         assert!(
-            FONT_SILVER.supported.contains(&'안'),
+            silver_font().unwrap().supported.contains(&'안'),
             "Silver must cover Hangul syllables"
         );
     }

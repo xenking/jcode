@@ -127,36 +127,40 @@ jobs:
           cargo install cargo-machete --locked
           cargo machete
 
-  release-automation:
-    name: Release Automation
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Test Discord release announcements
-        run: python3 -m unittest -v scripts/test_post_discord_release.py
-
-      - name: Test justrust release installation and routing
+      - name: Enforce test home and hook isolation
+        if: ${{ !cancelled() }}
+        shell: bash
         run: |
-          python3 tests/test_ci_workflow_guards.py
-          python3 tests/test_install_justrust_ci.py
-          python3 tests/test_install_justrust_hosted_ci.py
-          python3 tests/test_public_release_builds.py
-          python3 tests/test_release_ci.py
-          python3 scripts/test_safety_budgets.py
-          python3 tests/test_bash_platform_guards.py
-          python3 scripts/test_quick_release.py
-          python3 scripts/test_preview_release.py
-          python3 scripts/test_reconcile_preview_release.py
-          python3 tests/test_preview_linux_hosted.py
-          python3 tests/test_package_preview_linux_hosted.py
-          python3 tests/test_verify_public_release.py
-          python3 tests/test_watch_release_run.py
-          bash -n scripts/install_justrust_ci.sh scripts/build_linux_compat.sh scripts/quick-release.sh
+          python3 scripts/test_check_test_isolation.py
+          python3 scripts/check_test_isolation.py
 
-      - name: Compile release automation scripts
-        run: python3 -m py_compile scripts/post_discord_release.py scripts/test_post_discord_release.py
+      - name: Enforce swarm registry lock order
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          (cd scripts && python3 test_check_lock_order.py)
+          python3 scripts/check_lock_order.py
+
+      - name: Enforce display-cell chrome widths
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          python3 scripts/test_check_tui_chrome.py
+          python3 scripts/check_tui_chrome.py
+
+      - name: Enforce quota and progress bar ownership
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          python3 scripts/test_check_usage_bar_owner.py
+          python3 scripts/check_usage_bar_owner.py
+
+      - name: Enforce complete cached and forced catalog fanout
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          python3 scripts/test_check_catalog_fanout.py
+          python3 scripts/check_catalog_fanout.py
 
   build:
     name: Build & Test (${{ matrix.os }})
@@ -701,9 +705,6 @@ jobs:
 
       - name: Install probe shells
         run: sudo apt-get update && sudo apt-get install -y fish zsh
-
-      - name: Installer conversion telemetry tests
-        run: bash scripts/test_install_conversion.sh
 
       - name: Setup friction scorecard
         run: bash scripts/setup_friction_eval.sh

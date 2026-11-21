@@ -1,4 +1,18 @@
 #[test]
+fn message_attachments_survive_roundtrip_and_future_variants() -> Result<()> {
+    let wire = serde_json::json!({"type":"message", "id":1, "content":"hi", "attachments":[
+        {"type":"file", "name":"a.txt", "mime":"text/plain", "size":3, "data":"YWJj"},
+        {"type":"pasted_text", "text":"one\ntwo"},
+        {"type":"future_type", "extra":true}
+    ]});
+    let request: Request = serde_json::from_value(wire)?;
+    let encoded = serde_json::to_value(request)?;
+    assert_eq!(encoded["attachments"][0]["name"], "a.txt");
+    assert_eq!(encoded["attachments"][1]["text"], "one\ntwo");
+    Ok(())
+}
+
+#[test]
 fn provider_oauth_account_label_defaults_and_roundtrips() -> Result<()> {
     for legacy in [
         r#"{"type":"history","id":1,"session_id":"test","messages":[]}"#,
@@ -132,6 +146,7 @@ fn test_request_roundtrip() -> Result<()> {
         id: 1,
         content: "hello".to_string(),
         images: vec![],
+        attachments: vec![],
         system_reminder: None,
         active_skill: Some("verification".to_string()),
         no_reply: false,
@@ -746,7 +761,10 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         id: 101,
         session_id: "ses_test_456".to_string(),
         messages: vec![HistoryMessage {
+            tool_duration_ms: None,
+            attachments: Vec::new(),
             response_stats: None,
+            timestamp_ms: None,
             role: "assistant".to_string(),
             content: "hello".to_string(),
             tool_calls: None,
@@ -788,6 +806,8 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         reasoning_effort: None,
         service_tier: None,
         subagent_model: None,
+        pinned_skill: None,
+        pinned_skills: None,
         agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,
@@ -846,7 +866,10 @@ fn test_compacted_history_event_roundtrip() -> Result<()> {
         id: 77,
         session_id: "ses_compact_123".to_string(),
         messages: vec![HistoryMessage {
+            tool_duration_ms: None,
+            attachments: Vec::new(),
             response_stats: None,
+            timestamp_ms: None,
             role: "assistant".to_string(),
             content: "older response".to_string(),
             tool_calls: None,
@@ -1005,13 +1028,16 @@ fn test_agent_models_session_setter_and_response_roundtrip() -> Result<()> {
 #[test]
 fn history_prefix_fingerprint_is_stable_and_streaming_consistent() {
     let message = |role: &str, content: &str| HistoryMessage {
+        tool_duration_ms: None,
+        attachments: Vec::new(),
         response_stats: None,
+        timestamp_ms: None,
         role: role.to_string(),
         content: content.to_string(),
         tool_calls: None,
         tool_data: None,
     };
-    let messages = vec![message("user", "hi"), message("assistant", "hello")];
+    let messages = [message("user", "hi"), message("assistant", "hello")];
     let whole =
         crate::history_prefix_fingerprint(messages.iter().map(crate::HistoryMessageRef::from));
     // Pinned value: client and server may run different builds, so the
@@ -1025,7 +1051,7 @@ fn history_prefix_fingerprint_is_stable_and_streaming_consistent() {
     assert_eq!(streaming.base().count, 2);
     assert_ne!(first, whole);
     // Field boundaries must not alias.
-    let shifted = vec![message("user", "hia"), message("ssistant", "hello")];
+    let shifted = [message("user", "hia"), message("ssistant", "hello")];
     assert_ne!(
         crate::history_prefix_fingerprint(shifted.iter().map(crate::HistoryMessageRef::from)),
         whole
@@ -1034,10 +1060,9 @@ fn history_prefix_fingerprint_is_stable_and_streaming_consistent() {
 
 #[test]
 fn history_delta_fields_are_backward_compatible() {
-    let event: ServerEvent = serde_json::from_str(
-        r#"{"type":"history","id":1,"session_id":"s","messages":[]}"#,
-    )
-    .expect("legacy History without messages_base_count");
+    let event: ServerEvent =
+        serde_json::from_str(r#"{"type":"history","id":1,"session_id":"s","messages":[]}"#)
+            .expect("legacy History without messages_base_count");
     let ServerEvent::History {
         messages_base_count,
         ..

@@ -130,8 +130,17 @@ struct UsageBankedResetReport {
     provider: &'static str,
     /// Login label the reset is pinned to. `None` is the default login.
     account_label: Option<String>,
-    /// Resets that can be redeemed now.
+    /// Total unexpired saved resets.
     available_count: u64,
+    /// Currently usable saved resets when reported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usable_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_reset_available: Option<bool>,
     /// OpenAI: the limit is actually enforced, so redeeming is useful now.
     /// Claude: always true, since the offer only exists at the session wall.
     limit_reached: bool,
@@ -146,7 +155,19 @@ struct UsageProviderReport {
     extra_info: Vec<(String, String)>,
     #[serde(skip_serializing_if = "Option::is_none")]
     banked_reset: Option<UsageBankedResetReport>,
+    /// Dry-run auto-reset decision under current config. Never spends.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_reset: Option<UsageAutoResetReport>,
     error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct UsageAutoResetReport {
+    enabled: bool,
+    trigger: &'static str,
+    min_wait_minutes: u64,
+    decision: &'static str,
+    reason: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -505,7 +526,10 @@ pub(super) async fn run_usage_command(emit_json: bool) -> Result<()> {
             continue;
         }
 
-        if provider.limits.is_empty() && provider.extra_info.is_empty() {
+        if provider.limits.is_empty()
+            && provider.extra_info.is_empty()
+            && provider.banked_reset.is_none()
+        {
             println!("No usage data available.");
             continue;
         }
@@ -536,9 +560,44 @@ pub(super) async fn run_usage_command(emit_json: bool) -> Result<()> {
                 println!("{}: {}", key, value);
             }
         }
+        if let Some(reset) = &provider.banked_reset {
+            let name = if reset.provider == "claude" && reset.usable_count.is_none() {
+                "Session resets"
+            } else {
+                "Banked resets"
+            };
+            println!("{}: {}", name, banked_reset_text(reset));
+        }
+        if let Some(auto) = &provider.auto_reset {
+            println!(
+                "auto-reset ({}{}, >{}m): {} ({})",
+                auto.trigger,
+                if auto.enabled { "" } else { ", disabled" },
+                auto.min_wait_minutes,
+                auto.decision,
+                auto.reason
+            );
+        }
     }
 
     Ok(())
+}
+
+fn banked_reset_text(reset: &UsageBankedResetReport) -> String {
+    let mut text = match reset.usable_count {
+        Some(usable) => format!("{usable} usable / {}", reset.available_count),
+        None => format!("{} available", reset.available_count),
+    };
+    if let Some(at) = reset.expires_at.as_deref() {
+        text.push_str(&format!(
+            " · expires in {}",
+            crate::usage::format_reset_time(at)
+        ));
+    }
+    if let Some(source) = &reset.cached_source {
+        text.push_str(&format!(" · cached {source}"));
+    }
+    text
 }
 
 fn select_auth_doctor_providers(
@@ -585,8 +644,42 @@ fn usage_provider_report(provider: &crate::usage::ProviderUsage) -> UsageProvide
             .collect(),
         extra_info: provider.extra_info.clone(),
         banked_reset: banked_reset_report(provider),
+        auto_reset: auto_reset_report(provider),
         error: provider.error.clone(),
     }
+}
+
+fn auto_reset_report(provider: &crate::usage::ProviderUsage) -> Option<UsageAutoResetReport> {
+    use crate::provider::auto_reset_trigger as trigger;
+    if provider.error.is_some() {
+        return None;
+    }
+    let config = crate::config::Config::load().provider;
+    let enabled = if provider.openai_reset_credits.is_some() {
+        config.openai_auto_banked_reset
+    } else if provider.anthropic_banked_resets.is_some() || provider.anthropic_limit_reset.is_some()
+    {
+        config.anthropic_auto_fable_reset
+    } else {
+        return None;
+    };
+    let decision = trigger::decide(
+        config.auto_reset_trigger,
+        config.auto_reset_min_wait_minutes,
+        &trigger::input_from_report(provider),
+        chrono::Utc::now(),
+    );
+    Some(UsageAutoResetReport {
+        enabled,
+        trigger: config.auto_reset_trigger.as_str(),
+        min_wait_minutes: config.auto_reset_min_wait_minutes,
+        decision: if decision.is_redeem() {
+            "redeem"
+        } else {
+            "wait"
+        },
+        reason: decision.reason().to_string(),
+    })
 }
 
 fn banked_reset_report(provider: &crate::usage::ProviderUsage) -> Option<UsageBankedResetReport> {
@@ -608,23 +701,43 @@ fn banked_reset_report(provider: &crate::usage::ProviderUsage) -> Option<UsageBa
             provider: "openai",
             account_label: credits.account_label.clone(),
             available_count: credits.available_count,
+            usable_count: None,
+            cached_source: None,
+            expires_at: crate::usage::AccountBankedResets::earliest_expiry(
+                &credits.available_expirations,
+            ),
+            session_reset_available: None,
             limit_reached,
             next_available_at: None,
         });
     }
-    provider
-        .anthropic_limit_reset
-        .as_ref()
-        .map(|offer| UsageBankedResetReport {
-            provider: "claude",
-            account_label: offer.account_label.clone(),
-            available_count: u64::from(offer.available),
-            limit_reached: provider
+    let offer = provider.anthropic_limit_reset.as_ref();
+    let banked = provider.anthropic_banked_resets.as_ref();
+    if offer.is_none() && banked.is_none() {
+        return None;
+    }
+    let session = offer.is_some_and(|offer| offer.available);
+    let available_count = banked.map_or(u64::from(session), |b| b.available_count);
+    Some(UsageBankedResetReport {
+        provider: "claude",
+        account_label: banked
+            .and_then(|b| b.account_label.clone())
+            .or_else(|| offer.and_then(|offer| offer.account_label.clone())),
+        available_count,
+        usable_count: banked.map(|b| b.usable_count),
+        cached_source: banked.and_then(|b| b.cached_source.clone()),
+        expires_at: banked.and_then(|b| b.expires_at.clone()),
+        session_reset_available: Some(session),
+        // Only the session offer is claimable from here, at the five-hour wall.
+        limit_reached: session
+            && provider
                 .limits
                 .iter()
                 .any(|limit| limit.name == "5-hour window" && limit.usage_percent >= 100.0),
-            next_available_at: offer.next_available_at.clone(),
-        })
+        next_available_at: (available_count == 0)
+            .then(|| offer.and_then(|offer| offer.next_available_at.clone()))
+            .flatten(),
+    })
 }
 
 pub(super) fn list_cli_providers() -> Vec<ProviderListEntry> {
@@ -759,6 +872,22 @@ mod tests {
         let spent = banked_reset_report(&claude(false)).unwrap();
         assert_eq!(spent.available_count, 0);
         assert!(spent.next_available_at.is_some());
+        let mut saved = claude(false);
+        saved.anthropic_banked_resets = Some(crate::usage::AnthropicBankedResets {
+            account_label: Some("claude-otter".into()),
+            available_count: 2,
+            usable_count: 1,
+            expires_at: None,
+            cached_source: Some("OMP".into()),
+        });
+        let saved = banked_reset_report(&saved).unwrap();
+        assert_eq!((saved.available_count, saved.limit_reached), (2, false));
+        let saved_json = serde_json::to_value(&saved).unwrap();
+        assert_eq!(saved_json["usable_count"], 1);
+        assert!(banked_reset_text(&saved).contains("1 usable / 2"));
+        assert_eq!(saved_json["cached_source"], "OMP");
+        assert!(banked_reset_text(&saved).contains("cached OMP"));
+        assert!(saved.next_available_at.is_none());
         let json = serde_json::to_value(usage_provider_report(&claude(true))).unwrap();
         assert_eq!(json["banked_reset"]["provider"], "claude");
         let plain = serde_json::to_value(usage_provider_report(&ProviderUsage::default())).unwrap();

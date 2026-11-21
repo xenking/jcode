@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 use chrono::Utc;
+use serde::de::DeserializeOwned;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -76,9 +77,19 @@ struct JournalReplayDedupe {
 
 impl JournalReplayDedupe {
     fn new(session: &Session) -> Self {
+        Self::with_ids(
+            session.updated_at,
+            session.messages.iter().map(|message| message.id.clone()),
+        )
+    }
+
+    fn with_ids(
+        snapshot_updated_at: chrono::DateTime<Utc>,
+        message_ids: impl Iterator<Item = String>,
+    ) -> Self {
         Self {
-            seen_message_ids: session.messages.iter().map(|m| m.id.clone()).collect(),
-            snapshot_updated_at: session.updated_at,
+            seen_message_ids: message_ids.collect(),
+            snapshot_updated_at,
             in_stale_prefix: true,
             stale_entries: 0,
             dropped_messages: 0,
@@ -88,30 +99,44 @@ impl JournalReplayDedupe {
     /// Returns `None` when the entry is already contained in the snapshot,
     /// otherwise the entry with any already-present messages removed.
     fn filter(&mut self, mut entry: SessionJournalEntry) -> Option<SessionJournalEntry> {
-        let stale = self.in_stale_prefix
-            && if entry.append_messages.is_empty() {
-                // Without messages there is no id to compare. Snapshots stamp
-                // `updated_at` at write time, so an entry written no later than the
-                // snapshot was folded into it.
-                entry.meta.updated_at <= self.snapshot_updated_at
-            } else {
-                entry
-                    .append_messages
-                    .iter()
-                    .all(|m| self.seen_message_ids.contains(&m.id))
-            };
-        if stale {
-            self.stale_entries += 1;
-            self.dropped_messages += entry.append_messages.len();
+        if self.skip_stale(
+            entry.meta.updated_at,
+            entry
+                .append_messages
+                .iter()
+                .map(|message| message.id.as_str()),
+        ) {
             return None;
         }
-        self.in_stale_prefix = false;
         let before = entry.append_messages.len();
         entry
             .append_messages
             .retain(|m| self.seen_message_ids.insert(m.id.clone()));
         self.dropped_messages += before - entry.append_messages.len();
         Some(entry)
+    }
+
+    fn skip_stale<'a>(
+        &mut self,
+        updated_at: chrono::DateTime<Utc>,
+        mut message_ids: impl ExactSizeIterator<Item = &'a str>,
+    ) -> bool {
+        let messages_len = message_ids.len();
+        let stale = self.in_stale_prefix
+            && if messages_len == 0 {
+                // Legacy metadata-only records have no durable checkpoint
+                // position. Keep equal timestamps so a new tail is not lost.
+                updated_at < self.snapshot_updated_at
+            } else {
+                message_ids.all(|id| self.seen_message_ids.contains(id))
+            };
+        if stale {
+            self.stale_entries += 1;
+            self.dropped_messages += messages_len;
+        } else {
+            self.in_stale_prefix = false;
+        }
+        stale
     }
 
     fn found_duplicates(&self) -> bool {
@@ -136,19 +161,23 @@ fn dedupe_messages_by_id(messages: &mut Vec<super::StoredMessage>) -> usize {
 /// next successful append starts writing on the same line, producing
 /// `<torn json><complete entry json>\n` or `<entry json><entry json>\n`.
 /// Serialized entries always begin with `{"meta":` (struct field order), so
-/// scan for candidate starts and stream-parse consecutive complete entries
-/// from the first position that yields any.
-fn salvage_glued_journal_entries(line: &str, mut apply: impl FnMut(SessionJournalEntry)) -> usize {
-    const ENTRY_START: &str = "{\"meta\":";
+/// scan for candidate starts and stream-parse consecutive complete entries.
+/// After a corrupt span, resume searching past the last complete entry so
+/// repeated torn appends cannot hide later complete groups on the same line.
+fn salvage_glued_journal_entries<T: DeserializeOwned>(
+    line: &[u8],
+    mut apply: impl FnMut(T),
+) -> usize {
+    const ENTRY_START: &[u8] = b"{\"meta\":";
     let mut salvaged = 0usize;
     let mut search_from = 0usize;
-    while let Some(rel) = line
-        .get(search_from..)
-        .and_then(|rest| rest.find(ENTRY_START))
-    {
+    while let Some(rel) = line.get(search_from..).and_then(|rest| {
+        rest.windows(ENTRY_START.len())
+            .position(|part| part == ENTRY_START)
+    }) {
         let candidate_start = search_from + rel;
-        let mut stream = serde_json::Deserializer::from_str(&line[candidate_start..])
-            .into_iter::<SessionJournalEntry>();
+        let mut stream =
+            serde_json::Deserializer::from_slice(&line[candidate_start..]).into_iter::<T>();
         let mut parsed = Vec::new();
         for item in &mut stream {
             match item {
@@ -161,9 +190,10 @@ fn salvage_glued_journal_entries(line: &str, mut apply: impl FnMut(SessionJourna
             for entry in parsed {
                 apply(entry);
             }
-            break;
+            search_from = candidate_start + stream.byte_offset();
+        } else {
+            search_from = candidate_start + ENTRY_START.len();
         }
-        search_from = candidate_start + ENTRY_START.len();
     }
     salvaged
 }
@@ -183,55 +213,61 @@ fn salvage_glued_journal_entries(line: &str, mut apply: impl FnMut(SessionJourna
 /// instead of rewriting the whole transcript.
 const METADATA_SNAPSHOT_MAX_BYTES: u64 = 1024 * 1024;
 
-/// Apply the metadata from the newest journal entry without deserializing
-/// any appended messages.
-fn apply_latest_journal_meta(session: &mut Session, journal_path: &Path) {
+/// Apply the newest journal metadata without deserializing message content.
+fn apply_latest_journal_meta(
+    session: &mut Session,
+    journal_path: &Path,
+    dedupe: &mut JournalReplayDedupe,
+) -> Result<JournalReplayStats> {
     #[derive(serde::Deserialize)]
     struct MetaOnly {
         meta: super::journal::SessionJournalMeta,
+        #[serde(default)]
+        append_messages: Vec<super::SessionMessageId>,
     }
-    let Ok(file) = std::fs::File::open(journal_path) else {
-        return;
-    };
-    for line in BufReader::new(file).lines() {
-        let Ok(line) = line else { break };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+    replay_journal_lines(journal_path, |entry: MetaOnly| {
+        if dedupe.skip_stale(
+            entry.meta.updated_at,
+            entry
+                .append_messages
+                .iter()
+                .map(|message| message.id.as_str()),
+        ) {
+            return;
         }
-        if let Ok(entry) = serde_json::from_str::<MetaOnly>(trimmed) {
-            // Compatibility fields can retain an earlier entry's value, so
-            // applying only the last metadata record loses that state.
-            session.apply_journal_meta(entry.meta);
-        }
-    }
+        // Compatibility fields can retain an earlier entry's value, so
+        // applying only the last metadata record loses that state.
+        dedupe
+            .seen_message_ids
+            .extend(entry.append_messages.into_iter().map(|message| message.id));
+        session.apply_journal_meta(entry.meta);
+    })
 }
 
-fn replay_journal_lines(
+fn replay_journal_lines<T: DeserializeOwned>(
     journal_path: &Path,
-    mut apply: impl FnMut(SessionJournalEntry),
+    mut apply: impl FnMut(T),
 ) -> Result<JournalReplayStats> {
     let mut stats = JournalReplayStats::default();
-    if !journal_path.exists() {
+    if !journal_path.try_exists()? {
         return Ok(stats);
     }
 
     let file = std::fs::File::open(journal_path)?;
     let reader = BufReader::new(file);
-    for (line_idx, line) in reader.lines().enumerate() {
+    for (line_idx, line) in reader.split(b'\n').enumerate() {
         let line = line?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        match serde_json::from_str::<SessionJournalEntry>(trimmed) {
+        match serde_json::from_slice::<T>(&line) {
             Ok(entry) => {
                 stats.entries += 1;
                 apply(entry);
             }
             Err(err) => {
                 stats.skipped_lines += 1;
-                let salvaged = salvage_glued_journal_entries(trimmed, &mut apply);
+                let salvaged = salvage_glued_journal_entries(&line, &mut apply);
                 stats.entries += salvaged;
                 stats.salvaged_entries += salvaged;
                 crate::logging::warn(&format!(
@@ -266,8 +302,7 @@ impl Session {
     /// Replace every stored inline image with a text note, after a provider
     /// deterministically rejected an image (#1712). Persisted on next save.
     pub fn strip_all_images(&mut self) -> usize {
-        let mut contents: Vec<&mut Vec<crate::message::ContentBlock>> =
-            self.messages.iter_mut().map(|m| &mut m.content).collect();
+        let mut contents: Vec<_> = self.messages.iter_mut().map(|m| &mut m.content).collect();
         let stripped = jcode_compaction_core::strip_all_images_in_contents(&mut contents);
         if stripped > 0 {
             self.mark_memory_profile_dirty();
@@ -413,6 +448,7 @@ impl Session {
         // hold hundreds of MB of old inline images. Decay them now so the next
         // save rewrites a compact snapshot.
         let decayed_tool_images = session.decay_old_tool_images();
+        session.migrate_image_markers();
         if decayed_tool_images > 0 {
             crate::logging::event_info(
                 "SESSION_PERSISTENCE",
@@ -521,11 +557,21 @@ impl Session {
         // `from_reader` (which pulls bytes one at a time through io::Read) on
         // multi-MB sessions, and resume reads this on the first-frame path.
         let bytes = std::fs::read(&path)?;
-        let stub: SessionStartupStub = serde_json::from_slice(&bytes)?;
+        let mut stub: SessionStartupStub = serde_json::from_slice(&bytes)?;
+        let mut dedupe = JournalReplayDedupe::with_ids(
+            stub.updated_at,
+            std::mem::take(&mut stub.messages)
+                .into_iter()
+                .map(|message| message.id),
+        );
         let mut session = Self::session_from_startup_stub(stub);
         // Metadata changes on large sessions are journaled instead of forcing
         // a full snapshot rewrite, so the journal holds the latest metadata.
-        apply_latest_journal_meta(&mut session, &session_journal_path_from_snapshot(&path));
+        apply_latest_journal_meta(
+            &mut session,
+            &session_journal_path_from_snapshot(&path),
+            &mut dedupe,
+        )?;
         session.reset_persist_state(true);
         session.refresh_agent_model_overrides()?;
         Ok(session)
@@ -564,6 +610,7 @@ impl Session {
         session.reset_persist_state(path.exists());
         session.reset_provider_messages_cache();
         session.mark_memory_profile_dirty();
+        session.migrate_image_markers();
         let finalize_ms = finalize_start.elapsed().as_millis();
         crate::logging::info(&format!(
             "[TIMING] remote_startup_load: session={}, snapshot={}ms, journal={}ms, finalize={}ms, snapshot_bytes={}, journal_bytes={}, journal_entries={}, messages={}, total={}ms",
@@ -601,12 +648,73 @@ impl Session {
         self.save_inner(false)
     }
 
+    /// Write a full snapshot to an explicit path, collapsing its journal.
+    ///
+    /// Offline tools (session title backfill) load a snapshot through
+    /// [`Session::load_from_path`] and must persist back to the same file, which
+    /// is not necessarily under `JCODE_HOME`. The snapshot already contains the
+    /// replayed journal state, so the journal is removed instead of being
+    /// extended.
+    pub fn save_snapshot_to(&mut self, snapshot_path: &Path) -> Result<()> {
+        crate::storage::assert_not_real_home(snapshot_path);
+        let journal_path = session_journal_path_from_snapshot(snapshot_path);
+        self.checkpoint_snapshot(snapshot_path, &journal_path)
+    }
+
     /// Persist the session even when it has no visible conversation message
     /// yet. Use this for sessions prepared by one process and attached to by
     /// another (for example visible swarm spawns), where caller-configured
     /// state such as model, provider, or effort must survive until attach.
     pub fn save_prepared(&mut self) -> Result<()> {
         self.save_inner(true)
+    }
+
+    /// Commit the current session before dropping its only in-memory owner.
+    /// Unlike routine turn saves, an unload requires synchronous durability
+    /// and rejects the migration lease's successful no-write result.
+    pub fn save_for_idle_unload(&mut self) -> Result<()> {
+        if self.persist_state.transcript_stripped || self.migration_lease_block().is_some() {
+            bail!("Session {} cannot be checkpointed for idle unload", self.id);
+        }
+        self.save_prepared()?;
+        let path = session_path(&self.id)?;
+        let journal = session_journal_path_from_snapshot(&path);
+        let mut open = std::fs::OpenOptions::new();
+        open.read(true).write(true);
+        let snapshot = open.open(&path)?;
+        snapshot.sync_all()?;
+        match open.open(&journal) {
+            Ok(file) => file.sync_all()?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        #[cfg(unix)]
+        std::fs::File::open(path.parent().expect("session directory"))?.sync_all()?;
+        // Verify the replay boundary without reconstructing a second transcript
+        // or buffering the entire snapshot in memory.
+        let stub: SessionStartupStub = serde_json::from_reader(BufReader::new(snapshot))?;
+        let mut dedupe = JournalReplayDedupe::with_ids(
+            stub.updated_at,
+            stub.messages.iter().map(|message| message.id.clone()),
+        );
+        let mut persisted = Self::session_from_startup_stub(stub);
+        let replay = apply_latest_journal_meta(&mut persisted, &journal, &mut dedupe)?;
+        if persisted.id != self.id
+            || persisted.updated_at != self.updated_at
+            || replay.is_corrupt()
+            || dedupe.seen_message_ids.len() != self.messages.len()
+            || self
+                .messages
+                .iter()
+                .any(|message| !dedupe.seen_message_ids.contains(&message.id))
+            || self.migration_lease_block().is_some()
+        {
+            bail!(
+                "Session {} failed idle unload checkpoint verification",
+                self.id
+            );
+        }
+        Ok(())
     }
 
     fn save_inner(&mut self, force: bool) -> Result<()> {
@@ -617,6 +725,9 @@ impl Session {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let guard_ms = pre_start.elapsed().as_millis();
         self.refresh_agent_model_overrides()?;
+        // A placeholder model must never reach disk: it would resume as
+        // "unknown" and hide the session's real route from swarm lists.
+        self.normalize_placeholder_model();
         let overrides_ms = pre_start.elapsed().as_millis() - guard_ms;
         // A session that migrated to another machine (or whose on-disk copy was
         // replaced by a newer returned transcript) must not be overwritten by
@@ -638,6 +749,9 @@ impl Session {
         }
         self.updated_at = Utc::now();
         let path = session_path(&self.id)?;
+        // Last gate: a test build must never persist into the developer's real
+        // home, however the path was computed.
+        crate::storage::assert_not_real_home(&path);
         let journal_path = session_journal_path_from_snapshot(&path);
 
         // A newly opened panel contains only its hidden session-context message.
@@ -666,6 +780,7 @@ impl Session {
             && self.title.is_none()
             && self.parent_id.is_none()
             && self.system_prompt.is_none()
+            && self.pinned_skill.is_none()
             && !self.is_canary
             && !self.is_debug
         {

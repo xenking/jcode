@@ -3,14 +3,13 @@ use super::swarm_mutation_state::{
     PersistedSwarmMutationResponse, SwarmMutationRuntime, begin_or_replay, finish_request,
     request_key,
 };
-use super::turn_failover::process_reserved_locked_message_with_server_failover;
+use super::turn_failover::process_reserved_locked_message_with_swarm_fallbacks;
 use super::{
     SessionInterruptQueues, SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan,
     broadcast_swarm_plan, broadcast_swarm_status, create_headless_session, fanout_session_event,
-    persist_swarm_state_for, record_swarm_event, record_swarm_event_for_session,
-    remove_background_tool_signal, remove_session_channel_subscriptions, remove_session_from_swarm,
-    remove_session_interrupt_queue, set_member_task_label, truncate_detail, update_member_status,
-    update_member_status_with_report,
+    persist_swarm_state_for, record_swarm_event_for_session, remove_background_tool_signal,
+    remove_session_channel_subscriptions, remove_session_interrupt_queue, set_member_task_label,
+    truncate_detail, update_member_status, update_member_status_with_report,
 };
 use crate::config::SwarmSpawnMode;
 use crate::protocol::{NotificationType, ServerEvent};
@@ -30,7 +29,7 @@ type ClientConnections = Arc<RwLock<HashMap<String, ClientConnectionInfo>>>;
 /// Without a reservation or lock, many recursive agents can all observe the same
 /// free slot and burst past the configured limit before any child is registered.
 /// Weak entries avoid retaining locks for swarms that are no longer active.
-fn spawn_admission_lock(swarm_id: &str) -> Arc<Mutex<()>> {
+pub(super) fn spawn_admission_lock(swarm_id: &str) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<StdMutex<HashMap<String, Weak<Mutex<()>>>>> = OnceLock::new();
     let locks = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
     let mut locks = locks
@@ -68,13 +67,17 @@ fn create_visible_spawn_session(
     provider_key_override: Option<&str>,
     route_api_method_override: Option<&str>,
     effort_override: Option<&str>,
+    approval: Option<crate::session::WorkerModelApproval>,
     selfdev_requested: bool,
 ) -> anyhow::Result<(String, PathBuf)> {
-    let cwd = working_dir
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let cwd = match working_dir {
+        Some(dir) => PathBuf::from(dir),
+        None => std::env::current_dir()?,
+    };
 
     let mut session = Session::create(None, None);
+    session.is_swarm_worker = true;
+    session.set_worker_model_approval(approval);
     session.working_dir = Some(cwd.display().to_string());
     if let Some(model) = model_override {
         session.model = Some(model.to_string());
@@ -110,12 +113,12 @@ async fn resolve_spawn_working_dir(
     req_session_id: &str,
     sessions: &SessionAgents,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-) -> Option<String> {
+) -> anyhow::Result<Option<String>> {
     if requested_working_dir
         .as_deref()
         .is_some_and(|dir| !dir.trim().is_empty())
     {
-        return requested_working_dir;
+        return Ok(requested_working_dir);
     }
 
     if let Some(agent_dir) = {
@@ -128,16 +131,22 @@ async fn resolve_spawn_working_dir(
         })
     } && !agent_dir.trim().is_empty()
     {
-        return Some(agent_dir);
+        return Ok(Some(agent_dir));
     }
 
-    swarm_members
+    let member_dir = swarm_members
         .read()
         .await
         .get(req_session_id)
         .and_then(|member| member.working_dir.as_ref())
         .map(|dir| dir.display().to_string())
-        .filter(|dir| !dir.trim().is_empty())
+        .filter(|dir| !dir.trim().is_empty());
+    if member_dir.is_some() {
+        return Ok(member_dir);
+    }
+    Ok(Session::load_startup_stub(req_session_id)?
+        .working_dir
+        .filter(|dir| !dir.trim().is_empty()))
 }
 
 /// Launch a headed window for `session_id`, exporting the given spawn context
@@ -174,12 +183,36 @@ fn spawn_visible_session_window_with_context(
 }
 
 #[path = "spawn_model_selection.rs"]
-mod spawn_model_selection;
+pub(super) mod spawn_model_selection;
 use spawn_model_selection::{
     CoordinatorSpawnIdentity, SwarmSpawnSelection, pick_available_swarm_model,
     provider_key_for_spawn_model, resolve_coordinator_spawn_identity,
     resolve_swarm_spawn_selection, session_swarm_model,
 };
+
+fn inherit_visible_spawn_preferences(parent_id: &str, child_id: &str) -> anyhow::Result<()> {
+    let parent = match Session::load_startup_stub(parent_id) {
+        Ok(parent) => parent,
+        // An untouched parent has no persisted preferences to inherit yet.
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    if parent.agent_model_overrides.is_empty() && parent.pinned_skill.is_none() {
+        return Ok(());
+    }
+    // A startup stub deliberately refuses to overwrite the transcript. Load
+    // the just-prepared child in full before updating its initial snapshot.
+    let mut child = Session::load(child_id)?;
+    child.inherit_pinned_skill(&parent);
+    child.agent_model_overrides = parent.agent_model_overrides;
+    child.save_prepared()
+}
 
 fn persist_headed_startup_message(session_id: &str, message: &str) {
     crate::logging::info(&format!(
@@ -237,6 +270,7 @@ fn prepare_visible_spawn_session<F>(
     provider_key_override: Option<&str>,
     route_api_method_override: Option<&str>,
     effort_override: Option<&str>,
+    approval: Option<crate::session::WorkerModelApproval>,
     selfdev_requested: bool,
     startup_message: Option<&str>,
     launch_visible: F,
@@ -251,6 +285,7 @@ where
         provider_key.as_deref(),
         route_api_method_override,
         effort_override,
+        approval,
         selfdev_requested,
     )?;
 
@@ -381,6 +416,7 @@ pub(super) async fn spawn_swarm_agent(
     requested_model: Option<String>,
     requested_effort: Option<String>,
     label: Option<String>,
+    spawn_key: &str,
     sessions: &SessionAgents,
     global_session_id: &Arc<RwLock<String>>,
     provider_template: &Arc<dyn Provider>,
@@ -395,12 +431,36 @@ pub(super) async fn spawn_swarm_agent(
     soft_interrupt_queues: &SessionInterruptQueues,
     client_connections: &ClientConnections,
 ) -> anyhow::Result<String> {
+    let parent_lock = spawn_admission_lock(&format!("stop-tree:{req_session_id}"));
+    let parent_guard = parent_lock.lock().await;
+    anyhow::ensure!(
+        !crate::turn_activity::session_is_stopped(req_session_id),
+        "Stopped sessions cannot spawn workers"
+    );
+    // Check before resolving a mutable default route. A replay must never start
+    // another worker, even if the configured default changed after the first run.
+    let (replay, existing_worker) = super::premium_spawn::SpawnReplay::load(spawn_key)?;
+    if let Some(worker) = existing_worker {
+        return Ok(worker);
+    }
+    if let Some(lane_id) = lane_id.as_deref()
+        && let Some(worker) =
+            super::swarm_todo_link::open_spawn_lane_owner(req_session_id, lane_id)?
+    {
+        return Ok(worker);
+    }
     let agents_config = &crate::config::config().agents;
     agents_config
         .validate_swarm_model_request(requested_model.as_deref())
         .map_err(anyhow::Error::msg)?;
+    // Hard worker allowlist: an agent may only ask for a model the user has
+    // listed in `agents.spawn_allowed_models`. The error names the allowed set
+    // so the agent can retry correctly (or omit the model for swarm_model).
+    agents_config
+        .validate_spawn_allowed_model(requested_model.as_deref())
+        .map_err(anyhow::Error::msg)?;
     let resolved_working_dir =
-        resolve_spawn_working_dir(working_dir, req_session_id, sessions, swarm_members).await;
+        resolve_spawn_working_dir(working_dir, req_session_id, sessions, swarm_members).await?;
     let coordinator = resolve_coordinator_spawn_identity(req_session_id, sessions).await;
     let coordinator_is_canary = coordinator.is_canary;
     // Capture the requesting client's terminal env so spawn hooks place the new
@@ -435,31 +495,34 @@ pub(super) async fn spawn_swarm_agent(
             configured_swarm_model
         };
     let resolved_spawn_mode = resolve_swarm_spawn_mode(spawn_mode, agents_config.swarm_spawn_mode);
+    // Only a worker running on the configured default model gets the configured
+    // fallbacks at runtime. An explicit per-spawn model choice is honoured as-is,
+    // and every configured fallback is filtered by `agents.spawn_allowed_models`
+    // so a failing worker can never be moved to a model outside the allowlist.
+    let worker_fallbacks: Vec<String> = if requested_model.is_none() {
+        spawn_model_selection::worker_allowed_fallbacks(
+            &agents_config.spawn_allowed_models,
+            &agents_config.swarm_model_fallbacks,
+        )
+    } else {
+        Vec::new()
+    };
     let selection = resolve_swarm_spawn_selection(
         requested_model.clone(),
         configured_swarm_model.clone(),
         &coordinator,
     );
-    let spawn_model = selection.model.clone();
-    let spawn_provider_key = selection.provider_key.clone();
-    let spawn_route_api_method = selection.route_api_method.clone();
     let spawn_effort = resolve_swarm_spawn_effort(
         requested_effort.as_deref(),
         agents_config.swarm_effort.as_deref(),
     );
-    crate::logging::info(&format!(
-        "Swarm spawn model resolution: requested_model={:?} requested_effort={:?} configured_swarm_effort={:?} configured_swarm_model={:?} coordinator_model={:?} coordinator_provider_key={:?} coordinator_route={:?} -> spawn_model={:?} spawn_provider_key={:?} spawn_route={:?}",
-        requested_model,
-        requested_effort,
-        agents_config.swarm_effort,
-        configured_swarm_model,
-        coordinator.model,
-        coordinator.provider_key,
-        coordinator.route_api_method,
-        spawn_model,
-        spawn_provider_key,
-        spawn_route_api_method,
-    ));
+    let mut prepared = super::premium_spawn::PreparedSwarmWorker::resolve(
+        provider_template.as_ref(),
+        selection,
+        spawn_effort
+            .as_deref()
+            .unwrap_or(spawn_policy::DEFAULT_SWARM_WORKER_EFFORT),
+    )?;
 
     // Validate the explicit lane before allocating or launching a worker.
     let mut startup_message = if let Some(lane_id) = lane_id.as_deref() {
@@ -473,22 +536,50 @@ pub(super) async fn spawn_swarm_agent(
         initial_message.clone()
     };
 
+    // Stopping the coordinator must not wait on its approval dialog.
+    drop(parent_guard);
+    prepared
+        .authorize(
+            req_session_id,
+            swarm_members,
+            lane_id.as_deref().or(label.as_deref()),
+        )
+        .await?;
+    let _parent_guard = parent_lock.lock().await;
+    anyhow::ensure!(
+        !crate::turn_activity::session_is_stopped(req_session_id),
+        "Stopped sessions cannot spawn workers"
+    );
+    if let Some(lane_id) = lane_id.as_deref()
+        && let Some(worker) =
+            super::swarm_todo_link::open_spawn_lane_owner(req_session_id, lane_id)?
+    {
+        return Ok(worker);
+    }
+    let replay = if prepared.approval.is_some() {
+        prepared.recheck_approved_route()?;
+        replay.start()?;
+        Some(replay)
+    } else {
+        None
+    };
+
     let visible_spawn = match resolved_spawn_mode {
         // Inline workers run in-process like headless ones; the difference is
         // purely how the coordinator renders them (a live inline gallery).
-        SwarmSpawnMode::Headless | SwarmSpawnMode::Inline => {
-            Err(anyhow::anyhow!("headless spawn requested"))
-        }
-        SwarmSpawnMode::Visible | SwarmSpawnMode::Auto => prepare_visible_spawn_session(
+        SwarmSpawnMode::Headless | SwarmSpawnMode::Inline => None,
+        SwarmSpawnMode::Visible | SwarmSpawnMode::Auto => Some(prepare_visible_spawn_session(
             resolved_working_dir.as_deref(),
-            spawn_model.as_deref(),
-            spawn_provider_key.as_deref(),
-            spawn_route_api_method.as_deref(),
-            spawn_effort.as_deref(),
+            Some(&prepared.model),
+            prepared.provider_key.as_deref(),
+            prepared.route_api_method.as_deref(),
+            prepared.effort.as_deref(),
+            prepared.approval.clone(),
             coordinator_is_canary,
             startup_message.as_deref(),
             |session_id, cwd, selfdev_requested, provider_key| {
                 crate::session_env::inherit_session_env(req_session_id, session_id);
+                inherit_visible_spawn_preferences(req_session_id, session_id)?;
                 if let Some(lane_id) = lane_id.as_deref() {
                     let brief = super::swarm_todo_link::seed_spawn_lane(
                         req_session_id,
@@ -515,12 +606,15 @@ pub(super) async fn spawn_swarm_agent(
                     &context,
                 )
             },
-        ),
+        )),
     };
 
     let (new_session_id, is_headless_fallback) = match visible_spawn {
-        Ok((new_session_id, true)) => Ok((new_session_id, false)),
-        Ok((_, false)) | Err(_) => {
+        Some(Ok((new_session_id, true))) => Ok((new_session_id, false)),
+        Some(Err(error)) if replay.is_some() => {
+            return Err(error.context("Premium window launch failed and will not be retried"));
+        }
+        None | Some(Ok((_, false)) | Err(_)) => {
             let cmd = if let Some(ref dir) = resolved_working_dir {
                 format!("create_session:{dir}")
             } else {
@@ -537,12 +631,10 @@ pub(super) async fn spawn_swarm_agent(
                 swarm_plans,
                 soft_interrupt_queues,
                 coordinator_is_canary,
-                spawn_model.clone(),
-                spawn_provider_key.clone(),
-                spawn_route_api_method.clone(),
-                spawn_effort.clone(),
+                Some(prepared),
                 Some(Arc::clone(mcp_pool)),
                 Some(req_session_id.to_string()),
+                startup_message.is_some(),
                 super::headless::HeadlessMemoryScope::RealProject,
             )
             .await
@@ -604,9 +696,17 @@ pub(super) async fn spawn_swarm_agent(
     }
     // Label the worker with what it was spawned for so the swarm strip and
     // member lists can show the task, not just the animal name. An explicit
-    // spawn `label` wins; otherwise the label is derived from the initial prompt.
-    if let Some(label_text) = label.as_deref().or(initial_message.as_deref()) {
+    // spawn `label` wins. Auto-dispatch sends only a lane id, not a prompt.
+    let lane_title = lane_id
+        .as_ref()
+        .and_then(|_| crate::todo::load_session_title(&new_session_id));
+    if let Some(label_text) = label
+        .as_deref()
+        .or(lane_title.as_deref())
+        .or(initial_message.as_deref())
+    {
         set_member_task_label(&new_session_id, label_text, swarm_members).await;
+        broadcast_swarm_status(swarm_id, swarm_members, swarms_by_id).await;
     }
     let swarm_state = SwarmState {
         members: Arc::clone(swarm_members),
@@ -615,6 +715,9 @@ pub(super) async fn spawn_swarm_agent(
         coordinators: Arc::clone(swarm_coordinators),
     };
     persist_swarm_state_for(swarm_id, &swarm_state).await;
+    if let Some(replay) = replay {
+        replay.register(&new_session_id)?;
+    }
 
     if let Some(initial_msg) = startup_message
         && is_headless_fallback
@@ -637,6 +740,8 @@ pub(super) async fn spawn_swarm_agent(
         };
         if let Some(agent_arc) = agent_arc {
             let sid_clone = new_session_id.clone();
+            let worker_fallbacks = worker_fallbacks.clone();
+            let worker_allowed_models = agents_config.spawn_allowed_models.clone();
             let swarm_members2 = Arc::clone(swarm_members);
             let swarms_by_id2 = Arc::clone(swarms_by_id);
             let event_history2 = Arc::clone(event_history);
@@ -666,13 +771,15 @@ pub(super) async fn spawn_swarm_agent(
                     &lease,
                 );
                 let start_message_index = agent.message_count();
-                let result = process_reserved_locked_message_with_server_failover(
+                let result = process_reserved_locked_message_with_swarm_fallbacks(
                     &mut agent,
                     &lease,
                     &initial_msg,
                     vec![],
                     None,
                     events.sender(),
+                    &worker_fallbacks,
+                    &worker_allowed_models,
                 )
                 .await;
                 let completion_report =
@@ -808,6 +915,7 @@ pub(super) async fn handle_comm_spawn(
         model,
         effort,
         label,
+        &mutation_key,
         sessions,
         global_session_id,
         provider_template,
@@ -850,6 +958,17 @@ pub(super) async fn handle_comm_list_models(
     provider_template: &Arc<dyn Provider>,
     send_event: impl FnOnce(ServerEvent),
 ) {
+    if req_session_id.is_empty() {
+        let mut model_routes = provider_template.model_routes();
+        crate::model_usage::enrich_routes(&mut model_routes);
+        send_event(ServerEvent::CommListModelsResponse {
+            id,
+            current_model: Some(provider_template.model()),
+            configured_swarm_model: None,
+            model_routes,
+        });
+        return;
+    }
     let coordinator = resolve_coordinator_spawn_identity(req_session_id, sessions).await;
 
     let agent = {
@@ -894,7 +1013,7 @@ pub(super) async fn handle_comm_stop(
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
     soft_interrupt_queues: &SessionInterruptQueues,
-    swarm_mutation_runtime: &SwarmMutationRuntime,
+    await_members_runtime: &super::await_members_state::AwaitMembersRuntime,
 ) {
     // Stopping is authorized per-target by ownership (the requester is the
     // target's spawner or a transitive ancestor) rather than by the swarm-level
@@ -955,180 +1074,153 @@ pub(super) async fn handle_comm_stop(
         return;
     }
 
-    let _ = fanout_session_event(
-        swarm_members,
-        &target_session,
-        ServerEvent::SessionCloseRequested {
-            reason: format!("Stopped by coordinator {req_session_id}"),
-        },
-    )
-    .await;
-
-    let mutation_key = request_key(&req_session_id, "stop", &[swarm_id, target_session.clone()]);
-    let Some(mutation_state) = begin_or_replay(
-        swarm_mutation_runtime,
-        &mutation_key,
-        "stop",
-        &req_session_id,
-        id,
-        client_event_tx,
-    )
-    .await
-    else {
-        return;
-    };
-
-    let removed_agent = super::remove_session_entry(sessions, &target_session).await;
-    let removed_live_agent = removed_agent.is_some();
-    if let Some(agent_arc) = removed_agent {
-        remove_session_interrupt_queue(soft_interrupt_queues, &target_session).await;
-        remove_background_tool_signal(&target_session);
-        if let Ok(mut agent) = agent_arc.try_lock() {
-            agent.mark_closed();
-            let memory_enabled = agent.memory_enabled();
-            let transcript = if memory_enabled {
-                Some(agent.build_transcript_for_extraction())
-            } else {
-                None
-            };
-            let sid = target_session.clone();
-            let working_dir = agent.working_dir().map(|dir| dir.to_string());
-            drop(agent);
-            if let Some(transcript) = transcript {
-                crate::memory_agent::trigger_final_extraction_with_dir(
-                    transcript,
-                    sid,
-                    working_dir,
-                );
+    let stop = async {
+        anyhow::ensure!(
+            target_session != req_session_id,
+            "A turn cannot stop itself"
+        );
+        let activity = crate::turn_activity::global();
+        let mut pending = vec![target_session];
+        let mut tree = HashMap::new();
+        let reason = format!("Stopped by coordinator {req_session_id}");
+        while let Some(session) = pending.pop() {
+            if tree.contains_key(&session) {
+                continue;
             }
-        } else {
-            // The agent was mid-turn so its lock was busy; still record that
-            // the session is closed, or it looks alive on disk forever (and
-            // reload keeps re-announcing awaits on it).
-            if let Ok(mut session) = crate::session::Session::load(&target_session) {
-                session.mark_closed();
-                // save_prepared: a worker stopped before it wrote any message
-                // must still persist Closed (plain save skips empty sessions).
-                if let Err(error) = session.save_prepared() {
-                    crate::logging::warn(&format!(
-                        "stop {target_session}: failed to persist closed status: {error}"
-                    ));
+            // A concurrent spawn either registered its child before this read,
+            // or observes the stop marker at its own admission boundary.
+            let parent_lock = spawn_admission_lock(&format!("stop-tree:{session}"));
+            let guard = {
+                let _parent_guard = parent_lock.lock().await;
+                let guard = activity.stop(&session)?;
+                pending.extend(
+                    swarm_members
+                        .read()
+                        .await
+                        .values()
+                        .filter(|member| {
+                            member.report_back_to_session_id.as_deref() == Some(&session)
+                        })
+                        .map(|member| member.session_id.clone()),
+                );
+                guard
+            };
+            crate::turn_cancel_registry::mark_interruption(
+                &session,
+                crate::turn_cancel_registry::TurnInterruptionReason::Cancel,
+            );
+            super::swarm::cancel_active_turns(&session);
+            super::reload_recovery::cancel(&session)?;
+            tree.insert(session, guard);
+        }
+        let idle = || async {
+            for session in tree.keys() {
+                activity.wait_until_idle(session).await;
+            }
+        };
+        if tokio::time::timeout(std::time::Duration::from_secs(1), idle())
+            .await
+            .is_err()
+        {
+            for session in tree.keys() {
+                crate::turn_cancel_registry::force_stop(session);
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(4), idle())
+                .await
+                .map_err(|_| anyhow::anyhow!("Timed out waiting for stopped turns to finish"))?;
+        }
+
+        let background = crate::background::global();
+        for task in background.list().await.into_iter().filter(|task| {
+            tree.contains_key(&task.session_id)
+                && task.status == crate::bus::BackgroundTaskStatus::Running
+        }) {
+            background.cancel(&task.task_id).await?;
+        }
+
+        let swarm_state = SwarmState {
+            members: Arc::clone(swarm_members),
+            swarms_by_id: Arc::clone(swarms_by_id),
+            plans: Arc::clone(swarm_plans),
+            coordinators: Arc::clone(swarm_coordinators),
+        };
+        let mut affected_swarms = HashSet::new();
+        for session in tree.keys() {
+            super::ask_escalation::withdraw_worker(session);
+            super::comm_await::stop_session_awaits(await_members_runtime, session).await;
+            {
+                let members = swarm_members.read().await;
+                if let Some(member) = members.get(session)
+                    && let Some(swarm_id) = &member.swarm_id
+                {
+                    let unique_name = member.friendly_name.is_some()
+                        && !members.values().any(|other| {
+                            other.session_id != *session
+                                && other.swarm_id == member.swarm_id
+                                && other.friendly_name == member.friendly_name
+                        });
+                    super::await_members_state::record_stopped_member(
+                        swarm_id,
+                        session,
+                        member.friendly_name.clone(),
+                        unique_name,
+                    );
+                    affected_swarms.insert(swarm_id.clone());
                 }
             }
-        }
-    }
-
-    let (removed_swarm_id, removed_name) = {
-        let mut members = swarm_members.write().await;
-        if let Some(member) = members.remove(&target_session) {
-            (member.swarm_id, member.friendly_name)
-        } else {
-            (None, None)
-        }
-    };
-    if let Some(ref swarm_id) = removed_swarm_id {
-        record_swarm_event(
-            event_history,
-            event_counter,
-            swarm_event_tx,
-            target_session.clone(),
-            removed_name.clone(),
-            Some(swarm_id.clone()),
-            SwarmEventType::MemberChange {
-                action: "left".to_string(),
-            },
-        )
-        .await;
-        remove_session_from_swarm(
-            &target_session,
-            swarm_id,
-            swarm_members,
-            swarms_by_id,
-            swarm_coordinators,
-            swarm_plans,
-        )
-        .await;
-    }
-    remove_session_channel_subscriptions(
-        &target_session,
-        channel_subscriptions,
-        channel_subscriptions_by_session,
-    )
-    .await;
-
-    let response = if removed_live_agent || removed_swarm_id.is_some() {
-        PersistedSwarmMutationResponse::Done
-    } else {
-        PersistedSwarmMutationResponse::Error {
-            message: format!("Unknown session '{target_session}'"),
-            retry_after_secs: None,
-        }
-    };
-    finish_request(swarm_mutation_runtime, &mutation_state, response).await;
-}
-
-fn swarm_stop_allowed_by_owner(
-    req_session_id: &str,
-    target_member: &SwarmMember,
-    force: bool,
-) -> bool {
-    force || target_member.report_back_to_session_id.as_deref() == Some(req_session_id)
-}
-
-async fn resolve_stop_target_session(
-    swarm_id: &str,
-    target: &str,
-    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-) -> std::result::Result<String, String> {
-    let target = target.trim();
-    if target.is_empty() {
-        return Err("target_session is required.".to_string());
-    }
-
-    let members = swarm_members.read().await;
-    if members
-        .get(target)
-        .is_some_and(|member| member.swarm_id.as_deref() == Some(swarm_id))
-    {
-        return Ok(target.to_string());
-    }
-
-    let mut matches = members
-        .iter()
-        .filter(|(_, member)| member.swarm_id.as_deref() == Some(swarm_id))
-        .filter(|(session_id, member)| {
-            member.friendly_name.as_deref() == Some(target)
-                || session_id.starts_with(target)
-                || session_id.ends_with(target)
-        })
-        .map(|(session_id, member)| {
-            (
-                session_id.clone(),
-                member
-                    .friendly_name
-                    .as_deref()
-                    .unwrap_or(session_id)
-                    .to_string(),
+            update_member_status(
+                session,
+                "stopped",
+                Some(reason.clone()),
+                swarm_members,
+                swarms_by_id,
+                Some(event_history),
+                Some(event_counter),
+                Some(swarm_event_tx),
             )
-        })
-        .collect::<Vec<_>>();
-    matches.sort_by(|a, b| a.0.cmp(&b.0));
-
-    match matches.len() {
-        0 => Err(format!(
-            "Unknown swarm session '{target}'. Use an exact session ID, unique friendly name, or unique session ID prefix/suffix."
-        )),
-        1 => Ok(matches.remove(0).0),
-        _ => Err(format!(
-            "Ambiguous swarm session '{target}' matched: {}. Use an exact session ID.",
-            matches
-                .iter()
-                .map(|(session_id, friendly)| format!("{friendly} [{session_id}]"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )),
-    }
+            .await;
+            fanout_session_event(
+                swarm_members,
+                session,
+                ServerEvent::SessionCloseRequested {
+                    reason: reason.clone(),
+                },
+            )
+            .await;
+            if let Some(agent) = super::remove_session_entry(sessions, session).await {
+                tokio::time::timeout(std::time::Duration::from_secs(2), agent.lock())
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Timed out closing stopped session '{session}'"))?
+                    .mark_closed();
+            }
+            remove_session_interrupt_queue(soft_interrupt_queues, session).await;
+            remove_background_tool_signal(session);
+            remove_session_channel_subscriptions(
+                session,
+                channel_subscriptions,
+                channel_subscriptions_by_session,
+            )
+            .await;
+        }
+        for swarm_id in affected_swarms {
+            persist_swarm_state_for(&swarm_id, &swarm_state).await;
+        }
+        Ok::<_, anyhow::Error>(())
+    };
+    let response = match stop.await {
+        Ok(()) => ServerEvent::Done { id },
+        Err(error) => ServerEvent::Error {
+            id,
+            message: format!("Cannot stop swarm session: {error:#}"),
+            retry_after_secs: None,
+        },
+    };
+    let _ = client_event_tx.send(response);
 }
+
+#[path = "swarm_stop_target.rs"]
+mod swarm_stop_target;
+use swarm_stop_target::*;
 
 fn swarm_member_status_is_stale_for_coordination(status: &str) -> bool {
     matches!(
@@ -1138,7 +1230,7 @@ fn swarm_member_status_is_stale_for_coordination(status: &str) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn ensure_spawn_coordinator_swarm(
+pub(super) async fn ensure_spawn_coordinator_swarm(
     id: u64,
     req_session_id: &str,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,

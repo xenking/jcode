@@ -31,6 +31,37 @@ fn error_wants_failover(error: &str) -> bool {
     )
 }
 
+pub(super) fn usage_limit_event(
+    agent: &Agent,
+    error: &str,
+    action: &str,
+    target: Option<&str>,
+) -> Option<ServerEvent> {
+    let details = jcode_provider_core::failover::usage_limit_details(error)?;
+    let window = details.window;
+    let reset = details.reset.unwrap_or_else(|| "unknown".to_string());
+    let provider = agent.provider_name();
+    let model = agent.provider_model();
+    let account = agent.provider_handle().serving_oauth_account_label();
+    let account_display = account.as_deref().unwrap_or("unknown account");
+    let outcome = target
+        .map(|target| format!("failed over to {target}"))
+        .unwrap_or_else(|| "stopped".into());
+    let message = format!(
+        "{provider} / {model} / {account_display}: {window} usage window, reset {reset}; {outcome}."
+    );
+    Some(ServerEvent::UsageLimit {
+        provider,
+        model,
+        account,
+        window: window.into(),
+        reset,
+        action: action.into(),
+        target: target.map(str::to_string),
+        message,
+    })
+}
+
 /// One planned switch: how to apply it and how to describe it.
 pub(super) struct FailoverTarget {
     pub selection: Option<RouteSelection>,
@@ -46,11 +77,8 @@ fn describe_route(route: &crate::provider::ModelRoute) -> String {
 /// Pick the next pool-approved route for `agent` after `error`, or `None`
 /// when automatic switching is disabled or nothing eligible remains.
 pub(super) fn pick_failover_target(agent: &Agent, error: &str) -> Option<FailoverTarget> {
-    if crate::config::Config::load()
-        .provider
-        .cross_provider_failover
-        != crate::config::CrossProviderFailoverMode::Countdown
-    {
+    let config = crate::config::Config::load().provider;
+    if config.cross_provider_failover != crate::config::CrossProviderFailoverMode::Countdown {
         return None;
     }
     if !error_wants_failover(error) {
@@ -70,6 +98,7 @@ pub(super) fn pick_failover_target(agent: &Agent, error: &str) -> Option<Failove
     // The provider router already chose an exact target. Honor it.
     if let Some(prompt) = crate::provider::parse_failover_prompt_message(error)
         && let Some(spec) = prompt.target_route.as_deref()
+        && !config.failover_model_excluded(spec)
         && crate::provider::MultiProvider::is_failover_route_pool_approved(spec)
     {
         let route = route_for_spec(spec);
@@ -102,6 +131,7 @@ pub(super) fn pick_failover_target(agent: &Agent, error: &str) -> Option<Failove
         .find(|route| {
             let spec = RouteSelection::from_model_route(route).routed_model_spec();
             crate::provider::MultiProvider::is_failover_route_pool_approved(&spec)
+                && !config.failover_model_excluded(&route.model)
                 && jcode_provider_core::route_pool_key(&route.api_method) != source_key
         })
         .map(|route| {
@@ -112,6 +142,47 @@ pub(super) fn pick_failover_target(agent: &Agent, error: &str) -> Option<Failove
                 label: describe_route(route),
             }
         })
+}
+
+/// Effective worker model allowlist for a turn whose caller has no spawn-time
+/// knowledge (server wake, followup poke, planned task).
+///
+/// The session's persisted `is_swarm_worker` flag decides, not its current
+/// model: a worker that predates the allowlist (or that ran on a model since
+/// removed from it) must still be unable to fail over outside the list. A
+/// user-started session is never restricted.
+pub(super) fn effective_worker_allowed_models(agent: &Agent) -> Vec<String> {
+    if !agent.is_swarm_worker() {
+        return Vec::new();
+    }
+    crate::config::config().agents.spawn_allowed_models.clone()
+}
+
+/// Configured model fallbacks for a swarm worker turn, inside its allowlist.
+/// Every server-run worker turn (assign, wake, reload resume, direct message)
+/// uses them; a user-started session never switches models on its own.
+pub(super) fn effective_worker_fallbacks(agent: &Agent) -> Vec<String> {
+    if !agent.is_swarm_worker() {
+        return Vec::new();
+    }
+    let config = crate::config::config();
+    super::comm_session::spawn_model_selection::worker_allowed_fallbacks(
+        &config.agents.spawn_allowed_models,
+        &config.agents.swarm_model_fallbacks,
+    )
+}
+
+/// Whether an account-router target is inside the worker model allowlist.
+/// A non-worker turn passes an empty list and is unrestricted.
+fn worker_target_allowed(target: &FailoverTarget, allowed_models: &[String]) -> bool {
+    if allowed_models.is_empty() {
+        return true;
+    }
+    let agents = crate::config::AgentsConfig {
+        spawn_allowed_models: allowed_models.to_vec(),
+        ..Default::default()
+    };
+    agents.worker_may_use_model(&target.spec)
 }
 
 /// Apply `target` to the agent and tell every attached client.
@@ -171,6 +242,8 @@ pub(super) async fn process_message_with_server_failover(
         system_reminder,
         event_tx,
         enabled,
+        None,
+        None,
     )
     .await
 }
@@ -184,9 +257,12 @@ pub(super) async fn process_reserved_message_with_server_failover(
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
     enabled: bool,
+    queued_client_id: Option<Vec<String>>,
+    attachment_data: Option<jcode_session_types::MessageAttachments>,
 ) -> anyhow::Result<()> {
     let reminder = system_reminder.clone();
     let mut guard = agent.lock().await;
+    let attempt_start = guard.message_count();
     let result = super::client_lifecycle::process_reserved_message_streaming_mpsc(
         &mut guard,
         lease,
@@ -194,18 +270,99 @@ pub(super) async fn process_reserved_message_with_server_failover(
         images,
         system_reminder,
         event_tx.clone(),
+        queued_client_id,
+        attachment_data,
     )
     .await;
-    if !enabled && result.is_err() {
+    let fallbacks = effective_worker_fallbacks(&guard);
+    if !enabled && result.is_err() && fallbacks.is_empty() {
         return result;
     }
-    retry_turn_with_server_failover(&mut guard, lease, result, reminder, event_tx.clone()).await?;
-    super::runtime_ssh_loops::run_reserved_followups(&mut guard, lease, event_tx).await
+    let allowed = effective_worker_allowed_models(&guard);
+    let result = if enabled {
+        retry_turn_with_server_failover(
+            &mut guard,
+            lease,
+            result,
+            attempt_start,
+            reminder.clone(),
+            event_tx.clone(),
+            &allowed,
+        )
+        .await
+    } else {
+        result
+    };
+    retry_turn_with_model_fallbacks(
+        &mut guard,
+        lease,
+        result,
+        attempt_start,
+        reminder.clone(),
+        event_tx.clone(),
+        WorkerFallbackPolicy {
+            fallbacks: &fallbacks,
+            allowed_models: &allowed,
+        },
+    )
+    .await?;
+    let reload = is_reload_continuation(guard.session_id(), content, reminder.as_deref());
+    super::runtime_ssh_loops::run_reserved_followups(&mut guard, lease, event_tx, reload).await
 }
 
 /// Server-initiated turn (swarm spawn/assign, wake, headless reload recovery)
 /// on an already locked agent. No client runs a countdown for these turns, so
 /// the server always applies the account router itself.
+pub(super) async fn process_reserved_resume_with_server_failover(
+    agent: Arc<Mutex<Agent>>,
+    lease: &crate::agent::TurnLease,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+) -> anyhow::Result<crate::agent::ResumeOutcome> {
+    let mut guard = agent.lock().await;
+    // The interrupted assistant text already ends the transcript; only output
+    // produced by this attempt rules out a retry on another route.
+    let attempt_start = guard.message_count();
+    let attempt = guard
+        .resume_interrupted_turn_mpsc(lease, event_tx.clone(), true)
+        .await;
+    let outcome = attempt
+        .as_ref()
+        .copied()
+        .unwrap_or(crate::agent::ResumeOutcome::Continued);
+    if outcome == crate::agent::ResumeOutcome::NothingToResume {
+        return Ok(outcome);
+    }
+    // A failed attempt is retried on another route with the same continuation,
+    // never with a new prompt.
+    let allowed = effective_worker_allowed_models(&guard);
+    let result = retry_turn_with_server_failover(
+        &mut guard,
+        lease,
+        attempt.map(|_| ()),
+        attempt_start,
+        None,
+        event_tx.clone(),
+        &allowed,
+    )
+    .await;
+    let fallbacks = effective_worker_fallbacks(&guard);
+    retry_turn_with_model_fallbacks(
+        &mut guard,
+        lease,
+        result,
+        attempt_start,
+        None,
+        event_tx.clone(),
+        WorkerFallbackPolicy {
+            fallbacks: &fallbacks,
+            allowed_models: &allowed,
+        },
+    )
+    .await?;
+    super::runtime_ssh_loops::run_reserved_followups(&mut guard, lease, event_tx, true).await?;
+    Ok(outcome)
+}
+
 #[cfg(test)]
 pub(super) async fn process_locked_message_with_server_failover(
     agent: &mut Agent,
@@ -234,8 +391,44 @@ pub(super) async fn process_reserved_locked_message_with_server_failover(
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> anyhow::Result<()> {
+    let fallbacks = effective_worker_fallbacks(agent);
+    let allowed = effective_worker_allowed_models(agent);
+    process_reserved_locked_message_with_swarm_fallbacks(
+        agent,
+        lease,
+        content,
+        images,
+        system_reminder,
+        event_tx,
+        &fallbacks,
+        &allowed,
+    )
+    .await
+}
+
+/// [`process_reserved_locked_message_with_server_failover`] for swarm workers
+/// that also honor `agents.swarm_model_fallbacks`. After the account router has
+/// had its chance, any remaining failure of the turn (region/entitlement 400,
+/// auth, transport) moves the worker to the next configured fallback model and
+/// retries the same turn, instead of leaving a dead worker on the primary.
+///
+/// `allowed_models` is the worker's hard model allowlist
+/// (`agents.spawn_allowed_models`). When it is non-empty, neither the account
+/// router nor the configured fallbacks may move the worker outside it.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn process_reserved_locked_message_with_swarm_fallbacks(
+    agent: &mut Agent,
+    lease: &crate::agent::TurnLease,
+    content: &str,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+    fallbacks: &[String],
+    allowed_models: &[String],
+) -> anyhow::Result<()> {
     agent.validate_server_turn(lease)?;
     let reminder = system_reminder.clone();
+    let attempt_start = agent.message_count();
     let result = super::client_lifecycle::process_reserved_message_streaming_mpsc(
         agent,
         lease,
@@ -243,10 +436,224 @@ pub(super) async fn process_reserved_locked_message_with_server_failover(
         images,
         system_reminder,
         event_tx.clone(),
+        None,
+        None,
     )
     .await;
-    retry_turn_with_server_failover(agent, lease, result, reminder, event_tx.clone()).await?;
-    super::runtime_ssh_loops::run_reserved_followups(agent, lease, event_tx).await
+    let result = retry_turn_with_server_failover(
+        agent,
+        lease,
+        result,
+        attempt_start,
+        reminder.clone(),
+        event_tx.clone(),
+        allowed_models,
+    )
+    .await;
+    retry_turn_with_model_fallbacks(
+        agent,
+        lease,
+        result,
+        attempt_start,
+        reminder.clone(),
+        event_tx.clone(),
+        WorkerFallbackPolicy {
+            fallbacks,
+            allowed_models,
+        },
+    )
+    .await?;
+    let reload = is_reload_continuation(agent.session_id(), content, reminder.as_deref());
+    super::runtime_ssh_loops::run_reserved_followups(agent, lease, event_tx, reload).await
+}
+
+/// Route identity of a fallback selection.
+///
+/// `claude-oauth:opus` and `claude-api:opus` are the same model on two
+/// credential routes, and only one of them may be out of quota, so a repeat is
+/// decided on the route as well as the model.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FallbackTarget {
+    route: Option<String>,
+    model: String,
+}
+
+impl FallbackTarget {
+    /// Parse a `route:model` spec or a `model@route-pin` selection.
+    fn parse(spec: &str) -> Self {
+        let spec = spec.trim();
+        let (route, model) = match spec.split_once(':') {
+            Some((route, model)) if !route.trim().is_empty() && !model.trim().is_empty() => {
+                (Some(route), model)
+            }
+            _ => (None, spec),
+        };
+        // An explicit provider pin (`model@openai`) is a route identity too.
+        let (route, model) = match model.split_once('@') {
+            Some((model, pin)) if !pin.trim().is_empty() && !model.trim().is_empty() => {
+                (Some(pin), model)
+            }
+            _ => (route, model),
+        };
+        Self {
+            route: route.map(normalize_route),
+            model: model.trim().to_string(),
+        }
+    }
+
+    /// Whether this target already covers `candidate`, so attempting the
+    /// candidate could not reach a route that has not been tried.
+    fn covers(&self, candidate: &Self) -> bool {
+        if self.model != candidate.model {
+            return false;
+        }
+        match (self.route.as_deref(), candidate.route.as_deref()) {
+            (Some(tried), Some(next)) => same_route(tried, next),
+            // A spec without a route re-uses whatever route is active.
+            (_, None) => true,
+            // The active route is unknown, so an explicit route may differ.
+            (None, Some(_)) => false,
+        }
+    }
+}
+
+/// Whether two route names select the same credential route. The vocabularies
+/// overlap (`claude` is the OAuth route in automatic mode, `claude-api` and
+/// `anthropic-api` both name the API key), so compare canonically.
+fn same_route(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    match (
+        jcode_provider_core::AuthRoute::parse(left),
+        jcode_provider_core::AuthRoute::parse(right),
+    ) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// Compare route names without their account suffix (`claude-oauth@work`) or
+/// provider profile (`openai-compatible:nvidia-nim`).
+fn normalize_route(route: &str) -> String {
+    let route = route.split_once(':').map_or(route, |(base, _)| base);
+    let route = route.split_once('@').map_or(route, |(base, _)| base);
+    route.trim().to_ascii_lowercase()
+}
+
+/// The model and route the agent is running right now.
+fn current_target(agent: &Agent) -> FallbackTarget {
+    let mut target = FallbackTarget::parse(&agent.provider_model());
+    if target.route.is_none() {
+        target.route = [
+            agent.session_route_api_method(),
+            agent.session_provider_key(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|method| normalize_route(&method))
+        .find(|route| !route.is_empty());
+    }
+    target
+}
+
+struct WorkerFallbackPolicy<'a> {
+    fallbacks: &'a [String],
+    allowed_models: &'a [String],
+}
+
+/// While the turn keeps failing, switch to each configured fallback model in
+/// order (skipping the model already in use) and retry the same turn.
+async fn retry_turn_with_model_fallbacks(
+    agent: &mut Agent,
+    lease: &crate::agent::TurnLease,
+    mut result: anyhow::Result<()>,
+    mut attempt_start: usize,
+    reminder: Option<String>,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+    WorkerFallbackPolicy {
+        fallbacks,
+        allowed_models,
+    }: WorkerFallbackPolicy<'_>,
+) -> anyhow::Result<()> {
+    // A worker with no configured fallbacks failed on its own route; the
+    // provider's own error is the whole story. Read before filtering: a list
+    // emptied by exclusions still means failover was considered and refused.
+    let had_fallbacks = !fallbacks.is_empty();
+    // Defence in depth: the spawn path already filters the configured
+    // fallbacks, but a config change mid-turn must not leak a model outside the
+    // worker allowlist.
+    let fallbacks = super::comm_session::spawn_model_selection::worker_allowed_fallbacks(
+        allowed_models,
+        fallbacks,
+    );
+    let mut tried: Vec<FallbackTarget> = vec![current_target(agent)];
+    for fallback in &fallbacks {
+        let Err(error) = &result else {
+            break;
+        };
+        // Never re-ask after the model already produced a partial reply.
+        if attempt_produced_reply(agent, attempt_start) {
+            break;
+        }
+        let candidate = FallbackTarget::parse(fallback);
+        if crate::config::Config::load()
+            .provider
+            .failover_model_excluded(&candidate.model)
+        {
+            crate::logging::warn(&format!(
+                "Swarm failover: excluded fallback {fallback:?} by provider.failover_excluded_models"
+            ));
+            continue;
+        }
+        if candidate.model.is_empty() || tried.iter().any(|target| target.covers(&candidate)) {
+            continue;
+        }
+        crate::logging::warn(&format!(
+            "Swarm worker turn failed on {}: {}; falling back to {fallback}",
+            agent.provider_model(),
+            crate::util::format_error_chain(error)
+        ));
+        let limit_event = usage_limit_event(
+            agent,
+            &crate::util::format_error_chain(error),
+            "failed_over",
+            Some(fallback),
+        );
+        if let Err(switch_error) = agent.set_model(fallback) {
+            crate::logging::warn(&format!(
+                "Swarm fallback model {fallback} unavailable: {switch_error}"
+            ));
+            // No request was made on this route, so it stays untried: a later
+            // candidate that reaches it again must still get its chance.
+            continue;
+        }
+        if let Err(error) = agent.enforce_worker_request() {
+            crate::logging::warn(&format!("Swarm fallback {fallback} refused: {error:#}"));
+            continue;
+        }
+        if let Some(event) = limit_event {
+            let _ = event_tx.send(event);
+        }
+        tried.push(candidate);
+        agent.reset_provider_session();
+        let _ = event_tx.send(ServerEvent::ConnectionPhase {
+            phase: format!("retrying on fallback {fallback}"),
+        });
+        attempt_start = agent.message_count();
+        result = agent
+            .continue_turn_after_failover(lease, reminder.clone(), event_tx.clone())
+            .await;
+    }
+    result.map_err(|error| {
+        if had_fallbacks {
+            error.context(
+                "Automatic failover exhausted or excluded by provider.failover_excluded_models",
+            )
+        } else {
+            error
+        }
+    })
 }
 
 /// A server wake has no local user echo. Persist it as a context entry and
@@ -263,6 +670,7 @@ pub(super) async fn process_reserved_locked_context_with_server_failover(
 ) -> anyhow::Result<()> {
     agent.validate_server_turn(lease)?;
     let reminder = system_reminder.clone();
+    let attempt_start = agent.message_count();
     let result = agent
         .run_reserved_streaming_mpsc(
             lease,
@@ -271,6 +679,8 @@ pub(super) async fn process_reserved_locked_context_with_server_failover(
             system_reminder,
             event_tx.clone(),
             Some(display_role),
+            None,
+            None,
         )
         .await;
     if result.is_ok() {
@@ -287,8 +697,46 @@ pub(super) async fn process_reserved_locked_context_with_server_failover(
             std::time::Duration::from_secs(30),
         );
     }
-    retry_turn_with_server_failover(agent, lease, result, reminder, event_tx.clone()).await?;
-    super::runtime_ssh_loops::run_reserved_followups(agent, lease, event_tx).await
+    let allowed = effective_worker_allowed_models(agent);
+    let result = retry_turn_with_server_failover(
+        agent,
+        lease,
+        result,
+        attempt_start,
+        reminder.clone(),
+        event_tx.clone(),
+        &allowed,
+    )
+    .await;
+    let fallbacks = effective_worker_fallbacks(agent);
+    retry_turn_with_model_fallbacks(
+        agent,
+        lease,
+        result,
+        attempt_start,
+        reminder.clone(),
+        event_tx.clone(),
+        WorkerFallbackPolicy {
+            fallbacks: &fallbacks,
+            allowed_models: &allowed,
+        },
+    )
+    .await?;
+    let reload = is_reload_continuation(agent.session_id(), content, reminder.as_deref());
+    super::runtime_ssh_loops::run_reserved_followups(agent, lease, event_tx, reload).await
+}
+
+fn is_reload_continuation(session_id: &str, content: &str, reminder: Option<&str>) -> bool {
+    if reminder.is_some_and(|text| {
+        text == crate::tool::selfdev::ReloadContext::interrupted_session_continuation_message()
+            || text.starts_with("Reload complete. Resuming your task.\n\n")
+    }) {
+        return true;
+    }
+    [reminder, Some(content)].into_iter().flatten().any(|text| {
+        !text.is_empty()
+            && super::reload_recovery::is_delivered_continuation(session_id, text).unwrap_or(false)
+    })
 }
 
 /// [`process_locked_message_with_server_failover`] for callers holding an
@@ -312,15 +760,26 @@ pub(super) async fn process_server_initiated_message(
     .await
 }
 
+/// Whether the failed attempt that began at `attempt_start` messages already
+/// persisted assistant output. A resumed turn may end on the interrupted
+/// assistant text from before the restart; that is not this attempt's reply.
+fn attempt_produced_reply(agent: &Agent, attempt_start: usize) -> bool {
+    agent.message_count() > attempt_start
+        && agent.last_message_role() != Some(crate::message::Role::User)
+}
+
 /// Given the result of a turn attempt, switch to the next pool-approved
 /// account and re-run the same turn while it keeps failing with a
-/// usage/rate-limit error.
+/// usage/rate-limit error. `attempt_start` is the message count before the
+/// failed attempt.
 pub(super) async fn retry_turn_with_server_failover(
     agent: &mut Agent,
     lease: &crate::agent::TurnLease,
     mut result: anyhow::Result<()>,
+    mut attempt_start: usize,
     reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
+    allowed_models: &[String],
 ) -> anyhow::Result<()> {
     agent.validate_server_turn(lease)?;
     let mut attempts = 0;
@@ -329,15 +788,32 @@ pub(super) async fn retry_turn_with_server_failover(
             break;
         }
         let message = crate::util::format_error_chain(error);
-        // Only retry a turn whose last persisted message is still the
-        // request (user prompt or tool results). Never re-ask after the
-        // model already produced a partial reply.
-        if agent.last_message_role() != Some(crate::message::Role::User) {
+        // Only retry a turn whose failed attempt produced no assistant output.
+        // Never re-ask after the model already produced a partial reply.
+        if attempt_produced_reply(agent, attempt_start) {
             break;
         }
         let Some(target) = pick_failover_target(agent, &message) else {
+            if error_wants_failover(&message)
+                && crate::config::Config::load()
+                    .provider
+                    .cross_provider_failover
+                    == crate::config::CrossProviderFailoverMode::Countdown
+            {
+                result = result.map_err(|error| error.context("Automatic failover has no eligible route (see provider.failover_excluded_models)"));
+            }
             break;
         };
+        // A worker may only ever move inside its allowlist, even when the
+        // account router found a pool-approved route outside it.
+        if !worker_target_allowed(&target, allowed_models) {
+            crate::logging::warn(&format!(
+                "Server account failover: refusing {} for a worker outside agents.spawn_allowed_models",
+                target.spec
+            ));
+            break;
+        }
+        let limit_event = usage_limit_event(agent, &message, "failed_over", Some(&target.label));
         if let Err(switch_error) = apply_failover_target(agent, &target, &event_tx) {
             crate::logging::warn(&format!(
                 "Server account failover to {} failed: {switch_error}",
@@ -345,7 +821,11 @@ pub(super) async fn retry_turn_with_server_failover(
             ));
             break;
         }
+        if let Some(event) = limit_event {
+            let _ = event_tx.send(event);
+        }
         attempts += 1;
+        attempt_start = agent.message_count();
         result = agent
             .continue_turn_after_failover(lease, reminder.clone(), event_tx.clone())
             .await;
@@ -380,6 +860,118 @@ mod tests {
     use crate::provider::{EventStream, ModelRoute, Provider};
     use async_trait::async_trait;
     use std::sync::Mutex as StdMutex;
+
+    struct OpusOnlyProvider;
+
+    #[async_trait]
+    impl Provider for OpusOnlyProvider {
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self)
+        }
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<EventStream> {
+            anyhow::bail!("HTTP 429: usage_limit_reached")
+        }
+        fn name(&self) -> &str {
+            "OpenAI"
+        }
+        fn model(&self) -> String {
+            "gpt-6.1-sol".into()
+        }
+        fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
+            Some(jcode_provider_core::ResolvedCredential::ApiKey)
+        }
+        fn model_routes(&self) -> Vec<ModelRoute> {
+            vec![ModelRoute {
+                model: "claude-opus-5-5".into(),
+                provider: "Claude".into(),
+                api_method: "anthropic-api".into(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+                usage: None,
+            }]
+        }
+    }
+
+    #[test]
+    fn server_router_rejects_excluded_prompt_and_ranked_route() {
+        let _guard = crate::storage::lock_test_env();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let home = tempfile::tempdir().unwrap();
+                let prev = std::env::var_os("JCODE_HOME");
+                crate::env::set_var("JCODE_HOME", home.path());
+                crate::config::Config::invalidate_cache();
+                crate::provider::clear_all_provider_unavailability_for_account();
+                crate::provider::clear_provider_unavailable_for_account("anthropic-api");
+                crate::provider::clear_provider_unavailable_for_account("openai-api");
+                crate::auth::account_pool::AccountPool {
+                    members: vec!["openai-api".into(), "anthropic-api".into()],
+                    ..Default::default()
+                }
+                .save()
+                .unwrap();
+                let provider: Arc<dyn Provider> = Arc::new(OpusOnlyProvider);
+                let registry = crate::tool::Registry::new(Arc::clone(&provider)).await;
+                let session = crate::session::Session::create_with_id(
+                    "excluded_failover_test".into(),
+                    None,
+                    None,
+                );
+                let agent = Agent::new_with_session(provider, registry, session, None);
+                let prompt = jcode_provider_core::ProviderFailoverPrompt {
+                    from_provider: "openai".into(),
+                    from_label: "OpenAI".into(),
+                    to_provider: "claude".into(),
+                    to_label: "Claude".into(),
+                    target_route: Some("anthropic-api:claude-opus-5-5".into()),
+                    reason: "usage limit".into(),
+                    estimated_input_chars: 0,
+                    estimated_input_tokens: 0,
+                };
+                assert!(pick_failover_target(&agent, &prompt.to_error_message()).is_none());
+                assert!(pick_failover_target(&agent, "HTTP 429 usage_limit_reached").is_none());
+                let mut config = crate::config::Config::load();
+                config.provider.failover_excluded_models.clear();
+                config.save().unwrap();
+                assert!(
+                    crate::config::Config::load()
+                        .provider
+                        .failover_excluded_models
+                        .is_empty(),
+                    "config not persisted"
+                );
+                assert!(
+                    super::super::provider_control::automatic_failover_source_is_pool_member(
+                        &agent
+                    ),
+                    "source not enrolled"
+                );
+                assert!(
+                    crate::provider::MultiProvider::is_failover_route_pool_approved(
+                        "anthropic-api:claude-opus-5-5"
+                    ),
+                    "target not approved"
+                );
+                assert!(pick_failover_target(&agent, &prompt.to_error_message()).is_some());
+                assert!(pick_failover_target(&agent, "HTTP 429 usage_limit_reached").is_some());
+                crate::provider::clear_all_provider_unavailability_for_account();
+                match prev {
+                    Some(value) => crate::env::set_var("JCODE_HOME", value),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+                crate::config::Config::invalidate_cache();
+            });
+    }
 
     /// Fails with a usage limit while on the Anthropic API key, succeeds once
     /// the route switches to the OpenAI API key.
@@ -420,7 +1012,7 @@ mod tests {
             if *self.on_openai.lock().unwrap() {
                 "gpt-6.1-sol".into()
             } else {
-                "claude-opus-5-5".into()
+                "claude-sonnet-4-6".into()
             }
         }
         fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
@@ -441,6 +1033,27 @@ mod tests {
                 usage: None,
             }]
         }
+
+        /// Post-turn session titles spend one cheap side completion on a provider
+        /// fork. Answer it here so it is not counted as a turn request.
+        async fn complete_simple_with_usage(
+            &self,
+            _prompt: &str,
+            _system: &str,
+        ) -> anyhow::Result<(String, jcode_provider_core::SimpleCompletionUsage)> {
+            Ok((
+                "Swarm fallback".to_string(),
+                jcode_provider_core::SimpleCompletionUsage {
+                    requested_model: None,
+                    resolved_model: None,
+                    input_tokens: None,
+                    output_tokens: None,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                },
+            ))
+        }
+
         fn fork(&self) -> Arc<dyn Provider> {
             Arc::new(self.clone())
         }
@@ -522,8 +1135,16 @@ mod tests {
                     result.is_ok(),
                     "turn should succeed after failover: {result:?}"
                 );
+                // The first two provider calls are this turn: the failed request on
+                // the source and the retry on the target. Any further calls belong to
+                // the session-title side turn, which runs on a forked provider after
+                // the answered turn.
                 assert_eq!(
-                    calls.iter().map(|(openai, _)| *openai).collect::<Vec<_>>(),
+                    calls
+                        .iter()
+                        .take(2)
+                        .map(|(openai, _)| *openai)
+                        .collect::<Vec<_>>(),
                     vec![false, true],
                     "one failed request on the source, one retry on the target"
                 );
@@ -533,6 +1154,16 @@ mod tests {
                     event,
                     ServerEvent::ModelChanged { model, error: None, .. } if model == "gpt-6.1-sol"
                 )));
+                assert!(events.iter().any(|event| {
+                    let value = serde_json::to_value(event).unwrap();
+                    value["type"] == "usage_limit"
+                        && value["provider"] == "Claude"
+                        && value["model"] == "claude-sonnet-4-6"
+                        && value["window"] == "unknown"
+                        && value["reset"] == "unknown"
+                        && value["action"] == "failed_over"
+                        && value["target"].as_str().is_some_and(|target| target.contains("gpt-6.1-sol"))
+                }), "usage limit and actual failover must be published as structured data: {events:?}");
                 assert!(events.iter().any(|event| matches!(
                     event,
                     ServerEvent::ConnectionPhase { phase } if phase.starts_with("retrying on")
@@ -593,9 +1224,692 @@ mod tests {
                 crate::config::Config::invalidate_cache();
 
                 assert!(result.is_ok(), "worker turn should fail over: {result:?}");
+                // First two calls are the turn and its retry; a title side turn may
+                // follow on a cheap model.
                 assert_eq!(
-                    calls.iter().map(|(openai, _)| *openai).collect::<Vec<_>>(),
+                    calls
+                        .iter()
+                        .take(2)
+                        .map(|(openai, _)| *openai)
+                        .collect::<Vec<_>>(),
                     vec![false, true]
+                );
+            });
+    }
+
+    /// Primary model rejects every request with a plain HTTP 400 (region or
+    /// entitlement error, not a rate limit); the fallback model answers.
+    #[derive(Clone)]
+    struct RejectingPrimaryProvider {
+        model: Arc<StdMutex<String>>,
+        calls: Arc<StdMutex<Vec<String>>>,
+        quota_failure: bool,
+    }
+
+    #[async_trait]
+    impl Provider for RejectingPrimaryProvider {
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<EventStream> {
+            let model = self.model.lock().unwrap().clone();
+            self.calls.lock().unwrap().push(model.clone());
+            if model.contains("deepseek") {
+                if self.quota_failure {
+                    anyhow::bail!(
+                        "HTTP 429 weekly usage limit reached; resets at 2026-11-17T10:00:00Z"
+                    );
+                }
+                anyhow::bail!(
+                    "OpenAI-compatible chat request failed status: 400 Bad Request: \
+                     This OpenCode Go model is hosted outside Europe and the United States"
+                );
+            }
+            let events = vec![
+                Ok(StreamEvent::TextDelta("answered on fallback".into())),
+                Ok(StreamEvent::MessageEnd { stop_reason: None }),
+            ];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+        fn name(&self) -> &str {
+            "test"
+        }
+        fn model(&self) -> String {
+            self.model.lock().unwrap().clone()
+        }
+        fn set_model(&self, model: &str) -> anyhow::Result<()> {
+            let bare = model.split_once(':').map_or(model, |(_, bare)| bare);
+            *self.model.lock().unwrap() = bare.to_string();
+            Ok(())
+        }
+
+        /// Post-turn session titles spend one cheap side completion on a provider
+        /// fork. Answer it here so it is not counted as a turn request.
+        async fn complete_simple_with_usage(
+            &self,
+            _prompt: &str,
+            _system: &str,
+        ) -> anyhow::Result<(String, jcode_provider_core::SimpleCompletionUsage)> {
+            Ok((
+                "Swarm fallback".to_string(),
+                jcode_provider_core::SimpleCompletionUsage {
+                    requested_model: None,
+                    resolved_model: None,
+                    input_tokens: None,
+                    output_tokens: None,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                },
+            ))
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(self.clone())
+        }
+    }
+
+    #[derive(Clone)]
+    struct CappedFallbackProvider {
+        inner: RejectingPrimaryProvider,
+        effort: Arc<StdMutex<String>>,
+        observed: Arc<StdMutex<Vec<(String, String)>>>,
+    }
+
+    #[async_trait]
+    impl Provider for CappedFallbackProvider {
+        async fn complete(
+            &self,
+            messages: &[Message],
+            tools: &[ToolDefinition],
+            system: &str,
+            session_id: Option<&str>,
+        ) -> anyhow::Result<EventStream> {
+            self.observed
+                .lock()
+                .unwrap()
+                .push((self.model(), self.effort.lock().unwrap().clone()));
+            self.inner
+                .complete(messages, tools, system, session_id)
+                .await
+        }
+        fn name(&self) -> &str {
+            "test"
+        }
+        fn model(&self) -> String {
+            self.inner.model()
+        }
+        fn set_model(&self, model: &str) -> anyhow::Result<()> {
+            self.inner.set_model(model)
+        }
+        fn available_efforts(&self) -> Vec<&'static str> {
+            vec!["low", "medium", "high", "xhigh", "max"]
+        }
+        fn reasoning_effort(&self) -> Option<String> {
+            Some(self.effort.lock().unwrap().clone())
+        }
+        fn set_reasoning_effort(&self, effort: &str) -> anyhow::Result<()> {
+            *self.effort.lock().unwrap() = effort.to_string();
+            Ok(())
+        }
+        async fn complete_simple_with_usage(
+            &self,
+            prompt: &str,
+            system: &str,
+        ) -> anyhow::Result<(String, jcode_provider_core::SimpleCompletionUsage)> {
+            self.inner.complete_simple_with_usage(prompt, system).await
+        }
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(self.clone())
+        }
+    }
+
+    #[test]
+    fn worker_failover_applies_target_model_effort_cap_before_completion() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(home) => crate::env::set_var("JCODE_HOME", home),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+                crate::config::Config::invalidate_cache();
+            }
+        }
+        let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[agents]\nswarm_effort_caps = { \"test:claude-sonnet-5-5\" = \"medium\" }\n",
+        )
+        .unwrap();
+        crate::config::Config::invalidate_cache();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let provider = CappedFallbackProvider {
+                    inner: RejectingPrimaryProvider {
+                        model: Arc::new(StdMutex::new("deepseek-v4.1-flash".into())),
+                        calls: Arc::new(StdMutex::new(Vec::new())),
+                        quota_failure: false,
+                    },
+                    effort: Arc::new(StdMutex::new("max".into())),
+                    observed: Arc::new(StdMutex::new(Vec::new())),
+                };
+                let dyn_provider: Arc<dyn Provider> = Arc::new(provider.clone());
+                let registry = crate::tool::Registry::new(dyn_provider.clone()).await;
+                let session = crate::session::Session::create_with_id(
+                    "session_capped_fallback".into(),
+                    None,
+                    None,
+                );
+                let mut agent = Agent::new_with_session(dyn_provider, registry, session, None);
+                agent.mark_swarm_worker().unwrap();
+                agent.set_reasoning_effort("max").unwrap();
+                let lease = agent.claim_server_turn().unwrap();
+                let (tx, _rx) = mpsc::unbounded_channel();
+                let result = process_reserved_locked_message_with_swarm_fallbacks(
+                    &mut agent,
+                    &lease,
+                    "swarm task",
+                    Vec::new(),
+                    None,
+                    tx,
+                    &["claude:claude-sonnet-5-5".into()],
+                    &[],
+                )
+                .await;
+                assert!(result.is_ok(), "worker should fall back: {result:?}");
+                assert!(
+                    provider
+                        .observed
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|(model, effort)| model == "claude-sonnet-5-5" && effort == "medium")
+                );
+            });
+    }
+
+    #[test]
+    fn swarm_quota_model_fallback_reports_actual_route_and_reset() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(home) => crate::env::set_var("JCODE_HOME", home),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+                crate::config::Config::invalidate_cache();
+            }
+        }
+        let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", home.path());
+        crate::config::Config::invalidate_cache();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let provider = RejectingPrimaryProvider {
+                    model: Arc::new(StdMutex::new("deepseek-v4.1-flash".into())),
+                    calls: Arc::new(StdMutex::new(Vec::new())),
+                    quota_failure: true,
+                };
+                let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+                let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+                let session = crate::session::Session::create_with_id(
+                    "session_swarm_quota_fallback".into(),
+                    None,
+                    None,
+                );
+                let mut agent = Agent::new_with_session(provider_dyn, registry, session, None);
+                let lease = agent.claim_server_turn().unwrap();
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                let result = process_reserved_locked_message_with_swarm_fallbacks(
+                    &mut agent,
+                    &lease,
+                    "swarm task",
+                    Vec::new(),
+                    None,
+                    tx,
+                    &["claude:claude-sonnet-5-5".into()],
+                    &[],
+                )
+                .await;
+                assert!(result.is_ok(), "quota fallback should succeed: {result:?}");
+                let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+                assert!(
+                    events
+                        .iter()
+                        .any(|event| matches!(event, ServerEvent::UsageLimit {
+                model, window, reset, action, target: Some(target), ..
+            } if model == "deepseek-v4.1-flash" && window == "weekly"
+                && reset == "2026-11-17T10:00:00Z" && action == "failed_over"
+                && target.contains("claude-sonnet-5-5"))),
+                    "{events:?}"
+                );
+            });
+    }
+
+    #[test]
+    fn swarm_worker_turn_falls_back_when_primary_fails_with_non_rate_limit_error() {
+        let _guard = crate::storage::lock_test_env();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let provider = RejectingPrimaryProvider {
+                    model: Arc::new(StdMutex::new("deepseek-v4.1-flash".into())),
+                    calls: Arc::new(StdMutex::new(Vec::new())),
+                    quota_failure: false,
+                };
+                let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+                let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+                let session = crate::session::Session::create_with_id(
+                    "session_swarm_model_fallback".into(),
+                    None,
+                    None,
+                );
+                let mut agent = Agent::new_with_session(provider_dyn, registry, session, None);
+                let lease = agent.claim_server_turn().unwrap();
+                let (tx, _rx) = mpsc::unbounded_channel();
+                let fallbacks = vec![
+                    "opencode-go:deepseek-v4.1-flash".to_string(),
+                    "claude:claude-sonnet-5-5".to_string(),
+                ];
+
+                let result = process_reserved_locked_message_with_swarm_fallbacks(
+                    &mut agent,
+                    &lease,
+                    "swarm task",
+                    Vec::new(),
+                    None,
+                    tx,
+                    &fallbacks,
+                    &[],
+                )
+                .await;
+
+                assert!(result.is_ok(), "worker should fall back: {result:?}");
+                assert_eq!(
+                    provider.calls.lock().unwrap().clone(),
+                    vec![
+                        "deepseek-v4.1-flash",
+                        "deepseek-v4.1-flash",
+                        "claude-sonnet-5-5"
+                    ],
+                    "the fallback naming the running model is retried because this test has no \
+                     active-route identity to compare against, and the distinct model answers"
+                );
+            });
+    }
+
+    #[test]
+    fn swarm_worker_never_retries_excluded_opus() {
+        let _guard = crate::storage::lock_test_env();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let provider = RejectingPrimaryProvider {
+                    model: Arc::new(StdMutex::new("deepseek-v4.1-flash".into())),
+                    calls: Arc::new(StdMutex::new(Vec::new())),
+                    quota_failure: false,
+                };
+                let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+                let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+                let session = crate::session::Session::create_with_id(
+                    "session_no_opus_fallback".into(),
+                    None,
+                    None,
+                );
+                let mut agent = Agent::new_with_session(provider_dyn, registry, session, None);
+                let lease = agent.claim_server_turn().unwrap();
+                let (tx, _rx) = mpsc::unbounded_channel();
+                let result = process_reserved_locked_message_with_swarm_fallbacks(
+                    &mut agent,
+                    &lease,
+                    "swarm task",
+                    Vec::new(),
+                    None,
+                    tx,
+                    &["claude:claude-opus-5-5".into()],
+                    &[],
+                )
+                .await;
+                let error = result.expect_err("excluded fallback must not be tried");
+                assert!(format!("{error:#}").contains("failover_excluded_models"));
+                assert_eq!(*provider.calls.lock().unwrap(), vec!["deepseek-v4.1-flash"]);
+                assert_eq!(agent.provider_model(), "deepseek-v4.1-flash");
+            });
+    }
+
+    #[test]
+    fn swarm_worker_never_falls_back_outside_the_spawn_allowlist() {
+        let _guard = crate::storage::lock_test_env();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let provider = RejectingPrimaryProvider {
+                    model: Arc::new(StdMutex::new("deepseek-v4.1-flash".into())),
+                    calls: Arc::new(StdMutex::new(Vec::new())),
+                    quota_failure: false,
+                };
+                let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+                let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+                let session = crate::session::Session::create_with_id(
+                    "session_swarm_allowlist_fallback".into(),
+                    None,
+                    None,
+                );
+                let mut agent = Agent::new_with_session(provider_dyn, registry, session, None);
+                let lease = agent.claim_server_turn().unwrap();
+                let (tx, _rx) = mpsc::unbounded_channel();
+                let allowed = vec![
+                    "opencode-go:deepseek-v4.1-flash".to_string(),
+                    "claude:claude-opus-5-5".to_string(),
+                ];
+                // A stale or hand-edited config names fable: the worker must
+                // keep failing on its allowed model rather than escape the list.
+                let fallbacks = vec![
+                    "claude:claude-fable-5".to_string(),
+                    "claude:claude-astra-5".to_string(),
+                ];
+
+                let result = process_reserved_locked_message_with_swarm_fallbacks(
+                    &mut agent,
+                    &lease,
+                    "swarm task",
+                    Vec::new(),
+                    None,
+                    tx,
+                    &fallbacks,
+                    &allowed,
+                )
+                .await;
+
+                assert!(result.is_err(), "no allowed fallback could answer");
+                assert_eq!(
+                    provider.calls.lock().unwrap().clone(),
+                    vec!["deepseek-v4.1-flash"],
+                    "fable/astra must never be tried for a worker"
+                );
+                assert_eq!(agent.provider_model(), "deepseek-v4.1-flash");
+            });
+    }
+
+    #[test]
+    fn worker_allowed_fallbacks_keeps_order_and_drops_outside_models() {
+        let _guard = crate::storage::lock_test_env();
+        let fallbacks = vec![
+            "claude:claude-sonnet-5-5".to_string(),
+            "claude:claude-fable-5".to_string(),
+            "claude:claude-opus-5-5".to_string(),
+        ];
+        let allowed = vec![
+            "opencode-go:deepseek-v4.1-flash".to_string(),
+            "claude:claude-opus-5-5".to_string(),
+            "claude:claude-sonnet-5-5".to_string(),
+        ];
+        assert_eq!(
+            super::super::comm_session::spawn_model_selection::worker_allowed_fallbacks(
+                &allowed, &fallbacks
+            ),
+            vec!["claude:claude-sonnet-5-5".to_string()]
+        );
+        // Without an allowlist, the failover exclusion still applies.
+        assert_eq!(
+            super::super::comm_session::spawn_model_selection::worker_allowed_fallbacks(
+                &[],
+                &fallbacks
+            ),
+            vec![
+                "claude:claude-sonnet-5-5".to_string(),
+                "claude:claude-fable-5".to_string()
+            ]
+        );
+    }
+
+    /// Records the (route, model) of each request so a fallback that re-asks
+    /// the same model on a different credential route is visible, and lets a
+    /// `set_model` fail before any request is made.
+    #[derive(Clone)]
+    struct RouteSwitchingProvider {
+        route: Arc<StdMutex<String>>,
+        model: Arc<StdMutex<String>>,
+        /// Routes whose requests fail with a plain entitlement error.
+        failing_routes: Arc<StdMutex<Vec<String>>>,
+        /// Number of upcoming `set_model` calls that fail, as when a model or
+        /// credential is not available on that route yet. One agent-level
+        /// switch retries once after reloading auth, so this counts calls.
+        reject_switches: Arc<StdMutex<u32>>,
+        calls: Arc<StdMutex<Vec<(String, String)>>>,
+    }
+
+    impl RouteSwitchingProvider {
+        fn new(route: &str, model: &str, failing_routes: &[&str]) -> Self {
+            Self {
+                route: Arc::new(StdMutex::new(route.into())),
+                model: Arc::new(StdMutex::new(model.into())),
+                failing_routes: Arc::new(StdMutex::new(
+                    failing_routes
+                        .iter()
+                        .map(|route| route.to_string())
+                        .collect(),
+                )),
+                reject_switches: Arc::new(StdMutex::new(0)),
+                calls: Arc::new(StdMutex::new(Vec::new())),
+            }
+        }
+
+        fn calls(&self) -> Vec<(String, String)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl Provider for RouteSwitchingProvider {
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<EventStream> {
+            let route = self.route.lock().unwrap().clone();
+            let model = self.model.lock().unwrap().clone();
+            self.calls.lock().unwrap().push((route.clone(), model));
+            if self.failing_routes.lock().unwrap().contains(&route) {
+                anyhow::bail!(
+                    "400 Bad Request: this credential route is not entitled for the model"
+                );
+            }
+            let events = vec![
+                Ok(StreamEvent::TextDelta(
+                    "answered on the fallback route".into(),
+                )),
+                Ok(StreamEvent::MessageEnd { stop_reason: None }),
+            ];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+
+        fn name(&self) -> &str {
+            "Claude"
+        }
+
+        fn model(&self) -> String {
+            self.model.lock().unwrap().clone()
+        }
+
+        /// Report the active OAuth account so the agent knows which route is
+        /// running, exactly as a real saved login does.
+        fn oauth_account_label(&self) -> Option<String> {
+            Some("work".into())
+        }
+
+        fn set_model(&self, spec: &str) -> anyhow::Result<()> {
+            {
+                let mut remaining = self.reject_switches.lock().unwrap();
+                if *remaining > 0 {
+                    *remaining -= 1;
+                    anyhow::bail!("model is not available on this route yet");
+                }
+            }
+            let (route, model) = spec.split_once(':').unwrap_or(("claude", spec));
+            *self.route.lock().unwrap() = route.to_string();
+            *self.model.lock().unwrap() = model.to_string();
+            Ok(())
+        }
+
+        /// Post-turn session titles spend one cheap side completion on a provider
+        /// fork. Answer it here so it is not counted as a turn request.
+        async fn complete_simple_with_usage(
+            &self,
+            _prompt: &str,
+            _system: &str,
+        ) -> anyhow::Result<(String, jcode_provider_core::SimpleCompletionUsage)> {
+            Ok((
+                "Swarm fallback".to_string(),
+                jcode_provider_core::SimpleCompletionUsage {
+                    requested_model: None,
+                    resolved_model: None,
+                    input_tokens: None,
+                    output_tokens: None,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                },
+            ))
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(self.clone())
+        }
+    }
+
+    /// `claude-oauth:sonnet` and `claude-api:sonnet` are the same model on two
+    /// credential routes. Dedup on the bare model skipped the second route and
+    /// left the worker dead while the API-key route would have answered.
+    #[test]
+    fn swarm_fallback_retries_the_same_model_on_a_second_route() {
+        let _guard = crate::storage::lock_test_env();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let provider = RouteSwitchingProvider::new(
+                    "claude-oauth",
+                    "claude-sonnet-5-5",
+                    &["claude-oauth"],
+                );
+                let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+                let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+                let session = crate::session::Session::create_with_id(
+                    "session_swarm_route_fallback".into(),
+                    None,
+                    None,
+                );
+                let mut agent = Agent::new_with_session(provider_dyn, registry, session, None);
+                let lease = agent.claim_server_turn().unwrap();
+                let (tx, _rx) = mpsc::unbounded_channel();
+                let fallbacks = vec![
+                    "claude-oauth:claude-sonnet-5-5".to_string(),
+                    "claude-api:claude-sonnet-5-5".to_string(),
+                ];
+
+                let result = process_reserved_locked_message_with_swarm_fallbacks(
+                    &mut agent,
+                    &lease,
+                    "swarm task",
+                    Vec::new(),
+                    None,
+                    tx,
+                    &fallbacks,
+                    &[],
+                )
+                .await;
+
+                assert!(
+                    result.is_ok(),
+                    "the API-key route must be attempted for the same model: {result:?}"
+                );
+                assert_eq!(
+                    provider.calls(),
+                    vec![
+                        ("claude-oauth".to_string(), "claude-sonnet-5-5".to_string()),
+                        ("claude-api".to_string(), "claude-sonnet-5-5".to_string()),
+                    ],
+                    "the second route is a new attempt, not a repeat of the first"
+                );
+            });
+    }
+
+    /// A `set_model` that fails before any request must not consume the
+    /// candidate: the same spec later in the list still gets its chance.
+    #[test]
+    fn rejected_fallback_switch_does_not_consume_the_next_candidate() {
+        let _guard = crate::storage::lock_test_env();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let provider = RouteSwitchingProvider::new(
+                    "claude-oauth",
+                    "claude-opus-5-5",
+                    &["claude-oauth"],
+                );
+                *provider.reject_switches.lock().unwrap() = 2;
+                let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+                let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+                let session = crate::session::Session::create_with_id(
+                    "session_swarm_switch_retry".into(),
+                    None,
+                    None,
+                );
+                let mut agent = Agent::new_with_session(provider_dyn, registry, session, None);
+                let lease = agent.claim_server_turn().unwrap();
+                let (tx, _rx) = mpsc::unbounded_channel();
+                let fallbacks = vec![
+                    "claude-api:claude-sonnet-5-5".to_string(),
+                    "claude-api:claude-sonnet-5-5".to_string(),
+                ];
+
+                let result = process_reserved_locked_message_with_swarm_fallbacks(
+                    &mut agent,
+                    &lease,
+                    "swarm task",
+                    Vec::new(),
+                    None,
+                    tx,
+                    &fallbacks,
+                    &[],
+                )
+                .await;
+
+                assert!(
+                    result.is_ok(),
+                    "a failed switch must not blacklist the fallback: {result:?}"
+                );
+                assert_eq!(
+                    provider.calls(),
+                    vec![
+                        ("claude-oauth".to_string(), "claude-opus-5-5".to_string()),
+                        ("claude-api".to_string(), "claude-sonnet-5-5".to_string()),
+                    ]
                 );
             });
     }
@@ -636,5 +1950,220 @@ mod tests {
         // Context overflows are handled by compaction, not account switching.
         assert!(!error_wants_failover("context length exceeded"));
         assert!(!error_wants_failover("stream closed unexpectedly"));
+    }
+
+    #[test]
+    fn worker_allowlist_follows_the_worker_flag_not_the_current_model() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[agents]\nspawn_allowed_models = [\"claude:claude-opus-5-5\"]\n",
+        )
+        .unwrap();
+        crate::config::Config::invalidate_cache();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let provider: Arc<dyn Provider> = Arc::new(TwoAccountProvider {
+                    on_openai: Arc::new(StdMutex::new(false)),
+                    calls: Arc::new(StdMutex::new(Vec::new())),
+                });
+                let mut session = crate::session::Session::create_with_id(
+                    "session_worker_outside_allowlist".into(),
+                    None,
+                    None,
+                );
+                // A worker spawned before this allowlist existed still runs on
+                // fable. Its server-initiated turns must stay inside the list
+                // instead of turning into an unrestricted session.
+                session.model = Some("claude-fable-5".into());
+                session.is_swarm_worker = true;
+                let worker = Agent::new_with_session(
+                    Arc::clone(&provider),
+                    crate::tool::Registry::new(Arc::clone(&provider)).await,
+                    session,
+                    None,
+                );
+                let mut user_session = crate::session::Session::create_with_id(
+                    "session_user_outside_allowlist".into(),
+                    None,
+                    None,
+                );
+                user_session.model = Some("claude-fable-5".into());
+                let user = Agent::new_with_session(
+                    Arc::clone(&provider),
+                    crate::tool::Registry::new(Arc::clone(&provider)).await,
+                    user_session,
+                    None,
+                );
+
+                let worker_allowed = super::effective_worker_allowed_models(&worker);
+                let user_allowed = super::effective_worker_allowed_models(&user);
+
+                match prev_home {
+                    Some(value) => crate::env::set_var("JCODE_HOME", value),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+                crate::config::Config::invalidate_cache();
+
+                assert_eq!(
+                    worker_allowed,
+                    vec!["claude:claude-opus-5-5".to_string()],
+                    "a worker stays inside the allowlist even when it currently runs outside it"
+                );
+                assert!(
+                    user_allowed.is_empty(),
+                    "a user-started session is never restricted: {user_allowed:?}"
+                );
+            });
+    }
+
+    /// A worker that something moved outside the allowlist (an account-router
+    /// failover to fable, an older session) must not send a single request
+    /// there, whatever path starts the turn.
+    #[test]
+    fn swarm_worker_never_sends_a_request_outside_the_spawn_allowlist() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(home) => crate::env::set_var("JCODE_HOME", home),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+                crate::config::Config::invalidate_cache();
+            }
+        }
+        let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[agents]\nspawn_allowed_models = [\"test:claude-sonnet-5-5\"]\n",
+        )
+        .unwrap();
+        crate::config::Config::invalidate_cache();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                for (id, model, worker, expect_call) in [
+                    (
+                        "session_guard_fable_worker",
+                        "claude-fable-5-2",
+                        true,
+                        false,
+                    ),
+                    (
+                        "session_guard_allowed_worker",
+                        "claude-sonnet-5-5",
+                        true,
+                        true,
+                    ),
+                    ("session_guard_fable_user", "claude-fable-5-2", false, true),
+                ] {
+                    let provider = RejectingPrimaryProvider {
+                        model: Arc::new(StdMutex::new(model.into())),
+                        calls: Arc::new(StdMutex::new(Vec::new())),
+                        quota_failure: false,
+                    };
+                    let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+                    let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+                    let mut session =
+                        crate::session::Session::create_with_id(id.into(), None, None);
+                    session.provider_key = Some("test".into());
+                    let mut agent = Agent::new_with_session(provider_dyn, registry, session, None);
+                    if worker {
+                        agent.mark_swarm_worker().unwrap();
+                    }
+                    let lease = agent.claim_server_turn().unwrap();
+                    let (tx, _rx) = mpsc::unbounded_channel();
+                    let result = process_reserved_locked_message_with_server_failover(
+                        &mut agent,
+                        &lease,
+                        "task",
+                        Vec::new(),
+                        None,
+                        tx,
+                    )
+                    .await;
+                    let calls = provider.calls.lock().unwrap().clone();
+                    assert_eq!(!calls.is_empty(), expect_call, "{id}: {calls:?} {result:?}");
+                    if !expect_call {
+                        let error = format!("{:#}", result.unwrap_err());
+                        assert!(error.contains("spawn_allowed_models"), "{id}: {error}");
+                    }
+                }
+            });
+    }
+
+    /// A worker turn that does not come from spawn/assign (wake, reload resume,
+    /// direct message) must still move to the configured fallback model.
+    #[test]
+    fn worker_wake_turn_uses_configured_model_fallbacks() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(home) => crate::env::set_var("JCODE_HOME", home),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+                crate::config::Config::invalidate_cache();
+            }
+        }
+        let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", home.path());
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[agents]\nswarm_model_fallbacks = [\"claude:claude-sonnet-5-5\"]\n",
+        )
+        .unwrap();
+        crate::config::Config::invalidate_cache();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                for (id, worker) in [("session_wake_worker", true), ("session_wake_user", false)] {
+                    let provider = RejectingPrimaryProvider {
+                        model: Arc::new(StdMutex::new("deepseek-v4.1-flash".into())),
+                        calls: Arc::new(StdMutex::new(Vec::new())),
+                        quota_failure: true,
+                    };
+                    let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+                    let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+                    let session = crate::session::Session::create_with_id(id.into(), None, None);
+                    let mut agent = Agent::new_with_session(provider_dyn, registry, session, None);
+                    if worker {
+                        agent.mark_swarm_worker().unwrap();
+                    }
+                    let lease = agent.claim_server_turn().unwrap();
+                    let (tx, _rx) = mpsc::unbounded_channel();
+                    let result = process_reserved_locked_message_with_server_failover(
+                        &mut agent,
+                        &lease,
+                        "wake up",
+                        Vec::new(),
+                        None,
+                        tx,
+                    )
+                    .await;
+                    assert_eq!(result.is_ok(), worker, "{id}: {result:?}");
+                    assert_eq!(
+                        provider.calls.lock().unwrap().last().map(String::as_str)
+                            == Some("claude-sonnet-5-5"),
+                        worker,
+                        "{id}: only a worker switches models on its own"
+                    );
+                }
+            });
     }
 }

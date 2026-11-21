@@ -9,9 +9,74 @@ use std::time::Duration;
 use tokio::sync::{RwLock, mpsc};
 
 const AWAIT_MEMBERS_DIR: &str = "jcode-await-members";
+const STOPPED_MEMBERS_DIR: &str = "jcode-await-stopped-members";
 const FINAL_STATE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const PENDING_STATE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 static STATE_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct StoppedMember {
+    pub session_id: String,
+    pub friendly_name: Option<String>,
+}
+
+pub(super) fn record_stopped_member(
+    swarm_id: &str,
+    session_id: &str,
+    friendly_name: Option<String>,
+    unique_name: bool,
+) {
+    let stopped = StoppedMember {
+        session_id: session_id.to_owned(),
+        friendly_name,
+    };
+    let mut identifiers = vec![session_id];
+    if unique_name
+        && let Some(name) = stopped.friendly_name.as_deref()
+        && name != session_id
+    {
+        identifiers.push(name);
+    }
+    for identifier in identifiers {
+        let key = hashed_request_key(identifier, "stopped-member", &[swarm_id.to_owned()]);
+        save_json_state(STOPPED_MEMBERS_DIR, &key, &stopped, "stopped swarm member");
+    }
+
+    // Swarm-wide waits track live membership (including late joiners).
+    // Retain departures in the waiting generation, not the live registry.
+    let _guard = STATE_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    let now = now_unix_ms();
+    for mut state in scan_pending_await_members_including_expired() {
+        if state.swarm_id == swarm_id
+            && state.session_id != session_id
+            && state.requested_ids.is_empty()
+            && state.deadline_unix_ms > now
+            && !state
+                .stopped_members
+                .iter()
+                .any(|member| member.session_id == session_id)
+        {
+            state.stopped_members.push(stopped.clone());
+            save_state_unlocked(&state);
+        }
+    }
+}
+
+pub(super) fn stopped_member(swarm_id: &str, identifier: &str) -> Option<(String, Option<String>)> {
+    let key = hashed_request_key(identifier, "stopped-member", &[swarm_id.to_owned()]);
+    let stopped: StoppedMember = load_json_state(STOPPED_MEMBERS_DIR, &key, |_| false)?;
+    Some((stopped.session_id, stopped.friendly_name))
+}
+
+#[test]
+fn partial_await_record_loads_without_resuming_an_unidentifiable_swarm() {
+    let record = serde_json::json!({
+        "key": "wait", "session_id": "session", "created_at_unix_ms": 1,
+        "deadline_unix_ms": u64::MAX, "background": true, "final_response": null
+    });
+    let state: PersistedAwaitMembersState = serde_json::from_value(record).unwrap();
+    assert!(!state.is_pending());
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedAwaitMembersResult {
@@ -25,9 +90,14 @@ pub struct PersistedAwaitMembersResult {
 pub struct PersistedAwaitMembersState {
     pub key: String,
     pub session_id: String,
+    #[serde(default)]
     pub swarm_id: String,
+    #[serde(default)]
     pub target_status: Vec<String>,
+    #[serde(default)]
     pub requested_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) stopped_members: Vec<StoppedMember>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     pub created_at_unix_ms: u64,
@@ -57,7 +127,7 @@ impl PersistedAwaitMembersState {
     }
 
     pub fn is_pending(&self) -> bool {
-        self.final_response.is_none()
+        self.final_response.is_none() && !self.swarm_id.is_empty()
     }
 
     pub fn remaining_timeout(&self) -> Duration {
@@ -172,14 +242,24 @@ pub(super) fn load_state(key: &str) -> Option<PersistedAwaitMembersState> {
 
 pub(crate) fn save_state(state: &PersistedAwaitMembersState) {
     let _guard = STATE_WRITE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(current) = load_state(&state.key)
-        && (current.created_at_unix_ms > state.created_at_unix_ms
+    let current = load_state(&state.key);
+    if current.as_ref().is_some_and(|current| {
+        current.created_at_unix_ms > state.created_at_unix_ms
             || (current.created_at_unix_ms == state.created_at_unix_ms
-                && current.final_response.is_some()))
-    {
+                && current.final_response.is_some())
+    }) {
         return;
     }
-    save_state_unlocked(state);
+    if let Some(current) = current.filter(|current| {
+        current.created_at_unix_ms == state.created_at_unix_ms
+            && !current.stopped_members.is_empty()
+    }) {
+        let mut state = state.clone();
+        state.stopped_members = current.stopped_members;
+        save_state_unlocked(&state);
+    } else {
+        save_state_unlocked(state);
+    }
 }
 
 fn save_state_unlocked(state: &PersistedAwaitMembersState) {
@@ -225,6 +305,7 @@ pub fn set_dependency_delivery(
 /// tens of ms each. Writes in this process invalidate it directly, since the
 /// directory mtime alone can miss same-tick updates.
 struct PendingScan {
+    dir: std::path::PathBuf,
     dir_mtime: Option<std::time::SystemTime>,
     built_at: std::time::Instant,
     states: Vec<PersistedAwaitMembersState>,
@@ -266,6 +347,7 @@ pub(super) fn ensure_pending_state(
         swarm_id: swarm_id.to_string(),
         target_status: target_status.to_vec(),
         requested_ids: requested_ids.to_vec(),
+        stopped_members: Vec::new(),
         mode: mode.map(str::to_string),
         created_at_unix_ms: load_state(key)
             .map(|old| now_unix_ms().max(old.created_at_unix_ms.saturating_add(1)))
@@ -303,10 +385,19 @@ pub(super) fn persist_final_response(
         summary,
         resolved_at_unix_ms: now_unix_ms(),
     });
-    if !superseded {
-        save_state_unlocked(&next);
+    if superseded {
+        return (next, false);
     }
-    (next, !superseded)
+    // The terminal result is the durable delivery marker. Never publish the
+    // completion if that marker could not be committed, otherwise a restart
+    // can publish the same result again from the still-pending primary.
+    let path = super::durable_state::state_path(AWAIT_MEMBERS_DIR, &next.key);
+    if let Err(error) = crate::storage::write_json(&path, &next) {
+        crate::logging::warn(&format!("Failed to persist await completion: {error}"));
+        return (next, false);
+    }
+    invalidate_pending_scan();
+    (next, true)
 }
 
 pub fn pending_await_members_for_session(session_id: &str) -> Vec<PersistedAwaitMembersState> {
@@ -335,7 +426,8 @@ pub(super) fn all_pending_await_members() -> Vec<PersistedAwaitMembersState> {
 /// be finalized with a timeout instead of silently dropping the promised
 /// notify/wake.
 pub(super) fn all_pending_await_members_including_expired() -> Vec<PersistedAwaitMembersState> {
-    let dir_mtime = std::fs::metadata(state_dir(AWAIT_MEMBERS_DIR))
+    let dir = state_dir(AWAIT_MEMBERS_DIR);
+    let dir_mtime = std::fs::metadata(&dir)
         .and_then(|meta| meta.modified())
         .ok();
     {
@@ -344,6 +436,7 @@ pub(super) fn all_pending_await_members_including_expired() -> Vec<PersistedAwai
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(scan) = guard.as_ref()
             && scan.dir_mtime.is_some()
+            && scan.dir == dir
             && scan.dir_mtime == dir_mtime
             && scan.built_at.elapsed() < PENDING_SCAN_TTL
         {
@@ -354,6 +447,7 @@ pub(super) fn all_pending_await_members_including_expired() -> Vec<PersistedAwai
     *PENDING_SCAN
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(PendingScan {
+        dir,
         dir_mtime,
         built_at: std::time::Instant::now(),
         states: states.clone(),
@@ -370,13 +464,19 @@ fn scan_pending_await_members_including_expired() -> Vec<PersistedAwaitMembersSt
     let mut pending = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_file() {
+        // Atomic writes retain the previous generation as `.bak`. It is not
+        // a second await: scanning it resurrects a pending wait after its
+        // completed primary has expired, replaying old notifications forever.
+        if !path.is_file() || path.extension().is_none_or(|ext| ext != "json") {
             continue;
         }
 
         let Ok(state) = crate::storage::read_json::<PersistedAwaitMembersState>(&path) else {
             continue;
         };
+        if path.file_stem().and_then(|stem| stem.to_str()) != Some(state.key.as_str()) {
+            continue;
+        }
         if is_stale(&state) {
             let _ = std::fs::remove_file(path);
             continue;

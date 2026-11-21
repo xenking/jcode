@@ -6,8 +6,10 @@ use crate::auth;
 mod accessors;
 mod account_fetch;
 pub use account_fetch::fetch_oauth_account_usage;
+mod anthropic_banked;
 mod anthropic_fable_reset;
 mod anthropic_reset;
+mod omp_banked;
 pub(crate) use anthropic_fable_reset::auto_reset_fable_usage;
 mod anthropic_response;
 pub(crate) use anthropic_response::invalidate_auth_failure as invalidate_anthropic_usage_auth_failure;
@@ -28,17 +30,22 @@ mod openai_reset;
 pub(crate) use openai_reset::auto_reset_weekly_usage;
 mod provider_fetch;
 mod remote_accounts;
+#[cfg(test)]
+pub(crate) use remote_accounts::run_remote_account_test_in_subprocess;
 mod startup_snapshot;
 pub use accessors::*;
+pub use anthropic_banked::AnthropicBankedResets;
 pub use anthropic_reset::{
     AnthropicLimitResetOffer, AnthropicLimitResetOutcome, AnthropicLimitResetUnavailable,
     PendingAnthropicLimitReset, consume_anthropic_limit_reset,
     invalidate_anthropic_usage_reset_state, prepare_anthropic_limit_reset,
 };
 use api_keys::enqueue_api_key_usage_tasks;
+pub(crate) use cache::hydrate_persisted_account_usage;
 use cache::*;
 pub use cache::{
     account_known_exhausted, cached_account_usage_snapshot, cached_account_usage_status_snapshot,
+    cached_account_usage_windows, cached_anthropic_usage_for_label,
 };
 pub use disk_cache::{
     export_last_good as export_limits_snapshot, import_last_good as import_limits_snapshot,
@@ -71,7 +78,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 /// Usage API endpoint
-const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage?at_wall=1&skip_spend=1";
+const USAGE_URL: &str =
+    "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&at_wall=1&skip_spend=1";
 
 /// OpenAI ChatGPT usage endpoint
 const OPENAI_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
@@ -193,7 +201,10 @@ async fn fetch_anthropic_usage_data_uncached(
             .as_ref()
             .and_then(|window| window.utilization)
             .is_some();
-    let reset_status = serde_json::json!({ "juniper_tide": data.juniper_tide });
+    let reset_status = serde_json::json!({
+        "juniper_tide": data.juniper_tide,
+        "cedar_ember": data.cedar_ember,
+    });
     let usage = UsageData {
         five_hour: data
             .five_hour

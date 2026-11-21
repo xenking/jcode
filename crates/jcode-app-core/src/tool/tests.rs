@@ -8,24 +8,6 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::ffi::OsString;
 
-#[test]
-fn base_tools_do_not_expose_invalid_reporting_tool() {
-    let skills = Arc::new(RwLock::new(crate::skill::SkillRegistry::default()));
-    let tools = Registry::base_tools(&skills);
-    assert!(!tools.contains_key("invalid"));
-    assert!(tools.contains_key("bash"));
-}
-
-#[test]
-fn base_tools_exclude_replace_and_keep_other_editing_tools() {
-    let skills = Arc::new(RwLock::new(crate::skill::SkillRegistry::default()));
-    let tools = Registry::base_tools(&skills);
-    assert!(!tools.contains_key("replace"));
-    for name in ["edit", "write", "apply_patch"] {
-        assert!(tools.contains_key(name), "missing editing tool: {name}");
-    }
-}
-
 struct TestHomeGuard {
     previous: Option<OsString>,
 }
@@ -97,129 +79,6 @@ async fn register_empty_mcp_tools(registry: &Registry, working_dir: &std::path::
             Some(working_dir.to_path_buf()),
         )
         .await;
-}
-
-#[tokio::test]
-async fn mcp_list_remains_available_while_background_connect_is_handshaking() {
-    let _env_lock = crate::storage::lock_test_env();
-    let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
-    let _home_guard = TestHomeGuard::new(home.path());
-    let working_dir = tempfile::tempdir().expect("create isolated MCP working directory");
-
-    std::fs::write(
-        home.path().join("mcp.json"),
-        r#"{
-            "mcpServers": {
-                "slow": {
-                    "command": "/bin/sh",
-                    "args": ["-c", "sleep 2"],
-                    "timeout_secs": 86400
-                }
-            }
-        }"#,
-    )
-    .expect("write slow MCP config");
-
-    let registry = Registry::empty();
-    registry
-        .register_mcp_tools_for_dir(None, None, None, Some(working_dir.path().to_path_buf()))
-        .await;
-
-    // Let the background connection task acquire its read guard and enter the
-    // slow initialize handshake before asking the management tool to list.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let output = tokio::time::timeout(
-        std::time::Duration::from_millis(500),
-        registry.execute(
-            "mcp",
-            serde_json::json!({"action": "list"}),
-            mcp_test_context(working_dir.path()),
-        ),
-    )
-    .await
-    .expect("mcp list must not wait for a slow background handshake")
-    .expect("mcp list should succeed");
-
-    assert!(
-        output.output.contains("slow"),
-        "unexpected output: {}",
-        output.output
-    );
-}
-
-#[tokio::test]
-async fn real_mcp_registration_does_not_retain_registry_tool_map() {
-    let _env_lock = crate::storage::lock_test_env();
-    let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
-    let _home_guard = TestHomeGuard::new(home.path());
-    let working_dir = tempfile::tempdir().expect("create isolated MCP working directory");
-    let registry = Registry::empty();
-    let tools = Arc::downgrade(&registry.tools);
-
-    register_empty_mcp_tools(&registry, working_dir.path()).await;
-    assert!(registry.tool_names().await.iter().any(|name| name == "mcp"));
-
-    drop(registry);
-
-    assert!(
-        tools.upgrade().is_none(),
-        "McpManagementTool must not strongly retain the registry tool map that owns it"
-    );
-}
-
-#[tokio::test]
-async fn mcp_management_upgrades_registry_through_surviving_clone() {
-    let _env_lock = crate::storage::lock_test_env();
-    let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
-    let _home_guard = TestHomeGuard::new(home.path());
-    let working_dir = tempfile::tempdir().expect("create isolated MCP working directory");
-    let registry = Registry::empty();
-    let tools = Arc::downgrade(&registry.tools);
-
-    register_empty_mcp_tools(&registry, working_dir.path()).await;
-    let surviving_clone = registry.clone();
-    drop(registry);
-
-    let stale_tool = surviving_clone
-        .tools
-        .read()
-        .await
-        .get("mcp")
-        .cloned()
-        .expect("MCP management tool should be registered");
-    surviving_clone
-        .register("mcp__lifetime__sentinel".to_string(), stale_tool)
-        .await;
-
-    let output = surviving_clone
-        .execute(
-            "mcp",
-            serde_json::json!({"action": "reload"}),
-            mcp_test_context(working_dir.path()),
-        )
-        .await
-        .expect("MCP management should upgrade through the surviving registry clone");
-    assert!(output.output.contains("No servers found in config"));
-    assert!(
-        !surviving_clone
-            .tool_names()
-            .await
-            .iter()
-            .any(|name| name == "mcp__lifetime__sentinel"),
-        "reload should mutate the surviving registry through the weak handle"
-    );
-    assert!(
-        surviving_clone
-            .tool_names()
-            .await
-            .iter()
-            .any(|name| name == "mcp"),
-        "reload should preserve the MCP management tool"
-    );
-    assert!(tools.upgrade().is_some());
-
-    drop(surviving_clone);
-    assert!(tools.upgrade().is_none());
 }
 
 #[tokio::test]
@@ -307,22 +166,6 @@ fn test_resolve_skill_aliases_to_skill_manage() {
     assert_eq!(Registry::resolve_tool_name("skill"), "skill_manage");
     assert_eq!(Registry::resolve_tool_name("Skill"), "skill_manage");
     assert_eq!(Registry::resolve_tool_name("skill_manage"), "skill_manage");
-}
-
-#[tokio::test]
-async fn test_discover_tools_not_registered_when_sponsors_disabled() {
-    // sponsors.enabled is the legacy config key; when false, integration discovery must not exist.
-    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
-    let registry = Registry::new(provider).await;
-    let names = registry.tool_names().await;
-    if crate::config::config().sponsors.enabled {
-        assert!(names.iter().any(|n| n == "integration_tools"));
-    } else {
-        assert!(
-            !names.iter().any(|n| n == "integration_tools"),
-            "integration_tools must not be registered when sponsors are disabled"
-        );
-    }
 }
 
 #[tokio::test]
@@ -466,6 +309,55 @@ fn test_resolve_tool_name_oauth_aliases() {
 }
 
 #[tokio::test]
+async fn model_facing_definitions_advertise_canonical_names_only() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let definitions = registry.definitions(None).await;
+    assert!(!definitions.is_empty());
+    for definition in &definitions {
+        assert_eq!(
+            Registry::resolve_tool_name(&definition.name),
+            definition.name,
+            "advertised tool-name alias {}",
+            definition.name
+        );
+        let props = &definition.input_schema["properties"];
+        let hidden_fields: &[&str] = match definition.name.as_str() {
+            "swarm" => &["target_session", "initial_message"],
+            "edit" => &["old_string", "new_string", "replace_all"],
+            "bg" => &["lines"],
+            "agentgrep" => &["pattern", "file_path", "include"],
+            "codemode" => &["script", "source", "js"],
+            "load_tools" => &["tools", "name"],
+            _ => &[],
+        };
+        for field in hidden_fields {
+            assert!(
+                props.get(*field).is_none(),
+                "{} exposes alias {field}",
+                definition.name
+            );
+        }
+        let forbidden_enum_values: &[(&str, &str)] = match definition.name.as_str() {
+            "bg" => &[("action", "watch"), ("action", "subscribe")],
+            "gmail" => &[("action", "list")],
+            "mcp" => &[("transport", "streamable-http")],
+            "desktop_selfdev" => &[("action", "build-reload")],
+            _ => &[],
+        };
+        for (field, alias) in forbidden_enum_values {
+            if let Some(values) = props[*field]["enum"].as_array() {
+                assert!(
+                    !values.contains(&serde_json::json!(alias)),
+                    "{} exposes {field} alias {alias}",
+                    definition.name
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_batch_resolves_function_namespaced_tools() {
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
@@ -588,6 +480,7 @@ async fn registry_execute_pre_tool_hook_blocks_and_allows() {
     use std::os::unix::fs::PermissionsExt;
 
     let _guard = crate::storage::lock_test_env();
+    let _allow_hooks = jcode_base::hooks::TestHooksGuard::allow();
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
     let temp = tempfile::TempDir::new().expect("temp dir");
@@ -705,8 +598,6 @@ async fn print_tool_definition_token_report() {
 #[tokio::test]
 async fn tool_descriptions_stay_under_token_cap() {
     const DESCRIPTION_TOKEN_CAP: usize = 20;
-    // integration_tools keeps a deliberate second sentence explaining that catalog
-    // entries integrate directly with the agent.
     // swarm appends the user-tunable swarm-prompt.md by design.
     // batch carries a deliberate parallel-call example (2f4abae33, pinned by
     // batch_tests::description_includes_parallel_tool_call_example).
@@ -717,14 +608,23 @@ async fn tool_descriptions_stay_under_token_cap() {
     // applet carries the whole view-node vocabulary inline, since the model has
     // no other way to learn which node types and props the host renders.
     // codemode documents its sandbox API.
+    // ask is the only blocking question tool: its one sentence carries the
+    // trigger (a genuine owner decision you cannot research) and the two habits
+    // that make a batch of questions usable, so it is not boilerplate. The full
+    // rubric lives in the base system prompt; the question shape lives in the
+    // schema. Pinned by `blocking_and_desktop_tools_keep_their_steering`.
+    // macos_computer_use carries the only always-on guard for a tool that moves
+    // the user's cursor and focus: run in the background and act only on the
+    // requested task. Its action vocabulary is behind action='discover'.
     const EXEMPT: &[&str] = &[
-        "integration_tools",
         "swarm",
         "batch",
         "browser",
         "todo",
         "applet",
         "codemode",
+        "ask",
+        "macos_computer_use",
     ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
@@ -748,6 +648,51 @@ async fn tool_descriptions_stay_under_token_cap() {
         over_cap.is_empty(),
         "tool descriptions over the {DESCRIPTION_TOKEN_CAP}-token cap:\n{}",
         over_cap.join("\n")
+    );
+}
+
+/// The two tools exempted from the 20-token description cap must still carry
+/// the steering that earns the exemption. Without this, a later trim can strip
+/// the trigger from `ask` (and the tool stops being called) or the safety
+/// restraint from `macos_computer_use` (and it starts moving the user's cursor
+/// on its own initiative) while the cap test stays green.
+#[tokio::test]
+async fn blocking_and_desktop_tools_keep_their_steering() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let definitions = registry.definitions(None).await;
+    let description = |name: &str| {
+        definitions
+            .iter()
+            .find(|def| def.name == name)
+            .map(|def| def.description.as_str())
+            .unwrap_or_else(|| panic!("{name} is not registered"))
+    };
+
+    let ask = description("ask");
+    let ask_lower = ask.to_lowercase();
+    assert!(
+        ask_lower.contains("genuine owner decision"),
+        "ask keeps its trigger: {ask}"
+    );
+    assert!(ask_lower.contains("blocking"), "ask says it blocks: {ask}");
+    assert!(
+        ask_lower.contains("batch pending decisions into one call"),
+        "ask keeps the batching habit: {ask}"
+    );
+    assert!(
+        ask.contains("(Recommended)"),
+        "ask keeps the recommendation habit: {ask}"
+    );
+
+    let desktop = description("macos_computer_use");
+    assert!(
+        desktop.contains("act only on the requested task"),
+        "desktop control keeps the restraint: {desktop}"
+    );
+    assert!(
+        desktop.contains("background"),
+        "desktop control keeps the background-first rule: {desktop}"
     );
 }
 
@@ -1465,6 +1410,10 @@ async fn execute_big_output(input: Value) -> String {
 }
 
 async fn execute_big_output_in(session_id: &str, input: Value) -> String {
+    // Every call gets its own invocation id, like the model issuing a fresh tool
+    // call. A repeat is a *later* invocation: if two calls shared an id they would
+    // be one invocation retried, which is not what "repeat the same call" means.
+    static CALL_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
     {
@@ -1481,7 +1430,10 @@ async fn execute_big_output_in(session_id: &str, input: Value) -> String {
     let ctx = ToolContext {
         session_id: session_id.to_string(),
         message_id: "test".to_string(),
-        tool_call_id: "test".to_string(),
+        tool_call_id: format!(
+            "test-call-{}",
+            CALL_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ),
         working_dir: Some(std::env::temp_dir()),
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
@@ -1697,9 +1649,131 @@ async fn test_batch_guards_both_its_subcalls_and_its_own_aggregate() {
         "aggregate should contain per-subcall sections, got: {}",
         &accepted[..accepted.len().min(300)]
     );
+    // The batch-level opt-in is forwarded to the sub-calls, so they return
+    // truncated payloads instead of refusals, and no sub-call is withheld.
+    // Sub-call-level guarding is pinned by
+    // `batch_subcalls_are_guarded_with_the_session_budget`.
+    assert_eq!(
+        accepted.matches("OUTPUT WITHHELD").count(),
+        0,
+        "a batch-level opt-in covers its sub-calls: {}",
+        &accepted[..accepted.len().min(300)]
+    );
     assert!(
-        accepted.matches("OUTPUT WITHHELD").count() >= 1,
-        "each sub-call is guarded on its own; neither opted in"
+        accepted.contains("OUTPUT TRUNCATED"),
+        "opt-in returns truncated sub-call payloads, got tail: {}",
+        &accepted[accepted.len().saturating_sub(300)..]
+    );
+}
+
+/// Sub-calls are guarded against the *session's* context, not a default one.
+/// This used to be decided by a fresh `CompactionManager` per sub-call, so a
+/// batch admitted outputs that the session could not afford, and the outcome
+/// depended on the default budget rather than the caller's.
+#[tokio::test]
+async fn batch_subcalls_are_guarded_with_the_session_budget() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    {
+        let mut mgr = registry.compaction.write().await;
+        *mgr = CompactionManager::new().with_budget(20_000);
+    }
+    // ~7.5k tokens: affordable for a 200k default budget, too big for this
+    // session's 20k budget (single-output cap 6k tokens).
+    registry
+        .register(
+            "big_output".to_string(),
+            Arc::new(BigOutputTool { chars: 30_000 }),
+        )
+        .await;
+
+    let output = registry
+        .execute(
+            "batch",
+            serde_json::json!({
+                "intent": "test",
+                "tool_calls": [
+                    { "tool": "big_output", "intent": "one" },
+                    { "tool": "big_output", "intent": "two" },
+                ],
+            }),
+            ToolContext {
+                session_id: "test-batch-session-budget".to_string(),
+                message_id: "test".to_string(),
+                tool_call_id: "test".to_string(),
+                working_dir: Some(std::env::temp_dir()),
+                stdin_request_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: ToolExecutionMode::Direct,
+            },
+        )
+        .await
+        .expect("batch should succeed")
+        .output;
+
+    assert_eq!(
+        output.matches("OUTPUT WITHHELD").count(),
+        2,
+        "both sub-calls must be judged against the session budget, got: {}",
+        &output[..output.len().min(400)]
+    );
+    assert!(
+        !output.contains(&"x".repeat(100)),
+        "no payload may survive a refused sub-call"
+    );
+}
+
+/// Two identical sub-calls in one batch are two calls, not a refusal plus its
+/// accepted repeat. They share a repeat key (only `intent` differs, which is not
+/// identifying), so the second one used to spend the first one's record and slip
+/// through as an opt-in. Which one lost that race depended on completion order,
+/// which is what made the aggregate test flaky.
+#[tokio::test]
+async fn a_sibling_subcall_is_not_a_repeated_withheld_call() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    {
+        let mut mgr = registry.compaction.write().await;
+        *mgr = CompactionManager::new().with_budget(10_000);
+    }
+    registry
+        .register(
+            "big_output".to_string(),
+            Arc::new(BigOutputTool { chars: 400_000 }),
+        )
+        .await;
+
+    let mut counts = Vec::new();
+    for attempt in 0..8 {
+        let output = registry
+            .execute(
+                "batch",
+                serde_json::json!({
+                    "intent": "test",
+                    "tool_calls": [
+                        { "tool": "big_output", "intent": "one" },
+                        { "tool": "big_output", "intent": "two" },
+                    ],
+                }),
+                ToolContext {
+                    session_id: format!("test-batch-sibling-repeat-{attempt}"),
+                    message_id: "test".to_string(),
+                    tool_call_id: format!("call-{attempt}"),
+                    working_dir: Some(std::env::temp_dir()),
+                    stdin_request_tx: None,
+                    graceful_shutdown_signal: None,
+                    execution_mode: ToolExecutionMode::Direct,
+                },
+            )
+            .await
+            .expect("batch should succeed")
+            .output;
+        counts.push(output.matches("OUTPUT WITHHELD").count());
+    }
+
+    assert!(
+        counts.iter().all(|count| *count == 2),
+        "both siblings must be withheld on every run, got {counts:?}"
     );
 }
 
@@ -1960,11 +2034,79 @@ fn touched_paths_include_patch_headers_and_path_keys() {
     assert_eq!(Registry::patch_paths(diff), vec!["src/x.rs", "new.md"]);
 }
 
+/// Set a `JCODE_HOOK_*` override and make it visible immediately.
+///
+/// The hook command list comes from `crate::config::config()`, a throttled
+/// reloadable cache, and hook env overrides are only read during a load. A test
+/// that sets the variable and executes right away therefore races every other
+/// test in the binary: whichever one loaded config first decides whether the
+/// override exists. That is why a hook test passes under a single-test filter
+/// and fails in a full `--lib` run. Restores the previous value (and reloads
+/// again) on drop.
+struct HookEnvGuard {
+    name: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+fn set_hook_env(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> HookEnvGuard {
+    let previous = std::env::var_os(name);
+    crate::env::set_var(name, value);
+    crate::config::invalidate_config_cache();
+    HookEnvGuard { name, previous }
+}
+
+impl Drop for HookEnvGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => crate::env::set_var(self.name, value),
+            None => crate::env::remove_var(self.name),
+        }
+        crate::config::invalidate_config_cache();
+    }
+}
+
+/// A hook override applies even when config was already loaded.
+///
+/// This is the contract the feedback test depends on. Reproduced here without a
+/// tool call so the failure names the cause: a cached config keeps the old hook
+/// list until something invalidates it.
+#[test]
+fn hook_env_override_applies_after_config_is_already_loaded() {
+    let _env_lock = crate::storage::lock_test_env();
+    // The subject is hook resolution, so opt this test back into hooks: test builds
+    // suppress them by default.
+    let _allow_hooks = jcode_base::hooks::TestHooksGuard::allow();
+    // Load config before the override exists, as any earlier test would.
+    let _ = crate::config::config();
+    let baseline = jcode_base::hooks::hook_commands("post_tool_feedback");
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let script = dir.path().join("hook.sh");
+    std::fs::write(&script, "#!/bin/sh\nexit 0\n").expect("write hook");
+    let expected = script.to_string_lossy().to_string();
+
+    {
+        let _env = set_hook_env("JCODE_HOOK_POST_TOOL_FEEDBACK", &script);
+        assert_eq!(
+            jcode_base::hooks::hook_commands("post_tool_feedback"),
+            vec![expected],
+            "an env override must take effect on an already-loaded config"
+        );
+    }
+
+    assert_eq!(
+        jcode_base::hooks::hook_commands("post_tool_feedback"),
+        baseline,
+        "dropping the guard restores the previous hook list"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn post_tool_feedback_hook_appends_stdout_to_tool_result() {
     use std::os::unix::fs::PermissionsExt;
     let _env_lock = crate::storage::lock_test_env();
+    let _allow_hooks = jcode_base::hooks::TestHooksGuard::allow();
     let dir = tempfile::tempdir().expect("temp dir");
     let target = dir.path().join("prose.md");
     std::fs::write(&target, "hello\n").expect("write target");
@@ -1975,8 +2117,7 @@ async fn post_tool_feedback_hook_appends_stdout_to_tool_result() {
     )
     .expect("write script");
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    let previous = std::env::var_os("JCODE_HOOK_POST_TOOL_FEEDBACK");
-    crate::env::set_var("JCODE_HOOK_POST_TOOL_FEEDBACK", &script);
+    let _env = set_hook_env("JCODE_HOOK_POST_TOOL_FEEDBACK", &script);
 
     let registry = Registry::new(Arc::new(MockProvider) as Arc<dyn Provider>).await;
     let mut ctx = mcp_test_context(dir.path());
@@ -1985,10 +2126,7 @@ async fn post_tool_feedback_hook_appends_stdout_to_tool_result() {
         .execute("read", serde_json::json!({"file_path": "prose.md"}), ctx)
         .await;
 
-    match previous {
-        Some(value) => crate::env::set_var("JCODE_HOOK_POST_TOOL_FEEDBACK", value),
-        None => crate::env::remove_var("JCODE_HOOK_POST_TOOL_FEEDBACK"),
-    }
+    drop(_env);
     let output = result.expect("read should succeed").output;
     assert!(output.contains("hello"), "{output}");
     assert!(output.contains("[post_tool_feedback]"), "{output}");
@@ -1998,6 +2136,55 @@ async fn post_tool_feedback_hook_appends_stdout_to_tool_result() {
         "{output}"
     );
     assert!(output.contains("stdin-ok"), "{output}");
+}
+
+/// A hook configured for this process must not run inside a unit test.
+///
+/// Unit tests run the production config loader, so they used to inherit whatever
+/// the developer has in `~/.jcode/config.toml`: a `pre_tool` gate added its
+/// timeout to the paused clock of unrelated timing tests, and any hook's side
+/// effects landed in whatever test happened to be running. Test builds now
+/// suppress hooks unless a test opts in (see `jcode_base::hooks`), and this test
+/// pins that: it configures a hook that would leave a marker file and asserts the
+/// marker never appears. It is deterministic on any machine because the hook comes
+/// from this test's own env, not from the user's config.
+#[cfg(unix)]
+#[tokio::test]
+async fn user_configured_hooks_cannot_run_inside_a_unit_test() {
+    use std::os::unix::fs::PermissionsExt;
+    let _env_lock = crate::storage::lock_test_env();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let target = dir.path().join("prose.md");
+    std::fs::write(&target, "hello\n").expect("write target");
+    let marker = dir.path().join("hook-ran");
+    let script = dir.path().join("leak.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\n: > '{}'\nexit 0\n",
+            marker.display()
+        ),
+    )
+    .expect("write script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let _pre = set_hook_env("JCODE_HOOK_PRE_TOOL", &script);
+    let _feedback = set_hook_env("JCODE_HOOK_POST_TOOL_FEEDBACK", &script);
+
+    let registry = Registry::new(Arc::new(MockProvider) as Arc<dyn Provider>).await;
+    let result = registry
+        .execute(
+            "read",
+            serde_json::json!({"file_path": "prose.md"}),
+            mcp_test_context(dir.path()),
+        )
+        .await
+        .expect("read should succeed");
+
+    assert!(result.output.contains("hello"), "{}", result.output);
+    assert!(
+        !marker.exists(),
+        "a hook configured for the process ran inside a unit test"
+    );
 }
 
 /// Dump every model-visible tool definition as JSON so a real tokenizer can
@@ -2023,3 +2210,6 @@ async fn dump_tool_definitions() {
         .collect();
     println!("TOOL_DEFS_JSON\n{}", serde_json::to_string(&defs).unwrap());
 }
+
+#[path = "tests_additional_tests.rs"]
+mod additional_base_tools_do_not_expose_invalid_reporting_tool;

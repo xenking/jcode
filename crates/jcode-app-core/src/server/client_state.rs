@@ -3,7 +3,7 @@ use super::SessionAgents;
 use super::server_has_newer_binary;
 use crate::agent::Agent;
 use crate::bus::Bus;
-use crate::message::{ContentBlock, Role};
+use crate::message::Role;
 use crate::protocol::{
     HistoryMessage, ServerEvent, SessionActivitySnapshot, TokenUsageTotals, encode_event,
 };
@@ -84,61 +84,9 @@ fn should_debounce_attach_model_prefetch(provider_name: &str) -> bool {
     false
 }
 
-fn history_provider_name_from_session(session: &crate::session::Session) -> Option<String> {
-    let key = session.provider_key.as_deref()?.trim();
-    if key.is_empty() {
-        return None;
-    }
-
-    let label = match key.to_ascii_lowercase().as_str() {
-        "openai" => "OpenAI".to_string(),
-        "claude" | "anthropic" => "Anthropic".to_string(),
-        "openrouter" => "OpenRouter".to_string(),
-        "copilot" => "GitHub Copilot".to_string(),
-        "cursor" => "Cursor".to_string(),
-        "gemini" => "Gemini".to_string(),
-        "bedrock" => "Bedrock".to_string(),
-        "antigravity" => "Antigravity".to_string(),
-        "jcode" => "Jcode".to_string(),
-        // A direct OpenAI-compatible profile is persisted either bare
-        // (`deepseek`, the session vocabulary) or as its source key
-        // (`openai-compatible:deepseek`). Both name the same profile, so report
-        // its display name like every other arm here; a raw key would otherwise
-        // reach the header, and `source_key_for_provider_label` maps the
-        // prefixed shape away from `openai:api-key` only by accident (#1286).
-        other => {
-            // Import-source codes are stored in the same field but are not
-            // profile routes; `opencode` in particular collides with the
-            // `OpenCode Zen` profile id, so it must stay verbatim.
-            const IMPORT_SOURCE_CODES: &[&str] = &["opencode", "claude-code", "openai-codex"];
-            if IMPORT_SOURCE_CODES.contains(&other) {
-                other.to_string()
-            } else {
-                let profile_id = other.strip_prefix("openai-compatible:").unwrap_or(other);
-                crate::provider_catalog::openai_compatible_profile_by_id(profile_id)
-                    .map(|profile| profile.display_name.to_string())
-                    .unwrap_or_else(|| other.to_string())
-            }
-        }
-    };
-
-    Some(label)
-}
-
-/// The provider name a `History` payload reports.
-///
-/// The persisted session key wins when there is one. Otherwise ask for the
-/// profile-aware label: `Provider::name()` is the stable machine id for the
-/// provider *class* (`OpenRouter` for the multiplexing slot, `openrouter` for
-/// a concrete runtime instance), and that slot also serves every direct
-/// OpenAI-compatible profile, so it must not be shown as this session's
-/// provider (issue #1286).
-fn history_provider_name(
-    session: &crate::session::Session,
-    provider: &dyn Provider,
-) -> Option<String> {
-    history_provider_name_from_session(session).or_else(|| Some(provider.display_name()))
-}
+#[path = "history_provider_label.rs"]
+mod history_provider_label;
+use history_provider_label::*;
 
 pub(super) async fn handle_get_state(
     id: u64,
@@ -353,7 +301,13 @@ async fn build_model_catalog(
                                 .map(str::to_string)
                                 .collect(),
                         ),
-                        provider.reasoning_effort(),
+                        crate::session_effort::session_effort(&session_id)
+                            .or_else(|| {
+                                persisted
+                                    .as_ref()
+                                    .and_then(|session| session.reasoning_effort.clone())
+                            })
+                            .or_else(|| provider.reasoning_effort()),
                         "fallback",
                         provider_oauth_email(provider.as_ref()),
                         provider.serving_oauth_account_label(),
@@ -401,6 +355,8 @@ async fn build_model_catalog(
         // authoritative. Omitting it falsely turns off /fast status and its badge.
         service_tier,
         subagent_model: None,
+        pinned_skill: None,
+        pinned_skills: None,
         agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,
@@ -468,7 +424,10 @@ pub(super) async fn handle_get_model_catalog(
 
 #[path = "history_paging.rs"]
 mod history_paging;
-pub(super) use history_paging::handle_get_compacted_history;
+pub(super) use history_paging::{
+    handle_get_compacted_history, handle_history_image_chunk, handle_history_page,
+    handle_session_images,
+};
 
 /// Window canonical rendered entries, not raw provider messages. Images follow
 /// their rendered entry and the synthetic marker occupies its own index.
@@ -505,8 +464,20 @@ pub(super) fn recent_history_window(
     let is_prompt = |message: &&HistoryMessage| {
         message.role == "user" && !crate::session::is_attached_image_label_text(&message.content)
     };
+    // Image anchors use ordinals of actual user rows, not decision cards.
     let excluded_prompts = messages[..start].iter().filter(is_prompt).count();
-    let hidden_user_prompts = archived_prompts + excluded_prompts;
+    let excluded_ask_answers = messages[..start]
+        .iter()
+        .filter(|message| {
+            message.role == "tool"
+                && message
+                    .tool_data
+                    .as_ref()
+                    .is_some_and(|tool| tool.name == "ask")
+                && jcode_session_types::stored_ask_answer_text(&message.content).is_some()
+        })
+        .count();
+    let hidden_user_prompts = archived_prompts + excluded_prompts + excluded_ask_answers;
     let info = crate::session::RenderedCompactedHistoryInfo {
         total_messages: total,
         visible_messages: total - start,
@@ -518,7 +489,8 @@ pub(super) fn recent_history_window(
     }
     messages = messages.split_off(start);
     messages.insert(0, HistoryMessage {
-        response_stats: None,
+        attachments: Vec::new(),
+        response_stats: None, timestamp_ms: None, tool_duration_ms: None,
         role: "system".to_owned(),
         content: format!("{}{start} older historical messages hidden. Showing {} of {total} messages. Scroll to the top to load more. Hidden user prompts: {hidden_user_prompts}.", crate::protocol::RECENT_HISTORY_MARKER_PREFIX, info.visible_messages),
         tool_calls: None,
@@ -571,6 +543,9 @@ fn apply_recent_history_base(
             .filter(|base| base.count == 0)
             .and_then(|base| base.recent_messages)
     {
+        if visible == 0 {
+            return (Vec::new(), Vec::new());
+        }
         let (messages, images, _) = recent_history_window(messages, images, visible);
         return (messages, images);
     }
@@ -627,7 +602,10 @@ pub(super) fn apply_history_images_base(
 
 fn rendered_to_history_message(msg: crate::session::RenderedMessage) -> HistoryMessage {
     HistoryMessage {
+        attachments: msg.attachments,
         response_stats: msg.response_stats,
+        timestamp_ms: msg.timestamp_ms,
+        tool_duration_ms: msg.tool_duration_ms,
         role: msg.role,
         content: msg.content,
         tool_calls: if msg.tool_calls.is_empty() {
@@ -671,9 +649,7 @@ fn history_reload_recovery_snapshot_with(
             if super::reload_recovery::peek_for_session(session_id)
                 .ok()
                 .flatten()
-                .is_some_and(|record| {
-                    record.status == super::reload_recovery::ReloadRecoveryStatus::Delivered
-                })
+                .is_some_and(|record| !record.status.needs_admission())
             {
                 return None;
             }
@@ -715,27 +691,6 @@ fn history_reload_recovery_snapshot_with(
     directive
 }
 
-fn persisted_session_has_reload_interruption_marker(session: &Session) -> bool {
-    let Some(last) = session.messages.last() else {
-        return false;
-    };
-
-    last.content.iter().any(|block| match block {
-        ContentBlock::Text { text, .. } => {
-            text.ends_with("[generation interrupted - server reloading]")
-        }
-        ContentBlock::ToolResult {
-            content, is_error, ..
-        } => {
-            content == "Reload initiated. Process restarting..."
-                || (is_error.unwrap_or(false)
-                    && (content.contains("interrupted by server reload")
-                        || content.contains("Skipped - server reloading")))
-        }
-        _ => false,
-    })
-}
-
 #[cfg(test)]
 fn infer_persisted_session_interrupted_by_reload(session_id: &str) -> bool {
     let session = match Session::load_for_remote_startup(session_id)
@@ -756,21 +711,15 @@ fn infer_persisted_session_interrupted_by_reload(session_id: &str) -> bool {
 
 fn session_interrupted_by_reload(session: &Session) -> bool {
     let session_id = session.id.as_str();
-    let last_is_user = session
-        .messages
-        .last()
-        .map(|message| message.role == Role::User)
-        .unwrap_or(false);
+    let last = crate::agent::last_turn_message_for_recovery(&session.messages);
+    let last_is_user = last.is_some_and(|message| message.role == Role::User);
     let marker_active = crate::server::reload_marker_active(RELOAD_RESTORE_MARKER_MAX_AGE);
-    let pending_turn = last_is_user
-        || session
-            .messages
-            .last()
-            .is_some_and(super::client_session::last_message_has_pending_tool);
+    let pending_turn =
+        last_is_user || last.is_some_and(super::client_session::last_message_has_pending_tool);
     let interrupted = matches!(session.status, SessionStatus::Crashed { .. })
         || (matches!(session.status, SessionStatus::Active) && pending_turn && marker_active)
         || (matches!(session.status, SessionStatus::Closed) && pending_turn && marker_active)
-        || persisted_session_has_reload_interruption_marker(session);
+        || last.is_some_and(super::client_session::message_has_reload_interruption);
 
     crate::logging::info(&format!(
         "history_reload_recovery_snapshot: fallback inspect session={} status={} last_is_user={} pending_turn={} marker_active={} interrupted={}",
@@ -832,6 +781,7 @@ async fn send_history_from_persisted_session(
     };
     timing.stage("render");
     let token_usage_totals = session.token_usage_totals();
+    let context_occupancy = session.context_occupancy_tokens();
     let (rendered_messages, images) = crate::session::render_messages_and_images(&session);
     // Extract the small metadata fields we need, then drop the full Session
     // (including its message transcript) before building and serializing the
@@ -840,6 +790,8 @@ async fn send_history_from_persisted_session(
     let provider_name = history_provider_name(&session, provider.as_ref());
     let provider_model = session.model.clone().or_else(|| Some(provider.model()));
     let subagent_model = session.subagent_model.clone();
+    let pinned_skill = session.pinned_skill.clone();
+    let pinned_skills = Some(session.pinned_skill_names().to_vec());
     let autoreview_enabled = session.autoreview_enabled;
     let autojudge_enabled = session.autojudge_enabled;
     let is_canary = session.is_canary;
@@ -887,6 +839,8 @@ async fn send_history_from_persisted_session(
         provider_name,
         provider_model,
         subagent_model,
+        pinned_skill,
+        pinned_skills,
         agent_model_overrides,
         autoreview_enabled,
         autojudge_enabled,
@@ -932,6 +886,8 @@ async fn send_history_from_persisted_session(
 
     timing.stage("encode");
     let json = encode_event(&history_event);
+    let occupancy_json =
+        context_occupancy_event(session_id, context_occupancy).map(|event| encode_event(&event));
     timing.stage("writer_lock");
     let mut writer_guard = writer.lock().await;
     timing.stage("write");
@@ -944,9 +900,29 @@ async fn send_history_from_persisted_session(
         }
         sent?;
     }
-    let result = writer_guard.write_all(json.as_bytes()).await;
+    let mut result = writer_guard.write_all(json.as_bytes()).await;
+    if result.is_ok()
+        && let Some(occupancy_json) = occupancy_json.as_ref()
+    {
+        result = writer_guard.write_all(occupancy_json.as_bytes()).await;
+    }
     timing.result(&result);
     result.map_err(Into::into)
+}
+
+/// Persisted occupancy notice for a freshly attached client.
+///
+/// It is a distinct event, not a `tokens` event: the figure belongs to a
+/// completed request from before this attachment, so it must not enter the
+/// current turn's stats, cost, or KV-cache accounting.
+pub(super) fn context_occupancy_event(
+    session_id: &str,
+    prompt_tokens: Option<u64>,
+) -> Option<ServerEvent> {
+    prompt_tokens.map(|prompt_tokens| ServerEvent::ContextOccupancy {
+        session_id: session_id.to_owned(),
+        prompt_tokens,
+    })
 }
 
 /// How long the bootstrap History payload may wait on the model-name catalog.
@@ -1102,11 +1078,17 @@ async fn send_history_with_guard(
             .map(str::to_string)
             .collect(),
     );
+    let pinned_session = agent_guard.session_for_history();
+    let pinned_skill = pinned_session.pinned_skill.clone();
+    let pinned_skills = Some(pinned_session.pinned_skill_names().to_vec());
     let provider_oauth_email = provider_oauth_email(agent_guard.provider_handle().as_ref());
     let provider_oauth_account_label = agent_guard.provider_handle().serving_oauth_account_label();
     let inferred_interrupted = was_interrupted
         .is_none()
         .then(|| session_interrupted_by_reload(agent_guard.session_for_history()));
+    // A client attaching after a restart has no live usage report yet; replay
+    // the persisted occupancy so its context meter is meaningful immediately.
+    let context_occupancy = agent_guard.session_for_history().context_occupancy_tokens();
 
     // Only snapshot preparation needs the agent. Never hold it across session
     // metadata locks or socket backpressure.
@@ -1218,6 +1200,8 @@ async fn send_history_with_guard(
         provider_name: Some(provider_name),
         provider_model: Some(provider_model),
         subagent_model,
+        pinned_skill,
+        pinned_skills,
         agent_model_overrides,
         autoreview_enabled,
         autojudge_enabled,
@@ -1258,6 +1242,8 @@ async fn send_history_with_guard(
     // the payload stays resident across the awaited socket write.
     drop(history_event);
     let json_len = json.len();
+    let occupancy_json =
+        context_occupancy_event(session_id, context_occupancy).map(|event| encode_event(&event));
     let encode_ms = encode_start.elapsed().as_millis();
     timing.stage("writer_lock");
     let writer_lock_start = Instant::now();
@@ -1274,7 +1260,12 @@ async fn send_history_with_guard(
         }
         sent?;
     }
-    let result = writer_guard.write_all(json.as_bytes()).await;
+    let mut result = writer_guard.write_all(json.as_bytes()).await;
+    if result.is_ok()
+        && let Some(occupancy_json) = occupancy_json.as_ref()
+    {
+        result = writer_guard.write_all(occupancy_json.as_bytes()).await;
+    }
     timing.result(&result);
     drop(writer_guard);
     // Release the serialized payload before any further work (logging below

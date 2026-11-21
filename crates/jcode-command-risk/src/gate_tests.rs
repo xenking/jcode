@@ -12,6 +12,7 @@ fn ctx() -> RiskContext {
         scratch_dir: None,
         working_dir: Some(PathBuf::from("/home/u/proj")),
         home_dir: Some(PathBuf::from("/home/u")),
+        temp_dir: None,
     }
 }
 
@@ -64,6 +65,18 @@ fn first_attempt_at_a_risky_command_is_refused_with_a_reflection_prompt() {
         }
         other => panic!("expected a reflection prompt, got {other:?}"),
     }
+}
+
+#[test]
+fn reflection_explains_justification_length_rule() {
+    let assessment = assess("rm -rf $TARGET", &ctx());
+    let GateOutcome::Reflect { prompt } = gate(&assessment, &saying("too short")) else {
+        panic!("expected reflection");
+    };
+    assert!(
+        prompt.contains("25") && prompt.contains("bytes"),
+        "{prompt}"
+    );
 }
 
 #[test]

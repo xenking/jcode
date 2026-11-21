@@ -1,6 +1,14 @@
 use super::*;
 
 #[test]
+fn legacy_messages_default_to_steering() {
+    let persisted: PersistedSoftInterrupt =
+        serde_json::from_str(r#"{"content":"old","urgent":false,"source":"user"}"#).unwrap();
+    let message = SoftInterruptMessage::from(persisted);
+    assert_eq!(message.mode, jcode_agent_runtime::QueuedMessageMode::Steer);
+}
+
+#[test]
 fn append_take_and_clear_round_trip() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("temp dir");
@@ -11,22 +19,32 @@ fn append_take_and_clear_round_trip() {
     append(
         session_id,
         SoftInterruptMessage {
+            attachments: Vec::new(),
+            active_skill: None,
+            system_reminder: None,
             content: "hello".to_string(),
             images: Vec::new(),
             urgent: true,
             source: SoftInterruptSource::System,
+            mode: jcode_agent_runtime::QueuedMessageMode::Steer,
             client_id: None,
+            editing_by: None,
         },
     )
     .expect("append first interrupt");
     append(
         session_id,
         SoftInterruptMessage {
+            attachments: Vec::new(),
+            active_skill: None,
+            system_reminder: None,
             content: "world".to_string(),
             images: Vec::new(),
             urgent: false,
-            source: SoftInterruptSource::BackgroundTask,
+            source: SoftInterruptSource::FileActivity,
+            mode: jcode_agent_runtime::QueuedMessageMode::AfterYield,
             client_id: None,
+            editing_by: None,
         },
     )
     .expect("append second interrupt");
@@ -36,6 +54,15 @@ fn append_take_and_clear_round_trip() {
     assert_eq!(loaded[0].content, "hello");
     assert!(loaded[0].urgent);
     assert_eq!(loaded[1].content, "world");
+    assert_eq!(
+        loaded[0].mode,
+        jcode_agent_runtime::QueuedMessageMode::Steer
+    );
+    assert_eq!(
+        loaded[1].mode,
+        jcode_agent_runtime::QueuedMessageMode::AfterYield
+    );
+    assert_eq!(loaded[1].source, SoftInterruptSource::FileActivity);
 
     let taken = take(session_id).expect("take interrupts");
     assert_eq!(taken.len(), 2);
@@ -44,11 +71,16 @@ fn append_take_and_clear_round_trip() {
     append(
         session_id,
         SoftInterruptMessage {
+            attachments: Vec::new(),
+            active_skill: None,
+            system_reminder: None,
             content: "later".to_string(),
             images: Vec::new(),
             urgent: false,
             source: SoftInterruptSource::User,
+            mode: jcode_agent_runtime::QueuedMessageMode::Steer,
             client_id: None,
+            editing_by: None,
         },
     )
     .expect("append later interrupt");
@@ -59,11 +91,16 @@ fn append_take_and_clear_round_trip() {
         append(
             session_id,
             SoftInterruptMessage {
+                attachments: Vec::new(),
+                active_skill: None,
+                system_reminder: None,
                 content: content.to_string(),
                 images: Vec::new(),
                 urgent: false,
                 source: SoftInterruptSource::User,
+                mode: jcode_agent_runtime::QueuedMessageMode::Steer,
                 client_id: client_id.map(str::to_string),
+                editing_by: None,
             },
         )
         .expect("append id-bearing interrupt");

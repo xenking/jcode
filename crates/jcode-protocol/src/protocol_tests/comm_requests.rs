@@ -668,11 +668,16 @@ fn test_ask_user_request_and_response_roundtrip() -> Result<()> {
         answers: Some(vec![AskAnswer {
             selected: vec!["SQLite".to_string()],
             other: Some("libsql".to_string()),
+            comments: Default::default(),
+            other_images: vec![("image/png".into(), "YWJj".into())],
+            comment_images: [("SQLite".into(), vec![("image/jpeg".into(), "ZGVm".into())])].into_iter().collect(),
         }]),
     };
     let req = Request::AskUserResponse { id: 7, request_id: "ask-1".to_string(), response: response.clone() };
     let json = serde_json::to_string(&req)?;
     assert!(json.contains("\"type\":\"ask_user_response\""));
+    assert!(json.contains("\"other_images\":[[\"image/png\",\"YWJj\"]]"));
+    assert!(json.contains("\"comment_images\":{\"SQLite\":[[\"image/jpeg\",\"ZGVm\"]]}"));
     let decoded = parse_request_json(&json)?;
     assert_eq!(decoded.id(), 7);
     let Request::AskUserResponse { response: r, .. } = decoded else {
@@ -683,6 +688,14 @@ fn test_ask_user_request_and_response_roundtrip() -> Result<()> {
         format_ask_answers(&questions, &r),
         "User answers:\n1. Which DB? -> SQLite; Other: libsql\n"
     );
+    let legacy: Request = parse_request_json(r#"{"type":"ask_user_response","id":9,"request_id":"ask-1","response":{"answers":[{"selected":["SQLite"]}]}}"#)?;
+    let Request::AskUserResponse { response: legacy_response, .. } = &legacy else {
+        return Err(anyhow!("expected legacy AskUserResponse"));
+    };
+    let answer = &legacy_response.answers.as_ref().unwrap()[0];
+    assert!(answer.other_images.is_empty() && answer.comment_images.is_empty());
+    let encoded_legacy = serde_json::to_string(&legacy)?;
+    assert!(!encoded_legacy.contains("other_images") && !encoded_legacy.contains("comment_images"));
     let declined: Request = parse_request_json(r#"{"type":"ask_user_response","id":8,"request_id":"ask-1","response":{}}"#)?;
     let Request::AskUserResponse { response, .. } = declined else {
         return Err(anyhow!("expected AskUserResponse"));

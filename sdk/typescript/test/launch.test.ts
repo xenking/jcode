@@ -130,17 +130,22 @@ test("credential inheritance refuses to use the user's home as the instance home
 test("login inheritance creates file links, never credential directory links", () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "jcode-inherit-shape-test-"));
   const oldHome = process.env.HOME;
+  const oldUserProfile = process.env.USERPROFILE;
   const oldXdg = process.env.XDG_CONFIG_HOME;
+  const oldAppData = process.env.APPDATA;
   const home = path.join(sandbox, "home");
   const config = path.join(sandbox, "config");
   const from = path.join(home, ".jcode");
   const to = path.join(sandbox, "instance");
   fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
-  fs.mkdirSync(path.join(config, "jcode"), { recursive: true });
+  const platformConfig = process.platform === "darwin"
+    ? path.join(home, "Library", "Application Support")
+    : config;
+  fs.mkdirSync(path.join(platformConfig, "jcode"), { recursive: true });
   fs.mkdirSync(from, { recursive: true });
   fs.writeFileSync(path.join(home, ".claude", ".credentials.json"), "{}");
-  fs.writeFileSync(path.join(config, "jcode", "n.env"), "TOKEN=test");
-  fs.writeFileSync(path.join(config, "jcode", "usage.json"), "{}");
+  fs.writeFileSync(path.join(platformConfig, "jcode", "n.env"), "TOKEN=test");
+  fs.writeFileSync(path.join(platformConfig, "jcode", "usage.json"), "{}");
   const legacyTarget = path.join(sandbox, "legacy-linked-config");
   fs.mkdirSync(legacyTarget);
   fs.writeFileSync(path.join(legacyTarget, "precious"), "untouched");
@@ -149,7 +154,9 @@ test("login inheritance creates file links, never credential directory links", (
 
   try {
     process.env.HOME = home;
+    process.env.USERPROFILE = home;
     process.env.XDG_CONFIG_HOME = config;
+    process.env.APPDATA = config;
     const inherited = inheritCredentials(from, to);
 
     assert.ok(inherited.includes("config/jcode/n.env"));
@@ -169,8 +176,12 @@ test("login inheritance creates file links, never credential directory links", (
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
+    if (oldUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = oldUserProfile;
     if (oldXdg === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = oldXdg;
+    if (oldAppData === undefined) delete process.env.APPDATA;
+    else process.env.APPDATA = oldAppData;
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
 });

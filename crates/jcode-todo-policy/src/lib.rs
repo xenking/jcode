@@ -15,8 +15,9 @@ pub mod store;
 pub use followup::{
     ConfidenceSummary, Decision, FollowUp, FollowUpKind, FollowUpPolicy,
     INCOMPLETE_TODO_MAX_ATTEMPTS, IncompleteTodoBudget, MAX_GATE_ATTEMPTS, TodoEffects,
-    TodoSnapshot, goal_cannot_complete, is_incomplete_todo, todo_cannot_complete_reason,
-    todo_goal_cannot_complete, todo_requires_user_auth, todo_waits_on_running_task,
+    TodoSnapshot, goal_cannot_complete, is_incomplete_todo, swarm_member_is_working,
+    todo_assigned_elsewhere, todo_cannot_complete_reason, todo_goal_cannot_complete,
+    todo_requires_user_auth, todo_waits_on_running_task,
 };
 
 /// Generic mid-task reassessment prompt. The elapsed-time policy that triggers
@@ -210,7 +211,9 @@ const PRE_COMPACT_TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "[automated follow
 /// `delivery_state_passes`. Missing metadata is not evidence of unfinished work,
 /// and staying within the requested scope is not a failure of ownership. The
 /// deferred feedback-loop review already handles validation-quality concerns.
-fn ownership_followup_reasons(goal: &TodoGoal) -> Vec<&'static str> {
+/// Whether the goal records a deliberate stop (confirmed plateau, exhausted
+/// constraints or budget) together with the evidence for it.
+fn goal_has_documented_stop(goal: &TodoGoal) -> bool {
     let stopped = matches!(
         goal.iteration_maturity,
         Some(
@@ -223,10 +226,45 @@ fn ownership_followup_reasons(goal: &TodoGoal) -> Vec<&'static str> {
         .stopping_evidence
         .as_deref()
         .is_some_and(|evidence| !evidence.trim().is_empty());
+    stopped && has_stopping_evidence
+}
+
+/// Completed todos that still merit a "validate further" follow-up.
+///
+/// A todo qualifies when its completion confidence is missing or below the
+/// passing bar, unless its group's goal documents why validation stopped. More
+/// turns cannot lift an exhausted constraint, so asking again only loops: a
+/// session was nudged "Validate further" every few seconds for an item already
+/// marked `constraints_exhausted` with stopping evidence.
+pub fn todos_needing_validation<'a>(
+    todos: &'a [TodoItem],
+    goals: &[TodoGoal],
+) -> Vec<&'a TodoItem> {
+    todos
+        .iter()
+        .filter(|todo| todo_status_is_completed(&todo.status))
+        .filter(|todo| !completion_confidence_passes(todo.completion_confidence))
+        .filter(|todo| {
+            let group = normalized_group(todo.group.as_deref());
+            !goals.iter().any(|goal| {
+                normalized_group(goal.group.as_deref()) == group && goal_has_documented_stop(goal)
+            })
+        })
+        .collect()
+}
+
+/// Follow-up naming exactly the given completed todos as needing validation.
+pub fn build_todo_validation_continuation_message(targets: &[&TodoItem]) -> String {
+    let mut message = String::from(TODO_COMPLETION_CONTINUATION_MESSAGE);
+    append_named_todos(&mut message, "Validate further:", targets);
+    message
+}
+
+fn ownership_followup_reasons(goal: &TodoGoal) -> Vec<&'static str> {
     // More autonomous work cannot remove an explicitly documented constraint
     // or exhausted budget. Preserve the honest assessment instead of demanding
     // a higher score or repeatedly asking for the unavailable acceptance path.
-    if stopped && has_stopping_evidence {
+    if goal_has_documented_stop(goal) {
         return Vec::new();
     }
 
@@ -243,7 +281,16 @@ fn ownership_followup_reasons(goal: &TodoGoal) -> Vec<&'static str> {
     {
         reasons.push("keep iterating and test the remaining hypotheses.");
     }
-    if stopped && !has_stopping_evidence {
+    // A documented stop returned above, so a stop reaching here lacks evidence.
+    let stopped = matches!(
+        goal.iteration_maturity,
+        Some(
+            IterationMaturity::PlateauConfirmed
+                | IterationMaturity::ConstraintsExhausted
+                | IterationMaturity::BudgetExhausted
+        )
+    );
+    if stopped {
         reasons.push("gather more evidence about whether the work should stop.");
     }
     reasons
@@ -899,17 +946,27 @@ pub fn derive_session_title(todos: &[TodoItem], plan: &TodoPlan) -> Option<Strin
         return Some(title);
     }
 
-    let current = todos
+    // A lane handed to a swarm worker is named after the worker's task, not
+    // this session's work: it must never rename the coordinator.
+    let own = todos
+        .iter()
+        .filter(|todo| {
+            todo.assigned_to
+                .as_deref()
+                .is_none_or(|owner| owner == "@self" || owner.trim().is_empty())
+        })
+        .collect::<Vec<_>>();
+    let current = own
         .iter()
         .rev()
         .find(|todo| todo.status.eq_ignore_ascii_case("in_progress"))
         .or_else(|| {
-            todos
-                .iter()
+            own.iter()
                 .rev()
                 .find(|todo| !todo.status.eq_ignore_ascii_case("completed"))
         })
-        .or_else(|| todos.last());
+        .or_else(|| own.last())
+        .copied();
 
     if let Some(todo) = current {
         if let Some(group) = non_empty(todo.group.as_deref()) {

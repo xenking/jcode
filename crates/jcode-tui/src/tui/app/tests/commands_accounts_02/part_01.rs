@@ -11,43 +11,11 @@ fn remote_account_fixture(label: &str) -> crate::protocol::AccountUsageSnapshot 
         resets_at: None,
         error: None,
         banked_resets: None,
+        banked_usable: None,
+        banked_cached_source: None,
         banked_expires_at: None,
         banked_next_at: None,
     }
-}
-
-#[test]
-fn test_account_hotkeys_advance_from_pending_target_not_stale_header() {
-    with_ssh_remote_test_home(|| {
-        let mut app = create_test_app();
-        app.is_remote = true;
-        app.remote_provider_name = Some("openai".into());
-        app.remote_provider_oauth_account_label = Some("first".into());
-        crate::usage::set_remote_account_usage(
-            Vec::new(),
-            vec![
-                remote_account_fixture("first"),
-                remote_account_fixture("second"),
-                remote_account_fixture("third"),
-            ],
-        );
-        app.pending_account_switch_target = Some(crate::tui::AccountPickerAction::Switch {
-            provider_id: "openai".into(),
-            label: "second".into(),
-        });
-        for (forward, expected) in [(true, "third"), (false, "first")] {
-            app.cycle_account(forward);
-            assert!(matches!(app.pending_account_picker_action.take(),
-                Some(crate::tui::AccountPickerAction::Switch { provider_id, label })
-                    if provider_id == "openai" && label == expected
-            ));
-            assert_eq!(
-                app.remote_provider_oauth_account_label.as_deref(),
-                Some("first")
-            );
-        }
-        crate::usage::clear_remote_account_usage();
-    });
 }
 
 #[test]
@@ -494,9 +462,10 @@ fn test_account_picker_includes_all_configured_credentials_even_excluded_and_man
             "COPILOT_GITHUB_TOKEN",
             "GROQ_API_KEY",
         ]);
-        for key in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"] {
+        for key in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"] {
             crate::env::set_var(key, "picker-test-secret-api-key");
         }
+        crate::env::set_var("OPENROUTER_API_KEY", "sk-or-picker-test-secret-own-key");
         crate::env::set_var("COPILOT_GITHUB_TOKEN", "picker-test-secret-device-token");
         crate::env::set_var("GROQ_API_KEY", "picker-test-secret-compatible-key");
         crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
@@ -1173,19 +1142,22 @@ fn test_account_switch_shorthand_switches_openai_account_by_label() {
 
 #[test]
 fn test_account_picker_prompt_new_openai_label_cancel_clears_prompt() {
-    let mut app = create_test_app();
-    app.prompt_new_account_label(crate::tui::account_picker::AccountProviderKind::OpenAi);
+    // Shared env, config and catalog caches: run hermetically.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.prompt_new_account_label(crate::tui::account_picker::AccountProviderKind::OpenAi);
 
-    assert!(matches!(
-        app.pending_account_input,
-        Some(super::auth::PendingAccountInput::NewAccountLabel { ref provider_id, .. }) if provider_id == "openai"
-    ));
+        assert!(matches!(
+            app.pending_account_input,
+            Some(super::auth::PendingAccountInput::NewAccountLabel { ref provider_id, .. }) if provider_id == "openai"
+        ));
 
-    app.input = "/cancel".to_string();
-    app.submit_input();
+        app.input = "/cancel".to_string();
+        app.submit_input();
 
-    assert!(app.pending_account_input.is_none());
-    assert!(app.pending_login.is_none());
+        assert!(app.pending_account_input.is_none());
+        assert!(app.pending_login.is_none());
+    });
 }
 
 #[test]
@@ -1244,3 +1216,6 @@ fn test_commands_alias_shows_help() {
 #[path = "part_01/improvement_commands.rs"]
 mod improvement_commands;
 include!("usage_details.rs");
+
+#[path = "part_01_additional_tests.rs"]
+mod additional_test_account_hotkeys_advance_from_pending_target_not_stale_header;

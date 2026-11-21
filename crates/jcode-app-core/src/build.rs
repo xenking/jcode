@@ -1,3 +1,4 @@
+pub use jcode_build_support::runtime_generation;
 pub use jcode_build_support::{
     BinaryChoice, BinaryVersionReport, BuildInfo, BuildManifest, CanaryStatus, CrashInfo,
     DevBinarySourceMetadata, MigrationContext, PendingActivation, PublishedBuild,
@@ -25,3 +26,8 @@ pub use jcode_build_support::{
     version_matches_installed_channel, worktree_scope_key, write_build_progress,
     write_current_dev_binary_source_metadata, write_dev_binary_source_metadata,
 };
+pub use jcode_build_support::{
+    ChannelAdvance, advance_update_channels, install_verified_binary_at_version,
+    selfdev_hold_reason, verify_binary_built_from,
+};
+pub use jcode_build_support::{dispatch_linux_prerelease, linux_prerelease_candidate};

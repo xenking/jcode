@@ -127,6 +127,7 @@ impl MultiProvider {
             return None;
         }
         let mut candidates: Vec<(String, ActiveProvider, String, String)> = Vec::new();
+        let failover_config = crate::config::Config::load().provider;
         // Preserve the current model when rotating to another saved account.
         // This path never consults or mutates the global active login.
         let context_only = jcode_provider_core::classify_failover_error_message(&reason)
@@ -136,9 +137,22 @@ impl MultiProvider {
         } else {
             tokens
         };
-        if let Some(current) = from_label
-            .as_deref()
-            .filter(|_| !context_only && same_provider_account_failover_enabled())
+        let openai_context_limit = models::openai_route_context_limit_resolver();
+        // Use the same eligibility policy for saved-account and catalog
+        // candidates, without leaking Codex capacity into API-key routes.
+        let model_fits = |model: &str, provider: &str, api_method: &str| {
+            let limit = if provider == "openai" {
+                openai_context_limit(model, api_method)
+            } else {
+                models::context_limit_for_model_with_provider(model, Some(provider))
+            };
+            models::is_agent_model_for_failover(model, provider)
+                && limit.is_some_and(|limit| limit >= required_context)
+        };
+        if !failover_config.failover_model_excluded(&self.model())
+            && let Some(current) = from_label
+                .as_deref()
+                .filter(|_| !context_only && same_provider_account_failover_enabled())
         {
             let method = if from == ActiveProvider::OpenAI {
                 "openai-oauth"
@@ -151,7 +165,7 @@ impl MultiProvider {
             {
                 let spec = format!("{method}@{label}:{}", self.model());
                 if Self::is_failover_route_pool_approved(&spec)
-                    && Self::failover_model_fits(&self.model(), from_provider, required_context)
+                    && model_fits(&self.model(), from_provider, &format!("{method}@{label}"))
                 {
                     candidates.push((
                         crate::auth::account_pool::account_key(from_provider, Some(&label)),
@@ -162,11 +176,9 @@ impl MultiProvider {
                 }
             }
         }
-        for route in self
-            .model_routes()
-            .into_iter()
-            .filter(|route| route.available)
-        {
+        for route in self.model_routes().into_iter().filter(|route| {
+            route.available && !failover_config.failover_model_excluded(&route.model)
+        }) {
             let selection = jcode_provider_core::RouteSelection::from_model_route(&route);
             let spec = selection.routed_model_spec();
             if !Self::is_failover_route_pool_approved(&spec) {
@@ -186,10 +198,10 @@ impl MultiProvider {
                 jcode_provider_core::RuntimeKey::OpenRouter => ActiveProvider::OpenRouter,
                 _ => continue,
             };
-            if !Self::failover_model_fits(
+            if !model_fits(
                 &route.model,
                 Self::provider_key(target_provider),
-                required_context,
+                &route.api_method,
             ) || route.detail.contains("no tools")
             {
                 continue;

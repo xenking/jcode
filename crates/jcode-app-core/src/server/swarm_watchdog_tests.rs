@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
+static WATCHDOG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn member(session_id: &str, role: &str, status: &str, status_age: Duration) -> SwarmMember {
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     SwarmMember {
@@ -107,6 +109,7 @@ fn sweep_interval_is_clamped() {
 
 #[test]
 fn update_stalls_notifies_once_and_rearms_after_recovery() {
+    let _lock = WATCHDOG_TEST_LOCK.lock().unwrap();
     let worker = "wd_test_worker_once";
     let owned = "wd_test_worker_owned";
     let coord = "wd_test_coord";
@@ -143,6 +146,34 @@ fn update_stalls_notifies_once_and_rearms_after_recovery() {
     );
     assert!(stalled_for_secs(worker).is_some_and(|secs| secs >= 800));
     assert!(stalled_for_secs(coord).is_none());
+    let snapshot = || {
+        super::super::swarm_persistence::transfer_snapshot(&super::super::state::SwarmRuntime {
+            swarm_id: "swarm-wd".into(),
+            coordinator_session_id: Some(coord.into()),
+            member_session_ids: members.keys().cloned().collect(),
+            members: members.values().cloned().collect(),
+            plan: None,
+        })
+    };
+    let initial = snapshot();
+    assert!(
+        initial
+            .members
+            .iter()
+            .find(|m| m.record.session_id == worker)
+            .unwrap()
+            .stalled_secs
+            .is_some_and(|age| age >= 800)
+    );
+    assert!(
+        initial
+            .members
+            .iter()
+            .find(|m| m.record.session_id == coord)
+            .unwrap()
+            .stalled_secs
+            .is_none()
+    );
 
     // Still stalled: no repeat notification.
     let second = update_stalls(&members, &coordinators, WINDOW, silent, no_tool);
@@ -153,6 +184,15 @@ fn update_stalls_notifies_once_and_rearms_after_recovery() {
     assert!(update_stalls(&members, &coordinators, WINDOW, recovered, no_tool).is_empty());
     assert!(stalled_for_secs(worker).is_none());
     assert!(stalled_for_secs(owned).is_some());
+    assert!(
+        snapshot()
+            .members
+            .iter()
+            .find(|m| m.record.session_id == worker)
+            .unwrap()
+            .stalled_secs
+            .is_none()
+    );
 
     // A fresh stall after recovery notifies again.
     let again = update_stalls(&members, &coordinators, WINDOW, silent, no_tool);
@@ -178,6 +218,74 @@ fn update_stalls_notifies_once_and_rearms_after_recovery() {
     drop(owned_wait);
 
     clear_for_tests(&[worker, owned, coord]);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn watchdog_sweep_publishes_and_clears_stall_snapshot() {
+    let _lock = WATCHDOG_TEST_LOCK.lock().unwrap();
+    let _env = crate::storage::lock_test_env();
+    let dir = tempfile::tempdir().unwrap();
+    let old_home = std::env::var_os("JCODE_HOME");
+    let old_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+    let old_stall = std::env::var_os("JCODE_SWARM_STALL_AFTER_SECS");
+    crate::env::set_var("JCODE_SWARM_STALL_AFTER_SECS", "600");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::env::set_var("JCODE_RUNTIME_DIR", dir.path());
+    crate::config::Config::invalidate_cache();
+    let id = "wd_published_worker";
+    clear_for_tests(&[id]);
+    let state = super::super::SwarmState::new(
+        HashMap::from([(
+            id.into(),
+            member(id, "agent", "running", Duration::from_secs(601)),
+        )]),
+        HashMap::from([("swarm-wd".into(), [id.to_string()].into_iter().collect())]),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let sessions = std::sync::Arc::new(super::super::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
+    let queues = std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+    sweep_stalled_workers(&state, &sessions, &queues).await;
+    let snapshot = super::super::swarm_persistence::read_transfer_snapshot("swarm-wd")
+        .unwrap()
+        .unwrap();
+    assert!(
+        snapshot.members[0]
+            .stalled_secs
+            .is_some_and(|age| age >= 600)
+    );
+    state
+        .members
+        .write()
+        .await
+        .get_mut(id)
+        .unwrap()
+        .last_status_change = Instant::now();
+    sweep_stalled_workers(&state, &sessions, &queues).await;
+    let snapshot = super::super::swarm_persistence::read_transfer_snapshot("swarm-wd")
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.members[0].stalled_secs, None);
+    clear_for_tests(&[id]);
+    if let Some(value) = old_home {
+        crate::env::set_var("JCODE_HOME", value);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    if let Some(value) = old_runtime {
+        crate::env::set_var("JCODE_RUNTIME_DIR", value);
+    } else {
+        crate::env::remove_var("JCODE_RUNTIME_DIR");
+    }
+    if let Some(value) = old_stall {
+        crate::env::set_var("JCODE_SWARM_STALL_AFTER_SECS", value);
+    } else {
+        crate::env::remove_var("JCODE_SWARM_STALL_AFTER_SECS");
+    }
+    crate::config::Config::invalidate_cache();
 }
 
 #[test]

@@ -22,6 +22,10 @@ use std::time::Duration;
 mod protocol_disconnect;
 #[path = "client_behavior/protocol_partial_disconnect.rs"]
 mod protocol_partial_disconnect;
+#[path = "client_behavior/search_sessions.rs"]
+mod search_sessions;
+#[path = "client_behavior/swarm_status.rs"]
+mod swarm_status;
 
 /// A socket-pair transport, so the test drives the client over the same code
 /// path a real connection uses.
@@ -39,6 +43,7 @@ impl Transport for PairTransport {
 fn session(id: &str) -> SessionInfo {
     SessionInfo {
         edit_stats: None,
+        context: None,
         user_connected: false,
         parent_session_id: None,
         agent_label: None,
@@ -60,6 +65,13 @@ fn session(id: &str) -> SessionInfo {
 /// Start a fake harness on one end of a socket pair. `handle` is called for
 /// every client frame with a writer for replies.
 fn fake_harness(handle: impl Fn(&ClientFrame, &mut dyn Write) + Send + 'static) -> JcodeClient {
+    fake_harness_with_identity(None, handle)
+}
+
+fn fake_harness_with_identity(
+    runtime_identity: Option<jcode_sdk::api::ServingIdentity>,
+    handle: impl Fn(&ClientFrame, &mut dyn Write) + Send + 'static,
+) -> JcodeClient {
     let (ours, theirs) = UnixStream::pair().expect("socket pair");
     std::thread::spawn(move || {
         let mut reader = BufReader::new(theirs.try_clone().expect("clone"));
@@ -71,6 +83,7 @@ fn fake_harness(handle: impl Fn(&ClientFrame, &mut dyn Write) + Send + 'static) 
                     v: API_VERSION_MAJOR,
                     reply_to: Some(frame.id),
                     event: ApiEvent::HelloOk {
+                        runtime_identity: runtime_identity.clone(),
                         version: API_VERSION_MAJOR,
                         server: "fake-harness/1.0".to_string(),
                         capabilities: vec!["sessions".to_string()],
@@ -124,45 +137,27 @@ fn the_handshake_reports_the_server_and_its_capabilities() {
     );
 }
 
+#[test]
+fn handshake_and_clone_retain_the_bridge_serving_generation() {
+    let identity = jcode_sdk::api::ServingIdentity {
+        pid: 42,
+        binary_path: "/bundle/jcode".into(),
+        git_hash: "bundle-hash".into(),
+        version_label: Some("bundle".into()),
+        reload_id: None,
+        generation: 1,
+    };
+    let client = fake_harness_with_identity(Some(identity.clone()), |_, _| {});
+    assert_eq!(client.runtime_identity.as_ref(), Some(&identity));
+    assert_eq!(client.clone().runtime_identity.as_ref(), Some(&identity));
+    assert!(fake_harness(|_, _| {}).runtime_identity.is_none());
+}
+
 #[path = "client_behavior/soft_interrupt_tests.rs"]
 mod soft_interrupt_tests;
 
 #[path = "client_behavior/runtime_and_files.rs"]
 mod runtime_and_files;
-
-/// Replies must go to the request that asked for them, not to whichever one
-/// happens to be waiting. Answered out of order on purpose: in-order delivery
-/// would pass even with the correlation removed entirely.
-#[test]
-fn out_of_order_replies_reach_the_right_waiter() {
-    let client = fake_harness(|frame, writer| match &frame.request {
-        // Delay the first request's reply so the second overtakes it.
-        ApiRequest::AttachSession { session_id } => {
-            let id = session_id.clone();
-            std::thread::sleep(Duration::from_millis(120));
-            reply(
-                frame,
-                ApiEvent::Attached {
-                    session: session(&id),
-                },
-                writer,
-            );
-        }
-        ApiRequest::Ping => reply(frame, ApiEvent::Pong, writer),
-        _ => {}
-    });
-
-    let slow = {
-        let client = client.clone();
-        std::thread::spawn(move || client.attach_session("slow-session"))
-    };
-    std::thread::sleep(Duration::from_millis(20));
-    client
-        .ping()
-        .expect("the fast request must not wait on the slow one");
-    let attached = slow.join().expect("thread").expect("attach must succeed");
-    assert_eq!(attached.session_id, "slow-session");
-}
 
 /// An error frame becomes a typed failure with the wire code, so a caller can
 /// branch on the cause rather than matching on prose.
@@ -446,6 +441,7 @@ fn a_lost_connection_fails_requests_in_flight() {
                 v: API_VERSION_MAJOR,
                 reply_to: Some(hello.id),
                 event: ApiEvent::HelloOk {
+                    runtime_identity: None,
                     version: API_VERSION_MAJOR,
                     server: "fake/1.0".to_string(),
                     capabilities: vec![],
@@ -561,6 +557,35 @@ fn model_switch_refusal_is_a_typed_error_not_a_success() {
 }
 
 #[test]
+fn peer_messages_are_filtered_by_session_over_sdk_transport() {
+    let client = fake_harness(|frame, writer| {
+        if let ApiRequest::Ping = frame.request {
+            reply(frame, ApiEvent::Pong, writer);
+            for session_id in ["other", "mine"] {
+                push(
+                    ApiEvent::PeerUserMessage {
+                        session_id: session_id.into(),
+                        content: "external prompt".into(),
+                    },
+                    writer,
+                );
+            }
+        }
+    });
+    let stream = client.events(Some("mine"));
+    let all = client.events(None);
+    client.ping().expect("ping");
+    assert!(
+        matches!(stream.next_timeout(Duration::from_secs(5)), Some(ApiEvent::PeerUserMessage { session_id, content }) if session_id == "mine" && content == "external prompt")
+    );
+    for expected in ["other", "mine"] {
+        assert!(
+            matches!(all.next_timeout(Duration::from_secs(5)), Some(ApiEvent::PeerUserMessage {session_id, ..}) if session_id == expected)
+        );
+    }
+}
+
+#[test]
 fn recovery_events_are_delivered_and_filtered_by_session() {
     let client = fake_harness(|frame, writer| {
         if let ApiRequest::Ping = frame.request {
@@ -608,6 +633,7 @@ fn send_system_reminder_is_hidden_and_does_not_wait_for_acceptance() {
     assert_eq!(
         received.recv_timeout(Duration::from_secs(5)).unwrap(),
         ApiRequest::SendMessage {
+            attachments: Vec::new(),
             session_id: "mine".into(),
             content: String::new(),
             system_reminder: Some("continue task".into()),
@@ -926,6 +952,7 @@ fn create_session_options_preserve_system_prompt_wire_values() {
                 reply(
                     &frame,
                     ApiEvent::HelloOk {
+                        runtime_identity: None,
                         version: API_VERSION_MAJOR,
                         server: "fake-harness/1.0".into(),
                         capabilities: vec!["sessions".into()],
@@ -1013,6 +1040,7 @@ fn set_session_env_sends_replacement_and_clear() {
                 reply(
                     &frame,
                     ApiEvent::HelloOk {
+                        runtime_identity: None,
                         version: API_VERSION_MAJOR,
                         server: "fake-harness/1.0".into(),
                         capabilities: vec!["sessions".into()],
@@ -1248,3 +1276,6 @@ fn tool_names_arrive_before_any_arguments_and_interleaved_inputs_keep_call_ids()
         );
     }
 }
+
+#[path = "client_behavior/additional_tests.rs"]
+mod additional_the_handshake_reports_the_server_and_its_capabilities;

@@ -1,49 +1,4 @@
 #[test]
-fn test_model_picker_copilot_selection_prefixes_model() {
-    let mut app = create_test_app();
-    configure_test_remote_models_with_copilot(&mut app);
-
-    app.open_model_picker();
-
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("model picker should be open");
-
-    // Find grok-code-fast-1 (which should only be a copilot route)
-    let grok_idx = picker
-        .entries
-        .iter()
-        .position(|m| m.name == "grok-code-fast-1")
-        .expect("grok-code-fast-1 should be in picker");
-
-    // Navigate to it and select
-    let filtered_pos = picker
-        .filtered
-        .iter()
-        .position(|&i| i == grok_idx)
-        .expect("grok-code-fast-1 should be in filtered list");
-
-    // Set the selected position to grok's position
-    app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
-
-    // Press Enter to select
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-        .unwrap();
-
-    // In remote mode, selection should produce a pending_model_switch with copilot: prefix
-    if let Some(ref spec) = app.pending_model_switch {
-        assert!(
-            spec.starts_with("copilot:"),
-            "copilot model should be prefixed with 'copilot:', got: {}",
-            spec
-        );
-    }
-    // Picker should be closed
-    assert!(app.inline_interactive_state.is_none());
-}
-
-#[test]
 fn test_model_picker_cursor_models_have_cursor_route() {
     let mut app = create_test_app();
     configure_test_remote_models_with_cursor(&mut app);
@@ -1387,12 +1342,14 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
         app.session.provider_key = Some("test-provider".to_string());
         app.session.system_prompt = Some("custom transfer prompt".to_string());
         app.session.messages.push(crate::session::StoredMessage {
+            attachment_data: None,
             id: "msg-1".to_string(),
             role: Role::User,
             content: vec![ContentBlock::Text {
                 text: "full transcript should not be copied".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -1400,6 +1357,7 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
         });
         let transfer_compaction = crate::session::StoredCompactionState {
             summary_text: "Compacted handoff summary".to_string(),
+            plan_context: None,
             openai_encrypted_content: None,
             snapcompact: None,
             covers_up_to_turn: 1,
@@ -1441,7 +1399,7 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
 
         assert_eq!(child.parent_id.as_deref(), Some(app.session.id.as_str()));
         assert!(child.messages.is_empty());
-        assert_eq!(child.compaction, Some(transfer_compaction));
+        assert_eq!(child.compaction.as_deref(), Some(&transfer_compaction));
         assert_eq!(child.model.as_deref(), Some("test-model"));
         assert_eq!(child.provider_key.as_deref(), Some("test-provider"));
         assert_eq!(child.system_prompt, app.session.system_prompt);
@@ -2117,40 +2075,26 @@ fn test_handle_input_shell_completed_renders_markdown_blocks() {
     );
 }
 
-/// Regression for issue #427: selecting an effort-variant model row (e.g.
-/// "gpt-5.5 (high)") in the remote model picker must stage the chosen effort
-/// alongside the pending model switch. Previously only the model spec was
-/// staged, so the server kept its configured default effort (low) and the
-/// session silently ran gpt-5.5 at low effort.
+/// Regression for issue #427: the picker's second step must stage the chosen
+/// reasoning level alongside the pending model switch. Previously only the
+/// model spec was staged, so the server kept its configured default effort
+/// (low) and the session silently ran at low effort.
 #[test]
 fn test_model_picker_effort_variant_selection_stages_effort_in_remote_mode() {
     let mut app = create_test_app();
     configure_test_remote_models_with_openai_recommendations(&mut app);
 
     app.open_model_picker();
+    select_picker_entry(&mut app, |entry| entry.name == "gpt-5.5");
 
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("model picker should be open");
-
-    let entry_idx = picker
-        .entries
-        .iter()
-        .position(|m| m.name == "gpt-5.5 (high)")
-        .expect("gpt-5.5 (high) should be in picker");
-    assert_eq!(
-        picker.entries[entry_idx].effort.as_deref(),
-        Some("high"),
-        "effort variant rows must carry their effort"
+    // Step one opens the level list instead of switching.
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+    assert!(
+        app.pending_model_switch.is_none(),
+        "the level is chosen before the switch is staged"
     );
-
-    let filtered_pos = picker
-        .filtered
-        .iter()
-        .position(|&i| i == entry_idx)
-        .expect("gpt-5.5 (high) should be in filtered list");
-    app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
+    select_picker_entry(&mut app, |row| row.effort.as_deref() == Some("high"));
 
     app.handle_key(KeyCode::Enter, KeyModifiers::empty())
         .unwrap();
@@ -2166,10 +2110,12 @@ fn test_model_picker_effort_variant_selection_stages_effort_in_remote_mode() {
     assert_eq!(
         app.pending_reasoning_effort.as_deref(),
         Some("high"),
-        "the picked effort variant must be staged so it reaches the server (issue #427)"
+        "the picked effort must be staged so it reaches the server (issue #427)"
     );
 }
 
+/// Each route's level list follows its own runtime vocabulary: native OpenAI
+/// offers `max`, OpenRouter aliases it to `xhigh` and must not advertise it.
 #[test]
 fn test_model_picker_effort_variants_follow_each_route_vocabulary() {
     let mut app = create_test_app();
@@ -2184,35 +2130,44 @@ fn test_model_picker_effort_variants_follow_each_route_vocabulary() {
         cheapness: None,
     });
 
-    app.open_model_picker();
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("model picker should be open");
-    let has_route_effort = |api_method: &str, effort: &str| {
-        picker.entries.iter().any(|entry| {
-            entry.name.starts_with("gpt-5.5 (")
-                && entry.effort.as_deref() == Some(effort)
+    for (api_method, expected, forbidden) in [
+        ("openai-oauth", &["max", "minimal"][..], &[][..]),
+        ("openrouter", &["xhigh", "minimal"][..], &["max"][..]),
+    ] {
+        app.open_model_picker();
+        select_picker_entry(&mut app, |entry| {
+            entry.name == "gpt-5.5"
                 && entry
-                    .options
-                    .first()
+                    .active_option()
                     .is_some_and(|route| route.api_method == api_method)
-        })
-    };
-
-    assert!(has_route_effort("openai-oauth", "max"));
-    assert!(has_route_effort("openai-oauth", "minimal"));
-    assert!(has_route_effort("openrouter", "xhigh"));
-    assert!(has_route_effort("openrouter", "minimal"));
-    assert!(
-        !has_route_effort("openrouter", "max"),
-        "OpenRouter must not advertise max as a distinct rung because it aliases xhigh"
-    );
+        });
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+        let levels: Vec<String> = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("effort step")
+            .entries
+            .iter()
+            .filter_map(|row| row.effort.clone())
+            .collect();
+        for level in expected {
+            assert!(
+                levels.iter().any(|candidate| candidate == level),
+                "{api_method} should offer {level}: {levels:?}"
+            );
+        }
+        for level in forbidden {
+            assert!(
+                !levels.iter().any(|candidate| candidate == level),
+                "{api_method} must not advertise {level}: {levels:?}"
+            );
+        }
+        app.inline_interactive_state = None;
+    }
 }
 
-/// Plain model rows (no effort suffix) must not stage a reasoning effort.
-/// Routes whose runtime cannot apply a reasoning effort (e.g. Copilot) get
-/// plain rows even for models that have an effort ladder elsewhere.
+/// A route whose runtime cannot apply a reasoning effort (Copilot) switches in
+/// one step and must not touch the server's effort.
 #[test]
 fn test_model_picker_plain_selection_stages_no_effort_in_remote_mode() {
     let mut app = create_test_app();
@@ -2230,24 +2185,13 @@ fn test_model_picker_plain_selection_stages_no_effort_in_remote_mode() {
     });
 
     app.open_model_picker();
-
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("model picker should be open");
-
-    let entry_idx = picker
-        .entries
-        .iter()
-        .position(|m| m.name == "claude-opus-4-8" && m.effort.is_none())
-        .expect("claude-opus-4-8 should be in picker without an effort variant");
-
-    let filtered_pos = picker
-        .filtered
-        .iter()
-        .position(|&i| i == entry_idx)
-        .expect("claude-opus-4-8 should be in filtered list");
-    app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
+    select_picker_entry(&mut app, |entry| {
+        entry.name == "claude-opus-4-8"
+            && entry.effort.is_none()
+            && entry
+                .active_option()
+                .is_some_and(|route| route.api_method == "copilot")
+    });
 
     app.handle_key(KeyCode::Enter, KeyModifiers::empty())
         .unwrap();
@@ -2260,6 +2204,35 @@ fn test_model_picker_plain_selection_stages_no_effort_in_remote_mode() {
         app.pending_reasoning_effort.is_none(),
         "plain rows must not override the server's effort"
     );
+}
+
+/// Point the picker at the first row matching `matches`, as a user would after
+/// arrowing down to it.
+fn select_picker_entry(app: &mut App, matches: impl Fn(&crate::tui::PickerEntry) -> bool) {
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("picker should be open");
+    let index = picker
+        .entries
+        .iter()
+        .position(matches)
+        .unwrap_or_else(|| {
+            panic!(
+                "no row matched in {:?}",
+                picker
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.name.clone(), entry.effort.clone()))
+                    .collect::<Vec<_>>()
+            )
+        });
+    let filtered = picker
+        .filtered
+        .iter()
+        .position(|&i| i == index)
+        .expect("row should be in the filtered list");
+    app.inline_interactive_state.as_mut().unwrap().selected = filtered;
 }
 
 #[test]
@@ -2335,3 +2308,6 @@ fn test_model_switch_notice_omits_placeholder_route_details() {
 }
 
 include!("catalog_refresh.rs");
+
+#[path = "part_01_additional_tests.rs"]
+mod additional_test_model_picker_copilot_selection_prefixes_model;

@@ -12,7 +12,6 @@ fn test_body_cache_state_keeps_multiple_width_entries() {
         inline_images_visible: true,
         images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
     };
@@ -116,7 +115,6 @@ fn test_body_cache_state_does_not_reuse_a_different_mermaid_aspect_profile() {
         inline_images_visible: true,
         images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
     };
@@ -151,7 +149,6 @@ fn test_body_cache_state_evicts_oldest_entries() {
             inline_images_visible: true,
             images_signature: (0, 0),
             expanded_images_version: 0,
-            swarm_members_signature: 0,
             latex_rendering: crate::config::LatexRenderingMode::Image,
             show_link_urls: false,
         };
@@ -195,7 +192,6 @@ fn test_body_cache_state_accepts_large_single_entry_within_total_budget() {
         inline_images_visible: true,
         images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
     };
@@ -227,7 +223,6 @@ fn test_body_cache_state_retains_oversized_hot_entry() {
         inline_images_visible: true,
         images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
     };
@@ -260,7 +255,6 @@ fn test_body_cache_state_keeps_two_oversized_width_entries_hot() {
         inline_images_visible: true,
         images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
     };
@@ -300,7 +294,6 @@ fn test_body_cache_state_uses_oversized_hot_entry_as_incremental_base() {
         inline_images_visible: true,
         images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
     };
@@ -460,7 +453,9 @@ fn test_prepare_body_swarm_await_wake_is_not_a_numbered_prompt() {
                 .map(extract_line_text)
                 .collect::<Vec<_>>()
                 .join("\n");
-            assert!(text.contains("🐝 ✓ 1/1"), "{text}");
+            assert!(!text.contains("🐝 Swarm await"), "{text}");
+            assert!(text.contains("1› first prompt"), "{text}");
+            assert!(text.contains("2› second prompt"), "{text}");
             assert!(!text.contains("worker transcript"), "{text}");
             assert!(!text.contains("Swarm await finished"), "{text}");
             assert_eq!(prepared.user_prompt_texts.len(), 2);
@@ -578,7 +573,6 @@ fn test_full_prep_cache_state_keeps_multiple_width_entries() {
         batch_progress_hash: 0,
         inline_images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
         inline_images_visible: true,
@@ -681,7 +675,6 @@ fn test_full_prep_cache_state_does_not_reuse_a_different_mermaid_aspect_profile(
         inline_images_signature: (0, 0),
         inline_images_visible: true,
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
     };
@@ -717,7 +710,6 @@ fn test_full_prep_cache_state_evicts_oldest_entries() {
             batch_progress_hash: 0,
             inline_images_signature: (0, 0),
             expanded_images_version: 0,
-            swarm_members_signature: 0,
             latex_rendering: crate::config::LatexRenderingMode::Image,
             show_link_urls: false,
             inline_images_visible: true,
@@ -765,7 +757,6 @@ fn test_full_prep_cache_state_accepts_large_single_entry_within_total_budget() {
         batch_progress_hash: 0,
         inline_images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
         inline_images_visible: true,
@@ -800,7 +791,6 @@ fn test_full_prep_cache_state_retains_oversized_hot_entry() {
         batch_progress_hash: 0,
         inline_images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
         inline_images_visible: true,
@@ -837,7 +827,6 @@ fn test_full_prep_cache_state_keeps_two_oversized_width_entries_hot() {
         batch_progress_hash: 0,
         inline_images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
         inline_images_visible: true,
@@ -1065,7 +1054,6 @@ fn test_full_prep_cache_drops_superseded_streaming_frames() {
         batch_progress_hash: 0,
         inline_images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
         inline_images_visible: true,
@@ -1093,9 +1081,18 @@ fn test_full_prep_cache_drops_superseded_streaming_frames() {
     cache.insert(key_for(10, 80), prepared());
     cache.insert(key_for(20, 80), prepared());
 
-    assert!(cache.get_exact(&key_for(0, 80)).is_some(), "settled frame kept");
-    assert!(cache.get_exact(&key_for(10, 80)).is_none(), "stale stream frame dropped");
-    assert!(cache.get_exact(&key_for(20, 80)).is_some(), "newest stream frame kept");
+    assert!(
+        cache.get_exact(&key_for(0, 80)).is_some(),
+        "settled frame kept"
+    );
+    assert!(
+        cache.get_exact(&key_for(10, 80)).is_none(),
+        "stale stream frame dropped"
+    );
+    assert!(
+        cache.get_exact(&key_for(20, 80)).is_some(),
+        "newest stream frame kept"
+    );
 }
 
 #[test]
@@ -1113,7 +1110,6 @@ fn test_body_cache_drops_superseded_message_versions() {
         inline_images_visible: true,
         images_signature: (0, 0),
         expanded_images_version: 0,
-        swarm_members_signature: 0,
         latex_rendering: crate::config::LatexRenderingMode::Image,
         show_link_urls: false,
     };

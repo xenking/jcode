@@ -128,7 +128,13 @@ fn description_is_compact_and_explains_flat_parallel_calls() {
     assert!(BATCH_DESCRIPTION.contains("sibling fields"));
     assert!(BATCH_DESCRIPTION.contains("tool, intent"));
     assert!(BATCH_DESCRIPTION.contains("Do not batch dependent calls or nest batch"));
-    assert!(BATCH_DESCRIPTION.len() <= 200);
+    // `batch` is where a model lands when it wants several calls in one turn,
+    // which is exactly when a `codemode` script fits better. It has to say so.
+    assert!(
+        BATCH_DESCRIPTION
+            .contains("dependent chains, loops over results, or 10+ calls use `codemode`")
+    );
+    assert!(BATCH_DESCRIPTION.len() <= 260);
 }
 
 #[test]

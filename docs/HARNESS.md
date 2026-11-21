@@ -30,6 +30,37 @@ overrides before submitting resumed work, including after reconnecting to a
 restarted daemon. Automatic recovery may run without them: this feature adds no
 fail-closed recovery barrier and must not be treated as one.
 
+The ACP adapter defaults to `jcode acp --session-env none`, which leaves session
+overrides unchanged. `jcode acp --session-env inherit` or
+`JCODE_ACP_SESSION_ENV=inherit` replaces the overrides with the ACP process's own
+environment after each `session/new`, `session/load`, or `session/resume`
+subscription, before the request succeeds. The adapter drops `JCODE_*` keys
+case-insensitively and names that are empty or contain `=` or NUL. Environment
+names and values must be UTF-8, and values cannot contain NUL. An invalid value,
+daemon rejection, or disconnect fails session setup instead of proceeding without
+the requested environment. An explicit `--session-env` flag takes precedence over
+the environment variable.
+
+ACP automatically reconnects session connections after a daemon restart or
+reload, starting a stopped daemon through the normal daemon-start path. It
+re-attaches the same session ID and, with `--session-env inherit`, re-applies the
+original environment snapshot before sending more work. It also restores a model
+selected with `--model`, `session/set_config_option`, or `/model`. Loading or
+resuming another session still keeps that session's saved model.
+
+Reconnect attempts use exponential backoff from 100 ms up to 5 seconds, with a
+120-second total deadline that includes attachment and environment/model setup.
+A turn interrupted by a disconnect or reload returns an ACP error and is not
+replayed. If reconnecting times out, waiting requests fail with a reconnect error.
+The ACP process stays alive and the next request starts a new reconnect attempt.
+
+For `session/new`, an explicit ACP `--model` selects the session's model even
+when the daemon is already running. A bare model uses `--provider-profile` or an
+explicit non-`auto` `--provider` as its route. An explicitly routed model such as
+`openai:gpt-5.5` keeps its route. The adapter waits for model confirmation and fails
+session setup if the daemon rejects the model. `session/load` and `session/resume`
+keep the existing session's model instead of applying the ACP launch model.
+
 This is environment isolation, not a security sandbox or secret-redaction system.
 The registry does not intentionally log or persist values, but a command can print
 its environment into tool output, write it to disk, or transmit it elsewhere.
@@ -187,6 +218,24 @@ satisfy the dependency. The TUI shows concise `tests: after 1/1 · met`
 progress and does not dim a prerequisite-ready lane merely because its phase is
 later. This note describes the prerequisite gate, not the lane's lifecycle or
 other blockers.
+
+## Cancelling a todo
+
+The active plan uses three statuses: `pending`, `in_progress`, and `completed`.
+Cancel work you no longer intend to do with an action rather than another status:
+
+```json
+{"cancel":[{"name":"compiler-promotion","reason":"Superseded by publish-built-014"}]}
+```
+
+Cancellation removes the item from the plan and records why it was withdrawn.
+It does not count as successful completion. If another lane explicitly depends
+on that item, redirect its prerequisite to a replacement or explicitly clear
+that dependency before cancelling (or in the same edit).
+
+The cancellation history for a session lives at `todos/cancellations/<session-id>.json` under `JCODE_HOME`. It contains the item as it was before cancellation, the reason, and the timestamp.
+
+When space is tight, the collapsed pinned todo view prioritizes rows with live workers before showing `+N more`. This is a display choice only. Expanding the list restores plan order, and scheduling and dependencies are unchanged.
 
 ## Pausing a todo
 

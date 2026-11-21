@@ -74,11 +74,9 @@ pub fn read_secret_line() -> Result<String> {
                 KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                     anyhow::bail!("Cancelled.");
                 }
-                KeyCode::Backspace => {
-                    if input.pop().is_some() {
-                        // Erase one masking glyph.
-                        let _echoed = echo_secret_mask("\u{8} \u{8}");
-                    }
+                KeyCode::Backspace if input.pop().is_some() => {
+                    // Erase one masking glyph.
+                    let _echoed = echo_secret_mask("\u{8} \u{8}");
                 }
                 KeyCode::Char(c) => {
                     input.push(c);

@@ -125,3 +125,9 @@ Notes:
 - Other tool-specific importers exist for Claude Code, Codex, Gemini CLI,
   GitHub Copilot, and Cursor (see `auth/claude.rs`, `auth/codex.rs`,
   `auth/gemini.rs`, `auth/copilot.rs`, `auth/cursor.rs`).
+- Grok Build keeps its login in `~/.jcode/grok_build_auth.json`. The Grok CLI's
+  `$GROK_HOME/auth.json` (default `~/.grok/auth.json`) is only read, and refreshed
+  tokens only written back, after the user trusts it (source id
+  `grok_cli_auth_json`). Cursor's `auth.json` is the same: trusting it also lets
+  jcode write refreshed tokens back, merged into the existing JSON so Cursor's
+  other keys survive.

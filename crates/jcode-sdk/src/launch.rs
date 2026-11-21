@@ -78,7 +78,8 @@ pub struct LaunchOptions {
     pub jcode_home: Option<PathBuf>,
     /// Working directory inherited by sessions created in the instance.
     pub working_dir: Option<PathBuf>,
-    /// Share the user's provider login files. Enabled by default.
+    /// Share the user's provider login files (symlinked, so token refreshes
+    /// write through to them). Disabled by default; opt in explicitly.
     pub inherit_logins: bool,
     /// jcode executable. Defaults to `jcode` on `$PATH`.
     pub binary: Option<PathBuf>,
@@ -118,7 +119,7 @@ impl Default for LaunchOptions {
         Self {
             jcode_home: None,
             working_dir: None,
-            inherit_logins: true,
+            inherit_logins: false,
             binary: None,
             env: HashMap::new(),
             swarm_model: None,
@@ -222,6 +223,16 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
         .unwrap_or_else(|| PathBuf::from("jcode"));
     let mut command = Command::new(&binary);
     crate::process::no_console_window(&mut command);
+    // A runtime pin inherited from a daemon (Desktop started by a rollout, an
+    // agent's shell) names that daemon's binary; the bridge we launch here is
+    // `binary`, and refuses to start under a pin that is not its own image.
+    {
+        use jcode_build_support::runtime_generation as generation;
+        command
+            .env_remove(generation::TARGET_ENV)
+            .env_remove(generation::RELOAD_ID_ENV)
+            .env_remove(generation::GENERATION_ENV);
+    }
     command
         // `--no-update` turns off the bridge's own background update check, which
         // also runs for source builds.
@@ -368,150 +379,9 @@ pub fn user_jcode_home() -> PathBuf {
         .unwrap_or_else(|| home_dir().join(".jcode"))
 }
 
-/// Share rotating login records with an instance and copy mutable config.
-/// Returns the instance-relative paths which were inherited.
-pub fn inherit_credentials(from_home: &Path, to_home: &Path) -> Result<Vec<PathBuf>> {
-    fs::create_dir_all(to_home).map_err(launch_io)?;
-    let metadata = fs::symlink_metadata(to_home).map_err(launch_io)?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(Error::new(
-            ErrorKind::InvalidInstanceHome,
-            format!(
-                "instance home must be a real directory, not a link or file: {}",
-                to_home.display()
-            ),
-        ));
-    }
-    if from_home.exists() && fs::canonicalize(from_home).ok() == fs::canonicalize(to_home).ok() {
-        return Err(Error::new(
-            ErrorKind::InvalidInstanceHome,
-            "instance home must be different from the user's jcode home",
-        ));
-    }
-
-    let mut inherited = Vec::new();
-    for name in CREDENTIAL_FILES {
-        let source = from_home.join(name);
-        if !source.is_file() {
-            continue;
-        }
-        let destination = to_home.join(name);
-        if *name == "config.toml" {
-            fs::copy(&source, &destination).map_err(launch_io)?;
-            set_owner_only_file(&destination)?;
-        } else {
-            link_credential_file(&source, to_home, Path::new(name))?;
-        }
-        inherited.push(PathBuf::from(name));
-    }
-
-    // Provider env files live in the platform config directory. Link exact
-    // files, never the directory, so cleanup cannot traverse into user data.
-    if let Ok(entries) = fs::read_dir(user_app_config_dir()) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if !name.to_string_lossy().ends_with(".env") || !entry.path().is_file() {
-                continue;
-            }
-            let relative = PathBuf::from("config").join("jcode").join(&name);
-            link_credential_file(&entry.path(), to_home, &relative)?;
-            inherited.push(relative);
-        }
-    }
-
-    let home = home_dir();
-    for relative in EXTERNAL_CREDENTIAL_FILES {
-        let source = home.join(relative);
-        if !source.is_file() {
-            continue;
-        }
-        let instance_relative = PathBuf::from("external").join(relative);
-        link_credential_file(&source, to_home, &instance_relative)?;
-        inherited.push(instance_relative);
-    }
-
-    // OpenClaw's current credential store is per-agent. Enumerate only one
-    // agent-id level and only the two filenames its loader recognizes.
-    if let Ok(agents) = fs::read_dir(home.join(".openclaw/agents")) {
-        for agent in agents.flatten().filter(|entry| entry.path().is_dir()) {
-            for name in ["auth-profiles.json", "auth.json"] {
-                let relative = PathBuf::from(".openclaw")
-                    .join("agents")
-                    .join(agent.file_name())
-                    .join("agent")
-                    .join(name);
-                let source = home.join(&relative);
-                if source.is_file() {
-                    let instance_relative = PathBuf::from("external").join(&relative);
-                    link_credential_file(&source, to_home, &instance_relative)?;
-                    inherited.push(instance_relative);
-                }
-            }
-        }
-    }
-    Ok(inherited)
-}
-
-fn link_credential_file(source: &Path, root: &Path, relative: &Path) -> Result<()> {
-    let parent_relative = relative.parent().unwrap_or_else(|| Path::new(""));
-    let parent = ensure_instance_directory(root, parent_relative)?;
-    let destination = parent.join(relative.file_name().unwrap_or_default());
-    let _ = fs::remove_file(&destination);
-    link_file(source, &destination)
-}
-
-#[cfg(unix)]
-fn link_file(source: &Path, destination: &Path) -> Result<()> {
-    std::os::unix::fs::symlink(source, destination).map_err(launch_io)
-}
-
-#[cfg(windows)]
-fn link_file(source: &Path, destination: &Path) -> Result<()> {
-    // Preserve rotating credentials rather than silently creating a stale copy.
-    // Windows may require Developer Mode or symlink privileges; report that OS
-    // error to the caller when links are unavailable.
-    std::os::windows::fs::symlink_file(source, destination).map_err(launch_io)
-}
-
-fn ensure_instance_directory(root: &Path, relative: &Path) -> Result<PathBuf> {
-    if relative.is_absolute()
-        || relative
-            .components()
-            .any(|part| matches!(part, std::path::Component::ParentDir))
-    {
-        return Err(Error::new(
-            ErrorKind::InvalidInstanceHome,
-            format!("unsafe instance path: {}", relative.display()),
-        ));
-    }
-    let mut current = root.to_path_buf();
-    for part in relative.components() {
-        current.push(part);
-        match fs::symlink_metadata(&current) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                fs::remove_file(&current).map_err(launch_io)?;
-                fs::create_dir(&current).map_err(launch_io)?;
-            }
-            Ok(meta) if !meta.is_dir() => {
-                return Err(Error::new(
-                    ErrorKind::InvalidInstanceHome,
-                    format!(
-                        "instance credential path is not a directory: {}",
-                        current.display()
-                    ),
-                ));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir(&current).map_err(launch_io)?;
-            }
-            Err(error) => return Err(launch_io(error)),
-        }
-        set_owner_only_dir(&current)?;
-    }
-    Ok(current)
-}
-
+#[path = "launch_credential_links.rs"]
+mod credential_links;
+pub use credential_links::inherit_credentials;
 /// Progress while a shared runtime comes up.
 pub type Progress<'a> = dyn Fn(&str) + 'a;
 
@@ -544,19 +414,92 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
         .clone()
         .unwrap_or_else(|| sibling_exe("jcode"));
     let legacy = jcode_harness_api::legacy_socket_path();
+    let fallback = if api == jcode_harness_api::api_socket_path() {
+        jcode_build_support::runtime_generation::fallback_before_spawn(&legacy).map_err(
+            |error| {
+                Error::new(
+                    ErrorKind::LaunchFailed,
+                    format!("shared runtime generation selection failed: {error:#}"),
+                )
+            },
+        )?
+    } else {
+        None
+    };
     // A custom API socket may be a forwarded remote endpoint. Only the normal
     // local shared runtime can be offered our explicit packaged companion. A
     // PATH fallback is intentionally not an upgrade candidate.
     #[cfg(unix)]
-    if shared_upgrade::is_local_shared(&api, &legacy, &jcode) && socket_accepts(&legacy) {
+    if fallback.is_none()
+        && shared_upgrade::is_local_shared(&api, &legacy, &jcode)
+        && socket_accepts(&legacy)
+    {
         shared_upgrade::offer(&legacy, &jcode, options.start_timeout, progress);
     }
+    // Bundle clients must not mistake a previous bundle's surviving listener
+    // for their packaged bridge. Remote/custom SDK clients without an explicit
+    // local executable retain their existing endpoint semantics.
+    let standalone_bridge = sibling_exe("jcode-harness-api-bridge");
+    let (bridge, bridge_args) = shared_bridge_launch(
+        &jcode,
+        &standalone_bridge,
+        options.binary.is_some(),
+        CLI_SERVES_API_BRIDGE,
+    );
+    let bridge_target =
+        if options.api_socket.is_some() && options.binary.is_some() && jcode.is_file() {
+            let mut target = jcode_build_support::runtime_generation::resolve(
+                jcode_build_support::runtime_generation::DesiredSelection::Path(jcode.clone()),
+            )
+            .map_err(|error| Error::new(ErrorKind::LaunchFailed, error.to_string()))?;
+            if bridge != jcode {
+                let git_hash = target.git_hash;
+                target = jcode_build_support::runtime_generation::pin_path(bridge)
+                    .map_err(|error| Error::new(ErrorKind::LaunchFailed, error.to_string()))?;
+                target.git_hash = git_hash;
+            }
+            Some(target)
+        } else {
+            None
+        };
     if socket_accepts(&api) {
-        return Ok(());
+        if let Some(target) = &bridge_target {
+            match crate::bundle_bridge::verify_bundle_bridge(&api, target, options.start_timeout) {
+                Ok(()) => return Ok(()),
+                Err(identity_error) => {
+                    crate::bundle_bridge::retire_bridge(&api, options.start_timeout).map_err(
+                        |error| {
+                            Error::new(
+                                ErrorKind::HandshakeFailed,
+                                format!(
+                                    "{identity_error}; cannot retire stale bridge safely: {error}"
+                                ),
+                            )
+                        },
+                    )?;
+                    let deadline = Instant::now() + options.start_timeout;
+                    while socket_accepts(&api) {
+                        if Instant::now() >= deadline {
+                            return Err(Error::new(
+                                ErrorKind::LaunchFailed,
+                                "stale bridge did not withdraw its listener",
+                            ));
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            }
+        } else {
+            return Ok(());
+        }
     }
     if !socket_accepts(&legacy) {
         progress("starting jcode runtime...");
-        spawn_detached(&jcode, &["serve"]).map_err(|error| {
+        let spawn = match &fallback {
+            Some(target) => spawn_detached_inner(&target.binary_path, &["serve"], Some(target)),
+            None => spawn_detached(&jcode, &["serve"]),
+        };
+        spawn.map_err(|error| {
             Error::new(
                 ErrorKind::LaunchFailed,
                 format!("could not start the jcode runtime: {error}"),
@@ -565,20 +508,29 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
         wait_for_socket(&legacy, "jcode runtime", options.start_timeout)?;
     }
     progress("starting harness API bridge...");
-    let standalone_bridge = sibling_exe("jcode-harness-api-bridge");
-    let (bridge, bridge_args) = shared_bridge_launch(
-        &jcode,
-        &standalone_bridge,
-        options.binary.is_some(),
-        CLI_SERVES_API_BRIDGE,
-    );
-    spawn_detached(bridge, bridge_args).map_err(|error| {
-        Error::new(
-            ErrorKind::LaunchFailed,
-            format!("could not start the harness API bridge: {error}"),
+    // A PATH-only companion has no local file to pin yet. Once a concrete
+    // image exists, identity failures must abort rather than launch it unpinned.
+    let target = if bridge.is_file() {
+        Some(
+            jcode_build_support::runtime_generation::pin_path(bridge)
+                .map_err(|error| Error::new(ErrorKind::LaunchFailed, error.to_string()))?,
         )
-    })?;
-    wait_for_socket(&api, "harness API bridge", options.start_timeout)
+    } else {
+        None
+    };
+    spawn_detached_at(bridge, bridge_args, target.as_ref(), Some((&api, &legacy))).map_err(
+        |error| {
+            Error::new(
+                ErrorKind::LaunchFailed,
+                format!("could not start the harness API bridge: {error}"),
+            )
+        },
+    )?;
+    wait_for_socket(&api, "harness API bridge", options.start_timeout)?;
+    if let Some(target) = &bridge_target {
+        crate::bundle_bridge::verify_bundle_bridge(&api, target, options.start_timeout)?;
+    }
+    Ok(())
 }
 
 /// Whether the `jcode` CLI on this platform has the `api-bridge` subcommand.
@@ -610,7 +562,43 @@ fn shared_bridge_launch<'a>(
 }
 
 fn spawn_detached(program: &Path, args: &[&str]) -> std::io::Result<()> {
-    let mut command = Command::new(program);
+    use jcode_build_support::runtime_generation as generation;
+    let target = if program.is_file() {
+        Some(generation::pin_path(program).map_err(std::io::Error::other)?)
+    } else {
+        None
+    };
+    spawn_detached_inner(program, args, target.as_ref())
+}
+
+fn spawn_detached_inner(
+    program: &Path,
+    args: &[&str],
+    target: Option<&jcode_build_support::runtime_generation::ImmutableTarget>,
+) -> std::io::Result<()> {
+    spawn_detached_at(program, args, target, None)
+}
+
+fn spawn_detached_at(
+    program: &Path,
+    args: &[&str],
+    target: Option<&jcode_build_support::runtime_generation::ImmutableTarget>,
+    sockets: Option<(&Path, &Path)>,
+) -> std::io::Result<()> {
+    use jcode_build_support::runtime_generation as generation;
+    let mut command = Command::new(target.map_or(program, |target| target.binary_path.as_path()));
+    command
+        .env_remove(generation::TARGET_ENV)
+        .env_remove(generation::RELOAD_ID_ENV)
+        .env_remove(generation::GENERATION_ENV);
+    if let Some(target) = target {
+        generation::prepare_launch(&mut command, target).map_err(std::io::Error::other)?;
+    }
+    if let Some((api, legacy)) = sockets {
+        command
+            .env("JCODE_API_SOCKET", api)
+            .env("JCODE_SOCKET", legacy);
+    }
     command
         .args(args)
         .stdin(Stdio::null())
@@ -864,6 +852,106 @@ fn launch_io(error: std::io::Error) -> Error {
 mod executable_tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn existing_unidentified_bundle_bridge_is_not_reused() {
+        use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("jcode");
+        fs::write(
+            &binary,
+            "#!/bin/sh\nprintf '%s' '{\"version\":\"test\",\"git_hash\":\"abcdef123\"}'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let api = root.path().join("old.sock");
+        let listener = UnixListener::bind(&api).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while Instant::now() < deadline {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    use std::io::Write;
+                    let _ = stream.write_all(b"{\"v\":1,\"reply_to\":1,\"ev\":\"hello_ok\",\"version\":1,\"server\":\"old\",\"capabilities\":[]}\n");
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let result = ensure_runtime(
+            &LaunchOptions {
+                binary: Some(binary),
+                api_socket: Some(api),
+                start_timeout: Duration::from_millis(100),
+                ..Default::default()
+            },
+            &|_| {},
+        );
+        server.join().unwrap();
+        assert!(
+            result.is_err(),
+            "an accepting socket is not bundle identity evidence"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_bridge_with_previous_build_hash_is_retired_before_reuse() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("jcode");
+        fs::write(
+            &binary,
+            "#!/bin/sh\nprintf '%s' '{\"version\":\"test\",\"git_hash\":\"abcdef123\"}'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let api = root.path().join("api.sock");
+        let listener = UnixListener::bind(&api).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let identity_path = binary.clone();
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < deadline {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let mut line = String::new();
+                    BufReader::new(stream.try_clone().unwrap())
+                        .read_line(&mut line)
+                        .unwrap();
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    requests.push(request["req"].as_str().unwrap().to_owned());
+                    let reply = if request["req"] == "retire_bridge" {
+                        serde_json::json!({"v":1,"reply_to":1,"ev":"bridge_retiring"})
+                    } else {
+                        serde_json::json!({"v":1,"reply_to":1,"ev":"hello_ok","version":1,
+                            "runtime_identity":{"pid":std::process::id(),"binary_path":identity_path,
+                                "git_hash":"987654321","generation":1},
+                            "capabilities":crate::bundle_bridge::BUNDLE_BRIDGE_CAPABILITIES})
+                    };
+                    writeln!(stream, "{reply}").unwrap();
+                    if requests.last().unwrap() == "retire_bridge" {
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            requests
+        });
+        let result = ensure_runtime(
+            &LaunchOptions {
+                binary: Some(binary),
+                api_socket: Some(api),
+                start_timeout: Duration::from_millis(100),
+                ..Default::default()
+            },
+            &|_| {},
+        );
+        assert!(result.is_err(), "same path is not the expected build");
+        assert_eq!(server.join().unwrap(), ["hello", "retire_bridge"]);
+    }
+
     #[test]
     fn selected_runtime_bridge_wins_over_stale_standalone() {
         let root = tempfile::tempdir().unwrap();
@@ -954,6 +1042,11 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
+    #[test]
+    fn logins_are_not_inherited_unless_requested() {
+        assert!(!LaunchOptions::default().inherit_logins);
+    }
+
     #[test]
     fn swarm_model_reaches_runtime_and_overrides_generic_environment() {
         use std::os::unix::fs::PermissionsExt;

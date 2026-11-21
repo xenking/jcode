@@ -38,7 +38,15 @@ fn test_paths() {
     let _guard = crate::storage::lock_test_env();
 
     let bdir = browser_dir();
-    assert!(bdir.to_string_lossy().contains(".jcode"));
+    // The browser lives inside the resolved jcode home, which a test build keeps
+    // outside the developer's real `~/.jcode`.
+    let home = crate::storage::jcode_dir().expect("jcode home");
+    assert!(
+        bdir.starts_with(&home),
+        "{} not under {}",
+        bdir.display(),
+        home.display()
+    );
     assert!(bdir.to_string_lossy().ends_with("browser"));
 
     let bin = browser_binary_path();
@@ -833,4 +841,21 @@ fn a_bridge_answered_by_another_browser_is_not_the_requested_one() {
         status_answered_by(&status, BrowserKind::Brave),
         "same Chromium family"
     );
+}
+
+#[test]
+fn bridge_auto_update_is_opt_in_with_env_override() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_BROWSER_AUTO_UPDATE");
+    crate::env::remove_var("JCODE_BROWSER_AUTO_UPDATE");
+    assert!(!crate::config::config().companion.browser_updates);
+    assert!(browser_update::auto_update_disabled());
+    crate::env::set_var("JCODE_BROWSER_AUTO_UPDATE", "1");
+    assert!(!browser_update::auto_update_disabled());
+    crate::env::set_var("JCODE_BROWSER_AUTO_UPDATE", "0");
+    assert!(browser_update::auto_update_disabled());
+    match prev {
+        Some(v) => crate::env::set_var("JCODE_BROWSER_AUTO_UPDATE", v),
+        None => crate::env::remove_var("JCODE_BROWSER_AUTO_UPDATE"),
+    }
 }

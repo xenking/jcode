@@ -59,11 +59,11 @@ impl Agent {
     /// Try a small sequence of differently framed policy checks after Fable
     /// guardrails a response. Every prompt preserves warranted refusals, and the
     /// fixed suite size prevents an unbounded refusal/retry loop.
-    pub(crate) fn maybe_reconsider_fable_guardrail(
-        &mut self,
+    pub(crate) fn fable_guardrail_retry_prompt(
+        &self,
         stop_reason: Option<&str>,
         attempts: &mut u32,
-    ) -> Result<bool> {
+    ) -> Option<Message> {
         let model = self.provider.model();
         if !Self::should_reconsider_fable_guardrail(
             &model,
@@ -71,7 +71,7 @@ impl Agent {
             *attempts,
             Self::FABLE_GUARDRAIL_RECONSIDERATION_PROMPTS.len() as u32,
         ) {
-            return Ok(false);
+            return None;
         }
 
         let prompt = Self::FABLE_GUARDRAIL_RECONSIDERATION_PROMPTS[*attempts as usize];
@@ -82,15 +82,9 @@ impl Agent {
             attempts,
             Self::FABLE_GUARDRAIL_RECONSIDERATION_PROMPTS.len(),
         ));
-        self.add_message(
-            Role::User,
-            vec![ContentBlock::Text {
-                text: prompt.to_string(),
-                cache_control: None,
-            }],
-        );
-        self.session.save()?;
-        Ok(true)
+        let mut message = Message::user(prompt).into_request_only();
+        message.timestamp = None;
+        Some(message)
     }
 
     pub(crate) fn should_reconsider_fable_guardrail(
@@ -865,8 +859,7 @@ mod malformed_tool_call_recovery_tests {
                     .session
                     .messages
                     .iter()
-                    .filter(|m| m.role == Role::Assistant)
-                    .last()
+                    .rfind(|m| m.role == Role::Assistant)
                     .unwrap();
                 assert!(assistant.content.iter().any(
                     |b| matches!(b, ContentBlock::Text { text: stored, .. } if stored == text)

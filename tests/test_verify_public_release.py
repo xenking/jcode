@@ -46,6 +46,32 @@ class PublicReleaseTests(unittest.TestCase):
     def test_complete_release_passes(self):
         self.verify()
 
+    def test_async_platform_may_be_pending_but_core_may_not(self):
+        data = metadata()
+        data["assets"] = [a for a in data["assets"] if a["name"] != "jcode-freebsd-x86_64.tar.gz"]
+        with self.assertRaisesRegex(ValueError, "Missing required"):
+            verifier.verify_metadata(data, TAG)
+        verifier.verify_metadata(data, TAG, allow_missing=["freebsd-x86_64"])
+        data["assets"] = [a for a in data["assets"] if a["name"] != "jcode-linux-x86_64.tar.gz"]
+        with self.assertRaisesRegex(ValueError, "Missing required"):
+            verifier.verify_metadata(data, TAG, allow_missing=["freebsd-x86_64"])
+        with self.assertRaises(ValueError):
+            verifier.required_assets(["bogus"])
+
+    def test_late_async_asset_without_checksum_is_tolerated_only_when_pending(self):
+        late = "jcode-freebsd-x86_64.tar.gz"
+        self.names = self.names - {late}
+        self.write_checksums()
+        self.names = self.names | {late}
+        with self.assertRaisesRegex(ValueError, "exactly"):
+            self.verify()
+        verifier.verify_downloads(self.directory, self.names, TAG, SHA, ["freebsd-x86_64"])
+        self.names = self.names - {"jcode-linux-x86_64.tar.gz"}
+        self.write_checksums()
+        self.names = self.names | {"jcode-linux-x86_64.tar.gz"}
+        with self.assertRaisesRegex(ValueError, "exactly"):
+            verifier.verify_downloads(self.directory, self.names, TAG, SHA, ["freebsd-x86_64"])
+
     def test_draft_validation_is_explicit_and_still_checks_assets(self):
         data = metadata()
         data["draft"] = True
@@ -61,6 +87,7 @@ class PublicReleaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 verifier.verify_metadata(data, TAG, allow_draft=True)
 
+    @unittest.skipUnless((ROOT / ".github/workflows/release.yml").is_file(), "upstream release workflow not installed")
     def test_workflow_verifies_before_announcements_and_package_updates(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         publish = workflow.index("      - name: Publish completed release")

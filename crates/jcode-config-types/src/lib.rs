@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 mod display;
 mod update_policy;
-pub use update_policy::{CrossProviderFailoverMode, UpdateChannel};
+pub use update_policy::{AutoResetTrigger, CrossProviderFailoverMode, UpdateChannel};
 mod menubar;
 mod power;
 mod session;
@@ -287,6 +287,9 @@ impl ReasoningDisplayMode {
     }
 }
 
+#[cfg(test)]
+mod lib_snapcompact_config_tests;
+
 /// Compaction configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -346,6 +349,13 @@ pub struct CompactionConfig {
     /// Use bitmap snapcompact for vision-capable models at compaction time.
     /// Models without vision fall back to normal compaction.
     pub snapcompact: bool,
+    /// Frame shape snapcompact prints the archive with (omp `snapcompact.shape`).
+    /// `auto` picks the shape tuned for the active model; any `SHAPE_VARIANTS`
+    /// name (`11on16-bw`, `8on22-bw`, `6x6u-sent`, ...) forces that geometry.
+    pub snapcompact_shape: String,
+    /// Post-apply decisions extraction route. `auto` selects an available cheap
+    /// model (luna/haiku/flash/mini/nano), `off` disables enrichment. Never Opus.
+    pub snapcompact_decisions_model: String,
 
     /// Enable LLM-free "shake" elision of stale large tool outputs and code
     /// blocks. Runs only when the prompt prefix is being rewritten anyway:
@@ -364,6 +374,29 @@ pub struct CompactionConfig {
     /// (prefix is cold anyway). Skipped for providers with no TTL estimate,
     /// i.e. persistent or unknown caches.
     pub shake_cache_expiry: bool,
+    /// Start snapcompact on the first request after the provider prompt-cache
+    /// TTL expired, mirroring omp's idle compaction: the prefix is cold, so
+    /// folding it costs no cache. Requires `snapcompact`, a known TTL, and
+    /// context at or above `cache_expiry_threshold_tokens`. Never while warm.
+    pub snapcompact_cache_expiry: bool,
+    /// Minimum context tokens for cache-expiry snapcompact (omp
+    /// `idleThresholdTokens`). 0 disables the trigger.
+    pub cache_expiry_threshold_tokens: usize,
+    /// Override the estimated provider prompt-cache TTL (seconds) used by the
+    /// cache-expiry shake/snapcompact triggers. 0 = provider estimate. Useful
+    /// for testing; a value below the real TTL compacts a still-warm cache.
+    pub cache_ttl_secs: u64,
+
+    /// Compact opportunistically while the session is idle but still waiting on
+    /// something (swarm members, a `bg` wait, an `await_members` dependency)
+    /// instead of waiting for the next user message to hit the reactive
+    /// threshold. Requires `idle_precompact_ratio` of the resolved per-model
+    /// compaction threshold and a cold prompt cache (a warm cache means a turn
+    /// was just served, so the prefix is about to be reused).
+    pub idle_precompact: bool,
+    /// Fraction of the resolved compaction threshold that arms idle
+    /// pre-compaction. 0.95 means a 400k threshold compacts at 380k.
+    pub idle_precompact_ratio: f32,
 
     /// Per-provider overrides (`[compaction.providers.openai]`). Merged over
     /// the global section; model overrides win over provider overrides.
@@ -396,12 +429,19 @@ pub struct CompactionOverride {
     pub goal_window_turns: Option<usize>,
     pub max_context_tokens: Option<usize>,
     pub snapcompact: Option<bool>,
+    pub snapcompact_shape: Option<String>,
+    pub snapcompact_decisions_model: Option<String>,
     pub shake: Option<bool>,
     pub shake_protect_tokens: Option<usize>,
     pub shake_min_region_tokens: Option<usize>,
     pub shake_min_savings_tokens: Option<usize>,
     pub shake_code_blocks: Option<bool>,
     pub shake_cache_expiry: Option<bool>,
+    pub snapcompact_cache_expiry: Option<bool>,
+    pub cache_expiry_threshold_tokens: Option<usize>,
+    pub cache_ttl_secs: Option<u64>,
+    pub idle_precompact: Option<bool>,
+    pub idle_precompact_ratio: Option<f32>,
 }
 
 impl CompactionOverride {
@@ -425,14 +465,47 @@ impl CompactionOverride {
             goal_window_turns,
             max_context_tokens,
             snapcompact,
+            snapcompact_shape,
+            snapcompact_decisions_model,
             shake,
             shake_protect_tokens,
             shake_min_region_tokens,
             shake_min_savings_tokens,
             shake_code_blocks,
-            shake_cache_expiry
+            shake_cache_expiry,
+            snapcompact_cache_expiry,
+            cache_expiry_threshold_tokens,
+            cache_ttl_secs,
+            idle_precompact,
+            idle_precompact_ratio
         );
     }
+}
+
+/// Canonical model id for override matching: drops route prefixes
+/// (`claude:`, `anthropic/`), effort suffixes (`:high`), and window variants
+/// (`[1m]`), so all aliases of one model hit the same key.
+fn canonical_compaction_model_id(value: &str) -> String {
+    let mut v = value.trim().to_ascii_lowercase();
+    if let Some(idx) = v.find('[') {
+        v.truncate(idx);
+    }
+    if let Some((_, rest)) = v.rsplit_once('/') {
+        v = rest.to_string();
+    }
+    // `route:model` or `model:effort`; keep the part that looks like a model id.
+    let parts: Vec<&str> = v
+        .split(':')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    const EFFORTS: [&str; 7] = ["minimal", "low", "medium", "high", "xhigh", "max", "none"];
+    let kept: Vec<&str> = parts
+        .iter()
+        .copied()
+        .filter(|p| !EFFORTS.contains(p))
+        .collect();
+    kept.last().map(|s| s.to_string()).unwrap_or(v)
 }
 
 fn compaction_key_matches(key: &str, value: &str) -> bool {
@@ -441,6 +514,7 @@ fn compaction_key_matches(key: &str, value: &str) -> bool {
         || value
             .split_once(':')
             .is_some_and(|(_, bare)| key.trim().eq_ignore_ascii_case(bare.trim()))
+        || canonical_compaction_model_id(key) == canonical_compaction_model_id(value)
 }
 
 impl CompactionConfig {
@@ -484,12 +558,20 @@ impl Default for CompactionConfig {
             goal_window_turns: 5,
             max_context_tokens: 0,
             snapcompact: true,
+            snapcompact_shape: "auto".to_string(),
+            snapcompact_decisions_model: "auto".to_string(),
             shake: false,
-            shake_protect_tokens: 16_384,
+            // omp `DEFAULT_SHAKE_CONFIG`: protectTokens 16000, minSavings 4000.
+            shake_protect_tokens: 16_000,
             shake_min_region_tokens: 400,
-            shake_min_savings_tokens: 4_096,
+            shake_min_savings_tokens: 4_000,
             shake_code_blocks: true,
             shake_cache_expiry: true,
+            snapcompact_cache_expiry: false,
+            cache_expiry_threshold_tokens: 200_000,
+            cache_ttl_secs: 0,
+            idle_precompact: true,
+            idle_precompact_ratio: 0.95,
             providers: Default::default(),
             models: Default::default(),
         }
@@ -648,6 +730,14 @@ pub struct AgentsConfig {
     pub swarm_model_selection: bool,
     /// Exact model/route strings the agent may request. Empty denies all overrides.
     pub swarm_model_allowlist: Vec<String>,
+    /// Models a spawned worker is allowed to run on.
+    ///
+    /// This is the hard allowlist for agent-initiated choices: a spawn or
+    /// model-switch request for anything outside it is rejected, and worker
+    /// failover never steps outside it. Empty disables the restriction (legacy
+    /// behaviour: `swarm_model` plus its fallbacks are trusted as configured).
+    /// Only a user-started session (not a worker) is free to use any model.
+    pub spawn_allowed_models: Vec<String>,
     /// Ordered fallbacks tried when `swarm_model`'s route is not logged in
     /// (no available route in the coordinator's model catalog). The first
     /// available entry wins; if none is available, `swarm_model` is used as-is.
@@ -656,26 +746,27 @@ pub struct AgentsConfig {
     /// `"high"`, ...). The swarm tool does not let agents choose worker
     /// effort. Unset means `"low"`.
     pub swarm_effort: Option<String>,
+    /// Maximum worker effort per exact provider:model route. Empty is unrestricted.
+    pub swarm_effort_caps: std::collections::BTreeMap<String, String>,
+    /// Worker model pool, like omp's task pool: each exact `provider:model`
+    /// route lists the reasoning efforts a worker may use on it. A non-empty
+    /// pool is the worker allowlist (merged into `spawn_allowed_models` and
+    /// `swarm_model_allowlist`); an empty effort list allows every level.
+    /// A requested effort outside the list moves to the nearest allowed level,
+    /// preferring the next one up.
+    pub swarm_pool: std::collections::BTreeMap<String, Vec<String>>,
     /// Root reasoning effort in swarm mode. Unset or invalid means `low`.
     /// This does not change worker effort (`swarm_effort`).
     pub swarm_root_effort: Option<String>,
     /// Default terminal mode for swarm-created agents.
     pub swarm_spawn_mode: SwarmSpawnMode,
-    /// Maximum percentage (1-90) of the chat column height the inline swarm
-    /// gallery band may occupy. Leave unset to use the built-in default (40%).
-    /// Lower values keep more of the transcript visible; set near the minimum
-    /// to effectively collapse the gallery to a thin strip.
-    pub swarm_gallery_max_pct: Option<u8>,
-    /// Layout of the inline swarm strip above the status line:
-    /// `"vertical"` (default) lists one agent per row (session icon + status
-    /// glyph + task), capped to a few lines; `"horizontal"` packs all agents
-    /// as chips on a single row.
-    #[serde(default)]
-    pub swarm_strip_layout: SwarmStripLayout,
     /// Jev Decisions provider for recall: auto, openrouter, typesafe, laya,
     /// aimlapi, or jcode. Auto uses a provider-specific BYOK credential before Jcode.
     #[serde(default = "default_memory_jev_provider")]
     pub memory_jev_provider: String,
+    /// Opt in to Decisions-based automatic recall and extraction judging.
+    #[serde(default)]
+    pub memory_auto_recall: bool,
     /// Optional model override for memory Jev Decisions.
     pub memory_jev_model: Option<String>,
     /// Optional model override for browser Jev Decisions.
@@ -687,6 +778,13 @@ pub struct AgentsConfig {
     pub memory_jev_threshold: f32,
     /// Optional model override for memory extraction only, never recall.
     pub memory_model: Option<String>,
+    /// Optional model override for generated session titles.
+    ///
+    /// Titles are a tiny side call, so this defaults to the cheap non-OpenAI
+    /// chain in `jcode_session_types::DEFAULT_TITLE_MODELS` (Claude Haiku, then
+    /// the cheap DeepSeek flash route). The fallback chain keeps naming working
+    /// when OpenAI is paused or the first provider is unavailable.
+    pub title_model: Option<String>,
     /// Whether optional automatic memory extraction may use a text-generating
     /// sidecar. Recall always uses Jev and is independent of this setting.
     #[serde(default = "default_memory_sidecar_enabled")]
@@ -773,76 +871,8 @@ fn default_memory_rerank_min_agree() -> usize {
     2
 }
 
-impl Default for AgentsConfig {
-    fn default() -> Self {
-        Self {
-            swarm_model: None,
-            swarm_model_selection: false,
-            swarm_model_allowlist: Vec::new(),
-            swarm_model_fallbacks: Vec::new(),
-            swarm_effort: None,
-            swarm_root_effort: None,
-            swarm_spawn_mode: SwarmSpawnMode::default(),
-            swarm_gallery_max_pct: None,
-            swarm_strip_layout: SwarmStripLayout::default(),
-            memory_jev_provider: default_memory_jev_provider(),
-            memory_jev_model: None,
-            browser_jev_model: None,
-            voice_jev_model: None,
-            memory_jev_threshold: default_memory_jev_threshold(),
-            memory_model: None,
-            memory_sidecar_enabled: default_memory_sidecar_enabled(),
-            memory_rerank_cadence: default_memory_rerank_cadence(),
-            memory_rerank_votes: default_memory_rerank_votes(),
-            memory_rerank_min_agree: default_memory_rerank_min_agree(),
-            memory_embedding_backend: default_memory_embedding_backend(),
-            memory_embedding_model: None,
-            memory_embedding_base_url: None,
-            memory_embedding_dim: None,
-            swarm_max_concurrent_agents: default_swarm_max_concurrent_agents(),
-            swarm_stall_after_secs: default_swarm_stall_after_secs(),
-            swarm_stall_nudge: false,
-        }
-    }
-}
-
-impl AgentsConfig {
-    /// Validate an agent-supplied override before resolving any provider route.
-    /// Matching is exact: a bare model never authorizes another provider's route.
-    pub fn validate_swarm_model_request(&self, model: Option<&str>) -> Result<(), &'static str> {
-        let Some(model) = model else {
-            return Ok(());
-        };
-        if !self.swarm_model_selection {
-            return Err(
-                "Agent-selected swarm models are disabled. Omit model to use the user-configured default.",
-            );
-        }
-        if model.trim().is_empty()
-            || !self
-                .swarm_model_allowlist
-                .iter()
-                .any(|allowed| allowed == model)
-        {
-            return Err(
-                "Requested swarm model is not in agents.swarm_model_allowlist. Omit model to use the user-configured default.",
-            );
-        }
-        Ok(())
-    }
-
-    /// Resolve swarm mode's root effort without allowing the orchestration
-    /// sentinel to recurse into itself. Unknown values use the low-effort
-    /// default without invalidating other settings.
-    pub fn root_effort_for_swarm(&self) -> &'static str {
-        let value = self.swarm_root_effort.as_deref().unwrap_or("low").trim();
-        ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
-            .into_iter()
-            .find(|level| level.eq_ignore_ascii_case(value))
-            .unwrap_or("low")
-    }
-}
-
+#[path = "lib_agents_defaults.rs"]
+mod agents_defaults;
 /// How swarm-created agents should be spawned.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -877,36 +907,6 @@ impl SwarmSpawnMode {
             Self::Headless => "headless",
             Self::Inline => "inline",
             Self::Auto => "auto",
-        }
-    }
-}
-
-/// Layout of the inline swarm strip shown above the status line.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum SwarmStripLayout {
-    /// One agent per row: session icon + status glyph + task label, capped to
-    /// a few lines with a `+N more` overflow marker.
-    #[default]
-    Vertical,
-    /// All agents packed as chips on a single row (the historical layout).
-    Horizontal,
-}
-
-impl SwarmStripLayout {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "vertical" | "list" => Some(Self::Vertical),
-            "horizontal" | "chips" | "strip" => Some(Self::Horizontal),
-            _ => None,
-        }
-    }
-
-    /// Canonical lowercase string for this layout (matches config/env values).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Vertical => "vertical",
-            Self::Horizontal => "horizontal",
         }
     }
 }
@@ -1097,34 +1097,6 @@ pub struct AutoReviewConfig {
     pub enabled: bool,
     /// Optional model override for autoreview reviewer sessions.
     pub model: Option<String>,
-}
-
-/// Integration discovery configuration (legacy `[sponsors]` section name).
-///
-/// Integration discovery makes third-party developer tools discoverable to
-/// the agent via an `integration_tools` tool backed by a hosted directory. Some
-/// providers may share revenue with Jcode when a referred user becomes a
-/// customer, but partnership status never influences recommendations.
-/// See <https://jcode.sh/discovery-tools>.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SponsorsConfig {
-    /// Enable integration discovery. Disabled by default; set to true to opt
-    /// in. When false, no discovery categories are added to the prompt, the
-    /// `integration_tools` tool is not registered, and jcode never contacts the
-    /// discovery endpoint.
-    pub enabled: bool,
-    /// Base URL of the discovery endpoint.
-    pub endpoint: String,
-}
-
-impl Default for SponsorsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            endpoint: "https://api.jcode.sh/v1/discovery".to_string(),
-        }
-    }
 }
 
 /// Automatic end-of-turn execution judging configuration.
@@ -1329,7 +1301,7 @@ pub struct FeatureConfig {
     /// Inject timestamps into user messages and tool results sent to the model (default: true)
     pub message_timestamps: bool,
     /// Persist auto-recalled memory injections into normal session history instead of sending
-    /// them as request-only ephemeral suffix messages (default: false)
+    /// them as request-only ephemeral suffix messages (default: true).
     pub persist_memory_injections: bool,
     /// Surface an in-chat system message for each meaningful observed KV cache
     /// miss, including low/zero reads, route changes, expiry, and harness prefix
@@ -1365,7 +1337,7 @@ impl Default for FeatureConfig {
             todo_gate_digest: false,
             todo_gate_diagnostics: false,
             message_timestamps: true,
-            persist_memory_injections: false,
+            persist_memory_injections: true,
             kv_cache_miss_notices: true,
             code_mode: true,
             update_channel: UpdateChannel::default(),
@@ -1403,6 +1375,9 @@ pub struct ProviderConfig {
     pub preserve_reasoning_context: bool,
     /// How to handle cross-provider failover when the same input would be resent elsewhere.
     pub cross_provider_failover: CrossProviderFailoverMode,
+    /// Case-insensitive model substrings, with optional `*` wildcards, excluded
+    /// from automatic failover. Explicit model choices are unaffected.
+    pub failover_excluded_models: Vec<String>,
     /// Skip the cross-provider countdown for definitive exhausted usage only.
     /// Manual cross-provider failover still disables automatic switching.
     pub exhausted_usage_immediate_failover: bool,
@@ -1421,6 +1396,12 @@ pub struct ProviderConfig {
     /// Preserve earned resets while the account pool router has another ready route.
     /// Applies to both OpenAI and Anthropic automatic resets. Default: true.
     pub auto_reset_only_when_no_routes: bool,
+    /// When automatic resets may fire: "exhausted" (any window at 100%) or
+    /// "blocked_wait_over" (blocked and the reset is more than
+    /// `auto_reset_min_wait_minutes` away). Default: blocked_wait_over.
+    pub auto_reset_trigger: AutoResetTrigger,
+    /// Minimum remaining wait before `blocked_wait_over` spends a reset. Default: 10.
+    pub auto_reset_min_wait_minutes: u64,
     /// Copilot premium request mode: "normal", "one", or "zero"
     /// "zero" means all requests are free (no premium requests consumed)
     pub copilot_premium: Option<String>,
@@ -1473,12 +1454,15 @@ impl Default for ProviderConfig {
             openai_native_compaction_threshold_tokens: 200_000,
             preserve_reasoning_context: true,
             cross_provider_failover: CrossProviderFailoverMode::Countdown,
+            failover_excluded_models: vec!["opus".to_string()],
             exhausted_usage_immediate_failover: true,
             anthropic_retry_recoverable_rate_limits: true,
             same_provider_account_failover: true,
             openai_auto_banked_reset: true,
             anthropic_auto_fable_reset: false,
             auto_reset_only_when_no_routes: true,
+            auto_reset_trigger: AutoResetTrigger::default(),
+            auto_reset_min_wait_minutes: 10,
             copilot_premium: None,
             gemini_force_oauth: false,
             gemini_project: None,
@@ -1488,6 +1472,34 @@ impl Default for ProviderConfig {
             retry_backoff_cap_secs: 30,
             request_compression: "auto".to_string(),
         }
+    }
+}
+
+impl ProviderConfig {
+    /// Match against a model ID or routed model spec, never a provider name.
+    pub fn failover_model_excluded(&self, spec: &str) -> bool {
+        let model = spec
+            .rsplit(':')
+            .next()
+            .unwrap_or(spec)
+            .split('@')
+            .next()
+            .unwrap_or(spec)
+            .to_ascii_lowercase();
+        self.failover_excluded_models.iter().any(|pattern| {
+            let pattern = pattern.trim().to_ascii_lowercase();
+            if pattern.is_empty() {
+                return false;
+            }
+            let mut remaining = model.as_str();
+            for part in pattern.split('*').filter(|part| !part.is_empty()) {
+                let Some(index) = remaining.find(part) else {
+                    return false;
+                };
+                remaining = &remaining[index + part.len()..];
+            }
+            true
+        })
     }
 }
 
@@ -1736,9 +1748,9 @@ pub struct LaunchHotkeyEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct LaunchHotkeysConfig {
-    /// Whether the global launch hotkeys are installed at all. `None` means
-    /// "not decided yet" (fall back to the legacy auto-install gating); `Some`
-    /// is an explicit user/import choice.
+    /// Whether launch hotkeys may stay installed. Hotkeys are only ever
+    /// installed by an explicit `jcode setup-hotkey`; `Some(false)` also
+    /// removes an existing macOS LaunchAgent at startup.
     pub enabled: Option<bool>,
     /// Explicit chord -> directory mapping. Empty = use built-in defaults.
     pub entries: Vec<LaunchHotkeyEntry>,
@@ -1810,6 +1822,90 @@ mod compaction_override_tests {
         );
         let disabled: CompactionConfig = serde_json::from_str(r#"{"snapcompact":false}"#).unwrap();
         assert!(!disabled.resolve(None, None).snapcompact);
+    }
+
+    /// omp `DEFAULT_SHAKE_CONFIG` / `snapcompact.shape`: the migrated defaults
+    /// and the shape override have to survive TOML parsing as written in
+    /// `~/.jcode/config.toml`.
+    #[test]
+    fn omp_compaction_defaults_parse_from_toml() {
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            compaction: CompactionConfig,
+        }
+        let parsed: Wrapper = toml::from_str(
+            r#"
+[compaction]
+snapcompact = true
+snapcompact_shape = "auto"
+shake = true
+shake_protect_tokens = 16000
+shake_min_region_tokens = 400
+shake_min_savings_tokens = 4000
+shake_code_blocks = true
+
+[compaction.providers.gemini]
+reactive_threshold_tokens = 280000
+
+[compaction.models."claude-opus-5-5"]
+reactive_threshold_tokens = 500000
+"#,
+        )
+        .expect("migrated compaction section parses");
+        let resolved = parsed
+            .compaction
+            .resolve(Some("gemini"), Some("gemini-3.5-flash"));
+        assert_eq!(resolved.snapcompact_shape, "auto");
+        assert_eq!(resolved.shake_protect_tokens, 16_000);
+        assert_eq!(resolved.shake_min_region_tokens, 400);
+        assert_eq!(resolved.shake_min_savings_tokens, 4_000);
+        assert!(resolved.shake_code_blocks);
+        assert_eq!(resolved.reactive_threshold_tokens, 280_000);
+        assert_eq!(
+            parsed
+                .compaction
+                .resolve(Some("claude"), Some("claude-opus-5-5"))
+                .reactive_threshold_tokens,
+            500_000
+        );
+        // A forced shape name is preserved verbatim for the snapcompact pass.
+        let forced: CompactionConfig =
+            serde_json::from_str(r#"{"snapcompact_shape":"6x6u-sent"}"#).unwrap();
+        assert_eq!(forced.snapcompact_shape, "6x6u-sent");
+    }
+
+    #[test]
+    fn model_override_matches_prefixed_suffixed_and_aliased_ids() {
+        let mut config = CompactionConfig::default();
+        config.models.insert(
+            "claude-opus-5-5".into(),
+            CompactionOverride {
+                reactive_threshold_tokens: Some(500_000),
+                ..Default::default()
+            },
+        );
+        for id in [
+            "claude-opus-5-5",
+            "claude:claude-opus-5-5",
+            "claude-opus-5-5[1m]",
+            "anthropic/claude-opus-5-5",
+            "anthropic/claude-opus-5-5:high",
+            " CLAUDE-OPUS-5-5[1M] ",
+        ] {
+            assert_eq!(
+                config
+                    .resolve(Some("Claude"), Some(id))
+                    .reactive_threshold_tokens,
+                500_000,
+                "{id}"
+            );
+        }
+        assert_eq!(
+            config
+                .resolve(Some("Claude"), Some("claude-opus-5-5-fast"))
+                .reactive_threshold_tokens,
+            400_000
+        );
     }
 
     fn cfg() -> CompactionConfig {

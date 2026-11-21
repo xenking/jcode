@@ -4,6 +4,7 @@ use super::{
     fanout_session_event, queue_soft_interrupt_for_session, record_swarm_event, truncate_detail,
 };
 use crate::protocol::{CommDeliveryMode, NotificationType, ServerEvent};
+use crate::server::client_writer::send_client_event_best_effort;
 use jcode_agent_runtime::SoftInterruptSource;
 use jcode_swarm_core::ChannelIndex;
 use std::collections::{HashMap, HashSet};
@@ -76,6 +77,64 @@ async fn resolve_dm_target_session(
             ))
         }
     }
+}
+
+/// Resolve a DM target across every live session on the daemon, not just the
+/// sender's swarm. Accepts an exact session id or a unique friendly name.
+/// Returns the session id and the swarm it currently belongs to.
+pub(super) async fn resolve_global_session_target(
+    target: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> anyhow::Result<(String, String)> {
+    let target = target.trim();
+    let members = swarm_members.read().await;
+    if let Some(member) = members.get(target) {
+        if member.report_back_to_session_id.is_some() {
+            return Err(anyhow::anyhow!(
+                "Session '{target}' is a spawned worker of another swarm. Message its owner, or use to_swarm."
+            ));
+        }
+        return match member.swarm_id.clone() {
+            Some(swarm_id) => Ok((member.session_id.clone(), swarm_id)),
+            None => Err(anyhow::anyhow!("Session '{target}' is not in a swarm.")),
+        };
+    }
+    let mut matches: Vec<(String, String, String)> = members
+        .values()
+        .filter(|member| member.friendly_name.as_deref() == Some(target))
+        .filter(|member| member.report_back_to_session_id.is_none())
+        .filter_map(|member| {
+            Some((
+                member.session_id.clone(),
+                member.swarm_id.clone()?,
+                target.to_string(),
+            ))
+        })
+        .collect();
+    matches.sort();
+    match matches.len() {
+        1 => {
+            let (session_id, swarm_id, _) = matches.remove(0);
+            Ok((session_id, swarm_id))
+        }
+        0 => Err(anyhow::anyhow!(
+            "Unknown session '{target}' - use an exact live session_id or a unique friendly name (see swarm action=sessions)."
+        )),
+        _ => {
+            let list = matches
+                .iter()
+                .map(|(session_id, _, name)| format!("{name} [{session_id}]"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(anyhow::anyhow!(
+                "Friendly name '{target}' is ambiguous across live sessions. Use an exact session id. Matches: {list}"
+            ))
+        }
+    }
+}
+
+fn non_blank_str(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 fn resolve_comm_delivery_mode(
@@ -176,11 +235,15 @@ pub(super) async fn handle_comm_message(
                     Ok(resolved) if resolved == swarm_id => None,
                     Ok(resolved) => Some(resolved),
                     Err(err) => {
-                        let _ = client_event_tx.send(ServerEvent::Error {
-                            id,
-                            message: format!("Cross-swarm DM failed: {err}"),
-                            retry_after_secs: None,
-                        });
+                        send_client_event_best_effort(
+                            client_event_tx,
+                            ServerEvent::Error {
+                                id,
+                                message: format!("Cross-swarm DM failed: {err}"),
+                                retry_after_secs: None,
+                            },
+                            "client_comm_message: Error",
+                        );
                         return;
                     }
                 }
@@ -188,13 +251,73 @@ pub(super) async fn handle_comm_message(
             _ => None,
         };
         if cross_swarm_id.is_some() && channel.is_some() && to_session.is_none() {
-            let _ = client_event_tx.send(ServerEvent::Error {
+            send_client_event_best_effort(client_event_tx, ServerEvent::Error {
                 id,
                 message: "Channels are swarm-local. Cross-swarm messages are DMs: pass to_swarm with an optional to_session.".to_string(),
                 retry_after_secs: None,
-            });
+            }, "client_comm_message: Error");
             return;
         }
+        // Root (user-driven) sessions may DM any live session on the daemon by
+        // exact id or unique friendly name even when it lives in another swarm.
+        // Spawned workers stay confined to their own swarm.
+        let mut global_dm = false;
+        let cross_swarm_id = if cross_swarm_id.is_none()
+            && channel.is_none()
+            && non_blank_str(to_swarm.as_deref()).is_none()
+        {
+            match to_session.as_deref() {
+                Some(target) => {
+                    let sender_is_root = swarm_members
+                        .read()
+                        .await
+                        .get(&from_session)
+                        .is_some_and(|member| member.report_back_to_session_id.is_none());
+                    let local_ids: Vec<String> = {
+                        let swarms = swarms_by_id.read().await;
+                        swarms
+                            .get(&swarm_id)
+                            .map(|sessions| sessions.iter().cloned().collect())
+                            .unwrap_or_default()
+                    };
+                    let local_hit = {
+                        let members = swarm_members.read().await;
+                        local_ids.iter().any(|local| {
+                            local == target
+                                || members
+                                    .get(local)
+                                    .is_some_and(|m| m.friendly_name.as_deref() == Some(target))
+                        })
+                    };
+                    if sender_is_root && !local_hit {
+                        match resolve_global_session_target(target, swarm_members).await {
+                            Ok((_, target_swarm)) if target_swarm != swarm_id => {
+                                global_dm = true;
+                                Some(target_swarm)
+                            }
+                            Ok(_) => None,
+                            Err(err) => {
+                                send_client_event_best_effort(
+                                    client_event_tx,
+                                    ServerEvent::Error {
+                                        id,
+                                        message: err.to_string(),
+                                        retry_after_secs: None,
+                                    },
+                                    "client_comm_message: Error",
+                                );
+                                return;
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            }
+        } else {
+            cross_swarm_id
+        };
         let delivery_swarm_id = cross_swarm_id.clone().unwrap_or_else(|| swarm_id.clone());
 
         let swarm_session_ids: Vec<String> = {
@@ -249,11 +372,15 @@ pub(super) async fn handle_comm_message(
                             ("elapsed_ms", started.elapsed().as_millis().to_string()),
                         ],
                     );
-                    let _ = client_event_tx.send(ServerEvent::Error {
-                        id,
-                        message: message.to_string(),
-                        retry_after_secs: None,
-                    });
+                    send_client_event_best_effort(
+                        client_event_tx,
+                        ServerEvent::Error {
+                            id,
+                            message: message.to_string(),
+                            retry_after_secs: None,
+                        },
+                        "client_comm_message: Error",
+                    );
                     return;
                 }
             }
@@ -275,27 +402,35 @@ pub(super) async fn handle_comm_message(
                     ("elapsed_ms", started.elapsed().as_millis().to_string()),
                 ],
             );
-            let _ = client_event_tx.send(ServerEvent::Error {
-                id,
-                message: format!(
-                    "DM failed: session '{}' not in swarm '{}'",
-                    target,
-                    super::swarm_labels::swarm_display_name(&delivery_swarm_id)
-                ),
-                retry_after_secs: None,
-            });
+            send_client_event_best_effort(
+                client_event_tx,
+                ServerEvent::Error {
+                    id,
+                    message: format!(
+                        "DM failed: session '{}' not in swarm '{}'",
+                        target,
+                        super::swarm_labels::swarm_display_name(&delivery_swarm_id)
+                    ),
+                    retry_after_secs: None,
+                },
+                "client_comm_message: Error",
+            );
             return;
         }
 
         if cross_swarm_id.is_some() && resolved_to_session.is_none() {
-            let _ = client_event_tx.send(ServerEvent::Error {
-                id,
-                message: format!(
-                    "Cross-swarm DM failed: swarm '{}' has no reachable members.",
-                    super::swarm_labels::swarm_display_name(&delivery_swarm_id)
-                ),
-                retry_after_secs: None,
-            });
+            send_client_event_best_effort(
+                client_event_tx,
+                ServerEvent::Error {
+                    id,
+                    message: format!(
+                        "Cross-swarm DM failed: swarm '{}' has no reachable members.",
+                        super::swarm_labels::swarm_display_name(&delivery_swarm_id)
+                    ),
+                    retry_after_secs: None,
+                },
+                "client_comm_message: Error",
+            );
             return;
         }
         let sender_swarm_display = super::swarm_labels::swarm_display_name(&swarm_id);
@@ -320,11 +455,11 @@ pub(super) async fn handle_comm_message(
                 .get(&from_session)
                 .is_some_and(|member| member.role == "coordinator");
             if !sender_is_coordinator {
-                let _ = client_event_tx.send(ServerEvent::Error {
+                send_client_event_best_effort(client_event_tx, ServerEvent::Error {
                     id,
                     message: "message needs a target: pass to_session (the agent to message) or channel. Only the coordinator can message everyone without one.".to_string(),
                     retry_after_secs: None,
-                });
+                }, "client_comm_message: Error");
                 return;
             }
         }
@@ -374,6 +509,22 @@ pub(super) async fn handle_comm_message(
         };
 
         let mut delivered_targets = 0usize;
+        let mut queued_cold = Vec::new();
+        let operator_chain = {
+            let members = swarm_members.read().await;
+            let mut chain = vec![from_session.clone()];
+            while let Some(parent) = chain
+                .last()
+                .and_then(|id| members.get(id))
+                .and_then(|member| member.report_back_to_session_id.as_ref())
+            {
+                if chain.contains(parent) {
+                    break;
+                }
+                chain.push(parent.clone());
+            }
+            chain
+        };
         for session_id in &target_sessions {
             if !swarm_session_ids.contains(session_id) {
                 continue;
@@ -381,20 +532,56 @@ pub(super) async fn handle_comm_message(
             if known_member_ids.contains(session_id) {
                 let from_label = friendly_name
                     .clone()
-                    .unwrap_or_else(|| from_session[..8.min(from_session.len())].to_string());
+                    .unwrap_or_else(|| from_session.clone());
                 let scope_label = match (scope, channel.as_deref()) {
-                    _ if cross_swarm_id.is_some() => "Cross-swarm DM".to_string(),
+                    _ if cross_swarm_id.is_some() && !global_dm => "Cross-swarm DM".to_string(),
                     ("channel", Some(channel_name)) => format!("#{}", channel_name),
                     ("dm", _) => "DM".to_string(),
                     _ => "broadcast".to_string(),
                 };
-                let from_label = if cross_swarm_id.is_some() {
+                let from_label = if cross_swarm_id.is_some() && !global_dm {
                     format!("{} (swarm '{}')", from_label, sender_swarm_display)
                 } else {
                     from_label
                 };
                 let delivery_mode = resolve_comm_delivery_mode(scope, delivery, wake);
                 let notification_msg = format!("{} from {}: {}", scope_label, from_label, message);
+                if delivery_mode == CommDeliveryMode::Wake && session_id != &from_session {
+                    let model = swarm_members
+                        .read()
+                        .await
+                        .get(session_id)
+                        .and_then(|member| member.runtime.model.clone());
+                    if let Some(risk) =
+                        super::cold_agent_wake::assess(session_id, sessions, model).await
+                        && !super::cold_agent_wake::approved(&from_session, &operator_chain, &risk)
+                            .await
+                    {
+                        match super::cold_agent_wake::defer(
+                            session_id,
+                            from_session.clone(),
+                            friendly_name.clone(),
+                            notification_msg,
+                        ) {
+                            Ok(()) => queued_cold.push(session_id.clone()),
+                            Err(error) => {
+                                send_client_event_best_effort(
+                                    client_event_tx,
+                                    ServerEvent::Error {
+                                        id,
+                                        message: format!(
+                                            "Could not queue cold message to {session_id}: {error}"
+                                        ),
+                                        retry_after_secs: None,
+                                    },
+                                    "client_comm_message: cold queue error",
+                                );
+                                return;
+                            }
+                        }
+                        continue;
+                    }
+                }
                 let _ = fanout_session_event(
                     swarm_members,
                     session_id,
@@ -415,6 +602,10 @@ pub(super) async fn handle_comm_message(
                     .clone()
                     .unwrap_or_else(|| from_session.clone());
                 let reminder = match scope {
+                    "dm" if global_dm => Some(format!(
+                        "You just received a direct message from another session, {}. To reply, use swarm action=dm with to_session='{}'. Review it and respond or act if useful.",
+                        sender_name, from_session
+                    )),
                     _ if cross_swarm_id.is_some() => Some(format!(
                         "You just received a cross-swarm direct message from {} in swarm '{}'. To reply, use swarm action=dm with to_swarm='{}' and to_session='{}'.",
                         sender_name, sender_swarm_display, sender_swarm_display, from_session
@@ -537,7 +728,26 @@ pub(super) async fn handle_comm_message(
             .await;
         }
 
-        let _ = client_event_tx.send(ServerEvent::Done { id });
+        if !queued_cold.is_empty() {
+            send_client_event_best_effort(
+                client_event_tx,
+                ServerEvent::RuntimeCommandResult {
+                    id,
+                    command: "swarm_message".into(),
+                    data: serde_json::json!({"status":"queued_cold", "recipients": queued_cold, "delivered_immediately": delivered_targets}),
+                    message: format!(
+                        "queued_cold: saved without waking {}; delivered on the next user-started turn",
+                        queued_cold.join(", ")
+                    ),
+                },
+                "client_comm_message: queued cold",
+            );
+        }
+        send_client_event_best_effort(
+            client_event_tx,
+            ServerEvent::Done { id },
+            "client_comm_message: Done",
+        );
         crate::logging::event_info(
             "COMM_LIFECYCLE",
             vec![
@@ -563,10 +773,15 @@ pub(super) async fn handle_comm_message(
                 ("elapsed_ms", started.elapsed().as_millis().to_string()),
             ],
         );
-        let _ = client_event_tx.send(ServerEvent::Error {
-            id,
-            message: "Not in a swarm. Use a git repository to enable swarm features.".to_string(),
-            retry_after_secs: None,
-        });
+        send_client_event_best_effort(
+            client_event_tx,
+            ServerEvent::Error {
+                id,
+                message: "Not in a swarm. Use a git repository to enable swarm features."
+                    .to_string(),
+                retry_after_secs: None,
+            },
+            "client_comm_message: Error",
+        );
     }
 }

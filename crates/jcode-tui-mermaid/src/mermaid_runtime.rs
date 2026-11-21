@@ -217,6 +217,12 @@ fn parse_env_bool(raw: &str) -> Option<bool> {
 ///   so the probe respects that setting. Other terminals keep the fast path because
 ///   the upstream stdio probe can block for two seconds if they do not answer.
 ///   Multiplexer users can opt into the probe with `JCODE_MERMAID_PICKER_PROBE=1`.
+///
+/// Terminals that answer capability queries promptly but do not advertise
+/// graphics support through TERM/TERM_PROGRAM (Rex sets `TERM=xterm-256color`,
+/// `TERM_PROGRAM=rex` yet implements the Kitty graphics protocol).
+const PROBED_TERM_PROGRAMS: &[&str] = &["Orca", "rex"];
+
 pub(super) fn decide_picker_init_mode(
     probe_override: Option<bool>,
     _env_protocol: Option<ProtocolType>,
@@ -225,7 +231,11 @@ pub(super) fn decide_picker_init_mode(
 ) -> PickerInitMode {
     if probe_override.unwrap_or(
         multiplexer == Multiplexer::None
-            && term_program.is_some_and(|program| program.eq_ignore_ascii_case("Orca")),
+            && term_program.is_some_and(|program| {
+                PROBED_TERM_PROGRAMS
+                    .iter()
+                    .any(|known| program.eq_ignore_ascii_case(known))
+            }),
     ) {
         PickerInitMode::Probe
     } else {

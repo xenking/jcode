@@ -60,12 +60,22 @@ pub(super) async fn resolve_target_subscribe_working_dir(
         } else {
             // A generating Agent owns its mutex. The member records the same
             // session root, so attaching must not wait for the model turn.
-            members
+            // A plain chat that never joined a swarm has no member root, so
+            // fall back to the persisted root: the live session is real, and
+            // reporting it as unknown makes every reattach fail until the
+            // turn ends.
+            let member_cwd = members
                 .read()
                 .await
                 .get(target)
                 .and_then(|member| member.working_dir.as_ref())
-                .map(|path| path.to_string_lossy().into_owned())
+                .map(|path| path.to_string_lossy().into_owned());
+            match member_cwd {
+                Some(cwd) => Some(cwd),
+                None => crate::session::Session::load_startup_stub(target)
+                    .ok()
+                    .and_then(|session| session.working_dir),
+            }
         }
     } else {
         let session = crate::session::Session::load_startup_stub(target).map_err(|error| {

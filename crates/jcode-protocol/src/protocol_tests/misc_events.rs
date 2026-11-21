@@ -575,6 +575,7 @@ fn test_message_request_roundtrip_preserves_images_and_system_reminder() -> Resu
             ("image/png".to_string(), "AAA".to_string()),
             ("image/jpeg".to_string(), "BBB".to_string()),
         ],
+        attachments: vec![],
         system_reminder: Some("be concise".to_string()),
         active_skill: Some("verification".to_string()),
         no_reply: true,
@@ -588,6 +589,7 @@ fn test_message_request_roundtrip_preserves_images_and_system_reminder() -> Resu
         system_reminder,
         active_skill,
         no_reply,
+        ..
     } = decoded
     else {
         return Err(anyhow!("expected Message"));
@@ -663,6 +665,33 @@ fn test_message_end_carries_provider_stop_reason() -> Result<()> {
 }
 
 #[test]
+fn daemon_identity_pong_is_optional_and_roundtrips() -> Result<()> {
+    let legacy: ServerEvent = serde_json::from_str(r#"{"type":"pong","id":7}"#)?;
+    assert!(matches!(
+        &legacy,
+        ServerEvent::Pong {
+            daemon_identity: None,
+            ..
+        }
+    ));
+    assert!(
+        serde_json::to_value(legacy)?
+            .get("daemon_identity")
+            .is_none()
+    );
+    let modern = serde_json::json!({
+        "type": "pong", "id": 8,
+        "daemon_identity": {"pid": 123, "binary_path": "/target/release/jcode", "git_hash": "483d7848f"}
+    });
+    let decoded: ServerEvent = serde_json::from_value(modern.clone())?;
+    // Legacy identities deserialize with generation zero.
+    let mut expected = modern["daemon_identity"].clone();
+    expected["generation"] = 0.into();
+    assert_eq!(serde_json::to_value(decoded)?["daemon_identity"], expected);
+    Ok(())
+}
+
+#[test]
 fn test_native_ssh_pong_capability_is_backward_compatible() -> Result<()> {
     let legacy: ServerEvent = serde_json::from_str(r#"{"type":"pong","id":7}"#)?;
     assert!(matches!(
@@ -678,6 +707,7 @@ fn test_native_ssh_pong_capability_is_backward_compatible() -> Result<()> {
         native_ssh_protocol: Some(1),
         capabilities: vec!["session_tools".into()],
         user_connected_session_ids: None,
+        daemon_identity: None,
     };
     let json = serde_json::to_value(&modern)?;
     assert_eq!(json["native_ssh_protocol"], 1);
@@ -761,7 +791,13 @@ fn context_cap_wire_roundtrip() -> Result<()> {
 #[test]
 fn subscribe_and_resume_client_name_is_optional_and_compatible() {
     let old: Request = serde_json::from_str(r#"{"type":"subscribe","id":1}"#).unwrap();
-    assert!(matches!(old, Request::Subscribe { client_name: None, .. }));
+    assert!(matches!(
+        old,
+        Request::Subscribe {
+            client_name: None,
+            ..
+        }
+    ));
     let new: Request =
         serde_json::from_str(r#"{"type":"subscribe","id":1,"client_name":"jcode-ios/1.0"}"#)
             .unwrap();
@@ -772,7 +808,13 @@ fn subscribe_and_resume_client_name_is_optional_and_compatible() {
         r#"{"type":"resume_session","id":2,"session_id":"s","client_name":"jcode-ios/1.0"}"#,
     )
     .unwrap();
-    assert!(matches!(resume, Request::ResumeSession { client_name: Some(_), .. }));
+    assert!(matches!(
+        resume,
+        Request::ResumeSession {
+            client_name: Some(_),
+            ..
+        }
+    ));
     let json = serde_json::to_string(&old).unwrap();
     assert!(!json.contains("client_name"));
 }

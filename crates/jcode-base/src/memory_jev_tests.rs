@@ -3,6 +3,55 @@ use crate::memory::MemoryCategory;
 use crate::memory_graph::MemoryGraph;
 use std::sync::Mutex;
 
+#[tokio::test]
+async fn write_decisions_keep_only_durable_new_information() {
+    struct WriteMock;
+    #[async_trait]
+    impl RelevanceTransport for WriteMock {
+        async fn evaluate(&self, state: Value, questions: Map<String, Value>) -> Result<Value> {
+            assert!(state["candidate"].as_str().unwrap().contains("Rust"));
+            assert!(state["existing"].is_array());
+            assert!(questions.contains_key("remember"));
+            assert!(questions.contains_key("duplicate_0"));
+            Ok(json!({"answers": {
+                "remember": {"type":"noul", "noul":0.99},
+                "duplicate_0": {"type":"noul", "noul":0.98}
+            }}))
+        }
+    }
+    let existing = vec![entry("old", "Run Rust tests with cargo test")];
+    let outcome =
+        decide_write_with_transport(&WriteMock, "Use cargo test for Rust tests", &existing)
+            .await
+            .unwrap();
+    assert_eq!(outcome, WriteDecision::Duplicate(0));
+}
+
+#[tokio::test]
+async fn write_decision_rejects_bad_response_and_uncertain_candidate() {
+    struct Bad(bool);
+    #[async_trait]
+    impl RelevanceTransport for Bad {
+        async fn evaluate(&self, _: Value, _: Map<String, Value>) -> Result<Value> {
+            if self.0 {
+                anyhow::bail!("offline")
+            }
+            Ok(json!({"answers":{"remember":{"type":"noul","noul":0.2}}}))
+        }
+    }
+    assert_eq!(
+        decide_write_with_transport(&Bad(false), "transient", &[])
+            .await
+            .unwrap(),
+        WriteDecision::Skip
+    );
+    assert!(
+        decide_write_with_transport(&Bad(true), "transient", &[])
+            .await
+            .is_err()
+    );
+}
+
 fn entry(id: &str, content: &str) -> MemoryEntry {
     let mut entry = MemoryEntry::new(MemoryCategory::Fact, content);
     entry.id = id.into();

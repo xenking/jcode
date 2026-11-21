@@ -6,8 +6,9 @@
 
 use crate::agent::Agent;
 use anyhow::{Result, bail};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, RwLockReadGuard};
 
 type AgentHandle = Arc<Mutex<Agent>>;
@@ -22,6 +23,9 @@ pub(crate) struct SessionManager {
     // idle agents and expire as soon as the last old handle is gone.
     owners: StdMutex<HashMap<String, Weak<Mutex<Agent>>>>,
     observers: StdMutex<HashMap<String, crate::agent::TurnObserver>>,
+    unloaded: StdMutex<HashSet<String>>,
+    idle_eviction_count: AtomicU64,
+    pub(super) revive: OnceLock<super::worker_revive::WorkerReviveContext>,
 }
 
 #[cfg(test)]
@@ -54,26 +58,56 @@ impl SessionManager {
     /// Acquire before any connection, registry or agent guard. Cancellation
     /// drops the owned guard, so an abandoned restore cannot strand a slot.
     pub(super) async fn reserve(&self, session_id: &str) -> SessionReservation<'_> {
-        let gate = {
-            let mut gates = self
-                .reservations
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            gates.retain(|_, gate| gate.strong_count() > 0);
-            match gates.get(session_id).and_then(Weak::upgrade) {
-                Some(gate) => gate,
-                None => {
-                    let gate = Arc::new(Mutex::new(()));
-                    gates.insert(session_id.to_owned(), Arc::downgrade(&gate));
-                    gate
-                }
-            }
-        };
         SessionReservation {
             manager: self,
             session_id: session_id.to_owned(),
-            _guard: gate.lock_owned().await,
+            _guard: self.reservation_gate(session_id).lock_owned().await,
         }
+    }
+
+    pub(super) fn try_reserve(&self, session_id: &str) -> Option<SessionReservation<'_>> {
+        let Ok(guard) = self.reservation_gate(session_id).try_lock_owned() else {
+            return None;
+        };
+        Some(SessionReservation {
+            manager: self,
+            session_id: session_id.to_owned(),
+            _guard: guard,
+        })
+    }
+
+    fn reservation_gate(&self, session_id: &str) -> Arc<Mutex<()>> {
+        let mut gates = self
+            .reservations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        match gates.get(session_id).and_then(Weak::upgrade) {
+            Some(gate) => gate,
+            None => {
+                let gate = Arc::new(Mutex::new(()));
+                gates.insert(session_id.to_owned(), Arc::downgrade(&gate));
+                gate
+            }
+        }
+    }
+
+    pub(super) fn is_idle_unloaded(&self, session_id: &str) -> bool {
+        self.unloaded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(session_id)
+    }
+
+    pub(super) fn forget_idle_unloaded(&self, session_id: &str) {
+        self.unloaded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(session_id);
+    }
+
+    pub(super) fn idle_eviction_count(&self) -> u64 {
+        self.idle_eviction_count.load(Ordering::Relaxed)
     }
 
     pub(super) async fn register_new(&self, session_id: String, agent: AgentHandle) -> Result<()> {
@@ -157,6 +191,7 @@ impl SessionManager {
             reservations: StdMutex::default(),
             owners: StdMutex::new(owners),
             observers: StdMutex::new(observers),
+            ..Self::default()
         }
     }
 
@@ -247,6 +282,37 @@ impl SessionReservation<'_> {
             .cloned()
     }
 
+    /// The map write guard fences new handle clones. Only the map and the
+    /// sweeper may own a handle when it is removed.
+    pub(super) fn try_unload(&self, expected: &AgentHandle, detach: impl FnOnce() -> bool) -> bool {
+        let Ok(mut agents) = self.manager.agents.try_write() else {
+            return false;
+        };
+        if !agents
+            .get(&self.session_id)
+            .is_some_and(|agent| Arc::ptr_eq(agent, expected))
+            || Arc::strong_count(expected) != 2
+            || !detach()
+        {
+            return false;
+        }
+        self.manager
+            .unloaded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(self.session_id.clone());
+        agents.remove(&self.session_id);
+        self.manager
+            .observers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.session_id);
+        self.manager
+            .idle_eviction_count
+            .fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
     pub(super) async fn publish(&self, agent: AgentHandle) -> Result<()> {
         self.publish_rekeyed(None, agent).await
     }
@@ -309,6 +375,7 @@ impl SessionReservation<'_> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(self.session_id.clone(), observer);
         owners.insert(self.session_id.clone(), Arc::downgrade(&agent));
+        self.manager.forget_idle_unloaded(&self.session_id);
         agents.insert(self.session_id.clone(), agent);
         Ok(())
     }

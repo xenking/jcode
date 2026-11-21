@@ -1,16 +1,24 @@
 //! Server-to-client events: replies and streaming.
 
+use crate::search::SessionSearchHit;
 use serde::{Deserialize, Serialize};
 
 /// Curated event surface. Internally-tagged on `"ev"`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "ev", rename_all = "snake_case")]
 pub enum ApiEvent {
+    DraftModels {
+        current: Option<String>,
+        routes: Vec<ModelRouteInfo>,
+    },
     /// Handshake accepted. Sent in reply to `Hello`.
     HelloOk {
         version: u32,
         /// Server name and version, e.g. "jcode/0.55.1".
         server: String,
+        /// Executing bridge image, for detecting leftovers from an older bundle.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime_identity: Option<jcode_selfdev_types::ServingIdentity>,
         /// Optional capability strings for additive feature discovery.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         capabilities: Vec<String>,
@@ -31,7 +39,24 @@ pub enum ApiEvent {
     Error { code: ErrorCode, message: String },
 
     /// Reply to `ListSessions`.
-    Sessions { sessions: Vec<SessionInfo> },
+    Sessions {
+        sessions: Vec<SessionInfo>,
+        /// Facts from each session's own record, keyed by session id. Only
+        /// sessions whose record could be read appear here; a client shows
+        /// what it knows and nothing more. Workers read their model, effort
+        /// and spend from this table rather than guessing.
+        #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+        workers: std::collections::HashMap<String, WorkerMeta>,
+    },
+
+    /// Authoritative live swarm snapshot for the attached session. Unlike a
+    /// session-list reply, this is pushed on every lifecycle transition.
+    SwarmStatus {
+        session_id: String,
+        /// Daemon snapshot order, retained through bridge and client queues.
+        updated_at_unix_ms: u64,
+        members: Vec<SwarmMemberInfo>,
+    },
 
     /// Reply to `CreateSession` / `AttachSession`.
     Attached { session: SessionInfo },
@@ -46,6 +71,64 @@ pub enum ApiEvent {
         /// Images anchored to user prompts or tool calls in this transcript.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<RenderedImage>,
+    },
+
+    HistoryPage {
+        session_id: String,
+        fragments: Vec<serde_json::Value>,
+        before: Option<String>,
+    },
+
+    HistoryImageChunk {
+        session_id: String,
+        key: String,
+        offset: usize,
+        total: usize,
+        data: String,
+    },
+
+    SessionImages {
+        session_id: String,
+        images: Vec<serde_json::Value>,
+    },
+    SessionImage {
+        session_id: String,
+        image_id: String,
+        media_type: String,
+        offset: usize,
+        total: usize,
+        data: String,
+    },
+
+    /// Expanded archived transcript window and its remaining history.
+    CompactedHistory {
+        session_id: String,
+        messages: Vec<HistoryMessage>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<RenderedImage>,
+        compacted_total: usize,
+        compacted_visible: usize,
+        compacted_remaining: usize,
+        #[serde(default)]
+        compacted_hidden_prompts: usize,
+    },
+
+    /// Current daemon-owned prompt queue, sent as a reply or as a live update.
+    QueuedPrompts {
+        session_id: String,
+        prompts: Vec<crate::QueuedPrompt>,
+    },
+
+    QueuedPromptRemoved {
+        session_id: String,
+        prompt_id: String,
+        outcome: crate::QueuedPromptRemovalOutcome,
+    },
+    /// A queued prompt's content was replaced in place.
+    QueuedPromptEdited {
+        session_id: String,
+        prompt_id: String,
+        outcome: crate::QueuedPromptEditOutcome,
     },
 
     /// Reply to `Ping`.
@@ -153,7 +236,8 @@ pub enum ApiEvent {
         snapshot: jcode_applet_types::AgentApplets,
     },
 
-    /// Usage for the latest provider call, not cumulative session or turn totals.
+    /// Usage snapshot for the latest provider call, not cumulative session or
+    /// turn totals. Multiple snapshots can describe one request.
     /// Input/cache accounting is provider-specific: Anthropic reports cache
     /// reads and writes separately, while OpenAI includes cache reads in input.
     TokenUsage {
@@ -169,6 +253,22 @@ pub enum ApiEvent {
         effective_budget: Option<usize>,
     },
 
+    /// Final usage for one completed provider request. The request ID identifies
+    /// the same completion across subscribers. Counters not reported by the
+    /// provider are distinct from zero; this event is not replayed with history.
+    RequestUsage {
+        session_id: String,
+        request_id: String,
+        provider: String,
+        model: String,
+        input: Option<u64>,
+        output: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_read_input: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_creation_input: Option<u64>,
+    },
+
     /// A session context override changed, including its resolved budget.
     ContextCapChanged {
         session_id: String,
@@ -176,8 +276,19 @@ pub enum ApiEvent {
         effective_budget: usize,
     },
 
-    /// The provider request that just completed missed the KV (prompt) cache:
-    /// a meaningful part of the previously cached prefix had to be resent.
+    /// Prompt occupancy replayed when a client attaches, before the next
+    /// provider call reports usage.
+    ///
+    /// This is a persisted snapshot of an earlier completed request, so it
+    /// carries no turn or cost accounting: consumers only use it to paint the
+    /// context meter immediately after a restart or reconnect.
+    ContextOccupancy {
+        session_id: String,
+        prompt_tokens: u64,
+    },
+
+    /// The completed provider request reported substantially fewer prompt cache
+    /// reads than the diagnostic baseline. This does not measure retransmission.
     /// Follows the request's `TokenUsage`. `harness_caused` misses (the
     /// harness mutated the prefix) should be rendered prominently; switches
     /// and expiry are informational.
@@ -186,7 +297,9 @@ pub enum ApiEvent {
         /// Stable snake_case id, e.g. `prefix_changed`, `expired`.
         reason: String,
         harness_caused: bool,
+        /// Diagnostic shortfall, or current uncached input on a provider switch.
         missed_tokens: u64,
+        /// Prior reusable input, or current input on a provider switch.
         expected_tokens: u64,
         read_tokens: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -206,6 +319,15 @@ pub enum ApiEvent {
         provider_stop_reason: Option<String>,
     },
 
+    /// A provider stopped a request and jcode is retrying. Update the same
+    /// status row for a turn_id without marking the turn as stopped.
+    ProviderGuardrailRetry {
+        session_id: String,
+        turn_id: String,
+        attempt: u32,
+        max_attempts: u32,
+    },
+
     /// The turn finished; the agent is idle.
     TurnDone {
         session_id: String,
@@ -223,6 +345,10 @@ pub enum ApiEvent {
     /// before the first output of the response that sees the messages.
     SoftInterruptInjected {
         session_id: String,
+        /// The user or daemon message actually delivered to the model.
+        /// Older bridges omit it, so consumers must tolerate its absence.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<String>,
         /// Ids from `soft_interrupt.client_id`, in queue order. Several queued
         /// messages are delivered as one user message. Empty when none of the
         /// delivered messages carried an id.
@@ -267,6 +393,65 @@ pub enum ApiEvent {
         notification: String,
     },
 
+    /// Another session asked for this session to be raised (selected, brought
+    /// to the front). Best effort: clients that cannot raise a window ignore it.
+    FocusRequested {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_session: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_name: Option<String>,
+    },
+
+    /// Relevant memory was injected into this turn's context.
+    ///
+    /// `content` is the finished transcript row body: a label, a blank line,
+    /// then the display-only memory text. The daemon writes the identical row
+    /// into session history, so the live row and the one a reload returns agree
+    /// without the bridge re-deriving what was recalled.
+    MemoryInjected {
+        session_id: String,
+        /// Number of memories injected.
+        count: usize,
+        /// Row body: label, blank line, display text.
+        content: String,
+    },
+
+    /// Complete memory pipeline activity for the attached session. Display-only:
+    /// clients draw a status line, not transcript content.
+    MemoryActivity {
+        session_id: String,
+        activity: crate::MemoryActivitySnapshot,
+    },
+
+    /// A context compaction started or finished.
+    ///
+    /// `content` is the finished divider body (label, blank line, detail) the
+    /// daemon also stores into session history, so a live divider and the one
+    /// that comes back after a reload cannot disagree. `running` marks the
+    /// in-progress state, where only the label is meaningful.
+    CompactionDivider {
+        session_id: String,
+        /// Divider body: `label` then, after a blank line, the expandable detail.
+        content: String,
+        /// The compaction is still summarizing: show the running divider.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        running: bool,
+        /// How the transcript art was compacted: `summary`, `snapcompact`,
+        /// `native`, or `drop`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        method: Option<String>,
+        /// Trigger label, e.g. `reactive` or `idle_precompact`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger: Option<String>,
+        /// Context tokens before the fold.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pre_tokens: Option<u64>,
+        /// Context tokens after the fold, when the daemon reported them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        post_tokens: Option<u64>,
+    },
+
     /// A background task the agent is waiting on reported progress, or
     /// finished.
     ///
@@ -286,9 +471,28 @@ pub enum ApiEvent {
         percent: Option<f32>,
         /// One-line status, e.g. `42% · Running tests`.
         summary: String,
+        /// The completion notification, including its bounded output preview.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
         /// The task ended: clients should retire its bar.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         done: bool,
+    },
+
+    /// Replaces the previous background task snapshot for this session.
+    BackgroundTasks {
+        session_id: String,
+        snapshot: crate::BackgroundTasksSnapshot,
+    },
+
+    /// A prompt submitted by another client attached to this session.
+    PeerUserMessage { session_id: String, content: String },
+    /// A signed swarm DM addressed to this session. Not a user prompt.
+    AgentMessage {
+        session_id: String,
+        from_session: String,
+        from_name: Option<String>,
+        message: String,
     },
 
     /// The agent accepted a user message: it is in the session's queue and
@@ -300,6 +504,14 @@ pub enum ApiEvent {
     /// without it the only proof a message landed is the reply, which can be
     /// minutes away.
     MessageAccepted { session_id: String },
+
+    /// Durable IDs for the image attachments in a submitted user message.
+    UserImageIds {
+        session_id: String,
+        original_content: String,
+        content: String,
+        image_ids: Vec<String>,
+    },
 
     /// The `ask` tool is blocked on the user answering these questions.
     /// Reply with `AskResponse`; an empty response (no answers) declines.
@@ -347,6 +559,19 @@ pub enum ApiEvent {
     /// throughout all of these phases, while clients need the finer progress to
     /// avoid looking stuck before the model emits its first token.
     ConnectionPhase { session_id: String, phase: String },
+
+    /// Structured provider quota outcome for a turn.
+    UsageLimit {
+        session_id: String,
+        provider: String,
+        model: String,
+        account: Option<String>,
+        window: String,
+        reset: String,
+        action: String,
+        target: Option<String>,
+        message: String,
+    },
 
     /// The provider and model serving the attached session.
     ///
@@ -443,6 +668,18 @@ pub enum ApiEvent {
         modified_ms: Option<u64>,
     },
 
+    /// Reply to `SearchSessions`. Both sections are ranked best-first; a
+    /// client renders them as separate sections and groups the message hits by
+    /// session itself.
+    SessionSearch {
+        query: String,
+        titles: Vec<SessionSearchHit>,
+        messages: Vec<SessionSearchHit>,
+        indexed_sessions: u64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        truncated: bool,
+    },
+
     /// Reply to `GetTodoState`.
     TodoState {
         session_id: String,
@@ -453,11 +690,12 @@ pub enum ApiEvent {
     ///
     /// Compaction is not synchronous. The daemon summarizes at the next safe
     /// point rather than interrupting a turn mid-flight, so this confirms the
-    /// request was accepted, not that the transcript has already shrunk. A
-    /// client that wants the result should re-read the history afterwards.
+    /// request was accepted, not that the transcript has already shrunk.
+    /// `CompactionDivider` reports start and successful completion.
+    /// A terminal `BackgroundProgress` for `context-compaction` reports failure.
     Compacted {
         session_id: String,
-        /// Human-readable status, e.g. why compaction was refused.
+        /// Human-readable scheduling status.
         message: String,
     },
 
@@ -482,6 +720,8 @@ pub enum ErrorCode {
     UnsupportedVersion,
     UnknownRequest,
     UnknownSession,
+    /// The requested queued skill is absent from the daemon's registry.
+    UnknownSkill,
     InvalidRequest,
     Internal,
 }
@@ -496,6 +736,8 @@ pub struct SessionInfo {
     /// Cumulative built-in file-tool changes. Absent when unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edit_stats: Option<crate::SessionEditStats>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::SessionCatalogContext>,
     pub session_id: String,
     /// Swarm owner this agent reports to, not the transcript's fork parent.
     /// Absent for ordinary sessions and user-created forks.
@@ -547,6 +789,71 @@ pub struct SessionInfo {
     pub archived_at_ms: Option<u64>,
 }
 
+/// Live ownership and lifecycle facts. Transcript metadata cannot establish
+/// whether a worker is still running.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SwarmMemberInfo {
+    pub session_id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_label: Option<String>,
+}
+
+/// What a session's own record says about it: the model and effort it runs
+/// on, what it has spent, and what its newest message says it is doing.
+///
+/// A swarm worker is another session: its coordinator only ever sees a status
+/// string, so the model, the effort and the spend have to come from the
+/// worker's record. Absent fields are unknown, never zero.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct WorkerMeta {
+    /// Model id the session runs on, e.g. `deepseek-v4.1-flash`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Provider key serving it, e.g. `claude-oauth` or `opencode-go`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Reasoning effort the session was started with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// Provider-reported prompt tokens, summed over the session. Cache reads
+    /// are included only where the provider folds them into the prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    /// Provider-reported output tokens, summed over the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens: Option<u64>,
+    /// What the newest message says the session is doing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<WorkerPhase>,
+    /// Tool the session is running, when `phase` is [`WorkerPhase::Tool`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// Unix epoch millis of the newest message, so a client can age it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_ms: Option<i64>,
+}
+
+/// The tail of a session record, read as "what is it doing right now".
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerPhase {
+    /// Waiting on the model: reasoning, streaming, or about to call it.
+    Thinking,
+    /// Running a tool call that has not returned yet.
+    Tool,
+    /// Turn finished, or paused on a dependency: not producing anything.
+    Waiting,
+    /// Nothing recorded, so nothing claimed.
+    Idle,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelRouteInfo {
     pub model: String,
@@ -586,17 +893,27 @@ pub struct ResponseStats {
     pub cache_read_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation_tokens: Option<u64>,
+    /// Distinct tool calls in the completed turn, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HistoryMessage {
+    /// Unix epoch milliseconds when the stored message was recorded, so
+    /// clients show when it arrived rather than when they rendered it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_ms: Option<i64>,
     /// Present only on the final visible assistant row of a completed stored
     /// user turn. Tool-only intermediate rounds contribute to these totals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_stats: Option<ResponseStats>,
-    /// "user" | "assistant" | "tool".
+    /// "user" | "assistant" | "tool", plus display-only rows: "compaction"
+    /// and "memory" (daemon-formatted label and expandable detail).
     pub role: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<jcode_session_types::StoredAttachment>,
     /// On "tool" rows: the call this result answers, so clients can rebuild
     /// tool cards after a reload. `content` is the tool output. Absent from
     /// older servers.
@@ -606,6 +923,8 @@ pub struct HistoryMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HistoryTool {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
     pub id: String,
     pub name: String,
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]

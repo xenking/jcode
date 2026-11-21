@@ -1,5 +1,28 @@
 use super::*;
 use crate::bus::{BackgroundTaskProgressSource, BackgroundTaskStatus};
+
+/// Restores an environment variable when the test ends.
+struct EnvVarGuard {
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let prev = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match self.prev.take() {
+            Some(prev) => crate::env::set_var(self.key, prev),
+            None => crate::env::remove_var(self.key),
+        }
+    }
+}
 use crate::tool::StdinInputRequest;
 use crate::tool::bash::{
     BashTool, ProgressLineUpdate, parse_heuristic_progress, parse_progress_line,
@@ -26,14 +49,232 @@ pub(super) async fn wait_for_session_env_launch_gate(session_id: &str) {
 #[path = "bash_tests/session_environment.rs"]
 mod session_environment;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn reload_survival_background_and_promoted_bash() {
+    use crate::background::BackgroundTaskManager;
+    use crate::bus::{Bus, BusEvent};
+
+    for background in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let manager =
+            std::sync::Arc::new(BackgroundTaskManager::with_output_dir(dir.path().into()));
+        let mut ctx = make_ctx(None);
+        ctx.working_dir = Some(dir.path().into());
+        let result = BashTool { manager: Some(manager.clone()) }
+            .execute(json!({
+                "command": "echo started; for i in {1..160}; do if test -f go; then printf 'JCODE_PROGRESS {\"current\":2,\"total\":3}\\n'; sleep 1; echo finished; exit 0; fi; sleep 0.05; done; exit 99",
+                "run_in_background": background,
+                "timeout": if background { 15000 } else { 50 },
+                "notify": false, "wake": true,
+            }), ctx)
+            .await.unwrap();
+        let metadata = result.metadata.unwrap();
+        let id = metadata["task_id"].as_str().unwrap();
+        let first = manager.status(id).await.unwrap();
+        assert_eq!(manager.abort_live_tasks_for_reload().await, 0);
+        drop(manager);
+        let successor = BackgroundTaskManager::with_output_dir(dir.path().into());
+        let restored = successor.status(id).await.unwrap();
+        assert_eq!(restored.status, BackgroundTaskStatus::Running);
+        assert!(restored.detached);
+        let pid = first.pid.unwrap();
+        assert_eq!(restored.pid, Some(pid));
+        assert!(crate::platform::is_process_running(pid));
+        let mut events = Bus::global().subscribe();
+        std::fs::write(dir.path().join("go"), "").unwrap();
+        let completion = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                successor.sweep().await;
+                if let Ok(BusEvent::BackgroundTaskCompleted(event)) = events.try_recv() {
+                    if event.task_id == id {
+                        break event;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(35)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(completion.status, BackgroundTaskStatus::Completed);
+        assert_eq!(completion.exit_code, Some(0));
+        assert!(completion.notify && completion.wake);
+        assert!(successor.output(id).await.unwrap().contains("finished"));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reload_survival_bash_timeout_and_group_cancellation() {
+    use crate::background::BackgroundTaskManager;
+    for cancel in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let manager =
+            std::sync::Arc::new(BackgroundTaskManager::with_output_dir(dir.path().into()));
+        let mut ctx = make_ctx(None);
+        ctx.working_dir = Some(dir.path().into());
+        let launch = BashTool {
+            manager: Some(manager.clone()),
+        }
+        .execute(
+            json!({
+                "command": "bash -c 'trap \"\" TERM; echo $$ > child; sleep 8' & wait",
+                "run_in_background": true,
+                "timeout": if cancel { 8000 } else { 1200 },
+                "notify": false,
+            }),
+            ctx,
+        )
+        .await
+        .unwrap();
+        let meta = launch.metadata.unwrap();
+        let id = meta["task_id"].as_str().unwrap();
+        let first = manager.status(id).await.unwrap();
+        assert_eq!(manager.abort_live_tasks_for_reload().await, 0);
+        let successor = BackgroundTaskManager::with_output_dir(dir.path().into());
+        assert_eq!(
+            successor.status(id).await.unwrap().status,
+            BackgroundTaskStatus::Running
+        );
+        let descendants = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(contents) = tokio::fs::read_to_string(dir.path().join("child")).await
+                    && let Ok(pid) = contents.trim().parse::<u32>()
+                {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(crate::platform::is_process_running(descendants));
+        if cancel {
+            assert!(successor.cancel(id).await.unwrap());
+        }
+        tokio::time::timeout(Duration::from_secs(4), async {
+            while crate::platform::is_process_running(first.pid.unwrap())
+                || crate::platform::is_process_running(descendants)
+            {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let final_status = successor.status(id).await.unwrap();
+        assert_eq!(final_status.status, BackgroundTaskStatus::Failed);
+        if cancel {
+            assert_eq!(final_status.error.as_deref(), Some("Cancelled by user"));
+        } else {
+            assert_eq!(final_status.exit_code, Some(124));
+            assert!(
+                final_status
+                    .error
+                    .unwrap()
+                    .contains("timed out after 1200ms")
+            );
+        }
+    }
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn bash_search_hint_is_scoped_and_nonblocking() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/a"), "foo\n").unwrap();
+    let mut ctx = make_ctx(None);
+    ctx.session_id = "search-hint-runtime-test".into();
+    ctx.working_dir = Some(dir.path().into());
+    let tool = BashTool::new();
+    let run = |command: &str| tool.execute(json!({"command": command}), ctx.clone());
+    let result = run("rg foo src").await.unwrap();
+    assert!(result.output.contains("foo"));
+    assert!(result.output.contains("agentgrep"));
+    assert!(
+        !run("rg foo src")
+            .await
+            .unwrap()
+            .output
+            .contains("agentgrep")
+    );
+    for command in [
+        "git log",
+        "justrust test",
+        "rg foo src > output",
+        "rg foo src | tee output",
+    ] {
+        let mut other = ctx.clone();
+        other.session_id = format!("search-hint-{command}");
+        let output = tool
+            .execute(json!({"command": command}), other)
+            .await
+            .unwrap();
+        assert!(!output.output.contains("agentgrep"), "{command}");
+    }
+}
+
+#[test]
+fn read_hint_respects_session_tool_policy() {
+    let session = "search-hint-disabled-test";
+    super::super::set_session_tool_policy(session, None, ["agentgrep".to_string()].into());
+    assert!(super::search_read_hint(session, "rg foo src").is_none());
+    assert!(
+        super::search_read_hint(session, "cat file")
+            .unwrap()
+            .contains("read")
+    );
+    super::super::clear_session_tool_policy(session);
+    super::clear_read_hint_session(session);
+}
+
+#[test]
+fn read_hints_are_rate_limited_and_ignore_mutating_shell() {
+    let session = "search-hint-interval-test";
+    super::clear_read_hint_session(session);
+    assert!(super::search_read_hint(session, "rg foo src").is_some());
+    for _ in 0..9 {
+        assert!(super::search_read_hint(session, "cat file").is_none());
+    }
+    assert!(
+        super::search_read_hint(session, "cat file")
+            .unwrap()
+            .contains("read")
+    );
+    for command in [
+        "sed -n '1,10p' file > out",
+        "find . -delete",
+        "rg foo | tee out",
+        "git log",
+        "justrust test",
+    ] {
+        assert!(super::pure_read_hint(command).is_none(), "{command}");
+    }
+    assert!(
+        super::pure_read_hint("sed -n '1,10p' file")
+            .unwrap()
+            .contains("read")
+    );
+    super::clear_read_hint_session(session);
+}
+
 #[cfg(not(windows))]
 #[test]
 fn bash_definition_prefers_repository_search_tools() {
     let definition = BashTool::new().to_definition();
     assert_eq!(definition.name, "bash");
-    assert!(definition.description.contains("Prefer agentgrep/rg"));
-    assert!(definition.description.contains("hidden/ignored"));
-    assert!(definition.description.contains("--hidden --no-ignore"));
+    assert!(
+        definition
+            .description
+            .contains("Prefer agentgrep for code search")
+    );
+    assert!(definition.description.contains("read for file views"));
+    let schema = BashTool::new().parameters_schema();
+    let command = schema["properties"]["command"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(command.contains("hidden/ignored"));
+    assert!(command.contains("--hidden --no-ignore"));
 }
 
 #[test]
@@ -449,9 +690,20 @@ async fn test_reload_persistable_bash_continues_in_background() {
     let tool = BashTool::new();
     let signal = jcode_agent_runtime::InterruptSignal::new();
     let ctx = make_agent_ctx(signal.clone());
+    // A live turn registers its cancel signal; the interruption reason is
+    // recorded against that registration.
+    let _turn = crate::turn_cancel_registry::register_active_turn("test-session", signal.clone());
 
     let signal_task = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        // A reload is the only shutdown that keeps the command running, and the
+        // server records that reason before firing the signal
+        // (`signal_session_for_reload`). Without it a fired signal means a user
+        // cancel, which kills the command.
+        crate::turn_cancel_registry::mark_interruption(
+            "test-session",
+            crate::turn_cancel_registry::TurnInterruptionReason::Reload,
+        );
         signal.fire();
     });
 
@@ -995,13 +1247,18 @@ fn gate_ctx(working_dir: &str) -> ToolContext {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test must serialize process environment for its entire async lifetime"
+)]
 async fn bash_refuses_to_delete_the_home_directory() {
     // The #604 incident, at the real tool boundary.
     let temp = tempfile::tempdir().expect("temp home");
     let home = temp.path().to_string_lossy().to_string();
-    let previous = std::env::var("HOME").ok();
-    // SAFETY: single-threaded test setup; restored below.
-    unsafe { std::env::set_var("HOME", &home) };
+    // The gate reads HOME from the process environment at execute time, so this
+    // must hold the same lock the other env-mutating tests hold.
+    let _env_lock = crate::storage::lock_test_env();
+    let _home = EnvVarGuard::set("HOME", &home);
 
     let canary = temp.path().join("precious.txt");
     std::fs::write(&canary, "user data").expect("write canary");
@@ -1012,11 +1269,6 @@ async fn bash_refuses_to_delete_the_home_directory() {
             gate_ctx("/tmp"),
         )
         .await;
-
-    match previous {
-        Some(value) => unsafe { std::env::set_var("HOME", value) },
-        None => unsafe { std::env::remove_var("HOME") },
-    }
 
     let error = result.expect_err("deleting HOME must be refused");
     assert!(
@@ -1038,10 +1290,11 @@ async fn bash_holds_a_risky_delete_until_justified_then_runs_it() {
     std::fs::create_dir_all(&target).expect("target");
     std::fs::write(target.join("f.txt"), "x").expect("file");
 
-    // Temp paths are deliberately low risk. Use a shell-expanded target to
-    // exercise Confirm for a target the static assessor cannot resolve.
+    // Temp paths are deliberately low risk, and a literal path assigned on the
+    // same line is now resolved (so it is bounded). Use a command substitution
+    // to exercise Confirm for a target the static assessor cannot resolve.
     let command = format!(
-        "fixture_target=\"{}\"; rm -rf \"$fixture_target\"/* && rmdir \"$fixture_target\"",
+        "fixture_target=\"$(printf %s '{}')\"; rm -rf \"$fixture_target\"/* && rmdir \"$fixture_target\"",
         target.display()
     );
     let tool = BashTool::new();
@@ -1135,6 +1388,23 @@ async fn indirect_dispatch_paths_cannot_bypass_the_gate() {
 }
 
 #[test]
+fn explicit_background_title_reaches_the_renderer_as_one_line() {
+    let title = "Сверить установленную пару daemon и Desktop";
+    let long_title = format!("{} Проверка статуса", title.repeat(6));
+    assert_eq!(
+        super::summarize_background_command(Some(&long_title), "jcode rollout --dry-run"),
+        long_title,
+    );
+    assert_eq!(
+        super::summarize_background_command(
+            Some("  Сверить установленную пару\n daemon и Desktop  "),
+            "jcode rollout --dry-run",
+        ),
+        title,
+    );
+}
+
+#[test]
 fn parse_progress_line_classifies_markers_checkpoints_and_heuristics() {
     let update = parse_progress_line(r#"JCODE_PROGRESS {"percent":40,"message":"Working"}"#)
         .expect("parser should not fail")
@@ -1175,3 +1445,92 @@ fn parse_progress_line_classifies_markers_checkpoints_and_heuristics() {
 
 #[path = "bash_promoted_tests.rs"]
 mod promoted;
+
+#[test]
+fn background_timeout_honors_values_above_the_foreground_cap() {
+    // Field report: run_in_background with timeout=1800000 (30 min) was
+    // recorded as "timed out after 600000ms" and killed at 10 minutes.
+    assert_eq!(background_timeout_ms(Some(1_800_000)), Some(1_800_000));
+    assert_eq!(background_timeout_ms(Some(100)), Some(100));
+    assert_eq!(background_timeout_ms(None), None);
+}
+
+#[cfg(not(windows))]
+fn process_is_alive(pid: i32) -> bool {
+    // Signal 0 only probes for existence; a reaped pid returns ESRCH.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Requirement: Esc (turn cancel) must actually stop a running bash command.
+/// The command runs in its own session, so a cancel has to kill the whole
+/// process group; returning "continued in background" leaves a `sleep`/poll
+/// loop running for the rest of the turn and beyond.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn turn_cancel_kills_the_foreground_command_process_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("pid");
+    let signal = jcode_agent_runtime::InterruptSignal::new();
+    let mut ctx = make_ctx(None);
+    ctx.session_id = "bash-cancel-process-group".into();
+    ctx.working_dir = Some(dir.path().into());
+    ctx.execution_mode = crate::tool::ToolExecutionMode::AgentTurn;
+    ctx.graceful_shutdown_signal = Some(signal.clone());
+    crate::turn_cancel_registry::mark_interruption(
+        &ctx.session_id,
+        crate::turn_cancel_registry::TurnInterruptionReason::Cancel,
+    );
+
+    let tool = BashTool::new();
+    let command = format!(
+        "echo $$ > {}; while :; do sleep 0.1; done",
+        pid_file.display()
+    );
+    let started = Instant::now();
+    let wait_for_pid = pid_file.clone();
+    let cancel = tokio::spawn(async move {
+        // Give bash time to write its pid and enter the loop.
+        for _ in 0..200 {
+            if wait_for_pid.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        signal.fire();
+    });
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        tool.execute(json!({"command": command}), ctx),
+    )
+    .await
+    .expect("a turn cancel must end the bash tool instead of waiting for the command");
+    cancel.await.unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "cancel must end the tool within ~2s, took {:?}",
+        started.elapsed()
+    );
+    let text = result
+        .expect("an interrupted command is reported, not a hang")
+        .output;
+    assert!(
+        text.to_lowercase().contains("interrupt") || text.to_lowercase().contains("stopped"),
+        "the tool must report the interruption, got: {text}"
+    );
+
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while process_is_alive(pid) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        !process_is_alive(pid),
+        "cancel must kill the command's process group, pid {pid} is still alive"
+    );
+}

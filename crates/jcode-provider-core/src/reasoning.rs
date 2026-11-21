@@ -34,6 +34,44 @@ pub fn canonical_reasoning_effort(value: &str) -> Option<&'static str> {
     }
 }
 
+/// Rungs of the canonical effort ladder, weakest first, as `(level, glyph)`.
+///
+/// The glyph is a filling circle (omp's status-line ladder): the UI shows the
+/// symbol alone where hover text is available and prefixes list rows with it.
+/// Swarm modes are orchestration sentinels, not rungs, so they have no glyph.
+const EFFORT_GLYPHS: &[(&str, &str)] = &[
+    ("none", "⦸"),
+    ("minimal", "○"),
+    ("low", "◔"),
+    ("medium", "◑"),
+    ("high", "◒"),
+    ("xhigh", "◕"),
+    ("max", "◉"),
+];
+
+/// Compact glyph for a reasoning level, or `None` for swarm modes and values
+/// that are not rungs (callers keep their text label for those).
+pub fn reasoning_effort_glyph(level: &str) -> Option<&'static str> {
+    let level = level.trim();
+    EFFORT_GLYPHS
+        .iter()
+        .find(|(rung, _)| rung.eq_ignore_ascii_case(level))
+        .map(|(_, glyph)| *glyph)
+}
+
+/// Zero-based position of a level on the canonical ladder, for color ramps
+/// that must read the same on every model. `None` for swarm modes.
+pub fn reasoning_effort_rank(level: &str) -> Option<u8> {
+    let level = level.trim();
+    EFFORT_GLYPHS
+        .iter()
+        .position(|(rung, _)| rung.eq_ignore_ascii_case(level))
+        .map(|index| index as u8)
+}
+
+/// The strongest rank in the ladder, the top of a color ramp.
+pub const REASONING_EFFORT_MAX_RANK: u8 = EFFORT_GLYPHS.len() as u8 - 1;
+
 /// Infer the selectable effort ladder when only provider/model identity is
 /// available, such as in a remote TUI session.
 pub fn inferred_reasoning_efforts(
@@ -139,5 +177,42 @@ mod tests {
             inferred_reasoning_efforts(Some("anthropic"), Some("claude-opus-4-7")),
             vec!["none", "low", "medium", "high", "xhigh", "max", "swarm"]
         );
+    }
+
+    /// The compact glyph is the whole effort display now: one filling circle
+    /// per rung, exactly the ladder omp draws (○ ◔ ◑ ◒ ◕ ◉), so the status
+    /// line, the composer pill and the pickers cannot drift apart.
+    #[test]
+    fn effort_glyphs_fill_with_the_ladder() {
+        assert_eq!(reasoning_effort_glyph("none"), Some("⦸"));
+        assert_eq!(reasoning_effort_glyph("minimal"), Some("○"));
+        assert_eq!(reasoning_effort_glyph("low"), Some("◔"));
+        assert_eq!(reasoning_effort_glyph("medium"), Some("◑"));
+        assert_eq!(reasoning_effort_glyph("high"), Some("◒"));
+        assert_eq!(reasoning_effort_glyph("xhigh"), Some("◕"));
+        assert_eq!(reasoning_effort_glyph("max"), Some("◉"));
+        // Case and stray whitespace come from provider echoes.
+        assert_eq!(reasoning_effort_glyph(" High "), Some("◒"));
+    }
+
+    #[test]
+    fn effort_glyphs_skip_modes_and_unknown_levels() {
+        for mode in ["swarm", "swarm-deep", "default", "auto", "", "future"] {
+            assert_eq!(
+                reasoning_effort_glyph(mode),
+                None,
+                "{mode} is not a reasoning rung"
+            );
+        }
+    }
+
+    #[test]
+    fn effort_ranks_order_the_ladder_for_color_ramps() {
+        let ranks: Vec<u8> = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+            .into_iter()
+            .filter_map(reasoning_effort_rank)
+            .collect();
+        assert_eq!(ranks, vec![0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(reasoning_effort_rank("swarm"), None);
     }
 }

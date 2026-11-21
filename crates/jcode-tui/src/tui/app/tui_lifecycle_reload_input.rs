@@ -12,6 +12,7 @@ impl App {
         restored: RestoredReloadInput,
     ) {
         self.input = restored.input;
+        self.stashed_input = restored.stashed_input;
         self.cursor_pos = restored.cursor;
         self.pending_images = restored.pending_images;
         self.submit_input_on_startup = restored.submit_on_restore
@@ -75,7 +76,9 @@ impl App {
         }
 
         self.queued_messages = queued_messages;
+        self.queued_images = restored.queued_images;
         self.queued_commands = restored.queued_commands;
+        self.uncertain_queue_prompts = restored.uncertain_queue_prompts;
         if self.has_queued_followups() {
             if self.is_remote {
                 // Do not synthesize a processing turn for restored remote follow-ups.

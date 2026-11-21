@@ -131,6 +131,107 @@ async fn syntax_errors_are_reported() {
     assert!(out.error.is_some());
 }
 
+/// `types()` hands the model TypeScript declarations, so a model writes
+/// `const x: string = ...` and means it. Types are erased before QuickJS sees
+/// the script, exactly like Deno and Bun, so the annotation is a no-op rather
+/// than a syntax error.
+#[tokio::test(flavor = "multi_thread")]
+async fn typescript_annotations_run() {
+    let out = exec(
+        r#"
+        type Severity = "info" | "warn";
+        interface Finding { path: string; severity: Severity }
+        const name: string = "x";
+        const severity = "info" satisfies Severity;
+        const finding = { path: name, severity } as Finding;
+        const optional = (value?: string): string => value ?? "none";
+        return [finding.path, optional(), optional("y")];
+        "#,
+    )
+    .await;
+    assert_eq!(out.error, None);
+    assert_eq!(
+        out.result,
+        Some(json!(["x", "none", "y"])),
+        "{:?}",
+        out.result
+    );
+}
+
+/// The shape `types()` prints: a named input type plus a `declare const tools`
+/// whose members return promises. A model copies that and calls through it.
+#[tokio::test(flavor = "multi_thread")]
+async fn typescript_program_calls_tools_with_declaration_style_annotations() {
+    let out = exec(
+        r#"
+        type EchoInput = {
+          x: number;
+          note?: string;
+        };
+
+        declare const tools: {
+          echo(args: EchoInput): Promise<any>;
+        };
+
+        const args: EchoInput = { x: 1 } satisfies EchoInput;
+        const first = await tools.echo(args);
+        const second = await tools.echo<EchoInput>({ x: 2 });
+        return [first, second] as const;
+        "#,
+    )
+    .await;
+    assert_eq!(out.error, None);
+    assert_eq!(
+        out.result,
+        Some(json!([
+            { "echo": { "x": 1 } },
+            { "echo": { "x": 2 } }
+        ])),
+        "{:?}",
+        out.result
+    );
+    assert_eq!(out.tool_calls, 2);
+}
+
+/// A real syntax error has to name the line the model wrote. Type-only lines
+/// are gone after stripping, so the position comes from the parser over the
+/// original source rather than from the printed JavaScript.
+#[tokio::test(flavor = "multi_thread")]
+async fn typescript_syntax_errors_point_at_the_model_line() {
+    let out = exec("type A = string;\n\nconst a: A = ;\n").await;
+    let err = out.error.unwrap_or_default();
+    assert!(err.contains("line 3:"), "{err}");
+    assert_eq!(out.tool_calls, 0, "{err}");
+}
+
+/// Runtime errors come back from the stripped, wrapped source. The engine maps
+/// the position back onto the script the model wrote, so the line it is told to
+/// fix is the line it can see.
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_errors_point_at_the_model_line() {
+    let out = exec(
+        "type A = string;\ninterface B { x: A }\nconst a: A = 'x';\nnull.boom(a);\nreturn a;\n",
+    )
+    .await;
+    let err = out.error.unwrap_or_default();
+    assert!(err.contains("boom") || err.contains("null"), "{err}");
+    assert!(
+        err.contains(":4:"),
+        "error must point at line 4, got: {err}"
+    );
+}
+
+/// The hint is for parse failures only. A script that ran and threw keeps the
+/// plain message: telling it about TypeScript there would send the model off to
+/// rewrite working code.
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_errors_do_not_mention_plain_javascript() {
+    let out = exec("throw new Error('nope');").await;
+    let err = out.error.unwrap_or_default();
+    assert!(err.contains("nope"), "{err}");
+    assert!(!err.to_lowercase().contains("plain javascript"), "{err}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn unknown_tools_suggest_alternatives() {
     let out = exec("return await tools.ech({});").await;
@@ -248,6 +349,52 @@ async fn memory_limit_is_enforced() {
     )
     .await;
     assert!(out.error.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resource_refusals_name_budget_and_recovery() {
+    let limits = Limits {
+        max_tool_calls: 1,
+        ..Limits::default()
+    };
+    let out = exec_with(
+        "await tools.echo({}); await tools.echo({});",
+        Map::new(),
+        limits,
+    )
+    .await;
+    let error = out.error.unwrap();
+    assert!(
+        error.contains("1 per run") && error.contains("new codemode run"),
+        "{error}"
+    );
+
+    let limits = Limits {
+        timeout: Duration::from_millis(300),
+        ..Limits::default()
+    };
+    let out = exec_with("while (true) {}", Map::new(), limits).await;
+    let error = out.error.unwrap();
+    assert!(
+        error.contains("300ms") && error.contains("split"),
+        "{error}"
+    );
+
+    let limits = Limits {
+        memory_bytes: 8 * 1024 * 1024,
+        ..Limits::default()
+    };
+    let out = exec_with(
+        "const a = []; while (true) a.push('x'.repeat(65536));",
+        Map::new(),
+        limits,
+    )
+    .await;
+    let error = out.error.unwrap();
+    assert!(
+        error.contains("8388608 bytes") && error.contains("smaller"),
+        "{error}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

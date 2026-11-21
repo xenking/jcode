@@ -484,8 +484,12 @@ pub async fn refresh_resolved_tokens(
         .context("Cursor token was rejected and no refresh token is available")?;
     let mut refreshed = refresh_direct_access_token(client, refresh_token).await?;
     refreshed.source = tokens.source;
-    if tokens.source == "cursor_auth_file" {
-        let _ = save_auth_file_tokens(&refreshed);
+    if tokens.source == "cursor_auth_file"
+        && let Err(err) = save_auth_file_tokens(&refreshed)
+    {
+        crate::logging::warn(&format!(
+            "Could not persist refreshed Cursor tokens: {err:#}"
+        ));
     }
     Ok(refreshed)
 }
@@ -500,14 +504,46 @@ fn save_auth_file_tokens(tokens: &CursorDirectTokens) -> Result<()> {
     {
         return Ok(());
     }
-    let data = CursorAuthFileData {
-        access_token: Some(tokens.access_token.clone()),
-        refresh_token: tokens.refresh_token.clone(),
+    let file_path = crate::storage::validate_external_auth_file(&file_path)?;
+    let existing = std::fs::read(&file_path)
+        .with_context(|| format!("Failed to read {}", file_path.display()))?;
+    let merged = merge_auth_file_tokens(&existing, tokens)?;
+    // Same-directory temp file + rename so Cursor never sees a torn file; the
+    // original mode is kept (the new file would otherwise get the umask default).
+    let temporary = file_path.with_extension(format!("json.tmp-{}", std::process::id()));
+    let result = (|| -> Result<()> {
+        std::fs::write(&temporary, merged)?;
+        std::fs::set_permissions(&temporary, std::fs::metadata(&file_path)?.permissions())?;
+        std::fs::rename(&temporary, &file_path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.with_context(|| format!("Failed to update {}", file_path.display()))
+}
+
+/// Set the refreshed tokens in Cursor's `auth.json`, leaving every other key as
+/// the Cursor app wrote it. Refuses to rewrite a file that is not a JSON object.
+fn merge_auth_file_tokens(existing: &[u8], tokens: &CursorDirectTokens) -> Result<Vec<u8>> {
+    let serde_json::Value::Object(mut object) = serde_json::from_slice(existing)
+        .context("Cursor auth file is not valid JSON; refusing to overwrite it")?
+    else {
+        anyhow::bail!("Cursor auth file is not a JSON object; refusing to overwrite it");
     };
-    let serialized = serde_json::to_string_pretty(&data)?;
-    std::fs::write(&file_path, format!("{}\n", serialized))
-        .with_context(|| format!("Failed to update {}", file_path.display()))?;
-    Ok(())
+    object.insert(
+        "accessToken".into(),
+        serde_json::Value::String(tokens.access_token.clone()),
+    );
+    if let Some(refresh) = &tokens.refresh_token {
+        object.insert(
+            "refreshToken".into(),
+            serde_json::Value::String(refresh.clone()),
+        );
+    }
+    let mut out = serde_json::to_vec_pretty(&object)?;
+    out.push(b'\n');
+    Ok(out)
 }
 
 pub fn error_indicates_not_logged_in(err: &anyhow::Error) -> bool {

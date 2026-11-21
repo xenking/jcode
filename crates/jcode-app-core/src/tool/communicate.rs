@@ -24,14 +24,6 @@ const REQUEST_ID: u64 = 1;
 mod transport;
 use transport::{send_request, send_request_with_timeout};
 
-fn fresh_spawn_request_nonce(ctx: &ToolContext) -> String {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    format!("{}-{}-{}", ctx.session_id, ctx.message_id, now_ms)
-}
-
 fn check_error(response: &ServerEvent) -> Option<&str> {
     if let ServerEvent::Error { message, .. } = response {
         Some(message)
@@ -46,6 +38,47 @@ fn ensure_success(response: &ServerEvent) -> Result<()> {
     } else {
         Ok(())
     }
+}
+
+fn queued_cold_output(response: &ServerEvent) -> Option<ToolOutput> {
+    match response {
+        ServerEvent::RuntimeCommandResult {
+            command,
+            data,
+            message,
+            ..
+        } if command == "swarm_message" && data["status"] == "queued_cold" => {
+            Some(ToolOutput::new(message.clone()))
+        }
+        _ => None,
+    }
+}
+
+pub(super) async fn deliver_agent_draft(
+    sender: String,
+    recipient: String,
+    message: String,
+) -> Result<Value> {
+    let response = send_request(Request::CommMessage {
+        id: REQUEST_ID,
+        from_session: sender,
+        to_session: Some(recipient),
+        message,
+        delivery: Some(CommDeliveryMode::Wake),
+        channel: None,
+        wake: None,
+        tldr: None,
+        to_swarm: None,
+        require_target: true,
+    })
+    .await?;
+    ensure_success(&response)?;
+    Ok(match response {
+        ServerEvent::RuntimeCommandResult { command, data, .. } if command == "swarm_message" => {
+            data
+        }
+        _ => json!({"status":"sent"}),
+    })
 }
 
 async fn fetch_plan_status(session_id: &str) -> Result<PlanGraphStatus> {
@@ -108,6 +141,39 @@ async fn fetch_swarm_members(session_id: &str) -> Result<Vec<AgentInfo>> {
         }
         Err(e) => Err(anyhow::anyhow!("Failed to list swarm members: {}", e)),
     }
+}
+
+/// Members this session spawned that are still working, per the daemon. Their
+/// completion wakes the spawner, so a headless runner must not poke meanwhile.
+/// Fails open: with no daemon or no swarm there is nothing to wait for.
+pub async fn working_members_spawned_by(session_id: &str) -> Vec<String> {
+    let members = match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        fetch_swarm_members(session_id),
+    )
+    .await
+    {
+        Ok(Ok(members)) => members,
+        _ => return Vec::new(),
+    };
+    spawned_working_member_ids(&members, session_id)
+}
+
+fn spawned_working_member_ids(members: &[AgentInfo], session_id: &str) -> Vec<String> {
+    let mut working: Vec<String> = members
+        .iter()
+        .filter(|member| {
+            member.session_id != session_id
+                && member.report_back_to_session_id.as_deref() == Some(session_id)
+                && member
+                    .status
+                    .as_deref()
+                    .is_some_and(crate::todo::swarm_member_is_working)
+        })
+        .map(|member| member.session_id.clone())
+        .collect();
+    working.sort();
+    working
 }
 
 #[cfg(test)]
@@ -232,7 +298,7 @@ async fn spawn_assignment_session(ctx: &ToolContext, params: &CommunicateInput) 
         session_id: ctx.session_id.clone(),
         working_dir: params.working_dir.clone(),
         initial_message: None,
-        request_nonce: Some(fresh_spawn_request_nonce(ctx)),
+        request_nonce: Some(ctx.tool_call_id.clone()),
         spawn_mode: params.spawn_mode.clone(),
         model: params.model.clone(),
         // Worker effort is not agent-controlled: the server applies
@@ -334,6 +400,30 @@ fn resolve_optional_target_session(target: Option<String>, current_session: &str
     resolve_optional_comm_target_session(target, current_session)
 }
 
+/// Sessions a `status` call reports on. `target_session` (or its `to_session`
+/// alias) wins, then each of `session_ids`, and only with neither given does it
+/// fall back to the caller's own session.
+fn status_target_sessions(
+    target: Option<String>,
+    session_ids: Option<&[String]>,
+    current_session: &str,
+) -> Vec<String> {
+    if target.is_some() {
+        return vec![resolve_optional_target_session(target, current_session)];
+    }
+    let mut targets: Vec<String> = Vec::new();
+    for id in session_ids.unwrap_or_default() {
+        let id = resolve_optional_target_session(Some(id.clone()), current_session);
+        if !targets.contains(&id) {
+            targets.push(id);
+        }
+    }
+    if targets.is_empty() {
+        targets.push(current_session.to_string());
+    }
+    targets
+}
+
 fn format_awaited_members_with_reports(
     completed: bool,
     summary: &str,
@@ -414,6 +504,34 @@ pub(super) fn format_swarm_directory(swarms: &[crate::protocol::SwarmInfo]) -> S
     out
 }
 
+/// Render the `sessions` directory: live root sessions on the daemon (any
+/// swarm) with the id/name to pass to `message` or `focus`.
+pub(super) fn format_session_directory(sessions: &[AgentInfo]) -> ToolOutput {
+    if sessions.is_empty() {
+        return ToolOutput::new("No other live sessions.");
+    }
+    let mut out = String::from("Live sessions (any swarm):\n\n");
+    for session in sessions {
+        let name = session.friendly_name.as_deref().unwrap_or("(unnamed)");
+        let status = session.status.as_deref().unwrap_or("unknown");
+        let attached = match session.live_attachments {
+            Some(0) => " [no client attached]",
+            _ => "",
+        };
+        out.push_str(&format!(
+            "- {name} [{}] {status}{attached}\n",
+            session.session_id
+        ));
+        if let Some(detail) = session.detail.as_deref().filter(|d| !d.is_empty()) {
+            out.push_str(&format!("  {detail}\n"));
+        }
+    }
+    out.push_str(
+        "\nMessage one: action=message with to_session=<id or unique name>. Raise it in its TUI/Desktop: action=focus with to_session.",
+    );
+    ToolOutput::new(out)
+}
+
 fn format_channels(channels: &[SwarmChannelInfo]) -> ToolOutput {
     ToolOutput::new(format_comm_channels(channels))
 }
@@ -481,7 +599,7 @@ impl CommunicateTool {
 
     fn new_for_working_dir(working_dir: Option<&std::path::Path>) -> Self {
         const BASE_DESCRIPTION: &str =
-            "Coordinate agents: spawn todo-lane workers, message them, and manage plans.";
+            "Coordinate agents: spawn todo-lane workers and exchange messages.";
         let swarm_prompt = crate::prompt::load_swarm_prompt(working_dir);
         let description = if swarm_prompt.is_empty() {
             BASE_DESCRIPTION.to_string()
@@ -510,6 +628,9 @@ const ADVERTISED_SWARM_ACTIONS: &[&str] = &[
     "retry",
     "list_models",
     "list_swarms",
+    "sessions",
+    "focus",
+    "answer",
 ];
 
 #[derive(Clone, Deserialize)]
@@ -594,6 +715,14 @@ struct CommunicateInput {
     /// active phase.
     #[serde(default, alias = "stage")]
     phase: Option<u32>,
+    /// Escalated `ask` answer payload, in `AskResponse` shape: one object per
+    /// question. Used by `action = "answer"`.
+    #[serde(default)]
+    answers: Option<Vec<crate::protocol::AskAnswer>>,
+    /// Escalation id from the `ask_escalated` event or the coordinator
+    /// notification. Optional when the worker has one pending escalated ask.
+    #[serde(default)]
+    request_id: Option<String>,
 }
 
 impl CommunicateInput {
@@ -639,6 +768,8 @@ fn canonical_swarm_action(action: &str) -> &str {
         "broadcast_all" | "announce" => "broadcast",
         "agents" | "members" | "list_agents" | "list_members" | "roster" => "list",
         "swarms" | "list_swarm" | "swarm_list" => "list_swarms",
+        "list_sessions" | "all_sessions" | "other_sessions" => "sessions",
+        "raise" | "raise_session" | "focus_session" | "show_session" | "open_session" => "focus",
         "label_swarm" | "name_swarm" | "rename_swarm" | "set_label" => "set_swarm_label",
         "models" | "model_list" | "list_model" | "list_providers" | "list_routes" => "list_models",
         "plan" | "status_plan" => "plan_status",
@@ -681,7 +812,7 @@ impl Tool for CommunicateTool {
                 },
                 "to_session": {
                     "type": "string",
-                    "description": "Agent ID/unique name; alias of target_session."
+                    "description": "Agent ID/unique name."
                 },
                 "to_swarm": {
                     "type": "string",
@@ -690,10 +821,6 @@ impl Tool for CommunicateTool {
                 "channel": {
                     "type": "string",
                     "description": "Prefer DMs."
-                },
-                "target_session": {
-                    "type": "string",
-                    "description": "Alias of to_session."
                 },
                 "label": {
                     "type": "string",
@@ -706,15 +833,12 @@ impl Tool for CommunicateTool {
                     "description": "Spawn lane phase; defaults to active phase."
                 },
                 "working_dir": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Spawn working directory override. Omit to inherit the requesting session's working directory."
                 },
                 "prompt": {
                     "type": "string",
                     "description": "Extra spawn context, not lane tasks."
-                },
-                "initial_message": {
-                    "type": "string",
-                    "description": "Overrides prompt for spawn."
                 },
                 "limit": {
                     "type": "integer",
@@ -765,43 +889,28 @@ impl Tool for CommunicateTool {
                     "type": "string",
                     "enum": ["notify", "interrupt", "wake"]
                 },
+                "answers": {
+                    "type": "array",
+                    "description": "answer: one object per question, in order.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "selected": {"type": "array", "items": {"type": "string"}},
+                            "other": {"type": "string"}
+                        }
+                    }
+                },
+                "request_id": {
+                    "type": "string",
+                    "description": "answer: escalation id when the worker has several pending asks."
+                },
             }
         });
 
-        // `swarm` is a multi-action tool, so putting `label` in the top-level
-        // `required` array would incorrectly require it for read/list/message and
-        // every other action. Use mutually exclusive action branches instead:
-        // the spawn branch requires label, while the non-spawn branch does not.
-        // `anyOf` object branches are supported by our provider schema adapters
-        // and avoid the less-portable JSON Schema `if`/`then` keywords.
-        let non_spawn_actions: Vec<Value> = schema["properties"]["action"]["enum"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|action| action.as_str() != Some("spawn"))
-            .cloned()
-            .collect();
-        schema["anyOf"] = json!([
-            {
-                "type": "object",
-                "required": ["action", "label"],
-                "properties": {
-                    "action": { "type": "string", "enum": ["spawn"] },
-                    // Gemini validates that every `required` name is defined in
-                    // the same object's `properties` and rejects the whole
-                    // request otherwise (issue #655), so declare `label` here
-                    // instead of relying on the parent schema's declaration.
-                    "label": { "type": "string", "minLength": 1 }
-                }
-            },
-            {
-                "type": "object",
-                "required": ["action"],
-                "properties": {
-                    "action": { "type": "string", "enum": non_spawn_actions }
-                }
-            }
-        ]);
+        // Advertise one spelling per capability. target_session and
+        // initial_message remain accepted by execute for older callers.
+        // required_spawn_label checks spawn's conditional requirement locally,
+        // before dispatch, without repeating the action enum in schema branches.
 
         apply_swarm_model_policy(&mut schema, &crate::config::config().agents);
         schema
@@ -812,6 +921,12 @@ impl Tool for CommunicateTool {
         crate::config::config()
             .agents
             .validate_swarm_model_request(params.model.as_deref())
+            .map_err(anyhow::Error::msg)?;
+        // Hard worker allowlist: any agent-chosen worker model must be on
+        // `agents.spawn_allowed_models`. The error names the allowed set.
+        crate::config::config()
+            .agents
+            .validate_spawn_allowed_model(params.model.as_deref())
             .map_err(anyhow::Error::msg)?;
 
         // `to_session` and `target_session` both name a single session id. Historically
@@ -831,6 +946,30 @@ impl Tool for CommunicateTool {
         params.action = canonical_swarm_action(&params.action).to_string();
 
         match params.action.as_str() {
+            "answer" => {
+                let worker = params
+                    .to_session
+                    .clone()
+                    .or_else(|| params.target_session.clone())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "'to_session' is required for answer action: the worker whose escalated ask you are answering"
+                        )
+                    })?;
+                let request = Request::CommAnswerEscalatedAsk {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    worker_session_id: worker.clone(),
+                    request_id: params.request_id.clone(),
+                    answers: params.answers.clone(),
+                };
+                let response = send_request(request).await?;
+                ensure_success(&response)?;
+                return Ok(ToolOutput::new(format!(
+                    "Escalated ask answered. Worker {worker} resumes with your answer."
+                ))
+                .with_title("Ask answered"));
+            }
             "share" | "share_append" => {
                 let key = params
                     .key
@@ -912,6 +1051,9 @@ impl Tool for CommunicateTool {
                 match send_request(request).await {
                     Ok(response) => {
                         ensure_success(&response)?;
+                        if let Some(output) = queued_cold_output(&response) {
+                            return Ok(output);
+                        }
                         if let Some(swarm) = to_swarm {
                             return Ok(ToolOutput::new(cross_swarm_confirmation(
                                 &swarm,
@@ -965,6 +1107,9 @@ impl Tool for CommunicateTool {
                 match send_request(request).await {
                     Ok(response) => {
                         ensure_success(&response)?;
+                        if let Some(output) = queued_cold_output(&response) {
+                            return Ok(output);
+                        }
                         Ok(ToolOutput::new(format!(
                             "Broadcast sent to your spawned subtree: {}",
                             message
@@ -1004,6 +1149,9 @@ impl Tool for CommunicateTool {
                 match send_request(request).await {
                     Ok(response) => {
                         ensure_success(&response)?;
+                        if let Some(output) = queued_cold_output(&response) {
+                            return Ok(output);
+                        }
                         if let Some(swarm) = to_swarm {
                             return Ok(ToolOutput::new(cross_swarm_confirmation(
                                 &swarm,
@@ -1048,6 +1196,9 @@ impl Tool for CommunicateTool {
                 match send_request(request).await {
                     Ok(response) => {
                         ensure_success(&response)?;
+                        if let Some(output) = queued_cold_output(&response) {
+                            return Ok(output);
+                        }
                         Ok(ToolOutput::new(format!(
                             "Channel message sent to #{}: {}",
                             channel, message
@@ -1072,6 +1223,49 @@ impl Tool for CommunicateTool {
                         Ok(ToolOutput::new("No agents found."))
                     }
                     Err(e) => Err(anyhow::anyhow!("Failed to list agents: {}", e)),
+                }
+            }
+
+            "sessions" => {
+                let request = Request::CommListSessions {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                };
+                match send_request(request).await {
+                    Ok(ServerEvent::CommMembers { members, .. }) => {
+                        Ok(format_session_directory(&members))
+                    }
+                    Ok(response) => {
+                        ensure_success(&response)?;
+                        Ok(ToolOutput::new("No other live sessions."))
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to list sessions: {}", e)),
+                }
+            }
+
+            "focus" => {
+                let target = params
+                    .to_session
+                    .clone()
+                    .or_else(|| params.target_session.clone())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "'to_session' (or 'target_session') is required for focus action"
+                        )
+                    })?;
+                let request = Request::CommFocusSession {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    target_session: target.clone(),
+                };
+                match send_request(request).await {
+                    Ok(response) => {
+                        ensure_success(&response)?;
+                        Ok(ToolOutput::new(format!(
+                            "Asked the clients attached to {target} to raise it (Desktop selects the tab, terminal sessions use the configured focus hook)."
+                        )))
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to focus session: {}", e)),
                 }
             }
 
@@ -1298,7 +1492,7 @@ impl Tool for CommunicateTool {
                     session_id: ctx.session_id.clone(),
                     working_dir: params.working_dir.clone(),
                     initial_message: params.spawn_initial_message(),
-                    request_nonce: None,
+                    request_nonce: Some(ctx.tool_call_id.clone()),
                     spawn_mode: params.spawn_mode.clone(),
                     model: params.model.clone(),
                     // Worker effort is not agent-controlled: the server applies
@@ -1413,25 +1607,32 @@ impl Tool for CommunicateTool {
             }
 
             "status" => {
-                let target =
-                    resolve_optional_target_session(params.target_session, &ctx.session_id);
-
-                let request = Request::CommStatus {
-                    id: REQUEST_ID,
-                    session_id: ctx.session_id.clone(),
-                    target_session: target.clone(),
-                };
-
-                match send_request(request).await {
-                    Ok(ServerEvent::CommStatusResponse { snapshot, .. }) => {
-                        Ok(format_status_snapshot(&snapshot))
+                let targets = status_target_sessions(
+                    params.target_session,
+                    params.session_ids.as_deref(),
+                    &ctx.session_id,
+                );
+                let mut sections = Vec::new();
+                for target in targets {
+                    let request = Request::CommStatus {
+                        id: REQUEST_ID,
+                        session_id: ctx.session_id.clone(),
+                        target_session: target,
+                    };
+                    match send_request(request).await {
+                        Ok(ServerEvent::CommStatusResponse { snapshot, .. }) => {
+                            sections.push(format_status_snapshot(&snapshot).output);
+                        }
+                        Ok(response) => {
+                            ensure_success(&response)?;
+                            sections.push("No status snapshot returned.".to_string());
+                        }
+                        Err(e) => {
+                            return Err(anyhow::anyhow!("Failed to get status snapshot: {}", e));
+                        }
                     }
-                    Ok(response) => {
-                        ensure_success(&response)?;
-                        Ok(ToolOutput::new("No status snapshot returned."))
-                    }
-                    Err(e) => Err(anyhow::anyhow!("Failed to get status snapshot: {}", e)),
                 }
+                Ok(ToolOutput::new(sections.join("\n\n---\n\n")))
             }
 
             // Compatibility for old transcripts and scripts only. Worker output is
@@ -1853,3 +2054,7 @@ impl Tool for CommunicateTool {
 #[cfg(test)]
 #[path = "communicate_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "communicate_status_target_tests.rs"]
+mod status_target_tests;

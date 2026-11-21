@@ -10,12 +10,11 @@ pub(crate) struct IdleCacheRelease {
 }
 
 impl Agent {
-    /// Caller must hold the idle Agent reservation. Never checkpoint here:
-    /// save_prepared can succeed without writing under a migration lease.
-    /// Keeping the source history means waking is simply lazy cache rebuilding,
-    /// with no disk dependency, lifecycle hooks or environment resnapshotting.
-    pub(crate) fn hibernate_idle_caches(&mut self) -> Option<IdleCacheRelease> {
-        if crate::turn_cancel_registry::has_active_turn(self.session_id())
+    fn idle_memory_eligible(&self) -> Option<()> {
+        if crate::turn_activity::global()
+            .snapshot()
+            .session(self.session_id())
+            .is_some_and(|session| session.is_busy())
             || self.session.migration_lease_block().is_some()
             || !self.pending_alerts.is_empty()
         {
@@ -41,6 +40,37 @@ impl Agent {
             return None;
         }
 
+        Some(())
+    }
+
+    pub(crate) fn checkpoint_for_idle_unload(&mut self) -> Result<bool> {
+        if self.is_compacting_now() {
+            // The last subscriber may have detached before CompactionFinished.
+            self.poll_compaction_completion_event();
+        }
+        if self.rewind_undo_snapshot.is_some() || self.idle_memory_eligible().is_none() {
+            return Ok(false);
+        }
+        self.session.save_for_idle_unload()?;
+        Ok(true)
+    }
+
+    pub(crate) fn unload_queue_is_unowned(&self, registered: Option<&SoftInterruptQueue>) -> bool {
+        let registrations = match registered {
+            Some(queue) if Arc::ptr_eq(queue, &self.soft_interrupt_queue) => 1,
+            Some(_) => return false,
+            None => 0,
+        };
+        Arc::strong_count(&self.soft_interrupt_queue) == 1 + registrations
+            && self
+                .soft_interrupt_queue
+                .try_lock()
+                .is_ok_and(|queue| queue.is_empty())
+    }
+
+    /// Keep the transcript live. Waking only rebuilds disposable caches.
+    pub(crate) fn hibernate_idle_caches(&mut self) -> Option<IdleCacheRelease> {
+        self.idle_memory_eligible()?;
         let released = IdleCacheRelease {
             provider_cache_bytes: self
                 .session
@@ -149,6 +179,8 @@ mod tests {
             messages: agent.session.messages.clone(),
             provider_session_id: Some("undo-provider".into()),
             session_provider_session_id: None,
+            compaction: None,
+            removed_compaction_events: Vec::new(),
             visible_message_count: 2,
         });
         let released = agent.hibernate_idle_caches().unwrap();
@@ -202,11 +234,16 @@ mod tests {
         agent.pending_alerts.clear();
         let queue = agent.soft_interrupt_queue();
         queue.lock().unwrap().push(SoftInterruptMessage {
+            attachments: Vec::new(),
+            active_skill: None,
+            system_reminder: None,
             content: "scheduled wake".into(),
             images: Vec::new(),
             urgent: false,
             source: SoftInterruptSource::User,
+            mode: jcode_agent_runtime::QueuedMessageMode::Steer,
             client_id: None,
+            editing_by: None,
         });
         assert!(agent.hibernate_idle_caches().is_none());
         queue.lock().unwrap().clear();

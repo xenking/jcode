@@ -64,7 +64,8 @@ pub fn build_transcript_for_extraction(messages: &[crate::message::Message]) -> 
                 | crate::message::ContentBlock::AnthropicThinking { .. }
                 | crate::message::ContentBlock::OpenAIReasoning { .. }
                 | crate::message::ContentBlock::ToolReference { .. }
-                | crate::message::ContentBlock::ProviderNative { .. } => {}
+                | crate::message::ContentBlock::ProviderNative { .. }
+                | crate::message::ContentBlock::Unknown => {}
                 crate::message::ContentBlock::Image { .. } => {
                     transcript.push_str("[Image]\n");
                 }
@@ -217,7 +218,7 @@ impl MemoryAgent {
                         stats.turns_processed += 1;
                     }
                     if let Err(error) = self.process_context(&session_id, &messages).await {
-                        memory::clear_pending_memory(&session_id);
+                        memory::discard_pending_memory(&session_id);
                         self.sessions.entry(session_id).or_default().failed_at =
                             Some(Instant::now());
                         memory::add_event(MemoryEventKind::Error {
@@ -267,7 +268,7 @@ impl MemoryAgent {
         ss.last_query = Some(query);
         ss.last_check = Some(Instant::now());
         let manager = manager_for_working_dir(ss.working_dir.as_deref());
-        memory::clear_pending_memory(session_id);
+        memory::discard_pending_memory(session_id);
         if !memory::memory_runtime_active() {
             return Ok(());
         }

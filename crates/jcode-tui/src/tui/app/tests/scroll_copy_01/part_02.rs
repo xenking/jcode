@@ -208,6 +208,57 @@ fn test_prompt_history_up_does_not_replace_unmatched_draft() {
 }
 
 #[test]
+fn test_visual_prompt_up_down_at_soft_wrap_boundary() {
+    use crate::tui::ui::{input_ui, record_layout_snapshot};
+    use ratatui::layout::Rect;
+
+    let mut app = create_test_app();
+    let prompt = "abcdefghijklmnopqrstuvwxyz";
+    app.display_messages = vec![DisplayMessage::user("older"), DisplayMessage::user(prompt)];
+    app.bump_display_messages_version();
+    let width = 12;
+    let next_prompt = input_ui::next_input_prompt_number(&app);
+    let cursor = input_ui::composer_line_width(&app, width, next_prompt).unwrap();
+    record_layout_snapshot(Rect::default(), None, None, Some(Rect::new(0, 0, width, 5)));
+
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    app.cursor_pos = cursor;
+    app.handle_key(KeyCode::Up, KeyModifiers::NONE).unwrap();
+    assert_eq!(app.input, prompt, "Up must not leave the second visual row for history");
+    assert_eq!(app.cursor_pos, 0);
+
+    app.handle_key(KeyCode::Down, KeyModifiers::NONE).unwrap();
+    assert_eq!(app.cursor_pos, cursor);
+    app.handle_key(KeyCode::Up, KeyModifiers::NONE).unwrap();
+    app.handle_key(KeyCode::Up, KeyModifiers::NONE).unwrap();
+    assert_eq!(app.input, "older");
+
+    app.handle_key(KeyCode::Down, KeyModifiers::NONE).unwrap();
+    assert_eq!(app.input, prompt);
+    app.cursor_pos = cursor;
+    record_layout_snapshot(Rect::default(), None, None, Some(Rect::new(0, 0, 80, 5)));
+    app.handle_key(KeyCode::Up, KeyModifiers::NONE).unwrap();
+    assert_eq!(app.input, "older", "after widening, the old boundary is on the first row");
+}
+
+#[test]
+fn test_visual_prompt_column_survives_a_short_row_and_resets_after_left() {
+    let mut app = create_test_app();
+    app.input = "аб界👩‍💻ю\nя\nabcdefghi".to_string();
+    app.cursor_pos = "аб界👩‍💻".len();
+
+    app.handle_key(KeyCode::Down, KeyModifiers::NONE).unwrap();
+    assert_eq!(&app.input[..app.cursor_pos], "аб界👩‍💻ю\nя");
+    app.handle_key(KeyCode::Down, KeyModifiers::NONE).unwrap();
+    assert_eq!(&app.input[..app.cursor_pos], "аб界👩‍💻ю\nя\nabcdef");
+
+    app.handle_key(KeyCode::Up, KeyModifiers::NONE).unwrap();
+    app.handle_key(KeyCode::Left, KeyModifiers::NONE).unwrap();
+    app.handle_key(KeyCode::Up, KeyModifiers::NONE).unwrap();
+    assert_eq!(app.cursor_pos, 0);
+}
+
+#[test]
 fn test_multiline_prompt_up_down_moves_cursor_within_input() {
     let mut app = create_test_app();
     app.input = "abc\ndefg\nxy".to_string();
@@ -555,6 +606,44 @@ fn test_remote_ctrl_c_still_arms_quit_when_idle() {
     assert_eq!(
         app.status_notice(),
         Some("Press Ctrl+C again to quit".to_string())
+    );
+}
+
+/// A runtime that never confirms a stop (a tool that ignores cancellation)
+/// must not trap the user: the first two Ctrl+C presses interrupt and force
+/// stop, and the third detaches the client without touching the daemon.
+#[test]
+fn test_remote_ctrl_c_always_closes_client_when_stop_never_confirms() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    for press in 1..=2 {
+        rt.block_on(app.handle_remote_key(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            &mut remote,
+        ))
+        .unwrap();
+        assert!(
+            !app.should_quit,
+            "interrupt press {press} must not close the client before the escape hatch"
+        );
+        assert!(app.is_processing);
+    }
+
+    rt.block_on(app.handle_remote_key(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+        &mut remote,
+    ))
+    .unwrap();
+    assert!(
+        app.should_quit,
+        "a third Ctrl+C must detach when the runtime never confirms the stop"
     );
 }
 

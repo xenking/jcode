@@ -68,6 +68,7 @@ async fn restore_for_concurrency_test(
         target_id.to_owned(),
         None,
         None,
+        None,
         false,
         None,
         false,
@@ -335,4 +336,105 @@ async fn comm_status_releases_member_guard_before_reading_connections() {
         event_rx.recv().await,
         Some(ServerEvent::CommStatusResponse { .. })
     ));
+}
+
+/// 2026-11-19: the daemon died (SIGTERM) while a turn waited on a tool. The
+/// client respawned a daemon and resumed the session, the restore saw the
+/// pending tool call and reported `was_interrupted=true`, yet nothing ever
+/// continued the turn: clients only observe recovery, the daemon only admits
+/// persisted intents, and an abrupt death writes none. The session sat idle
+/// for ten hours. A restore that finds an unfinished turn must leave a
+/// daemon-owned recovery intent behind.
+#[tokio::test]
+async fn resume_of_a_turn_cut_by_daemon_death_schedules_recovery() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedConcurrencyEnv::new();
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut persisted = crate::session::Session::create(None, Some("Cut by daemon death".into()));
+    persisted.add_message(
+        crate::message::Role::User,
+        vec![ContentBlock::Text {
+            text: "wait for the rollout".into(),
+            cache_control: None,
+        }],
+    );
+    persisted.add_message(
+        crate::message::Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "toolu_wait".into(),
+            name: "bg".into(),
+            input: serde_json::json!({"action": "wait", "task_id": "t1"}),
+            thought_signature: None,
+        }],
+    );
+    persisted.save()?;
+    let target_id = persisted.id.clone();
+    let source = Arc::new(Mutex::new(Agent::new_provisional_with_initial_working_dir(
+        provider.clone(),
+        registry.clone(),
+        None,
+    )));
+    let source_id = source.lock().await.session_id().to_owned();
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(source_id.clone(), source.clone())]),
+    ));
+
+    restore_for_concurrency_test(
+        &target_id, &source_id, &source, &provider, &registry, &sessions,
+    )
+    .await?;
+
+    let record = crate::server::reload_recovery::peek_for_session(&target_id)?
+        .expect("an interrupted turn must leave a daemon-owned recovery intent");
+    assert!(
+        record.status.needs_admission(),
+        "the intent must still be waiting for admission, got {:?}",
+        record.status
+    );
+    Ok(())
+}
+
+/// A finished turn has nothing to continue, and a turn the user stopped must
+/// stay stopped: neither may schedule a recovery.
+#[tokio::test]
+async fn resume_of_a_finished_turn_schedules_nothing() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedConcurrencyEnv::new();
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut persisted = crate::session::Session::create(None, Some("Finished".into()));
+    persisted.add_message(
+        crate::message::Role::User,
+        vec![ContentBlock::Text {
+            text: "hi".into(),
+            cache_control: None,
+        }],
+    );
+    persisted.add_message(
+        crate::message::Role::Assistant,
+        vec![ContentBlock::Text {
+            text: "done".into(),
+            cache_control: None,
+        }],
+    );
+    persisted.save()?;
+    let target_id = persisted.id.clone();
+    let source = Arc::new(Mutex::new(Agent::new_provisional_with_initial_working_dir(
+        provider.clone(),
+        registry.clone(),
+        None,
+    )));
+    let source_id = source.lock().await.session_id().to_owned();
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(source_id.clone(), source.clone())]),
+    ));
+
+    restore_for_concurrency_test(
+        &target_id, &source_id, &source, &provider, &registry, &sessions,
+    )
+    .await?;
+
+    assert!(crate::server::reload_recovery::peek_for_session(&target_id)?.is_none());
+    Ok(())
 }

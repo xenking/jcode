@@ -26,6 +26,16 @@ pub(crate) fn run_migrate(
     let journal_path = directory.join("journal.json");
     if journal_path.exists() {
         let old: Journal = read_json(&journal_path)?;
+        if old.phase == Phase::Complete
+            && GroupDeparture::from_group(&old.group)?
+                .commit()?
+                .path()?
+                .is_file()
+        {
+            bail!(
+                "this migration already returned; the group lives locally. Starting a new move for the same group is not supported yet"
+            );
+        }
         if root(&old.group)?.manifest.target_host != host {
             bail!(
                 "unfinished or completed migration targets another host; refusing to change ownership"
@@ -381,6 +391,6 @@ fn report(group: &Group, dry_run: bool) -> Result<MoveReport> {
         snapshot: manifest.repo.as_ref().map(|r| r.snapshot.clone()),
         dry_run,
         attach_command: format!("jcode cloud attach --session {}", group.coordinator),
-        return_command: "Group return is not implemented; do not return individual members".into(),
+        return_command: format!("jcode cloud return --session {}", group.coordinator),
     })
 }

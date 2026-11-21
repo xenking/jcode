@@ -23,6 +23,10 @@ pub mod output;
 pub mod proctitle;
 pub mod provider_doctor;
 pub mod provider_init;
+#[cfg(unix)]
+pub mod rollout;
+#[cfg(unix)]
+pub mod rollout_host;
 pub mod selfdev;
 pub mod ssh;
 #[cfg(unix)]
@@ -30,4 +34,6 @@ pub mod ssh_transport;
 pub mod startup;
 pub mod telemetry;
 pub mod terminal;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod tui_launch;

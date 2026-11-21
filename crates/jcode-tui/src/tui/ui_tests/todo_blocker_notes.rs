@@ -164,3 +164,55 @@ fn blocked_reason_lives_below_response_not_in_pinned_todos() {
         .join("\n");
     assert!(!text.contains(reason));
 }
+
+fn render_rows(state: &TestState, width: u16, height: u16) -> Vec<String> {
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+    terminal.draw(|frame| draw(frame, state)).unwrap();
+    terminal
+        .backend()
+        .buffer()
+        .content
+        .chunks(usize::from(width))
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+        .collect()
+}
+
+#[test]
+fn pending_user_message_shows_queued_line_and_status_marker() {
+    let _guard = viewport_snapshot_test_lock();
+    clear_test_render_state_for_tests();
+    let state = TestState {
+        input: "composer-marker".into(),
+        status: ProcessingStatus::RunningTool("bg".into()),
+        pending_soft_interrupts: vec!["please look at this now".into()],
+        ..Default::default()
+    };
+    let rows = render_rows(&state, 100, 24);
+    let queued_row = rows
+        .iter()
+        .position(|row| row.contains("queued ⏎ please look at this now"))
+        .unwrap_or_else(|| panic!("queued line missing: {rows:#?}"));
+    let input_row = rows
+        .iter()
+        .position(|row| row.contains("composer-marker"))
+        .unwrap();
+    assert!(queued_row < input_row, "queued line sits above the input");
+    assert!(
+        rows.iter().any(|row| row.contains("⏎ 1 queued")),
+        "status bar marker missing: {rows:#?}"
+    );
+}
+
+#[test]
+fn no_queued_indicator_without_pending_message() {
+    let _guard = viewport_snapshot_test_lock();
+    clear_test_render_state_for_tests();
+    let state = TestState {
+        input: "composer-marker".into(),
+        status: ProcessingStatus::RunningTool("bg".into()),
+        ..Default::default()
+    };
+    let rows = render_rows(&state, 100, 24);
+    assert!(!rows.iter().any(|row| row.contains("queued")), "{rows:#?}");
+}

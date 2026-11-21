@@ -4,6 +4,69 @@ use anyhow::{Result, bail};
 use jcode_harness_api::RuntimeCommand;
 use serde_json::{Value, json};
 
+pub(super) async fn background_output(
+    manager: &crate::background::BackgroundTaskManager,
+    session_id: &str,
+    args: &[String],
+) -> Result<(Value, String)> {
+    let [task_id] = args else {
+        bail!("Expected a task identifier")
+    };
+    if task_id.is_empty()
+        || !task_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        bail!("Invalid task identifier");
+    }
+    let task = manager
+        .status(task_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Background task not found"))?;
+    if task.session_id != session_id {
+        bail!("Background task not found");
+    }
+    let output = manager
+        .output(task_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Background output unavailable"))?;
+    Ok((json!({"task_id": task_id, "output": output}), String::new()))
+}
+
+#[cfg(test)]
+mod background_output_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn full_output_is_scoped_to_the_attached_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager =
+            crate::background::BackgroundTaskManager::with_output_dir(dir.path().to_owned());
+        let status = json!({"task_id":"abc", "tool_name":"bash", "session_id":"owner", "status":"completed", "exit_code":0, "error":null, "started_at":"2026-01-01T00:00:00Z", "completed_at":null, "duration_secs":1.0});
+        tokio::fs::write(manager.status_path_for("abc"), status.to_string())
+            .await
+            .unwrap();
+        let output = format!("{}last line", "line\n".repeat(300));
+        tokio::fs::write(manager.output_path_for("abc"), &output)
+            .await
+            .unwrap();
+        let (result, _) = background_output(&manager, "owner", &["abc".into()])
+            .await
+            .unwrap();
+        assert_eq!(result["output"], output);
+        assert!(
+            background_output(&manager, "other", &["abc".into()])
+                .await
+                .is_err()
+        );
+        assert!(
+            background_output(&manager, "owner", &["../abc".into()])
+                .await
+                .is_err()
+        );
+    }
+}
+
 pub(super) fn boolean_action(
     args: &[String],
     current: bool,
@@ -40,6 +103,21 @@ pub(super) async fn execute(
 ) -> Result<(Value, String)> {
     let config = crate::config::Config::load();
     let data = match command {
+        RuntimeCommand::BackgroundOutput => {
+            bail!("Background output must be handled by the session runtime")
+        }
+        RuntimeCommand::Mode => {
+            let message = agent.mode_command(&args.join(" "))?;
+            let session = agent.session_for_split();
+            return Ok((
+                json!({"pinned_skill": session.pinned_skill, "pinned_skills": session.pinned_skill_names()}),
+                if args.first().is_some_and(|arg| arg == "toggle") {
+                    String::new()
+                } else {
+                    message
+                },
+            ));
+        }
         RuntimeCommand::Review | RuntimeCommand::Judge | RuntimeCommand::Subagent => {
             let role = match command {
                 RuntimeCommand::Review => "review",
@@ -294,50 +372,7 @@ pub(super) async fn execute(
             json!({"service_tier": provider.service_tier(), "provider": provider.display_name()})
         }
         RuntimeCommand::Telemetry => {
-            use crate::telemetry::TelemetryCategory;
-            let usage = "Usage: /telemetry [all|none] or /telemetry <content|usage|crashes|features|cost|accounts> on|off";
-            let parse_on = |v: &str| match v {
-                "on" | "yes" | "true" | "1" => Some(true),
-                "off" | "no" | "false" | "0" => Some(false),
-                _ => None,
-            };
-            let mut checked = crate::telemetry::category_settings();
-            let changed = match args {
-                [] => false,
-                [arg] if matches!(arg.as_str(), "show" | "status") => false,
-                [arg] if matches!(arg.as_str(), "everything" | "all" | "on") => {
-                    checked = [true; 6];
-                    true
-                }
-                [arg] if matches!(arg.as_str(), "nothing" | "none" | "off") => {
-                    checked = [false; 6];
-                    true
-                }
-                [key, value] => {
-                    let (Some(category), Some(on)) =
-                        (TelemetryCategory::from_key(key), parse_on(value))
-                    else {
-                        bail!("{usage}");
-                    };
-                    if let Some(i) = TelemetryCategory::ALL.iter().position(|c| *c == category) {
-                        checked[i] = on;
-                    }
-                    true
-                }
-                _ => bail!("{usage}"),
-            };
-            if changed {
-                if checked.iter().any(|on| *on) && crate::telemetry::opt_out_forced_by_env() {
-                    bail!("Telemetry is forced off by the runtime environment");
-                }
-                crate::telemetry::set_category_settings(checked);
-            }
-            let status = crate::telemetry::status();
-            let categories: serde_json::Map<String, serde_json::Value> = TelemetryCategory::ALL
-                .into_iter()
-                .map(|c| (c.key().to_string(), json!(c.enabled())))
-                .collect();
-            json!({"enabled": status.enabled, "content_sharing_enabled": status.content_sharing_enabled, "categories": categories, "opt_out_source": status.opt_out_source.map(|source| source.as_str())})
+            json!({"enabled": false, "message": "Telemetry is disabled in this build. Nothing is collected or sent."})
         }
         RuntimeCommand::Subscription => {
             status_only(args)?;
@@ -418,7 +453,10 @@ fn skills_report(data: &Value) -> String {
     }
     for skill in loaded {
         let name = skill["name"].as_str().unwrap_or("");
-        let active = if data["active_skill"].as_str() == Some(name) {
+        let active = if data["pinned_skills"]
+            .as_array()
+            .is_some_and(|names| names.iter().any(|active| active == name))
+        {
             " (active)"
         } else {
             ""
@@ -637,6 +675,139 @@ mod tests {
         assert!(boolean_action(&["typo".into()], false, false).is_err());
         assert!(boolean_action(&["on".into(), "off".into()], false, false).is_err());
     }
+
+    #[tokio::test]
+    async fn pinned_mode_runtime_command_persists_without_inference() {
+        let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let dir = project.path().join(".jcode/skills/mode-probe");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: mode-probe\ndescription: Runtime mode\n---\nMODE_PROBE_BODY\n",
+        )
+        .unwrap();
+        let mut agent = Agent::new_with_initial_working_dir(
+            Arc::new(NoInferenceProvider::default()),
+            crate::tool::Registry::empty(),
+            project.path().to_str(),
+        );
+        for args in [vec!["mode-probe".into()], Vec::new()] {
+            let (data, message) =
+                execute(&mut agent, RuntimeCommand::Mode, &args, false, Value::Null)
+                    .await
+                    .unwrap();
+            assert_eq!(data["pinned_skill"], "mode-probe");
+            assert!(message.contains("mode-probe"));
+            assert_eq!(
+                crate::session::Session::load(agent.session_id())
+                    .unwrap()
+                    .pinned_skill
+                    .as_deref(),
+                Some("mode-probe")
+            );
+        }
+        let count = agent.message_count();
+        execute(
+            &mut agent,
+            RuntimeCommand::Mode,
+            &["mode-probe".into()],
+            false,
+            Value::Null,
+        )
+        .await
+        .unwrap();
+        assert_eq!(agent.message_count(), count);
+        assert!(
+            execute(
+                &mut agent,
+                RuntimeCommand::Mode,
+                &["missing-mode-probe".into()],
+                false,
+                Value::Null
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown skill: /missing-mode-probe")
+        );
+        assert_eq!(
+            agent.runtime_skills_snapshot()["active_skill"],
+            "mode-probe"
+        );
+        let (data, _) = execute(
+            &mut agent,
+            RuntimeCommand::Mode,
+            &["off".into()],
+            false,
+            Value::Null,
+        )
+        .await
+        .unwrap();
+        assert!(data["pinned_skill"].is_null());
+        assert!(
+            crate::session::Session::load(agent.session_id())
+                .unwrap()
+                .pinned_skill
+                .is_none()
+        );
+    }
+    #[tokio::test]
+    async fn mode_toggles_roundtrip_through_session_storage() {
+        let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        for name in ["alpha-mode", "beta-mode", "gamma-mode"] {
+            let dir = project.path().join(".jcode/skills").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), format!(
+                "---\nname: {name}\ndescription: Runtime mode\nicon: '⚙'\n---\n{name} instructions\n"
+            )).unwrap();
+        }
+        let mut agent = Agent::new_with_initial_working_dir(
+            Arc::new(NoInferenceProvider::default()),
+            crate::tool::Registry::empty(),
+            project.path().to_str(),
+        );
+        for (name, expected) in [
+            ("alpha-mode", json!(["alpha-mode"])),
+            ("beta-mode", json!(["alpha-mode", "beta-mode"])),
+            (
+                "gamma-mode",
+                json!(["alpha-mode", "beta-mode", "gamma-mode"]),
+            ),
+            ("beta-mode", json!(["alpha-mode", "gamma-mode"])),
+        ] {
+            let (data, _) = execute(
+                &mut agent,
+                RuntimeCommand::Mode,
+                &["toggle".into(), name.into()],
+                false,
+                Value::Null,
+            )
+            .await
+            .unwrap();
+            assert_eq!(data["pinned_skills"], expected);
+            assert_eq!(data["pinned_skill"], "alpha-mode");
+        }
+        let loaded = crate::session::Session::load(agent.session_id()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap()["pinned_skills"],
+            json!(["alpha-mode", "gamma-mode"])
+        );
+        let snapshot = agent.runtime_skills_snapshot();
+        assert_eq!(
+            snapshot["pinned_skills"],
+            json!(["alpha-mode", "gamma-mode"])
+        );
+        let alpha = snapshot["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|skill| skill["name"] == "alpha-mode")
+            .unwrap();
+        assert_eq!(alpha["icon"], "⚙");
+    }
+
     #[test]
     fn role_arguments_preserve_model_and_task_and_reject_unsupported_resume() {
         let args = [

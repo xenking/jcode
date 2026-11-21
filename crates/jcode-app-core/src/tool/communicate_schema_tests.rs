@@ -37,7 +37,14 @@ fn model_facing_swarm_definition_stays_compact() {
         prose_bytes < 1_150,
         "swarm field descriptions grew to {prose_bytes} bytes"
     );
-    for field in ["action", "working_dir", "session_ids", "delivery"] {
+    // working_dir needs its inheritance rule: omission must not accidentally
+    // spawn workers in the daemon's own working directory.
+    let working_dir = schema["properties"]["working_dir"]["description"]
+        .as_str()
+        .expect("working directory override must explain inheritance");
+    assert!(working_dir.contains("override"));
+    assert!(working_dir.contains("inherit the requesting session"));
+    for field in ["action", "session_ids", "delivery"] {
         assert!(
             schema["properties"][field].get("description").is_none(),
             "{field}"
@@ -90,6 +97,58 @@ fn schema_only_exposes_exact_allowlisted_worker_models_when_enabled() {
     agents.swarm_model_allowlist.clear();
     super::super::apply_swarm_model_policy(&mut schema, &agents);
     assert!(schema["properties"].get("model").is_none());
+}
+
+#[test]
+fn schema_exposes_only_spawn_allowed_models_to_agents() {
+    let mut schema = CommunicateTool::new().parameters_schema();
+    let agents = crate::config::AgentsConfig {
+        spawn_allowed_models: vec![
+            "opencode-go:deepseek-v4.1-flash".to_string(),
+            "claude:claude-opus-5-5".to_string(),
+        ],
+        ..Default::default()
+    };
+    super::super::apply_swarm_model_policy(&mut schema, &agents);
+    assert_eq!(
+        schema["properties"]["model"]["enum"],
+        json!(["opencode-go:deepseek-v4.1-flash", "claude:claude-opus-5-5"])
+    );
+}
+
+#[test]
+fn spawn_allowlist_rejects_fable_and_astra_for_worker_actions() {
+    let agents = crate::config::AgentsConfig {
+        spawn_allowed_models: vec![
+            "opencode-go:deepseek-v4.1-flash".to_string(),
+            "claude:claude-sonnet-5-5".to_string(),
+            "claude:claude-opus-5-5".to_string(),
+        ],
+        ..Default::default()
+    };
+    for action in ["spawn", "assign_task", "assign_next", "retry", "resume"] {
+        let input: CommunicateInput = serde_json::from_value(json!({
+            "action": action, "model": "claude:claude-opus-5-5"
+        }))
+        .unwrap();
+        assert!(
+            agents
+                .validate_spawn_allowed_model(input.model.as_deref())
+                .is_ok()
+        );
+        for denied in [
+            "claude:claude-fable-5",
+            "claude:claude-fable-5-2",
+            "claude:claude-astra-5",
+        ] {
+            let error = agents
+                .validate_spawn_allowed_model(Some(denied))
+                .expect_err(denied);
+            assert!(error.contains("claude:claude-opus-5-5"), "{error}");
+        }
+        // Omitting the model means "use agents.swarm_model", never fable.
+        assert!(agents.validate_spawn_allowed_model(None).is_ok());
+    }
 }
 
 #[test]
@@ -159,14 +218,9 @@ fn schema_requires_a_nonblank_label_for_spawn() {
     );
     assert!(schema["properties"]["action"].get("description").is_none());
 
-    let branches = schema["anyOf"]
-        .as_array()
-        .expect("swarm schema should declare action-specific branches");
-    let spawn_branch = branches
-        .iter()
-        .find(|branch| branch["properties"]["action"]["enum"] == json!(["spawn"]))
-        .expect("spawn schema branch");
-    assert_eq!(spawn_branch["required"], json!(["action", "label"]));
+    // Spawn's conditional requirement is enforced by required_spawn_label,
+    // not by paying for a repeated action enum in root combiners.
+    assert!(schema.get("anyOf").is_none());
     let prompt_description = schema["properties"]["prompt"]["description"]
         .as_str()
         .expect("prompt description");
@@ -178,38 +232,27 @@ fn schema_requires_a_nonblank_label_for_spawn() {
             .expect("label description")
             .contains("source of truth")
     );
-
-    let non_spawn_branch = branches
-        .iter()
-        .find(|branch| {
-            branch["properties"]["action"]["enum"]
-                .as_array()
-                .is_some_and(|actions| !actions.contains(&json!("spawn")))
-        })
-        .expect("non-spawn schema branch");
-    assert_eq!(non_spawn_branch["required"], json!(["action"]));
 }
 
 #[test]
-fn schema_branches_only_require_properties_they_declare() {
-    // Gemini rejects the entire request when a `required` entry names a property
-    // the same object does not define, which made every tool-enabled Gemini call
-    // fail on this tool's spawn branch (issue #655).
+fn schema_advertises_only_canonical_spawn_and_target_fields() {
     let schema = CommunicateTool::new().parameters_schema();
-    for branch in schema["anyOf"].as_array().expect("schema branches") {
-        let declared = branch["properties"]
-            .as_object()
-            .expect("branch properties")
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        for required in branch["required"].as_array().expect("branch required") {
-            let name = required.as_str().expect("required name");
-            assert!(
-                declared.iter().any(|known| known == name),
-                "branch requires '{name}' without declaring it: {branch}"
-            );
-        }
+    let props = schema["properties"].as_object().unwrap();
+    for canonical in ["to_session", "prompt"] {
+        assert!(props.contains_key(canonical), "{canonical}");
+    }
+    for alias in ["target_session", "initial_message"] {
+        assert!(!props.contains_key(alias), "advertised alias {alias}");
+    }
+    let gemini =
+        jcode_schema_dialect::dialect::apply(&schema, &jcode_schema_dialect::registry::GEMINI);
+    let errors = jcode_schema_dialect::must_not_contain_unsupported_constructs(
+        &gemini,
+        &jcode_schema_dialect::registry::GEMINI,
+    );
+    assert!(errors.is_empty(), "{errors:?}");
+    for required in schema["required"].as_array().unwrap() {
+        assert!(props.contains_key(required.as_str().unwrap()));
     }
 }
 
@@ -461,7 +504,6 @@ fn schema_advertises_a_lean_lane_first_action_set() {
     for kept in [
         "message",
         "to_session",
-        "target_session",
         "channel",
         "label",
         "phase",
@@ -473,6 +515,8 @@ fn schema_advertises_a_lean_lane_first_action_set() {
         assert!(props.contains_key(kept), "{kept} param should be offered");
     }
     for dropped in [
+        "target_session",
+        "initial_message",
         "status",
         "validation",
         "follow_up",

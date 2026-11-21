@@ -66,6 +66,39 @@ fn test_openai_switching_models_include_dynamic_catalog_entries() {
 }
 
 #[test]
+fn test_openai_scoped_future_model_is_available_for_switching_and_display() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let home = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", home.path());
+    let _model = EnvVarGuard::remove("JCODE_OPENAI_MODEL");
+    let future_model = "gpt-99.7-future";
+
+    let provider = OpenAIProvider::new(CodexCredentials {
+        access_token: "scoped-future-model-route-test".to_string(),
+        refresh_token: String::new(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    });
+    // Populate only the held credential's catalog: a future release must not
+    // need an entry in the compiled fallback list to reach either picker API.
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec![future_model.to_string()],
+    );
+
+    let switching = provider.available_models_for_switching();
+    let display = provider.available_models_display();
+    assert!(
+        switching.iter().any(|model| model == future_model)
+            && display.iter().any(|model| model == future_model),
+        "scoped future model must reach switching and display: switching={switching:?}, display={display:?}"
+    );
+    provider.set_model(future_model).unwrap();
+    assert_eq!(provider.model(), future_model);
+}
+
+#[test]
 fn test_chatgpt_web_model_bypasses_live_api_catalog() {
     let _guard = jcode_base::storage::lock_test_env();
     let home = tempfile::TempDir::new().unwrap();
@@ -360,6 +393,10 @@ fn test_service_tier_can_be_changed_while_a_request_snapshot_is_held() {
 /// endpoints. If these ever diverge, OpenAI returns 401.
 #[test]
 fn openai_catalog_and_chat_endpoints_agree_on_credential_shape() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let _b = EnvVarGuard::remove("JCODE_OPENAI_API_BASE");
+    let _c = EnvVarGuard::remove("OPENAI_BASE_URL");
+    let _d = EnvVarGuard::remove("OPENAI_API_BASE");
     // API-key-shaped credential: no refresh token, no id token.
     let api_key_creds = CodexCredentials {
         access_token: "sk-platform-key".to_string(),

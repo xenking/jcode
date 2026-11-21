@@ -4,6 +4,38 @@ use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
+pub(super) fn event_for_transport(
+    mut event: ServerEvent,
+    supports_turn_identity: bool,
+) -> Option<ServerEvent> {
+    if supports_turn_identity {
+        return Some(event);
+    }
+    loop {
+        event = match event {
+            ServerEvent::TurnEvent { event, .. } => *event,
+            ServerEvent::TurnStarted { .. } | ServerEvent::TurnState { .. } => return None,
+            event => return Some(event),
+        };
+    }
+}
+
+/// Client disconnects must not cancel daemon-owned work, but lost replies need
+/// a source location and operation without dumping private event payloads.
+#[track_caller]
+pub(super) fn send_client_event_best_effort(
+    sender: &tokio::sync::mpsc::UnboundedSender<ServerEvent>,
+    event: ServerEvent,
+    operation: &str,
+) {
+    if sender.send(event).is_err() {
+        crate::logging::debug(&format!(
+            "Client receiver disconnected during {operation} at {}",
+            std::panic::Location::caller()
+        ));
+    }
+}
+
 /// Project wire copies only. Persisted state and opted-in API bridges retain
 /// PDF bytes, while old native clients can decode the complete History event.
 pub(super) fn side_panel_for_client(
@@ -32,8 +64,14 @@ pub(super) fn todos_snapshot_event(session_id: &str) -> ServerEvent {
             crate::logging::warn(&format!("Failed to load todos for {session_id}: {error}"));
             Vec::new()
         }),
-        "plan": crate::todo::load_plan(session_id).unwrap_or_default(),
-        "goals": crate::todo::load_goals(session_id).unwrap_or_default(),
+        "plan": crate::todo::load_plan(session_id).unwrap_or_else(|error| {
+            crate::logging::warn(&format!("Failed to load todo plan for {session_id}: {error}"));
+            Default::default()
+        }),
+        "goals": crate::todo::load_goals(session_id).unwrap_or_else(|error| {
+            crate::logging::warn(&format!("Failed to load todo goals for {session_id}: {error}"));
+            Default::default()
+        }),
     });
     ServerEvent::Todos {
         session_id: session_id.to_owned(),
@@ -58,6 +96,18 @@ mod tests {
     use crate::side_panel::{
         SidePanelPage, SidePanelPageFormat, SidePanelPageSource, SidePanelSnapshot,
     };
+
+    #[test]
+    fn best_effort_delivery_preserves_replies_and_tolerates_detached_clients() {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        send_client_event_best_effort(&sender, ServerEvent::Done { id: 42 }, "test reply");
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ServerEvent::Done { id: 42 })
+        ));
+        drop(receiver);
+        send_client_event_best_effort(&sender, ServerEvent::Done { id: 43 }, "detached reply");
+    }
 
     #[test]
     fn pdf_panels_live_projection_preserves_fallback_and_opted_in_payload() {

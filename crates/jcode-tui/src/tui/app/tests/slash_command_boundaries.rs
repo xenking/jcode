@@ -149,7 +149,7 @@ fn parser_handles_unicode_and_fenced_code_boundaries() {
     );
     assert_eq!(
         super::slash_command_parser::find_known_commands("```\n/help\n``` /review", &commands),
-        vec![super::slash_command_parser::SlashCommandMatch {
+        vec![super::slash_command_parser::Match {
             start: "```\n/help\n``` ".len(),
             name_end: "```\n/help\n``` /review".len(),
         }]

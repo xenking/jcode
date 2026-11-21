@@ -79,7 +79,10 @@ impl TuiState for SessionView<'_> {
         self.messages
     }
     fn display_user_message_count(&self) -> usize {
-        self.messages.iter().filter(|m| m.role == "user").count()
+        self.messages
+            .iter()
+            .filter(|m| m.role == "user" || m.is_answered_ask())
+            .count()
     }
     fn compacted_hidden_user_prompts(&self) -> usize {
         self.hidden_prompts

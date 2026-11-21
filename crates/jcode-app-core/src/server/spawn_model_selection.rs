@@ -46,7 +46,7 @@ pub(super) struct CoordinatorSpawnIdentity {
 /// with, after reconciling `agents.swarm_model` config against the
 /// coordinator's identity.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct SwarmSpawnSelection {
+pub(in crate::server) struct SwarmSpawnSelection {
     pub model: Option<String>,
     pub provider_key: Option<String>,
     pub route_api_method: Option<String>,
@@ -174,6 +174,37 @@ pub(super) fn selection_for_concrete_model(
     }
 }
 
+/// Filter worker fallbacks down to the models the worker is allowed to use.
+///
+/// `agents.spawn_allowed_models` is a hard boundary: a worker whose primary
+/// fails may only move to a configured fallback that is on the list, never to
+/// an arbitrary pool-approved route. A skipped entry is logged so a
+/// misconfigured list is visible instead of silently shrinking.
+pub(crate) fn worker_allowed_fallbacks(
+    allowed_models: &[String],
+    fallbacks: &[String],
+) -> Vec<String> {
+    let config = crate::config::Config::load().provider;
+    let agents = crate::config::AgentsConfig {
+        spawn_allowed_models: allowed_models.to_vec(),
+        ..Default::default()
+    };
+    fallbacks
+        .iter()
+        .filter(|fallback| {
+            let allowed = (allowed_models.is_empty() || agents.worker_may_use_model(fallback))
+                && !config.failover_model_excluded(fallback);
+            if !allowed {
+                crate::logging::warn(&format!(
+                    "Swarm failover: skipping fallback {fallback:?} excluded by provider.failover_excluded_models or agents.spawn_allowed_models"
+                ));
+            }
+            allowed
+        })
+        .cloned()
+        .collect()
+}
+
 pub(super) async fn session_swarm_model(
     req_session_id: &str,
     sessions: &SessionAgents,
@@ -235,9 +266,7 @@ pub(super) fn pick_available_swarm_model(
     routes: &[crate::provider::ModelRoute],
 ) -> Option<String> {
     let configured = configured.filter(|m| !m.trim().is_empty() && !is_inherit_sentinel(m.trim()));
-    let Some(primary) = configured else {
-        return None;
-    };
+    let primary = configured?;
     if fallbacks.is_empty() || routes.is_empty() {
         return Some(primary);
     }
@@ -254,7 +283,11 @@ pub(super) fn pick_available_swarm_model(
         })
     };
     std::iter::once(&primary)
-        .chain(fallbacks.iter())
+        .chain(fallbacks.iter().filter(|candidate| {
+            !crate::config::Config::load()
+                .provider
+                .failover_model_excluded(candidate)
+        }))
         .find(|c| available(c))
         .cloned()
         .or(Some(primary))

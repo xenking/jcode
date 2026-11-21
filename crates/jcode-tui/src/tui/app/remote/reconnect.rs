@@ -1,6 +1,5 @@
 use super::{
-    App, DisplayMessage, ProcessingStatus, handle_terminal_event_while_disconnected,
-    process_remote_followups,
+    App, DisplayMessage, handle_terminal_event_while_disconnected, process_remote_followups,
 };
 use crate::tool::selfdev::ReloadContext;
 use crate::tui::app::PendingReloadReconnectStatus;
@@ -24,6 +23,7 @@ pub(in crate::tui::app) struct RemoteRunState {
     pub server_reload_in_progress: bool,
     pub reload_recovery_attempted: bool,
     pub last_reload_pid: Option<u32>,
+    pub last_reload_id: Option<String>,
     /// When this client last tried to start a replacement for a server that
     /// vanished outside a reload. Throttles respawns (issue #1887).
     pub last_dead_server_respawn: Option<Instant>,
@@ -243,7 +243,9 @@ fn disconnected_redraw_interval(
 
 pub(in crate::tui::app) fn reload_handoff_active(state: &RemoteRunState) -> bool {
     !crate::tui::is_ssh_remote()
-        && (state.server_reload_in_progress || super::session_persistence::reload_marker_active())
+        && (state.server_reload_in_progress
+            || (!state.reload_recovery_attempted
+                && super::session_persistence::reload_marker_active()))
 }
 
 pub(in crate::tui::app) fn should_use_same_session_fast_path(
@@ -272,15 +274,9 @@ async fn wait_for_reload_handoff_before_reconnect(
         return Ok(None);
     }
 
-    // The marker stays `SocketReady` for up to RELOAD_MARKER_MAX_AGE after a
-    // reload completes. Any client launched in that window would otherwise
-    // flash "Waiting for reload handoff..." (an extra notice row that shoved
-    // the layout) even though the replacement server is already serving.
-    if !state.server_reload_in_progress
-        && crate::server::recent_reload_state(RELOAD_MARKER_MAX_AGE)
-            .is_some_and(|marker| marker.phase == crate::server::ReloadPhase::SocketReady)
-    {
-        return Ok(None);
+    if state.last_reload_id.is_none() {
+        state.last_reload_id = crate::server::recent_reload_state(RELOAD_MARKER_MAX_AGE)
+            .map(|marker| marker.request_id);
     }
 
     state.disconnect_start.get_or_insert_with(Instant::now);
@@ -294,10 +290,12 @@ async fn wait_for_reload_handoff_before_reconnect(
     terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
 
     let socket_path = crate::server::socket_path();
-    match crate::server::inspect_reload_wait_status(
+    match crate::server::inspect_reload_wait_status_for(
         &socket_path,
         RELOAD_MARKER_MAX_AGE,
         state.last_reload_pid,
+        state.last_reload_id.as_deref(),
+        None,
     )
     .await
     {
@@ -307,6 +305,11 @@ async fn wait_for_reload_handoff_before_reconnect(
                 crate::server::reload_state_summary(RELOAD_MARKER_MAX_AGE)
             ));
             Ok(None)
+        }
+        crate::server::ReloadWaitStatus::Unknown { reason } => {
+            state.last_disconnect_reason = Some(format!("Runtime generation unknown: {reason}"));
+            crate::server::wait_for_reload_handoff_event(state.last_reload_pid, &socket_path).await;
+            Ok(Some(ConnectOutcome::Retry))
         }
         crate::server::ReloadWaitStatus::Failed(detail) => {
             crate::logging::warn(&format!(
@@ -321,7 +324,10 @@ async fn wait_for_reload_handoff_before_reconnect(
             if recover_reloading_server(app, terminal, state, &detail).await? {
                 Ok(Some(ConnectOutcome::Retry))
             } else {
-                Ok(None)
+                // Failure is not permission to attach to an unconfirmed old listener.
+                crate::server::wait_for_reload_handoff_event(state.last_reload_pid, &socket_path)
+                    .await;
+                Ok(Some(ConnectOutcome::Retry))
             }
         }
         crate::server::ReloadWaitStatus::Idle => {
@@ -339,7 +345,9 @@ async fn wait_for_reload_handoff_before_reconnect(
             {
                 Ok(Some(ConnectOutcome::Retry))
             } else {
-                Ok(None)
+                crate::server::wait_for_reload_handoff_event(state.last_reload_pid, &socket_path)
+                    .await;
+                Ok(Some(ConnectOutcome::Retry))
             }
         }
         crate::server::ReloadWaitStatus::Waiting { pid } => {
@@ -376,10 +384,15 @@ async fn recover_reloading_server(
     state: &mut RemoteRunState,
     detail: &str,
 ) -> Result<bool> {
-    if crate::tui::is_ssh_remote()
-        || state.reload_recovery_attempted
-        || crate::server_spawn::is_running().await
-    {
+    if crate::tui::is_ssh_remote() || state.reload_recovery_attempted {
+        return Ok(false);
+    }
+    let socket_path = crate::server::socket_path();
+    let owner = state.last_reload_pid.or_else(|| {
+        crate::server::recent_reload_state(RELOAD_MARKER_MAX_AGE).map(|marker| marker.pid)
+    });
+    if let Err(reason) = crate::server::replacement_spawn_permission(&socket_path, owner).await {
+        state.last_disconnect_reason = Some(format!("replacement deferred: {reason}"));
         return Ok(false);
     }
 
@@ -400,12 +413,23 @@ async fn recover_reloading_server(
         detail
     ));
 
-    match crate::server_spawn::spawn_default_server().await {
+    let replacement = async {
+        crate::server_spawn::spawn_default_server().await?;
+        crate::server::confirm_replacement_generation(&socket_path, RELOAD_MARKER_MAX_AGE).await?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    match replacement {
         Ok(()) => {
             state.initial_server_start = true;
+            state.server_reload_in_progress = false;
+            state.last_reload_id = None;
+            state.last_reload_pid = None;
             state.last_disconnect_reason =
-                Some("replacement server started; reconnecting".to_string());
-            crate::logging::info("Replacement shared server started after stalled reload");
+                Some("replacement generation confirmed; reconnecting".to_string());
+            crate::logging::info(
+                "Replacement shared server generation confirmed after stalled reload",
+            );
             Ok(true)
         }
         Err(error) => {
@@ -435,8 +459,12 @@ async fn respawn_dead_server(
 ) -> Result<bool> {
     if !should_respawn_dead_server(state, crate::tui::is_ssh_remote(), Instant::now())
         || reload_handoff_active(state)
-        || crate::server_spawn::is_running().await
     {
+        return Ok(false);
+    }
+    let socket_path = crate::server::socket_path();
+    if let Err(reason) = crate::server::replacement_spawn_permission(&socket_path, None).await {
+        state.last_disconnect_reason = Some(format!("replacement deferred: {reason}"));
         return Ok(false);
     }
     state.last_dead_server_respawn = Some(Instant::now());
@@ -449,17 +477,24 @@ async fn respawn_dead_server(
         state.reconnect_attempts
     ));
 
-    let socket_path = crate::server::socket_path();
     if crate::server::reap_stale_socket_if_dead(&socket_path).await {
         crate::logging::info("Reconnect: reaped stale socket before respawn");
     }
 
-    match crate::server_spawn::spawn_default_server().await {
+    let replacement = async {
+        crate::server_spawn::spawn_default_server().await?;
+        crate::server::confirm_replacement_generation(&socket_path, RELOAD_MARKER_MAX_AGE).await?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    match replacement {
         Ok(()) => {
             state.initial_server_start = true;
             state.last_disconnect_reason =
-                Some("replacement server started; reconnecting".to_string());
-            crate::logging::info("Replacement shared server started after server loss");
+                Some("replacement generation confirmed; reconnecting".to_string());
+            crate::logging::info(
+                "Replacement shared server generation confirmed after server loss",
+            );
             Ok(true)
         }
         Err(error) => {
@@ -590,10 +625,12 @@ pub(in crate::tui::app) async fn connect_with_retry(
 
             if reload_handoff_active(state) {
                 let socket_path = crate::server::socket_path();
-                match crate::server::inspect_reload_wait_status(
+                match crate::server::inspect_reload_wait_status_for(
                     &socket_path,
                     RELOAD_MARKER_MAX_AGE,
                     state.last_reload_pid,
+                    state.last_reload_id.as_deref(),
+                    None,
                 )
                 .await
                 {
@@ -602,6 +639,16 @@ pub(in crate::tui::app) async fn connect_with_retry(
                             "Reconnect reload handoff: ready immediately (state={})",
                             crate::server::reload_state_summary(RELOAD_MARKER_MAX_AGE)
                         ));
+                        return Ok(ConnectOutcome::Retry);
+                    }
+                    crate::server::ReloadWaitStatus::Unknown { reason } => {
+                        state.last_disconnect_reason =
+                            Some(format!("Runtime generation unknown: {reason}"));
+                        crate::server::wait_for_reload_handoff_event(
+                            state.last_reload_pid,
+                            &socket_path,
+                        )
+                        .await;
                         return Ok(ConnectOutcome::Retry);
                     }
                     crate::server::ReloadWaitStatus::Failed(detail) => {
@@ -840,6 +887,7 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
     state.reconnect_attempts = 0;
     state.initial_server_start = false;
     state.server_reload_in_progress = false;
+    state.last_reload_id = None;
 
     if same_session_reload_fast_path {
         crate::logging::info(
@@ -951,45 +999,25 @@ pub(super) fn load_reload_reconnect_hints(
     }
 }
 
-/// Reconnect can dispatch before its bootstrap History arrives. Remember a
-/// recovery after it leaves the queue, including while its turn is running or
-/// finished, instead of treating an empty queue as permission to send it again.
-pub(in crate::tui::app) fn queue_reload_continuation_once(
+/// Recovery is owned by the daemon. Reconnect only displays its notice.
+/// The notice is a transient status line, never a transcript row: the resumed
+/// turn continues in place, so there is no new message to show.
+pub(in crate::tui::app) fn show_reload_recovery_notice_once(
     app: &mut App,
     session_id: &str,
     directive: crate::tool::selfdev::ReloadRecoveryDirective,
     notice: &str,
 ) -> bool {
-    // Initiator notices identify the build even if background-task notes were
-    // regenerated between the local context and the server snapshot. Legacy
-    // interrupted-peer recovery has no notice and uses its stable prompt.
     let identity = directive
         .reconnect_notice
-        .as_ref()
-        .unwrap_or(&directive.continuation_message)
-        .clone();
+        .unwrap_or(directive.continuation_message);
     if !app
         .scheduled_reload_recoveries
         .insert((session_id.to_string(), identity))
     {
         return false;
     }
-    let continuation = directive.continuation_message;
-    let already_queued = app
-        .hidden_queued_system_messages
-        .iter()
-        .any(|queued| queued == &continuation)
-        || app
-            .rate_limit_pending_message
-            .as_ref()
-            .and_then(|pending| pending.system_reminder.as_ref())
-            .is_some_and(|queued| queued == &continuation);
-    if already_queued {
-        return false;
-    }
-    app.push_display_message(DisplayMessage::system(notice));
-    app.hidden_queued_system_messages.push(continuation);
-    app.reload_recovery_dispatch_pending = true;
+    app.set_status_notice(notice);
     true
 }
 
@@ -999,100 +1027,82 @@ pub(in crate::tui::app) fn finalize_reload_reconnect(
     hints: ReloadReconnectHints,
     reconnected_after_disconnect: bool,
 ) {
-    let should_queue_reload_continuation = hints.reload_ctx_for_session.is_some();
-    crate::logging::info(&format!(
-        "Reload continuation check: should_queue={}, reload_info_empty={}, has_ctx={}, has_marker={}",
-        should_queue_reload_continuation,
-        app.reload_info.is_empty(),
-        hints.reload_ctx_for_session.is_some(),
-        hints.has_client_reload_marker
-    ));
-    if should_queue_reload_continuation {
+    if let Some(ctx) = hints.reload_ctx_for_session {
         app.pending_reload_reconnect_status = None;
-        let reload_ctx = session_to_resume.and_then(|sid| {
-            let result = ReloadContext::load_for_session(sid);
-            crate::logging::info(&format!(
-                "Reload load_for_session({}) = {:?}",
-                sid,
-                result.as_ref().map(|r| r.is_some())
-            ));
-            result.ok().flatten()
-        });
-
         let background_task_note = session_to_resume
             .map(super::super::reload_persisted_background_tasks_note)
             .unwrap_or_default();
-        let directive = ReloadContext::recovery_directive(
-            reload_ctx.as_ref(),
-            false,
-            &background_task_note,
-            None,
-        );
-
-        if let Some(directive) = directive {
-            let session_id = session_to_resume.unwrap_or("unknown");
-            let queued = queue_reload_continuation_once(
+        if let Some(directive) =
+            ReloadContext::recovery_directive(Some(&ctx), false, &background_task_note, None)
+        {
+            show_reload_recovery_notice_once(
                 app,
-                session_id,
-                directive,
-                "Reload complete - continuing because reload recovery was pending.",
-            );
-            if queued
-                && app.current_message_id.is_none()
-                && (app.remote_resume_activity.is_some() || app.is_processing)
-            {
-                crate::logging::info(
-                    "Reload reconnect: clearing stale resumed-processing state before dispatching continuation",
-                );
-                app.remote_resume_activity = None;
-                app.is_processing = false;
-                app.status = ProcessingStatus::Idle;
-                // Reload recovery continues the same visible turn. Only the
-                // request-level processing state is stale, not its elapsed time.
-                app.visible_turn_started = app.visible_turn_started.or(app.processing_started);
-                app.processing_started = None;
-                app.last_stream_activity = None;
-                app.replay_processing_started_ms = None;
-                app.replay_elapsed_override = None;
-            }
-
-            ReloadContext::log_recovery_outcome(
-                "tui_reconnect",
-                session_id,
-                if queued { "resumed" } else { "skipped" },
-                if queued {
-                    "queued initiator continuation after reconnect"
-                } else {
-                    "initiator continuation already scheduled"
-                },
-            );
-        } else {
-            ReloadContext::log_recovery_outcome(
-                "tui_reconnect",
                 session_to_resume.unwrap_or("unknown"),
-                "failed",
-                "reload context missing for reconnecting initiator session",
-            );
-            crate::logging::warn(
-                "Reload context missing for initiating session after reconnect; skipping selfdev continuation",
+                directive,
+                "Reload complete. The daemon owns continuation recovery.",
             );
         }
         app.reload_info.clear();
     } else if hints.has_client_reload_marker {
         app.pending_reload_reconnect_status = None;
-        ReloadContext::log_recovery_outcome(
-            "tui_reconnect",
-            session_to_resume.unwrap_or("unknown"),
-            "skipped",
-            "client reload marker present without session reload context",
-        );
         if !reconnected_after_disconnect && !app.reload_info.is_empty() {
             app.push_display_message(DisplayMessage::system(app.reload_info.join("\n")));
         }
         app.push_display_message(DisplayMessage::system(
-            "Reload complete - no continuation queued because no recovery context was pending."
-                .to_string(),
+            "Reload complete. Recovery is managed by the daemon.",
         ));
         app.reload_info.clear();
+    }
+}
+
+#[cfg(test)]
+mod reconnect_context_tests {
+    use super::*;
+    use crate::tui::app::tests::create_test_app;
+
+    #[test]
+    fn recovery_notice_never_enqueues_model_input() {
+        let mut app = create_test_app();
+        show_reload_recovery_notice_once(
+            &mut app,
+            "session",
+            crate::tool::selfdev::ReloadRecoveryDirective {
+                continuation_message: "continue".into(),
+                reconnect_notice: None,
+            },
+            "Resumed after reload",
+        );
+        assert!(app.hidden_queued_system_messages.is_empty());
+        assert!(!app.reload_recovery_dispatch_pending);
+    }
+
+    #[test]
+    fn reconnect_preserves_peeked_context_after_file_is_consumed() {
+        let _env_guard = crate::storage::lock_test_env();
+        let mut app = create_test_app();
+        let session_id = crate::id::new_id("reload_context_race");
+        let ctx = ReloadContext {
+            task_context: None,
+            version_before: "before".to_string(),
+            version_after: "after".to_string(),
+            session_id: session_id.clone(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+        ctx.save().unwrap();
+        let hints = load_reload_reconnect_hints(&mut app, Some(&session_id));
+        assert!(hints.reload_ctx_for_session.is_some());
+        ReloadContext::load_for_session(&session_id)
+            .unwrap()
+            .unwrap();
+
+        finalize_reload_reconnect(&mut app, Some(&session_id), hints.clone(), true);
+        assert!(app.hidden_queued_system_messages.is_empty());
+        assert!(!app.reload_recovery_dispatch_pending);
+        let notices = app.display_messages().len();
+
+        // A delayed second bootstrap still must not duplicate the recovery.
+        finalize_reload_reconnect(&mut app, Some(&session_id), hints, true);
+        assert!(app.hidden_queued_system_messages.is_empty());
+        assert_eq!(app.display_messages().len(), notices);
     }
 }

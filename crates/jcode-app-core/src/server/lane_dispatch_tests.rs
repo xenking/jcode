@@ -93,3 +93,49 @@ fn normalize_makes_owner_lane_wide() {
     assert_eq!(todos[1].lane_owner.as_deref(), Some("worker"));
     assert_eq!(todos[2].lane_owner, None);
 }
+
+fn member(session_id: &str, status: &str, report_back: Option<&str>) -> super::SwarmMember {
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    super::SwarmMember {
+        session_id: session_id.to_string(),
+        event_tx,
+        event_txs: Default::default(),
+        working_dir: None,
+        swarm_id: Some("swarm".to_string()),
+        swarm_enabled: true,
+        status: status.to_string(),
+        detail: None,
+        task_label: None,
+        friendly_name: None,
+        report_back_to_session_id: report_back.map(str::to_string),
+        latest_completion_report: None,
+        role: "agent".to_string(),
+        joined_at: std::time::Instant::now(),
+        last_status_change: std::time::Instant::now(),
+        is_headless: true,
+        output_tail: None,
+        todo_progress: None,
+        todo_items: Vec::new(),
+        runtime: crate::protocol::SwarmMemberRuntime::default(),
+    }
+}
+
+#[test]
+fn only_working_members_spawned_by_the_session_count() {
+    let members: std::collections::HashMap<_, _> = [
+        member("coord", "ready", None),
+        member("w-running", "running", Some("coord")),
+        member("w-queued", "queued", Some("coord")),
+        member("w-done", "completed", Some("coord")),
+        member("w-ready", "ready", Some("coord")),
+        member("other-running", "running", Some("someone-else")),
+    ]
+    .into_iter()
+    .map(|m| (m.session_id.clone(), m))
+    .collect();
+    assert_eq!(
+        super::working_members_spawned_by(&members, "coord"),
+        vec!["w-queued".to_string(), "w-running".to_string()]
+    );
+    assert!(super::working_members_spawned_by(&members, "w-done").is_empty());
+}

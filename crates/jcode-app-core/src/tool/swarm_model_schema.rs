@@ -7,6 +7,20 @@ pub(super) fn apply_swarm_model_policy(schema: &mut Value, agents: &crate::confi
         );
         return;
     };
+    // `agents.spawn_allowed_models` is the hard worker allowlist: advertise
+    // exactly those entries so a model never proposes anything else at spawn
+    // time. Without it, fall back to the legacy opt-in selection allowlist.
+    if !agents.spawn_allowed_models.is_empty() {
+        properties.insert(
+            "model".to_string(),
+            json!({
+                "type": "string",
+                "enum": agents.spawn_allowed_models,
+                "description": "Exact user-allowlisted worker model; omit for agents.swarm_model."
+            }),
+        );
+        return;
+    }
     if !agents.swarm_model_selection || agents.swarm_model_allowlist.is_empty() {
         properties.remove("model");
     } else {

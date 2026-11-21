@@ -17,7 +17,10 @@ fn test_handle_server_event_service_tier_changed_mentions_next_request_when_stre
         &mut remote,
     );
 
-    assert!(redraw, "tier configuration acknowledgement must redraw immediately");
+    assert!(
+        redraw,
+        "tier configuration acknowledgement must redraw immediately"
+    );
     assert_eq!(app.remote_service_tier, Some("priority".to_string()));
     assert_eq!(
         app.status_notice(),
@@ -191,7 +194,7 @@ fn test_reload_handoff_active_when_socket_ready_marker_present() {
 }
 
 #[test]
-fn test_handle_server_event_history_with_interruption_queues_continuation() {
+fn test_handle_server_event_history_with_interruption_preserves_transcript() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -204,7 +207,10 @@ fn test_handle_server_event_history_with_interruption_queues_continuation() {
             id: 1,
             session_id: "ses_test_123".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
+                tool_duration_ms: None,
+                attachments: Vec::new(),
                 response_stats: None,
+                timestamp_ms: None,
                 role: "assistant".to_string(),
                 content: "I was working on something".to_string(),
                 tool_calls: None,
@@ -214,6 +220,8 @@ fn test_handle_server_event_history_with_interruption_queues_continuation() {
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -249,26 +257,27 @@ fn test_handle_server_event_history_with_interruption_queues_continuation() {
         &mut remote,
     );
 
-    assert!(app.display_messages().len() >= 2);
+    let [message] = app.display_messages() else {
+        panic!("reload must preserve only the original assistant row");
+    };
+    assert_eq!(message.role, "assistant");
+    assert_eq!(message.content, "I was working on something");
     assert_eq!(app.connection_type.as_deref(), Some("websocket"));
-    let system_msg = app
-        .display_messages()
-        .iter()
-        .find(|m| m.role == "system" && m.content.starts_with("Reload complete - continuing"))
-        .expect("should have a short reload continuation message");
     assert!(
-        system_msg
-            .content
-            .starts_with("Reload complete - continuing")
+        app.status_notice
+            .as_ref()
+            .is_some_and(|(text, _)| text.starts_with("Reload complete - continuing")),
+        "the reload continuation is a status line, not a transcript row"
     );
 
     assert!(app.queued_messages().is_empty());
-    assert_eq!(app.hidden_queued_system_messages.len(), 1);
-    assert!(app.hidden_queued_system_messages[0].contains("interrupted by a server reload"));
+    assert!(app.hidden_queued_system_messages.is_empty());
+    assert!(!app.reload_recovery_dispatch_pending);
     assert!(
         app.display_messages()
             .iter()
-            .any(|m| m.role == "system" && m.content.starts_with("Reload complete - continuing"))
+            .all(|m| !m.content.starts_with("Reload complete - continuing")),
+        "no synthetic reload row may appear in the transcript"
     );
 }
 
@@ -285,7 +294,10 @@ fn test_handle_server_event_history_uses_server_owned_reload_recovery_directive(
         id: 1,
         session_id: "ses_server_owned_reload".to_string(),
         messages: vec![crate::protocol::HistoryMessage {
+            tool_duration_ms: None,
+            attachments: Vec::new(),
             response_stats: None,
+            timestamp_ms: None,
             role: "assistant".to_string(),
             content: "Reconnect me from server history".to_string(),
             tool_calls: None,
@@ -295,6 +307,8 @@ fn test_handle_server_event_history_uses_server_owned_reload_recovery_directive(
         provider_name: Some("claude".to_string()),
         provider_model: Some("claude-sonnet-4-20250514".to_string()),
         subagent_model: None,
+        pinned_skill: None,
+        pinned_skills: None,
         agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,
@@ -334,11 +348,8 @@ fn test_handle_server_event_history_uses_server_owned_reload_recovery_directive(
     app.handle_server_event(event.clone(), &mut remote);
     app.handle_server_event(event, &mut remote);
 
-    assert_eq!(app.hidden_queued_system_messages.len(), 1);
-    assert_eq!(
-        app.hidden_queued_system_messages[0],
-        "Server-owned reload continuation"
-    );
+    assert!(app.hidden_queued_system_messages.is_empty());
+    assert!(!app.reload_recovery_dispatch_pending);
     assert_eq!(
         app.reload_info
             .iter()
@@ -347,16 +358,19 @@ fn test_handle_server_event_history_uses_server_owned_reload_recovery_directive(
         1,
         "duplicate History payloads should not duplicate the visible reload notice"
     );
+    assert!(
+        app.status_notice
+            .as_ref()
+            .is_some_and(|(text, _)| text.contains("recovery directive was pending")),
+        "the continuation notice is a status line"
+    );
     assert_eq!(
-        app.display_messages()
+        app.scheduled_reload_recoveries
             .iter()
-            .filter(|message| {
-                message.role == "system"
-                    && message.content.contains("recovery directive was pending")
-            })
+            .filter(|(session, _)| session == "ses_server_owned_reload")
             .count(),
         1,
-        "duplicate History payloads should not duplicate the visible continuation notice"
+        "duplicate History payloads must not schedule a second continuation notice"
     );
 }
 
@@ -374,7 +388,10 @@ fn test_handle_server_event_history_without_interruption_does_not_queue() {
             id: 1,
             session_id: "ses_test_456".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
+                tool_duration_ms: None,
+                attachments: Vec::new(),
                 response_stats: None,
+                timestamp_ms: None,
                 role: "assistant".to_string(),
                 content: "Normal response".to_string(),
                 tool_calls: None,
@@ -384,6 +401,8 @@ fn test_handle_server_event_history_without_interruption_does_not_queue() {
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -445,7 +464,10 @@ fn test_handle_server_event_history_after_reload_reports_no_continuation_needed(
             id: 1,
             session_id: "ses_reload_done".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
+                tool_duration_ms: None,
+                attachments: Vec::new(),
                 response_stats: None,
+                timestamp_ms: None,
                 role: "assistant".to_string(),
                 content: "Finished before reload".to_string(),
                 tool_calls: None,
@@ -455,6 +477,8 @@ fn test_handle_server_event_history_after_reload_reports_no_continuation_needed(
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -492,10 +516,9 @@ fn test_handle_server_event_history_after_reload_reports_no_continuation_needed(
 
     assert!(app.hidden_queued_system_messages.is_empty());
     assert!(app.pending_reload_reconnect_status.is_none());
-    assert!(app.display_messages().iter().any(|m| {
-        m.role == "system"
-            && m.content.contains("no continuation needed")
-            && m.content.contains("previous response had already finished")
+    assert!(app.status_notice.as_ref().is_some_and(|(text, _)| {
+        text.contains("no continuation needed")
+            && text.contains("previous response had already finished")
     }));
 }
 
@@ -613,12 +636,13 @@ fn test_finalize_reload_reconnect_mentions_persisted_background_task() {
         false,
     );
 
-    assert_eq!(app.hidden_queued_system_messages.len(), 1);
-    let continuation = &app.hidden_queued_system_messages[0];
-    assert!(continuation.contains("Persisted background task(s)"));
-    assert!(continuation.contains(&info.task_id));
-    assert!(continuation.contains("Do not rerun those commands"));
-    assert!(continuation.contains("wait for completion rather than repeatedly polling"));
+    assert!(app.hidden_queued_system_messages.is_empty());
+    assert!(
+        crate::tool::selfdev::ReloadContext::peek_for_session(&session_id)
+            .unwrap()
+            .is_some(),
+        "only the daemon may consume recovery context"
+    );
 
     cleanup_background_task_files(&info.task_id);
     cleanup_reload_context_file(&session_id);
@@ -659,8 +683,7 @@ fn test_finalize_reload_reconnect_is_session_scoped_across_reconnect_order() {
         false,
     );
 
-    assert_eq!(app_b.hidden_queued_system_messages.len(), 1);
-    assert!(app_b.hidden_queued_system_messages[0].contains("new-b"));
+    assert!(app_b.hidden_queued_system_messages.is_empty());
     assert!(
         crate::tool::selfdev::ReloadContext::peek_for_session(&session_a)
             .expect("peek session a")
@@ -670,8 +693,8 @@ fn test_finalize_reload_reconnect_is_session_scoped_across_reconnect_order() {
     assert!(
         crate::tool::selfdev::ReloadContext::peek_for_session(&session_b)
             .expect("peek session b")
-            .is_none(),
-        "session B context should be consumed by its own reconnect"
+            .is_some(),
+        "session B context remains owned by the daemon"
     );
 
     remote::finalize_reload_reconnect(
@@ -684,13 +707,12 @@ fn test_finalize_reload_reconnect_is_session_scoped_across_reconnect_order() {
         false,
     );
 
-    assert_eq!(app_a.hidden_queued_system_messages.len(), 1);
-    assert!(app_a.hidden_queued_system_messages[0].contains("new-a"));
+    assert!(app_a.hidden_queued_system_messages.is_empty());
     assert!(
         crate::tool::selfdev::ReloadContext::peek_for_session(&session_a)
             .expect("peek session a after consume")
-            .is_none(),
-        "session A context should be consumed only by session A reconnect"
+            .is_some(),
+        "session A context remains owned by the daemon"
     );
 }
 
@@ -721,13 +743,12 @@ fn test_finalize_reload_reconnect_supports_repeated_reload_cycles_for_same_sessi
             false,
         );
 
-        assert_eq!(app.hidden_queued_system_messages.len(), 1);
-        assert!(app.hidden_queued_system_messages[0].contains(&version_after));
+        assert!(app.hidden_queued_system_messages.is_empty());
         assert!(
             crate::tool::selfdev::ReloadContext::peek_for_session(&session_id)
                 .expect("peek loop reload context")
-                .is_none(),
-            "reload context should be consumed each cycle"
+                .is_some(),
+            "reload context remains daemon-owned each cycle"
         );
     }
 }
@@ -765,6 +786,8 @@ fn test_handle_server_event_history_restores_side_panel_snapshot() {
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -829,6 +852,8 @@ fn test_handle_server_event_history_restores_active_resume_processing_state() {
             provider_name: Some("openai".to_string()),
             provider_model: Some("gpt-5.4".to_string()),
             subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,

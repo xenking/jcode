@@ -1,6 +1,23 @@
 use super::*;
 
 impl Agent {
+    pub(super) fn warn_missing_native_compaction_summary(
+        &mut self,
+        event_tx: Option<&crate::stream_batching::BatchingSender>,
+    ) {
+        let detail = format!("⚠ {}", crate::compaction::MISSING_NATIVE_SUMMARY);
+        logging::warn(&format!(
+            "[compaction] session={}: {detail}",
+            self.session.id
+        ));
+        self.session
+            .record_replay_display_message("system", None, &detail);
+        self.persist_session_best_effort("missing native compaction summary warning");
+        if let Some(tx) = event_tx {
+            let _ = tx.send(ServerEvent::StatusDetail { detail });
+        }
+    }
+
     /// Flush an idle session before optional process replacement. Never abandon
     /// a pending compaction or lose a completed summary that has not been polled.
     pub(crate) fn checkpoint_idle_runtime_upgrade(&mut self) -> Result<()> {
@@ -10,7 +27,7 @@ impl Agent {
             .try_read()
             .map_err(|_| anyhow::anyhow!("compaction state is busy"))?;
         anyhow::ensure!(!manager.is_compacting(), "compaction is still running");
-        self.session.compaction = manager.persisted_state();
+        self.session.compaction = manager.persisted_state().map(Arc::new);
         // Prepared blank sessions also have externally visible IDs. Ordinary
         // save intentionally skips these until the first user message.
         self.session.save_prepared()?;
@@ -28,28 +45,127 @@ impl Agent {
         self.locked_tools = None;
         self.provider_session_id = None;
         self.session.provider_session_id = None;
+        if self.session.pinned_skill.is_some() {
+            self.active_skill = self.session.pinned_skill.clone();
+            self.announce_active_skill();
+        }
     }
 
     pub fn poll_compaction_completion_event(&mut self) -> Option<CompactionEvent> {
         let provider_messages = self.session.messages_for_provider();
         let compaction = self.registry.compaction();
-        let event = match compaction.try_write() {
+        let (event, decisions_updated) = match compaction.try_write() {
             Ok(mut manager) => {
                 let event = manager.poll_compaction_event_with(&provider_messages);
-                if event.is_some() {
+                let decisions_updated = manager.take_decisions_updated();
+                if event.is_some() || decisions_updated {
                     self.sync_session_compaction_state_from_manager(&manager);
                 }
-                event
+                (event, decisions_updated)
             }
             Err(_) => return None,
         };
 
-        if event.is_some() {
+        if let Some(event) = event.as_ref() {
             self.note_compaction_applied();
-            self.persist_session_best_effort("compaction completion");
+            self.record_compaction_divider(event);
+        }
+        if event.is_some() || decisions_updated {
+            self.persist_session_best_effort("compaction completion/enrichment");
         }
 
         event
+    }
+
+    /// The server only calls this while a client is attached and owns no turn.
+    pub(crate) fn idle_cache_expiry_at(
+        &mut self,
+        now: std::time::SystemTime,
+    ) -> (bool, Option<CompactionEvent>) {
+        if self.is_swarm_worker() || !self.provider.uses_jcode_compaction() {
+            return (false, None);
+        }
+        let compaction = self.registry.compaction();
+        let Ok(mut manager) = compaction.try_write() else {
+            return (false, None);
+        };
+        let ttl = self.cache_expiry_ttl_secs(&manager);
+        if !manager.claim_idle_cache_expiry(
+            now,
+            ttl,
+            self.session
+                .last_cache_expiry_compaction_for
+                .map(Into::into),
+        ) {
+            return (false, None);
+        }
+        let boundary = CompactionBoundary::Idle;
+        let messages = self.session.provider_messages();
+        let target = manager.cache_expiry_request_target(messages, now, ttl);
+        let fold_planned =
+            target.is_some() && manager.plan_cache_expiry_compaction(messages, now, ttl);
+        let fold_instead = self.prefer_cold_cache_fold(&manager, target, fold_planned);
+        if let Some((detail, Some(event))) =
+            self.maybe_shake_at(&mut manager, now, boundary, fold_instead, fold_planned)
+        {
+            logging::info(&detail);
+            return (false, Some(event));
+        }
+        (
+            self.maybe_cache_expiry_compaction(&mut manager, now, boundary),
+            None,
+        )
+    }
+
+    /// Opportunistic compaction while the session is idle but still waiting.
+    ///
+    /// The caller owns the definition of "waiting" (a swarm member still
+    /// running, a `bg` wait, an `await_members` dependency). This method only
+    /// decides whether the context is full enough to fold now, so that the next
+    /// user message finds a compacted transcript instead of triggering a
+    /// compaction in the middle of its own turn.
+    pub fn maybe_idle_precompact(&mut self) -> bool {
+        if self.is_swarm_worker() || !self.provider.uses_jcode_compaction() {
+            return false;
+        }
+        let now = std::time::SystemTime::now();
+        let compaction = self.registry.compaction();
+        let mut manager = match compaction.try_write() {
+            Ok(manager) => manager,
+            Err(_) => return false,
+        };
+        let ttl = self.cache_expiry_ttl_secs(&manager);
+        if manager.attempted_cache_expiry_compaction()
+            || self.cache_expiry_already_compacted(&manager, now, ttl)
+        {
+            return false;
+        }
+        let messages = self.session.provider_messages();
+        if !manager.plan_idle_precompaction_with(messages, now, ttl) {
+            return false;
+        }
+        let tokens = manager.effective_token_count_with(messages);
+        let started = manager.start_idle_precompaction(messages, self.provider.clone());
+        if started {
+            logging::info(&format!(
+                "[compaction] strategy={} tokens_before={} reason=idle_waiting",
+                crate::compaction::IDLE_PRECOMPACTION_TRIGGER,
+                tokens,
+            ));
+        }
+        started
+    }
+
+    /// Whether this agent is currently summarizing in the background.
+    ///
+    /// The compaction bus events are process-global, so a per-session client
+    /// must ask its own agent before painting a running divider.
+    pub fn is_compacting_now(&self) -> bool {
+        self.registry
+            .compaction()
+            .try_read()
+            .map(|manager| manager.is_compacting())
+            .unwrap_or(false)
     }
 
     pub(crate) fn poll_compaction_status(
@@ -68,6 +184,12 @@ impl Agent {
     }
 
     pub fn request_manual_compaction(&mut self) -> (String, bool) {
+        if self.is_swarm_worker() {
+            return (
+                "Separate model-assisted compaction is not available for swarm workers.".into(),
+                false,
+            );
+        }
         if !self.provider.supports_compaction() {
             return (
                 "Manual compaction is not available for this provider.".to_string(),
@@ -232,8 +354,9 @@ impl Agent {
     /// carrying its measured before/after token counts.
     pub(super) fn take_recovery_compaction_event(&mut self) -> crate::protocol::ServerEvent {
         let stats = self.last_recovery_compaction.take();
-        crate::protocol::ServerEvent::Compaction {
+        crate::compaction::compaction_server_event(&crate::compaction::CompactionEvent {
             trigger: "auto_recovery".to_string(),
+            method: Some("drop".to_string()),
             pre_tokens: stats.map(|(pre, _, _)| pre),
             post_tokens: stats.map(|(_, post, _)| post),
             tokens_saved: stats.map(|(pre, post, _)| pre.saturating_sub(post)),
@@ -242,7 +365,7 @@ impl Agent {
             messages_compacted: None,
             summary_chars: None,
             active_messages: None,
-        }
+        })
     }
 
     /// Best-effort recovery after a provider HTTP 413 "request too large" error.
@@ -417,10 +540,16 @@ impl Agent {
             cache_read_input_tokens,
             cache_creation_input_tokens,
         );
+        // The provider can report more input tokens than the request carried, so
+        // the report is checked against the harness's own estimate of the same
+        // messages before it drives the context percentage or the compaction
+        // trigger.
+        let messages = self.session.provider_messages();
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
-            manager.update_observed_input_tokens(observed);
-            manager.push_token_snapshot(observed);
+            let estimate = manager.token_estimate_with(messages);
+            let accepted = manager.update_observed_input_tokens_with_estimate(observed, estimate);
+            manager.push_token_snapshot(accepted);
         };
     }
 

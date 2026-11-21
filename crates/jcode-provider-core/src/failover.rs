@@ -94,6 +94,91 @@ pub fn is_definitive_usage_exhaustion(message: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
+/// Details explicitly present in a provider's usage-limit error. A retry hint
+/// is not a window reset and must not be reported as one.
+#[derive(Debug, PartialEq, Eq)]
+pub struct UsageLimitDetails {
+    pub window: &'static str,
+    pub reset: Option<String>,
+}
+
+pub fn usage_limit_details(message: &str) -> Option<UsageLimitDetails> {
+    let prompt = parse_failover_prompt_message(message);
+    let message = prompt.as_ref().map_or(message, |p| p.reason.as_str());
+    let lower = message.to_ascii_lowercase();
+    let is_limit = is_definitive_usage_exhaustion(message)
+        || contains_independent_status_code(&lower, "429")
+        || [
+            "rate limit",
+            "rate-limit",
+            "rate_limit",
+            "too many requests",
+            "usage limit",
+            "usage_limit",
+            "quota",
+            "exhausted window",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle));
+    if !is_limit {
+        return None;
+    }
+    let window = if lower.contains("weekly") {
+        "weekly"
+    } else if lower.contains("daily") {
+        "daily"
+    } else if lower.contains("hourly") {
+        "hourly"
+    } else {
+        "unknown"
+    };
+    let utc_timestamp = |value: &str| -> Option<String> {
+        let candidate = value.get(..20)?;
+        let bytes = candidate.as_bytes();
+        if bytes[4] == b'-'
+            && bytes[7] == b'-'
+            && bytes[10] == b' '
+            && bytes[13] == b':'
+            && &bytes[16..] == b" UTC"
+            && [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15]
+                .iter()
+                .all(|&i| bytes[i].is_ascii_digit())
+        {
+            Some(candidate.to_string())
+        } else {
+            None
+        }
+    };
+    let reset = ["resets at ", "reset at "]
+        .iter()
+        .find_map(|marker| {
+            let pos = lower.find(marker)? + marker.len();
+            let rest = &message[pos..];
+            if let Some(timestamp) = utc_timestamp(rest) {
+                return Some(timestamp);
+            }
+            let value = rest
+                .split_whitespace()
+                .next()?
+                .trim_end_matches([',', '.', ';']);
+            // Copy only timestamp-like values, never the remainder of a provider error.
+            (value.len() <= 40
+                && value.contains('-')
+                && value.chars().all(|c| {
+                    c.is_ascii_digit() || matches!(c, '-' | ':' | 'T' | 't' | 'Z' | 'z' | '+' | '.')
+                }))
+            .then(|| value.to_string())
+        })
+        .or_else(|| {
+            // OpenAI formats a known reset as `Resets in 30d (2026-08-21 04:31 UTC)`.
+            let pos = lower.find("resets in ")?;
+            let rest = &message[pos..];
+            let (_, timestamp) = rest.split_once('(')?;
+            utc_timestamp(timestamp)
+        });
+    Some(UsageLimitDetails { window, reset })
+}
+
 pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
     let lower = message.to_ascii_lowercase();
 
@@ -174,6 +259,25 @@ pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_limit_details_do_not_confuse_retry_hint_with_reset() {
+        let details = usage_limit_details(
+            "HTTP 429 weekly rate limit, resets at 2026-11-17T10:00:00Z. retry after 60 seconds",
+        )
+        .unwrap();
+        assert_eq!(details.window, "weekly");
+        assert_eq!(details.reset.as_deref(), Some("2026-11-17T10:00:00Z"));
+        assert_eq!(
+            usage_limit_details("429 too many requests, retry after 60 seconds")
+                .unwrap()
+                .reset,
+            None
+        );
+        assert_eq!(usage_limit_details("Rate limited: The usage limit has been reached. Plan: team. Resets in 30d 4h 29m (2026-08-21 04:31 UTC).").unwrap().reset.as_deref(), Some("2026-08-21 04:31 UTC"));
+        assert!(usage_limit_details("401 invalid token id 14290").is_none());
+        assert!(usage_limit_details("insufficient_quota").is_some());
+    }
 
     #[test]
     fn definitive_exhaustion_excludes_ambiguous_rate_limits() {

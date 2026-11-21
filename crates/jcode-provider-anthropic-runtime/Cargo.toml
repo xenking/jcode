@@ -8,6 +8,9 @@ description = "Direct Anthropic Messages API provider runtime (OAuth + API key, 
 name = "jcode_provider_anthropic_runtime"
 path = "src/lib.rs"
 
+[features]
+test-support = ["jcode-base/test-support"]
+
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"

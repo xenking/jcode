@@ -22,6 +22,9 @@ pub struct SessionToolDefinition {
 /// Replaces the session SDK overlay. None inherits normal selection.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionToolConfig {
+    /// Session-only instructions owned by the configuring connection, not persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt_append: Option<String>,
     #[serde(default)]
     pub enabled: Option<Vec<String>>,
     #[serde(default)]
@@ -30,10 +33,71 @@ pub struct SessionToolConfig {
     pub custom: Vec<SessionToolDefinition>,
 }
 
+/// Delivery phase for a queued user prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedPromptMode {
+    Steer,
+    AfterYield,
+}
+
+/// Result of attempting to remove a prompt at the queue's delivery boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedPromptRemovalOutcome {
+    Removed,
+    InFlight,
+    AlreadyDelivered,
+    NotFound,
+}
+
+/// Result of replacing a still-queued prompt's content in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedPromptEditOutcome {
+    Edited,
+    InFlight,
+    AlreadyDelivered,
+    NotFound,
+}
+
+/// Why the daemon rejected a queued prompt before accepting it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedPromptRejection {
+    UnknownSkill,
+}
+
+/// One user-authored message still owned by the daemon queue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedPrompt {
+    pub client_id: String,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<jcode_session_types::Attachment>,
+    pub mode: QueuedPromptMode,
+    /// Skill name resolved by the daemon when this item is delivered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_skill: Option<String>,
+    /// True while a client holds this prompt open for editing. Held prompts
+    /// stay in place (position and mode preserved) but are never delivered.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub editing: bool,
+}
+
 /// Client request to server
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
+    /// Passive latest-state metadata. Never starts a turn or cancels generation.
+    #[serde(rename = "screen_context")]
+    ScreenContext {
+        id: u64,
+        session_id: String,
+        action: ScreenContextAction,
+    },
     #[serde(rename = "configure_tools")]
     ConfigureTools { id: u64, tools: SessionToolConfig },
     #[serde(rename = "list_tools")]
@@ -53,6 +117,8 @@ pub enum Request {
         content: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<jcode_session_types::Attachment>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_reminder: Option<String>,
         /// Skill selected by the client for this and subsequent turns. The
@@ -69,9 +135,102 @@ pub enum Request {
     #[serde(rename = "cancel")]
     Cancel { id: u64 },
 
+    /// Abort the current turn of the attached session, without waiting for it.
+    #[serde(rename = "force_stop_turn")]
+    ForceStopTurn { id: u64, session_id: String },
+
     /// Move the currently executing tool to background
     #[serde(rename = "background_tool")]
     BackgroundTool { id: u64 },
+
+    #[serde(rename = "background_tasks")]
+    BackgroundTasks {
+        id: u64,
+        session_id: String,
+        #[serde(default)]
+        task_id: Option<String>,
+        #[serde(default)]
+        cancel: bool,
+    },
+
+    /// Queue a user prompt with a stable caller id. Acknowledged only after
+    /// the queue has accepted and persisted it.
+    #[serde(rename = "queue_prompt")]
+    QueuePrompt {
+        id: u64,
+        client_id: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<jcode_session_types::Attachment>,
+        mode: QueuedPromptMode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_reminder: Option<String>,
+        /// Requires the `queued_prompt_active_skill` capability. Unknown names are rejected.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_skill: Option<String>,
+    },
+
+    /// Change the delivery phase of a prompt that is still queued.
+    #[serde(rename = "set_queued_prompt_mode")]
+    SetQueuedPromptMode {
+        id: u64,
+        client_id: String,
+        mode: QueuedPromptMode,
+    },
+
+    /// Stop the current turn and deliver the selected queued prompt next.
+    #[serde(rename = "interrupt_queued_prompt")]
+    InterruptQueuedPrompt { id: u64, client_id: String },
+
+    /// Interrupt and deliver these queued prompts together, in queue order.
+    #[serde(rename = "interrupt_queued_prompts")]
+    InterruptQueuedPrompts { id: u64, ids: Vec<String> },
+
+    /// Obtain a fresh queue snapshot after reconnecting.
+    #[serde(rename = "get_queued_prompts")]
+    GetQueuedPrompts { id: u64 },
+
+    #[serde(rename = "remove_queued_prompt")]
+    RemoveQueuedPrompt {
+        id: u64,
+        client_id: String,
+        prompt_id: String,
+    },
+
+    #[serde(rename = "reorder_queued_prompts")]
+    ReorderQueuedPrompts {
+        id: u64,
+        client_id: String,
+        order: Vec<String>,
+    },
+
+    /// Hold a queued prompt open for editing so the drain skips it until it is
+    /// saved, cancelled, or the holding client disconnects. Requires the
+    /// `queued_prompt_editing` capability.
+    #[serde(rename = "set_queued_prompt_editing")]
+    SetQueuedPromptEditing {
+        id: u64,
+        client_id: String,
+        prompt_id: String,
+        editing: bool,
+    },
+
+    /// Replace a still-queued prompt's content and images in place, keeping its
+    /// queue position, delivery mode, and active skill. Requires the
+    /// `queued_prompt_editing` capability.
+    #[serde(rename = "edit_queued_prompt")]
+    EditQueuedPrompt {
+        id: u64,
+        client_id: String,
+        prompt_id: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<jcode_session_types::Attachment>,
+    },
 
     /// Soft interrupt: inject message at next safe point without cancelling
     #[serde(rename = "soft_interrupt")]
@@ -108,6 +267,9 @@ pub enum Request {
     /// Rewind conversation history to the given 1-based message index.
     #[serde(rename = "rewind")]
     Rewind { id: u64, message_index: usize },
+
+    #[serde(rename = "rewind_transcript")]
+    RewindTranscript { id: u64, target: jcode_session_types::RewindAnchor },
 
     /// Undo the most recent rewind, if one is available.
     #[serde(rename = "rewind_undo")]
@@ -228,6 +390,32 @@ pub enum Request {
     /// Get full conversation history (for TUI sync on connect)
     #[serde(rename = "get_history")]
     GetHistory { id: u64 },
+
+    /// Cursor-based, byte-bounded transcript fragments.
+    #[serde(rename = "get_history_page")]
+    GetHistoryPage {
+        id: u64,
+        before: Option<String>,
+        limit: usize,
+    },
+
+    /// A bounded slice of a lazily loaded history image (base64 bytes).
+    #[serde(rename = "get_history_image_chunk")]
+    GetHistoryImageChunk { id: u64, key: String, offset: usize },
+
+    /// List durable image references in the attached session.
+    #[serde(rename = "list_session_images")]
+    ListSessionImages { id: u64, session_id: String },
+
+    /// Retrieve a bounded chunk of one session image by its stable ID.
+    #[serde(rename = "get_session_image")]
+    GetSessionImage {
+        id: u64,
+        session_id: String,
+        image_id: String,
+        #[serde(default)]
+        offset: usize,
+    },
 
     /// Get only provider/model metadata and available models.
     #[serde(rename = "get_model_catalog")]
@@ -673,6 +861,22 @@ pub enum Request {
     #[serde(rename = "comm_list_swarms")]
     CommListSwarms { id: u64, session_id: String },
 
+    /// List every live root session on the daemon (any swarm), so an agent can
+    /// find sessions to message or raise. Answered with `comm_members`.
+    #[serde(rename = "comm_list_sessions")]
+    CommListSessions { id: u64, session_id: String },
+
+    /// Ask the clients attached to another live session to raise/focus it
+    /// (Desktop selects the tab, TUI rings the bell, and the server runs the
+    /// configured terminal focus hook). `target_session` is an exact session
+    /// id or unique friendly name.
+    #[serde(rename = "comm_focus_session")]
+    CommFocusSession {
+        id: u64,
+        session_id: String,
+        target_session: String,
+    },
+
     /// Set (or clear, with an empty label) the human-readable label of the
     /// caller's swarm. Labels are unique across swarms.
     #[serde(rename = "comm_set_swarm_label")]
@@ -931,10 +1135,30 @@ pub enum Request {
         #[serde(default = "default_true")]
         wake: bool,
     },
+
+    /// Answer an escalated `ask` from a swarm worker. Escalation happens when a
+    /// worker has no interactive client and its question was forwarded to the
+    /// swarm root coordinator (see `ServerEvent::AskEscalated`).
+    #[serde(rename = "comm_answer_escalated_ask")]
+    CommAnswerEscalatedAsk {
+        id: u64,
+        session_id: String,
+        /// Worker whose ask is waiting.
+        worker_session_id: String,
+        /// Escalation id from `ServerEvent::AskEscalated`. Optional when the
+        /// worker has exactly one pending escalated ask.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        /// Answers in `AskResponse` shape. `None` (or omitted) declines.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answers: Option<Vec<AskAnswer>>,
+    },
 }
 
 mod events;
-pub use events::{AccountUsageSnapshot, AccountUsageWindow, ServerEvent, TurnIdentity};
+pub use events::{
+    AccountUsageSnapshot, AccountUsageWindow, DaemonIdentity, ServerEvent, TurnIdentity,
+};
 
 impl std::fmt::Debug for Request {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

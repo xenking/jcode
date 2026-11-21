@@ -8,11 +8,15 @@ mod cloud_ephemeral;
 mod cloud_runtime;
 mod google;
 mod mcp;
+#[cfg(unix)]
+mod rollout;
 pub(crate) use cloud_ephemeral::CloudEphemeralCommand;
 pub(crate) use cloud_runtime::CloudRuntimeCommand;
 #[allow(unused_imports)]
 pub(crate) use google::{GoogleAccessTierArg, GoogleLoginArgs};
 pub(crate) use mcp::McpCommand;
+#[cfg(unix)]
+pub(crate) use rollout::RolloutArgs;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum TranscriptModeArg {
@@ -37,6 +41,18 @@ pub(crate) enum ProviderAuthArg {
 #[command(version = jcode_build_meta::version())]
 #[command(about = "J-Code: A coding agent using Claude Max or ChatGPT Pro subscriptions")]
 pub(crate) struct Args {
+    /// Experimental voice conversation mode with local spoken replies
+    #[arg(long, global = true)]
+    pub(crate) jarvis: bool,
+
+    /// Experimental continuous microphone capture with actionable-speech gating
+    #[arg(long, global = true)]
+    pub(crate) jarvis_always_on: bool,
+
+    /// Opt in to passive local window metadata in Jarvis mode (no screenshots)
+    #[arg(long, global = true)]
+    pub(crate) jarvis_screen: bool,
+
     /// Initial provider to use (jcode, claude, openai, openai-api, openrouter, azure, opencode, opencode-go, zai, 302ai, baseten, conifer, cortecs, comtegra, deepseek, fpt, firmware, huggingface, moonshotai, nebius, scaleway, stackit, groq, mistral, perplexity, togetherai, deepinfra, xai, grok-build, nvidia-nim, lmstudio, ollama, chutes, cerebras, alibaba-coding-plan, openai-compatible, cursor, copilot, gemini, antigravity, google, or auto-detect). Interactive sessions can switch providers with /model.
     #[arg(short, long, default_value = "auto", global = true)]
     pub(crate) provider: ProviderChoice,
@@ -65,8 +81,8 @@ pub(crate) struct Args {
     #[arg(long, global = true)]
     pub(crate) no_update: bool,
 
-    /// Auto-update when new version is available (default: true for release builds)
-    #[arg(long, global = true, default_value = "true")]
+    /// Opt in to installing updates automatically when one is found (default: notify only; run `jcode update` to install)
+    #[arg(long, global = true)]
     pub(crate) auto_update: bool,
 
     /// Log tool inputs/outputs and token usage to stderr
@@ -185,7 +201,11 @@ pub(crate) enum Command {
     },
 
     /// Run as an Agent Client Protocol (ACP) adapter backed by the Jcode daemon
-    Acp,
+    Acp {
+        /// Session subprocess environment (default: none, env: JCODE_ACP_SESSION_ENV)
+        #[arg(long, value_enum, value_name = "MODE")]
+        session_env: Option<super::acp::SessionEnvMode>,
+    },
 
     /// Manage the background server daemon (e.g. `jcode server stop`).
     Server {
@@ -311,11 +331,23 @@ pub(crate) enum Command {
         json: bool,
     },
 
+    /// Build, stage and roll out a matched jcode + Jcode Desktop pair on this
+    /// machine: plan, build, package, stage, drain, reload, swap, verify, with
+    /// automatic rollback. Re-running resumes where the last run stopped.
+    #[cfg(unix)]
+    Rollout(RolloutArgs),
+
     /// Show usage limits for connected providers
     Usage {
         /// Emit JSON instead of plain text
         #[arg(long)]
         json: bool,
+    },
+
+    /// Maintain generated session titles
+    Titles {
+        #[command(subcommand)]
+        action: TitlesCommand,
     },
 
     /// Inspect or change usage telemetry settings
@@ -424,6 +456,14 @@ pub(crate) enum Command {
         #[arg(long)]
         no_voice_notifications: bool,
 
+        /// Do not use the Fn key as push-to-talk for always-on Jarvis
+        #[arg(long)]
+        no_jarvis_fn_key: bool,
+
+        /// Do not open an always-on Jarvis when Fn is held and none is running
+        #[arg(long)]
+        no_jarvis_fn_launch: bool,
+
         /// Do not handle open/reveal requests (clients open locally)
         #[arg(long)]
         no_open: bool,
@@ -436,7 +476,7 @@ pub(crate) enum Command {
         #[arg(long)]
         no_lid: bool,
 
-        /// Do not auto-update the browser bridge
+        /// Do not auto-update the browser bridge (already off unless `[companion] browser_updates = true`)
         #[arg(long)]
         no_browser_updates: bool,
     },
@@ -454,7 +494,8 @@ pub(crate) enum Command {
         #[arg(long, hide = true)]
         listen_macos_hotkey: bool,
 
-        /// Internal: show a rate-limited shortcut reminder from a CLI SessionStart hook.
+        /// Internal: accepted as a no-op so stale SessionStart hooks written by older
+        /// versions keep exiting 0; the hook is removed on first run.
         #[arg(long, hide = true, value_name = "CLI")]
         notify_cli_launch: Option<String>,
 
@@ -677,6 +718,36 @@ pub(crate) enum TelemetryCommand {
     Disable,
 }
 
+#[derive(Subcommand, Debug)]
+pub(crate) enum TitlesCommand {
+    /// Regenerate session titles that were truncated prompts or internal text.
+    ///
+    /// Dry-run by default: prints what would change and writes nothing.
+    Backfill {
+        /// Write the new titles.
+        #[arg(long)]
+        apply: bool,
+        /// Regenerate every session without a manual title, not just bad ones.
+        #[arg(long)]
+        all: bool,
+        /// Process at most this many sessions, newest first.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Process only this session id.
+        #[arg(long)]
+        session: Option<String>,
+        /// Sessions directory to read (defaults to JCODE_HOME/sessions).
+        #[arg(long)]
+        sessions_dir: Option<std::path::PathBuf>,
+        /// Include sessions owned by a running daemon (risk of a write race).
+        #[arg(long)]
+        include_active: bool,
+        /// Emit one JSON object per processed session.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MobileMessagesState {
     On,
@@ -886,9 +957,10 @@ pub(crate) enum CloudCommand {
         json: bool,
     },
 
-    /// Bring a moved session back: pull the cloud transcript and merge its git
-    /// work into your local checkout with a normal 3-way merge.
+    /// Bring back a moved session or its whole migrated group. Import the
+    /// transcripts and merge cloud Git work into the local checkout once.
     Return {
+        /// Session ID or name. Any member of a migrated group selects the entire group.
         #[arg(long)]
         session: Option<String>,
         #[command(flatten)]
@@ -1024,7 +1096,11 @@ pub(crate) enum CloudCommand {
 
     /// Internal: SSH ProxyCommand that wakes and authorizes the managed machine.
     #[command(hide = true)]
-    Proxy,
+    Proxy {
+        /// A machine registered with a self-hosted control plane.
+        #[arg(long)]
+        machine: Option<String>,
+    },
 
     /// Internal: transfer one named OAuth account over the private SSH channel.
     #[command(hide = true)]
@@ -1080,6 +1156,28 @@ pub(crate) enum CloudCommand {
         epoch: u64,
     },
 
+    /// Internal: fence and export an entire coordinated migration.
+    #[command(hide = true)]
+    GroupExport {
+        #[arg(long)]
+        coordinator: String,
+        #[arg(long)]
+        epoch: u64,
+        #[arg(long)]
+        transfer: String,
+    },
+
+    /// Internal: acknowledge a durable local group return.
+    #[command(hide = true)]
+    GroupCompleteReturn {
+        #[arg(long)]
+        coordinator: String,
+        #[arg(long)]
+        epoch: u64,
+        #[arg(long)]
+        transfer: String,
+    },
+
     /// Internal: restore cloud ownership after a rejected credential return.
     #[command(hide = true)]
     CancelReturn {
@@ -1104,6 +1202,7 @@ pub(crate) enum CloudMachineAction {
 pub(crate) struct CloudMoveTarget {
     /// SSH host alias for the cloud machine. Defaults to $JCODE_CLOUD_HOST,
     /// else your subscription's managed Jcode Cloud machine (`jcode-cloud`).
+    /// `cloud:<name>` picks a machine registered with a self-hosted control plane.
     #[arg(long)]
     pub(crate) host: Option<String>,
     /// Remote jcode binary (name or path). Defaults to `jcode`.
@@ -1122,226 +1221,13 @@ pub(crate) use cloud_sessions::*;
 #[path = "args/restart.rs"]
 mod restart;
 pub(crate) use restart::RestartCommand;
-#[derive(Subcommand, Debug)]
-pub(crate) enum ModelCommand {
-    /// List model names you can pass to -m/--model
-    List {
-        /// Emit JSON instead of plain text
-        #[arg(long)]
-        json: bool,
-
-        /// Show provider/selection summary before the list
-        #[arg(long)]
-        verbose: bool,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-pub(crate) enum SessionCommand {
-    /// Rename a saved session's human-readable name/title
-    Rename {
-        /// Session ID or memorable short name, e.g. fox
-        session: String,
-
-        /// New session name/title
-        #[arg(required_unless_present = "clear")]
-        name: Option<String>,
-
-        /// Clear the custom session name/title
-        #[arg(long, conflicts_with = "name")]
-        clear: bool,
-
-        /// Emit JSON instead of human-readable output
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-pub(crate) enum ProviderCommand {
-    /// List provider IDs you can pass to -p/--provider
-    List {
-        /// Emit JSON instead of plain text
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Show the currently requested and resolved provider selection
-    Current {
-        /// Emit JSON instead of plain text
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Add a named OpenAI-compatible API provider profile
-    Add {
-        /// Profile name used with --provider-profile and config defaults, e.g. my-gateway
-        name: String,
-
-        /// OpenAI-compatible API base URL, e.g. https://llm.example.com/v1
-        #[arg(long, alias = "api-base")]
-        base_url: String,
-
-        /// Default model id for this provider profile
-        #[arg(short, long)]
-        model: String,
-
-        /// Optional model context window in tokens
-        #[arg(long)]
-        context_window: Option<usize>,
-
-        /// Environment variable name that contains the API key
-        #[arg(long, conflicts_with = "no_api_key")]
-        api_key_env: Option<String>,
-
-        /// API key value to store in jcode's private provider env file. Prefer --api-key-stdin for shell history safety.
-        #[arg(long, conflicts_with_all = ["api_key_stdin", "no_api_key"])]
-        api_key: Option<String>,
-
-        /// Read the API key from stdin and store it in jcode's private provider env file
-        #[arg(long, conflicts_with = "no_api_key")]
-        api_key_stdin: bool,
-
-        /// Configure the provider with no API key/authentication
-        #[arg(long, conflicts_with_all = ["api_key", "api_key_stdin", "api_key_env"])]
-        no_api_key: bool,
-
-        /// Authentication style for the API key
-        #[arg(long, value_enum)]
-        auth: Option<ProviderAuthArg>,
-
-        /// Header name when --auth api-key is used (default: api-key)
-        #[arg(long)]
-        auth_header: Option<String>,
-
-        /// Private env file name under jcode's app config directory for stored API keys
-        #[arg(long)]
-        env_file: Option<String>,
-
-        /// Make this profile the startup default provider/model
-        #[arg(long, alias = "default")]
-        set_default: bool,
-
-        /// Replace an existing profile with the same name
-        #[arg(long)]
-        overwrite: bool,
-
-        /// Allow provider-routing features for OpenRouter-style gateways
-        #[arg(long)]
-        provider_routing: bool,
-
-        /// Fetch/list models from the provider's /models endpoint
-        #[arg(long)]
-        model_catalog: bool,
-
-        /// Emit JSON instead of human-readable setup output
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-pub(crate) enum AuthCommand {
-    /// Import one selected OAuth login from a trusted client (never overwrites a store)
-    Import {
-        /// Read the private credential envelope from stdin, never from command arguments
-        #[arg(long, required = true)]
-        stdin: bool,
-
-        /// Emit a secret-free JSON acknowledgement
-        #[arg(long)]
-        json: bool,
-    },
-    /// Show configured authentication status for model/tool providers
-    Status {
-        /// Emit JSON instead of plain text
-        #[arg(long)]
-        json: bool,
-    },
-    /// Diagnose provider auth issues and suggest next steps
-    Doctor {
-        /// Optional provider id or alias to focus diagnosis on one provider
-        #[arg(id = "auth_provider", value_name = "PROVIDER")]
-        provider: Option<String>,
-
-        /// Run live post-login validation for configured providers during diagnosis
-        #[arg(long)]
-        validate: bool,
-
-        /// Emit JSON instead of plain text
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-pub(crate) enum AmbientCommand {
-    /// Show ambient mode status
-    Status,
-    /// Show recent ambient activity log
-    Log,
-    /// Manually trigger an ambient cycle
-    Trigger,
-    /// Stop ambient mode
-    Stop,
-    /// Run an ambient cycle in a visible TUI (internal, spawned by the ambient runner)
-    #[command(hide = true)]
-    RunVisible,
-}
-
-#[derive(Subcommand, Debug)]
-pub(crate) enum MemoryCommand {
-    /// List all stored memories
-    List {
-        /// Filter by scope (project, global, all)
-        #[arg(short, long, default_value = "all")]
-        scope: String,
-
-        /// Filter by tag
-        #[arg(short, long)]
-        tag: Option<String>,
-    },
-
-    /// Search memories by query
-    Search {
-        /// Search query
-        query: String,
-
-        /// Use Jev relevance decisions instead of local keyword search (requires Jev access)
-        #[arg(short, long)]
-        semantic: bool,
-    },
-
-    /// Export memories to a JSON file
-    Export {
-        /// Output file path
-        output: String,
-
-        /// Export scope (project, global, all)
-        #[arg(short, long, default_value = "all")]
-        scope: String,
-    },
-
-    /// Import memories from a JSON file
-    Import {
-        /// Input file path
-        input: String,
-
-        /// Import scope (project, global)
-        #[arg(short, long, default_value = "project")]
-        scope: String,
-
-        /// Overwrite existing memories with same ID
-        #[arg(long)]
-        overwrite: bool,
-    },
-
-    /// Show memory statistics
-    Stats,
-
-    /// Clear test memory storage (used by debug sessions)
-    ClearTest,
-}
-
+#[path = "args_management.rs"]
+mod management;
+pub(crate) use management::AmbientCommand;
+pub(crate) use management::AuthCommand;
+pub(crate) use management::MemoryCommand;
+pub(crate) use management::ModelCommand;
+pub(crate) use management::ProviderCommand;
+pub(crate) use management::SessionCommand;
 #[cfg(test)]
 mod tests;

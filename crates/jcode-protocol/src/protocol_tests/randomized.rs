@@ -27,6 +27,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             id,
             content: content.clone(),
             images: images.clone(),
+            attachments: vec![],
             system_reminder: system_reminder.clone(),
             active_skill: None,
             no_reply: rng.random_bool(0.5),

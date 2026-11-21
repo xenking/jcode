@@ -187,15 +187,7 @@ async fn active_swarm_member(
     members.get(session_id).cloned()
 }
 
-/// Live agent for `session_id`, restoring a headless worker from disk when its
-/// agent is not loaded (for example a worker that failed before a reload).
-async fn task_agent_session(
-    session_id: &str,
-    sessions: &SessionAgents,
-    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-) -> Option<Arc<Mutex<Agent>>> {
-    super::worker_revive::live_or_revived_agent(session_id, sessions, swarm_members).await
-}
+use super::worker_revive::live_or_revived_agent as task_agent_session;
 
 async fn resolve_assignment_target_session(
     req_session_id: &str,
@@ -550,15 +542,30 @@ fn spawn_assigned_task_run(
         );
         let event_tx = progress_events.sender();
         let start_message_index = agent.message_count();
-        let result = super::turn_failover::process_reserved_locked_message_with_server_failover(
-            &mut agent,
-            &turn_lease,
-            &assignment_text,
-            vec![],
-            None,
-            event_tx,
-        )
-        .await;
+        // A planned task runs on a spawned worker: keep its failover inside the
+        // worker model allowlist exactly like the spawn path does.
+        let agents_config = crate::config::config().agents.clone();
+        let worker_allowed_models = agents_config.spawn_allowed_models.clone();
+        let worker_fallbacks = super::comm_session::spawn_model_selection::worker_allowed_fallbacks(
+            &worker_allowed_models,
+            &agents_config.swarm_model_fallbacks,
+        );
+        let result = match agent.mark_swarm_worker() {
+            Ok(()) => {
+                super::turn_failover::process_reserved_locked_message_with_swarm_fallbacks(
+                    &mut agent,
+                    &turn_lease,
+                    &assignment_text,
+                    vec![],
+                    None,
+                    event_tx,
+                    &worker_fallbacks,
+                    &worker_allowed_models,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
         let completion_report = agent.recent_assistant_output_tail_after(start_message_index);
         // The lease preserves ownership without holding Agent across queue drains.
         drop(agent);
@@ -909,7 +916,9 @@ pub(super) async fn handle_comm_assign_role(
                             .unwrap_or((true, false))
                     };
                     let not_in_sessions = !sessions.read().await.contains_key(coord_id);
-                    channel_closed || not_in_sessions || coord_is_headless
+                    coord_is_headless
+                        || (!sessions.is_idle_unloaded(coord_id)
+                            && (channel_closed || not_in_sessions))
                 } else {
                     true
                 }
@@ -966,6 +975,7 @@ pub(super) async fn handle_comm_assign_role(
         if let Some(member) = members.get_mut(&target_session) {
             member.role = role.clone();
         } else {
+            drop(members);
             finish_swarm_mutation_request(
                 swarm_mutation_runtime,
                 &mutation_state,
@@ -1397,7 +1407,7 @@ async fn handle_comm_assign_task_with_mode(
     )
     .await;
 
-    let target_agent = task_agent_session(&target_session, sessions, swarm_members).await;
+    let target_agent = task_agent_session(&target_session, sessions).await;
     let _ = queue_soft_interrupt_for_session(
         &target_session,
         notification.clone(),
@@ -1476,6 +1486,7 @@ async fn handle_comm_assign_task_with_mode(
         }
     }
 
+    drop(members);
     finish_swarm_mutation_request(
         swarm_mutation_runtime,
         &mutation_state,
@@ -1563,7 +1574,29 @@ pub(super) async fn handle_comm_assign_next(
             if let Ok(unused_target) = &preferred_target {
                 release_auto_assign_claim(&swarm_id, unused_target);
             }
-            match super::comm_session::spawn_swarm_agent(
+            let admission = super::comm_session::spawn_admission_lock(&swarm_id);
+            let guard = admission.lock().await;
+            if super::comm_session::ensure_spawn_coordinator_swarm(
+                id,
+                &req_session_id,
+                client_event_tx,
+                swarm_members,
+                swarms_by_id,
+                swarm_coordinators,
+                swarm_plans,
+                crate::config::config().agents.swarm_max_concurrent_agents,
+            )
+            .await
+            .is_none()
+            {
+                return;
+            }
+            let spawn_key = swarm_mutation_request_key(
+                &req_session_id,
+                "assign-next-spawn",
+                &[swarm_id.clone(), selected_task_id.clone()],
+            );
+            let result = super::comm_session::spawn_swarm_agent(
                 &req_session_id,
                 &swarm_id,
                 None,
@@ -1573,6 +1606,7 @@ pub(super) async fn handle_comm_assign_next(
                 model.clone(),
                 effort.clone(),
                 None,
+                &spawn_key,
                 sessions,
                 global_session_id,
                 provider_template,
@@ -1587,8 +1621,9 @@ pub(super) async fn handle_comm_assign_next(
                 soft_interrupt_queues,
                 client_connections,
             )
-            .await
-            {
+            .await;
+            drop(guard);
+            match result {
                 Ok(spawned_session) => {
                     handle_comm_assign_task(
                         id,
@@ -1735,6 +1770,7 @@ pub(super) async fn handle_comm_task_control(
             &req_session_id,
             &owner_swarm_id,
             target,
+            action,
             message.as_deref(),
             client_event_tx,
             sessions,
@@ -1778,6 +1814,7 @@ pub(super) async fn handle_comm_task_control(
             &req_session_id,
             &swarm_id,
             target,
+            action,
             message.as_deref(),
             client_event_tx,
             sessions,
@@ -1895,8 +1932,17 @@ pub(super) async fn handle_comm_task_control(
             // first and only then discover the agent was missing or busy,
             // leaving a live task falsely queued with its run history mangled
             // even though the request was rejected.
-            let Some(agent_arc) = task_agent_session(&assignee, sessions, swarm_members).await
-            else {
+            if action == TaskControlAction::Resume
+                && let Err(error) = crate::turn_activity::global().resume(&assignee)
+            {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: error.to_string(),
+                    retry_after_secs: None,
+                });
+                return;
+            }
+            let Some(agent_arc) = task_agent_session(&assignee, sessions).await else {
                 let _ = client_event_tx.send(ServerEvent::Error {
                     id,
                     message: format!(
@@ -2123,17 +2169,16 @@ pub(super) async fn handle_comm_task_control(
                 let prior_name = active_swarm_member(&assignee, swarm_members)
                     .await
                     .and_then(|member| member.friendly_name);
-                let summaries = if let Some(agent_arc) =
-                    task_agent_session(&assignee, sessions, swarm_members).await
-                {
-                    if let Ok(agent) = agent_arc.try_lock() {
-                        agent.get_tool_call_summaries(12)
+                let summaries =
+                    if let Some(agent_arc) = task_agent_session(&assignee, sessions).await {
+                        if let Ok(agent) = agent_arc.try_lock() {
+                            agent.get_tool_call_summaries(12)
+                        } else {
+                            vec![]
+                        }
                     } else {
                         vec![]
-                    }
-                } else {
-                    vec![]
-                };
+                    };
                 let mut salvage = format_salvage_message(
                     &assignee,
                     prior_name.as_deref(),
@@ -2374,6 +2419,7 @@ async fn wake_session_without_plan(
     req_session_id: &str,
     swarm_id: &str,
     target: &str,
+    action: TaskControlAction,
     message: Option<&str>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     sessions: &SessionAgents,
@@ -2403,10 +2449,17 @@ async fn wake_session_without_plan(
         });
         return;
     }
-    if task_agent_session(&session_id, sessions, swarm_members)
-        .await
-        .is_none()
+    if action == TaskControlAction::Resume
+        && let Err(error) = crate::turn_activity::global().resume(&session_id)
     {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: error.to_string(),
+            retry_after_secs: None,
+        });
+        return;
+    }
+    if task_agent_session(&session_id, sessions).await.is_none() {
         let _ = client_event_tx.send(ServerEvent::Error {
             id,
             message: format!(

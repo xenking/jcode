@@ -1,12 +1,12 @@
 use super::*;
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 fn inline_view_display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
-pub(super) fn inline_ui_height(app: &dyn TuiState) -> u16 {
+pub(crate) fn inline_ui_height(app: &dyn TuiState) -> u16 {
     match app.inline_ui_state() {
         Some(crate::tui::InlineUiStateRef::Interactive(picker)) => {
             // Model choices replace the command suggestions, without reflowing chat.
@@ -20,7 +20,15 @@ pub(super) fn inline_ui_height(app: &dyn TuiState) -> u16 {
         Some(crate::tui::InlineUiStateRef::View(view)) => {
             let visible_rows = view.lines.len().max(1) as u16;
             let rows_needed = visible_rows + 1 + 2; // header + rounded border
-            rows_needed.min(10)
+            // The `/btw` side-question card streams an answer and pays for its
+            // rows; every other inline view stays a compact notice.
+            if app.btw_card_open() {
+                // A streamed answer wraps, so a card with few logical lines
+                // still needs room; cap it so it never eats the transcript.
+                rows_needed.clamp(10, 18)
+            } else {
+                rows_needed.min(10)
+            }
         }
         None => 0,
     }
@@ -103,5 +111,13 @@ fn draw_inline_view(
         )));
     }
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    // A `/btw` answer is prose that streams into a fixed-width card: wrap it
+    // instead of clipping every line at the border. Every other inline view is
+    // a short notice that already fits.
+    let paragraph = if app.btw_card_open() {
+        Paragraph::new(lines).wrap(Wrap { trim: false })
+    } else {
+        Paragraph::new(lines)
+    };
+    frame.render_widget(paragraph, inner);
 }

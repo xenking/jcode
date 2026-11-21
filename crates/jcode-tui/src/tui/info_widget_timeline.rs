@@ -13,6 +13,7 @@ use ratatui::prelude::*;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::Instant;
+use unicode_width::UnicodeWidthStr;
 
 /// Maximum number of events retained in the rolling timeline.
 const MAX_EVENTS: usize = 48;
@@ -194,7 +195,7 @@ pub fn clear_timeline_for_tests() {
 const NOW_MARKER: &str = " ◀";
 
 fn render_event_line(ev: &TimelineEvent, width: usize, is_last: bool) -> Line<'static> {
-    let reserved = if is_last { NOW_MARKER.chars().count() } else { 0 };
+    let reserved = if is_last { NOW_MARKER.width() } else { 0 };
     let mut spans: Vec<Span<'static>> = Vec::new();
 
     match ev.kind {
@@ -221,7 +222,7 @@ fn render_event_line(ev: &TimelineEvent, width: usize, is_last: bool) -> Line<'s
             let mut used = 2usize;
             if let Some(hash) = ev.detail.as_deref() {
                 let hash_disp = format!("{} ", hash);
-                used += hash_disp.chars().count();
+                used += hash_disp.width();
                 spans.push(Span::styled(
                     hash_disp,
                     Style::default().fg(rgb(110, 200, 140)),

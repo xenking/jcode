@@ -526,7 +526,7 @@ fn render_memory_step_line(
     let available = max_width
         .saturating_sub(UnicodeWidthStr::width(prefix))
         .saturating_sub(UnicodeWidthStr::width(marker))
-        .saturating_sub(label.chars().count() + 4);
+        .saturating_sub(label.width() + 4);
     let rail_color = if matches!(status, StepStatus::Running) {
         rgb(255, 200, 100)
     } else {

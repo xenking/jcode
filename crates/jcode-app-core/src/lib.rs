@@ -23,6 +23,13 @@
 // paths resolve here exactly as they did before the split.
 pub use jcode_base::*;
 
+mod comm_format;
+
+pub mod protocol {
+    pub use crate::comm_format::*;
+    pub use jcode_base::protocol::*;
+}
+
 // Upper layer (server / tool / agent and supporting leaves).
 pub mod agent;
 pub mod ambient;
@@ -31,6 +38,7 @@ pub mod ambient_scheduler;
 pub mod build;
 pub mod catchup;
 pub mod channel;
+pub mod incoming_message;
 pub use jcode_base::external_auth;
 pub mod agents_status;
 pub mod mission;
@@ -42,6 +50,7 @@ pub mod perf;
 pub mod replay;
 pub mod restart_snapshot;
 pub mod running_tool_registry;
+pub mod screen_context;
 pub mod server;
 pub mod server_spawn;
 pub mod session_effort;
@@ -54,6 +63,7 @@ pub mod ssh_remote;
 pub mod startup_profile;
 pub(crate) mod stream_batching;
 pub mod tool;
+pub mod turn_activity;
 pub mod turn_cancel_registry;
 pub mod update;
 pub mod wait_registry;

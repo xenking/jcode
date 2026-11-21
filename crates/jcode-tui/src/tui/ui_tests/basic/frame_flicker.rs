@@ -832,9 +832,10 @@ fn notification_spans_include_recent_flicker_warning_and_log_hint() {
         rendered.contains("logs:"),
         "expected log hint in notification line, got: {rendered}"
     );
+    let badge = format!("[{}⇧Z]", crate::tui::ui::viewport::COPY_BADGE_ALT_LABEL);
     assert!(
-        rendered.contains("[Alt⇧Z]"),
-        "expected copy badge in notification line, got: {rendered}"
+        rendered.contains(&badge),
+        "expected copy badge {badge} in notification line, got: {rendered}"
     );
 
     let target = recent_flicker_copy_target_for_key('z').expect("expected flicker copy target");

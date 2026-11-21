@@ -804,6 +804,8 @@ pub(crate) struct ReturnReport {
     pub epoch: u64,
     pub messages: usize,
     pub merge: MergeOutcome,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -832,8 +834,17 @@ pub(crate) fn run_return(
     keep_local_auth: bool,
 ) -> Result<ReturnReport> {
     let session_id = resolve_session_id(session_ref)?;
-    group::reject_member_return(&session_id)?;
+    if let Some(coordinator) = group::return_coordinator(&session_id)? {
+        return group::return_group(
+            &coordinator,
+            &session_id,
+            target,
+            refs_only,
+            keep_local_auth,
+        );
+    }
     let _migration_lock = group::lock_sessions(std::slice::from_ref(&session_id))?;
+    group::reject_member_return(&session_id)?;
     let lease = storage::read_session_lease(&session_id)
         .with_context(|| format!("session {session_id} was never moved"))?;
     let receipt_path = return_state_path(&session_id, lease.epoch, "receipt.json")?;
@@ -994,6 +1005,7 @@ pub(crate) fn run_return(
         epoch,
         messages: sess.messages.len(),
         merge,
+        members: Vec::new(),
     };
     // Persist the completion receipt before switching the local lease. A retry
     // can acknowledge the remote fence even after a lost SSH response/crash.
@@ -1916,6 +1928,45 @@ fn merge_back(
     base_snapshot: Option<&str>,
     refs_only: bool,
 ) -> Result<MergeOutcome> {
+    let plan = plan_merge_back(root, session_id, remote, bundle, base_snapshot, refs_only)?;
+    if let Some(checkout) = &plan.checkout {
+        apply_checkout_merge(root, checkout)?;
+    }
+    Ok(plan.outcome)
+}
+
+#[derive(Serialize, Deserialize)]
+struct ReturnMergePlan {
+    outcome: MergeOutcome,
+    checkout: Option<CheckoutMerge>,
+}
+
+impl From<MergeOutcome> for ReturnMergePlan {
+    fn from(outcome: MergeOutcome) -> Self {
+        Self {
+            outcome,
+            checkout: None,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct CheckoutMerge {
+    local_head: String,
+    new_head: String,
+    branch: Option<String>,
+    ours: String,
+    tree: String,
+}
+
+fn plan_merge_back(
+    root: &Path,
+    session_id: &str,
+    remote: &RepoManifest,
+    bundle: &Path,
+    base_snapshot: Option<&str>,
+    refs_only: bool,
+) -> Result<ReturnMergePlan> {
     let cloud_ref = format!("{SNAPSHOT_REF_PREFIX}/{session_id}/cloud");
     let cloud_head_ref = format!("{SNAPSHOT_REF_PREFIX}/{session_id}/cloud-head");
     let bundle_str = bundle.to_string_lossy().to_string();
@@ -1934,10 +1985,10 @@ fn merge_back(
     let cloud_snapshot = remote.snapshot.clone();
 
     if base_snapshot == Some(cloud_snapshot.as_str()) {
-        return Ok(MergeOutcome::Unchanged);
+        return Ok(MergeOutcome::Unchanged.into());
     }
     if refs_only {
-        return Ok(MergeOutcome::RefsOnly { cloud_snapshot });
+        return Ok(MergeOutcome::RefsOnly { cloud_snapshot }.into());
     }
 
     // Step 1: commits. If the cloud branch strictly moved ahead of the
@@ -2034,43 +2085,101 @@ fn merge_back(
         return Ok(MergeOutcome::Conflicts {
             cloud_snapshot,
             files: conflicts,
-        });
+        }
+        .into());
     }
 
-    // Apply: move branch (if fast-forwarded), then check out merged tree as
-    // uncommitted changes relative to the new HEAD. `read-tree -m -u` with two
-    // trees refuses to overwrite files that differ from the old tree, so we
-    // go from the "ours" tree we just captured (== current worktree).
-    if new_head != local_head
-        && let Some(branch) = &local_branch
+    Ok(ReturnMergePlan {
+        outcome: MergeOutcome::Applied {
+            cloud_snapshot,
+            branch: local_branch.clone(),
+            head: new_head.clone(),
+        },
+        checkout: Some(CheckoutMerge {
+            local_head,
+            new_head,
+            branch: local_branch,
+            ours,
+            tree,
+        }),
+    })
+}
+
+fn apply_checkout_merge(root: &Path, plan: &CheckoutMerge) -> Result<()> {
+    let staging = tempfile::tempdir()?;
+    let head = git(root, &["rev-parse", "HEAD"])?;
+    let branch = git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok();
+    if branch != plan.branch || (head != plan.local_head && head != plan.new_head) {
+        bail!(
+            "local HEAD or branch changed during cloud return; the cloud work is still in the rescue refs"
+        );
+    }
+    let current = snapshot_worktree_tree(root, staging.path())?;
+    if current != plan.ours && current != plan.tree {
+        // On restart, each file may be in its original or merged state, but a
+        // third state is a concurrent edit and must not be overwritten.
+        let before = changed_paths(root, &plan.ours, &current)?;
+        let after = changed_paths(root, &plan.tree, &current)?;
+        if !before.is_disjoint(&after) {
+            bail!(
+                "local worktree changed during cloud return; the cloud work is still in the rescue refs"
+            );
+        }
+    }
+    if current != plan.tree {
+        let index = staging.path().join("apply.index");
+        let env = [("GIT_INDEX_FILE", index.as_os_str())];
+        git_env(root, &["read-tree", &current], &env)?;
+        let _ = git_env(root, &["update-index", "-q", "--refresh"], &env);
+        git_env(root, &["read-tree", "-m", "-u", &current, &plan.tree], &env)?;
+    }
+    if plan.new_head != head
+        && let Some(branch) = &plan.branch
     {
         git(
             root,
             &[
                 "update-ref",
                 &format!("refs/heads/{branch}"),
-                &new_head,
-                &local_head,
+                &plan.new_head,
+                &head,
             ],
         )?;
     }
-    let index = staging.path().join("apply.index");
-    let env = [("GIT_INDEX_FILE", index.as_os_str())];
-    git_env(root, &["read-tree", &ours], &env)?;
-    // A fresh index has no stat data, so every file looks modified. Refresh
-    // it against the worktree (which equals `ours`) so two-way read-tree can
-    // update files safely.
-    let _ = git_env(root, &["update-index", "-q", "--refresh"], &env);
-    git_env(root, &["read-tree", "-m", "-u", &ours, &tree], &env)?;
-    // Real index: reflect new HEAD, keep changes unstaged like before.
-    git(root, &["reset", "--quiet", "--mixed", &new_head])?;
-    // Files deleted by the merge that were untracked locally are handled by
-    // read-tree -u. Report.
-    Ok(MergeOutcome::Applied {
-        cloud_snapshot,
-        branch: local_branch,
-        head: new_head,
-    })
+    git(root, &["reset", "--quiet", "--mixed", &plan.new_head])?;
+    Ok(())
+}
+
+fn changed_paths(
+    root: &Path,
+    before: &str,
+    after: &str,
+) -> Result<std::collections::BTreeSet<Vec<u8>>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            before,
+            after,
+            "--",
+        ])
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "could not compare Git return trees: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(output
+        .stdout
+        .split(|&byte| byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect())
 }
 
 /// Tree object for the current working tree (tracked + untracked, not ignored).
@@ -2269,10 +2378,21 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
                         files.join(", ")
                     ),
                 };
-                println!(
-                    "Returned {} from `{}` ({} messages). Code: {merge}.\n  Resume: jcode --resume {}",
-                    report.session_id, report.host, report.messages, report.session_id
-                );
+                if report.members.is_empty() {
+                    println!(
+                        "Returned {} from `{}` ({} messages). Code: {merge}.\n  Resume: jcode --resume {}",
+                        report.session_id, report.host, report.messages, report.session_id
+                    );
+                } else {
+                    println!(
+                        "Returned {} sessions from `{}` ({} messages): {}. Code: {merge}.\n  Resume: jcode --resume {}",
+                        report.members.len(),
+                        report.host,
+                        report.messages,
+                        report.members.join(", "),
+                        report.session_id
+                    );
+                }
             }
             if attach {
                 let exe = std::env::current_exe()?;
@@ -2326,7 +2446,7 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             println!("{}", super::cloud_managed::describe(&reply));
             Ok(())
         }
-        C::Proxy => super::cloud_managed::run_proxy(),
+        C::Proxy { machine } => super::cloud_managed::run_proxy(machine),
         C::Credentials {
             provider,
             account,
@@ -2341,6 +2461,21 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             require_completion,
         } => run_export(&session, epoch, require_completion),
         C::CompleteReturn { session, epoch } => complete_return(&session, epoch),
+        C::GroupExport {
+            coordinator,
+            epoch,
+            transfer,
+        } => {
+            let bytes = group::export_group(coordinator, epoch, transfer)?;
+            std::io::stdout().write_all(&bytes)?;
+            std::io::stdout().flush()?;
+            Ok(())
+        }
+        C::GroupCompleteReturn {
+            coordinator,
+            epoch,
+            transfer,
+        } => group::complete_group_return(coordinator, epoch, transfer),
         C::CancelReturn { session, epoch } => {
             group::reject_member_return(&session)?;
             let _migration_lock = group::lock_sessions(std::slice::from_ref(&session))?;
@@ -2447,149 +2582,9 @@ fn install_session(sess: &session::Session, stage: &Path) -> Result<()> {
     Ok(())
 }
 
-fn append_system_notice(sess: &mut session::Session, text: &str) {
-    append_arrival(sess, &[], "", text);
-}
-
-/// Tool calls in the final assistant message that have no result yet. When
-/// the agent itself runs `/cloud` mid-turn, its own bash call is one of these.
-fn dangling_tool_use_ids(sess: &session::Session) -> Vec<String> {
-    use crate::message::{ContentBlock, Role};
-    let Some(last_assistant) = sess
-        .messages
-        .iter()
-        .rposition(|m| m.role == Role::Assistant)
-    else {
-        return Vec::new();
-    };
-    let answered: std::collections::HashSet<&str> = sess.messages[last_assistant + 1..]
-        .iter()
-        .flat_map(|m| m.content.iter())
-        .filter_map(|b| match b {
-            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
-            _ => None,
-        })
-        .collect();
-    sess.messages[last_assistant]
-        .content
-        .iter()
-        .filter_map(|b| match b {
-            ContentBlock::ToolUse { id, .. } if !answered.contains(id.as_str()) => Some(id.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
-fn append_arrival(sess: &mut session::Session, dangling: &[String], host: &str, text: &str) {
-    let mut blocks: Vec<crate::message::ContentBlock> = dangling
-        .iter()
-        .map(|id| crate::message::ContentBlock::ToolResult {
-            tool_use_id: id.clone(),
-            content: format!(
-                "jcode cloud move completed. This session now runs on cloud host `{host}`. This tool call was interrupted by the move; rerun it here if its result still matters."
-            ),
-            is_error: None,
-        })
-        .collect();
-    blocks.push(crate::message::ContentBlock::Text {
-        text: format!("<system-reminder>\n{text}\n</system-reminder>"),
-        cache_control: None,
-    });
-    // Tool results must stay provider-visible and paired with their calls.
-    let role = dangling
-        .is_empty()
-        .then_some(session::StoredDisplayRole::System);
-    sess.add_message_with_display_role(crate::message::Role::User, blocks, role);
-}
-
-fn arrival_context(manifest: &MoveManifest) -> Vec<String> {
-    let mut lines = vec![format!(
-        "This session was moved from `{}` to cloud host `{}` at {} (migration epoch {}). You are now running on the cloud host. The conversation, todos and project memory came along.",
-        manifest.source_host, manifest.target_host, manifest.created_at, manifest.epoch
-    )];
-    if let Some(repo) = &manifest.repo {
-        lines.push(format!(
-            "The repository is restored at the same path `{}` on branch `{}` at {}{}. Paths in earlier messages are still valid.",
-            repo.root,
-            repo.branch.as_deref().unwrap_or("(detached)"),
-            &repo.head[..repo.head.len().min(12)],
-            if repo.dirty {
-                ", with the same uncommitted and untracked changes"
-            } else {
-                ""
-            }
-        ));
-        if !repo.ignored_files.is_empty() {
-            lines.push(format!(
-                "Ignored files copied: {}.",
-                repo.ignored_files.join(", ")
-            ));
-        }
-        lines.push("Build caches (target/, node_modules/, etc.) did not come along. The first build here will be cold. Install dependencies if a command fails for that reason.".to_string());
-    }
-    if !manifest.toolchain_hints.is_empty() {
-        lines.push(format!(
-            "Toolchain hints from the repo: {}. Check these tools exist on this host before relying on them.",
-            manifest.toolchain_hints.join(", ")
-        ));
-    }
-    if !manifest.not_transferred.is_empty() {
-        lines.push(format!(
-            "These were running locally and did NOT move: {}. Restart them here if you still need them.",
-            manifest.not_transferred.join("; ")
-        ));
-    }
-    if !manifest.mcp_servers.is_empty() {
-        lines.push(format!(
-            "Local MCP servers ({}) are not connected here unless this host configures them too.",
-            manifest.mcp_servers.join(", ")
-        ));
-    }
-    lines
-}
-
-fn arrival_notice(manifest: &MoveManifest) -> String {
-    let mut lines = arrival_context(manifest);
-    lines.push("There is no local display, desktop, browser or ssh-agent on this host. Keep working on the task exactly where you left off. The user can bring the session back with /local (`jcode cloud return`). Git will merge your work with any local edits.".to_string());
-    lines.push(crate::cloud_environment::migration_guidance(
-        &manifest.session_id,
-    ));
-    lines.join("\n")
-}
-
-fn describe_local_only_state(session_id: &str) -> Vec<String> {
-    let mut items = Vec::new();
-    let dir = std::env::temp_dir().join("jcode-bg-tasks");
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_none_or(|e| e != "json") {
-                continue;
-            }
-            let Ok(raw) = std::fs::read(&path) else {
-                continue;
-            };
-            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&raw) else {
-                continue;
-            };
-            if value.get("session_id").and_then(|v| v.as_str()) != Some(session_id) {
-                continue;
-            }
-            if value.get("status").and_then(|v| v.as_str()) != Some("running") {
-                continue;
-            }
-            let name = value
-                .get("display_name")
-                .and_then(|v| v.as_str())
-                .or_else(|| value.get("tool_name").and_then(|v| v.as_str()))
-                .unwrap_or("task");
-            let id = value.get("task_id").and_then(|v| v.as_str()).unwrap_or("?");
-            items.push(format!("background task {id} ({name})"));
-        }
-    }
-    items
-}
-
+#[path = "cloud_move_arrival.rs"]
+mod arrival;
+use arrival::*;
 fn toolchain_hints(root: Option<&Path>) -> Vec<String> {
     let Some(root) = root else { return Vec::new() };
     [

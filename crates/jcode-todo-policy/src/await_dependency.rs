@@ -22,7 +22,13 @@ impl AwaitDependency {
     }
 
     pub fn is_running_at(&self, now_ms: u64) -> bool {
-        self.background && self.final_response.is_none() && self.deadline_unix_ms > now_ms
+        // The deadline only schedules finalization. Until the watcher commits
+        // a result, completion has not woken the session yet. Mirror the
+        // server's pending-state TTL to avoid blocking on abandoned records.
+        const PENDING_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+        self.background
+            && self.final_response.is_none()
+            && now_ms.saturating_sub(self.deadline_unix_ms) <= PENDING_TTL_MS
     }
 
     pub fn is_running(&self) -> bool {

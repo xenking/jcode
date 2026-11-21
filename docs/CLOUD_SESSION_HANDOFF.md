@@ -46,6 +46,30 @@ The VM's `~/.local/bin/jcode` and service launchers are preserved, including the
 
 Automatic upgrades apply only to the managed host. Other SSH targets or custom launchers must already provide compatible commands; their binaries are not automatically replaced.
 
+## Registered machines on a self-hosted control plane
+
+When `JCODE_API_BASE` points at a self-hosted control plane (xenking/jcode-cloud),
+`jcode-cloud` is the account's default registered machine. To pick another one,
+pass its registered name with the `cloud:` prefix:
+
+```sh
+jcode cloud move --host cloud:orc-htz
+jcode cloud return --host cloud:orc-htz
+```
+
+The name goes only to the control plane, which returns the address, login, port
+and host keys. It is never resolved through SSH config or DNS, so it cannot be
+confused with an SSH alias of the same name. Each named machine has its own
+private SSH config, pinned host keys, remembered login and shared connection
+under `~/.jcode/cloud/`. A control plane that does not confirm the requested
+name is refused instead of falling back to the default machine.
+
+A registered machine keeps the jcode its owner installed. Preflight does not
+install a release into `/opt/jcode-cloud` there. It probes the installed jcode
+for the required handoff commands, as it does for an ordinary SSH host, and
+creates this computer's home directory on the machine so the repository keeps
+its path.
+
 ## Transfer performance and recovery
 
 Host preparation and local snapshot preparation run concurrently. SSH protocol

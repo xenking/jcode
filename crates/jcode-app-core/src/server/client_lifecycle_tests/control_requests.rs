@@ -130,6 +130,42 @@ async fn refreshed_session_control_handle_does_not_wait_for_busy_agent_lock() {
 }
 
 #[tokio::test]
+async fn busy_missing_queue_fails_closed_without_waiting() {
+    let provider: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
+        forked: Arc::new(AtomicBool::new(false)),
+    });
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+    let _busy = agent.lock().await;
+    let queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
+    let signals = Arc::new(RwLock::new(HashMap::new()));
+    let control = tokio::time::timeout(
+        Duration::from_millis(100),
+        refresh_session_control_handle("missing-queue-session", &agent, &signals, &queues),
+    )
+    .await
+    .expect("busy agent must not block attachment");
+    assert!(control.needs_queue_refresh());
+    assert!(!control.queue_soft_interrupt(
+        "hello".into(),
+        Vec::new(),
+        false,
+        SoftInterruptSource::User
+    ));
+    assert!(
+        control
+            .enqueue_user_prompt(
+                "id".into(),
+                "hello".into(),
+                Vec::new(),
+                jcode_agent_runtime::QueuedMessageMode::Steer,
+                None
+            )
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn busy_session_background_tool_signal_fires_via_registry_fallback() {
     // Regression: pressing Alt+B/Ctrl+B while a turn owns the agent mutex (e.g.
     // running `await_members`) used to silently no-op because the lock-free
@@ -242,6 +278,7 @@ async fn context_message_persists_without_starting_turn() {
         77,
         "remember this context",
         vec![("image/png".to_string(), "AAA".to_string())],
+        None,
         session_id,
         false,
         &agent,
@@ -286,6 +323,7 @@ async fn context_message_rejects_while_busy_without_waiting_for_agent_lock() {
             78,
             "too busy",
             Vec::new(),
+            None,
             "session_context_busy",
             true,
             &agent,
@@ -319,9 +357,9 @@ async fn cancel_without_local_task_still_signals_session_control() {
     // after reload, server-initiated turn). Without a registered active turn
     // the cancel is a deliberate no-op, because arming the signal with nothing
     // running only kills the *next* message.
-    let _active_turn = crate::turn_cancel_registry::register_active_turn(
+    let active_turn = crate::turn_cancel_registry::register_active_turn(
         "session_detached_cancel",
-        InterruptSignal::new(),
+        stop_signal.clone(),
     );
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let swarm_members = Arc::new(RwLock::new(HashMap::new()));
@@ -357,24 +395,21 @@ async fn cancel_without_local_task_still_signals_session_control() {
     .await;
 
     assert!(stop_signal.is_set());
-    assert!(!client_is_processing);
-    assert!(message_id.is_none());
-    assert!(session_id.is_none());
-    assert!(matches!(
-        client_event_rx.recv().await,
-        Some(ServerEvent::TurnStopped {
-            reason: crate::protocol::TurnStopReason::Interrupted,
-            ..
-        })
-    ));
-    assert!(matches!(
-        client_event_rx.recv().await,
-        Some(ServerEvent::Interrupted)
-    ));
-    assert!(matches!(
-        client_event_rx.recv().await,
-        Some(ServerEvent::Done { id: 99 })
-    ));
+    // A signal is not confirmation: the detached turn still owns the agent.
+    assert!(client_is_processing);
+    assert_eq!(message_id, Some(99));
+    assert_eq!(session_id.as_deref(), Some("session_detached_cancel"));
+    assert!(client_event_rx.try_recv().is_err());
+    tokio::time::sleep(Duration::from_millis(650)).await;
+    assert!(
+        stop_signal.is_set(),
+        "a running turn must retain cancellation until it observes it"
+    );
+    drop(active_turn);
+    assert!(
+        !stop_signal.is_set(),
+        "turn completion resets the signal for the next turn"
+    );
 }
 
 /// Regression for issue #428: the detached-turn cancel path schedules a

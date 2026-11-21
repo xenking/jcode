@@ -375,55 +375,9 @@ fn find_session_file(session_id: &str) -> Result<PathBuf> {
     anyhow::bail!("Session {} not found", session_id);
 }
 
-/// Convert Claude Code content blocks to jcode ContentBlocks
-fn convert_content_blocks(content: &ClaudeCodeContent) -> Vec<ContentBlock> {
-    match content {
-        ClaudeCodeContent::Empty => vec![],
-        ClaudeCodeContent::Text(text) => {
-            if text.is_empty() {
-                vec![]
-            } else {
-                vec![ContentBlock::Text {
-                    text: text.clone(),
-                    cache_control: None,
-                }]
-            }
-        }
-        ClaudeCodeContent::Blocks(blocks) => blocks
-            .iter()
-            .filter_map(|block| match block {
-                ClaudeCodeContentBlock::Text { text } => Some(ContentBlock::Text {
-                    text: text.clone(),
-                    cache_control: None,
-                }),
-                ClaudeCodeContentBlock::Thinking { thinking, .. } => {
-                    Some(ContentBlock::Reasoning {
-                        text: thinking.clone(),
-                    })
-                }
-                ClaudeCodeContentBlock::ToolUse { id, name, input } => {
-                    Some(ContentBlock::ToolUse {
-                        id: id.clone(),
-                        name: name.clone(),
-                        input: input.clone(),
-                        thought_signature: None,
-                    })
-                }
-                ClaudeCodeContentBlock::ToolResult {
-                    tool_use_id,
-                    content,
-                    is_error,
-                } => Some(ContentBlock::ToolResult {
-                    tool_use_id: tool_use_id.clone(),
-                    content: content.clone(),
-                    is_error: *is_error,
-                }),
-                ClaudeCodeContentBlock::Unknown => None,
-            })
-            .collect(),
-    }
-}
-
+#[path = "import/content_conversion.rs"]
+mod content_conversion;
+use content_conversion::convert_content_blocks;
 fn truncate_import_text(text: String, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
         return text;
@@ -463,7 +417,8 @@ fn imported_message_text(blocks: &[ContentBlock], truncate_blocks: bool) -> (Str
             | ContentBlock::OpenAIReasoning { .. }
             | ContentBlock::OpenAICompaction { .. }
             | ContentBlock::ToolReference { .. }
-            | ContentBlock::ProviderNative { .. } => {
+            | ContentBlock::ProviderNative { .. }
+            | ContentBlock::Unknown => {
                 changed = true;
                 continue;
             }
@@ -530,7 +485,8 @@ fn normalize_imported_history(session: &mut Session, apply_limits: bool) -> bool
         message.content = vec![ContentBlock::Text {
             text,
             cache_control: None,
-        }];
+        }]
+        .into();
         normalized.push(message);
     }
 
@@ -563,6 +519,7 @@ fn normalize_imported_history(session: &mut Session, apply_limits: bool) -> bool
             kept_reversed.insert(
                 0,
                 StoredMessage {
+                    attachment_data: None,
                     id: crate::id::new_id("message"),
                     role: Role::User,
                     content: vec![ContentBlock::Text {
@@ -570,7 +527,7 @@ fn normalize_imported_history(session: &mut Session, apply_limits: bool) -> bool
                             "[Imported session: {omitted} older messages were omitted for a fast, provider-safe resume. Use session_search to inspect earlier external history.]"
                         ),
                         cache_control: None,
-                    }],
+                    }].into(),
                     display_role: None,
                     timestamp: None,
                     tool_duration_ms: None,
@@ -842,9 +799,10 @@ fn import_session_from_file_with_target(
                 .unwrap_or_else(|| crate::id::new_id("msg"));
 
             imported_messages.push(StoredMessage {
+                attachment_data: None,
                 id: msg_id,
                 role,
-                content: content_blocks,
+                content: content_blocks.into(),
                 display_role: None,
                 timestamp: None,
                 tool_duration_ms: None,
@@ -992,12 +950,14 @@ fn append_text_message(
         return;
     }
     session.append_stored_message(StoredMessage {
+        attachment_data: None,
         id: crate::id::new_id("msg"),
         role,
         content: vec![ContentBlock::Text {
             text: text.to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp,
         tool_duration_ms: None,

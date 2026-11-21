@@ -12,6 +12,7 @@ fn partial_frame_transport_eof_is_not_a_fatal_protocol_error() {
             &ServerFrame::reply(
                 hello.id,
                 ApiEvent::HelloOk {
+                    runtime_identity: None,
                     version: API_VERSION_MAJOR,
                     server: "partial-frame-test".into(),
                     capabilities: vec![],

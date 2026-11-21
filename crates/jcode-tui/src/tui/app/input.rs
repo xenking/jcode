@@ -6,6 +6,8 @@ mod word_boundaries;
 #[path = "input/shell_commands.rs"]
 mod shell_commands;
 use shell_commands::*;
+#[path = "input_key_dispatch.rs"]
+mod key_dispatch;
 
 use super::{
     App, ContentBlock, DisplayMessage, Message, ProcessingStatus, Role, SendAction, commands,
@@ -45,36 +47,8 @@ pub(super) fn floor_char_boundary(text: &str, index: usize) -> usize {
     index
 }
 
-/// Remove reasoning-marked lines from committed transcript text. Reasoning lines
-/// are wrapped in emphasis containing the invisible [`REASONING_SENTINEL`]
-/// (see `jcode_tui_markdown::reasoning_line_markup`). Trailing blank lines left
-/// behind are trimmed so the remaining answer renders cleanly.
-pub(super) fn strip_reasoning_lines(content: &str) -> String {
-    let sentinel = jcode_tui_markdown::REASONING_SENTINEL;
-    let mut out_lines: Vec<&str> = Vec::new();
-    for line in content.split('\n') {
-        if line.contains(sentinel) {
-            continue;
-        }
-        out_lines.push(line);
-    }
-    // Collapse runs of blank lines created by removed reasoning blocks, and trim
-    // leading/trailing blank lines.
-    let mut result = String::with_capacity(content.len());
-    let mut prev_blank = true; // suppress leading blanks
-    for line in out_lines {
-        let is_blank = line.trim().is_empty();
-        if is_blank && prev_blank {
-            continue;
-        }
-        if !result.is_empty() {
-            result.push('\n');
-        }
-        result.push_str(line);
-        prev_blank = is_blank;
-    }
-    result.trim_end().to_string()
-}
+mod reasoning_transcript;
+pub(super) use reasoning_transcript::strip_reasoning_lines;
 
 fn mission_turn_reminder(session_id: &str) -> Option<String> {
     crate::mission::active_system_reminder(session_id)
@@ -100,6 +74,7 @@ pub(super) struct PreparedInput {
     pub raw_input: String,
     pub expanded: String,
     pub images: Vec<(String, String)>,
+    pub pasted_contents: Vec<String>,
 }
 
 // Roughly 500k English words at ~6 bytes/word including spaces. This is still
@@ -337,6 +312,7 @@ use paste_guard::load_dropped_image;
 pub(crate) use paste_guard::tiny_png_bytes_for_test;
 
 pub(super) fn handle_paste(app: &mut App, text: String) {
+    app.preferred_input_column = None;
     if app.append_ssh_login_input(&text) {
         return;
     }
@@ -883,20 +859,24 @@ fn visible_prompt_history(app: &mut App) -> Vec<String> {
     app.merged_prompt_history()
 }
 
-fn byte_offset_for_line_column(
-    input: &str,
-    line_start: usize,
-    line_end: usize,
+pub(super) struct PreferredInputColumn {
+    cursor_pos: usize,
+    line_width: usize,
     column: usize,
-) -> usize {
-    let mut offset = line_end;
-    for (idx, (byte_offset, _)) in input[line_start..line_end].char_indices().enumerate() {
-        if idx == column {
-            offset = line_start + byte_offset;
-            break;
-        }
+}
+
+fn vertical_input_step(code: KeyCode, modifiers: KeyModifiers) -> Option<isize> {
+    match (code, modifiers.is_empty()) {
+        (KeyCode::Up, true) => Some(-1),
+        (KeyCode::Down, true) => Some(1),
+        _ => None,
     }
-    offset
+}
+
+pub(super) fn reset_preferred_input_column(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    if vertical_input_step(code, modifiers).is_none() {
+        app.preferred_input_column = None;
+    }
 }
 
 pub(super) fn handle_multiline_input_navigation(
@@ -904,77 +884,37 @@ pub(super) fn handle_multiline_input_navigation(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> bool {
-    if !modifiers.is_empty() || !matches!(code, KeyCode::Up | KeyCode::Down) {
-        return false;
-    }
-
-    // Prefer true visual-row movement: with soft wrapping a single logical
-    // line can occupy several rows, and Up/Down should follow what the user
-    // sees. Falls through to history recall at the first/last visual row.
-    if let Some(target) = visual_line_move_in_composer(app, code) {
-        app.cursor_pos = target;
-        return true;
-    }
-
-    if !app.input.contains('\n') {
-        return false;
-    }
-
-    let input = app.input.as_str();
-    let cursor = app.cursor_pos.min(input.len());
-    let line_start = input[..cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
-    let line_end = input[cursor..]
-        .find('\n')
-        .map(|idx| cursor + idx)
-        .unwrap_or(input.len());
-    let column = input[line_start..cursor].chars().count();
-
-    let target = match code {
-        KeyCode::Up => {
-            if line_start == 0 {
-                return false;
-            }
-            let previous_line_end = line_start - 1;
-            let previous_line_start = input[..previous_line_end]
-                .rfind('\n')
-                .map(|idx| idx + 1)
-                .unwrap_or(0);
-            byte_offset_for_line_column(input, previous_line_start, previous_line_end, column)
-        }
-        KeyCode::Down => {
-            if line_end >= input.len() {
-                return false;
-            }
-            let next_line_start = line_end + 1;
-            let next_line_end = input[next_line_start..]
-                .find('\n')
-                .map(|idx| next_line_start + idx)
-                .unwrap_or(input.len());
-            byte_offset_for_line_column(input, next_line_start, next_line_end, column)
-        }
-        _ => return false,
-    };
-
-    app.cursor_pos = target;
-    true
-}
-
-/// Visual (wrapped-row) cursor movement using the composer's current render
-/// width. Returns `None` when the width is unknown or the cursor is already on
-/// the first/last visual row.
-fn visual_line_move_in_composer(app: &App, code: KeyCode) -> Option<usize> {
     use crate::tui::ui::input_ui;
 
-    let width = composer_area_width()?;
-    let state: &dyn crate::tui::TuiState = app;
-    let next_prompt = input_ui::next_input_prompt_number(state);
-    let line_width = input_ui::composer_line_width(state, width, next_prompt)?;
-    let delta = match code {
-        KeyCode::Up => -1,
-        KeyCode::Down => 1,
-        _ => return None,
+    let Some(delta) = vertical_input_step(code, modifiers) else {
+        return false;
     };
-    input_ui::visual_line_move(&app.input, app.cursor_pos, line_width, delta)
+    let line_width = composer_area_width()
+        .and_then(|width| {
+            input_ui::composer_line_width(app, width, input_ui::next_input_prompt_number(app))
+        })
+        .unwrap_or(usize::MAX);
+    let preferred_column = app
+        .preferred_input_column
+        .take()
+        .filter(|goal| goal.line_width == line_width && goal.cursor_pos == app.cursor_pos)
+        .map(|goal| goal.column);
+    let Some((cursor_pos, column)) = input_ui::visual_line_move(
+        &app.input,
+        app.cursor_pos,
+        line_width,
+        delta,
+        preferred_column,
+    ) else {
+        return false;
+    };
+    app.cursor_pos = cursor_pos;
+    app.preferred_input_column = Some(PreferredInputColumn {
+        cursor_pos,
+        line_width,
+        column,
+    });
+    true
 }
 
 fn composer_area_width() -> Option<u16> {
@@ -1151,7 +1091,23 @@ pub(super) fn expand_paste_placeholders(app: &App, input: &str) -> String {
 
 pub(super) fn queue_message(app: &mut App) {
     let prepared = take_prepared_input(app);
-    app.queued_messages.push(prepared.expanded);
+    stage_queued_input(app, prepared);
+    app.restore_stash_after_send();
+}
+
+pub(super) fn stage_queued_input(app: &mut App, prepared: PreparedInput) {
+    let mut text = prepared.expanded;
+    offset_image_markers(&mut text, prepared.images.len(), app.queued_images.len());
+    app.queued_messages.push(text);
+    app.queued_images.extend(prepared.images);
+}
+
+pub(super) fn offset_image_markers(text: &mut String, count: usize, offset: usize) {
+    if offset > 0 {
+        for i in (1..=count).rev() {
+            *text = text.replace(&format!("[image {i}]"), &format!("[image {}]", offset + i));
+        }
+    }
 }
 
 /// True for composer text that runs as a client command rather than a prompt:
@@ -1272,7 +1228,11 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
         had_pending = true;
     }
     if !app.queued_messages.is_empty() {
-        parts.extend(std::mem::take(&mut app.queued_messages));
+        for mut text in std::mem::take(&mut app.queued_messages) {
+            offset_image_markers(&mut text, app.queued_images.len(), app.pending_images.len());
+            parts.push(text);
+        }
+        app.pending_images.append(&mut app.queued_images);
         if !app.has_queued_followups() {
             app.pending_queued_dispatch = false;
         }
@@ -1342,9 +1302,11 @@ impl App {
     /// new prompt" rather than "stop everything", so the follow-up is kept
     /// and auto-continuation stays on. Automatic pokes do not count.
     pub(super) fn has_pending_user_followup(&self) -> bool {
-        self.interleave_message
-            .as_deref()
-            .is_some_and(|message| !message.trim().is_empty())
+        !self.server_queued_prompts.is_empty()
+            || self
+                .interleave_message
+                .as_deref()
+                .is_some_and(|message| !message.trim().is_empty())
             || self
                 .pending_soft_interrupts
                 .iter()
@@ -1438,9 +1400,15 @@ impl App {
         if self.is_replay {
             return false;
         }
-        // SSH workflow state and todo reads belong to the remote daemon.
-        // Even the guardrail/report checks below consult laptop session files.
+        // SSH campaign state and todo reads belong to the remote daemon.
+        // A local daemon still uses the explicit TUI overnight campaign below,
+        // separately from daemon-owned ordinary todo continuation.
         if crate::tui::is_ssh_remote() {
+            return false;
+        }
+        // Reload recovery already owns this boundary. A synthetic todo poke
+        // must not compete with its interrupted-turn continuation.
+        if self.reload_recovery_dispatch_pending || self.pending_reload_reconnect_status.is_some() {
             return false;
         }
         if self.guardrail_stops_exhausted_at_turn_end() {
@@ -1458,9 +1426,17 @@ impl App {
         if self.has_pending_user_followup() {
             return false;
         }
+        if self.is_remote {
+            // Ordinary todo follow-ups belong to the daemon. Explicit local
+            // /overnight campaigns retain their independent scheduler until
+            // campaign ownership is migrated as well.
+            return self.schedule_overnight_poke_followup_if_needed();
+        }
         if self.all_open_todos_are_paused() {
-            self.last_auto_poke_fingerprint = None;
-            self.auto_poke_attempts = 0;
+            if self.last_auto_poke_fingerprint.is_none() {
+                self.auto_poke_attempts = 0;
+            }
+            self.auto_poke_outcome_pending = false;
             return false;
         }
         self.schedule_auto_poke_followup_after_response(final_response_delivered)
@@ -1479,7 +1455,7 @@ impl App {
         if self.is_replay {
             return false;
         }
-        if crate::tui::is_ssh_remote() {
+        if self.is_remote || crate::tui::is_ssh_remote() {
             return false;
         }
         // Completion is visible even with /poke off, and never needs another
@@ -1515,6 +1491,16 @@ impl App {
             return false;
         }
 
+        // A poke whose turn made no tool calls achieved nothing (the model
+        // answered "nothing to do"). Asking again for the same open state only
+        // loops, so spend the budget until the todo set or member state changes.
+        if std::mem::take(&mut self.auto_poke_outcome_pending) && !self.turn_tool_call_seen {
+            crate::logging::info(
+                "AUTO_POKE_DECISION action=idle reason=poke_turn_without_tool_calls",
+            );
+            self.auto_poke_attempts = crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS;
+        }
+
         let todos = super::commands::poke_todos(self);
         let incomplete: Vec<_> = todos
             .iter()
@@ -1525,8 +1511,10 @@ impl App {
         if incomplete.is_empty() && todos.iter().any(super::commands::is_incomplete_poke_todo) {
             // User-only blockers and live waits are neither resistance nor
             // completion. Do not spend work or assessment review budgets.
-            self.last_auto_poke_fingerprint = None;
-            self.auto_poke_attempts = 0;
+            if self.last_auto_poke_fingerprint.is_none() {
+                self.auto_poke_attempts = 0;
+            }
+            self.auto_poke_outcome_pending = false;
             return false;
         }
         let todo_session_id = self
@@ -1640,12 +1628,16 @@ impl App {
             let needs_spike_challenge = quality_reviews_enabled
                 && confidence_summary.confidence_spike_detected
                 && !self.todo_confidence_spike_challenged;
+            // Goals that document why validation stopped exempt their todos:
+            // asking again cannot change an exhausted constraint.
+            let validation_targets = crate::todo::todos_needing_validation(&todos, &goals);
             let needs_validation = quality_reviews_enabled
-                && confidence_summary.completion_confidence_needs_validation;
+                && confidence_summary.completion_confidence_needs_validation
+                && !validation_targets.is_empty();
             if (needs_validation || needs_spike_challenge) && gate_budget_left {
                 self.todo_completion_gate_attempts =
                     self.todo_completion_gate_attempts.saturating_add(1);
-                let notice = if confidence_summary.completion_confidence_needs_validation {
+                let notice = if needs_validation {
                     crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Completion);
                     "🔍 Double-checking confidence for you..."
                 } else {
@@ -1658,7 +1650,11 @@ impl App {
                 self.push_display_message(DisplayMessage::system(notice));
                 // User-role content: reminder-only turns read as empty user
                 // messages and models answer instead of re-validating.
-                let summary = super::commands::build_todo_confidence_summary_message(&todos);
+                let summary = if needs_validation {
+                    crate::todo::build_todo_validation_continuation_message(&validation_targets)
+                } else {
+                    crate::todo::build_todo_confidence_spike_continuation_message(&todos)
+                };
                 self.queued_messages.push(summary);
                 self.pending_queued_dispatch = true;
                 return true;
@@ -1722,8 +1718,9 @@ impl App {
         self.todo_gate_digest_delivered = false;
         self.todo_confidence_spike_challenged = false;
         self.last_todo_ownership_fingerprint = None;
-        let fingerprint =
-            serde_json::to_string(&incomplete).unwrap_or_else(|_| poke_message.clone());
+        let fingerprint = self
+            .current_incomplete_poke_fingerprint()
+            .unwrap_or_else(|| poke_message.clone());
         if self.last_auto_poke_fingerprint.as_ref() != Some(&fingerprint) {
             self.auto_poke_attempts = 0;
         }
@@ -1756,6 +1753,8 @@ impl App {
         self.todo_completion_gate_attempts = 0;
         self.last_auto_poke_fingerprint = Some(fingerprint);
         self.auto_poke_attempts += 1;
+        self.auto_poke_outcome_pending = true;
+        self.turn_tool_call_seen = false;
         self.queued_messages.push(poke_message);
         self.pending_queued_dispatch = true;
         true
@@ -1764,14 +1763,14 @@ impl App {
     /// Fingerprint of the current open todos, matching the one auto-poke
     /// records when it nudges, so a poke sent elsewhere can be credited here.
     fn current_incomplete_poke_fingerprint(&self) -> Option<String> {
-        let incomplete: Vec<_> = super::commands::poke_todos(self)
+        let mut incomplete: Vec<_> = super::commands::poke_todos(self)
             .into_iter()
             .filter(super::commands::is_incomplete_poke_todo)
-            .filter(|todo| !self.todo_is_paused_for_auto_followup(todo))
             .collect();
         if incomplete.is_empty() {
             return None;
         }
+        incomplete.sort_by(|a, b| a.id.cmp(&b.id));
         serde_json::to_string(&incomplete).ok()
     }
 
@@ -1916,7 +1915,7 @@ fn input_routes_to_new_session(app: &App) -> bool {
     !trimmed.starts_with('/') && extract_input_shell_command(trimmed).is_none()
 }
 
-fn route_prompt_to_new_session_local(app: &mut App) -> bool {
+pub(super) fn route_prompt_to_new_session_local(app: &mut App) -> bool {
     if !input_routes_to_new_session(app) {
         return false;
     }
@@ -2187,6 +2186,8 @@ pub(super) fn handle_alt_key(app: &mut App, code: KeyCode) -> bool {
         }
         KeyCode::Char('e') => {
             let expanded = crate::tui::ui::viewport::toggle_prompt_history_expanded();
+            app.prompt_history_backfill = (None, 0);
+            app.maybe_backfill_expanded_prompt_history();
             app.set_status_notice(if expanded {
                 "Prompt history: showing more previous prompts (Alt+E to collapse)"
             } else {
@@ -2439,16 +2440,12 @@ pub(super) fn handle_pre_control_shortcuts(
         return true;
     }
 
-    // Swarm views: Alt+N cycles chat → inline controls → full live page → chat.
-    // Selection/open/prompt controls stay available in both active views, while
-    // plain typing continues to flow to the chat input.
+    // Alt+N toggles the dedicated swarm page. Passive worker status lives in
+    // pinned todos rather than a separate inline controls strip.
     if app.toggle_keys.swarm_panel_focus.matches(code, modifiers) {
         match app.cycle_swarm_panel_view() {
             super::tui_state::SwarmPanelView::Chat => {
                 app.set_status_notice("Swarm view closed");
-            }
-            super::tui_state::SwarmPanelView::Controls => {
-                app.set_status_notice(crate::tui::keybind::swarm_view_hint("full page"));
             }
             super::tui_state::SwarmPanelView::FullPage => {
                 app.set_status_notice(crate::tui::keybind::swarm_page_hint());
@@ -2912,10 +2909,14 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
                 .unwrap_or(false)
             {
                 app.inline_interactive_state = None;
-                app.inline_view_state = None;
+                app.clear_inline_view();
                 clear_input_for_escape(app);
             } else if app.inline_view_state.is_some() {
-                app.inline_view_state = None;
+                // A `/btw` card owns its own Esc: with a draft, Esc just clears
+                // the draft and leaves the card up.
+                if !app.inline_view_is_btw {
+                    app.clear_inline_view();
+                }
                 clear_input_for_escape(app);
             } else if app.is_processing && app.has_pending_user_followup() {
                 // The user typed a new prompt while this turn ran, then hit
@@ -2977,7 +2978,7 @@ pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
     let raw_input = std::mem::take(&mut app.input);
     app.record_prompt_history(&raw_input);
     let expanded = expand_paste_placeholders(app, &raw_input);
-    app.pasted_contents.clear();
+    let pasted_contents = std::mem::take(&mut app.pasted_contents);
     let images = app.take_pending_image_payloads();
     app.cursor_pos = 0;
     app.clear_input_undo_history();
@@ -2985,6 +2986,7 @@ pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
         raw_input,
         expanded,
         images,
+        pasted_contents,
     }
 }
 
@@ -2996,6 +2998,7 @@ pub(super) fn stage_local_interleave(
     app.interleave_message = Some(content);
     app.interleave_images = images;
     app.set_status_notice("⏭ Sending now (interleave)");
+    app.restore_stash_after_send();
 }
 
 fn attach_image(app: &mut App, media_type: String, base64_data: String) {
@@ -3015,11 +3018,21 @@ impl App {
     /// refer to a different image.
     pub(super) fn sync_input_image_attachments(&mut self) {
         let mut removed = 0;
-        for (index, (media_type, data)) in self.pending_images.iter_mut().enumerate() {
-            if !data.is_empty() && !self.input.contains(&format!("[image {}]", index + 1)) {
-                media_type.clear();
-                data.clear();
+        if self.pending_images.is_empty() {
+            self.detached_images.clear();
+        }
+        for (index, slot) in self.pending_images.iter_mut().enumerate() {
+            let marked = self.input.contains(&format!("[image {}]", index + 1));
+            if !slot.1.is_empty() && !marked {
+                // Keep the payload: Esc and Ctrl+U promise "Ctrl+Z to restore",
+                // and a restored marker must still carry its image.
+                self.detached_images.insert(index, std::mem::take(slot));
                 removed += 1;
+            } else if slot.1.is_empty()
+                && marked
+                && let Some(payload) = self.detached_images.remove(&index)
+            {
+                *slot = payload;
             }
         }
         if removed > 0 {
@@ -3036,6 +3049,7 @@ impl App {
     }
 
     pub(super) fn take_pending_image_payloads(&mut self) -> Vec<(String, String)> {
+        self.detached_images.clear();
         std::mem::take(&mut self.pending_images)
             .into_iter()
             .filter(|(media_type, data)| !media_type.is_empty() && !data.is_empty())
@@ -3050,6 +3064,75 @@ fn paste_placeholder(content: &str) -> String {
         line_count,
         if line_count == 1 { "" } else { "s" }
     )
+}
+
+pub(super) fn paste_attachment_payload(
+    raw: &str,
+    expanded: &str,
+    pastes: &[String],
+    supported: bool,
+) -> (String, Vec<jcode_session_types::Attachment>) {
+    if !supported || pastes.is_empty() {
+        return (expanded.to_owned(), Vec::new());
+    }
+    let mut content = raw.to_owned();
+    let mut attachments = Vec::new();
+    for text in pastes.iter().rev() {
+        let placeholder = paste_placeholder(text);
+        if let Some(position) = content.rfind(&placeholder) {
+            content.replace_range(position..position + placeholder.len(), "[Pasted text]");
+            attachments.push(jcode_session_types::Attachment::PastedText { text: text.clone() });
+        }
+    }
+    attachments.reverse();
+    if attachments.is_empty() {
+        (expanded.to_owned(), attachments)
+    } else {
+        (content, attachments)
+    }
+}
+
+#[cfg(test)]
+mod paste_attachment_tests {
+    #[test]
+    fn wire_preserves_same_sized_pastes_and_ignores_deleted_placeholders() {
+        use jcode_session_types::Attachment;
+        let pastes = vec![
+            "one\ntwo".into(),
+            "three\nfour".into(),
+            "stale\ntext\nignored".into(),
+        ];
+        let (content, attachments) = super::paste_attachment_payload(
+            "A [pasted 2 lines] B [pasted 2 lines]",
+            "expanded",
+            &pastes,
+            true,
+        );
+        assert_eq!(content, "A [Pasted text] B [Pasted text]");
+        assert_eq!(
+            attachments,
+            vec![
+                Attachment::PastedText {
+                    text: "one\ntwo".into()
+                },
+                Attachment::PastedText {
+                    text: "three\nfour".into()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn older_daemon_receives_expanded_text() {
+        let (content, attachments) = super::paste_attachment_payload(
+            "[pasted 2 lines]",
+            "one\ntwo",
+            &["one\ntwo".into()],
+            false,
+        );
+        assert_eq!(content, "one\ntwo");
+        assert!(attachments.is_empty());
+    }
 }
 
 impl App {
@@ -3118,210 +3201,6 @@ impl App {
         self.handle_key_core(code, modifiers, None)
     }
 
-    fn handle_key_core(
-        &mut self,
-        code: KeyCode,
-        modifiers: KeyModifiers,
-        text_input: Option<String>,
-    ) -> Result<()> {
-        let mut code = code;
-        let mut modifiers = modifiers;
-        ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
-
-        if self.handle_ssh_login_key(code, modifiers, text_input.as_deref()) {
-            return Ok(());
-        }
-
-        // Alt+5 always starts the onboarding rehearsal from a pristine first
-        // screen, even when another modal or a previous sim screen is active.
-        if self.handle_onboarding_sim_reset_shortcut(code, modifiers) {
-            return Ok(());
-        }
-        if self.handle_update_sim_shortcut(code, modifiers) {
-            return Ok(());
-        }
-        if self.handle_update_rehearsal_shortcut(code, modifiers) {
-            return Ok(());
-        }
-
-        // Cmd+5 toggles the onboarding rehearsal. Every other key goes to the
-        // real onboarding handlers, exactly as on a first run.
-        if self.handle_onboarding_sim_toggle_shortcut(code, modifiers) {
-            return Ok(());
-        }
-
-        if handle_modal_key(self, code, modifiers)? {
-            return Ok(());
-        }
-
-        if self.handle_onboarding_continue_prompt_key(code) {
-            return Ok(());
-        }
-
-        // Inline hotkey feedback: when a known-but-rarely-used chord is pressed,
-        // show "you just pressed X → does Y". Placed after the modal/overlay
-        // handlers so overlay-local keys stay silent. Unknown chords are
-        // reported at the fall-through points below.
-        self.observe_known_hotkey(code, modifiers, false);
-
-        if code == KeyCode::BackTab {
-            self.cycle_model_favorite_hotkey();
-            return Ok(());
-        }
-
-        // While the model picker preview is visible, route its favorite/default
-        // hotkeys (Ctrl+O set default, Ctrl+N toggle favorite) to the focused
-        // picker handler before the global control shortcuts can claim them. This
-        // makes the hotkeys work directly in the preview list the user always
-        // sees, without colliding with the readline/tmux keys (Ctrl+B/Ctrl+F).
-        if self.model_picker_preview_hotkey(code, modifiers)? {
-            return Ok(());
-        }
-
-        if self.handle_key_during_provider_failover(code) {
-            return Ok(());
-        }
-
-        // Accept an armed post-error fallback offer: switch to the next best
-        // model/auth-method and resend the failed turn.
-        if self.pending_fallback_offer.is_some()
-            && !self.is_processing
-            && self.fallback_switch_key_matches(code, modifiers)
-        {
-            self.apply_pending_fallback_offer();
-            return Ok(());
-        }
-
-        // Accept an armed "merge the diverged update" offer: spawn a jcode agent
-        // to reconcile the branches. Shares the fallback-switch accept key.
-        if self.merge_offer_key_matches(code, modifiers) {
-            self.accept_update_merge_offer();
-            return Ok(());
-        }
-
-        if is_next_prompt_new_session_hotkey(code, modifiers) {
-            self.toggle_next_prompt_new_session_routing();
-            return Ok(());
-        }
-
-        if self.handle_command_suggestion_key(code, modifiers) {
-            return Ok(());
-        }
-
-        if handle_pre_control_shortcuts(self, code, modifiers) {
-            return Ok(());
-        }
-
-        self.normalize_diagram_state();
-        let diagram_available = self.diagram_available();
-
-        // Ctrl / Alt(Option) / Cmd(Super) + Up all recall queued/pending messages
-        // for editing and then walk prompt history. We accept any of the three
-        // single modifiers so the gesture works regardless of which one a given
-        // terminal forwards (some send Option as Alt, some forward Command as
-        // Super), without the user having to rebind anything. Alt+Up/Down are
-        // claimed earlier by the speed-tier keys by default; unbinding
-        // speed_increase/speed_decrease restores the Alt alias here.
-        if code == KeyCode::Up && is_prompt_recall_modifier(modifiers) {
-            if retrieve_pending_message_for_edit(self) {
-                return Ok(());
-            }
-            // Normalize to CONTROL so handle_prompt_history_navigation takes its
-            // explicit-history path (jump straight into history even mid-draft).
-            handle_prompt_history_navigation(self, KeyCode::Up, KeyModifiers::CONTROL);
-            return Ok(());
-        }
-
-        if code == KeyCode::Down && is_prompt_recall_modifier(modifiers) {
-            handle_prompt_history_navigation(self, KeyCode::Down, KeyModifiers::CONTROL);
-            return Ok(());
-        }
-
-        // Handle ctrl combos regardless of processing state
-        if modifiers.contains(KeyModifiers::CONTROL)
-            && handle_global_control_shortcuts(self, code, diagram_available)
-        {
-            return Ok(());
-        }
-
-        // Ctrl+Enter / Cmd+Enter: does opposite of queue_mode during processing.
-        // Terminals may encode Command as either Super or Meta.
-        if is_alternate_enter(code, modifiers) {
-            handle_alternate_enter(self);
-            return Ok(());
-        }
-
-        // Shift+Enter, Alt/Option+Enter, and the trailing-backslash fallback all
-        // insert a newline in the input box.
-        if newline::enter_inserts_newline(self, code, modifiers) {
-            return Ok(());
-        }
-
-        // When the model picker preview is visible, arrow keys navigate the picker list
-        if self
-            .inline_interactive_state
-            .as_ref()
-            .map(|p| p.preview)
-            .unwrap_or(false)
-        {
-            match code {
-                KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
-                    return self.handle_inline_interactive_key(code, modifiers);
-                }
-                _ => {}
-            }
-        }
-
-        if handle_multiline_input_navigation(self, code, modifiers)
-            || handle_prompt_history_navigation(self, code, modifiers)
-        {
-            return Ok(());
-        }
-
-        if let Some(text) = text_input.or_else(|| text_input_for_key(code, modifiers)) {
-            handle_text_input(self, &text);
-            return Ok(());
-        }
-
-        // Never fall through and insert literal text for unhandled Ctrl+key chords. This stays
-        // after text_input so Ctrl+Alt/AltGr symbols delivered as final printable text still work.
-        if modifiers.contains(KeyModifiers::CONTROL) {
-            self.note_unrecognized_hotkey(code, modifiers, false);
-            return Ok(());
-        }
-
-        if code == KeyCode::Enter {
-            // Stray post-paste Enter from some terminals is not a submit (#544).
-            if paste_guard::consume_paste_trailing_enter() {
-                return Ok(());
-            }
-            // During the onboarding model-selection phase, Enter on an empty
-            // prompt opens the model picker instead of submitting nothing.
-            if self.input.trim().is_empty()
-                && matches!(
-                    self.onboarding_phase(),
-                    Some(crate::tui::app::onboarding_flow::OnboardingPhase::ModelSelect)
-                )
-            {
-                self.open_model_picker();
-                return Ok(());
-            }
-            handle_enter(self);
-            return Ok(());
-        }
-
-        // A modified chord (or function key) that reached this point is not
-        // bound to anything; tell the user instead of silently swallowing it or
-        // inserting a surprise character.
-        self.note_unrecognized_hotkey(code, modifiers, false);
-
-        if handle_basic_key(self, code) {
-            return Ok(());
-        }
-
-        Ok(())
-    }
-
     pub(super) fn request_full_redraw(&mut self) {
         self.force_full_redraw = true;
     }
@@ -3337,6 +3216,7 @@ impl App {
     const RESIZE_REDRAW_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
 
     fn commit_resize_redraw(&mut self, now: std::time::Instant) -> bool {
+        self.preferred_input_column = None;
         self.last_resize_redraw = Some(now);
         self.resize_redraw_pending = false;
         // A paused viewport holds a wrapped line index; capture the reading
@@ -3689,7 +3569,7 @@ impl App {
         if self.reasoning_partial_len > 0 {
             self.reasoning_partial_len = 0;
         }
-        self.streaming.streaming_text.push_str(text);
+        self.streaming.streaming_text_mut().push_str(text);
         self.refresh_split_view_if_needed();
     }
 
@@ -3749,7 +3629,7 @@ impl App {
     }
 
     pub(super) fn replace_streaming_text(&mut self, text: String) {
-        self.streaming.streaming_text = text;
+        *self.streaming.streaming_text_mut() = text;
         // The live reasoning tail belonged to the *previous* buffer. Keeping its
         // byte length would make `strip_reasoning_partial_tail` slice at an
         // offset that has no relation to the new contents (and can land
@@ -3762,7 +3642,7 @@ impl App {
     }
 
     pub(super) fn clear_streaming_render_state(&mut self) {
-        self.streaming.streaming_text.clear();
+        self.streaming.streaming_text_mut().clear();
         self.stream_message_ended = false;
         self.deferred_stream_done_id = None;
         self.reasoning_streaming = false;
@@ -3786,6 +3666,7 @@ impl App {
         self.streaming.streaming_context_stale = false;
         self.streaming.streaming_usage_call_reset_pending = false;
         self.kv_cache.current_api_usage_recorded = false;
+        self.remote_context_tokens = None;
     }
 
     /// Discard all client-side render state for the current streaming attempt:
@@ -3828,7 +3709,7 @@ impl App {
     }
 
     pub(super) fn take_streaming_text(&mut self) -> String {
-        let content = std::mem::take(&mut self.streaming.streaming_text);
+        let content = std::mem::take(self.streaming.streaming_text_mut());
         self.stream_message_ended = false;
         self.deferred_stream_done_id = None;
         self.reasoning_streaming = false;
@@ -3900,6 +3781,96 @@ impl App {
             }
         }
         *call_output_tokens_seen = output_tokens;
+    }
+
+    pub(super) fn handle_mode_command(&mut self, input: &str) -> bool {
+        if input.split_whitespace().next() != Some("/mode") {
+            return false;
+        }
+        let argument = input.strip_prefix("/mode").unwrap_or_default().trim();
+        if let Some(name) = argument.strip_prefix("toggle ") {
+            let mut names = self.session.pinned_skill_names().to_vec();
+            if let Some(index) = names.iter().position(|active| active == name) {
+                names.remove(index);
+            } else {
+                names.push(name.into());
+            }
+            let skills = self.current_skills_snapshot();
+            if let Some(missing) = names.iter().find(|name| skills.get(name).is_none()) {
+                self.push_display_message(DisplayMessage::error(
+                    crate::skill::unknown_skill_message(missing),
+                ));
+                return true;
+            }
+            self.session.set_pinned_skill_names(names);
+            self.active_skill = self.session.pinned_skill.clone();
+            if !self.is_remote {
+                if self.active_skill.is_some() {
+                    self.reannounce_pinned_skill();
+                } else {
+                    self.append_turn_system_reminder(Some(crate::skill::MODE_OFF_REMINDER.into()));
+                }
+            }
+            self.session_save_pending = true;
+        } else if argument == "off" {
+            let changed =
+                !self.session.pinned_skill_names().is_empty() | self.active_skill.take().is_some();
+            self.session.set_pinned_skill_names(Vec::new());
+            if changed {
+                if !self.is_remote {
+                    self.append_turn_system_reminder(Some(crate::skill::MODE_OFF_REMINDER.into()));
+                }
+                self.session_save_pending = true;
+            }
+        } else if !argument.is_empty() {
+            let snapshot = self.current_skills_snapshot();
+            let Some(skill) = snapshot.get(argument) else {
+                self.push_display_message(DisplayMessage::error(
+                    crate::skill::unknown_skill_message(argument),
+                ));
+                return true;
+            };
+            self.activate_pinned_skill(argument, skill.get_prompt());
+        }
+        self.push_display_message(DisplayMessage::system(format!(
+            "Session mode: {}",
+            if self.session.pinned_skill_names().is_empty() {
+                "off".into()
+            } else {
+                self.session.pinned_skill_names().join(", ")
+            }
+        )));
+        true
+    }
+
+    fn activate_pinned_skill(&mut self, name: &str, prompt: String) {
+        let names = vec![name.to_owned()];
+        let changed = self.session.pinned_skill_names() != names;
+        self.session.set_pinned_skill_names(names);
+        self.active_skill = Some(name.into());
+        if changed && !self.is_remote {
+            self.append_turn_system_reminder(Some(format!("# Active Skill\n\n{}", prompt.trim())));
+        }
+        self.session_save_pending = true;
+    }
+
+    pub(super) fn reannounce_pinned_skill(&mut self) {
+        if self.is_remote {
+            return;
+        }
+        self.active_skill = self.session.pinned_skill.clone();
+        let skills = self.current_skills_snapshot();
+        let rendered = crate::session::Session::render_pinned_skill_announcement(
+            self.session.pinned_skill_names(),
+            |name| skills.get(name).map(|skill| skill.get_prompt()),
+        );
+        let reminder = rendered
+            .as_deref()
+            .or_else(|| self.session.stored_pinned_skill_announcement())
+            .and_then(|text| text.strip_prefix("<system-reminder>\n"))
+            .and_then(|text| text.strip_suffix("\n</system-reminder>"))
+            .map(str::to_owned);
+        self.append_turn_system_reminder(reminder);
     }
 
     /// Submit input - just sets up message and flags, processing happens in next loop iteration
@@ -4042,13 +4013,7 @@ impl App {
             }
 
             if let Some(skill) = skill {
-                self.active_skill = Some(skill_name.clone());
-                if !self.is_remote {
-                    self.append_turn_system_reminder(Some(format!(
-                        "# Active Skill\n\n{}",
-                        skill.get_prompt().trim()
-                    )));
-                }
+                self.activate_pinned_skill(&skill_name, skill.get_prompt());
                 self.push_display_message(DisplayMessage {
                     role: "system".to_string(),
                     content: format!("Activated skill: {} - {}", skill.name, skill.description),
@@ -4066,23 +4031,9 @@ impl App {
                 // Distinguish an endorsed-but-not-installed skill from a
                 // typo: the skill list advertises endorsed skills, so a bare
                 // "Unknown skill" for them reads like a bug (issue #445).
-                let endorsed_hint = crate::skill::endorsed_skills()
-                    .iter()
-                    .find(|endorsed| endorsed.name == skill_name)
-                    .map(|endorsed| match endorsed.install {
-                        Some(install) => format!(
-                            "Skill /{} is endorsed but not installed. Install it with `{}`, then run /skills or skill_manage reload_all.",
-                            skill_name, install
-                        ),
-                        None => format!(
-                            "Skill /{} is endorsed but not installed (source: {}). Install it into ~/.jcode/skills/{}/SKILL.md.",
-                            skill_name, endorsed.source, skill_name
-                        ),
-                    });
                 self.push_display_message(DisplayMessage {
                     role: "error".to_string(),
-                    content: endorsed_hint
-                        .unwrap_or_else(|| format!("Unknown skill: /{}", skill_name)),
+                    content: crate::skill::unknown_skill_message(&skill_name),
                     tool_calls: vec![],
                     duration_secs: None,
                     title: None,
@@ -4200,6 +4151,7 @@ impl App {
         self.processing_started = Some(Instant::now());
         self.visible_turn_started = Some(Instant::now());
         self.pending_turn = true;
+        self.restore_stash_after_send();
     }
 
     /// Process all queued messages (combined into a single request)
@@ -4250,14 +4202,11 @@ impl App {
                     &combined,
                     self.provider.reasoning_effort().as_deref(),
                 );
-                self.add_provider_message(Message::user(&combined));
-                self.session.add_message(
-                    Role::User,
-                    vec![ContentBlock::Text {
-                        text: combined.clone(),
-                        cache_control: None,
-                    }],
-                );
+                let message =
+                    Message::user_with_images(&combined, std::mem::take(&mut self.queued_images));
+                self.session
+                    .add_message(Role::User, message.content.to_vec());
+                self.add_provider_message(message);
             }
             self.append_turn_system_reminder(turn_reminder);
             self.session_save_pending = true;

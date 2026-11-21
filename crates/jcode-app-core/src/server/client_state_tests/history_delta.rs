@@ -3,13 +3,34 @@ fn delta_test_messages() -> Vec<crate::protocol::HistoryMessage> {
         .into_iter()
         .enumerate()
         .map(|(index, content)| crate::protocol::HistoryMessage {
+            tool_duration_ms: None,
+            attachments: Vec::new(),
             response_stats: None,
+            timestamp_ms: None,
             role: if index % 2 == 0 { "user" } else { "assistant" }.to_string(),
             content: content.to_string(),
             tool_calls: None,
             tool_data: None,
         })
         .collect()
+}
+
+#[test]
+fn rendered_tool_history_preserves_timing_on_wire() {
+    let row = crate::session::RenderedMessage {
+        timestamp_ms: Some(20_000),
+        tool_duration_ms: Some(7_000),
+        response_stats: None,
+        role: "tool".into(),
+        content: "ok".into(),
+        attachments: vec![],
+        tool_calls: vec![],
+        tool_data: None,
+        stored_index: Some(1),
+    };
+    let wire = serde_json::to_value(super::super::rendered_to_history_message(row)).unwrap();
+    assert_eq!(wire["timestamp_ms"], 20_000);
+    assert_eq!(wire["tool_duration_ms"], 7_000);
 }
 
 fn delta_test_base(
@@ -26,6 +47,44 @@ fn delta_test_base(
         images_fingerprint: None,
         recent_messages: None,
     }
+}
+
+#[test]
+fn recent_history_counts_ask_answers_but_preserves_image_ordinals() {
+    let mut messages = delta_test_messages();
+    messages.insert(
+        1,
+        crate::protocol::HistoryMessage {
+            tool_duration_ms: None,
+            attachments: Vec::new(),
+            response_stats: None,
+            timestamp_ms: None,
+            role: "tool".into(),
+            content: "User answers:\n1. Which? -> Mango\n".into(),
+            tool_calls: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "a".into(),
+                name: "ask".into(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
+            }),
+        },
+    );
+    let image = crate::session::RenderedImage {
+        media_type: "image/png".into(),
+        data: "data".into(),
+        label: None,
+        source: crate::session::RenderedImageSource::UserInput,
+        anchor: Some(crate::session::RenderedImageAnchor::UserPrompt { ordinal: 1 }),
+        history_message_index: None,
+    };
+    let (_, images, info) = super::super::recent_history_window(messages, vec![image], 2);
+    assert_eq!(info.hidden_user_prompts, 2);
+    assert_eq!(
+        images[0].anchor,
+        Some(crate::session::RenderedImageAnchor::UserPrompt { ordinal: 0 })
+    );
 }
 
 #[test]
@@ -99,7 +158,10 @@ fn history_images_base_omits_only_matching_image_sets() {
 fn recent_history_bounds_seven_thousand_message_bootstrap() {
     let messages: Vec<_> = (0..7000)
         .map(|index| crate::protocol::HistoryMessage {
+            tool_duration_ms: None,
+            attachments: Vec::new(),
             response_stats: None,
+            timestamp_ms: None,
             role: if index % 2 == 0 { "user" } else { "assistant" }.to_owned(),
             content: format!("{index}: {}", "x".repeat(2000)),
             tool_calls: None,
@@ -130,7 +192,9 @@ fn recent_history_bounds_seven_thousand_message_bootstrap() {
 fn recent_history_preserves_archive_prompt_offset_and_rebases_images() {
     let mut messages = delta_test_messages();
     messages.insert(0, crate::protocol::HistoryMessage {
-        response_stats: None, role: "system".to_owned(),
+            tool_duration_ms: None,
+        attachments: Vec::new(),
+        response_stats: None, timestamp_ms: None, role: "system".to_owned(),
         content: "Earlier conversation compacted - 10 historical messages hidden from the UI. Scroll to the top to load older history. Hidden user prompts: 7.".to_owned(),
         tool_calls: None, tool_data: None,
     });
@@ -248,6 +312,7 @@ async fn recent_history_live_and_busy_bootstrap_and_expansion() {
     let mut session = crate::session::Session::create_with_id(session_id.to_owned(), None, None);
     for index in 0..8 {
         session.append_stored_message(crate::session::StoredMessage {
+            attachment_data: None,
             id: format!("message-{index}"),
             role: if index % 2 == 0 {
                 crate::message::Role::User
@@ -257,7 +322,8 @@ async fn recent_history_live_and_busy_bootstrap_and_expansion() {
             content: vec![crate::message::ContentBlock::Text {
                 text: format!("message {index}"),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,

@@ -1,6 +1,9 @@
 #[path = "commands_release_prompts.rs"]
 mod release_prompts;
 pub(super) use release_prompts::*;
+#[path = "commands_manual_subagent.rs"]
+mod manual_subagent;
+use manual_subagent::launch_manual_subagent;
 
 pub(super) use super::commands_improve::{
     build_improve_prompt, build_improve_resume_prompt, build_refactor_prompt,
@@ -400,7 +403,7 @@ pub(super) fn create_transfer_session_from_parent(
     }
     let mut child = crate::session::Session::create(Some(parent_session_id.to_string()), None);
     child.messages.clear();
-    child.compaction = compaction;
+    child.compaction = compaction.map(std::sync::Arc::new);
     child.system_prompt = parent.system_prompt.clone();
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
@@ -425,7 +428,7 @@ async fn prepare_transfer_session_local(
     let compaction = crate::compaction::build_transfer_compaction_state(
         provider,
         transfer_active_messages(&parent),
-        parent.compaction.clone(),
+        parent.compaction.as_deref().cloned(),
     )
     .await?;
     let (session_id, session_name) =
@@ -673,116 +676,6 @@ pub(super) fn parse_manual_subagent_spec(rest: &str) -> Result<ManualSubagentSpe
         session_id,
         prompt,
     })
-}
-
-fn launch_manual_subagent(app: &mut App, spec: ManualSubagentSpec) {
-    let description = derive_subagent_description(&spec.prompt);
-    let tool_call = crate::message::ToolCall {
-        id: id::new_id("call"),
-        name: "subagent".to_string(),
-        input: serde_json::json!({
-            "description": description,
-            "prompt": spec.prompt,
-            "subagent_type": spec.subagent_type,
-            "model": spec.model,
-            "session_id": spec.session_id,
-            "command": "/subagent",
-        }),
-        intent: None,
-        thought_signature: None,
-    };
-
-    app.push_display_message(DisplayMessage {
-        role: "tool".to_string(),
-        content: tool_call.name.clone(),
-        tool_calls: vec![],
-        duration_secs: None,
-        title: None,
-        tool_data: Some(tool_call.clone()),
-    });
-
-    let content_blocks = vec![ContentBlock::ToolUse {
-        id: tool_call.id.clone(),
-        name: tool_call.name.clone(),
-        input: tool_call.input.clone(),
-        thought_signature: None,
-    }];
-    app.add_provider_message(Message {
-        role: Role::Assistant,
-        content: content_blocks.clone(),
-        timestamp: Some(chrono::Utc::now()),
-        tool_duration_ms: None,
-    });
-    let message_id = app.session.add_message(Role::Assistant, content_blocks);
-    let _ = app.session.save();
-    app.subagent_status = Some("starting subagent".to_string());
-    app.set_status_notice("Running subagent");
-
-    let registry = app.registry.clone();
-    let session_id = app.session.id.clone();
-    let working_dir = app.session.working_dir.clone();
-    let tool_call_for_task = tool_call.clone();
-    tokio::spawn(async move {
-        Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-            session_id: session_id.clone(),
-            message_id: message_id.clone(),
-            tool_call_id: tool_call_for_task.id.clone(),
-            tool_name: tool_call_for_task.name.clone(),
-            status: ToolStatus::Running,
-            intent: tool_call_for_task.intent.clone(),
-            title: None,
-        }));
-
-        let ctx = crate::tool::ToolContext {
-            session_id: session_id.clone(),
-            message_id: message_id.clone(),
-            tool_call_id: tool_call_for_task.id.clone(),
-            working_dir: working_dir.as_deref().map(PathBuf::from),
-            stdin_request_tx: None,
-            graceful_shutdown_signal: None,
-            execution_mode: crate::tool::ToolExecutionMode::Direct,
-        };
-
-        let start = Instant::now();
-        let result = registry
-            .execute(
-                &tool_call_for_task.name,
-                tool_call_for_task.input.clone(),
-                ctx,
-            )
-            .await;
-        let duration_ms = start.elapsed().as_millis() as u64;
-
-        let (output, is_error, title, status) = match result {
-            Ok(output) => {
-                crate::telemetry::record_tool_call();
-                (output.output, false, output.title, ToolStatus::Completed)
-            }
-            Err(error) => {
-                crate::telemetry::record_tool_failure();
-                (format!("Error: {}", error), true, None, ToolStatus::Error)
-            }
-        };
-
-        Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-            session_id: session_id.clone(),
-            message_id,
-            tool_call_id: tool_call_for_task.id.clone(),
-            tool_name: tool_call_for_task.name.clone(),
-            status,
-            intent: tool_call_for_task.intent.clone(),
-            title: title.clone(),
-        }));
-
-        Bus::global().publish(BusEvent::ManualToolCompleted(ManualToolCompleted {
-            session_id,
-            tool_call: tool_call_for_task,
-            output,
-            is_error,
-            title,
-            duration_ms,
-        }));
-    });
 }
 
 fn handle_subagent_model_command(app: &mut App, trimmed: &str) -> bool {
@@ -1355,7 +1248,7 @@ fn disconnect_ssh_remote(app: &mut App, name: &str) {
     }
 }
 
-fn handle_btw_command(app: &mut App, trimmed: &str) -> bool {
+pub(super) fn handle_btw_command(app: &mut App, trimmed: &str) -> bool {
     if trimmed != "/btw" && !trimmed.starts_with("/btw ") {
         return false;
     }
@@ -1366,7 +1259,9 @@ fn handle_btw_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
-    fork_session_with_prompt_local(app, Some(question));
+    if app.start_btw(question) {
+        app.pending_btw_turn = true;
+    }
     true
 }
 
@@ -1387,8 +1282,9 @@ fn handle_fork_command(app: &mut App, trimmed: &str) -> bool {
 }
 
 /// Fork the current session (like `/split`) and, when given, deliver `prompt`
-/// as the first message of the forked session. Shared by `/btw <question>`,
-/// `/fork [prompt]`, and `/split`.
+/// as the first message of the forked session. Shared by `/fork [prompt]` and
+/// `/split`; `/btw` uses a side card instead and only annotates a prompt here on
+/// a remote daemon session.
 pub(super) fn fork_session_with_prompt_local(app: &mut App, prompt: Option<&str>) {
     // Images attached to the input belong to the prompt being forked off, so
     // they travel with it instead of lingering on the parent's next message.
@@ -2816,15 +2712,6 @@ fn weighted_confidence_average(scores: impl IntoIterator<Item = (u8, u32)>) -> O
     }
 }
 
-pub(super) fn build_todo_confidence_summary_message(todos: &[crate::todo::TodoItem]) -> String {
-    let summary = todo_confidence_summary(todos);
-    if summary.confidence_spike_detected && !summary.completion_confidence_needs_validation {
-        crate::todo::build_todo_confidence_spike_continuation_message(todos)
-    } else {
-        crate::todo::build_todo_completion_continuation_message(todos)
-    }
-}
-
 pub(super) fn todo_confidence_summary(todos: &[crate::todo::TodoItem]) -> TodoConfidenceSummary {
     let completed: Vec<&crate::todo::TodoItem> = todos
         .iter()
@@ -3781,81 +3668,17 @@ pub(super) fn handle_feedback_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
-/// `/telemetry [all|none|<category> on|off]` - show or change the same
-/// per-category telemetry choices offered by the onboarding "Telemetry settings"
-/// page, so the promise made there ("change this later with /telemetry") holds.
+/// `/telemetry` - this build has telemetry removed; there is nothing to configure.
 pub(super) fn handle_telemetry_command(app: &mut App, trimmed: &str) -> bool {
     let Some(rest) = trimmed.strip_prefix("/telemetry") else {
         return false;
     };
-    if !rest.is_empty()
-        && !rest
-            .chars()
-            .next()
-            .map(|c| c.is_whitespace())
-            .unwrap_or(false)
-    {
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
         return false;
     }
-
-    use crate::telemetry::TelemetryCategory;
-    use crate::tui::app::onboarding_flow::status_label_for;
-    let args: Vec<String> = rest
-        .split_whitespace()
-        .map(|a| a.to_ascii_lowercase())
-        .collect();
-    let mut checked = crate::telemetry::category_settings();
-    let parse_on = |v: &str| match v {
-        "on" | "yes" | "true" | "1" => Some(true),
-        "off" | "no" | "false" | "0" => Some(false),
-        _ => None,
-    };
-    let usage = "Usage: /telemetry [all|none] or /telemetry <category> on|off. Categories: content, usage, crashes, features, cost, accounts.";
-    match args.as_slice() {
-        [] => {
-            let mut text = String::from("Telemetry settings:\n");
-            for (i, category) in TelemetryCategory::ALL.into_iter().enumerate() {
-                text.push_str(&format!(
-                    "  [{}] {} ({}): {}\n",
-                    if checked[i] { "x" } else { " " },
-                    category.label(),
-                    category.key(),
-                    category.caption()
-                ));
-            }
-            if crate::telemetry::opt_out_forced_by_env() {
-                text.push_str("Your environment disables all telemetry (JCODE_NO_TELEMETRY / DO_NOT_TRACK).\n");
-            }
-            text.push_str(usage);
-            app.push_display_message(DisplayMessage::system(text));
-            app.set_status_notice(status_label_for(checked));
-            return true;
-        }
-        [all] if matches!(all.as_str(), "all" | "everything" | "on") => checked = [true; 6],
-        [none] if matches!(none.as_str(), "none" | "nothing" | "off") => checked = [false; 6],
-        [all, value] if all == "all" && parse_on(value).is_some() => {
-            checked = [parse_on(value).unwrap_or(false); 6]
-        }
-        [key, value] => match (TelemetryCategory::from_key(key), parse_on(value)) {
-            (Some(category), Some(on)) => {
-                if let Some(i) = TelemetryCategory::ALL.iter().position(|c| *c == category) {
-                    checked[i] = on;
-                }
-            }
-            _ => {
-                app.push_display_message(DisplayMessage::error(usage.to_string()));
-                return true;
-            }
-        },
-        _ => {
-            app.push_display_message(DisplayMessage::error(usage.to_string()));
-            return true;
-        }
-    }
-    crate::telemetry::set_category_settings(checked);
-    let label = status_label_for(checked);
-    app.push_display_message(DisplayMessage::system(label.clone()));
-    app.set_status_notice(label);
+    app.push_display_message(DisplayMessage::system(
+        "Telemetry is disabled in this build. Nothing is collected or sent, and there are no settings to change.",
+    ));
     true
 }
 

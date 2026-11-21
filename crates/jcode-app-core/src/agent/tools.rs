@@ -75,6 +75,22 @@ pub(super) fn tool_output_side_pane_images(
         .collect()
 }
 
+pub(super) fn label_session_images(
+    session_id: &str,
+    message_id: &str,
+    first_ordinal: usize,
+    images: &mut [jcode_session_types::RenderedImage],
+) {
+    for (offset, image) in images.iter_mut().enumerate() {
+        let id = crate::session::image_id(session_id, message_id, first_ordinal + offset);
+        let label = image.label.get_or_insert_with(String::new);
+        if !label.is_empty() {
+            label.push(' ');
+        }
+        label.push_str(&format!("[#{id}]"));
+    }
+}
+
 /// Metadata key a tool sets to load deferred tool definitions into context.
 /// Value: array of registry tool names (e.g. `mcp__github__create_issue`).
 pub(crate) const TOOL_REFERENCES_METADATA_KEY: &str = "tool_references";
@@ -107,10 +123,11 @@ pub(super) fn tool_output_to_content_blocks(
         is_error: None,
     }];
     for img in output.images {
-        blocks.push(ContentBlock::Image {
-            media_type: img.media_type,
-            data: img.data,
-        });
+        // Every tool result passes through here, so MCP and browser
+        // screenshots are bounded like the built-in ones.
+        let (media_type, data) =
+            crate::image_normalize::fit_base64_image_for_model(img.media_type, img.data);
+        blocks.push(ContentBlock::Image { media_type, data });
         if let Some(label) = img.label.filter(|label| !label.trim().is_empty()) {
             blocks.push(ContentBlock::Text {
                 text: format!(
@@ -178,6 +195,45 @@ mod tests {
         assert!(
             matches!(&restored[0], ContentBlock::ToolResult { content, tool_use_id, .. }
             if content == text && tool_use_id == "edit-call")
+        );
+    }
+
+    #[test]
+    fn a_large_tool_image_is_stored_at_the_size_the_model_reads() {
+        use base64::Engine as _;
+        let engine = &base64::engine::general_purpose::STANDARD;
+        let shot = image::RgbImage::from_fn(3456, 2234, |x, y| {
+            let fine = if (x / 3 + y / 7) % 11 == 0 { 255 } else { 20 };
+            image::Rgb([(x / 14) as u8, fine, ((x ^ y) & 0xff) as u8])
+        });
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(shot)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let sent = engine.encode(png.into_inner());
+        let output = ToolOutput::new("shot").with_labeled_image("image/png", sent.clone(), "mcp");
+
+        let blocks = tool_output_to_content_blocks("call".into(), output);
+        let Some(ContentBlock::Image { media_type, data }) = blocks
+            .iter()
+            .find(|block| matches!(block, ContentBlock::Image { .. }))
+        else {
+            panic!("the image block is kept: {blocks:?}");
+        };
+        let stored = engine.decode(data).unwrap();
+        assert!(
+            stored.len() <= crate::image_normalize::MODEL_IMAGE_MAX_BYTES,
+            "stored {} bytes of {} sent",
+            stored.len(),
+            sent.len()
+        );
+        let decoded = image::load_from_memory(&stored).unwrap();
+        assert!(
+            decoded.width().max(decoded.height()) <= crate::image_normalize::MODEL_IMAGE_MAX_EDGE
+        );
+        assert_eq!(
+            crate::image_normalize::sniff_provider_media_type(&stored),
+            Some(media_type.as_str())
         );
     }
 

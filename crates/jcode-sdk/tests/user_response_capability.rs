@@ -41,6 +41,7 @@ fn user_response_capability_is_sent_only_when_client_opts_in() {
                 &ServerFrame::reply(
                     frame.id,
                     ApiEvent::HelloOk {
+                        runtime_identity: None,
                         version: API_VERSION_MAJOR,
                         server: "capability-test".into(),
                         capabilities: vec![],

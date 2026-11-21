@@ -6,48 +6,18 @@ use crate::{terminal_eprintln as eprintln, terminal_print as print, terminal_pri
 #[path = "provider_prewarm.rs"]
 mod provider_prewarm;
 
+#[path = "turn_loop_policy.rs"]
+mod turn_loop_policy;
+
 impl Agent {
     /// Run turns until no more tool calls
-    /// Maximum number of context-limit compaction retries before giving up.
-    pub(super) const MAX_CONTEXT_LIMIT_RETRIES: u32 = 5;
-    pub(super) const MAX_INCOMPLETE_CONTINUATION_ATTEMPTS: u32 = 3;
-    /// Retries allowed when the provider returns an empty response right after
-    /// tool results. This is a transient provider hiccup, not a signal that the
-    /// task is finished, so a single retry is too few: one empty response
-    /// observed once in 43 turns silently ended a 20-hour benchmark run with the
-    /// task half-done. The counter is per turn-loop, so a genuinely finished
-    /// agent still exits promptly.
-    pub(crate) const MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS: u32 = 5;
-    const SEQUENTIAL_TOOL_ROUNDS_BEFORE_BATCH_NUDGE: u32 = 3;
-    const BATCH_NUDGE: &str = "<system-reminder>Several tool calls have been made one at a time. If the next independent operations can run concurrently, use the batch tool instead of making more sequential calls. Keep sequential calls when one result is required to decide the next operation.</system-reminder>";
-    const TOOL_CALLS_BEFORE_TODO_NUDGE: usize = 20;
-    const TODO_NUDGE: &str = "<system-reminder>Many tool calls have been made but this session has no todos. Use the todo tool to plan and track this task.</system-reminder>";
-    fn update_sequential_tool_rounds(current: u32, tool_count: usize, used_batch: bool) -> u32 {
-        if tool_count == 1 && !used_batch {
-            current.saturating_add(1)
-        } else {
-            0
-        }
-    }
-
-    fn should_inject_batch_nudge(pending: bool, batch_available: bool) -> bool {
-        pending && batch_available
-    }
-
-    pub(super) fn plan_limit_reminder(
-        notice: &crate::subscription_notice::QuotaExceeded,
-    ) -> String {
-        format!(
-            "<system-reminder>Jcode plan limit: {notice} An upgrade card with a button is already shown to the user in the chat. Mention the limit in one short sentence, including the upgrade link if one is given. Do not open checkout or purchase anything. Continue the task without that feature.</system-reminder>"
-        )
-    }
-
     pub(super) async fn run_turn(&mut self, print_output: bool) -> Result<String> {
         let _runtime_activity =
             crate::runtime_activity::global().try_enter_session(&self.session.id)?;
         self.ensure_session_lease()?;
         self.set_log_context();
         let usage_turn_id = self.model_usage_turn_id();
+        self.provider.begin_turn(&usage_turn_id).await;
         crate::session_metrics::record_turn(&self.session.id);
         // Mark this session as actively streaming for presence UIs (e.g. the
         // macOS menu bar indicator). Cleared automatically on every exit path.
@@ -64,6 +34,7 @@ impl Agent {
         let mut incomplete_continuations = 0u32;
         let mut empty_post_tool_continuations = 0u32;
         let mut fable_guardrail_reconsiderations = 0u32;
+        let mut guardrail_retry_prompt = None;
         let mut sequential_single_tool_rounds = 0u32;
         let mut batch_nudge_pending = false;
         let mut turn_tool_calls = 0usize;
@@ -91,15 +62,18 @@ impl Agent {
                     repaired
                 ));
             }
+            self.apply_pending_reasoning_effort();
             // Start provider transport setup before deriving and potentially
             // compacting the request history. This is the first point where the
             // stable request settings are available.
             let mut tools = self.tool_definitions().await;
+            self.freeze_static_prompt();
+            self.record_prompt_inputs()?;
             let mut split_prompt = self.build_system_prompt_split(None);
             self.provider
                 .prewarm(&tools, &split_prompt.static_part)
                 .await;
-            let (messages, compaction_event) = self.messages_for_provider();
+            let (messages, compaction_event) = self.messages_for_provider(None).await?;
             if let Some(event) = compaction_event {
                 // Reset cache tracker and tool lock on compaction since the message history changes
                 self.cache_tracker.reset();
@@ -122,6 +96,7 @@ impl Agent {
                 split_prompt = self.build_system_prompt_split(None);
             }
 
+            let tools = self.prepare_tools_for_request(tools, &messages)?;
             let messages: std::sync::Arc<[Message]> = messages.into();
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_pending =
@@ -129,34 +104,37 @@ impl Agent {
             // Use split prompt for better caching - static content cached, dynamic not
             self.log_prompt_prefix_accounting(&split_prompt, &tools);
 
-            // Check for client-side cache violations before memory injection.
-            // Memory is an ephemeral suffix that changes each turn; tracking it would cause
-            // false-positive violations every turn (prior turn's memory ≠ current history prefix).
-            self.record_client_cache_request(&messages);
-
             // The request snapshot now owns everything the provider needs. Drop
             // the session's derived transcript copy before the network wait.
             self.session.release_provider_messages_cache();
 
-            // Inject memory as a user message at the end (preserves cache prefix)
             let mut messages_with_memory: Vec<Message> = messages.iter().cloned().collect();
-            if let Some(memory) = memory_pending.as_ref() {
+            let mut ephemeral_memory = None;
+            if let Some(memory) = memory_pending.as_ref()
+                && let Some((message, persisted)) =
+                    self.prepare_memory_injection_message(&messages, memory)
+            {
                 let memory_count = memory.count.max(1);
                 let age_ms = memory.computed_at.elapsed().as_millis() as u64;
                 crate::memory::record_injected_prompt(&memory.prompt, memory_count, age_ms);
-                self.record_memory_injection_in_session(memory);
                 logging::info(&format!(
                     "Memory injected as message ({} chars)",
                     memory.prompt.len()
                 ));
-                let (memory_msg, _persisted) = self.prepare_memory_injection_message(memory);
-                messages_with_memory.push(memory_msg);
+                if persisted {
+                    messages_with_memory.push(message);
+                } else {
+                    // An opted-out recall is absent from the next request, so
+                    // it must not carry a provider cache marker.
+                    ephemeral_memory = Some(message.into_request_only());
+                }
             }
+            let before_reminders = messages_with_memory.len();
             if Self::should_inject_batch_nudge(
                 batch_nudge_pending,
                 tools.iter().any(|tool| tool.name == "batch"),
             ) {
-                messages_with_memory.push(Message::user(Self::BATCH_NUDGE));
+                messages_with_memory.push(self.append_model_reminder(Self::BATCH_NUDGE));
                 batch_nudge_pending = false;
                 sequential_single_tool_rounds = 0;
             }
@@ -167,7 +145,7 @@ impl Agent {
                     .map(|t| t.is_empty())
                     .unwrap_or(false)
             {
-                messages_with_memory.push(Message::user(Self::TODO_NUDGE));
+                messages_with_memory.push(self.append_model_reminder(Self::TODO_NUDGE));
                 todo_nudge_sent = true;
             }
             // Background features (memory recall) can hit a plan limit with no
@@ -181,7 +159,23 @@ impl Agent {
                 .flatten()
             {
                 crate::subscription_notice::show_upgrade_card(&notice, &self.session.id);
-                messages_with_memory.push(Message::user(&Self::plan_limit_reminder(&notice)));
+                messages_with_memory
+                    .push(self.append_model_reminder(&Self::plan_limit_reminder(&notice)));
+            }
+            if messages_with_memory.len() > before_reminders {
+                self.persist_session_best_effort("turn reminders");
+            }
+            self.record_client_cache_request(&messages_with_memory);
+
+            // Request-only messages follow every durable block. A reload nudge
+            // only makes this particular continuation valid on the wire.
+            messages_with_memory.extend(ephemeral_memory);
+            messages_with_memory.extend(guardrail_retry_prompt.take());
+            if let Some(mut nudge) =
+                super::reload_resume::trailing_assistant_nudge(&messages_with_memory)
+            {
+                nudge.timestamp = None;
+                messages_with_memory.push(nudge.into_request_only());
             }
 
             logging::info(&format!(
@@ -204,18 +198,20 @@ impl Agent {
                 .then(|| Message::with_timestamps(&messages_with_memory));
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
+            self.enforce_worker_request()?;
             self.last_status_detail = None;
             self.provider.set_session_id(&self.session.id);
-            let completion = self
-                .provider
-                .complete_split(
+            let completion = jcode_provider_core::with_pinned_worker_request(
+                self.session.is_swarm_worker,
+                self.provider.complete_split(
                     send_messages,
                     &tools,
                     &split_prompt.static_part,
                     &split_prompt.dynamic_part,
                     self.provider_session_id.as_deref(),
-                )
-                .await;
+                ),
+            )
+            .await;
             self.sync_bound_account_route();
             let mut stream = match completion {
                 Ok(stream) => stream,
@@ -620,7 +616,17 @@ impl Agent {
                             eprintln!("[trace] provider_service_tier={tier}");
                         }
                     }
+                    StreamEvent::ResolvedModel { model } => {
+                        usage_recorder.resolve_model(model);
+                    }
                     StreamEvent::RetryRollback { attempt, max } => {
+                        // Preserve reported usage from the failed attempt, but
+                        // never let its model or counters bleed into the retry.
+                        usage_recorder.finish();
+                        usage_input = None;
+                        usage_output = None;
+                        usage_cache_read = None;
+                        usage_cache_creation = None;
                         // Transient transport fault mid-stream; the provider is
                         // replaying the request. Discard this attempt's partial
                         // output so the replay doesn't duplicate it in history.
@@ -1014,10 +1020,11 @@ impl Agent {
 
             // If no tool calls, we're done
             if tool_calls.is_empty() {
-                if self.maybe_reconsider_fable_guardrail(
+                if let Some(prompt) = self.fable_guardrail_retry_prompt(
                     stop_reason.as_deref(),
                     &mut fable_guardrail_reconsiderations,
-                )? {
+                ) {
+                    guardrail_retry_prompt = Some(prompt);
                     continue;
                 }
                 if self.maybe_continue_empty_post_tool_response(
@@ -1101,6 +1108,7 @@ impl Agent {
             let mut malformed_calls: Vec<MalformedToolCallInfo> = Vec::new();
             let mut executed_valid_call = false;
             let mut tool_results_dirty = false;
+            let mut ambient_cycle_ended = false;
             for tc in tool_calls {
                 let message_id = assistant_message_id
                     .clone()
@@ -1256,6 +1264,11 @@ impl Agent {
 
                 match result {
                     Ok(output) => {
+                        if tc.name == "end_ambient_cycle"
+                            && crate::tool::ambient::is_ambient_session_registered(&self.session.id)
+                        {
+                            ambient_cycle_ended = true;
+                        }
                         let output = cap_tool_output_for_history(&tc.name, output);
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
                             session_id: self.session.id.clone(),
@@ -1282,7 +1295,15 @@ impl Agent {
                             println!("{}", preview.lines().next().unwrap_or("(done)"));
                         }
 
-                        let blocks = tool_output_to_content_blocks(tc.id, output);
+                        let mut blocks = tool_output_to_content_blocks(tc.id, output);
+                        if self.provider.name().eq_ignore_ascii_case("openai")
+                            && self.native_deferred_mcp()
+                        {
+                            crate::provider::openai_request::freeze_deferred_tools(
+                                &mut blocks,
+                                &tools,
+                            );
+                        }
                         self.add_message_with_duration(
                             Role::User,
                             blocks,
@@ -1328,6 +1349,10 @@ impl Agent {
 
             if tool_results_dirty {
                 self.session.save()?;
+            }
+
+            if ambient_cycle_ended {
+                break;
             }
 
             if !generated_image_contexts.is_empty() {

@@ -3,6 +3,47 @@ use crate::tui::app::tests::create_test_app;
 use crate::tui::backend::RemoteConnection;
 
 #[test]
+fn local_tool_registration_error_is_visible_without_settling_active_turn() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _guard = runtime.enter();
+    let mut app = create_test_app();
+    let mut remote = RemoteConnection::dummy();
+    app.is_processing = true;
+    app.current_message_id = Some(99);
+    app.input = "unsent draft".into();
+    remote.local_tools_request = Some(42);
+    assert!(handle_server_event(
+        &mut app,
+        ServerEvent::Error {
+            id: 42,
+            message: "Session is busy".into(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    ));
+    assert!(remote.local_tools_request.is_none());
+    assert!(!remote.jarvis_tools_configured);
+    assert!(app.is_processing);
+    assert_eq!(app.current_message_id, Some(99));
+    assert_eq!(app.input, "unsent draft");
+    assert!(
+        app.display_messages
+            .last()
+            .unwrap()
+            .content
+            .contains("registration failed")
+    );
+    remote.local_tools_request = Some(43);
+    assert!(!handle_server_event(
+        &mut app,
+        ServerEvent::Ack { id: 43 },
+        &mut remote
+    ));
+    assert!(remote.local_tools_request.is_none());
+    assert!(app.is_processing);
+}
+
+#[test]
 fn stale_terminals_cannot_settle_or_touch_newer_work() {
     let mut app = create_test_app();
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -158,5 +199,28 @@ fn runtime_command_result_renders_without_starting_or_disrupting_turn() {
         assert_eq!(app.current_message_id, active.then_some(99));
         assert_eq!(app.last_stream_activity, activity);
         assert_eq!(app.input, "draft prompt");
+    }
+}
+
+#[test]
+fn pinned_mode_remote_acknowledgement_updates_session_without_a_turn() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _runtime_guard = runtime.enter();
+    let mut app = create_test_app();
+    let mut remote = RemoteConnection::dummy();
+    for mode in [Some("server-only-skill"), None] {
+        assert!(handle_server_event(
+            &mut app,
+            ServerEvent::RuntimeCommandResult {
+                id: 42,
+                command: "mode".into(),
+                data: serde_json::json!({"pinned_skill": mode}),
+                message: format!("Session mode: {}", mode.unwrap_or("off")),
+            },
+            &mut remote
+        ));
+        assert_eq!(app.active_skill.as_deref(), mode);
+        assert_eq!(app.session.pinned_skill.as_deref(), mode);
+        assert!(!app.is_processing);
     }
 }

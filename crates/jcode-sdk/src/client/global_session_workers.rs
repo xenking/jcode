@@ -15,7 +15,7 @@ pub(super) fn discover_global_sessions(
                 limit: None,
             })
             .and_then(|frame| match frame.event {
-                ApiEvent::Sessions { sessions } => Ok(sessions),
+                ApiEvent::Sessions { sessions, .. } => Ok(sessions),
                 other => Err(unexpected("sessions", &other)),
             }) {
             Ok(sessions) => sessions,

@@ -166,6 +166,30 @@ pub fn blend_color(from: Color, to: Color, t: f32) -> Color {
     )
 }
 
+/// Ink for a reasoning-effort glyph, a heat scale rather than a fade toward
+/// the brand accent.
+///
+/// `t` is the level's position on the shared ladder, 0..=1. The weak rungs stay
+/// cool and dim, the middle is neutral chrome ink, and the top rungs warm to
+/// amber then red: the color alone says how hard the model is being asked to
+/// think. The desktop composer bar draws the same scale
+/// (`jcode_desktop_ui::effort::tint`); swarm modes pass 0 and keep the quiet
+/// tint because they are orchestration modes, not rungs.
+pub fn effort_ramp(t: f32) -> Color {
+    match t.clamp(0.0, 1.0) {
+        t if t < 0.15 => dim_color(),
+        // Cool: low rungs.
+        t if t < 0.3 => rgb(110, 150, 200),
+        t if t < 0.45 => rgb(110, 180, 240),
+        // Neutral middle.
+        t if t < 0.6 => rgb(170, 175, 180),
+        // Warm, then hot.
+        t if t < 0.75 => rgb(224, 164, 88),
+        t if t < 0.9 => rgb(232, 115, 74),
+        _ => rgb(224, 69, 63),
+    }
+}
+
 pub fn rainbow_prompt_color(distance: usize) -> Color {
     // Rainbow colors (hue progression): red -> orange -> yellow -> green -> cyan -> blue -> violet
     const RAINBOW: [(u8, u8, u8); 7] = [

@@ -81,3 +81,24 @@ impl CrossProviderFailoverMode {
         }
     }
 }
+
+/// When an automatic earned-reset redemption may fire.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoResetTrigger {
+    /// Redeem as soon as a usage window reaches 100%.
+    Exhausted,
+    /// Redeem only while blocked and the window reset is further away than
+    /// `auto_reset_min_wait_minutes`. Short waits keep the reset banked.
+    #[default]
+    BlockedWaitOver,
+}
+
+impl AutoResetTrigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Exhausted => "exhausted",
+            Self::BlockedWaitOver => "blocked_wait_over",
+        }
+    }
+}

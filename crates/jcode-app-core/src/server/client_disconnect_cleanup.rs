@@ -16,6 +16,26 @@ use tokio::sync::{RwLock, broadcast, mpsc};
 use super::SessionAgents;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
+/// Drop every editing hold this connection owns, keeping the prompts queued.
+async fn release_editing_holds(
+    soft_interrupt_queues: &SessionInterruptQueues,
+    session_id: &str,
+    connection_id: &str,
+) {
+    let queue = soft_interrupt_queues.read().await.get(session_id).cloned();
+    let Some(queue) = queue else {
+        return;
+    };
+    let Ok(mut queue) = queue.lock() else {
+        return;
+    };
+    for item in queue.iter_mut() {
+        if item.editing_by.as_deref() == Some(connection_id) {
+            item.editing_by = None;
+        }
+    }
+}
+
 const RELOAD_DISCONNECT_MARKER_MAX_AGE: Duration = Duration::from_secs(30);
 pub(super) const IDLE_RECONNECT_GRACE: Duration = Duration::from_secs(30);
 
@@ -156,7 +176,14 @@ pub(super) async fn cleanup_client_connection(
     if disposition == DisconnectDisposition::Closed {
         crate::agents_status::session_closed(client_session_id);
     }
-    let originally_registered = swarm_members.read().await.contains_key(client_session_id);
+    let (originally_registered, server_owned_worker) = {
+        let members = swarm_members.read().await;
+        let member = members.get(client_session_id);
+        (
+            member.is_some(),
+            member.is_some_and(|member| member.is_headless),
+        )
+    };
 
     record_transport_closed(client_session_id, client_connection_id, client_connections).await;
 
@@ -170,7 +197,35 @@ pub(super) async fn cleanup_client_connection(
     )
     .await;
 
-    if continue_on_disconnect {
+    // A connection that dropped while editing a queued prompt must not strand
+    // it: release the hold so the queue can deliver it again.
+    release_editing_holds(
+        soft_interrupt_queues,
+        client_session_id,
+        client_connection_id,
+    )
+    .await;
+
+    // A headless swarm worker is driven by the server, not by whoever is
+    // viewing it. A Desktop/TUI viewer closing must only release its own
+    // transport; tearing the worker down here stopped it mid-turn and dropped
+    // it from its swarm, so the coordinator lost the worker for good.
+    // A turn this connection did not start (reload recovery, swarm wake,
+    // server failover) is owned by the server, like a headless worker's. Its
+    // Agent must stay published: unpublishing it while the turn holds the only
+    // strong handle made every reattach fail with "still has a runtime owner"
+    // until the turn ended.
+    let server_owned_turn = processing_task
+        .as_ref()
+        .is_none_or(|task| task.is_finished())
+        && sessions
+            .turn_observer(client_session_id)
+            .is_some_and(|observer| observer.snapshot().1.is_some());
+    if continue_on_disconnect
+        || server_owned_worker
+        || server_owned_turn
+        || crate::turn_activity::session_is_stopped(client_session_id)
+    {
         // Remote continuation is a session lifetime policy, not merely a
         // promise to finish the current turn. Idle coordinators must remain
         // addressable for worker reports and future wake turns after EOF.

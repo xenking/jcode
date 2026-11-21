@@ -112,7 +112,7 @@ static CACHE: LazyLock<Mutex<VecDeque<Entry>>> = LazyLock::new(|| Mutex::new(Vec
 
 fn builder(profile: Profile) -> reqwest::ClientBuilder {
     match profile {
-        Profile::Shared => reqwest::Client::builder()
+        Profile::Shared => jcode_provider_core::reqwest_builder()
             .user_agent(crate::provider::JCODE_USER_AGENT)
             .connect_timeout(Duration::from_secs(15))
             .tcp_keepalive(Some(Duration::from_secs(30)))
@@ -121,10 +121,10 @@ fn builder(profile: Profile) -> reqwest::ClientBuilder {
             .http2_keep_alive_while_idle(true)
             .pool_idle_timeout(Duration::from_secs(90))
             .pool_max_idle_per_host(8),
-        Profile::Custom => reqwest::Client::builder()
+        Profile::Custom => jcode_provider_core::reqwest_builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(30)),
-        Profile::Kagi => reqwest::Client::builder()
+        Profile::Kagi => jcode_provider_core::reqwest_builder()
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
             .timeout(Duration::from_secs(30)),

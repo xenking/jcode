@@ -1,15 +1,13 @@
 use super::state::{MAX_EVENT_HISTORY, fanout_session_event};
 use super::{SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan};
-use super::{persist_swarm_state_for, remove_persisted_swarm_state_for};
+use super::{persist_swarm_state_after_departure, persist_swarm_state_for};
 use crate::agent::Agent;
 use crate::plan::{PlanItem, newly_ready_item_ids};
 use crate::protocol::{NotificationType, ServerEvent};
 use crate::session::Session;
 use anyhow::Result;
 use futures::future::try_join_all;
-use jcode_swarm_core::{
-    completion_notification_with_lane_plan, normalize_completion_report, truncate_detail,
-};
+use jcode_swarm_core::{completion_notification_with_lane_plan, normalize_completion_report};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -101,6 +99,26 @@ pub(super) fn swarm_descendants(
     descendants
 }
 
+/// Fire the cancel signal of every turn `session_id` is currently running.
+/// Returns how many were fired.
+///
+/// `swarm stop` removes the worker's session entry and swarm membership. A
+/// worker that was mid-turn kept its own `Arc<Agent>` and went on generating
+/// and writing files for minutes, with no handle left to stop it by.
+pub(super) fn cancel_active_turns(session_id: &str) -> usize {
+    let signals = crate::turn_cancel_registry::active_turn_signals(session_id);
+    for signal in &signals {
+        signal.fire();
+    }
+    if !signals.is_empty() {
+        crate::logging::info(&format!(
+            "SWARM_STOP_CANCELLED_ACTIVE_TURNS session={session_id} fired={}",
+            signals.len()
+        ));
+    }
+    signals.len()
+}
+
 /// Stop the running turns of every worker `session_id` spawned (workers run
 /// their own server-side turns, so cancelling only the coordinator left them
 /// spending tokens). Idle workers are left alone. Returns the stopped ids.
@@ -119,6 +137,10 @@ pub(super) async fn cancel_spawned_descendant_turns(
         if signals.is_empty() {
             continue;
         }
+        crate::turn_cancel_registry::mark_interruption(
+            &descendant,
+            crate::turn_cancel_registry::TurnInterruptionReason::Cancel,
+        );
         for signal in &signals {
             signal.fire();
         }
@@ -229,16 +251,6 @@ pub(super) fn now_unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
-}
-
-fn log_swarm_lifecycle(phase: &str, fields: Vec<(&str, String)>) {
-    crate::logging::event_info(
-        "SWARM_LIFECYCLE",
-        Vec::from([("phase", phase.to_string())])
-            .into_iter()
-            .chain(fields)
-            .collect::<Vec<_>>(),
-    );
 }
 
 pub(super) fn swarm_task_heartbeat_interval() -> Duration {
@@ -703,8 +715,8 @@ pub(super) async fn refresh_swarm_task_staleness(
     // them, and salvaging inside that window would double-assign their work.
     let salvage_grace = swarm_task_stale_after();
     let salvage_candidates: Vec<(String, String)> = {
-        let plans = swarm_plans.read().await;
         let members = swarm_members.read().await;
+        let plans = swarm_plans.read().await;
         let mut pairs = std::collections::BTreeSet::new();
         for (swarm_id, plan) in plans.iter() {
             for item in &plan.items {
@@ -786,6 +798,17 @@ async fn broadcast_swarm_status_now(
     if targets.is_empty() {
         return;
     }
+    // Allocate under the publication lock: delayed bridge/SDK consumers can
+    // reject older snapshots even when two transitions happen in one millis.
+    static LAST_SNAPSHOT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    LAST_SNAPSHOT_MS.fetch_max(now_ms, std::sync::atomic::Ordering::Relaxed);
+    let snapshot_at_unix_ms = LAST_SNAPSHOT_MS
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .saturating_add(1);
     let broadcast_terminal_retention = swarm_status_broadcast_terminal_retention();
     let members_list: Vec<crate::protocol::SwarmMemberStatus> = session_ids
         .iter()
@@ -820,6 +843,7 @@ async fn broadcast_swarm_status_now(
                         todo_progress: m.todo_progress,
                         todo_items: m.todo_items.clone(),
                         runtime: crate::protocol::SwarmMemberRuntime {
+                            snapshot_at_unix_ms: Some(snapshot_at_unix_ms),
                             live_status: super::live_status::snapshot(&m.session_id),
                             wait_reason: wait.as_ref().map(|(reason, _)| reason.clone()).or_else(
                                 || {
@@ -849,6 +873,7 @@ async fn broadcast_swarm_status_now(
                             activity_age_secs: crate::session_metrics::last_activity_age_secs(
                                 &m.session_id,
                             ),
+                            stalled_secs: super::swarm_watchdog::stalled_for_secs(&m.session_id),
                             context_tokens: tokens.map(|(context, _)| context).filter(|t| *t > 0),
                             context_limit,
                             output_tokens: tokens.map(|(_, output)| output).filter(|t| *t > 0),
@@ -1193,6 +1218,9 @@ pub(super) async fn remove_session_from_swarm(
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
 ) {
     let started = Instant::now();
+    // A stopped or removed worker can never consume its parked escalated ask.
+    // Withdraw it so the coordinator is not left with a dead question.
+    super::ask_escalation::withdraw_worker(session_id);
     crate::agents_status::session_closed(session_id);
     log_swarm_lifecycle(
         "member_remove_start",
@@ -1248,8 +1276,8 @@ pub(super) async fn remove_session_from_swarm(
     let mut elected_coordinator = None;
     if was_coordinator {
         let new_coordinator = {
-            let swarms = swarms_by_id.read().await;
             let members = swarm_members.read().await;
+            let swarms = swarms_by_id.read().await;
             swarms.get(swarm_id).and_then(|swarm| {
                 swarm
                     .iter()
@@ -1283,6 +1311,7 @@ pub(super) async fn remove_session_from_swarm(
             if let Some(vp) = plans.get_mut(swarm_id) {
                 vp.participants.insert(new_id.clone());
             }
+            drop(plans);
             let members = swarm_members.read().await;
             if let Some(member) = members.get(&new_id) {
                 let _ = member.event_tx.send(ServerEvent::Notification {
@@ -1373,23 +1402,13 @@ pub(super) async fn remove_session_from_swarm(
         );
     }
 
-    if swarm_plans.read().await.contains_key(swarm_id) {
-        let swarm_state = SwarmState {
-            members: Arc::clone(swarm_members),
-            swarms_by_id: Arc::clone(swarms_by_id),
-            plans: Arc::clone(swarm_plans),
-            coordinators: Arc::clone(swarm_coordinators),
-        };
-        persist_swarm_state_for(swarm_id, &swarm_state).await;
-    } else {
-        let swarm_state = SwarmState {
-            members: Arc::clone(swarm_members),
-            swarms_by_id: Arc::clone(swarms_by_id),
-            plans: Arc::clone(swarm_plans),
-            coordinators: Arc::clone(swarm_coordinators),
-        };
-        remove_persisted_swarm_state_for(swarm_id, &swarm_state).await;
-    }
+    let swarm_state = SwarmState {
+        members: Arc::clone(swarm_members),
+        swarms_by_id: Arc::clone(swarms_by_id),
+        plans: Arc::clone(swarm_plans),
+        coordinators: Arc::clone(swarm_coordinators),
+    };
+    persist_swarm_state_after_departure(swarm_id, &swarm_state).await;
 
     let remaining_member_count = swarms_by_id
         .read()
@@ -1427,6 +1446,9 @@ fn member_awaits_unrestored_notice(member: &SwarmMember) -> bool {
         // continuation. Startup will restore that worker, so don't tell its
         // coordinator it had no work in flight and needs replacing.
         && !super::reload_recovery::has_pending_for_session(&member.session_id)
+        // An open lane may be waiting for a dependency. Restore its agent
+        // without a turn and let the dependency completion wake it.
+        && !super::worker_revive::has_open_lane(&member.session_id)
 }
 
 /// Tell `owner_session_id` about idle headless workers that the last server
@@ -1572,6 +1594,23 @@ pub(super) async fn notify_owner_of_unrestored_idle_workers(
     count
 }
 
+/// One-line preview of user or agent text for swarm status, plan progress and
+/// event history.
+///
+/// These previews are echoed to other agents (`swarm status`, `swarm list`),
+/// persisted with swarm state and rendered in every attached client, so a
+/// credential at the start of a user request must not be copied into them.
+pub(super) fn truncate_detail(text: &str, max_len: usize) -> String {
+    // Bound the redaction scan: only the head of the text can reach the
+    // preview, and prompts with pasted content can be very large.
+    let scan_chars = max_len.saturating_mul(4).saturating_add(64);
+    let head = match text.char_indices().nth(scan_chars) {
+        Some((end, _)) => &text[..end],
+        None => text,
+    };
+    jcode_swarm_core::truncate_detail(&crate::message::redact_preview_secrets(head), max_len)
+}
+
 /// Set a member's stable task label, derived from its spawn prompt or task
 /// assignment. Unlike `detail` (transient status text), the label survives
 /// status churn so UIs can always answer "what was this agent for?". A later
@@ -1581,7 +1620,9 @@ pub(super) async fn set_member_task_label(
     task_text: &str,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) {
-    let Some(label) = jcode_swarm_core::derive_swarm_task_label(task_text) else {
+    let Some(label) = jcode_swarm_core::derive_swarm_task_label(task_text)
+        .map(|label| crate::message::redact_preview_secrets(&label))
+    else {
         return;
     };
     let mut members = swarm_members.write().await;
@@ -1590,59 +1631,10 @@ pub(super) async fn set_member_task_label(
     }
 }
 
-pub(super) async fn record_swarm_event(
-    event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
-    event_counter: &Arc<std::sync::atomic::AtomicU64>,
-    swarm_event_tx: &broadcast::Sender<SwarmEvent>,
-    session_id: String,
-    session_name: Option<String>,
-    swarm_id: Option<String>,
-    event: SwarmEventType,
-) {
-    let swarm_event = SwarmEvent {
-        id: event_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-        session_id,
-        session_name,
-        swarm_id,
-        event,
-        timestamp: Instant::now(),
-        absolute_time: std::time::SystemTime::now(),
-    };
-    let _ = swarm_event_tx.send(swarm_event.clone());
-    let mut history = event_history.write().await;
-    history.push_back(swarm_event);
-    if history.len() > MAX_EVENT_HISTORY {
-        history.pop_front();
-    }
-}
-
-pub(super) async fn record_swarm_event_for_session(
-    session_id: &str,
-    event: SwarmEventType,
-    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-    event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
-    event_counter: &Arc<std::sync::atomic::AtomicU64>,
-    swarm_event_tx: &broadcast::Sender<SwarmEvent>,
-) {
-    let (session_name, swarm_id) = {
-        let members = swarm_members.read().await;
-        if let Some(member) = members.get(session_id) {
-            (member.friendly_name.clone(), member.swarm_id.clone())
-        } else {
-            (None, None)
-        }
-    };
-    record_swarm_event(
-        event_history,
-        event_counter,
-        swarm_event_tx,
-        session_id.to_string(),
-        session_name,
-        swarm_id,
-        event,
-    )
-    .await;
-}
+#[path = "swarm_event_history.rs"]
+mod swarm_event_history;
+use swarm_event_history::log_swarm_lifecycle;
+pub(super) use swarm_event_history::{record_swarm_event, record_swarm_event_for_session};
 
 #[expect(
     clippy::too_many_arguments,
@@ -1719,6 +1711,38 @@ pub(super) async fn update_member_status_with_report_tldr(
     swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
 ) {
     let completion_report = normalize_completion_report(completion_report);
+    // Snapshot before publishing the status transition. Once published, an
+    // await watcher can finalize concurrently and disappear from the pending
+    // registry. Its result already carries the worker report, so starting a
+    // second owner turn races that wake and can strand the queued result.
+    let covered_by_await = if matches!(
+        status,
+        "ready" | "completed" | "failed" | "stopped" | "crashed"
+    ) {
+        let owner_and_swarm = {
+            let members = swarm_members.read().await;
+            members.get(session_id).and_then(|member| {
+                Some((
+                    member.report_back_to_session_id.clone()?,
+                    member.swarm_id.clone()?,
+                ))
+            })
+        };
+        owner_and_swarm.is_some_and(|(owner, swarm_id)| {
+            super::pending_await_members_for_session(&owner)
+                .iter()
+                .any(|wait| {
+                    wait.background
+                        && wait.wake
+                        && wait.swarm_id == swarm_id
+                        && wait.target_status.iter().any(|target| target == status)
+                        && (wait.requested_ids.is_empty()
+                            || wait.requested_ids.iter().any(|id| id == session_id))
+                })
+        })
+    } else {
+        false
+    };
     let detail_present = detail.is_some();
     let (
         swarm_id,
@@ -1730,6 +1754,9 @@ pub(super) async fn update_member_status_with_report_tldr(
         report_back_to_session_id,
     ) = {
         let mut members = swarm_members.write().await;
+        if status != "stopped" && crate::turn_activity::session_is_stopped(session_id) {
+            return;
+        }
         if let Some(member) = members.get_mut(session_id) {
             // The live gallery buffer mixes tool activity and partial prose.
             // Never promote it to the worker's final response on interruption.
@@ -1896,7 +1923,7 @@ pub(super) async fn update_member_status_with_report_tldr(
                 // context. Deliver reports through the reliable runtime bus,
                 // which wakes idle owners and queues reports for busy ones.
                 // Explicit stops are cancellation, not permission to restart.
-                if report_back_to_session_id.is_some() && status != "stopped" {
+                if report_back_to_session_id.is_some() && status != "stopped" && !covered_by_await {
                     crate::bus::Bus::global().publish(crate::bus::BusEvent::SwarmWorkerReported(
                         crate::bus::SwarmWorkerReported {
                             session_id: recipient_session_id.clone(),

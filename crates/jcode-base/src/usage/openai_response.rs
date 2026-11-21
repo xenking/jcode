@@ -1,6 +1,8 @@
 //! Quota windows returned on Codex model responses.
 use super::*;
 
+// Invalid optional quota fields stay unknown. Invalid utilization rejects the
+// window, so a wholly malformed response cannot replace the last good report.
 pub(super) fn parse_headers(headers: &reqwest::header::HeaderMap) -> Vec<UsageLimit> {
     ["primary", "secondary"]
         .into_iter()

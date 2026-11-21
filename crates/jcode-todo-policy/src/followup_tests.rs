@@ -193,14 +193,11 @@ fn running_dependencies_pause_without_consuming_budget_or_reviews() {
         waiting_on: vec!["build".into()],
         ..todo("validate", "in_progress")
     }]);
-    // First exhaust the actionable budget, then explicitly wait. Resolution
-    // must get a fresh budget even though the todo payload did not change.
-    for _ in 0..INCOMPLETE_TODO_MAX_ATTEMPTS {
-        assert_eq!(
-            kind(&policy.decide(&state)),
-            Some(FollowUpKind::IncompleteTodos)
-        );
-    }
+    // Waiting and resolution must not reset the unchanged todo fingerprint.
+    assert_eq!(
+        kind(&policy.decide(&state)),
+        Some(FollowUpKind::IncompleteTodos)
+    );
     assert_eq!(policy.decide(&state), Decision::default());
     state.running_background_tasks = vec!["build".into()];
     state.long_session_review_due = true;
@@ -209,12 +206,7 @@ fn running_dependencies_pause_without_consuming_budget_or_reviews() {
     }
     state.running_background_tasks.clear();
     state.long_session_review_due = false;
-    for _ in 0..INCOMPLETE_TODO_MAX_ATTEMPTS {
-        assert_eq!(
-            kind(&policy.decide(&state)),
-            Some(FollowUpKind::IncompleteTodos)
-        );
-    }
+    assert_eq!(policy.decide(&state), Decision::default());
 }
 
 #[test]
@@ -239,6 +231,27 @@ fn mixed_dependencies_poke_only_actionable_todos() {
     assert!(follow_up.message.contains("write-tests"));
     assert!(!follow_up.message.contains("blocked-validation"));
     assert!(is_auto_poke_message(&follow_up.message));
+}
+
+#[test]
+fn unchanged_todo_set_is_not_poked_again_when_a_dependency_finishes() {
+    let mut state = snapshot(vec![
+        todo("independent", "pending"),
+        TodoItem {
+            waiting_on: vec!["await-1".into()],
+            ..todo("waiting", "pending")
+        },
+    ]);
+    state.running_background_tasks = vec!["await-1".into()];
+    let mut policy = FollowUpPolicy::new(true);
+    let message = policy.decide(&state).follow_up.unwrap().message;
+    assert!(message.contains("independent"));
+    assert!(!message.contains("waiting"));
+    state.running_background_tasks.clear();
+    state.todos.reverse();
+    assert_eq!(policy.decide(&state), Decision::default());
+    state.todos[0].content.push_str(" updated");
+    assert!(policy.decide(&state).follow_up.is_some());
 }
 
 #[test]
@@ -274,7 +287,7 @@ fn disabled_policy_never_follows_up() {
 }
 
 #[test]
-fn pokes_open_work_three_times_per_distinct_state() {
+fn pokes_open_work_once_per_distinct_state() {
     let mut policy = FollowUpPolicy::new(true);
     let open = snapshot(vec![todo("a", "pending"), todo("b", "in_progress")]);
     let first = policy.decide(&open);
@@ -282,13 +295,7 @@ fn pokes_open_work_three_times_per_distinct_state() {
     assert_eq!(follow_up.kind, FollowUpKind::IncompleteTodos);
     assert!(is_auto_poke_message(&follow_up.message));
     assert!(follow_up.notice.contains("2 incomplete todos"));
-    for _ in 1..INCOMPLETE_TODO_MAX_ATTEMPTS {
-        assert_eq!(
-            kind(&policy.decide(&open)),
-            Some(FollowUpKind::IncompleteTodos)
-        );
-    }
-    // Three attempts without progress exhaust the budget, without disabling it.
+    // One attempt exhausts the budget without disabling it.
     assert_eq!(policy.decide(&open), Decision::default());
     assert_eq!(policy.decide(&open), Decision::default());
     assert!(policy.is_enabled());
@@ -747,4 +754,204 @@ fn delivered_final_preserves_gate_breaker_and_disabled_policy() {
     assert!(policy.final_response_fingerprint.is_none());
     policy.disable();
     assert_eq!(policy.decide_after_turn(&state, true), Decision::default());
+}
+
+fn assigned(content: &str, owner: &str) -> TodoItem {
+    TodoItem {
+        assigned_to: Some(owner.into()),
+        ..todo(content, "in_progress")
+    }
+}
+
+#[test]
+fn todo_assigned_to_another_session_is_not_actionable() {
+    let mut policy = FollowUpPolicy::new(true);
+    let mut state = snapshot(vec![assigned("worker lane", "swarm-worker")]);
+    state.session_id = "coordinator".into();
+    for _ in 0..4 {
+        assert_eq!(policy.decide(&state), Decision::default());
+    }
+    // Own work in the same list is still poked, and names only that work.
+    state.todos.push(todo("mine", "pending"));
+    let message = policy.decide(&state).follow_up.unwrap().message;
+    assert!(message.contains("mine"));
+    assert!(!message.contains("worker lane"));
+    // `@self`, empty and the session's own id are this session's work.
+    for owner in ["@self", "", "coordinator"] {
+        let mut own = snapshot(vec![assigned("own lane", owner)]);
+        own.session_id = "coordinator".into();
+        assert_eq!(
+            kind(&FollowUpPolicy::new(true).decide(&own)),
+            Some(FollowUpKind::IncompleteTodos),
+            "{owner:?}"
+        );
+    }
+}
+
+#[test]
+fn assigned_elsewhere_todo_does_not_reach_final_response_gates() {
+    let mut policy = FollowUpPolicy::new(true);
+    let mut state = snapshot(vec![assigned("worker lane", "swarm-worker")]);
+    state.session_id = "coordinator".into();
+    state
+        .todos
+        .push(done("finished", ConfidenceState::Verified));
+    assert_eq!(policy.decide(&state), Decision::default());
+}
+
+#[test]
+fn running_swarm_members_suppress_poke_without_spending_budget() {
+    let mut policy = FollowUpPolicy::new(true);
+    let mut state = snapshot(vec![todo("own work", "pending")]);
+    state.session_id = "coordinator".into();
+    state.running_swarm_members = vec!["worker-1".into()];
+    for _ in 0..10 {
+        assert_eq!(policy.decide(&state), Decision::default());
+    }
+    // Members finishing wakes the session with a fresh budget.
+    state.running_swarm_members.clear();
+    for _ in 0..INCOMPLETE_TODO_MAX_ATTEMPTS {
+        assert_eq!(
+            kind(&policy.decide(&state)),
+            Some(FollowUpKind::IncompleteTodos)
+        );
+    }
+    assert_eq!(policy.decide(&state), Decision::default());
+}
+
+#[test]
+fn pending_swarm_await_suppresses_poke_without_spending_budget() {
+    // Desktop decides from `get_todo_state`, which cannot list running swarm
+    // members but does report a live wake-enabled await. An open todo that
+    // carries no `waiting_on` must still not be poked while that await runs.
+    let mut policy = FollowUpPolicy::new(true);
+    let mut state = snapshot(vec![todo("roll out after workers", "pending")]);
+    state.session_id = "coordinator".into();
+    state.pending_swarm_await = Some(true);
+    for _ in 0..10 {
+        assert_eq!(policy.decide(&state), Decision::default());
+    }
+    // The await resolving wakes the session with a fresh budget. An unknown
+    // await state (older bridge, disk-only read) stays actionable.
+    for settled in [Some(false), None] {
+        let mut policy = policy.clone();
+        state.pending_swarm_await = settled;
+        assert_eq!(
+            kind(&policy.decide(&state)),
+            Some(FollowUpKind::IncompleteTodos),
+            "{settled:?}"
+        );
+    }
+}
+
+#[test]
+fn swarm_member_status_classification() {
+    for status in [
+        "queued",
+        "running",
+        "running_stale",
+        "streaming",
+        "thinking",
+    ] {
+        assert!(swarm_member_is_working(status), "{status}");
+    }
+    for status in ["ready", "completed", "failed", "stopped", "crashed", "done"] {
+        assert!(!swarm_member_is_working(status), "{status}");
+    }
+}
+
+#[test]
+fn poke_turn_without_tool_calls_blocks_repeat_until_todos_change() {
+    let mut policy = FollowUpPolicy::new(true);
+    let state = snapshot(vec![todo("stuck", "pending")]);
+    assert_eq!(
+        kind(&policy.decide(&state)),
+        Some(FollowUpKind::IncompleteTodos)
+    );
+    policy.record_turn(false);
+    for _ in 0..5 {
+        assert_eq!(policy.decide(&state), Decision::default());
+    }
+    // A changed todo set is a new situation.
+    let changed = snapshot(vec![todo("stuck", "in_progress")]);
+    assert_eq!(
+        kind(&policy.decide(&changed)),
+        Some(FollowUpKind::IncompleteTodos)
+    );
+}
+
+#[test]
+fn poke_turn_with_tool_calls_keeps_normal_budget() {
+    let mut policy = FollowUpPolicy::new(true);
+    let state = snapshot(vec![todo("busy", "pending")]);
+    for _ in 0..INCOMPLETE_TODO_MAX_ATTEMPTS {
+        assert!(policy.decide(&state).follow_up.is_some());
+        policy.record_turn(true);
+    }
+    assert_eq!(policy.decide(&state), Decision::default());
+}
+
+#[test]
+fn record_turn_without_a_poke_is_a_no_op() {
+    let mut policy = FollowUpPolicy::new(true);
+    policy.record_turn(false);
+    let state = snapshot(vec![todo("fresh", "pending")]);
+    assert!(policy.decide(&state).follow_up.is_some());
+}
+
+/// Field report: "Validate further: <todo>" kept firing every few seconds for
+/// a todo whose goal was already marked `constraints_exhausted` with stopping
+/// evidence. More turns cannot lift an exhausted constraint.
+#[test]
+fn documented_stop_exempts_its_todos_from_validation_nudges() {
+    let mut blocked = done("ship", ConfidenceState::Plausible);
+    blocked.group = Some("release".into());
+    let mut other = done("docs", ConfidenceState::Plausible);
+    other.group = Some("docs".into());
+    let stop = |evidence: Option<&str>| crate::TodoGoal {
+        group: Some("release".into()),
+        iteration_maturity: Some(crate::IterationMaturity::ConstraintsExhausted),
+        stopping_evidence: evidence.map(str::to_string),
+        ..Default::default()
+    };
+
+    let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
+    let mut state = snapshot(vec![blocked.clone()]);
+    state.goals = vec![stop(Some(
+        "staging access was revoked; cannot run the smoke test",
+    ))];
+    for _ in 0..(MAX_GATE_ATTEMPTS as usize + 2) {
+        let decision = policy.decide(&state);
+        assert_ne!(kind(&decision), Some(FollowUpKind::CompletionValidation));
+        assert!(decision.notice.is_none(), "must not trip the stall breaker");
+    }
+
+    // Without evidence the stop is unsupported, so a nudge still applies.
+    let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
+    state.goals = vec![stop(None)];
+    assert!(policy.decide(&state).follow_up.is_some());
+    assert_eq!(
+        crate::todos_needing_validation(&state.todos, &state.goals).len(),
+        1
+    );
+
+    // Other groups are still validated, and only they are named.
+    let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
+    state.todos = vec![blocked, other];
+    state.goals = vec![stop(Some("staging access was revoked"))];
+    let followup = policy.decide(&state).follow_up.unwrap();
+    assert_eq!(followup.kind, FollowUpKind::CompletionValidation);
+    assert!(
+        followup.message.contains("\"docs\""),
+        "{}",
+        followup.message
+    );
+    assert!(
+        !followup.message.contains("\"ship\""),
+        "{}",
+        followup.message
+    );
 }

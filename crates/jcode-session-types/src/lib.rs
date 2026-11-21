@@ -1,16 +1,84 @@
 use chrono::{DateTime, Utc};
-use jcode_message_types::{ContentBlock, Message, Role, ToolCall};
+use jcode_message_types::{ContentBlock, Message, Role, SharedContent, ToolCall};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 mod ask;
+mod memory;
+mod rewind;
+pub use rewind::{RewindAnchor, RewindMessageKey};
 mod title;
 pub use ask::*;
+pub use memory::{memory_injection_content, memory_injection_label};
 mod transcription;
-pub use title::prompt_title;
+pub use title::{
+    AUTO_LANE_START, DEFAULT_TITLE_MODELS, TITLE_CHAR_MAX, TITLE_SYSTEM_PROMPT, TITLE_WORD_MAX,
+    TitleAction, TitleDecisionInput, TitleSkipReason, TitleStage, build_title_user_message,
+    clean_prompt_text, needs_title_backfill, plan_title_update, prompt_title, sanitize_title,
+    title_model_candidates,
+};
 pub use transcription::{
     TRANSCRIPTION_CLOSE, TRANSCRIPTION_OPEN, strip_transcription, wrap_transcription,
 };
+
+pub const FILE_ATTACHMENTS_CAPABILITY: &str = "file_attachments_v1";
+
+/// Last persisted model settings for a session catalog row, without its transcript.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCatalogContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<String>,
+    /// Estimated prompt-cache expiry in Unix milliseconds, not a guaranteed hit.
+    /// Absent when the provider's retention or the last refresh is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_expires_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Attachment {
+    File {
+        name: String,
+        mime: String,
+        size: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    PastedText {
+        text: String,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StoredAttachment {
+    File {
+        name: String,
+        mime: String,
+        size: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    PastedText {
+        text: String,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageAttachments {
+    pub display_content: String,
+    pub items: Vec<StoredAttachment>,
+}
 
 /// Identifies a session to resume, across the agent backends jcode can import
 /// from. This is pure data (only ids/paths) with no UI dependency; it lives in
@@ -66,6 +134,12 @@ pub struct ResponseStats {
     /// so restored history leaves this absent. Never inferred from tool timings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_secs: Option<f64>,
+    /// Full prompt size of this turn's final provider request, resolved with
+    /// the provider that actually served it. Unlike the summed `input_tokens`
+    /// field this is the current context size, not the sum of every tool round,
+    /// so clients can restore it after a restart without a local transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,10 +148,17 @@ pub struct ResponseStats {
     pub cache_read_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation_tokens: Option<u64>,
+    /// Distinct tool calls in the completed turn, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderedMessage {
+    /// Unix epoch milliseconds when the stored message was recorded, so
+    /// clients show when it arrived rather than when they rendered it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_ms: Option<i64>,
     /// Execution duration for a completed tool row, when recorded by the runner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_duration_ms: Option<u64>,
@@ -87,6 +168,8 @@ pub struct RenderedMessage {
     pub response_stats: Option<ResponseStats>,
     pub role: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<StoredAttachment>,
     pub tool_calls: Vec<String>,
     pub tool_data: Option<ToolCall>,
     /// Index of the stored session message this rendered message came from.
@@ -155,7 +238,7 @@ pub struct RenderedImage {
     pub history_message_index: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
 pub enum SessionStatus {
     #[default]
     Active,
@@ -169,6 +252,63 @@ pub enum SessionStatus {
     Error {
         message: String,
     },
+    Unknown,
+}
+
+#[derive(Deserialize)]
+#[serde(remote = "SessionStatus")]
+enum KnownSessionStatus {
+    Active,
+    Closed,
+    Crashed {
+        message: Option<String>,
+    },
+    Reloaded,
+    Compacted,
+    RateLimited,
+    Error {
+        message: String,
+    },
+    #[serde(skip)]
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for SessionStatus {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let tag = match &value {
+            serde_json::Value::String(tag) => Some(tag.as_str()),
+            serde_json::Value::Object(map) if map.len() == 1 => {
+                map.keys().next().map(String::as_str)
+            }
+            _ => None,
+        };
+        match tag {
+            Some(
+                "Active" | "Closed" | "Crashed" | "Reloaded" | "Compacted" | "RateLimited"
+                | "Error",
+            ) => KnownSessionStatus::deserialize(value).map_err(D::Error::custom),
+            Some(_) => Ok(Self::Unknown),
+            None => Err(D::Error::custom("invalid session status")),
+        }
+    }
+}
+
+#[test]
+fn session_status_unknown_and_known_payloads() {
+    assert_eq!(
+        serde_json::from_str::<SessionStatus>(r#""future""#).unwrap(),
+        SessionStatus::Unknown
+    );
+    let status = SessionStatus::Error {
+        message: "failed".into(),
+    };
+    assert_eq!(
+        serde_json::from_value::<SessionStatus>(serde_json::to_value(&status).unwrap()).unwrap(),
+        status
+    );
+    assert!(serde_json::from_str::<SessionStatus>(r#"{"Error":{"other":1}}"#).is_err());
 }
 
 impl SessionStatus {
@@ -181,6 +321,7 @@ impl SessionStatus {
             SessionStatus::Compacted => "compacted",
             SessionStatus::RateLimited => "rate limited",
             SessionStatus::Error { .. } => "error",
+            SessionStatus::Unknown => "unknown",
         }
     }
 
@@ -193,6 +334,7 @@ impl SessionStatus {
             SessionStatus::Compacted => "📦",
             SessionStatus::RateLimited => "⏳",
             SessionStatus::Error { .. } => "❌",
+            SessionStatus::Unknown => "?",
         }
     }
 
@@ -269,11 +411,24 @@ pub struct StoredMemoryInjection {
     pub timestamp: DateTime<Utc>,
 }
 
+/// Appended to a partial assistant message when a server reload stops
+/// generation mid-stream. It is a durable interruption signal, never
+/// conversation content: it is stripped before a resumed request and before
+/// rendering, so neither the model nor the user sees it.
+pub const RELOAD_INTERRUPTED_MARKER: &str = "\n\n[generation interrupted - server reloading]";
+
+/// Remove the reload interruption marker from displayed or replayed text.
+pub fn strip_reload_interruption_marker(text: &str) -> &str {
+    text.strip_suffix(RELOAD_INTERRUPTED_MARKER).unwrap_or(text)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredMessage {
     pub id: String,
     pub role: Role,
-    pub content: Vec<ContentBlock>,
+    pub content: SharedContent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_data: Option<MessageAttachments>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_role: Option<StoredDisplayRole>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -289,6 +444,7 @@ pub struct StoredMessage {
 pub enum StoredDisplayRole {
     System,
     BackgroundTask,
+    FileActivity,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -308,8 +464,13 @@ pub struct StoredTokenUsage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredCompactionState {
     pub summary_text: String,
+    /// Frozen when this checkpoint is first prepared for playback. An empty
+    /// snapshot means there was no plan, not that playback should reread it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub openai_encrypted_content: Option<String>,
+    pub plan_context: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // Shared with manager summaries and copy-on-write session snapshots.
+    pub openai_encrypted_content: Option<std::sync::Arc<str>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapcompact: Option<jcode_message_types::SnapcompactArchive>,
     pub covers_up_to_turn: usize,
@@ -444,12 +605,15 @@ pub fn session_search_raw_matches_query(raw: &[u8], query: &SessionSearchQueryPr
         if contains_case_insensitive_bytes(raw, query.normalized.as_bytes()) {
             return true;
         }
-        let matched_terms = query
-            .terms
-            .iter()
-            .filter(|term| contains_case_insensitive_bytes(raw, term.as_bytes()))
-            .count();
-        return matched_terms >= query.min_term_matches;
+        // Public profiles may request zero hits. Avoid underflow, and stop once
+        // enough terms match without changing duplicate or empty-term semantics.
+        return query.min_term_matches == 0
+            || query
+                .terms
+                .iter()
+                .filter(|term| contains_case_insensitive_bytes(raw, term.as_bytes()))
+                .nth(query.min_term_matches - 1)
+                .is_some();
     }
 
     let Ok(raw_text) = std::str::from_utf8(raw) else {
@@ -505,6 +669,26 @@ pub fn tokenize_session_search_query(query: &str) -> Vec<String> {
 
     terms
 }
+
+/// Tokenize text already lowercased as a whole, preserving index Unicode boundaries.
+/// Ordinary queries intentionally retain split-then-lowercase behavior.
+pub fn tokenize_prelowercased_session_search_text(text: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    for token in text.split(|c: char| !c.is_alphanumeric()) {
+        if token.is_empty() || is_session_search_stop_word(token) {
+            continue;
+        }
+        let keep = token.chars().count() >= 2 || token.chars().all(|c| c.is_ascii_digit());
+        if keep && seen.insert(token) {
+            terms.push(token.to_owned());
+        }
+    }
+    terms
+}
+
+#[cfg(test)]
+mod prelowercased_tokenization_tests;
 
 pub fn is_session_search_stop_word(token: &str) -> bool {
     matches!(

@@ -4,12 +4,22 @@ use super::*;
 use super::streaming::StreamUsageRecorder;
 
 #[path = "tool_handoff.rs"]
-mod tool_handoff;
+pub(super) mod tool_handoff;
 pub(super) use tool_handoff::execute_with_background;
-use tool_handoff::{
-    auto_background_allowed, incomplete_turn_stop, reload_interrupted_tool_result,
-    wait_for_tool_handoff,
-};
+use tool_handoff::{incomplete_turn_stop, reload_interrupted_tool_result, wait_for_tool_handoff};
+
+struct ForegroundToolAbortGuard(Option<tokio::task::AbortHandle>);
+
+impl Drop for ForegroundToolAbortGuard {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+#[path = "stream_request_preparation.rs"]
+mod stream_request_preparation;
+
 impl Agent {
     pub(super) async fn run_turn_streaming_mpsc(
         &mut self,
@@ -24,6 +34,7 @@ impl Agent {
         self.ensure_session_lease()?;
         self.set_log_context();
         let usage_turn_id = self.model_usage_turn_id();
+        self.provider.begin_turn(&usage_turn_id).await;
         // Mark this session as actively streaming for presence UIs (e.g. the
         // macOS menu bar indicator). Cleared automatically on every exit path.
         let _streaming_guard = crate::session::StreamingGuard::new(self.session.id.clone());
@@ -31,15 +42,22 @@ impl Agent {
         // a cancel routed through *any* control handle for this session (even a
         // stale one built for a different agent object, e.g. after a
         // reattach/reload) aborts this in-flight stream immediately (issue #428).
-        let _turn_cancel_guard = crate::turn_cancel_registry::register_active_turn(
+        let turn_cancel_guard = crate::turn_cancel_registry::register_active_turn(
             &self.session.id,
             self.graceful_shutdown.clone(),
         );
+        if !self
+            .resume_interrupted_ask(&event_tx, &turn_cancel_guard)
+            .await?
+        {
+            return Ok(());
+        }
         let trace = trace_enabled();
         let mut context_limit_retries = 0u32;
         let mut incomplete_continuations = 0u32;
         let mut empty_post_tool_continuations = 0u32;
         let mut fable_guardrail_reconsiderations = 0u32;
+        let mut guardrail_retry_prompt = None;
         let mut consecutive_malformed_tool_rounds = 0u32;
 
         loop {
@@ -66,44 +84,8 @@ impl Agent {
                     repaired
                 ));
             }
-            // Start provider transport setup before deriving and potentially
-            // compacting the request history. This is the first point where the
-            // stable request settings are available.
-            let mut tools = self.tool_definitions().await;
-            let mut split_prompt = self.build_system_prompt_split(None);
-            self.provider
-                .prewarm(&tools, &split_prompt.static_part)
-                .await;
-            let (messages, compaction_event) = self.messages_for_provider();
-            if let Some(event) = compaction_event {
-                // Reset cache tracker and tool lock on compaction since the message history changes
-                self.cache_tracker.reset();
-                self.kv_cache_monitor.reset();
-                self.locked_tools = None;
-                logging::info(&format!(
-                    "Context compacted ({}{})",
-                    event.trigger,
-                    event
-                        .pre_tokens
-                        .map(|t| format!(" {} tokens", t))
-                        .unwrap_or_default()
-                ));
-                let _ = event_tx.send(ServerEvent::Compaction {
-                    trigger: event.trigger.clone(),
-                    pre_tokens: event.pre_tokens,
-                    post_tokens: event.post_tokens,
-                    tokens_saved: event.tokens_saved,
-                    duration_ms: event.duration_ms,
-                    messages_dropped: event.messages_dropped,
-                    messages_compacted: event.messages_compacted,
-                    summary_chars: event.summary_chars,
-                    active_messages: event.active_messages,
-                });
-                // Compaction clears the tool lock, so rebuild the foreground
-                // request metadata rather than relying on the pre-compaction snapshot.
-                tools = self.tool_definitions().await;
-                split_prompt = self.build_system_prompt_split(None);
-            }
+            self.apply_pending_reasoning_effort();
+            let (tools, split_prompt, messages) = self.prepare_stream_request(&event_tx).await?;
 
             let messages: std::sync::Arc<[Message]> = messages.into();
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
@@ -119,27 +101,17 @@ impl Agent {
             // Use split prompt for better caching - static content cached, dynamic not
             self.log_prompt_prefix_accounting(&split_prompt, &tools);
 
-            // Check for client-side cache violations before memory injection.
-            // Memory is an ephemeral suffix that changes each turn; tracking it would cause
-            // false-positive violations every turn (prior turn's memory ≠ current history prefix).
-            self.record_client_cache_request(&messages);
-
             // `messages` now owns the provider-facing request snapshot. Do not
             // retain the session's second, derived copy for the entire network
             // wait and response stream.
             self.session.release_provider_messages_cache();
 
-            let mut cache_signature_messages =
-                if crate::config::config().features.message_timestamps {
-                    Message::with_timestamps(&messages)
-                } else {
-                    messages.iter().cloned().collect()
-                };
-            let mut ephemeral_signature_messages = Vec::new();
-
-            // Inject memory as a user message at the end (preserves cache prefix)
             let mut messages_with_memory: Vec<Message> = messages.iter().cloned().collect();
-            if let Some(memory) = memory_pending.as_ref() {
+            let mut ephemeral_memory = None;
+            if let Some(memory) = memory_pending.as_ref()
+                && let Some((message, persisted)) =
+                    self.prepare_memory_injection_message(&messages, memory)
+            {
                 let memory_count = memory.count.max(1);
                 let computed_age_ms = memory.computed_at.elapsed().as_millis() as u64;
                 crate::memory::record_injected_prompt(
@@ -147,7 +119,6 @@ impl Agent {
                     memory_count,
                     computed_age_ms,
                 );
-                self.record_memory_injection_in_session(memory);
                 let _ = event_tx.send(ServerEvent::MemoryInjected {
                     count: memory_count,
                     prompt: memory.prompt.clone(),
@@ -155,13 +126,13 @@ impl Agent {
                     prompt_chars: memory.prompt.chars().count(),
                     computed_age_ms,
                 });
-                let (memory_msg, persisted) = self.prepare_memory_injection_message(memory);
-                if !persisted {
-                    ephemeral_signature_messages.push(memory_msg.clone());
+                if persisted {
+                    messages_with_memory.push(message);
                 } else {
-                    cache_signature_messages.push(memory_msg.clone());
+                    // An opted-out recall is absent from the next request, so
+                    // it must not carry a provider cache marker.
+                    ephemeral_memory = Some(message.into_request_only());
                 }
-                messages_with_memory.push(memory_msg);
             }
             // Surface background plan-limit hits once so the user sees the
             // upgrade prompt in the reply (see turn_loops for rationale).
@@ -171,9 +142,21 @@ impl Agent {
                 .flatten()
             {
                 crate::subscription_notice::show_upgrade_card(&notice, &self.session.id);
-                let reminder = Message::user(&Self::plan_limit_reminder(&notice));
-                ephemeral_signature_messages.push(reminder.clone());
+                let reminder = self.append_model_reminder(&Self::plan_limit_reminder(&notice));
+                self.persist_session_best_effort("plan-limit reminder");
                 messages_with_memory.push(reminder);
+            }
+            self.record_client_cache_request(&messages_with_memory);
+
+            // Request-only messages follow every durable block.
+            let durable_message_count = messages_with_memory.len();
+            messages_with_memory.extend(ephemeral_memory);
+            messages_with_memory.extend(guardrail_retry_prompt.take());
+            if let Some(mut nudge) =
+                super::reload_resume::trailing_assistant_nudge(&messages_with_memory)
+            {
+                nudge.timestamp = None;
+                messages_with_memory.push(nudge.into_request_only());
             }
 
             logging::info(&format!(
@@ -189,6 +172,7 @@ impl Agent {
                 .then(|| Message::with_timestamps(&messages_with_memory));
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
+            self.enforce_worker_request()?;
             let provider = Arc::clone(&self.provider);
             // Capture the model id the request was issued with. A provider may
             // transparently switch models mid-request (e.g. Anthropic's retired
@@ -204,11 +188,20 @@ impl Agent {
                 crate::server::provider_oauth_email(provider.as_ref());
             let resume_session_id = self.provider_session_id.clone();
             self.last_status_detail = None;
-            // Hash the whole system prompt, not only the static block.
-            // Providers place the dynamic block ahead of the transcript (in
-            // the system param or right after the latest user prompt), so a
-            // change there is a harness-caused miss and must be attributed.
-            let system_signature_text = if split_prompt.dynamic_part.is_empty() {
+            let dynamic_is_tail = matches!(
+                jcode_provider_core::parse_provider_hint(provider.name()),
+                Some(jcode_provider_core::ActiveProvider::Claude)
+            );
+            // Claude receives the dynamic block after the transcript, so it
+            // belongs to the request-only tail of the cache signature.
+            let mut ephemeral_signature_messages: Vec<Message> =
+                send_messages[durable_message_count..].to_vec();
+            if dynamic_is_tail && !split_prompt.dynamic_part.is_empty() {
+                let mut dynamic = Message::user(&split_prompt.dynamic_part);
+                dynamic.timestamp = None;
+                ephemeral_signature_messages.push(dynamic);
+            }
+            let system_signature_text = if dynamic_is_tail || split_prompt.dynamic_part.is_empty() {
                 std::borrow::Cow::Borrowed(split_prompt.static_part.as_str())
             } else {
                 std::borrow::Cow::Owned(format!(
@@ -216,32 +209,35 @@ impl Agent {
                     split_prompt.static_part, split_prompt.dynamic_part
                 ))
             };
+            let request_id = uuid::Uuid::new_v4().to_string();
             let kv_request = kv_cache_request_event(
-                &cache_signature_messages,
+                &send_messages[..durable_message_count],
                 &tools,
                 &system_signature_text,
                 &ephemeral_signature_messages,
             );
             drop(system_signature_text);
+            drop(ephemeral_signature_messages);
             self.begin_kv_cache_monitor_request(&kv_request, &model_at_request_start);
             if let Err(error) = event_tx.send(kv_request) {
                 logging::debug(&format!("KV request event receiver disconnected: {error}"));
             }
-            // These vectors are only needed to build the cache telemetry event.
-            // Explicitly release their deeply cloned transcript strings before
-            // waiting for the provider stream.
-            drop(cache_signature_messages);
-            drop(ephemeral_signature_messages);
             let mut keepalive = stream_keepalive_ticker();
-            let mut stream = {
+            let (mut stream, mut canonical_input) = {
                 provider.set_session_id(&self.session.id);
-                let mut complete_future = std::pin::pin!(provider.complete_split(
-                    send_messages,
-                    &tools,
-                    &split_prompt.static_part,
-                    &split_prompt.dynamic_part,
-                    resume_session_id.as_deref(),
-                ));
+                let mut complete_future =
+                    std::pin::pin!(super::cache_request::capture_canonical_input(
+                        jcode_provider_core::with_pinned_worker_request(
+                            self.session.is_swarm_worker,
+                            provider.complete_split(
+                                send_messages,
+                                &tools,
+                                &split_prompt.static_part,
+                                &split_prompt.dynamic_part,
+                                resume_session_id.as_deref(),
+                            ),
+                        )
+                    ));
                 loop {
                     tokio::select! {
                         _ = keepalive.tick() => {
@@ -253,10 +249,10 @@ impl Agent {
                             );
                             return Ok(());
                         }
-                        result = &mut complete_future => {
+                        (result, canonical_input) = &mut complete_future => {
                             self.sync_bound_account_route();
                             match result {
-                                Ok(stream) => break stream,
+                                Ok(stream) => break (stream, canonical_input),
                                 Err(e) => {
                                     self.record_failed_account_route(&e.to_string());
                                     if self.try_auto_compact_after_context_limit(&e.to_string()) {
@@ -334,7 +330,9 @@ impl Agent {
             let mut usage_cache_creation: Option<u64> = None;
             let mut usage_recorder = StreamUsageRecorder::new(&self.session.id);
             let mut saw_message_end = false;
+            let mut openai_ws_delta = false;
             let mut stop_reason: Option<String> = None;
+            let mut reported_model = None;
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
             let provider_name = self.provider.name().to_string();
@@ -642,11 +640,17 @@ impl Agent {
                             logging::info(
                                 "Graceful shutdown during streaming - checkpointing partial response",
                             );
+                            let marker = if turn_cancel_guard.interruption_reason()
+                                == Some(crate::turn_cancel_registry::TurnInterruptionReason::Reload)
+                            {
+                                super::reload_resume::RELOAD_INTERRUPTED_MARKER
+                            } else {
+                                "\n\n[generation cancelled by the user]"
+                            };
                             let _ = event_tx.send(ServerEvent::TextDelta {
-                                text: "\n\n[generation interrupted - server reloading]".to_string(),
+                                text: marker.to_string(),
                             });
-                            text_content
-                                .push_str("\n\n[generation interrupted - server reloading]");
+                            text_content.push_str(marker);
                             break;
                         }
                     }
@@ -847,6 +851,12 @@ impl Agent {
                         }
                     }
                     StreamEvent::ConnectionType { connection } => {
+                        openai_ws_delta = connection == "websocket/persistent-reuse";
+                        let connection = if connection == "websocket/persistent-replay" {
+                            "websocket/persistent-reuse".to_string()
+                        } else {
+                            connection
+                        };
                         crate::telemetry::record_connection_type(&connection);
                         self.last_connection_type = Some(connection.clone());
                         let _ = event_tx.send(ServerEvent::ConnectionType { connection });
@@ -863,7 +873,22 @@ impl Agent {
                     StreamEvent::ServiceTier { tier, requested } => {
                         let _ = event_tx.send(ServerEvent::ServiceTierReported { requested, tier });
                     }
+                    StreamEvent::ResolvedModel { model } => {
+                        reported_model = Some(model.clone());
+                        usage_recorder.resolve_model(model);
+                    }
                     StreamEvent::RetryRollback { attempt, max } => {
+                        // Retry bodies can be reshaped after the initial capture.
+                        canonical_input = None;
+                        openai_ws_delta = false;
+                        // Preserve reported usage from the failed attempt, but
+                        // never let its model or counters bleed into the retry.
+                        usage_recorder.finish();
+                        usage_input = None;
+                        usage_output = None;
+                        usage_cache_read = None;
+                        usage_cache_creation = None;
+                        reported_model = None;
                         // A transient transport fault hit mid-stream after partial
                         // output was already emitted; the provider is replaying the
                         // request from the top. Discard everything accumulated for
@@ -1131,6 +1156,19 @@ impl Agent {
                 ],
             );
 
+            if saw_message_end {
+                let _ = event_tx.send(ServerEvent::RequestUsage {
+                    session_id: self.session.id.clone(),
+                    request_id,
+                    provider: provider.name().into(),
+                    model: reported_model.unwrap_or_else(|| provider.model()),
+                    input: usage_input,
+                    output: usage_output,
+                    cache_read_input: usage_cache_read,
+                    cache_creation_input: usage_cache_creation,
+                });
+            }
+
             if usage_input.is_some()
                 || usage_output.is_some()
                 || usage_cache_read.is_some()
@@ -1184,6 +1222,17 @@ impl Agent {
                 // this item, so discarded attempts cannot explain a real miss.
                 if openai_native_compaction.is_some() {
                     self.kv_cache_monitor.note_provider_compaction();
+                }
+                if let Some(input) = canonical_input.take()
+                    && provider.model() == model_at_request_start
+                    && provider.active_resolved_credential() == credential_at_request_start
+                    && provider.serving_oauth_account_label()
+                        == oauth_account_label_at_request_start
+                {
+                    self.kv_cache_monitor.note_canonical_input(input);
+                    if saw_message_end && openai_ws_delta {
+                        self.kv_cache_monitor.note_openai_ws_delta();
+                    }
                 }
                 if let Some(miss) = self.finish_kv_cache_monitor_request(
                     usage_input.unwrap_or(0),
@@ -1314,19 +1363,31 @@ impl Agent {
                 // which is not the pre-compaction context size (#1178).
                 let pre_tokens = native_pre_tokens.or(estimated_pre_tokens);
                 let post_tokens = estimated_post_tokens;
-                let _ = event_tx.send(ServerEvent::Compaction {
-                    trigger: native_trigger,
-                    pre_tokens,
+                let _ = event_tx.send(crate::compaction::compaction_server_event(
+                    &crate::compaction::CompactionEvent {
+                        trigger: native_trigger,
+                        method: Some("native".to_string()),
+                        pre_tokens,
+                        post_tokens,
+                        tokens_saved: pre_tokens
+                            .zip(post_tokens)
+                            .map(|(pre, post)| pre.saturating_sub(post)),
+                        duration_ms: None,
+                        messages_dropped: None,
+                        messages_compacted: Some(compacted_count),
+                        summary_chars: None,
+                        active_messages: None,
+                    },
+                ));
+                // The last usage report described the transcript that was just
+                // replaced; publish the new size so clients stop showing the
+                // pre-compaction context percentage.
+                if let Some(usage) = crate::agent::compaction_context_usage_event(
                     post_tokens,
-                    tokens_saved: pre_tokens
-                        .zip(post_tokens)
-                        .map(|(pre, post)| pre.saturating_sub(post)),
-                    duration_ms: None,
-                    messages_dropped: None,
-                    messages_compacted: Some(compacted_count),
-                    summary_chars: None,
-                    active_messages: None,
-                });
+                    Some(self.effective_context_budget().await),
+                ) {
+                    let _ = event_tx.send(usage);
+                }
             }
 
             // If stop_reason indicates truncation (e.g. max_tokens), discard tool calls
@@ -1355,11 +1416,17 @@ impl Agent {
             if tool_calls.is_empty() {
                 if saw_message_end
                     && !self.is_graceful_shutdown()
-                    && self.maybe_reconsider_fable_guardrail(
+                    && let Some(prompt) = self.fable_guardrail_retry_prompt(
                         stop_reason.as_deref(),
                         &mut fable_guardrail_reconsiderations,
-                    )?
+                    )
                 {
+                    guardrail_retry_prompt = Some(prompt);
+                    let _ = event_tx.send(ServerEvent::ProviderGuardrailRetry {
+                        turn_id: usage_turn_id.clone(),
+                        attempt: fable_guardrail_reconsiderations,
+                        max_attempts: Self::FABLE_GUARDRAIL_RECONSIDERATION_PROMPTS.len() as u32,
+                    });
                     continue;
                 }
                 // Retry transient empty responses (dropped/empty upstream
@@ -1437,7 +1504,14 @@ impl Agent {
                         Role::User,
                         vec![ContentBlock::ToolResult {
                             tool_use_id: tc.id.clone(),
-                            content: "[Skipped - server reloading]".to_string(),
+                            content: if turn_cancel_guard.interruption_reason()
+                                == Some(crate::turn_cancel_registry::TurnInterruptionReason::Reload)
+                            {
+                                "[Skipped - server reloading]"
+                            } else {
+                                "[Skipped - cancelled by the user]"
+                            }
+                            .to_string(),
                             is_error: Some(true),
                         }],
                     );
@@ -1598,11 +1672,18 @@ impl Agent {
                 let registry_clone = self.registry.clone();
                 let tool_name_for_spawn = tc.name.clone();
                 let tool_input_for_spawn = tc.input.clone();
+                let bash_handoff = crate::tool::BashHandoff::for_tool(&tc.name);
+                let bash_handoff_for_tool = bash_handoff.clone();
                 let tool_handle =
                     crate::runtime_activity::spawn_session(&self.session.id, async move {
-                        registry_clone
-                            .execute(&tool_name_for_spawn, tool_input_for_spawn, ctx)
-                            .await
+                        tool_handoff::run_tool(
+                            registry_clone,
+                            tool_name_for_spawn,
+                            tool_input_for_spawn,
+                            ctx,
+                            bash_handoff_for_tool,
+                        )
+                        .await
                     })
                     .ok_or_else(|| {
                         anyhow::anyhow!("Session transfer in progress; tool not accepted")
@@ -1616,10 +1697,13 @@ impl Agent {
                 let bg_signal = self.background_tool_signal.clone();
                 let shutdown_signal = self.graceful_shutdown.clone();
                 let foreground_budget = tool_handoff::foreground_budget();
+                let handoff = tool_handoff::handoff_budget(&tc.name, &tc.input, foreground_budget);
                 let allow_reload_handoff = tc.name == "bash";
                 let tool_result;
                 let mut automatic_background = false;
                 let mut tool_handle = tool_handle;
+                let mut abort_tool_on_drop =
+                    ForegroundToolAbortGuard(Some(tool_handle.abort_handle()));
                 let running_tool_guard =
                     crate::running_tool_registry::register(self.session_id(), &tc.id, &tc.name);
                 tokio::select! {
@@ -1630,11 +1714,14 @@ impl Agent {
                             Err(e) => Err(anyhow::anyhow!("Tool task panicked: {}", e)),
                         });
                     }
-                    automatic = wait_for_tool_handoff(&bg_signal, &shutdown_signal, auto_background_allowed(&tc.name, &tc.input), foreground_budget) => {
+                    automatic = wait_for_tool_handoff(&bg_signal, &shutdown_signal, handoff, bash_handoff.as_ref()) => {
                         automatic_background = automatic;
-                        if self.is_graceful_shutdown() && allow_reload_handoff {
+                        if !shutdown_signal.is_set() && let Some(handoff) = &bash_handoff {
+                            handoff.request.fire();
+                        }
+                        if allow_reload_handoff && (!shutdown_signal.is_set() || turn_cancel_guard.interruption_reason() == Some(crate::turn_cancel_registry::TurnInterruptionReason::Reload)) {
                             tool_result = match tokio::time::timeout(
-                                Duration::from_millis(750),
+                                tool_handoff::CANCEL_TOOL_GRACE,
                                 &mut tool_handle,
                             )
                             .await
@@ -1643,6 +1730,10 @@ impl Agent {
                                     Ok(r) => r,
                                     Err(e) => Err(anyhow::anyhow!("Tool task panicked: {}", e)),
                                 }),
+                                Err(_) if !shutdown_signal.is_set() && cfg!(unix) => {
+                                    tool_handle.abort();
+                                    Some(Err(anyhow::anyhow!("Bash did not acknowledge background handoff")))
+                                }
                                 Err(_) => None,
                             };
                         } else {
@@ -1673,15 +1764,54 @@ impl Agent {
                     match result {
                         Ok(output) => {
                             let output = cap_tool_output_for_history(&tc.name, output);
+                            let mut side_pane_images =
+                                tool_output_side_pane_images(&tc.id, &tc.name, &tc.input, &output);
+                            let mut blocks = tool_output_to_content_blocks(tc.id.clone(), output);
+                            if self.provider.name().eq_ignore_ascii_case("openai")
+                                && self.native_deferred_mcp()
+                            {
+                                crate::provider::openai_request::freeze_deferred_tools(
+                                    &mut blocks,
+                                    &tools,
+                                );
+                            }
+                            let message_id = self.add_message_with_duration(
+                                Role::User,
+                                blocks,
+                                Some(tool_elapsed.as_millis() as u64),
+                            );
+                            label_session_images(
+                                &self.session.id,
+                                &message_id,
+                                0,
+                                &mut side_pane_images,
+                            );
+                            if !side_pane_images.is_empty() {
+                                // RPC readers may load from disk while this turn holds the agent lock.
+                                self.persist_session_now()?;
+                            }
+                            let output_text = self
+                                .session
+                                .messages
+                                .last()
+                                .and_then(|message| {
+                                    message.content.iter().find_map(|block| match block {
+                                        ContentBlock::ToolResult {
+                                            tool_use_id,
+                                            content,
+                                            ..
+                                        } if tool_use_id == &tc.id => Some(content.clone()),
+                                        _ => None,
+                                    })
+                                })
+                                .unwrap_or_default();
                             let _ = event_tx.send(ServerEvent::ToolDone {
                                 id: tc.id.clone(),
                                 name: tc.name.clone(),
-                                output: output.output.clone(),
+                                output: output_text,
                                 error: None,
                             });
 
-                            let side_pane_images =
-                                tool_output_side_pane_images(&tc.id, &tc.name, &tc.input, &output);
                             if !side_pane_images.is_empty() {
                                 logging::info(&format!(
                                     "SidePaneImages: emitting {} image(s) from tool '{}' (session={})",
@@ -1694,13 +1824,6 @@ impl Agent {
                                     images: side_pane_images,
                                 });
                             }
-
-                            let blocks = tool_output_to_content_blocks(tc.id.clone(), output);
-                            self.add_message_with_duration(
-                                Role::User,
-                                blocks,
-                                Some(tool_elapsed.as_millis() as u64),
-                            );
                             tool_results_dirty = true;
                         }
                         Err(e) => {
@@ -1725,30 +1848,63 @@ impl Agent {
                         }
                     }
                 } else if self.is_graceful_shutdown() {
-                    // Server reload - abort tool and save interrupted result
+                    let is_reload = turn_cancel_guard.interruption_reason()
+                        == Some(crate::turn_cancel_registry::TurnInterruptionReason::Reload);
                     logging::info(&format!(
-                        "Tool '{}' interrupted by server reload after {:.1}s",
+                        "Tool '{}' interrupted by {} after {:.1}s",
                         tc.name,
+                        if is_reload {
+                            "server reload"
+                        } else {
+                            "user cancellation"
+                        },
                         tool_elapsed.as_secs_f64()
                     ));
                     tool_handle.abort();
 
-                    // For selfdev reload and wait-like tools, the interruption is expected:
-                    // selfdev initiated the restart, while wait-like tools should be resumed
-                    // after reload rather than treated as failed work.
-                    let (interrupted_msg, is_error) =
-                        reload_interrupted_tool_result(tc, tool_elapsed.as_secs_f64());
+                    // Leave the real tool_use unanswered: recovery runs the same
+                    // wait before calling the model. A placeholder result would
+                    // acknowledge it and make it disappear from the resume plan.
+                    if is_reload && tool_handoff::is_reload_replayable_wait(&tc.name, &tc.input) {
+                        self.session.save()?;
+                        return Ok(());
+                    }
 
-                    let _ = event_tx.send(ServerEvent::ToolDone {
-                        id: tc.id.clone(),
-                        name: tc.name.clone(),
-                        output: interrupted_msg.clone(),
-                        error: if is_error {
-                            Some("interrupted by reload".to_string())
-                        } else {
-                            None
-                        },
-                    });
+                    let (interrupted_msg, is_error) = if is_reload {
+                        reload_interrupted_tool_result(tc, tool_elapsed.as_secs_f64())
+                    } else {
+                        (
+                            format!(
+                                "[Tool '{}' cancelled by the user after {:.1}s]",
+                                tc.name,
+                                tool_elapsed.as_secs_f64()
+                            ),
+                            true,
+                        )
+                    };
+
+                    // An ask interrupted by reload is still pending, not a
+                    // completed decision. Keep its durable marker for recovery
+                    // but do not publish a false ToolDone to live clients.
+                    if !(is_reload && tc.name == "ask") {
+                        let _ = event_tx.send(ServerEvent::ToolDone {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            output: interrupted_msg.clone(),
+                            error: if is_error {
+                                Some(
+                                    if is_reload {
+                                        "interrupted by reload"
+                                    } else {
+                                        "cancelled by the user"
+                                    }
+                                    .to_string(),
+                                )
+                            } else {
+                                None
+                            },
+                        });
+                    }
 
                     self.add_message_with_duration(
                         Role::User,
@@ -1763,11 +1919,24 @@ impl Agent {
 
                     // Add results for any remaining tools too
                     for remaining_tc in &tool_calls[(tool_index + 1)..] {
+                        if is_reload
+                            && tool_handoff::is_reload_replayable_wait(
+                                &remaining_tc.name,
+                                &remaining_tc.input,
+                            )
+                        {
+                            continue;
+                        }
                         self.add_message(
                             Role::User,
                             vec![ContentBlock::ToolResult {
                                 tool_use_id: remaining_tc.id.clone(),
-                                content: "[Skipped - server reloading]".to_string(),
+                                content: if is_reload {
+                                    "[Skipped - server reloading]"
+                                } else {
+                                    "[Skipped - cancelled by the user]"
+                                }
+                                .to_string(),
                                 is_error: Some(true),
                             }],
                         );
@@ -1792,6 +1961,7 @@ impl Agent {
                             tool_handle,
                         )
                         .await;
+                    abort_tool_on_drop.0 = None;
 
                     let reason = if automatic_background {
                         tool_handoff::automatic_handoff_reason(foreground_budget)

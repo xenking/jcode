@@ -15,7 +15,7 @@ pub enum TelemetryCategory {
     Usage,
     /// Crash reports.
     Crashes,
-    /// Feature usage: onboarding steps, discovery, todo stats, feedback.
+    /// Feature usage: onboarding steps, todo stats, feedback.
     Features,
     /// Token and cost usage reports.
     Cost,
@@ -135,7 +135,7 @@ impl TelemetryCategory {
             "session_crash" => TelemetryCategory::Crashes,
             "usage_report" => TelemetryCategory::Cost,
             "auth_success" | "oauth_account" => TelemetryCategory::Accounts,
-            "onboarding_step" | "onboarding_trace" | "discovery" | "todo_session" | "feedback" => {
+            "onboarding_step" | "onboarding_trace" | "todo_session" | "feedback" => {
                 TelemetryCategory::Features
             }
             _ => TelemetryCategory::Usage,
@@ -165,6 +165,7 @@ pub fn set_category_settings(settings: [bool; 6]) {
 }
 
 /// Whether a payload may be delivered under the current category choices.
+#[cfg_attr(not(test), allow(dead_code))] // delivery is compiled out in this fork
 pub(crate) fn payload_allowed(payload: &serde_json::Value) -> bool {
     match payload.get("event").and_then(|v| v.as_str()) {
         // The opt-out notice is the one event sent on the way out.

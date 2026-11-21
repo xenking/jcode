@@ -122,6 +122,10 @@ pub struct FileTouch {
     pub summary: Option<String>,
     /// Optional compact preview of what changed. Keep this short and already truncated.
     pub detail: Option<String>,
+    /// Lines added by this touch (0 for reads).
+    pub added: u64,
+    /// Lines removed by this touch (0 for reads).
+    pub removed: u64,
 }
 
 /// Streaming output tail for a swarm worker session, used to render the inline
@@ -311,6 +315,19 @@ pub struct SwarmWorkerReported {
     pub notification: String,
 }
 
+/// A headless swarm worker parked on `ask` and escalated the question to the
+/// swarm root coordinator. The coordinator must be woken so it can answer with
+/// `swarm action="answer"` (or re-ask a human with its own `ask`).
+#[derive(Clone, Debug)]
+pub struct SwarmAskEscalated {
+    /// Root coordinator session that must decide.
+    pub session_id: String,
+    pub worker_session_id: String,
+    pub request_id: String,
+    /// Already-rendered notification body for the coordinator's model.
+    pub notification: String,
+}
+
 /// Result of a `/productivity` report generation run.
 ///
 /// Carries already-rendered outputs (markdown + PNG bytes) so the TUI layer can
@@ -447,6 +464,8 @@ pub enum BusEvent {
     SwarmAwaitCompleted(SwarmAwaitCompleted),
     /// A spawned worker finished and its owner needs to coordinate next steps.
     SwarmWorkerReported(SwarmWorkerReported),
+    /// A headless worker parked on `ask`; the root coordinator must decide.
+    SwarmAskEscalated(SwarmAskEscalated),
     /// Usage report fetched from providers
     UsageReport(Vec<jcode_usage_types::ProviderUsage>),
     /// Progressive usage report update while providers are still loading
@@ -469,6 +488,10 @@ pub enum BusEvent {
     UpdateStatus(UpdateStatus),
     /// Interactive client update status for a specific session
     SessionUpdateStatus(SessionUpdateStatus),
+    /// A session's turn reservation was released. Carries the session id.
+    /// Queued after-yield prompts wait for exactly this, whichever owner
+    /// (client, swarm wake, background completion) ran the turn.
+    TurnReleased(String),
     /// External dictation command completed with transcript text
     DictationCompleted {
         dictation_id: String,
@@ -487,6 +510,18 @@ pub enum BusEvent {
     VoiceInputWake,
     /// Background compaction task finished (check_and_apply should be called)
     CompactionFinished,
+    /// A session applied a finished compaction. All of its attached clients
+    /// need the same result, not only the client that consumed the worker.
+    CompactionApplied {
+        session_id: String,
+        event: Box<crate::protocol::ServerEvent>,
+    },
+    /// A background compaction task started summarizing. Carries the trigger
+    /// label so attached clients can render a running divider without polling.
+    CompactionStarted {
+        trigger: String,
+        pre_tokens: u64,
+    },
     /// Provider's available models list may have changed
     ModelsUpdated,
     /// A single route's usage changed. Carries its snapshot so busy agents do
@@ -531,6 +566,7 @@ impl BusEvent {
             Self::BackgroundTaskStalled(event) => Some(&event.session_id),
             Self::SwarmAwaitCompleted(event) => Some(&event.session_id),
             Self::SwarmWorkerReported(event) => Some(&event.session_id),
+            Self::SwarmAskEscalated(event) => Some(&event.session_id),
             Self::UiActivity(event) => event.session_id.as_deref(),
             Self::ToolUpdated(event) => Some(&event.session_id),
             Self::SubagentStatus(event) => Some(&event.session_id),
@@ -669,6 +705,7 @@ impl Bus {
                 | BusEvent::BackgroundTaskStalled(_)
                 | BusEvent::SwarmAwaitCompleted(_)
                 | BusEvent::SwarmWorkerReported(_)
+                | BusEvent::SwarmAskEscalated(_)
                 | BusEvent::UiActivity(_)
                 | BusEvent::ToolUpdated(_)
                 | BusEvent::SubagentStatus(_)
@@ -815,6 +852,22 @@ mod tests {
         );
         drop(delivery);
         assert!(bus.runtime_delivery_checkpoint().is_some());
+    }
+
+    #[tokio::test]
+    async fn escalated_ask_uses_reliable_root_scoped_runtime_delivery() {
+        let bus = Bus::new_isolated_for_tests();
+        let mut receiver = bus.subscribe_runtime();
+        bus.publish(BusEvent::SwarmAskEscalated(super::SwarmAskEscalated {
+            session_id: "root".into(),
+            worker_session_id: "worker".into(),
+            request_id: "escalation-1".into(),
+            notification: "Which option?".into(),
+        }));
+        let delivery = receiver.try_recv().expect("runtime wake must be queued");
+        assert_eq!(delivery.event.runtime_session_id(), Some("root"));
+        assert!(matches!(delivery.event, BusEvent::SwarmAskEscalated(event)
+            if event.request_id == "escalation-1" && event.worker_session_id == "worker"));
     }
 
     #[tokio::test]

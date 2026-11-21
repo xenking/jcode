@@ -12,6 +12,8 @@ pub(super) struct ParsedOpenAIUsageReport {
     pub(super) hard_limit_reached: bool,
     pub(super) available_reset_count: Option<u64>,
     pub(super) ordinary_usage_allowed: Option<bool>,
+    /// Paid credits fund requests past the spent plan window.
+    pub(super) credit_overage: bool,
 }
 
 fn normalize_ratio_value(raw: f32) -> f32 {
@@ -258,6 +260,34 @@ pub(super) fn parse_openai_hard_limit_reached(json: &serde_json::Value) -> bool 
         == Some(false)
 }
 
+/// Whether paid credits keep a spent plan window usable. `/wham/usage` only
+/// describes the plan allowance; Codex CLI keeps serving from the credit
+/// balance once it is spent, so a funded account must not be parked until the
+/// weekly reset (omp `hasPlanCreditOverage` makes the same call). Only plan
+/// exhaustion qualifies: a refusal for any other reason is not something a
+/// balance can pay for.
+fn parse_openai_credit_overage(json: &serde_json::Value, plan_limit_reached: bool) -> bool {
+    if !plan_limit_reached {
+        return false;
+    }
+    let Some(credits) = json.get("credits").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    let flag = |obj: &serde_json::Map<String, serde_json::Value>, key: &str| {
+        obj.get(key).and_then(parse_bool_value) == Some(true)
+    };
+    if !flag(credits, "unlimited") && !flag(credits, "has_credits") {
+        return false;
+    }
+    if flag(credits, "overage_limit_reached") {
+        return false;
+    }
+    !json
+        .get("spend_control")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|spend| flag(spend, "reached"))
+}
+
 fn parse_window_seconds(obj: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
     ["limit_window_seconds", "window_seconds"]
         .iter()
@@ -337,8 +367,10 @@ fn qualify_additional_limit(limit_name: &str, mut limit: UsageLimit) -> UsageLim
 }
 
 pub(super) fn parse_openai_usage_payload(json: &serde_json::Value) -> ParsedOpenAIUsageReport {
+    let hard_limit_reached = parse_openai_hard_limit_reached(json);
     let mut parsed = ParsedOpenAIUsageReport {
-        hard_limit_reached: parse_openai_hard_limit_reached(json),
+        hard_limit_reached,
+        credit_overage: parse_openai_credit_overage(json, hard_limit_reached),
         available_reset_count: json
             .get("rate_limit_reset_credits")
             .and_then(|credits| credits.get("available_count"))

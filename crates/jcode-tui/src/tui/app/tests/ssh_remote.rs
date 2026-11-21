@@ -1,4 +1,9 @@
 fn with_ssh_remote_test_home(f: impl FnOnce()) {
+    let thread = std::thread::current();
+    let test_name = thread.name().expect("named test thread");
+    if super::commands_dispatch::ssh_test_runs_in_child(test_name) {
+        return;
+    }
     with_temp_jcode_home(|| {
         struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
         impl Drop for RestoreEnv {
@@ -237,6 +242,8 @@ fn ssh_remote_history_is_authoritative_even_when_empty_or_server_version_differs
             provider_name: Some("remote-provider".into()),
             provider_model: Some("remote-model".into()),
             subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: Some(false),
             autojudge_enabled: Some(false),

@@ -801,10 +801,17 @@ async fn swarm_status_immediate_broadcasts_preserve_snapshot_order() {
     a.await.expect("broadcast task");
 
     let mut statuses = Vec::new();
+    let mut timestamps = Vec::new();
     while let Ok(event) = worker_rx.try_recv() {
         if let ServerEvent::SwarmStatus { members } = event {
             assert_eq!(members.len(), 1);
             assert_eq!(members[0].session_id, "worker");
+            timestamps.push(
+                members[0]
+                    .runtime
+                    .snapshot_at_unix_ms
+                    .expect("publication stamp"),
+            );
             statuses.push(members[0].status.clone());
         }
     }
@@ -813,6 +820,7 @@ async fn swarm_status_immediate_broadcasts_preserve_snapshot_order() {
         vec!["ready".to_string(), "running".to_string()],
         "snapshot publication must not invert newer and older statuses"
     );
+    assert!(timestamps.windows(2).all(|pair| pair[0] < pair[1]));
 }
 
 /// Restored (persisted) plan participants with dead channels starve live
@@ -1119,3 +1127,47 @@ async fn departing_sole_owner_keeps_its_workers_owned() {
 
 #[path = "swarm_owner_tests.rs"]
 mod owner_notifications;
+
+#[test]
+fn swarm_detail_preview_redacts_a_credential_at_the_start_of_a_request() {
+    // Reported from the field: `swarm status` echoed the coordinator's task
+    // preview, which copied the head of a user message that began with a
+    // deliberately supplied credential.
+    let request = "DEPLOY_TOKEN=tok_live_4f9a8b7c6d5e use this to roll the staging cluster, then verify the rollout and report back with the pod status";
+    let preview = super::truncate_detail(request, 120);
+    assert!(!preview.contains("tok_live_4f9a8b7c6d5e"), "{preview}");
+    assert!(
+        preview.starts_with("DEPLOY_TOKEN=[REDACTED_SECRET] use this"),
+        "{preview}"
+    );
+    assert!(preview.chars().count() <= 120);
+
+    // A token cut off by the preview limit must not survive as a prefix.
+    let cut = super::truncate_detail(
+        &format!(
+            "{} sk-ant-oat01-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+            "x".repeat(96)
+        ),
+        120,
+    );
+    assert!(!cut.contains("sk-ant-oat01"), "{cut}");
+
+    // Huge prompts are only scanned at the head, and ordinary text is unchanged.
+    let big = format!("refactor the parser {}", "y ".repeat(200_000));
+    assert!(super::truncate_detail(&big, 30).starts_with("refactor the parser"));
+    assert_eq!(
+        super::truncate_detail("hello   there\nworld", 11),
+        "hello th..."
+    );
+}
+
+#[tokio::test]
+async fn swarm_task_label_redacts_credentials() {
+    let members = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+    let (member, _rx) = swarm_member("worker", "agent", false);
+    members.write().await.insert("worker".to_string(), member);
+    super::set_member_task_label("worker", "API_KEY=abcd1234efgh fix the build", &members).await;
+    let label = members.read().await["worker"].task_label.clone().unwrap();
+    assert!(!label.contains("abcd1234efgh"), "{label}");
+    assert!(label.contains("fix the build"), "{label}");
+}

@@ -146,17 +146,17 @@ pub(super) async fn maybe_handle_swarm_write_command(
         let swarm_id = if let Some(id) = target_swarm_id {
             Some(id)
         } else {
-            let members = ctx.swarm_members.read().await;
             let current_session = ctx.session_id.read().await;
+            let members = ctx.swarm_members.read().await;
             members
                 .get(&*current_session)
                 .and_then(|member| member.swarm_id.clone())
         };
 
         if let Some(swarm_id) = swarm_id {
-            let swarms = ctx.swarms_by_id.read().await;
-            let members = ctx.swarm_members.read().await;
             let current_session = ctx.session_id.read().await;
+            let members = ctx.swarm_members.read().await;
+            let swarms = ctx.swarms_by_id.read().await;
             let from_name = members
                 .get(&*current_session)
                 .and_then(|member| member.friendly_name.clone());
@@ -213,8 +213,8 @@ pub(super) async fn maybe_handle_swarm_write_command(
                 return Err(anyhow::anyhow!("swarm:notify requires a message"));
             }
 
-            let members = ctx.swarm_members.read().await;
             let current_session = ctx.session_id.read().await;
+            let members = ctx.swarm_members.read().await;
             let from_name = members
                 .get(&*current_session)
                 .and_then(|member| member.friendly_name.clone());
@@ -234,7 +234,7 @@ pub(super) async fn maybe_handle_swarm_write_command(
                     return Ok(Some(
                         serde_json::json!({
                             "sent_to": target_session,
-                            "sent_to_name": target.friendly_name.clone(),
+                            "sent_to_name": target.friendly_name,
                             "message": message,
                         })
                         .to_string(),

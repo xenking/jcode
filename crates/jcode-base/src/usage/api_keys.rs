@@ -67,6 +67,80 @@ async fn probe_openai_compatible_key(api_base: &str, api_key: &str) -> String {
     }
 }
 
+/// Window keys OpenCode answers on `GET {base}/usage`, in the order the
+/// service lists them. The label is what `/usage` and the Desktop pill show.
+const OPENCODE_USAGE_WINDOWS: [(&str, &str); 3] = [
+    ("rolling", "Rolling window"),
+    ("weekly", "Weekly window"),
+    ("monthly", "Monthly window"),
+];
+
+/// Parse an OpenCode (Zen / Go) quota payload:
+/// `{"usage":{"rolling":{"status":"ok","percent":23,"resetsAt":"..."}, ...}}`.
+///
+/// Unavailable windows must not read as a healthy zero.
+fn opencode_usage_limits(payload: &serde_json::Value) -> Vec<UsageLimit> {
+    let Some(usage) = payload.get("usage") else {
+        return Vec::new();
+    };
+    OPENCODE_USAGE_WINDOWS
+        .iter()
+        .filter_map(|(key, label)| {
+            let window = usage.get(*key)?;
+            if !matches!(
+                window.get("status").and_then(|status| status.as_str()),
+                Some("ok" | "rate-limited")
+            ) {
+                return None;
+            }
+            let percent = window.get("percent")?.as_f64()? as f32;
+            if !percent.is_finite() {
+                return None;
+            }
+            Some(UsageLimit {
+                name: (*label).to_string(),
+                usage_percent: percent,
+                resets_at: window
+                    .get("resetsAt")
+                    .and_then(|reset| reset.as_str())
+                    .map(str::to_string),
+            })
+        })
+        .collect()
+}
+
+/// Live quota windows for an OpenCode Zen / OpenCode Go API key. The service
+/// exposes real percentages, so the report never has to guess from spend.
+async fn fetch_opencode_usage_limits(api_base: &str, api_key: &str) -> Result<Vec<UsageLimit>> {
+    let base = api_base.trim_end_matches('/');
+    if base.is_empty() {
+        return Err(anyhow::anyhow!("no API endpoint"));
+    }
+    let response = crate::provider::shared_http_client()
+        .get(format!("{base}/usage"))
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Accept", "application/json")
+        .timeout(HTTP_TIMEOUT)
+        .send()
+        .await
+        .context("request the OpenCode usage endpoint")?;
+    if !response.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "usage endpoint answered {}",
+            response.status()
+        ));
+    }
+    let payload: serde_json::Value = response
+        .json()
+        .await
+        .context("parse the OpenCode usage payload")?;
+    let limits = opencode_usage_limits(&payload);
+    if limits.is_empty() {
+        return Err(anyhow::anyhow!("no quota windows returned"));
+    }
+    Ok(limits)
+}
+
 fn month_start_utc() -> chrono::DateTime<chrono::Utc> {
     use chrono::Datelike;
     let now = chrono::Utc::now();
@@ -112,7 +186,12 @@ pub(super) fn enqueue_api_key_usage_tasks(
         }
 
         let source_key = format!("openai-compatible:{}", profile.id);
-        let has_balance_api = matches!(profile.id, "deepseek" | "moonshotai" | "kimi" | "zai");
+        // Profiles with a real quota or balance endpoint always report: they
+        // do not need a prior local call to say something useful.
+        let has_balance_api = matches!(
+            profile.id,
+            "deepseek" | "moonshotai" | "kimi" | "zai" | "opencode" | "opencode-go"
+        );
         // Only surface profiles jcode has actually used (or that expose a real
         // balance API); listing every configured-but-idle key is noise.
         let used_before = provider_activity::last_used_unix_secs(&source_key).is_some()
@@ -273,6 +352,22 @@ async fn fetch_compatible_profile_report(
                 }
             }
         }
+        "opencode" | "opencode-go" => {
+            if let Some(api_key) = configured_key(profile.api_key_env, profile.env_file) {
+                let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
+                match fetch_opencode_usage_limits(&resolved.api_base, &api_key).await {
+                    Ok(fetched) => limits.extend(fetched),
+                    Err(e) => {
+                        // Older Zen deployments expose no quota endpoint. The
+                        // free key probe still proves the credential works.
+                        let status =
+                            probe_openai_compatible_key(&resolved.api_base, &api_key).await;
+                        extra_info.push(("Key status".to_string(), status));
+                        extra_info.push(("Quota".to_string(), format!("unavailable ({e})")));
+                    }
+                }
+            }
+        }
         "muse-subscription" => {
             // Native subscription: the account snapshot comes from the key mint,
             // which reports a plan tier but no numeric quota windows. Show what
@@ -315,7 +410,7 @@ async fn fetch_compatible_profile_report(
     // subscription, which is a flat-rate plan and not metered per token here).
     let plan_quota_shown = profile.id == "kimi"
         || profile.id == "muse-subscription"
-        || (profile.id == "zai" && !limits.is_empty());
+        || (matches!(profile.id, "zai" | "opencode" | "opencode-go") && !limits.is_empty());
     if !plan_quota_shown {
         push_local_spend(&mut extra_info, &source_key);
     }
@@ -765,4 +860,107 @@ async fn fetch_openai_org_cost(admin_key: &str) -> Option<f64> {
         }
     }
     saw_any.then_some(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// The live `GET /zen/go/v1/usage` answer captured from a configured
+    /// OpenCode Go key. Every window carries its own reset timestamp.
+    const OPENCODE_USAGE: &str = r#"{"usage":{
+        "rolling":{"status":"ok","percent":23,"resetsAt":"2026-11-15T11:08:23.000Z"},
+        "weekly":{"status":"ok","percent":9,"resetsAt":"2026-11-16T00:00:00.000Z"},
+        "monthly":{"status":"ok","percent":4,"resetsAt":"2026-12-15T05:54:05.000Z"}}}"#;
+
+    fn serve_once(status_line: &'static str, body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 2048];
+                let _ = stream.read(&mut request);
+                let response = format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        format!("http://{address}")
+    }
+
+    #[test]
+    fn opencode_usage_payload_becomes_one_limit_per_window() {
+        let limits = opencode_usage_limits(&serde_json::from_str(OPENCODE_USAGE).unwrap());
+        let names: Vec<_> = limits.iter().map(|limit| limit.name.as_str()).collect();
+        assert_eq!(names, ["Rolling window", "Weekly window", "Monthly window"]);
+        let percents: Vec<_> = limits.iter().map(|limit| limit.usage_percent).collect();
+        assert_eq!(percents, [23.0, 9.0, 4.0]);
+        assert_eq!(
+            limits[0].resets_at.as_deref(),
+            Some("2026-11-15T11:08:23.000Z")
+        );
+    }
+
+    #[test]
+    fn opencode_usage_skips_windows_the_server_does_not_report() {
+        let payload = serde_json::json!({"usage":{
+            "rolling":{"status":"ok","percent":23,"resetsAt":"2026-11-15T11:08:23.000Z"},
+            "weekly":{"status":"error","percent":9},
+            "monthly":{"status":"ok"},
+            "seasonal":"unexpected"
+        }});
+        let limits = opencode_usage_limits(&payload);
+        assert_eq!(limits.len(), 1);
+        assert_eq!(limits[0].name, "Rolling window");
+        // No windows at all is not a healthy zero.
+        assert!(opencode_usage_limits(&serde_json::json!({"usage":{}})).is_empty());
+    }
+
+    #[test]
+    fn opencode_usage_keeps_rate_limited_window() {
+        let payload = serde_json::json!({"usage":{
+            "rolling":{"status":"rate-limited","percent":100,"resetsAt":"2026-11-17T20:16:01.000Z"},
+            "weekly":{"status":"ok","percent":43},
+            "monthly":{"status":"ok","percent":34}
+        }});
+        let limits = opencode_usage_limits(&payload);
+        assert_eq!(limits.len(), 3);
+        assert_eq!(limits[0].usage_percent, 100.0);
+        assert_eq!(
+            limits[0].resets_at.as_deref(),
+            Some("2026-11-17T20:16:01.000Z")
+        );
+    }
+
+    #[test]
+    fn opencode_usage_fetch_reads_the_key_endpoint() {
+        let base = serve_once("200 OK", OPENCODE_USAGE);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let limits = runtime
+            .block_on(fetch_opencode_usage_limits(&base, "test-key"))
+            .expect("live quota response parses");
+        assert_eq!(limits.len(), 3);
+        assert_eq!(limits[0].usage_percent, 23.0);
+    }
+
+    #[test]
+    fn opencode_usage_fetch_reports_a_missing_endpoint_instead_of_zeros() {
+        let base = serve_once("404 Not Found", "{}");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert!(
+            runtime
+                .block_on(fetch_opencode_usage_limits(&base, "test-key"))
+                .is_err()
+        );
+    }
 }

@@ -400,6 +400,7 @@ fn capture(
 enum Session {
     Nari(NariSession),
     Soniox(super::SonioxSession),
+    ElevenLabs(ElevenLabsSession),
 }
 
 #[derive(Default)]
@@ -491,7 +492,8 @@ impl NariRecording {
     /// Push-to-talk for the configured `[dictation] backend` / `base_url` /
     /// `recorder`. `Auto` uses a Nari key if present, else a Soniox key, else
     /// `NariNotConfigured`. A missing key returns `NariNotConfigured` or
-    /// `SonioxNotConfigured`. `Subscription`/`Command` are not streaming
+    /// `SonioxNotConfigured`. ElevenLabs must be explicitly selected and needs
+    /// its own API key. `Subscription`/`Command` are not streaming
     /// backends here and return `Unavailable`.
     pub fn start_configured(cancel: Arc<AtomicBool>) -> Result<Self, VoiceError> {
         use jcode_base::config::DictationBackend as B;
@@ -505,6 +507,12 @@ impl NariRecording {
             B::Soniox => (
                 super::StreamingBackend::Soniox,
                 super::soniox_api_key().ok_or(VoiceError::SonioxNotConfigured)?,
+            ),
+            B::ElevenLabs => (
+                super::StreamingBackend::ElevenLabs,
+                super::StreamingBackend::ElevenLabs
+                    .api_key()
+                    .ok_or(VoiceError::ElevenLabsNotConfigured)?,
             ),
             B::Auto => {
                 if let Some(key) = super::nari_api_key() {
@@ -618,6 +626,9 @@ impl NariRecording {
                                     super::StreamingBackend::Soniox => Session::Soniox(
                                         super::SonioxSession::connect_to(&url, &key, c).await?,
                                     ),
+                                    super::StreamingBackend::ElevenLabs => Session::ElevenLabs(
+                                        ElevenLabsSession::connect(&key, c).await?,
+                                    ),
                                 })
                             }
                         });
@@ -651,6 +662,7 @@ impl NariRecording {
                         let result = match session {
                             Session::Nari(s) => s.run(pcm, sink).await,
                             Session::Soniox(s) => s.run_nari_events(pcm, sink).await,
+                            Session::ElevenLabs(s) => s.run(pcm, sink).await,
                         };
                         super::timing::mark("nari stream finished");
                         mic.stop();

@@ -1259,6 +1259,8 @@ async fn run_relay_turn(
         Vec::new(),
         None,
         events.sender(),
+        None,
+        None,
     )
     .await;
     let reply = agent.latest_assistant_text_after(start_message_index);

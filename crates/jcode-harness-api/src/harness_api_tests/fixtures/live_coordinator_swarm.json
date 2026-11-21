@@ -1,0 +1,71 @@
+{
+ "swarm_id": "session:session_microbe_1794670947943_2648f3bbec7c7e5e",
+ "coordinator_session_id": "session_microbe_1794670947943_2648f3bbec7c7e5e",
+ "updated_at_unix_ms": 1794719153524,
+ "members": [
+  {
+   "session_id": "session_fish_1794718668083_01dd7767afb8aa44",
+   "working_dir": "/Users/xenking",
+   "swarm_id": "session:session_microbe_1794670947943_2648f3bbec7c7e5e",
+   "swarm_enabled": true,
+   "status": "running",
+   "task_label": "desktop-compact",
+   "friendly_name": "fish",
+   "report_back_to_session_id": "session_microbe_1794670947943_2648f3bbec7c7e5e",
+   "role": "agent",
+   "is_headless": true,
+   "detail": "[redacted]"
+  },
+  {
+   "session_id": "session_fox_1794718668160_87674d9271df588d",
+   "working_dir": "/Users/xenking",
+   "swarm_id": "session:session_microbe_1794670947943_2648f3bbec7c7e5e",
+   "swarm_enabled": true,
+   "status": "running",
+   "task_label": "claude-resets",
+   "friendly_name": "fox",
+   "report_back_to_session_id": "session_microbe_1794670947943_2648f3bbec7c7e5e",
+   "role": "agent",
+   "is_headless": true,
+   "detail": "[redacted]"
+  },
+  {
+   "session_id": "session_hamster_1794718698462_fa6bdd5a9eec4f73",
+   "working_dir": "/Users/xenking",
+   "swarm_id": "session:session_microbe_1794670947943_2648f3bbec7c7e5e",
+   "swarm_enabled": true,
+   "status": "running",
+   "task_label": "swarm-view-fix",
+   "friendly_name": "hamster",
+   "report_back_to_session_id": "session_microbe_1794670947943_2648f3bbec7c7e5e",
+   "role": "agent",
+   "is_headless": true,
+   "detail": "[redacted]"
+  },
+  {
+   "session_id": "session_microbe_1794670947943_2648f3bbec7c7e5e",
+   "working_dir": "/Users/xenking",
+   "swarm_id": "session:session_microbe_1794670947943_2648f3bbec7c7e5e",
+   "swarm_enabled": true,
+   "status": "crashed",
+   "friendly_name": "microbe",
+   "report_back_to_session_id": null,
+   "role": "coordinator",
+   "is_headless": false,
+   "detail": "[redacted]"
+  },
+  {
+   "session_id": "session_pig_1794719052030_479fcf881e1b1c52",
+   "working_dir": "/Users/xenking",
+   "swarm_id": "session:session_microbe_1794670947943_2648f3bbec7c7e5e",
+   "swarm_enabled": true,
+   "status": "stopped",
+   "task_label": "cache-compaction",
+   "friendly_name": "pig",
+   "report_back_to_session_id": "session_microbe_1794670947943_2648f3bbec7c7e5e",
+   "role": "agent",
+   "is_headless": true,
+   "detail": "[redacted]"
+  }
+ ]
+}

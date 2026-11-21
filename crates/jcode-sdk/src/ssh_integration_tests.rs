@@ -197,6 +197,7 @@ fn localhost_native_harness() {
     // one context message without a model turn or any provider credentials.
     let stored = client
         .request(crate::ApiRequest::SendMessage {
+            attachments: Vec::new(),
             session_id: session.session_id.clone(),
             content: "SSH acceptance context, no model reply requested".into(),
             images: vec![],

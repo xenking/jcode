@@ -498,8 +498,8 @@ pub async fn run_login_provider(
 }
 
 /// Native xAI OAuth device flow with the Grok CLI client id. Tokens are stored
-/// in the Grok CLI credential store (`$GROK_HOME/auth.json`), so an existing
-/// `grok login` is reused and this login is visible to the Grok CLI too.
+/// in `~/.jcode/grok_build_auth.json`, or in the Grok CLI's `$GROK_HOME/auth.json`
+/// only when the user already trusted that file.
 async fn login_grok_build_flow(no_browser: bool) -> Result<()> {
     let client = crate::provider::shared_http_client();
     let authorization = crate::auth::grok_build::initiate_device_login(&client).await?;
@@ -591,33 +591,9 @@ pub(crate) async fn run_jcode_account_login(no_browser: bool) -> Result<()> {
     login_jcode_flow(no_browser).await
 }
 
-fn login_openai_api_key_flow() -> Result<()> {
-    eprintln!("Setting up OpenAI API key...");
-    eprintln!("Get your API key from: https://platform.openai.com/api-keys\n");
-    eprint!("Paste your OpenAI API key: ");
-    io::stdout().flush()?;
-
-    let key = read_secret_line()?;
-    if key.is_empty() {
-        anyhow::bail!("No API key provided.");
-    }
-    if !key.starts_with("sk-") {
-        eprintln!("Warning: OpenAI API keys usually start with 'sk-'. Saving anyway.");
-    }
-
-    save_named_api_key("openai.env", "OPENAI_API_KEY", &key)?;
-    eprintln!("\nSuccessfully saved OpenAI API key!");
-    eprintln!(
-        "Stored at {}",
-        crate::storage::app_config_dir()?
-            .join("openai.env")
-            .display()
-    );
-    eprintln!("Provider: openai-api (native OpenAI Responses API)");
-    crate::telemetry::record_auth_success("openai-api", "api_key");
-    Ok(())
-}
-
+#[path = "login_key_flows.rs"]
+mod key_flows;
+use key_flows::*;
 async fn login_claude_flow(requested_label: Option<&str>, no_browser: bool) -> Result<()> {
     let label = auth::claude::login_target_label(requested_label)?;
     eprintln!("Logging in to Claude (account: {})...", label);

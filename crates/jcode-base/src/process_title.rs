@@ -54,8 +54,8 @@ pub fn terminal_session_label(session_name: &str, display_title: Option<&str>) -
 }
 
 /// Resolve the human-authored title used by terminal windows and `/resume`.
-/// Explicit renames win over todo/goal-derived titles, which win over the
-/// generated session title.
+/// Explicit renames win over the generated session title. Todo groups are lane
+/// labels, so they only fill in when no title exists at all.
 pub fn terminal_display_title_for_id(session_id: &str) -> Option<String> {
     crate::session::Session::load_startup_stub(session_id)
         .ok()
@@ -63,8 +63,8 @@ pub fn terminal_display_title_for_id(session_id: &str) -> Option<String> {
             session
                 .custom_title
                 .filter(|title| !title.trim().is_empty())
-                .or_else(|| crate::todo::load_session_title(session_id))
                 .or(session.title)
+                .or_else(|| crate::todo::load_session_title(session_id))
         })
 }
 
@@ -216,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_session_label_for_id_prefers_todo_title_over_generated_title() {
+    fn terminal_session_label_for_id_prefers_generated_title_over_todo_lane_label() {
         let _guard = lock_test_env();
         let previous_home = std::env::var_os("JCODE_HOME");
         let temp = tempfile::tempdir().expect("temp dir");
@@ -253,6 +253,16 @@ mod tests {
         )
         .expect("save todos");
 
+        assert_eq!(
+            terminal_session_label_for_id(session_id),
+            "Generated title (fox)"
+        );
+
+        // A todo group is a lane label ("resume title sync"), so it only names
+        // sessions that have no generated title at all.
+        let mut untitled = crate::session::Session::load(session_id).expect("load session");
+        untitled.title = None;
+        untitled.save().expect("save untitled session");
         assert_eq!(
             terminal_session_label_for_id(session_id),
             "resume title sync (fox)"

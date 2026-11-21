@@ -34,7 +34,7 @@ fn sample() -> UsageData {
 fn reset_offers_reuse_the_single_coordinated_usage_response() {
     with_home(|runtime| {
         runtime.block_on(async {
-            assert!(super::super::USAGE_URL.ends_with("?at_wall=1&skip_spend=1"));
+            assert!(super::super::USAGE_URL.ends_with("?cedar_ember=1&at_wall=1&skip_spend=1"));
             for (index, status) in [
                 serde_json::json!({"eligible": true, "arm": "reset", "available": true}),
                 serde_json::json!({"eligible": false}),
@@ -101,6 +101,7 @@ fn response_diagnostics_capture_only_bounded_printable_retry_hints() {
 #[test]
 fn concurrent_callers_make_one_probe() {
     with_home(|runtime| {
+        let _shared = cache::lock_usage_cache_tests();
         runtime.block_on(async {
             let probes = AtomicUsize::new(0);
             let key = "label:flight-concurrent";
@@ -123,6 +124,7 @@ fn concurrent_callers_make_one_probe() {
 #[test]
 fn different_accounts_can_probe_concurrently() {
     with_home(|runtime| {
+        let _shared = cache::lock_usage_cache_tests();
         runtime.block_on(async {
             let barrier = tokio::sync::Barrier::new(2);
             let probes = (0..2).map(|index| {

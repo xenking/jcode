@@ -2,66 +2,63 @@ use super::*;
 use anyhow::{Result, anyhow};
 
 #[test]
-fn test_session_exists_roundtrip() -> Result<()> {
-    let tmp_dir = std::env::temp_dir().join(format!(
-        "jcode-session-test-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| anyhow!(e))?
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(tmp_dir.join("sessions"))?;
-
-    assert!(!session_path_in_dir(&tmp_dir, "missing-session").exists());
-
-    let session_path = session_path_in_dir(&tmp_dir, "exists-session");
-    std::fs::write(&session_path, "{}")?;
-    assert!(session_path.exists());
-
-    let random_id = format!(
-        "missing-session-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| anyhow!(e))?
-            .as_nanos()
-    );
-    assert!(!session_exists(&random_id));
-    Ok(())
-}
-
-#[test]
-fn released_provider_message_cache_rebuilds_from_canonical_history() {
-    let mut session = Session::create_with_id(
-        "session_provider_cache_release_test".to_string(),
-        None,
-        Some("Provider cache release".to_string()),
-    );
+fn session_loads_future_content_block() {
+    let mut session = Session::create_with_id("session_future_block".into(), None, None);
     session.add_message(
         Role::User,
         vec![ContentBlock::Text {
-            text: "large derived payload".repeat(1024),
+            text: "kept".into(),
             cache_control: None,
         }],
     );
+    let mut json = serde_json::to_value(&session).unwrap();
+    json["messages"][0]["content"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "type": "future_content", "payload": {"x": 1}
+        }));
+    let restored: Session = serde_json::from_value(json).unwrap();
+    assert_eq!(restored.messages[0].content_preview(), "kept");
+}
 
-    let before = session.provider_messages().to_vec();
-    assert_eq!(before.len(), 1);
-    assert_eq!(
-        session.debug_memory_profile()["provider_messages_cache"]["count"],
-        1
-    );
+#[test]
+fn session_loads_future_status() {
+    let session = Session::create_with_id("session_future_status".into(), None, None);
+    let mut json = serde_json::to_value(&session).unwrap();
+    json["status"] = serde_json::json!({"FutureStatus": {"detail": 42}});
+    let restored: Session = serde_json::from_value(json).unwrap();
+    assert_eq!(restored.id, session.id);
+}
 
-    session.release_provider_messages_cache();
-    let released = session.debug_memory_profile();
-    assert_eq!(released["provider_messages_cache"]["count"], 0);
-    assert_eq!(released["provider_messages_cache"]["json_bytes"], 0);
-
-    let rebuilt = session.provider_messages();
-    assert_eq!(rebuilt.len(), 1);
-    assert_eq!(
-        serde_json::to_value(rebuilt).unwrap(),
-        serde_json::to_value(before).unwrap()
-    );
+#[test]
+fn session_loads_unknown_replay_event_without_losing_messages() {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let mut session = Session::create_with_id("session_future_event_test".into(), None, None);
+    for text in ["before", "after"] {
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: text.into(),
+                cache_control: None,
+            }],
+        );
+    }
+    let mut json = serde_json::to_value(&session).unwrap();
+    json["replay_events"] = serde_json::json!([{
+        "timestamp": "2026-11-18T00:00:00Z",
+        "event": "future_display_event",
+        "new_payload": {"value": 42}
+    }]);
+    let path = session_path(&session.id).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, serde_json::to_vec(&json).unwrap()).unwrap();
+    let restored = Session::load(&session.id).unwrap();
+    assert_eq!(restored.messages.len(), 2);
+    assert_eq!(restored.messages[0].content_preview(), "before");
+    assert_eq!(restored.messages[1].content_preview(), "after");
 }
 
 #[test]
@@ -314,6 +311,95 @@ fn existing_non_empty_session_does_not_get_retroactive_session_context() {
 }
 
 #[test]
+fn placeholder_model_is_never_persisted_and_resumes_unresolved() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-placeholder-model-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let session_id = "session_placeholder_model";
+    let mut session = Session::create_with_id(
+        session_id.to_string(),
+        None,
+        Some("placeholder model".to_string()),
+    );
+    // A stub provider (or a resumed session whose model was never resolved)
+    // reports "unknown". Persisting it makes the session unroutable and shows
+    // every swarm/session list the literal word instead of the real model.
+    session.model = Some("unknown".to_string());
+    session.provider_key = Some("claude".to_string());
+    session.route_api_method = Some("claude-oauth".to_string());
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.save()?;
+
+    let raw = std::fs::read_to_string(crate::session::storage_paths::session_path(session_id)?)?;
+    assert!(
+        !raw.contains("\"model\":\"unknown\""),
+        "placeholder model reached disk: {raw}"
+    );
+
+    let restored = Session::load_startup_stub(session_id)?;
+    assert_eq!(
+        restored.model, None,
+        "a placeholder must load as unresolved"
+    );
+    assert_eq!(restored.provider_key, None);
+    assert_eq!(restored.route_api_method, None);
+    Ok(())
+}
+
+#[test]
+fn placeholder_model_keeps_an_observed_account_route() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-placeholder-account-route-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let session_id = "session_placeholder_account_route";
+    let mut session = Session::create_with_id(session_id.to_string(), None, None);
+    // An unresolved model must not persist, but the account the session was
+    // observed to use is not model state: forgetting it on resume would route
+    // the session to another account.
+    session.model = Some("unknown".to_string());
+    session.provider_key = Some("openai-oauth".to_string());
+    session.route_api_method = Some("openai-oauth@work".to_string());
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.save()?;
+
+    let raw = std::fs::read_to_string(crate::session::storage_paths::session_path(session_id)?)?;
+    assert!(
+        !raw.contains("\"model\":\"unknown\""),
+        "placeholder model reached disk: {raw}"
+    );
+
+    let restored = Session::load_startup_stub(session_id)?;
+    assert_eq!(restored.model, None, "a placeholder loads as unresolved");
+    assert_eq!(
+        restored.route_api_method.as_deref(),
+        Some("openai-oauth@work"),
+        "the observed account route must survive an unresolved model"
+    );
+    assert_eq!(restored.provider_key.as_deref(), Some("openai-oauth"));
+    Ok(())
+}
+
+#[test]
 fn load_startup_stub_preserves_metadata_but_skips_heavy_vectors() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
@@ -334,12 +420,14 @@ fn load_startup_stub_preserves_metadata_but_skips_heavy_vectors() -> Result<()> 
     session.route_api_method = Some("openai-api".to_string());
     session.set_canary("self-dev");
     session.append_stored_message(StoredMessage {
+        attachment_data: None,
         id: "msg_1".to_string(),
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "hello world".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: Some(Utc::now()),
         tool_duration_ms: None,
@@ -408,12 +496,14 @@ fn load_for_remote_startup_preserves_messages_and_replay_but_skips_heavy_vectors
     session.model = Some("gpt-5.4".to_string());
     session.reasoning_effort = Some("medium".to_string());
     session.append_stored_message(StoredMessage {
+        attachment_data: None,
         id: "msg_remote_1".to_string(),
         role: Role::Assistant,
         content: vec![ContentBlock::Text {
             text: "hello remote startup".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: Some(Utc::now()),
         tool_duration_ms: None,
@@ -454,7 +544,9 @@ fn load_for_remote_startup_preserves_messages_and_replay_but_skips_heavy_vectors
     assert_eq!(loaded.model.as_deref(), Some("gpt-5.4"));
     assert_eq!(loaded.reasoning_effort.as_deref(), Some("medium"));
     assert_eq!(loaded.messages.len(), 1);
-    assert!(loaded.replay_events.is_empty());
+    assert_eq!(loaded.messages[0].content_preview(), "hello remote startup");
+    assert_eq!(loaded.replay_events.len(), 1);
+    assert_eq!(loaded.replay_events, session.replay_events);
     assert!(loaded.env_snapshots.is_empty());
     assert!(loaded.memory_injections.is_empty());
     Ok(())
@@ -702,14 +794,18 @@ fn test_save_persists_compaction_state() -> Result<()> {
         None,
         Some("compaction persistence test".to_string()),
     );
-    session.compaction = Some(StoredCompactionState {
-        summary_text: "saved summary".to_string(),
-        openai_encrypted_content: None,
-        snapcompact: None,
-        covers_up_to_turn: 8,
-        original_turn_count: 8,
-        compacted_count: 8,
-    });
+    session.compaction = Some(
+        StoredCompactionState {
+            summary_text: "saved summary".to_string(),
+            plan_context: None,
+            openai_encrypted_content: None,
+            snapcompact: None,
+            covers_up_to_turn: 8,
+            original_turn_count: 8,
+            compacted_count: 8,
+        }
+        .into(),
+    );
 
     session.save()?;
 
@@ -743,14 +839,18 @@ fn test_startup_stub_save_preserves_compaction_state() -> Result<()> {
     }
     owner.save()?;
     // Compaction lands in the journal, as it does for a live large session.
-    owner.compaction = Some(StoredCompactionState {
-        summary_text: "owner summary".to_string(),
-        openai_encrypted_content: None,
-        snapcompact: None,
-        covers_up_to_turn: 3,
-        original_turn_count: 3,
-        compacted_count: 3,
-    });
+    owner.compaction = Some(
+        StoredCompactionState {
+            summary_text: "owner summary".to_string(),
+            plan_context: None,
+            openai_encrypted_content: None,
+            snapcompact: None,
+            covers_up_to_turn: 3,
+            original_turn_count: 3,
+            compacted_count: 3,
+        }
+        .into(),
+    );
     owner.add_message(
         Role::User,
         vec![ContentBlock::Text {
@@ -1599,14 +1699,18 @@ fn failed_wake_errors_follow_compacted_history_window() {
     session.messages[100].timestamp = Some(start + chrono::Duration::seconds(100));
     session.record_replay_display_message("error", None, "current failure");
     session.replay_events.last_mut().unwrap().timestamp = start + chrono::Duration::seconds(101);
-    session.compaction = Some(StoredCompactionState {
-        summary_text: "older context".into(),
-        openai_encrypted_content: None,
-        snapcompact: None,
-        covers_up_to_turn: 20,
-        original_turn_count: 20,
-        compacted_count: 100,
-    });
+    session.compaction = Some(
+        StoredCompactionState {
+            summary_text: "older context".into(),
+            plan_context: None,
+            openai_encrypted_content: None,
+            snapcompact: None,
+            covers_up_to_turn: 20,
+            original_turn_count: 20,
+            compacted_count: 100,
+        }
+        .into(),
+    );
     let (limited, _, info) = render_messages_and_images_with_compacted_history(&session, 10);
     assert!(info.unwrap().remaining_messages > 0);
     assert!(!limited.iter().any(|message| message.content == "failure 0"));
@@ -1835,14 +1939,18 @@ fn test_render_messages_shows_recent_compacted_history_by_default() {
             cache_control: None,
         }],
     );
-    session.compaction = Some(StoredCompactionState {
-        summary_text: "old prompt and response".to_string(),
-        openai_encrypted_content: None,
-        snapcompact: None,
-        covers_up_to_turn: 2,
-        original_turn_count: 2,
-        compacted_count: 2,
-    });
+    session.compaction = Some(
+        StoredCompactionState {
+            summary_text: "old prompt and response".to_string(),
+            plan_context: None,
+            openai_encrypted_content: None,
+            snapcompact: None,
+            covers_up_to_turn: 2,
+            original_turn_count: 2,
+            compacted_count: 2,
+        }
+        .into(),
+    );
 
     let rendered = render_messages(&session);
     assert_eq!(rendered.len(), 4);
@@ -1885,14 +1993,18 @@ fn test_render_messages_can_expand_compacted_history_window() {
             cache_control: None,
         }],
     );
-    session.compaction = Some(StoredCompactionState {
-        summary_text: "old prompt and response".to_string(),
-        openai_encrypted_content: None,
-        snapcompact: None,
-        covers_up_to_turn: 2,
-        original_turn_count: 2,
-        compacted_count: 2,
-    });
+    session.compaction = Some(
+        StoredCompactionState {
+            summary_text: "old prompt and response".to_string(),
+            plan_context: None,
+            openai_encrypted_content: None,
+            snapcompact: None,
+            covers_up_to_turn: 2,
+            original_turn_count: 2,
+            compacted_count: 2,
+        }
+        .into(),
+    );
 
     // A small compacted prefix (few renderable messages, a single turn) must
     // never be truncated, even when a tiny visible window is requested. A single
@@ -1962,14 +2074,18 @@ fn test_compacted_history_truncates_only_when_long_and_many_turns() {
     );
 
     let compacted_count = prefix_turns * 5; // every prefix message is compacted
-    session.compaction = Some(StoredCompactionState {
-        summary_text: "older compacted context".to_string(),
-        openai_encrypted_content: None,
-        snapcompact: None,
-        covers_up_to_turn: prefix_turns,
-        original_turn_count: prefix_turns,
-        compacted_count,
-    });
+    session.compaction = Some(
+        StoredCompactionState {
+            summary_text: "older compacted context".to_string(),
+            plan_context: None,
+            openai_encrypted_content: None,
+            snapcompact: None,
+            covers_up_to_turn: prefix_turns,
+            original_turn_count: prefix_turns,
+            compacted_count,
+        }
+        .into(),
+    );
 
     let total_renderable = prefix_turns * 5; // 100
 
@@ -2032,14 +2148,18 @@ fn test_compacted_history_never_truncates_single_long_turn() {
     );
 
     let compacted_count = 151; // prompt + 150 responses
-    session.compaction = Some(StoredCompactionState {
-        summary_text: "older compacted context".to_string(),
-        openai_encrypted_content: None,
-        snapcompact: None,
-        covers_up_to_turn: 1,
-        original_turn_count: 1,
-        compacted_count,
-    });
+    session.compaction = Some(
+        StoredCompactionState {
+            summary_text: "older compacted context".to_string(),
+            plan_context: None,
+            openai_encrypted_content: None,
+            snapcompact: None,
+            covers_up_to_turn: 1,
+            original_turn_count: 1,
+            compacted_count,
+        }
+        .into(),
+    );
 
     // Even with a tiny requested window, a single long turn is never truncated.
     let (_rendered, _images, info) = render_messages_and_images_with_compacted_history(&session, 5);
@@ -2093,14 +2213,18 @@ fn test_compacted_history_window_counts_renderable_messages_not_hidden_reminders
             cache_control: None,
         }],
     );
-    session.compaction = Some(StoredCompactionState {
-        summary_text: "older compacted context".to_string(),
-        openai_encrypted_content: None,
-        snapcompact: None,
-        covers_up_to_turn: 4,
-        original_turn_count: 4,
-        compacted_count: 4,
-    });
+    session.compaction = Some(
+        StoredCompactionState {
+            summary_text: "older compacted context".to_string(),
+            plan_context: None,
+            openai_encrypted_content: None,
+            snapcompact: None,
+            covers_up_to_turn: 4,
+            original_turn_count: 4,
+            compacted_count: 4,
+        }
+        .into(),
+    );
 
     let (rendered, _images, info) = render_messages_and_images_with_compacted_history(&session, 1);
     let info = info.expect("compacted info");
@@ -2166,7 +2290,11 @@ fn test_render_messages_and_images_share_tool_resolution_and_labels() {
     // otherwise it leaks out as a bogus "last prompt".
     assert_eq!(rendered.len(), 1);
     assert_eq!(rendered[0].role, "tool");
-    assert_eq!(rendered[0].content, "rendered image");
+    let image_id = &session.session_images()[0].image_id;
+    assert_eq!(
+        rendered[0].content,
+        format!("rendered image\n\nAttached session images: [#{image_id}]")
+    );
     assert!(
         !rendered
             .iter()
@@ -2204,6 +2332,7 @@ fn reasoning_trace_survives_session_save_and_load() -> Result<()> {
     let session_id = "session_reasoning_trace_roundtrip";
     let mut session = Session::create_with_id(session_id.to_string(), None, None);
     session.append_stored_message(StoredMessage {
+        attachment_data: None,
         id: "msg_assistant".to_string(),
         role: Role::Assistant,
         content: vec![
@@ -2214,7 +2343,8 @@ fn reasoning_trace_survives_session_save_and_load() -> Result<()> {
                 text: "Here is my answer.".to_string(),
                 cache_control: None,
             },
-        ],
+        ]
+        .into(),
         display_role: None,
         timestamp: Some(Utc::now()),
         tool_duration_ms: None,
@@ -2429,6 +2559,16 @@ fn streaming_guard_creates_visible_macos_sleep_assertion() {
     let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
 
     let reason = "Jcode streaming model response";
+    // Other jcode processes (the shared daemon, other test binaries) hold the
+    // same assertion reason. Only this process's own assertion proves the
+    // guard works, so scope the check to our pid instead of matching the
+    // string globally.
+    let our_pid = std::process::id();
+    let ours_hold = |stdout: &str| {
+        stdout
+            .lines()
+            .any(|line| line.contains(&format!("pid {our_pid}(")) && line.contains(reason))
+    };
     {
         let _streaming = StreamingGuard::new("session_power");
 
@@ -2439,8 +2579,8 @@ fn streaming_guard_creates_visible_macos_sleep_assertion() {
         assert!(output.status.success(), "pmset should succeed");
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            stdout.contains(reason),
-            "pmset output should show the streaming assertion; output was:\n{stdout}"
+            ours_hold(&stdout),
+            "pmset output should show the streaming assertion for pid {our_pid}; output was:\n{stdout}"
         );
     }
 
@@ -2450,8 +2590,8 @@ fn streaming_guard_creates_visible_macos_sleep_assertion() {
         .expect("pmset -g assertions should run on macOS");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        !stdout.contains(reason),
-        "streaming assertion should be released after guard drop; output was:\n{stdout}"
+        !ours_hold(&stdout),
+        "streaming assertion should be released after guard drop for pid {our_pid}; output was:\n{stdout}"
     );
 }
 
@@ -2697,14 +2837,18 @@ fn restored_tool_image_boundaries_follow_returned_history_rows() {
 
     // Compaction adds a synthetic notice. Boundaries count returned rows, not
     // stored message indices or user-prompt ordinals.
-    session.compaction = Some(StoredCompactionState {
-        summary_text: "summary".into(),
-        openai_encrypted_content: None,
-        snapcompact: None,
-        covers_up_to_turn: 1,
-        original_turn_count: 1,
-        compacted_count: 1,
-    });
+    session.compaction = Some(
+        StoredCompactionState {
+            summary_text: "summary".into(),
+            plan_context: None,
+            openai_encrypted_content: None,
+            snapcompact: None,
+            covers_up_to_turn: 1,
+            original_turn_count: 1,
+            compacted_count: 1,
+        }
+        .into(),
+    );
     let (messages, images, _) =
         render_messages_and_images_with_compacted_history(&session, usize::MAX);
     assert_eq!(messages[0].role, "system");
@@ -2845,6 +2989,35 @@ fn system_prompt_missing_in_legacy_session_defaults_to_none() -> Result<()> {
 }
 
 #[test]
+fn pinned_mode_survives_session_storage_and_startup_stubs() -> Result<()> {
+    let _lock = lock_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path());
+    let legacy = serde_json::to_value(Session::create(None, None))?;
+    assert!(legacy.get("pinned_skill").is_none());
+    let mut value = legacy;
+    value["pinned_skill"] = serde_json::json!("future-mode-probe");
+    let mut session: Session = serde_json::from_value(value)?;
+    session.save()?;
+    for loaded in [
+        Session::load(&session.id)?,
+        Session::load_startup_stub(&session.id)?,
+    ] {
+        assert_eq!(
+            serde_json::to_value(loaded)?["pinned_skill"],
+            "future-mode-probe"
+        );
+    }
+    session.model = Some("changed-model".into());
+    session.save()?;
+    assert_eq!(
+        serde_json::to_value(Session::load(&session.id)?)?["pinned_skill"],
+        "future-mode-probe"
+    );
+    Ok(())
+}
+
+#[test]
 fn first_visible_user_prompt_becomes_the_generated_title() {
     let mut session = Session::create_with_id("session_prompt_title_1".to_string(), None, None);
     session.add_message(
@@ -2899,12 +3072,14 @@ fn env_snapshot_past_cap_appends_instead_of_rewriting_snapshot() -> Result<()> {
     let session_id = "session_env_snapshot_append";
     let mut session = Session::create_with_id(session_id.to_string(), None, None);
     session.append_stored_message(StoredMessage {
+        attachment_data: None,
         id: "msg_env_1".to_string(),
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: Some(Utc::now()),
         tool_duration_ms: None,
@@ -2973,12 +3148,14 @@ fn metadata_change_on_large_session_is_journaled_not_rewritten() -> Result<()> {
     let big = "x".repeat(64 * 1024);
     for i in 0..24 {
         session.append_stored_message(StoredMessage {
+            attachment_data: None,
             id: format!("msg_{i}"),
             role: Role::User,
             content: vec![ContentBlock::Text {
                 text: big.clone(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: Some(Utc::now()),
             tool_duration_ms: None,
@@ -3038,12 +3215,14 @@ fn route_journal_roundtrip(large: bool) -> Result<()> {
     session.model = Some("same-model".into());
     session.route_api_method = Some("account:first".into());
     session.append_stored_message(StoredMessage {
+        attachment_data: None,
         id: "message".into(),
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "x".repeat(if large { 2 * 1024 * 1024 } else { 10 }),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: Some(Utc::now()),
         tool_duration_ms: None,
@@ -3117,15 +3296,17 @@ fn route_journal_legacy_entries_preserve_snapshot_and_prior_journal_route() -> R
     Ok(())
 }
 
-fn big_compaction(tag: &str) -> crate::session::StoredCompactionState {
+fn big_compaction(tag: &str) -> std::sync::Arc<crate::session::StoredCompactionState> {
     crate::session::StoredCompactionState {
         summary_text: String::new(),
-        openai_encrypted_content: Some(format!("{tag}{}", "e".repeat(300 * 1024))),
+        plan_context: None,
+        openai_encrypted_content: Some(format!("{tag}{}", "e".repeat(300 * 1024)).into()),
         snapcompact: None,
         covers_up_to_turn: 3,
         original_turn_count: 3,
         compacted_count: 3,
     }
+    .into()
 }
 
 /// Multi-MB compaction state must not be repeated in every journal entry
@@ -3143,12 +3324,14 @@ fn journal_entries_elide_unchanged_compaction_but_loads_keep_it() -> Result<()> 
     let session_id = "session_compaction_elide";
     let mut session = Session::create_with_id(session_id.to_string(), None, None);
     let msg = |i: usize| StoredMessage {
+        attachment_data: None,
         id: format!("m{i}"),
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: format!("hello {i}"),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: Some(Utc::now()),
         tool_duration_ms: None,
@@ -3212,12 +3395,14 @@ fn legacy_journal_entries_with_inline_compaction_still_load() -> Result<()> {
     let session_id = "session_compaction_legacy";
     let mut session = Session::create_with_id(session_id.to_string(), None, None);
     session.append_stored_message(StoredMessage {
+        attachment_data: None,
         id: "m0".into(),
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: "hi".into(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: Some(Utc::now()),
         tool_duration_ms: None,
@@ -3259,12 +3444,14 @@ fn write_compaction_elision_compat_fixture() -> Result<()> {
     let mut session = Session::create_with_id("session_compat_fixture_1".to_string(), None, None);
     for i in 0..4 {
         session.append_stored_message(StoredMessage {
+            attachment_data: None,
             id: format!("m{i}"),
             role: Role::User,
             content: vec![ContentBlock::Text {
                 text: format!("compat {i}"),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: Some(Utc::now()),
             tool_duration_ms: None,
@@ -3306,3 +3493,146 @@ mod provider_identity;
 
 #[path = "memory_profile_tests.rs"]
 mod memory_profile;
+
+/// A compaction divider is a stored transcript row, not a transient client
+/// notice: it must render from the session file alone after a reload.
+#[test]
+fn compaction_divider_renders_from_a_stored_session() {
+    let mut session = Session::create_with_id(
+        "session_compaction_divider_render".to_string(),
+        None,
+        Some("Divider".to_string()),
+    );
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "hello".into(),
+            cache_control: None,
+        }],
+    );
+    session.record_compaction_event(
+        &crate::compaction::CompactionEvent {
+            trigger: "reactive".to_string(),
+            method: Some("snapcompact".to_string()),
+            pre_tokens: Some(180_000),
+            post_tokens: Some(26_000),
+            tokens_saved: Some(154_000),
+            duration_ms: Some(12_300),
+            messages_dropped: None,
+            messages_compacted: Some(84),
+            summary_chars: Some(1_200),
+            active_messages: Some(12),
+        },
+        Some("snapcompact"),
+        Some("Resume prior conversation.\n\nReading HISTORY:\n\nHISTORY\n==================="),
+    );
+
+    let rows = render_messages(&session);
+    let divider = rows
+        .iter()
+        .find(|row| row.role == "compaction")
+        .expect("the stored compaction must render a divider row");
+    let (label, detail) = divider
+        .content
+        .split_once("\n\n")
+        .expect("a divider body is label plus detail");
+    assert_eq!(label, "compacted · snapcompact · 180k→26k · 12s");
+    assert!(
+        detail.contains("messages archived: 84"),
+        "detail must name the elided messages: {detail}"
+    );
+    assert!(
+        detail.contains("Scroll up to read earlier messages.") && !detail.contains("HISTORY"),
+        "detail must explain where to find history without model instructions: {detail}"
+    );
+
+    // Reload from the stored JSON, exactly as Desktop's provisional history and
+    // a resumed TUI do, and the divider must still be there.
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "jcode-compaction-divider-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&tmp_dir).expect("temp dir");
+    let path = tmp_dir.join("session.json");
+    crate::storage::write_json_fast(&path, &session).expect("write stored session");
+    let reloaded = Session::load_from_path(&path).expect("reload stored session");
+    std::fs::remove_dir_all(&tmp_dir).ok();
+
+    let rows = render_messages(&reloaded);
+    let divider = rows
+        .iter()
+        .find(|row| row.role == "compaction")
+        .expect("the divider must survive a reload");
+    assert_eq!(divider.content, format!("{label}\n\n{detail}"));
+}
+
+/// An idle pre-compaction says so, so the reader knows why the fold happened
+/// while nothing was running.
+#[test]
+fn idle_compaction_divider_says_it_compacted_while_waiting() {
+    let mut session =
+        Session::create_with_id("session_compaction_divider_idle".to_string(), None, None);
+    session.record_compaction_event(
+        &crate::compaction::CompactionEvent {
+            trigger: crate::compaction::IDLE_PRECOMPACTION_TRIGGER.to_string(),
+            method: Some("summary".to_string()),
+            pre_tokens: Some(476_000),
+            post_tokens: Some(58_400),
+            tokens_saved: Some(417_600),
+            duration_ms: Some(48_000),
+            messages_dropped: None,
+            messages_compacted: Some(120),
+            summary_chars: Some(900),
+            active_messages: Some(10),
+        },
+        Some("summary"),
+        None,
+    );
+
+    let rows = render_messages(&session);
+    let divider = rows
+        .iter()
+        .find(|row| row.role == "compaction")
+        .expect("divider row");
+    let label = divider.content.lines().next().unwrap_or_default();
+    assert_eq!(label, "compacted while waiting · summary · 476k→58k · 48s");
+}
+
+/// Emergency hard compaction drops messages instead of summarizing; the label
+/// must not claim a summary happened.
+#[test]
+fn hard_compaction_divider_labels_the_drop() {
+    let mut session =
+        Session::create_with_id("session_compaction_divider_drop".to_string(), None, None);
+    session.record_compaction_event(
+        &crate::compaction::CompactionEvent {
+            trigger: "hard_compact".to_string(),
+            method: Some("drop".to_string()),
+            pre_tokens: Some(500_000),
+            post_tokens: Some(120_000),
+            tokens_saved: Some(380_000),
+            duration_ms: Some(0),
+            messages_dropped: Some(210),
+            messages_compacted: Some(210),
+            summary_chars: None,
+            active_messages: Some(4),
+        },
+        Some("drop"),
+        None,
+    );
+    let rows = render_messages(&session);
+    let divider = rows
+        .iter()
+        .find(|row| row.role == "compaction")
+        .expect("divider row");
+    assert_eq!(
+        divider.content.lines().next().unwrap_or_default(),
+        "compacted · drop · 500k→120k · 0.0s"
+    );
+    assert!(divider.content.contains("messages dropped: 210"));
+}
+#[path = "cases_additional_tests.rs"]
+mod additional_test_session_exists_roundtrip;

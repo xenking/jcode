@@ -138,15 +138,12 @@ fn persisted_swarm_state_round_trips_and_marks_running_stale() {
 }
 
 #[test]
-fn ready_headless_member_with_report_stops_without_losing_report() {
-    // A headless worker that finished its task has no process after restart.
-    // Preserve its report, but do not eagerly reconstruct the full Agent just
-    // to keep an idle worker reusable indefinitely.
+fn ready_headless_member_with_live_owner_preserves_report_across_reloads() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let _env = test_env(&dir);
 
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
-    let members = vec![SwarmMember {
+    let worker = SwarmMember {
         session_id: "session-ready".to_string(),
         event_tx,
         event_txs: HashMap::new(),
@@ -166,22 +163,48 @@ fn ready_headless_member_with_report_stops_without_losing_report() {
         todo_progress: None,
         todo_items: Vec::new(),
         runtime: crate::protocol::SwarmMemberRuntime::default(),
-        task_label: None,
-    }];
-
-    persist_swarm_state("swarm-gamma", None, None, &members);
-    let loaded = load_runtime_state();
-
-    let recovered = loaded.members.get("session-ready").expect("member");
-    assert_eq!(recovered.status, "stopped");
-    assert_eq!(
-        recovered.detail.as_deref(),
-        Some("idle worker not restored after server restart")
-    );
-    assert_eq!(
-        recovered.latest_completion_report.as_deref(),
-        Some("Done. Built the worker; all tests pass.")
-    );
+        task_label: Some("original lane".into()),
+    };
+    let owner = SwarmMember {
+        session_id: "session-coordinator".into(),
+        report_back_to_session_id: None,
+        is_headless: false,
+        ..worker.clone()
+    };
+    let orphan = SwarmMember {
+        session_id: "session-orphan".into(),
+        report_back_to_session_id: Some("historical-owner".into()),
+        ..worker.clone()
+    };
+    let mut members = vec![worker, owner.clone(), orphan];
+    for _ in 0..3 {
+        persist_swarm_state("swarm-gamma", None, Some(&owner.session_id), &members);
+        let loaded = load_runtime_state();
+        let recovered = &loaded.members["session-ready"];
+        assert_eq!(recovered.status, "ready");
+        assert_eq!(recovered.detail, None);
+        assert_eq!(recovered.task_label.as_deref(), Some("original lane"));
+        assert_eq!(
+            recovered.latest_completion_report.as_deref(),
+            Some("Done. Built the worker; all tests pass.")
+        );
+        assert_eq!(loaded.members["session-orphan"].status, "stopped");
+        assert_eq!(loaded.members[&owner.session_id].status, "stopped");
+        assert_eq!(
+            loaded
+                .members
+                .values()
+                .filter(|m| m.status == "ready")
+                .count(),
+            1
+        );
+        members = loaded.members.into_values().collect();
+        // Simulate the live coordinator reattaching before the next reload.
+        *members
+            .iter_mut()
+            .find(|m| m.session_id == owner.session_id)
+            .unwrap() = owner.clone();
+    }
 }
 
 #[test]
@@ -795,8 +818,8 @@ fn load_runtime_state_ignores_bak_when_primary_json_exists() {
     );
 }
 
-#[test]
-fn persisted_swarm_state_without_plan_still_restores_coordinator_and_members() {
+#[tokio::test]
+async fn planless_swarm_restores_only_members_who_have_not_left() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let _env = test_env(&dir);
 
@@ -824,6 +847,16 @@ fn persisted_swarm_state_without_plan_still_restores_coordinator_and_members() {
         task_label: None,
     }];
 
+    let worker = SwarmMember {
+        session_id: "worker-1".to_string(),
+        status: "running".to_string(),
+        role: "agent".to_string(),
+        report_back_to_session_id: Some("coord-1".to_string()),
+        is_headless: true,
+        ..members[0].clone()
+    };
+    let mut members = members;
+    members.push(worker);
     persist_swarm_state("swarm-gamma", None, Some("coord-1"), &members);
 
     let loaded = load_runtime_state();
@@ -839,8 +872,28 @@ fn persisted_swarm_state_without_plan_still_restores_coordinator_and_members() {
             .and_then(|member| member.friendly_name.as_deref()),
         Some("owl")
     );
+    assert!(loaded.running_before_restart.contains("worker-1"));
+    let runtime = crate::server::SwarmState::new(
+        loaded.members,
+        loaded.swarms_by_id,
+        loaded.plans,
+        loaded.coordinators,
+    );
+    runtime.members.write().await.remove("worker-1");
+    crate::server::remove_session_from_swarm(
+        "worker-1",
+        "swarm-gamma",
+        &runtime.members,
+        &runtime.swarms_by_id,
+        &runtime.coordinators,
+        &runtime.plans,
+    )
+    .await;
+
+    let restored = load_runtime_state();
+    assert!(!restored.members.contains_key("worker-1"));
     assert_eq!(
-        loaded.swarms_by_id.get("swarm-gamma"),
+        restored.swarms_by_id.get("swarm-gamma"),
         Some(&HashSet::from(["coord-1".to_string()]))
     );
 }
@@ -897,11 +950,11 @@ fn empty_persist_dissolution_removes_backup_and_cannot_resurrect() {
     );
 }
 
-/// Delete-vs-write interleaving between `remove_persisted_swarm_state_for`
+/// Delete-vs-write interleaving between `persist_swarm_state_after_departure`
 /// and a concurrent persist (wiring-audit.bak-resurrection, part b).
 ///
-/// `remove_persisted_swarm_state_for` (server.rs:120) is `load_runtime()
-/// .await` followed by an unserialized `remove_swarm_state`. Like the
+/// Before the snapshot version guard, the removal was `load_runtime().await`
+/// followed by a deletion with no stale-file check. Like the
 /// persist inversion race above, `load_runtime` observes the four state
 /// maps across multiple await points, so a remover that saw an all-empty
 /// (dissolved) runtime can park, lose the race to a swarm re-creation plus
@@ -942,7 +995,8 @@ async fn stale_remove_cannot_delete_fresh_snapshot_or_restore_backup() {
     let a = tokio::spawn({
         let swarm_state = swarm_state.clone();
         async move {
-            crate::server::remove_persisted_swarm_state_for("swarm-del-race", &swarm_state).await;
+            crate::server::persist_swarm_state_after_departure("swarm-del-race", &swarm_state)
+                .await;
         }
     });
     // Current-thread test runtime: yielding runs A until it parks on the

@@ -1,6 +1,164 @@
 use super::*;
 
 #[test]
+fn compaction_prompt_keeps_meaningful_tool_output_with_a_total_budget() {
+    let result = |content: String| Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "tool".into(),
+            content,
+            is_error: None,
+        }]
+        .into(),
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let mut messages = vec![result(format!(
+        "{} exact build error follows",
+        "x".repeat(1500)
+    ))];
+    messages.extend((0..40).map(|_| result("x".repeat(8_000))));
+    let text = build_compaction_conversation_text(&messages, None);
+    assert!(text.contains("exact build error follows"));
+    assert!(
+        text.len() < 70_000,
+        "tool bodies must share one capped budget"
+    );
+}
+
+#[test]
+fn emergency_truncation_noops_keep_shared_bodies_at_exact_limits() {
+    let canonical = vec![Message::user("unchanged"), tool_image_msg(4096)];
+    let mut request = canonical.clone();
+    assert_eq!(emergency_truncate_tool_results(&mut request, 21), 0);
+    assert_eq!(emergency_truncate_large_payloads(&mut request, 21, 4096), 0);
+    for (original, current) in canonical.iter().zip(&request) {
+        assert!(original.content.shares_storage_with(&current.content));
+    }
+    assert_eq!(
+        serde_json::to_vec(&request).unwrap(),
+        serde_json::to_vec(&canonical).unwrap()
+    );
+}
+
+#[test]
+fn emergency_tool_truncation_detaches_only_changed_messages() {
+    let mut oversized = tool_image_msg(8);
+    if let ContentBlock::ToolResult { content, .. } = &mut oversized.content[0] {
+        *content = "é".repeat(100);
+    }
+    let canonical = vec![Message::user("unchanged"), tool_image_msg(8), oversized];
+    let original = serde_json::to_vec(&canonical).unwrap();
+    let mut request = canonical.clone();
+    assert_eq!(emergency_truncate_tool_results(&mut request, 30), 1);
+    for index in 0..2 {
+        assert!(
+            canonical[index]
+                .content
+                .shares_storage_with(&request[index].content)
+        );
+    }
+    assert!(
+        !canonical[2]
+            .content
+            .shares_storage_with(&request[2].content)
+    );
+    if let ContentBlock::ToolResult { content, .. } = &request[2].content[0] {
+        assert_eq!(
+            content,
+            &emergency_truncated_tool_result(&"é".repeat(100), 30)
+        );
+    } else {
+        panic!("expected tool result");
+    }
+    assert!(matches!(request[2].content[1], ContentBlock::Image { .. }));
+    assert_eq!(serde_json::to_vec(&canonical).unwrap(), original);
+}
+
+#[test]
+fn emergency_large_payload_truncation_detaches_only_changed_messages() {
+    let mut oversized = tool_image_msg(4097);
+    if let ContentBlock::ToolResult { content, .. } = &mut oversized.content[0] {
+        *content = "é".repeat(100);
+    }
+    let canonical = vec![Message::user("unchanged"), tool_image_msg(4096), oversized];
+    let original = serde_json::to_vec(&canonical).unwrap();
+    let mut request = canonical.clone();
+    assert_eq!(emergency_truncate_large_payloads(&mut request, 30, 4096), 2);
+    for index in 0..2 {
+        assert!(
+            canonical[index]
+                .content
+                .shares_storage_with(&request[index].content)
+        );
+    }
+    assert!(
+        !canonical[2]
+            .content
+            .shares_storage_with(&request[2].content)
+    );
+    if let ContentBlock::ToolResult { content, .. } = &request[2].content[0] {
+        assert_eq!(
+            content,
+            &emergency_truncated_tool_result(&"é".repeat(100), 30)
+        );
+    } else {
+        panic!("expected tool result");
+    }
+    if let ContentBlock::Text {
+        text,
+        cache_control,
+    } = &request[2].content[1]
+    {
+        assert_eq!(
+            text,
+            "[Image omitted during emergency context recovery: media_type=image/png, original_base64_chars=4097. Rely on adjacent browser/tool text, screenshots saved to disk, or re-open/re-screenshot if visual details are needed.]"
+        );
+        assert!(cache_control.is_none());
+    } else {
+        panic!("expected image omission marker");
+    }
+    assert_eq!(serde_json::to_vec(&canonical).unwrap(), original);
+}
+
+#[test]
+fn noop_image_recovery_preserves_shared_content_allocations() {
+    use jcode_message_types::SharedContent;
+
+    let text: SharedContent = vec![ContentBlock::Text {
+        text: "large tool output".repeat(32 * 1024),
+        cache_control: None,
+    }]
+    .into();
+    let mut text_request = text.clone();
+    assert_eq!(strip_all_images_in_contents(&mut [&mut text_request]), 0);
+    assert!(text.shares_storage_with(&text_request));
+
+    let image: SharedContent = vec![
+        ContentBlock::ToolResult {
+            tool_use_id: "call".into(),
+            content: "screenshot".into(),
+            is_error: None,
+        },
+        ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: "a".repeat(4096),
+        },
+    ]
+    .into();
+    let mut request = image.clone();
+    assert_eq!(strip_large_images_in_contents(&mut [&mut request], 4096), 0);
+    assert!(image.shares_storage_with(&request));
+    assert_eq!(decay_old_tool_images_in_contents(&mut [&mut request]), 0);
+    assert!(image.shares_storage_with(&request));
+
+    assert_eq!(strip_all_images_in_contents(&mut [&mut request]), 1);
+    assert!(!image.shares_storage_with(&request));
+    assert!(matches!(image[1], ContentBlock::Image { .. }));
+    assert!(matches!(request[1], ContentBlock::Text { .. }));
+}
+
+#[test]
 fn reusable_cache_boundary_excludes_only_split_uncached_tail() {
     for provider in ["Claude", "anthropic", "unknown"] {
         assert_eq!(
@@ -41,7 +199,8 @@ fn compaction_text_keeps_native_search_query_and_urls() {
                     "url": "https://blog.rust-lang.org/", "title": "Rust Blog",
                     "encrypted_content": "ENC"}]}),
             },
-        ],
+        ]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -79,6 +238,23 @@ fn effective_context_subset_accounting_does_not_double_count() {
     assert_eq!(
         effective_context_tokens_from_usage("opencode-go", 396_000, None, None),
         396_000
+    );
+}
+
+#[test]
+fn effective_context_openai_compatible_profiles_never_double_count_cache_reads() {
+    // OpenCode Go and the OpenRouter slot report input inclusively (OpenAI
+    // Responses accounting), so a cache read that is a subset of input must not
+    // be added back on top. The reported 231k context stays 231k, matching the
+    // compaction trigger's figure instead of the 431k double-count a client can
+    // otherwise show.
+    assert_eq!(
+        effective_context_tokens_from_usage("opencode-go", 231_621, Some(231_424), None),
+        231_621
+    );
+    assert_eq!(
+        effective_context_tokens_from_usage("openrouter", 231_621, Some(231_424), None),
+        231_621
     );
 }
 
@@ -145,7 +321,8 @@ fn safe_cutoff_keeps_tool_use_with_tool_result() {
             name: "read".to_string(),
             input: serde_json::json!({"file":"src/lib.rs"}),
             thought_signature: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     };
@@ -155,7 +332,8 @@ fn safe_cutoff_keeps_tool_use_with_tool_result() {
             tool_use_id: "call_1".to_string(),
             content: "ok".to_string(),
             is_error: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     };
@@ -196,7 +374,8 @@ fn image_token_cost_is_bounded_not_base64_length() {
     image_msg.content = vec![ContentBlock::Image {
         media_type: "image/png".to_string(),
         data: huge_base64.clone(),
-    }];
+    }]
+    .into();
 
     let chars = message_char_count(&image_msg);
     // Flat per-image cost in char-equivalents, far below the raw payload.
@@ -217,13 +396,75 @@ fn image_token_cost_is_bounded_not_base64_length() {
 }
 
 #[test]
+fn dense_png_dimensions_and_archive_cap_are_counted_consistently() {
+    use base64::Engine as _;
+    let mut header = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    header.extend_from_slice(&1932u32.to_be_bytes());
+    header.extend_from_slice(&1920u32.to_be_bytes());
+    let page = base64::engine::general_purpose::STANDARD.encode(header);
+    let image = Message {
+        content: vec![ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: page.clone(),
+        }]
+        .into(),
+        ..Message::user("")
+    };
+    let cost = 1932 * 1920 / 750;
+    assert_eq!(message_char_count(&image), cost * CHARS_PER_TOKEN);
+    let summary = Summary {
+        text: String::new(),
+        openai_encrypted_content: None,
+        snapcompact: Some(jcode_message_types::SnapcompactArchive {
+            source: String::new(),
+            pages: vec![page; 74],
+            index: String::new(),
+            decisions: String::new(),
+            deferred_decisions: String::new(),
+            page_ranges: vec![],
+            render_key: String::new(),
+        }),
+        covers_up_to_turn: 0,
+        original_turn_count: 0,
+    };
+    assert_eq!(
+        summary_payload_char_count(&summary),
+        cost * CHARS_PER_TOKEN * SNAPCOMPACT_REQUEST_PAGE_LIMIT
+    );
+}
+
+#[test]
+fn summary_clone_shares_encrypted_body_when_text_changes() {
+    let body: std::sync::Arc<str> = "encrypted-body-".repeat(128 * 1024).into();
+    let summary = Summary {
+        text: "original summary".into(),
+        openai_encrypted_content: Some(body.clone()),
+        snapcompact: None,
+        covers_up_to_turn: 3,
+        original_turn_count: 7,
+    };
+    let mut cloned = summary.clone();
+    cloned.text.push_str(" changed");
+    assert!(std::sync::Arc::ptr_eq(
+        &body,
+        cloned.openai_encrypted_content.as_ref().unwrap()
+    ));
+    assert_eq!(summary.text, "original summary");
+    cloned.openai_encrypted_content = None;
+    assert!(std::sync::Arc::ptr_eq(
+        &body,
+        summary.openai_encrypted_content.as_ref().unwrap()
+    ));
+}
+
+#[test]
 fn openai_native_compaction_cost_is_bounded_not_ciphertext_length() {
     // Regression: a 1.1M-char encrypted payload was estimated at ~285k
     // tokens, so compaction reported 294k -> 303k while the provider saw
     // 219k -> 34k.
     let summary = Summary {
         text: String::new(),
-        openai_encrypted_content: Some("x".repeat(1_141_900)),
+        openai_encrypted_content: Some("x".repeat(1_141_900).into()),
         snapcompact: None,
         covers_up_to_turn: 229,
         original_turn_count: 229,
@@ -236,7 +477,8 @@ fn openai_native_compaction_cost_is_bounded_not_ciphertext_length() {
     let mut msg = Message::user("");
     msg.content = vec![ContentBlock::OpenAICompaction {
         encrypted_content: "x".repeat(1_141_900),
-    }];
+    }]
+    .into();
     assert_eq!(
         message_char_count(&msg),
         OPENAI_COMPACTION_TOKEN_COST * CHARS_PER_TOKEN
@@ -257,7 +499,8 @@ fn builds_semantic_text_from_relevant_content() {
                 content: "tool output".to_string(),
                 is_error: None,
             },
-        ],
+        ]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     };
@@ -277,7 +520,8 @@ fn builds_emergency_summary_with_tools_and_files() {
                 name: "read".to_string(),
                 input: serde_json::json!({"file":"src/lib.rs"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -307,7 +551,8 @@ fn emergency_truncation_replaces_large_images_with_text_marker() {
         content: vec![ContentBlock::Image {
             media_type: "image/png".to_string(),
             data: "a".repeat(2048),
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -363,7 +608,8 @@ fn image_msg(data_len: usize) -> Message {
         content: vec![ContentBlock::Image {
             media_type: "image/png".to_string(),
             data: "a".repeat(data_len),
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }
@@ -407,15 +653,15 @@ fn tool_image_msg(data_len: usize) -> Message {
                 media_type: "image/png".to_string(),
                 data: "a".repeat(data_len),
             },
-        ],
+        ]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }
 }
 
 fn decay(messages: &mut [Message]) -> usize {
-    let mut contents: Vec<&mut Vec<ContentBlock>> =
-        messages.iter_mut().map(|m| &mut m.content).collect();
+    let mut contents: Vec<_> = messages.iter_mut().map(|m| &mut m.content).collect();
     decay_old_tool_images_in_contents(&mut contents)
 }
 
@@ -427,37 +673,13 @@ fn is_image(message: &Message) -> bool {
 }
 
 #[test]
-fn tool_image_decay_waits_for_trigger_then_keeps_newest() {
-    let mut messages: Vec<Message> = (0..TOOL_IMAGE_DECAY_TRIGGER_COUNT)
-        .map(|_| tool_image_msg(10))
-        .collect();
-    assert_eq!(
-        decay(&mut messages),
-        0,
-        "at the trigger count nothing decays"
-    );
-
-    messages.push(tool_image_msg(10));
-    let total = messages.len();
-    assert_eq!(decay(&mut messages), total - TOOL_IMAGE_DECAY_KEEP_COUNT);
-    for (index, message) in messages.iter().enumerate() {
-        assert_eq!(
-            is_image(message),
-            index >= total - TOOL_IMAGE_DECAY_KEEP_COUNT
-        );
-        // The tool_result itself is preserved for tool_use pairing.
-        assert!(matches!(
-            message.content[0],
-            ContentBlock::ToolResult { .. }
-        ));
+fn tool_image_count_alone_does_not_rewrite_history() {
+    let mut messages = Vec::new();
+    for _ in 0..40 {
+        messages.push(tool_image_msg(1024));
+        assert_eq!(decay(&mut messages), 0);
+        assert!(messages.iter().all(is_image));
     }
-    let ContentBlock::Text { text, .. } = &messages[0].content[1] else {
-        panic!("decayed image must become a text marker");
-    };
-    assert!(text.contains("Older tool screenshot omitted"));
-    assert!(text.contains("original_base64_chars=10"));
-    // Stable after decay: nothing more to do until the trigger is hit again.
-    assert_eq!(decay(&mut messages), 0);
 }
 
 #[test]
@@ -480,8 +702,8 @@ fn tool_image_decay_bounds_bytes_but_keeps_newest_huge_image() {
 #[test]
 fn tool_image_decay_ignores_user_pasted_images() {
     let mut messages = vec![image_msg(10)];
-    messages.extend((0..TOOL_IMAGE_DECAY_TRIGGER_COUNT + 5).map(|_| tool_image_msg(10)));
-    decay(&mut messages);
+    messages.extend((0..2).map(|_| tool_image_msg(TOOL_IMAGE_DECAY_KEEP_CHARS + 1)));
+    assert_eq!(decay(&mut messages), 1);
     assert!(
         is_image(&messages[0]),
         "user images are not tool screenshots"
@@ -505,4 +727,37 @@ fn strip_large_images_strips_all_when_single_image_exceeds_budget() {
     let stripped = emergency_strip_large_images(&mut messages, 2000);
     assert_eq!(stripped, 1);
     assert!(matches!(messages[0].content[0], ContentBlock::Text { .. }));
+}
+
+/// A screenshot-heavy turn sends one more image per request. Trimming the
+/// request to its budget must not move the cut on every request: each move
+/// rewrites a message the provider already cached.
+#[test]
+fn outbound_image_trim_keeps_the_sent_prefix_stable_between_steps() {
+    const IMAGE: usize = 1000;
+    const BUDGET: usize = 24 * IMAGE;
+    const STEP: usize = 8 * IMAGE;
+    let mut transcript: Vec<Message> = Vec::new();
+    let mut previous: Vec<bool> = Vec::new();
+    let mut rewrites = 0;
+    for _ in 0..64 {
+        transcript.push(tool_image_msg(IMAGE));
+        let mut request = transcript.clone();
+        let mut contents: Vec<_> = request.iter_mut().map(|m| &mut m.content).collect();
+        strip_oldest_images_in_steps(&mut contents, BUDGET, STEP);
+        let sent: Vec<bool> = request.iter().map(is_image).collect();
+        let payload = sent.iter().filter(|kept| **kept).count() * IMAGE;
+        assert!(payload <= BUDGET, "request stays within its budget");
+        assert!(
+            *sent.last().unwrap(),
+            "the newest screenshot is always sent"
+        );
+        if sent[..previous.len()] != previous[..] {
+            rewrites += 1;
+        }
+        previous = sent;
+    }
+    // 40 images arrive past the budget; a cut that follows each one rewrites
+    // the sent prefix 40 times.
+    assert_eq!(rewrites, 5, "the sent prefix changes once per step");
 }

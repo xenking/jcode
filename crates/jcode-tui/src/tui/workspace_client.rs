@@ -231,7 +231,7 @@ fn derive_visual_state(
             WorkspaceSessionVisualState::Error
         }
         Ok(SessionStatus::Active) => WorkspaceSessionVisualState::Idle,
-        Err(_) => WorkspaceSessionVisualState::Detached,
+        Ok(SessionStatus::Unknown) | Err(_) => WorkspaceSessionVisualState::Detached,
     }
 }
 

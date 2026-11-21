@@ -93,7 +93,7 @@ pub(super) fn kv_cache_footer_summary(body: &str) -> Option<String> {
     let reason = body
         .split_once('[')
         .and_then(|(_, rest)| rest.split_once(']'))
-        .map(|(r, _)| r.trim().to_string())?;
+        .map(|(r, _)| r.trim())?;
     let missed = kv_cache_missed_token_text(body);
     let hit = body.split_once(" cached / ").and_then(|(before, after)| {
         let cached = parse_kv_token_count(before.rsplit(' ').next()?)?;
@@ -101,15 +101,34 @@ pub(super) fn kv_cache_footer_summary(body: &str) -> Option<String> {
         (expected > 0.0).then(|| ((cached / expected) * 100.0).round().clamp(0.0, 100.0))
     });
     let lead = match missed {
+        Some(missed)
+            if matches!(reason, "provider_switch" | "provider switch")
+                && body.contains(" tokens uncached on the new provider") =>
+        {
+            format!("{missed} uncached input")
+        }
+        Some(missed) if body.contains(" tokens below prior cache baseline") => {
+            format!("~{missed} {kind}")
+        }
         Some(missed) => format!("{missed} {kind}"),
         None => kind.to_string(),
     };
-    let mut parts = vec![lead, reason];
-    if body
+    let mut parts = vec![
+        lead,
+        if reason == "provider_switch" {
+            "provider switch"
+        } else {
+            reason
+        }
+        .to_string(),
+    ];
+    if let Some(tag) = body
         .split_once(']')
-        .is_some_and(|(_, tail)| tail.trim_start().starts_with("[prefix unchanged]"))
+        .and_then(|(_, tail)| tail.trim_start().strip_prefix('['))
+        .and_then(|tail| tail.split_once(']').map(|(tag, _)| tag))
+        && matches!(tag, "prefix unchanged" | "wire suffix changed")
     {
-        parts.push("prefix unchanged".to_string());
+        parts.push(tag.to_string());
     }
     if let Some(hit) = hit {
         parts.push(format!("{hit:.0}% hit"));

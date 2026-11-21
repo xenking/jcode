@@ -672,7 +672,14 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Use opposite send mode while processing",
     ));
     lines.push(key_entry("Ctrl+Up", "Retrieve pending message for editing"));
-    lines.push(key_entry("Ctrl+Tab / Ctrl+T", "Toggle queue mode"));
+    lines.push(key_entry(
+        "Ctrl+Tab / Ctrl+T",
+        "Toggle default send mode (steer / after yield)",
+    ));
+    lines.push(key_entry(
+        "Alt+↑/↓",
+        "Select queued prompt; m switches mode, Enter interrupts, Esc exits",
+    ));
     lines.push(key_entry(
         "Ctrl+R",
         "Search prompt history (across sessions)",
@@ -686,6 +693,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Quick-copy visible chat viewport plus nearby context",
     ));
     lines.push(key_entry(&alt("Y"), "Toggle chat selection/copy mode"));
+    lines.push(key_entry(
+        "E (selection mode)",
+        "Expand/collapse swarm row under cursor",
+    ));
     lines.push(key_entry(&alt("S"), "Toggle typing scroll lock"));
     lines.push(key_entry("Ctrl+P", "Toggle auto-poke for incomplete todos"));
     lines.push(key_entry(&alt("X"), "Show/dismiss todo list card in chat"));

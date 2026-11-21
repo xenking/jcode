@@ -7,6 +7,10 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(3);
+/// How far the remaining budget may drift before the read timeout is re-armed.
+/// Small enough that a reply cannot outlive its deadline by more than this plus
+/// one socket timeout, large enough that a frame costs at most a few syscalls.
+const REARM_SLACK: Duration = Duration::from_millis(250);
 const MAX_FRAME: usize = 64 * 1024;
 
 pub(super) fn is_local_shared(api: &Path, native: &Path, candidate: &Path) -> bool {
@@ -22,14 +26,36 @@ fn connect(path: &Path, timeout: Duration) -> io::Result<UnixStream> {
     Ok(socket.into())
 }
 
+/// Read one newline-terminated frame, never waiting past `deadline`.
+///
+/// The read timeout is armed once and only re-armed when the remaining budget
+/// has moved by [`REARM_SLACK`], not on every byte. Two reasons:
+///
+/// - a `setsockopt` per byte is pure overhead on a path that runs at startup;
+/// - once the peer has closed, Darwin rejects `SO_RCVTIMEO` with `EINVAL` even
+///   though the reply is still buffered on this side. A daemon that answers and
+///   then exits (an upgrade, a restart) would have its answer thrown away. A
+///   closed peer cannot block, so a failed arm is not fatal: the buffered bytes
+///   and then EOF decide, exactly as they would with a timeout armed.
 fn read_frame(stream: &mut UnixStream, deadline: Instant) -> io::Result<Option<Value>> {
     let mut bytes = Vec::new();
+    let mut armed: Option<Duration> = None;
+    let mut arm_attempted = false;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             return Err(io::ErrorKind::TimedOut.into());
         }
-        stream.set_read_timeout(Some(left))?;
+        let rearm = match armed {
+            Some(window) => window > left + REARM_SLACK,
+            None => !arm_attempted,
+        };
+        if rearm {
+            arm_attempted = true;
+            if stream.set_read_timeout(Some(left)).is_ok() {
+                armed = Some(left);
+            }
+        }
         let mut byte = [0];
         if stream.read(&mut byte)? == 0 {
             return Ok(None);

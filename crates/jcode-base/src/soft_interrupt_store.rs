@@ -5,13 +5,21 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedSoftInterrupt {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<jcode_session_types::Attachment>,
     content: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     images: Vec<(String, String)>,
     urgent: bool,
     source: PersistedSoftInterruptSource,
+    #[serde(default)]
+    after_yield: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    system_reminder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_skill: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -20,6 +28,7 @@ enum PersistedSoftInterruptSource {
     User,
     System,
     BackgroundTask,
+    FileActivity,
 }
 
 impl From<SoftInterruptSource> for PersistedSoftInterruptSource {
@@ -28,6 +37,7 @@ impl From<SoftInterruptSource> for PersistedSoftInterruptSource {
             SoftInterruptSource::User => Self::User,
             SoftInterruptSource::System => Self::System,
             SoftInterruptSource::BackgroundTask => Self::BackgroundTask,
+            SoftInterruptSource::FileActivity => Self::FileActivity,
         }
     }
 }
@@ -38,6 +48,7 @@ impl From<PersistedSoftInterruptSource> for SoftInterruptSource {
             PersistedSoftInterruptSource::User => Self::User,
             PersistedSoftInterruptSource::System => Self::System,
             PersistedSoftInterruptSource::BackgroundTask => Self::BackgroundTask,
+            PersistedSoftInterruptSource::FileActivity => Self::FileActivity,
         }
     }
 }
@@ -45,11 +56,15 @@ impl From<PersistedSoftInterruptSource> for SoftInterruptSource {
 impl From<SoftInterruptMessage> for PersistedSoftInterrupt {
     fn from(value: SoftInterruptMessage) -> Self {
         Self {
+            attachments: value.attachments,
             content: value.content,
             images: value.images,
             urgent: value.urgent,
             source: value.source.into(),
+            after_yield: value.mode != jcode_agent_runtime::QueuedMessageMode::Steer,
             client_id: value.client_id,
+            system_reminder: value.system_reminder,
+            active_skill: value.active_skill,
         }
     }
 }
@@ -57,11 +72,22 @@ impl From<SoftInterruptMessage> for PersistedSoftInterrupt {
 impl From<PersistedSoftInterrupt> for SoftInterruptMessage {
     fn from(value: PersistedSoftInterrupt) -> Self {
         Self {
+            attachments: value.attachments,
             content: value.content,
             images: value.images,
             urgent: value.urgent,
             source: value.source.into(),
+            mode: if value.after_yield {
+                jcode_agent_runtime::QueuedMessageMode::AfterYield
+            } else {
+                jcode_agent_runtime::QueuedMessageMode::Steer
+            },
             client_id: value.client_id,
+            system_reminder: value.system_reminder,
+            active_skill: value.active_skill,
+            // Editing holds are per-connection; a daemon restart drops them so
+            // a crash can never strand a queued prompt.
+            editing_by: None,
         }
     }
 }

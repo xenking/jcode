@@ -6,6 +6,10 @@ use tokio_tungstenite::{WebSocketStream, accept_hdr_async};
 const HINT: &str = r#"{"type":"commands_available"}"#;
 const FALLBACK: Duration = Duration::from_secs(5);
 
+#[allow(
+    clippy::result_large_err,
+    reason = "WebSocket handshake callback uses tungstenite error type"
+)]
 async fn fixture() -> (Wakeups, WebSocketStream<TcpStream>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -39,6 +43,10 @@ async fn fixture() -> (Wakeups, WebSocketStream<TcpStream>) {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::result_large_err,
+    reason = "WebSocket handshake callback uses tungstenite error type"
+)]
 async fn changed_source_closes_old_socket_and_authenticates_only_new_endpoint() {
     use std::sync::Mutex;
     let old = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -311,7 +319,7 @@ async fn unavailable_endpoint_does_not_hot_loop_and_fallback_remains_live() {
             let (mut stream, _) = listener.accept().await.unwrap();
             count.fetch_add(1, Ordering::SeqCst);
             let mut request = [0; 4096];
-            stream.read(&mut request).await.unwrap();
+            let _ = stream.read(&mut request).await.unwrap();
             stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
         }
     });

@@ -3,6 +3,20 @@ use super::openrouter_sse_stream::run_stream_with_retries;
 use super::*;
 use jcode_base::provider::{ModelCatalogRefreshSummary, summarize_model_catalog_refresh};
 
+fn canonical_input_parts(request: &Value) -> (&[Value], Option<&Value>, Option<&Value>, usize) {
+    let items = request
+        .get("messages")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let system = items
+        .first()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("system"));
+    let tools = request.get("tools");
+    let count = tools.and_then(Value::as_array).map(Vec::len).unwrap_or(0);
+    (items, system, tools, count)
+}
+
 #[async_trait]
 impl Provider for OpenRouterProvider {
     fn runtime_display_name(&self) -> String {
@@ -251,21 +265,8 @@ impl Provider for OpenRouterProvider {
             }
         }
 
-        let message_items = request
-            .get("messages")
-            .and_then(|value| value.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let tools_value = request.get("tools").cloned();
-        let system_value = message_items
-            .first()
-            .filter(|message| message.get("role").and_then(|role| role.as_str()) == Some("system"))
-            .cloned();
-        let tool_count = tools_value
-            .as_ref()
-            .and_then(|value| value.as_array())
-            .map(|tools| tools.len())
-            .unwrap_or(0);
+        let (message_items, system_value, tools_value, tool_count) =
+            canonical_input_parts(&request);
         jcode_provider_core::fingerprint::log_provider_canonical_input(
             if self.supports_provider_features {
                 "openrouter"
@@ -279,9 +280,9 @@ impl Provider for OpenRouterProvider {
                 "chat_completions"
             },
             &request,
-            &message_items,
-            system_value.as_ref(),
-            tools_value.as_ref(),
+            message_items,
+            system_value,
+            tools_value,
             Some(tool_count),
             &[
                 ("cache_supported", cache_supported.to_string()),
@@ -294,8 +295,13 @@ impl Provider for OpenRouterProvider {
             ],
         );
 
-        // OpenRouter uses HTTPS/SSE transport only
-        jcode_base::logging::info("OpenRouter transport: HTTPS (SSE)");
+        // The shared transport serves OpenRouter and direct OpenAI-compatible
+        // endpoints. Name the one in use, never OpenRouter for OpenCode Go.
+        jcode_base::logging::info(if self.supports_provider_features {
+            "OpenRouter transport: HTTPS (SSE)"
+        } else {
+            "OpenAI-compatible transport: HTTPS (SSE)"
+        });
 
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
         let client = self.client.clone();
@@ -381,8 +387,8 @@ impl Provider for OpenRouterProvider {
         // honour that before falling back to a per-provider guess. Without this
         // a vision-capable model on the native OpenRouter route is clamped to
         // text even though the provider advertised image input for it.
-        if self.catalog_declares_image_input(&model_id) {
-            return true;
+        if let Some(supports_images) = self.catalog_image_input(&model_id) {
+            return supports_images;
         }
 
         // Direct OpenAI-compatible local providers such as Ollama and LM Studio
@@ -1058,26 +1064,32 @@ impl OpenRouterProvider {
     /// `supports_image_input` is a sync trait method, so the in-memory read uses
     /// `try_read` rather than awaiting the tokio lock; a busy lock defers to the
     /// disk copy instead of blocking.
+    #[cfg(test)]
     pub(crate) fn catalog_declares_image_input(&self, model_id: &str) -> bool {
+        self.catalog_image_input(model_id) == Some(true)
+    }
+
+    fn catalog_image_input(&self, model_id: &str) -> Option<bool> {
         if !self.supports_model_catalog {
-            return false;
+            return None;
         }
         if let Ok(cache) = self.models_cache.try_read()
             && let Some(model) = cache
                 .models
                 .iter()
                 .find(|model| model.id.trim().eq_ignore_ascii_case(model_id))
+            && !model.input.is_empty()
         {
-            return declares_image_input(model);
+            return Some(declares_image_input(model));
         }
-        self.load_usable_model_disk_cache_entry()
-            .is_some_and(|entry| {
-                entry
-                    .models
-                    .iter()
-                    .find(|model| model.id.trim().eq_ignore_ascii_case(model_id))
-                    .is_some_and(declares_image_input)
-            })
+        self.load_usable_model_disk_cache_entry().and_then(|entry| {
+            entry
+                .models
+                .iter()
+                .find(|model| model.id.trim().eq_ignore_ascii_case(model_id))
+                .filter(|model| !model.input.is_empty())
+                .map(declares_image_input)
+        })
     }
 }
 
@@ -1088,3 +1100,7 @@ fn declares_image_input(model: &jcode_provider_openrouter::ModelInfo) -> bool {
         .iter()
         .any(|modality| modality.eq_ignore_ascii_case("image"))
 }
+
+#[cfg(test)]
+#[path = "openrouter_canonical_input_tests.rs"]
+mod canonical_input_tests;

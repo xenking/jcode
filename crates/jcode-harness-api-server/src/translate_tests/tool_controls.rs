@@ -332,6 +332,25 @@ fn guardrail_stop_preserves_provider_reason_and_finishes_observer_turn() {
 }
 
 #[test]
+fn provider_guardrail_retry_is_session_scoped_and_leaves_final_stop_available() {
+    let mut state = state_with_session();
+    let retry = json!({
+        "type":"provider_guardrail_retry", "turn_id":"turn-1", "attempt":2, "max_attempts":3,
+    });
+    let frames = state.legacy_event_to_api(&retry);
+    assert!(matches!(
+        frames.as_slice(),
+        [ServerFrame { event: ApiEvent::ProviderGuardrailRetry {
+            session_id, turn_id, attempt: 2, max_attempts: 3,
+        }, .. }] if session_id == "s1" && turn_id == "turn-1"
+    ));
+    let frames = state.legacy_event_to_api(
+        &json!({"type":"provider_guardrail","stop_reason":"refusal","message":"Provider refused"}),
+    );
+    assert!(matches!(frames[0].event, ApiEvent::TurnStopped { .. }));
+}
+
+#[test]
 fn legacy_interrupt_finishes_observer_turn_but_idle_cancel_is_not_a_stop() {
     let mut state = state_with_session();
     let idle = state.legacy_event_to_api(&json!({"type":"interrupted"}));

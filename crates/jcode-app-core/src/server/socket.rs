@@ -176,8 +176,7 @@ pub async fn reap_stale_socket_if_dead(path: &std::path::Path) -> bool {
     // Try to grab this socket's daemon lock. If a live daemon holds it, this
     // fails and we leave everything alone (the daemon may just be slow to
     // answer).
-    let lock_path = daemon_lock_path_for(path);
-    let Ok(Some(_lock)) = try_acquire_daemon_lock(&lock_path) else {
+    let Ok(Some(_lock)) = try_acquire_daemon_locks(&daemon_lock_paths_for(path)) else {
         return false;
     };
 
@@ -232,7 +231,11 @@ pub(super) fn daemon_lock_path_for(socket: &std::path::Path) -> PathBuf {
     if is_shared_socket(socket) {
         return crate::storage::runtime_dir().join("jcode-daemon.lock");
     }
+    socket_scoped_lock_path(socket)
+}
 
+#[cfg(unix)]
+fn socket_scoped_lock_path(socket: &std::path::Path) -> PathBuf {
     // Derive the lock from the resolved identity, not the spelling: two
     // spellings of one custom socket must contend for the same lock, or two
     // daemons could bind the same socket.
@@ -251,7 +254,26 @@ pub(super) fn daemon_lock_path_for(socket: &std::path::Path) -> PathBuf {
 /// while the server runs. Recomputing could name a different file and leave
 /// the real lock behind (review of #1768, finding 2).
 #[cfg(unix)]
-static HELD_DAEMON_LOCK: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+static HELD_DAEMON_LOCK: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+
+/// Every lock a server on `socket` must hold.
+///
+/// The shared socket takes both its runtime-dir lock and the socket-scoped
+/// lock. Builds disagree about which socket is "shared" (a build that read
+/// `$TMPDIR` saw the macOS user temp socket as custom and locked only
+/// `jcode.sock.daemon.lock`), so taking one name let a newer build start a
+/// second daemon on the same path, unlink the live daemon's socket, idle out,
+/// and leave the machine with no reachable server.
+#[cfg(unix)]
+pub(super) fn daemon_lock_paths_for(socket: &std::path::Path) -> Vec<PathBuf> {
+    let scoped = socket_scoped_lock_path(socket);
+    let primary = daemon_lock_path_for(socket);
+    if primary == scoped {
+        vec![primary]
+    } else {
+        vec![primary, scoped]
+    }
+}
 
 /// Remove the daemon lock this process holds, on a path that exits without
 /// unwinding and so skips [`DaemonLockGuard`]'s `Drop`.
@@ -262,7 +284,7 @@ static HELD_DAEMON_LOCK: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new
 /// rather than a stuck lock: but a per-run socket would leave one per run.
 #[cfg(unix)]
 pub(super) fn cleanup_held_daemon_lock() {
-    if let Some(path) = HELD_DAEMON_LOCK.get() {
+    for path in HELD_DAEMON_LOCK.get().into_iter().flatten() {
         let _ = std::fs::remove_file(path);
     }
 }
@@ -278,6 +300,20 @@ impl Drop for DaemonLockGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+/// All-or-nothing acquisition of several daemon locks: `None` (with every
+/// lock taken so far released) as soon as one is held elsewhere.
+#[cfg(unix)]
+pub(super) fn try_acquire_daemon_locks(paths: &[PathBuf]) -> Result<Option<Vec<DaemonLockGuard>>> {
+    let mut guards = Vec::with_capacity(paths.len());
+    for path in paths {
+        match try_acquire_daemon_lock(path)? {
+            Some(guard) => guards.push(guard),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(guards))
 }
 
 #[cfg(unix)]
@@ -307,16 +343,16 @@ pub(super) fn try_acquire_daemon_lock(path: &std::path::Path) -> Result<Option<D
 }
 
 #[cfg(unix)]
-pub(super) fn acquire_daemon_lock_for(socket: &std::path::Path) -> Result<DaemonLockGuard> {
-    let path = daemon_lock_path_for(socket);
-    let guard = try_acquire_daemon_lock(&path)?.ok_or_else(|| {
+pub(super) fn acquire_daemon_lock_for(socket: &std::path::Path) -> Result<Vec<DaemonLockGuard>> {
+    let paths = daemon_lock_paths_for(socket);
+    let guards = try_acquire_daemon_locks(&paths)?.ok_or_else(|| {
         anyhow::anyhow!(
             "Another jcode server process is already running on socket {}",
             socket.display()
         )
     })?;
-    let _ = HELD_DAEMON_LOCK.set(path);
-    Ok(guard)
+    let _ = HELD_DAEMON_LOCK.set(paths);
+    Ok(guards)
 }
 
 #[cfg(unix)]

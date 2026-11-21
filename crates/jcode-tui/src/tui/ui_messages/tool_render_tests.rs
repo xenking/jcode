@@ -2,6 +2,95 @@
 use super::*;
 
 #[test]
+fn answered_ask_is_rendered_as_a_full_user_decision() {
+    let msg = DisplayMessage::tool(
+        "User answers:\n1. Which database? -> Postgres (comment: reliable)\n2. When? -> Now\n",
+        crate::message::ToolCall {
+            id: "ask-1".into(),
+            name: "ask".into(),
+            input: serde_json::json!({"questions": [
+                {"header":"Database", "question":"Which database?", "options":[{"label":"Postgres"},{"label":"SQLite"}]},
+                {"question":"When?", "options":[{"label":"Now"},{"label":"Later"}]}
+            ]}),
+            intent: None,
+            thought_signature: None,
+        },
+    );
+    let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+    let text = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("Decision") && text.contains("Which database?") && text.contains("When?"),
+        "{text}"
+    );
+    assert!(text.contains("✓ Postgres"), "{text}");
+    assert!(
+        !text.contains("questions\":") && !text.contains("questions answered"),
+        "{text}"
+    );
+}
+
+#[test]
+fn swarm_message_is_a_single_compact_buffer_row() {
+    use ratatui::{
+        buffer::Buffer,
+        layout::Rect,
+        widgets::{Paragraph, Widget},
+    };
+    let msg = DisplayMessage::tool(
+        "Direct message sent to session_fox_123_abc: first line\nsecond line",
+        crate::message::ToolCall {
+            id: "swarm-dm".into(),
+            name: "swarm".into(),
+            input: serde_json::json!({"action":"message", "to_session":"session_fox_123_abc", "message":"first line\nsecond line", "intent":"hidden intent"}),
+            intent: Some("hidden intent".into()),
+            thought_signature: None,
+        },
+    );
+    let lines = render_tool_message(&msg, 70, crate::config::DiffDisplayMode::Off);
+    assert_eq!(lines.len(), 1);
+    let area = Rect::new(0, 0, 70, 2);
+    let mut buffer = Buffer::empty(area);
+    Paragraph::new(lines).render(area, &mut buffer);
+    let row = (0..70).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
+    assert!(row.contains("fox") && row.contains("first line"), "{row}");
+    assert!(
+        !row.contains("session_") && !row.contains("hidden intent"),
+        "{row}"
+    );
+    assert!((0..70).all(|x| buffer[(x, 1)].symbol() == " "));
+}
+
+#[test]
+fn speak_card_displays_the_requested_text_not_queue_confirmation() {
+    let msg = DisplayMessage::tool(
+        "Held for local playback",
+        crate::message::ToolCall {
+            id: "v".into(),
+            name: "speak".into(),
+            input: serde_json::json!({"text":"Can you hear me?\n界\u{1b}[31mHello\u{1b}[0m"}),
+            intent: Some("Answer microphone check".into()),
+            thought_signature: None,
+        },
+    );
+    let rows = render_tool_message(&msg, 36, crate::config::DiffDisplayMode::Off);
+    let caption = rows
+        .iter()
+        .skip(1)
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        caption.contains("Can you hear me?") && caption.contains("界Hello"),
+        "{caption}"
+    );
+    assert!(!caption.contains('\u{1b}') && !caption.contains("Held for local playback"));
+}
+
+#[test]
 fn render_tool_message_groups_duration_and_tokens() {
     for name in [
         "bash",
@@ -686,7 +775,10 @@ fn render_tool_message_shows_swarm_spawn_prompt_summary() {
         .map(|span| span.content.as_ref())
         .collect();
 
-    assert!(rendered.contains("swarm spawn"), "rendered={rendered}");
+    assert!(
+        rendered.contains("🐝") && rendered.contains('+'),
+        "rendered={rendered}"
+    );
     assert!(
         rendered.contains("Extract the restart command cluster"),
         "rendered={rendered}"

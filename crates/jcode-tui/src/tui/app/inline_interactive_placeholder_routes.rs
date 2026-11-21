@@ -32,7 +32,7 @@ where
 /// Effort rows are only rendered for these routes; other routes (Copilot,
 /// Bedrock, Antigravity CLI, remote-catalog placeholders, ...) get one plain
 /// row per model because a picked effort could not actually be applied.
-pub(super) fn route_supports_reasoning_effort(api_method: &str) -> bool {
+pub(crate) fn route_supports_reasoning_effort(api_method: &str) -> bool {
     use crate::provider::ModelRouteApiMethod as Method;
     match Method::parse(api_method) {
         Method::ClaudeOAuth

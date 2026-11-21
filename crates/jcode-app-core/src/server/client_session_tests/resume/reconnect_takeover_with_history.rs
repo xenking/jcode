@@ -102,6 +102,7 @@ async fn handle_resume_session_allows_reconnect_takeover_with_local_history() ->
         target_session_id.to_string(),
         None,
         None,
+        None,
         true,
         None,
         true,

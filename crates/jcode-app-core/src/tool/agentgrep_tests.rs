@@ -44,6 +44,25 @@ fn grep_input(query: &str, max_regions: Option<usize>) -> AgentGrepInput {
     }
 }
 
+#[test]
+fn grep_regex_glob_paths_only_searches_real_files() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("one.rs"), "needle123\n").unwrap();
+    fs::write(dir.path().join("two.txt"), "needle123\n").unwrap();
+    fs::write(dir.path().join("three.rs"), "other\n").unwrap();
+    let mut input = grep_input(r"needle[0-9]+", None);
+    input.regex = Some(true);
+    input.glob = Some("*.rs".into());
+    input.paths_only = Some(true);
+    let output = run_agentgrep_blocking(&input, &test_ctx(dir.path()))
+        .unwrap()
+        .output;
+    assert!(output.contains("one.rs"), "{output}");
+    assert!(!output.contains("two.txt"), "{output}");
+    assert!(!output.contains("three.rs"), "{output}");
+    assert!(!output.contains("needle123"), "{output}");
+}
+
 #[tokio::test]
 async fn foreground_budget_returns_fast_search_result_directly() {
     let handle = spawn_cancellable_search(|| Ok(ToolOutput::new("fast result")));
@@ -52,6 +71,8 @@ async fn foreground_budget_returns_fast_search_result_directly() {
         std::time::Duration::from_secs(1),
         "fast search".to_string(),
         "agentgrep-fast-test".to_string(),
+        #[cfg(unix)]
+        None,
     )
     .await
     .expect("fast search should complete in foreground");
@@ -71,6 +92,8 @@ async fn foreground_budget_promotes_slow_search_without_cancelling_it() {
         std::time::Duration::from_millis(1),
         "slow search".to_string(),
         "agentgrep-slow-test".to_string(),
+        #[cfg(unix)]
+        None,
     )
     .await
     .expect("slow search should be promoted");
@@ -144,6 +167,8 @@ async fn search_cancellation_foreground_future_stops_linked_search() {
         std::time::Duration::from_secs(60),
         "cancel foreground".into(),
         "agentgrep-cancel-foreground".into(),
+        #[cfg(unix)]
+        None,
     ));
     tokio::time::timeout(std::time::Duration::from_secs(5), started)
         .await
@@ -182,6 +207,8 @@ async fn search_cancellation_promoted_search_lives_until_background_cancel() {
         std::time::Duration::from_millis(1),
         "promoted cancellation".into(),
         "agentgrep-promoted-cancel".into(),
+        #[cfg(unix)]
+        None,
     )
     .await
     .unwrap();
@@ -615,10 +642,7 @@ fn build_args_for_trace_still_requires_terms() {
     };
 
     let error = trace_or_smart_terms_owned(&params).unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "agentgrep trace requires non-empty 'terms'"
-    );
+    assert!(error.to_string().contains("nonempty parameter `terms`"));
 }
 
 #[test]
@@ -656,8 +680,8 @@ fn schema_only_advertises_common_public_fields() {
             json!("trace")
         ]
     );
-    assert!(!props.contains_key("hidden"));
-    assert!(!props.contains_key("no_ignore"));
+    assert!(props.contains_key("hidden"));
+    assert!(props.contains_key("no_ignore"));
     assert!(!props.contains_key("full_region"));
     assert!(!props.contains_key("debug_plan"));
     assert!(!props.contains_key("debug_score"));

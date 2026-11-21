@@ -432,18 +432,21 @@ fn compute_tier(
 }
 
 fn detect_wsl() -> bool {
-    if std::env::var("WSL_DISTRO_NAME").is_ok() || std::env::var("WSLENV").is_ok() {
-        return true;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(v) = std::fs::read_to_string("/proc/version") {
-            let lower = v.to_ascii_lowercase();
-            if lower.contains("microsoft") || lower.contains("wsl") {
-                return true;
-            }
-        }
-    }
+    let env_hint =
+        std::env::var_os("WSL_DISTRO_NAME").is_some() || std::env::var_os("WSLENV").is_some();
+    env_hint || proc_version_mentions_wsl()
+}
+
+#[cfg(target_os = "linux")]
+fn proc_version_mentions_wsl() -> bool {
+    std::fs::read_to_string("/proc/version").is_ok_and(|v| {
+        let lower = v.to_ascii_lowercase();
+        lower.contains("microsoft") || lower.contains("wsl")
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn proc_version_mentions_wsl() -> bool {
     false
 }
 

@@ -70,7 +70,12 @@ fn request_type_from_json(json: &str) -> String {
 }
 
 pub(super) async fn send_request(request: Request) -> Result<ServerEvent> {
-    send_request_with_timeout(request, None).await
+    let timeout = matches!(
+        &request,
+        Request::CommMessage { .. } | Request::CommSpawn { .. } | Request::CommAssignNext { .. }
+    )
+    .then(|| std::time::Duration::from_secs(150));
+    send_request_with_timeout(request, timeout).await
 }
 
 pub(super) async fn send_request_with_timeout(

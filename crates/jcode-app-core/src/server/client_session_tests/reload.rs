@@ -4,6 +4,7 @@ use anyhow::{Result, anyhow};
 #[test]
 fn restored_active_pending_tool_counts_as_interrupted() {
     let message = crate::session::StoredMessage {
+        attachment_data: None,
         id: "pending_bg".into(),
         role: crate::message::Role::Assistant,
         content: vec![ContentBlock::ToolUse {
@@ -11,7 +12,8 @@ fn restored_active_pending_tool_counts_as_interrupted() {
             name: "bg".into(),
             input: serde_json::json!({"action": "wait", "max_wait_seconds": 400}),
             thought_signature: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -28,12 +30,14 @@ fn restored_active_pending_tool_counts_as_interrupted() {
 #[test]
 fn restored_active_completed_assistant_does_not_count_as_interrupted() {
     let agent = test_agent(vec![crate::session::StoredMessage {
+        attachment_data: None,
         id: "done".into(),
         role: crate::message::Role::Assistant,
         content: vec![ContentBlock::Text {
             text: "Done".into(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -49,12 +53,14 @@ fn restored_active_completed_assistant_does_not_count_as_interrupted() {
 #[test]
 fn detects_reload_interrupted_generation_text() {
     let agent = test_agent(vec![crate::session::StoredMessage {
+        attachment_data: None,
         id: "msg_1".to_string(),
         role: crate::message::Role::Assistant,
         content: vec![ContentBlock::Text {
             text: "partial\n\n[generation interrupted - server reloading]".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -67,13 +73,15 @@ fn detects_reload_interrupted_generation_text() {
 #[test]
 fn detects_reload_interrupted_tool_result() {
     let agent = test_agent(vec![crate::session::StoredMessage {
+        attachment_data: None,
         id: "msg_2".to_string(),
         role: crate::message::Role::User,
         content: vec![ContentBlock::ToolResult {
             tool_use_id: "tool_1".to_string(),
             content: "[Tool 'bash' interrupted by server reload after 0.2s]".to_string(),
             is_error: Some(true),
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -86,13 +94,15 @@ fn detects_reload_interrupted_tool_result() {
 #[test]
 fn detects_reload_skipped_tool_result() {
     let agent = test_agent(vec![crate::session::StoredMessage {
+        attachment_data: None,
         id: "msg_3".to_string(),
         role: crate::message::Role::User,
         content: vec![ContentBlock::ToolResult {
             tool_use_id: "tool_2".to_string(),
             content: "[Skipped - server reloading]".to_string(),
             is_error: Some(true),
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -105,13 +115,15 @@ fn detects_reload_skipped_tool_result() {
 #[test]
 fn detects_selfdev_reload_tool_result_even_when_not_marked_error() {
     let agent = test_agent(vec![crate::session::StoredMessage {
+        attachment_data: None,
         id: "msg_3b".to_string(),
         role: crate::message::Role::User,
         content: vec![ContentBlock::ToolResult {
             tool_use_id: "tool_2b".to_string(),
             content: "Reload initiated. Process restarting...".to_string(),
             is_error: Some(false),
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -124,13 +136,15 @@ fn detects_selfdev_reload_tool_result_even_when_not_marked_error() {
 #[test]
 fn ignores_normal_tool_errors() {
     let agent = test_agent(vec![crate::session::StoredMessage {
+        attachment_data: None,
         id: "msg_4".to_string(),
         role: crate::message::Role::User,
         content: vec![ContentBlock::ToolResult {
             tool_use_id: "tool_3".to_string(),
             content: "Error: file not found".to_string(),
             is_error: Some(true),
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -143,12 +157,14 @@ fn ignores_normal_tool_errors() {
 #[test]
 fn restored_closed_session_with_reload_marker_still_counts_as_interrupted() {
     let agent = test_agent(vec![crate::session::StoredMessage {
+        attachment_data: None,
         id: "msg_5".to_string(),
         role: crate::message::Role::Assistant,
         content: vec![ContentBlock::Text {
             text: "partial\n\n[generation interrupted - server reloading]".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -177,12 +193,14 @@ fn restored_closed_session_with_pending_user_message_during_reload_should_count_
     );
 
     let agent = test_agent(vec![crate::session::StoredMessage {
+        attachment_data: None,
         id: "msg_pending_reload".to_string(),
         role: crate::message::Role::User,
         content: vec![ContentBlock::Text {
             text: "continue this after reload".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -224,12 +242,14 @@ fn restored_closed_session_with_pending_user_message_during_socket_ready_handoff
     );
 
     let agent = test_agent(vec![crate::session::StoredMessage {
+        attachment_data: None,
         id: "msg_pending_reload_ready".to_string(),
         role: crate::message::Role::User,
         content: vec![ContentBlock::Text {
             text: "continue this after socket-ready handoff".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -265,12 +285,14 @@ fn restored_closed_session_with_pending_user_message_without_reload_marker_is_no
     crate::server::clear_reload_marker();
 
     let agent = test_agent(vec![crate::session::StoredMessage {
+        attachment_data: None,
         id: "msg_pending_normal_close".to_string(),
         role: crate::message::Role::User,
         content: vec![ContentBlock::Text {
             text: "normal pending user text".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -295,12 +317,14 @@ fn restored_closed_session_with_pending_user_message_without_reload_marker_is_no
 #[test]
 fn restored_closed_session_without_reload_marker_is_not_interrupted() {
     let agent = test_agent(vec![crate::session::StoredMessage {
+        attachment_data: None,
         id: "msg_6".to_string(),
         role: crate::message::Role::Assistant,
         content: vec![ContentBlock::Text {
             text: "finished normally".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,

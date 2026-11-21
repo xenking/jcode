@@ -12,7 +12,7 @@ pub struct SessionTelemetry {
     /// Normalized prompt size for one provider request, excluding output.
     pub context_tokens: u64,
     pub context_limit: Option<usize>,
-    pub compaction: Option<jcode_session_types::StoredCompactionState>,
+    pub compaction: Option<std::sync::Arc<jcode_session_types::StoredCompactionState>>,
     #[serde(default)]
     pub route_api_method: Option<String>,
     #[serde(default)]
@@ -77,6 +77,8 @@ pub fn save_context(
                         resets_at: usage.resets_at,
                         error: usage.error,
                         banked_resets: None,
+                        banked_usable: None,
+                        banked_cached_source: None,
                         banked_expires_at: None,
                         banked_next_at: None,
                     })

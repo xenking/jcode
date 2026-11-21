@@ -2,7 +2,9 @@ use super::*;
 
 mod cloud_directories;
 mod codemode_preview;
+mod compact_agent_dms;
 mod preview_redraw_schedule;
+mod queued_reminders;
 mod resume_parity;
 use crate::tui::session_picker;
 use crate::tui::ui::tools_ui;
@@ -163,7 +165,6 @@ struct TestState {
     status_notice: Option<String>,
     time_since_user_interaction: Option<Duration>,
     swarm_members: Vec<crate::protocol::SwarmMemberStatus>,
-    transcript_swarm_members: Option<Vec<crate::protocol::SwarmMemberStatus>>,
     swarm_panel_selected: usize,
     swarm_panel_focused: bool,
     pinned_todos_payload: Option<String>,
@@ -187,7 +188,7 @@ impl crate::tui::TuiState for TestState {
     fn display_user_message_count(&self) -> usize {
         self.display_messages
             .iter()
-            .filter(|message| message.role == "user")
+            .filter(|message| message.role == "user" || message.is_answered_ask())
             .count()
     }
     fn compacted_hidden_user_prompts(&self) -> usize {
@@ -344,11 +345,6 @@ impl crate::tui::TuiState for TestState {
     }
     fn inline_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
         self.swarm_members.clone()
-    }
-    fn swarm_members_for_transcript(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
-        self.transcript_swarm_members
-            .clone()
-            .unwrap_or_else(|| self.swarm_members.clone())
     }
     fn swarm_panel_selected(&self) -> usize {
         self.swarm_panel_selected

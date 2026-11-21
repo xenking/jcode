@@ -19,6 +19,18 @@ pub(super) fn usage_percent_from_remaining_limit(remaining: f64, limit: f64) -> 
     usage_percent_from_used_limit((limit - remaining).max(0.0), limit)
 }
 
+pub(super) fn set_anthropic_banked_status(
+    report: &mut ProviderUsage,
+    banked: Option<AnthropicBankedResets>,
+) {
+    if banked.is_none() {
+        report
+            .extra_info
+            .push(("Banked resets".into(), "Unknown".into()));
+    }
+    report.anthropic_banked_resets = banked;
+}
+
 pub(super) async fn fetch_anthropic_usage_for_token(
     display_name: String,
     access_token: String,
@@ -73,8 +85,16 @@ pub(super) async fn fetch_anthropic_usage_for_token(
                     &access_token,
                     stored.then_some(account_label.as_str()),
                 );
-                super::banked::record_anthropic_offer(&account_label, offer.as_ref());
+                let label = stored.then_some(account_label.as_str());
+                let mut banked =
+                    super::anthropic_banked::cached_banked_resets(&access_token, label);
+                if banked.is_none() {
+                    let key = anthropic_usage_cache_key(&access_token, label);
+                    super::omp_banked::import_for_account(&access_token, &key).await;
+                    banked = super::anthropic_banked::cached_banked_resets(&access_token, label);
+                }
                 report.anthropic_limit_reset = offer;
+                set_anthropic_banked_status(&mut report, banked);
                 if ineligible {
                     report
                         .extra_info
@@ -355,6 +375,7 @@ pub(super) async fn fetch_openai_usage_for_account(
         limits: parsed.limits,
         extra_info: parsed.extra_info,
         hard_limit_reached: parsed.hard_limit_reached,
+        openai_credit_overage: parsed.credit_overage,
         openai_reset_credits: parsed.available_reset_count.map(|available_count| {
             jcode_usage_types::OpenAiResetCredits {
                 available_count,
@@ -364,6 +385,7 @@ pub(super) async fn fetch_openai_usage_for_account(
             }
         }),
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
     };
@@ -393,6 +415,13 @@ pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
 
     let mut limits = Vec::new();
     let mut extra_info = Vec::new();
+    // A configured but rejected key must not vanish from /usage: the account
+    // row needs to say why it has no balance instead of looking untested.
+    let auth_error = openrouter_rejected_key(
+        [&key_resp, &credits_resp]
+            .into_iter()
+            .filter_map(|response| response.as_ref().ok().map(|response| response.status())),
+    );
 
     if let Ok(resp) = credits_resp
         && resp.status().is_success()
@@ -465,7 +494,13 @@ pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
     }
 
     if limits.is_empty() && extra_info.is_empty() {
-        return None;
+        return Some(ProviderUsage {
+            provider_name: "OpenRouter".to_string(),
+            error: Some(
+                auth_error.unwrap_or_else(|| "no usage data returned by OpenRouter".to_string()),
+            ),
+            ..Default::default()
+        });
     }
 
     Some(ProviderUsage {
@@ -473,28 +508,29 @@ pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
         limits,
         extra_info,
         hard_limit_reached: false,
+        openai_credit_overage: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
     })
 }
 
+/// A configured OpenRouter key the service refuses to authenticate. Rate
+/// limits and transport failures are not credential problems, so they stay
+/// ordinary errors rather than telling the user to sign in again.
+pub(super) fn openrouter_rejected_key(
+    statuses: impl IntoIterator<Item = reqwest::StatusCode>,
+) -> Option<String> {
+    statuses
+        .into_iter()
+        .find(|status| matches!(status.as_u16(), 401 | 403))
+        .map(|status| format!("OpenRouter rejected the API key ({status})"))
+}
+
 pub(super) fn openrouter_api_key() -> Option<String> {
-    std::env::var("OPENROUTER_API_KEY")
-        .ok()
-        .or_else(|| {
-            let config_path = crate::storage::app_config_dir()
-                .ok()?
-                .join("openrouter.env");
-            crate::storage::harden_secret_file_permissions(&config_path);
-            let content = std::fs::read_to_string(config_path).ok()?;
-            content
-                .lines()
-                .find_map(|line| line.strip_prefix("OPENROUTER_API_KEY="))
-                .map(|k| k.trim().to_string())
-        })
-        .filter(|k| !k.is_empty())
+    crate::provider::openrouter::standard_openrouter_api_key()
 }
 
 /// Antigravity per-model quota report. The backend's `fetchAvailableModels`
@@ -572,8 +608,10 @@ pub(super) async fn fetch_antigravity_usage_report() -> Option<ProviderUsage> {
         limits,
         extra_info,
         hard_limit_reached: false,
+        openai_credit_overage: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
     })
@@ -614,8 +652,10 @@ pub(super) async fn fetch_gemini_usage_report() -> Option<ProviderUsage> {
         limits: Vec::new(),
         extra_info: vec![("Key status".to_string(), status)],
         hard_limit_reached: false,
+        openai_credit_overage: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
     })
@@ -709,8 +749,10 @@ pub(super) fn cursor_plan_usage_report(json: &serde_json::Value) -> ProviderUsag
         limits,
         extra_info: Vec::new(),
         hard_limit_reached: false,
+        openai_credit_overage: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
     }
@@ -782,8 +824,10 @@ async fn cursor_key_status_report() -> ProviderUsage {
         limits: Vec::new(),
         extra_info,
         hard_limit_reached: false,
+        openai_credit_overage: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
     }
@@ -905,8 +949,10 @@ pub(super) async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
         limits,
         extra_info,
         hard_limit_reached: false,
+        openai_credit_overage: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
     })

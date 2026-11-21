@@ -18,8 +18,13 @@
 
 pub mod allocator;
 pub mod background_progress;
+pub mod search_index;
 pub mod timing;
 pub mod translate;
+
+#[cfg(test)]
+#[path = "search_api_tests.rs"]
+mod search_api_tests;
 
 #[cfg(all(test, unix))]
 mod session_presence_tests;
@@ -27,9 +32,14 @@ mod session_presence_tests;
 mod stdio_tests;
 
 use anyhow::{Context, Result};
-use jcode_harness_api::{API_VERSION_MAJOR, ApiEvent, ErrorCode, ServerFrame};
+use jcode_harness_api::{
+    API_VERSION_MAJOR, ApiEvent, BACKGROUND_TASKS_CAPABILITY, BackgroundTasksSnapshot, ErrorCode,
+    ServerFrame,
+};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 // Unix sockets on Unix, named pipes on Windows, one API. Without this the
 // bridge simply did not compile for Windows, so the SDK could not run there at
@@ -87,6 +97,120 @@ async fn daemon_capabilities(socket: &std::path::Path) -> Option<Vec<String>> {
         .await
         .ok()
         .flatten()
+}
+
+async fn daemon_background_tasks(
+    socket: &std::path::Path,
+    session_id: &str,
+    task_id: Option<&str>,
+    cancel: bool,
+) -> Result<Value> {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut stream = Stream::connect(socket).await?;
+        write_json_line(
+            &mut stream,
+            &serde_json::json!({
+                "type": "background_tasks", "id": 1, "session_id": session_id,
+                "task_id": task_id, "cancel": cancel,
+            }),
+        )
+        .await?;
+        let mut line = String::new();
+        read_frame(&mut BufReader::new(stream), &mut line).await?;
+        let reply: Value = serde_json::from_str(&line)?;
+        match reply["type"].as_str() {
+            Some("background_tasks") if !cancel => Ok(reply),
+            Some("done") if cancel => Ok(reply),
+            Some("error") => anyhow::bail!(
+                "{}",
+                reply["message"]
+                    .as_str()
+                    .unwrap_or("Native task inspection failed")
+            ),
+            _ => anyhow::bail!("Unexpected response to background task inspection"),
+        }
+    })
+    .await?
+}
+
+#[derive(Default)]
+struct TaskWatch {
+    session_id: String,
+    task_id: Option<String>,
+    last: Option<BackgroundTasksSnapshot>,
+}
+
+impl TaskWatch {
+    async fn fetch(
+        socket: &std::path::Path,
+        session_id: &str,
+        task_id: Option<&str>,
+    ) -> Result<BackgroundTasksSnapshot> {
+        Ok(serde_json::from_value(
+            daemon_background_tasks(socket, session_id, task_id, false).await?,
+        )?)
+    }
+
+    fn accept(&mut self, snapshot: BackgroundTasksSnapshot, force: bool) -> Option<ApiEvent> {
+        if !force && self.last.as_ref() == Some(&snapshot) {
+            return None;
+        }
+        self.last = Some(snapshot.clone());
+        Some(ApiEvent::BackgroundTasks {
+            session_id: self.session_id.clone(),
+            snapshot,
+        })
+    }
+}
+
+async fn daemon_draft_models(socket: &std::path::Path) -> ApiEvent {
+    let query = async {
+        // A first-frame lightweight command closes its daemon stream after the
+        // reply. Give it its own connection, never the client's session stream.
+        let mut stream = Stream::connect(socket).await?;
+        write_json_line(
+            &mut stream,
+            &serde_json::json!({"type":"comm_list_models", "id":1, "session_id":""}),
+        )
+        .await?;
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        while read_frame(&mut reader, &mut line).await? != 0 {
+            let reply: Value = serde_json::from_str(&line)?;
+            if reply["id"] != 1 {
+                continue;
+            }
+            match reply["type"].as_str() {
+                Some("comm_list_models_response") => {
+                    return Ok(ApiEvent::DraftModels {
+                        current: reply["current_model"].as_str().map(str::to_owned),
+                        routes: if reply["model_routes"].is_null() {
+                            Vec::new()
+                        } else {
+                            serde_json::from_value(reply["model_routes"].clone())?
+                        },
+                    });
+                }
+                Some("error") => anyhow::bail!(
+                    "{}",
+                    reply["message"].as_str().unwrap_or("catalog unavailable")
+                ),
+                _ => {}
+            }
+        }
+        anyhow::bail!("daemon closed before returning the draft catalog")
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(4), query).await {
+        Ok(Ok(event)) => event,
+        Ok(Err(error)) => ApiEvent::Error {
+            code: ErrorCode::Internal,
+            message: error.to_string(),
+        },
+        Err(_) => ApiEvent::Error {
+            code: ErrorCode::Internal,
+            message: "Draft model catalog timed out".into(),
+        },
+    }
 }
 
 /// Fresh source-daemon connections. A disposable Ping never subscribes,
@@ -179,16 +303,6 @@ where
 #[cfg(unix)]
 pub(crate) struct InstanceLock {
     _file: std::fs::File,
-    path: PathBuf,
-}
-
-#[cfg(unix)]
-impl Drop for InstanceLock {
-    fn drop(&mut self) {
-        // Best effort: the flock is released by the fd close regardless, and a
-        // leftover empty lock file is harmless (the next bridge re-locks it).
-        let _ = std::fs::remove_file(&self.path);
-    }
 }
 
 /// Take the exclusive bridge lock beside the API socket, or report that a live
@@ -209,10 +323,22 @@ pub(crate) fn single_instance_lock(api_socket: &std::path::Path) -> Result<Optio
         .open(&path)
         .with_context(|| format!("open bridge lock {}", path.display()))?;
     let taken = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
-    Ok(taken.then_some(InstanceLock { _file: file, path }))
+    // Never unlink a lock inode: a successor may already be waiting on it.
+    Ok(taken.then_some(InstanceLock { _file: file }))
+}
+
+fn capture_bridge_identity() -> Result<()> {
+    use jcode_build_support::runtime_generation;
+    runtime_generation::serving_identity(jcode_build_meta::git_hash())?;
+    if let Some(warning) = runtime_generation::identity_warning() {
+        anyhow::bail!("invalid inherited API bridge identity: {warning}");
+    }
+    Ok(())
 }
 
 pub async fn run_bridge(api_socket: PathBuf, legacy_socket: PathBuf) -> Result<()> {
+    capture_bridge_identity()
+        .context("capture API bridge generation before publishing its listener")?;
     // Only one bridge may own the socket.
     //
     // This is the fix for clients seeing "disconnected: harness API stream
@@ -274,22 +400,61 @@ pub async fn run_bridge(api_socket: PathBuf, legacy_socket: PathBuf) -> Result<(
         api_socket.display(),
         legacy_socket.display()
     );
+    drop(search_index::warm_on_start());
+    let retiring = Arc::new(AtomicBool::new(false));
+    let mut clients = tokio::task::JoinSet::new();
+    let idle_timeout = std::time::Duration::from_secs(30);
+    let mut idle_since = tokio::time::Instant::now();
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
+    #[cfg(unix)]
+    let parent = unsafe { libc::getppid() };
     loop {
-        let (stream, _) = listener.accept().await?;
-        let legacy = legacy_socket.clone();
-        tokio::spawn(async move {
-            if let Err(error) = handle_api_client(stream, legacy).await {
-                eprintln!("harness API bridge: client ended: {error:#}");
+        tokio::select! {
+            biased;
+            _ = tick.tick() => {
+                #[cfg(unix)]
+                if unsafe { libc::getppid() } != parent {
+                    retiring.store(true, Ordering::Relaxed);
+                }
+                if retiring.load(Ordering::Relaxed)
+                    || (clients.is_empty() && idle_since.elapsed() >= idle_timeout) {
+                    break;
+                }
             }
-            // A closed client drops its translation state and buffers.
-            allocator::trim();
-        });
+            Some(_) = clients.join_next(), if !clients.is_empty() => {
+                if clients.is_empty() { idle_since = tokio::time::Instant::now(); }
+            }
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let legacy = legacy_socket.clone();
+                let retiring = Arc::clone(&retiring);
+                clients.spawn(async move {
+                    if let Err(error) = handle_api_client(stream, legacy, retiring).await {
+                        eprintln!("harness API bridge: client ended: {error:#}");
+                    }
+                    allocator::trim();
+                });
+            }
+        }
     }
+    // Withdraw discovery before draining, without interrupting existing streams.
+    drop(listener);
+    #[cfg(unix)]
+    {
+        let _ = std::fs::remove_file(&api_socket);
+        drop(_lock);
+    }
+    while clients.join_next().await.is_some() {}
+    Ok(())
 }
 
-async fn handle_api_client(stream: Stream, legacy_socket: PathBuf) -> Result<()> {
+async fn handle_api_client(
+    stream: Stream,
+    legacy_socket: PathBuf,
+    retiring: Arc<AtomicBool>,
+) -> Result<()> {
     let (read_half, write_half) = stream.into_split();
-    run_bridge_stream(read_half, write_half, legacy_socket).await
+    run_bridge_stream_inner(read_half, write_half, legacy_socket, Some(retiring)).await
 }
 
 /// Serve the process's stdin/stdout as one API connection.
@@ -299,6 +464,8 @@ async fn handle_api_client(stream: Stream, legacy_socket: PathBuf) -> Result<()>
 /// while SSH still holds stdin open. This entrypoint is for a CLI process only.
 #[cfg(unix)]
 pub async fn run_bridge_stdio(legacy_socket: PathBuf) -> Result<()> {
+    capture_bridge_identity().context("capture stdio bridge generation before accepting input")?;
+    drop(search_index::warm_on_start());
     let (input, mut writer) = std::os::unix::net::UnixStream::pair()?;
     input.set_nonblocking(true)?;
     let input = tokio::net::UnixStream::from_std(input)?;
@@ -315,19 +482,40 @@ pub async fn run_bridge_stdio(legacy_socket: PathBuf) -> Result<()> {
 /// stdio. No API listener or filesystem socket is created for this connection.
 pub async fn run_bridge_stream<R, W>(
     read_half: R,
-    mut write_half: W,
+    write_half: W,
     legacy_socket: PathBuf,
 ) -> Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
+    run_bridge_stream_inner(read_half, write_half, legacy_socket, None).await
+}
+
+async fn run_bridge_stream_inner<R, W>(
+    read_half: R,
+    mut write_half: W,
+    legacy_socket: PathBuf,
+    retiring: Option<Arc<AtomicBool>>,
+) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let runtime_identity =
+        jcode_build_support::runtime_generation::serving_identity(jcode_build_meta::git_hash())
+            .context("capture API bridge serving generation")?;
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
     let mut pending = timing::Pending::default();
 
     // 1. Handshake: first frame must be hello with a compatible version.
-    read_frame(&mut reader, &mut line).await?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        read_frame(&mut reader, &mut line),
+    )
+    .await
+    .context("API client hello timed out")??;
     // A malformed first frame used to abort the task, closing the connection
     // with no reply at all: the client saw only an EOF and could not tell a
     // protocol mistake from a crashed bridge. Say what was wrong, then close.
@@ -343,6 +531,19 @@ where
         }
     };
     let reply_to = hello["id"].as_u64().unwrap_or(0);
+    if hello["req"] == "retire_bridge"
+        && let Some(retiring) = retiring
+    {
+        retiring.store(true, Ordering::Relaxed);
+        write_json_line(
+            &mut write_half,
+            &serde_json::json!({
+                "v": API_VERSION_MAJOR, "reply_to": reply_to, "ev": "bridge_retiring"
+            }),
+        )
+        .await?;
+        return Ok(());
+    }
     let client_name = hello["client"].as_str().unwrap_or_default();
     let compatible = hello["req"] == "hello"
         && hello["min_version"].as_u64().unwrap_or(0) <= u64::from(API_VERSION_MAJOR)
@@ -380,14 +581,39 @@ where
     let user_connections_supported = daemon_caps.iter().any(|cap| cap == "session_connections");
     let runtime_commands_supported = daemon_caps.iter().any(|cap| cap == "runtime_commands");
     let session_tools_supported = daemon_caps.iter().any(|cap| cap == "session_tools");
+    let force_stop_turn_supported = daemon_caps.iter().any(|cap| cap == "force_stop_turn_v1");
     let soft_interrupt_ids_supported = daemon_caps.iter().any(|cap| cap == "soft_interrupt_ids");
+    let queued_prompts_supported = daemon_caps.iter().any(|cap| cap == "queued_prompts");
+    let file_attachments_supported = daemon_caps
+        .iter()
+        .any(|cap| cap == jcode_harness_api::FILE_ATTACHMENTS_CAPABILITY);
+    let queued_prompt_batch_interrupt_supported = daemon_caps
+        .iter()
+        .any(|cap| cap == "queued_prompt_batch_interrupt_v1");
+    let queued_prompt_mutations_supported = daemon_caps
+        .iter()
+        .any(|cap| cap == "queued_prompt_mutations_v1");
+    let queued_prompt_editing_supported =
+        daemon_caps.iter().any(|cap| cap == "queued_prompt_editing");
+    let queued_prompt_active_skill_supported = daemon_caps
+        .iter()
+        .any(|cap| cap == "queued_prompt_active_skill");
+    let bounded_history_supported = daemon_caps.iter().any(|cap| cap == "bounded_history_v1");
+    let ask_response_images_supported = daemon_caps.iter().any(|cap| cap == "ask_response_images");
+    let background_tasks_supported = daemon_caps
+        .iter()
+        .any(|cap| cap == BACKGROUND_TASKS_CAPABILITY);
     let hello_ok = ServerFrame::reply(
         reply_to,
         ApiEvent::HelloOk {
+            runtime_identity: Some(runtime_identity),
             version: API_VERSION_MAJOR,
             server: format!("jcode-harness-api-bridge/{}", env!("CARGO_PKG_VERSION")),
             capabilities: [
                 "sessions",
+                "draft_model_catalog",
+                "bridge_lifecycle_v1",
+                "peer_user_message_v1",
                 "streaming",
                 "text_framing",
                 "turn_stop_reasons",
@@ -401,13 +627,38 @@ where
                 "session_retention",
                 "session_files",
                 "session_fork",
+                "session_search",
                 "todo_state",
+                "todo_state_pending_swarm_await_v1",
+                "memory_events",
             ]
             .into_iter()
             .map(str::to_string)
             .chain(user_connections_supported.then(|| "session_connections".to_string()))
             .chain(runtime_commands_supported.then(|| "runtime_commands".to_string()))
+            .chain(runtime_commands_supported.then(|| "skill_message_v1".to_string()))
             .chain(session_tools_supported.then(|| "session_tools".to_string()))
+            .chain(force_stop_turn_supported.then(|| "force_stop_turn_v1".to_string()))
+            .chain(queued_prompts_supported.then(|| "queued_prompts".to_string()))
+            .chain(
+                file_attachments_supported
+                    .then(|| jcode_harness_api::FILE_ATTACHMENTS_CAPABILITY.to_string()),
+            )
+            .chain(
+                queued_prompt_batch_interrupt_supported
+                    .then(|| "queued_prompt_batch_interrupt_v1".to_string()),
+            )
+            .chain(
+                queued_prompt_mutations_supported.then(|| "queued_prompt_mutations_v1".to_string()),
+            )
+            .chain(queued_prompt_editing_supported.then(|| "queued_prompt_editing".to_string()))
+            .chain(
+                queued_prompt_active_skill_supported
+                    .then(|| "queued_prompt_active_skill".to_string()),
+            )
+            .chain(bounded_history_supported.then(|| "bounded_history_v1".to_string()))
+            .chain(ask_response_images_supported.then(|| "ask_response_images".to_string()))
+            .chain(background_tasks_supported.then(|| BACKGROUND_TASKS_CAPABILITY.to_string()))
             .chain(
                 ["soft_interrupt_ids", "background_tool_result"]
                     .into_iter()
@@ -426,15 +677,27 @@ where
     let mut state =
         translate::BridgeState::with_crash_on_disconnect(client_name.starts_with("jcode-desktop-"));
     state.session_tools_supported = session_tools_supported;
+    state.force_stop_turn_supported = force_stop_turn_supported;
     state.supports_user_response = hello["supports_user_response"].as_bool().unwrap_or(false);
     state.client_name = Some(client_name.to_string()).filter(|n| !n.is_empty());
     state.runtime_commands_supported = runtime_commands_supported;
     state.soft_interrupt_ids_supported = soft_interrupt_ids_supported;
+    state.queued_prompts_supported = queued_prompts_supported;
+    state.file_attachments_supported = file_attachments_supported;
+    state.queued_prompt_batch_interrupt_supported = queued_prompt_batch_interrupt_supported;
+    state.queued_prompt_mutations_supported = queued_prompt_mutations_supported;
+    state.queued_prompt_editing_supported = queued_prompt_editing_supported;
+    state.queued_prompt_active_skill_supported = queued_prompt_active_skill_supported;
+    state.bounded_history_supported = bounded_history_supported;
 
     // 3. Pump both directions in one select loop so translation state stays
     //    single-threaded.
     let mut api_frame = Vec::new();
     let mut legacy_frame = Vec::new();
+    let mut task_watch: Option<TaskWatch> = None;
+    let mut task_poll = None;
+    let mut task_tick = tokio::time::interval(std::time::Duration::from_secs(2));
+    task_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             // A busy daemon can keep the legacy socket continuously readable.
@@ -504,6 +767,49 @@ where
                         daemon_user_connections(&legacy_socket).await
                     } else { Default::default() };
                 }
+                if request["req"] == "list_draft_models" {
+                    let id = request["id"].as_u64().unwrap_or(0);
+                    let event = daemon_draft_models(&legacy_socket).await;
+                    write_json_line(&mut write_half, &ServerFrame::reply(id, event)).await?;
+                    continue;
+                }
+                if matches!(request["req"].as_str(), Some("watch_background_tasks" | "cancel_background_task")) {
+                    use jcode_harness_api::{ApiRequest, ClientFrame};
+                    let id = request["id"].as_u64().unwrap_or(0);
+                    let event = if background_tasks_supported {
+                        match serde_json::from_value::<ClientFrame>(request).map(|frame| frame.request) {
+                            Ok(ApiRequest::WatchBackgroundTasks { session_id, task_id }) if
+                                state.session_id.as_ref().is_none_or(|attached| attached == &session_id) => {
+                                task_poll = None;
+                                let mut watch = TaskWatch { session_id, task_id, last: None };
+                                let event = TaskWatch::fetch(&legacy_socket, &watch.session_id, watch.task_id.as_deref()).await
+                                    .map(|snapshot| watch.accept(snapshot, true).expect("forced snapshot"));
+                                task_watch = Some(watch);
+                                task_tick.reset();
+                                match event {
+                                    Ok(event) => event,
+                                    Err(error) => ApiEvent::Error { code: ErrorCode::Internal, message: error.to_string() },
+                                }
+                            }
+                            Ok(ApiRequest::CancelBackgroundTask { session_id, task_id }) if
+                                state.session_id.as_ref().is_none_or(|attached| attached == &session_id) => {
+                                match daemon_background_tasks(&legacy_socket, &session_id, Some(&task_id), true).await {
+                                    Ok(_) => ApiEvent::Ok,
+                                    Err(error) => ApiEvent::Error { code: ErrorCode::Internal, message: error.to_string() },
+                                }
+                            }
+                            _ => ApiEvent::Error { code: ErrorCode::InvalidRequest, message: "Invalid background task request for this connection".into() },
+                        }
+                    } else {
+                        ApiEvent::Error { code: ErrorCode::UnknownRequest, message: "The native daemon does not support background task inspection".into() }
+                    };
+                    write_json_line(&mut write_half, &ServerFrame::reply(id, event)).await?;
+                    continue;
+                }
+                if matches!(request["req"].as_str(), Some("attach_session" | "create_session" | "detach_session")) {
+                    task_watch = None;
+                    task_poll = None;
+                }
                 // Translation may inspect persisted session/archive files. Tell
                 // Tokio before entering that synchronous region so it can keep
                 // the accept loop and fresh-client handshakes scheduled.
@@ -533,6 +839,25 @@ where
                 }
                 if heavy {
                     allocator::trim();
+                }
+            }
+            _ = task_tick.tick(), if task_watch.is_some() && task_poll.is_none() => {
+                if let Some(watch) = &task_watch {
+                    let socket = legacy_socket.clone();
+                    let session_id = watch.session_id.clone();
+                    let task_id = watch.task_id.clone();
+                    task_poll = Some(Box::pin(async move {
+                        TaskWatch::fetch(&socket, &session_id, task_id.as_deref()).await
+                    }));
+                }
+            }
+            snapshot = async { task_poll.as_mut().expect("pending task poll").await }, if task_poll.is_some() => {
+                task_poll = None;
+                if let Some(watch) = &mut task_watch
+                    && let Ok(snapshot) = snapshot
+                    && let Some(event) = watch.accept(snapshot, false)
+                {
+                    write_json_line(&mut write_half, &ServerFrame::event(event)).await?;
                 }
             }
             n = read_frame_bytes(&mut legacy_reader, &mut legacy_frame) => {
@@ -756,7 +1081,11 @@ mod public_acceptance_tests {
                         .unwrap();
                     }
                     Some("message") => {
-                        assert_eq!(request["content"], "public boundary prompt");
+                        if request["content"] == "public boundary prompt" {
+                            continue;
+                        }
+                        assert_eq!(request["content"], "hello");
+                        assert_eq!(request["active_skill"], "poteto-mode");
                         return;
                     }
                     _ => {}
@@ -797,6 +1126,13 @@ mod public_acceptance_tests {
         write_json_line(
             &mut write,
             &json!({"id":3, "req":"send_message", "session_id":"session_alpha", "content":"public boundary prompt"}),
+        )
+        .await
+        .unwrap();
+
+        write_json_line(
+            &mut write,
+            &json!({"id":4, "req":"send_skill_message", "session_id":"session_alpha", "content":"hello", "active_skill":"poteto-mode"}),
         )
         .await
         .unwrap();

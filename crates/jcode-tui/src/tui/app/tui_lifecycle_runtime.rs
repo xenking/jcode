@@ -27,6 +27,7 @@ impl App {
         app.auto_poke_default_on = false;
         app.overnight_auto_poke = None;
         app.queued_messages.clear();
+        app.queued_images.clear();
         app.queued_commands.clear();
         app.hidden_queued_system_messages.clear();
         app.status_notice = None;
@@ -95,19 +96,17 @@ impl App {
             .unwrap_or_else(|| session_id.to_string());
         let session_icon = crate::id::session_icon(&session_name);
         // Keep the live terminal title aligned with /resume: an explicit rename
-        // wins, then the model's current todo/goal title, then the generated title.
-        let todo_title = self
-            .session
-            .custom_title
-            .is_none()
+        // wins, then the generated title. A todo group is a lane label, so it is
+        // only a last resort for sessions that have no title at all.
+        let todo_title = (self.session.custom_title.is_none() && self.session.title.is_none())
             .then(|| crate::todo::load_session_title(session_id))
             .flatten();
         let display_title = self
             .session
             .custom_title
             .as_deref()
-            .or(todo_title.as_deref())
             .or(self.session.title.as_deref());
+        let display_title = display_title.or(todo_title.as_deref());
         let is_canary = if self.is_remote {
             self.remote_is_canary.unwrap_or(self.session.is_canary)
         } else {
@@ -386,6 +385,7 @@ impl App {
             // Don't restore provider_session_id - Claude sessions don't persist across
             // process restarts. The messages are restored, so Claude will get full context.
             self.provider_session_id = None;
+            self.active_skill = session.pinned_skill.clone();
             self.session = session;
             crate::memory::sync_injected_memories(
                 &self.session.id,
@@ -453,19 +453,14 @@ impl App {
                 .is_some();
             let message = format!("Reload complete - continuing.{}", stats);
 
-            // Add success message with stats (only if there's actual content or a reload happened)
+            // A status line, not a transcript row: the daemon resumes the turn
+            // in place, so no synthetic message belongs in the conversation.
             if total_turns > 0 || has_reload_ctx {
-                self.push_display_message(DisplayMessage {
-                    role: "system".to_string(),
-                    content: message,
-                    tool_calls: vec![],
-                    duration_secs: None,
-                    title: None,
-                    tool_data: None,
-                });
+                self.set_status_notice(message);
             }
 
-            // Queue an automatic message to notify the AI that reload completed
+            // Continuation is daemon-owned. Never queue a synthetic prompt
+            // from the client: it would be attributed to the user.
             let reload_ctx = ReloadContext::load_for_session(session_id).ok().flatten();
             let background_task_note = super::reload_persisted_background_tasks_note(session_id);
             let directive = ReloadContext::recovery_directive(
@@ -480,21 +475,11 @@ impl App {
                 } else {
                     "restored interrupted non-initiator session after reload"
                 };
-
+                ReloadContext::log_recovery_outcome("local_restore", session_id, "resumed", detail);
                 crate::logging::info(&format!(
-                    "Queuing reload continuation message ({} chars)",
+                    "Reload recovery is daemon-owned; client does not queue a continuation ({} chars in directive)",
                     directive.continuation_message.len()
                 ));
-                ReloadContext::log_recovery_outcome("local_restore", session_id, "resumed", detail);
-                self.hidden_queued_system_messages
-                    .push(directive.continuation_message);
-                // Trigger processing so the queued message gets sent to the LLM.
-                // Without this, the local event loop waits for user input since
-                // process_queued_messages only runs inside process_turn_with_input.
-                self.is_processing = true;
-                self.status = ProcessingStatus::Sending;
-                self.processing_started = Some(Instant::now());
-                self.pending_turn = true;
             } else {
                 ReloadContext::log_recovery_outcome(
                     "local_restore",

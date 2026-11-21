@@ -25,7 +25,62 @@ fn description_is_compact_and_preserves_execution_contract() {
     ] {
         assert!(description.contains(clause), "Missing contract: {clause}");
     }
-    assert!(description.len() <= 750);
+    assert!(description.len() <= 1100);
+}
+
+/// The description is the only steering a model gets when it reads the tool
+/// list, so it must name the work shapes where one script beats many calls and
+/// say which tool wins for each shape. Measured over three days, models that
+/// were only told the mechanics used `codemode` in 0.14% of tool calls.
+#[test]
+fn description_steers_toward_scripts_over_many_single_calls() {
+    let registry = Registry::empty();
+    let tool = CodemodeTool::new(registry.downgrade());
+    let description = tool.to_definition().description;
+    for clause in [
+        "Reach for it when work needs several calls",
+        "dependent chains",
+        "loops over a previous result",
+        "5+ calls",
+        "summarized",
+        "Prefer it over repeated single calls or `batch`",
+        "`batch` for 1-10 independent calls",
+        "`bash` for shell work",
+    ] {
+        assert!(description.contains(clause), "Missing steer: {clause}");
+    }
+    // The steering must come before the mechanics: a model that stops reading
+    // early still has to learn when the tool is worth a turn.
+    let steer_at = description.find("Reach for it when").unwrap();
+    let mechanics_at = description.find("Supply an async function body").unwrap();
+    assert!(steer_at < mechanics_at);
+}
+
+#[test]
+fn corrupt_store_is_not_overwritten_by_a_fresh_script() {
+    let _guard = crate::storage::lock_test_env();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let session = format!("codemode-corrupt-{}", uuid::Uuid::new_v4());
+        let path = store_path(&session).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{broken").unwrap();
+        let registry = registry().await;
+        let result = registry
+            .execute(
+                "codemode",
+                json!({"code":"store('replacement', 1); return 1;"}),
+                ctx(&session),
+            )
+            .await;
+        let after = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(result.is_err());
+        assert_eq!(after, "{broken");
+    });
 }
 
 struct JsonTool;
@@ -98,6 +153,130 @@ async fn registry() -> Registry {
     );
     drop(tools);
     registry
+}
+
+#[tokio::test]
+async fn opt_in_budget_preserves_unbudgeted_output_and_store() {
+    let registry = registry().await;
+    let session = format!("codemode-budget-{}", uuid::Uuid::new_v4());
+    let script = "const data = await tools.shout({text: 'word '.repeat(5000) + 'tail'}); store('full', data); return data;";
+    let preview = registry
+        .execute(
+            "codemode",
+            json!({"code": script, "max_output_tokens": 4000}),
+            ctx(&session),
+        )
+        .await
+        .unwrap()
+        .output;
+    assert!(preview.len() <= 16_000, "{} bytes", preview.len());
+    assert!(
+        preview.contains("truncated") && preview.contains("load(\"full\")"),
+        "{preview}"
+    );
+    assert!(
+        preview.contains("[1 tool call") && preview.contains("1 ok"),
+        "{preview}"
+    );
+    let artifact = preview
+        .lines()
+        .find_map(|line| line.strip_prefix("Full report: "))
+        .unwrap();
+    assert!(std::fs::read_to_string(artifact).unwrap().contains("TAIL"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(artifact).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let recovered = registry
+        .execute(
+            "codemode",
+            json!({"code": "return load('full').slice(-4);"}),
+            ctx(&session),
+        )
+        .await
+        .unwrap()
+        .output;
+    assert!(recovered.contains("TAIL"), "{recovered}");
+    let full = registry
+        .execute("codemode", json!({"code": script}), ctx(&session))
+        .await
+        .unwrap()
+        .output;
+    assert!(
+        full.contains("TAIL") && !full.contains("truncated"),
+        "{} bytes",
+        full.len()
+    );
+}
+
+#[tokio::test]
+async fn budget_keeps_agentgrep_argument_repair_after_large_console_output() {
+    let registry = registry().await;
+    registry
+        .register(
+            "agentgrep".into(),
+            Arc::new(super::super::agentgrep::AgentGrepTool::new()),
+        )
+        .await;
+    let mut context = ctx("codemode-agentgrep-argument");
+    context.working_dir = Some(std::env::current_dir().unwrap());
+    let output = registry.execute("codemode", json!({
+        "max_output_tokens": 512,
+        "code": "console.log('🦀'.repeat(5000)); await tools.agentgrep({mode:'trace', terms:['not-a-dsl-term']});"
+    }), context).await.unwrap().output;
+    assert!(output.len() <= 2048, "{} bytes", output.len());
+    assert!(
+        output.contains("error: Error: agentgrep:") && output.contains("parameter `terms`"),
+        "{output}"
+    );
+    assert!(output.contains("await tools.agentgrep({mode: 'trace', terms: ['subject:auth_status', 'relation:rendered']})"), "{output}");
+    assert!(output.contains("1 failed"), "{output}");
+}
+
+#[tokio::test]
+async fn nested_argument_errors_show_field_and_one_runnable_example() {
+    let registry = registry().await;
+    registry
+        .register(
+            "agentgrep".into(),
+            Arc::new(super::super::agentgrep::AgentGrepTool::new()),
+        )
+        .await;
+    registry
+        .register("read".into(), Arc::new(super::super::read::ReadTool::new()))
+        .await;
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("Cargo.toml"), "# TODO\n").unwrap();
+    let mut context = ctx("codemode-argument-examples");
+    context.working_dir = Some(fixture.path().to_path_buf());
+    let output = registry.execute("codemode", json!({"code": r#"
+        const cases = [
+          [() => tools.agentgrep({query: ['TODO']}), 'agentgrep', 'query'],
+          [() => tools.read({file_path: 'Cargo.toml', limit: 'ten'}), 'read', 'limit'],
+        ];
+        const recovered = [];
+        for (const [run, tool, field] of cases) {
+          try { await run(); throw new Error('accepted malformed arguments'); }
+          catch (error) {
+            const message = error.message;
+            if (!message.startsWith(tool + ':') || !message.includes('parameter `' + field + '`')) throw error;
+            const examples = message.match(/Example: (.*)/g);
+            if (examples?.length !== 1) throw error;
+            const result = await eval('(async () => ' + examples[0].slice(9) + ')()');
+            recovered.push([tool, String(result).includes('TODO')]);
+          }
+        }
+        return JSON.stringify(recovered);
+    "#}), context).await.unwrap().output;
+    assert!(
+        output.contains(r#"[["agentgrep",true],["read",true]]"#),
+        "{output}"
+    );
+    assert!(output.contains("[4 tool calls"), "{output}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -173,6 +352,41 @@ async fn script_composes_registry_tools() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn typescript_script_runs_through_the_tool() {
+    let registry = registry().await;
+    // The shape `types()` prints, plus the annotations a model writes after
+    // reading it: this has to reach the registry's tools, not just the parser.
+    let out = registry
+        .execute(
+            "codemode",
+            json!({
+                "code": r#"
+                    type LookupInput = { id: number };
+                    interface LookupResult { square: number }
+
+                    declare const tools: {
+                      lookup(args: LookupInput): Promise<LookupResult>;
+                      shout(args: { text: string }): Promise<any>;
+                    };
+
+                    const ids: number[] = [1, 2, 3];
+                    const rows = await Promise.all(
+                      ids.map((id: number) => tools.lookup({ id } as LookupInput)),
+                    );
+                    const total = rows.reduce((s: number, r: LookupResult) => s + r.square, 0);
+                    const loud = await tools.shout<{ text: string }>({ text: "done" });
+                    return { total, loud } satisfies Record<string, unknown>;
+                "#
+            }),
+            ctx("codemode-typescript-test"),
+        )
+        .await
+        .expect("codemode runs TypeScript");
+    assert!(out.output.contains("\"total\": 14"), "{}", out.output);
+    assert!(out.output.contains("\"loud\": \"DONE\""), "{}", out.output);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn script_cannot_call_itself_or_batch() {
     let registry = registry().await;
     let out = registry
@@ -233,6 +447,19 @@ async fn uncaught_errors_without_side_effects_are_tool_errors() {
 }
 
 #[test]
+fn report_explains_console_limit_even_if_first_line_was_dropped() {
+    let out = jcode_codemode::RunOutput {
+        logs_truncated: true,
+        ..Default::default()
+    };
+    let report = render_report(&out);
+    assert!(
+        report.contains("65536") && report.contains("console") && report.contains("smaller"),
+        "{report}"
+    );
+}
+
+#[test]
 fn report_renders_strings_raw_and_lists_store_keys() {
     let mut store = Map::new();
     store.insert("k".into(), json!(1));
@@ -253,9 +480,14 @@ fn report_renders_strings_raw_and_lists_store_keys() {
 /// authority: a blocked call is a thrown error plus a `failed` receipt.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test must serialize process environment for its entire async lifetime"
+)]
 async fn pre_tool_hook_gates_each_nested_call() {
     use std::os::unix::fs::PermissionsExt;
     let _guard = crate::storage::lock_test_env();
+    let _allow_hooks = jcode_base::hooks::TestHooksGuard::allow();
     let temp = tempfile::TempDir::new().unwrap();
     let policy = temp.path().join("policy.sh");
     let seen = temp.path().join("seen.log");

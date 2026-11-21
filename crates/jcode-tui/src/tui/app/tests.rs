@@ -1,5 +1,79 @@
 #![cfg_attr(test, allow(clippy::clone_on_copy))]
+#[test]
+fn prompt_stash_survives_reload_handoff() {
+    let mut app = create_test_app();
+    let session_id = format!("stash-test-{}", std::process::id());
+    app.input = "saved [paste 1] [image 1]".into();
+    app.cursor_pos = 5;
+    app.pasted_contents.push("large paste".into());
+    app.pending_images.push(("image/png".into(), "data".into()));
+    app.toggle_input_stash();
+    app.save_input_for_reload(&session_id);
+    let restored = App::restore_input_for_reload(&session_id).expect("stash handoff");
+    let mut restarted = create_test_app();
+    restarted.apply_restored_reload_input(restored);
+    assert!(restarted.stashed_input.is_some());
+    assert!(crate::tui::TuiState::has_stashed_input(&restarted));
+    let other_id = format!("{session_id}-other");
+    assert!(App::restore_input_for_reload(&other_id).is_none());
+    restarted.input = "current draft".into();
+    restarted.cursor_pos = restarted.input.len();
+    restarted.save_input_for_reload(&session_id);
+    let restored_again = App::restore_input_for_reload(&session_id).unwrap();
+    let mut restarted = create_test_app();
+    restarted.apply_restored_reload_input(restored_again);
+    assert_eq!(restarted.input, "current draft");
+    restarted.toggle_input_stash();
+    assert_eq!(restarted.input, "saved [paste 1] [image 1]");
+    assert_eq!(restarted.cursor_pos, 5);
+    assert_eq!(restarted.pasted_contents, ["large paste"]);
+    assert_eq!(
+        restarted.stashed_input.as_ref().unwrap().text,
+        "current draft"
+    );
+    assert_eq!(
+        restarted.pending_images,
+        [("image/png".into(), "data".into())]
+    );
+}
+
+#[test]
+fn prompt_stash_returns_after_send() {
+    let mut app = create_test_app();
+    app.input = "saved draft".into();
+    app.cursor_pos = 5;
+    app.handle_key(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert!(app.input.is_empty());
+    assert!(app.stashed_input.is_some());
+    app.input = "send this".into();
+    app.cursor_pos = app.input.len();
+    app.submit_input();
+    assert_eq!(app.input, "saved draft");
+    assert_eq!(app.cursor_pos, 5);
+    assert!(app.stashed_input.is_none());
+}
+
+#[test]
+fn prompt_stash_preserves_pastes_and_images() {
+    let mut app = create_test_app();
+    app.input = "[paste 1] [image 1]".into();
+    app.cursor_pos = app.input.len();
+    app.pasted_contents.push("saved large paste".into());
+    app.pending_images.push(("image/png".into(), "data".into()));
+    app.toggle_input_stash();
+    assert!(app.pending_images.is_empty());
+    assert!(app.pasted_contents.is_empty());
+    app.input = "other prompt".into();
+    app.cursor_pos = app.input.len();
+    input::queue_message(&mut app);
+    assert_eq!(app.input, "[paste 1] [image 1]");
+    assert_eq!(app.pasted_contents, ["saved large paste"]);
+    assert_eq!(app.pending_images, [("image/png".into(), "data".into())]);
+    assert_eq!(app.queued_messages, ["other prompt"]);
+}
 mod tool_duration;
+include!("tests/streaming_hash.rs");
 include!("tests/provider_env.rs");
 include!("tests/cache_diagnostics.rs");
 include!("tests/support_failover/part_01.rs");
@@ -13,6 +87,8 @@ include!("tests/state_model_poke_01/part_02.rs");
 include!("tests/state_model_poke_02/part_01.rs");
 include!("tests/state_model_poke_02/part_02.rs");
 include!("tests/state_model_poke_03.rs");
+#[path = "tests/daemon_poke.rs"]
+mod daemon_poke;
 include!("tests/remote_startup_input_01/part_01.rs");
 include!("tests/remote_startup_input_01/part_02.rs");
 include!("tests/remote_startup_input_02/part_01.rs");
@@ -43,6 +119,7 @@ include!("tests/scroll_copy_02/part_02.rs");
 include!("tests/scroll_copy_03.rs");
 include!("tests/resize_viewport.rs");
 include!("tests/issue_1642_panel_dismiss.rs");
+include!("tests/btw_side_question.rs");
 include!("tests/resize_anchor.rs");
 include!("tests/recent_history.rs");
 include!("tests/input_copy_selection.rs");
@@ -61,6 +138,7 @@ include!("tests/final_response_followup.rs");
 include!("tests/reload_recovery_replay.rs");
 include!("tests/issue_496_input_routing.rs");
 include!("tests/oauth_login_progress.rs");
+include!("tests/swarm_tool_disclosure.rs");
 include!("tests/issue_544_paste_enter.rs");
 include!("tests/keybinding_hot_reload.rs");
 include!("tests/latex_command.rs");
@@ -72,6 +150,7 @@ include!("tests/issue_832_remote_ctrl_k.rs");
 include!("tests/voice_input.rs");
 include!("tests/issue_998_model_status_overlay.rs");
 include!("tests/issue_1685_bounded_auto_resume.rs");
+include!("tests/held_retry_dispatch.rs");
 include!("tests/spinner_slash_commands.rs");
 include!("tests/command_suggestions_cache.rs");
 include!("tests/merge_command.rs");
@@ -81,44 +160,6 @@ include!("tests/slash_command_boundaries.rs");
 include!("tests/prompt_history_cross_session.rs");
 include!("tests/ssh_remote.rs");
 include!("tests/skill_startup.rs");
-#[test]
-fn kv_cache_signature_prefix_match_allows_appended_messages() {
-    let baseline_messages = vec![
-        crate::message::Message::user("first prompt"),
-        crate::message::Message::assistant_text("first answer"),
-    ];
-    let mut current_messages = baseline_messages.clone();
-    current_messages.push(crate::message::Message::user("follow up"));
-
-    let baseline = App::kv_cache_request_signature(&baseline_messages, &[], "system", "memory a");
-    let current = App::kv_cache_request_signature(&current_messages, &[], "system", "memory b");
-
-    assert!(App::kv_cache_signatures_prefix_match(&current, &baseline));
-    assert_eq!(
-        App::kv_cache_common_prefix_messages(&current, &baseline),
-        baseline_messages.len()
-    );
-    assert_ne!(baseline.ephemeral_hash, current.ephemeral_hash);
-}
-
-#[test]
-fn kv_cache_signature_prefix_match_detects_prefix_mutation() {
-    let baseline_messages = vec![
-        crate::message::Message::user("first prompt"),
-        crate::message::Message::assistant_text("first answer"),
-    ];
-    let current_messages = vec![
-        crate::message::Message::user("changed first prompt"),
-        crate::message::Message::assistant_text("first answer"),
-        crate::message::Message::user("follow up"),
-    ];
-
-    let baseline = App::kv_cache_request_signature(&baseline_messages, &[], "system", "");
-    let current = App::kv_cache_request_signature(&current_messages, &[], "system", "");
-
-    assert!(!App::kv_cache_signatures_prefix_match(&current, &baseline));
-    assert_eq!(App::kv_cache_common_prefix_messages(&current, &baseline), 0);
-}
 
 #[test]
 fn kv_cache_signature_ignores_non_transmitted_message_metadata() {
@@ -135,7 +176,8 @@ fn kv_cache_signature_ignores_non_transmitted_message_metadata() {
             content: vec![ContentBlock::Text {
                 text: "boundary answer".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         },
@@ -159,7 +201,8 @@ fn kv_cache_signature_ignores_non_transmitted_message_metadata() {
                 ContentBlock::ReasoningTrace {
                     text: "internal scratch thinking".to_string(),
                 },
-            ],
+            ]
+            .into(),
             // Backfilled after the tool ran / a newer turn was committed.
             timestamp: Some(chrono::Utc::now() + chrono::Duration::seconds(5)),
             tool_duration_ms: Some(1234),
@@ -615,11 +658,12 @@ fn kv_cache_notice_explicit_loss_matrix() {
             assert_eq!(notices.len(), 1, "route={route} read={read:?}");
             assert!(notices[0].content.contains(reason), "{:?}", notices[0]);
             assert!(notices[0].content.contains("call 3"));
-            assert!(
-                notices[0].content.contains("cached / 100K expected"),
-                "{:?}",
-                notices[0]
-            );
+            let denominator = if route == "provider" {
+                "cached / 110K input tokens"
+            } else {
+                "cached / 100K expected"
+            };
+            assert!(notices[0].content.contains(denominator), "{:?}", notices[0]);
             if route == "account" {
                 assert!(
                     notices[0].content.contains("account switched fox -> otter"),
@@ -788,17 +832,21 @@ fn compaction_invalidates_kv_cache_baseline_and_stale_completion_cannot_restore_
     // finished. Its completion must not re-establish a pre-compaction baseline.
     app.begin_remote_kv_cache_request(old_signature);
     let old_generation = app.kv_cache.cache_generation;
-    app.handle_compaction_event(crate::compaction::CompactionEvent {
-        trigger: "semantic".to_string(),
-        pre_tokens: Some(80_169),
-        post_tokens: Some(27_641),
-        tokens_saved: Some(52_528),
-        duration_ms: Some(500),
-        messages_dropped: None,
-        messages_compacted: Some(173),
-        summary_chars: Some(10_000),
-        active_messages: Some(3),
-    });
+    app.handle_compaction_event(
+        crate::compaction::CompactionEvent {
+            trigger: "semantic".to_string(),
+            method: Some("snapcompact".to_string()),
+            pre_tokens: Some(80_169),
+            post_tokens: Some(27_641),
+            tokens_saved: Some(52_528),
+            duration_ms: Some(500),
+            messages_dropped: None,
+            messages_compacted: Some(173),
+            summary_chars: Some(10_000),
+            active_messages: Some(3),
+        },
+        None,
+    );
     assert_ne!(app.kv_cache.cache_generation, old_generation);
     assert!(app.kv_cache.kv_cache_baseline.is_none());
 
@@ -1175,6 +1223,65 @@ fn skill_invocation_with_prompt_activates_and_submits_in_one_turn() {
 }
 
 #[test]
+fn pinned_mode_commands_activate_report_and_clear_without_a_turn() {
+    let mut app = create_test_app();
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join(".jcode/skills/pinned-probe");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        "---\nname: pinned-probe\ndescription: Mode test\n---\nPINNED_MODE_BODY\n",
+    )
+    .unwrap();
+    app.session.working_dir = Some(temp.path().to_string_lossy().into_owned());
+    for command in ["/mode pinned-probe", "/mode"] {
+        app.input = command.into();
+        app.submit_input();
+        assert!(
+            !app.is_processing,
+            "{command} must not submit an agent turn"
+        );
+        assert_eq!(app.active_skill.as_deref(), Some("pinned-probe"));
+        assert_eq!(
+            serde_json::to_value(&app.session).unwrap()["pinned_skill"],
+            "pinned-probe"
+        );
+        assert!(
+            app.display_messages()
+                .last()
+                .unwrap()
+                .content
+                .contains("pinned-probe")
+        );
+    }
+    let announcements = app.session.messages.len();
+    app.input = "/mode pinned-probe".into();
+    app.submit_input();
+    assert_eq!(
+        app.session.messages.len(),
+        announcements,
+        "re-pinning is idempotent"
+    );
+    app.input = "/mode absent-mode-probe".into();
+    app.submit_input();
+    assert_eq!(app.active_skill.as_deref(), Some("pinned-probe"));
+    assert_eq!(
+        app.display_messages().last().unwrap().content,
+        "Unknown skill: /absent-mode-probe"
+    );
+    app.input = "/mode off".into();
+    app.submit_input();
+    assert!(app.active_skill.is_none());
+    assert!(
+        serde_json::to_value(&app.session)
+            .unwrap()
+            .get("pinned_skill")
+            .is_none()
+    );
+    assert!(!app.is_processing);
+}
+
+#[test]
 fn skill_invocation_with_prompt_attaches_pending_image_to_user_message() {
     let mut app = create_test_app();
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1204,15 +1311,24 @@ fn skill_invocation_with_prompt_attaches_pending_image_to_user_message() {
         .last()
         .expect("submitted session message");
     assert_eq!(submitted.role, Role::User);
-    assert!(matches!(
-        submitted.content.as_slice(),
-        [
-            ContentBlock::Image { media_type, data },
-            ContentBlock::Text { text, .. },
-        ] if media_type == "image/png"
-            && data == "ZmFrZSBwbmcgYnl0ZXM="
-            && text == "describe this screenshot"
-    ));
+    let images = app.session.session_images();
+    assert_eq!(images.len(), 1);
+    let expected_reference = format!("Attached session images: [#{}]", images[0].image_id);
+    assert!(
+        matches!(
+            submitted.content.as_slice(),
+            [
+                ContentBlock::Image { media_type, data },
+                ContentBlock::Text { text, .. },
+                ContentBlock::Text { text: reference, .. },
+            ] if media_type == "image/png"
+                && data == "ZmFrZSBwbmcgYnl0ZXM="
+                && text == "describe this screenshot"
+                && reference == &expected_reference
+        ),
+        "submitted content: {:?}",
+        submitted.content
+    );
 }
 
 #[test]
@@ -1329,88 +1445,96 @@ fn update_command_reloads_stale_remote_server_before_client_update_check() {
 
 #[test]
 fn stale_server_history_is_deferred_before_remote_state_is_applied() {
-    crate::env::remove_var("JCODE_ALLOW_SERVER_VERSION_MISMATCH");
-    let mut app = create_test_app();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    // Shared env, config and catalog caches: run hermetically.
+    with_temp_jcode_home(|| {
+        crate::env::remove_var("JCODE_ALLOW_SERVER_VERSION_MISMATCH");
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
-    app.is_remote = true;
-    app.remote_session_id = Some("session_existing".to_string());
-    app.connection_type = Some("websocket".to_string());
+        app.is_remote = true;
+        app.remote_session_id = Some("session_existing".to_string());
+        app.connection_type = Some("websocket".to_string());
 
-    let redraw = app.handle_server_event(
-        crate::protocol::ServerEvent::History {
-            messages_base_count: None,
-            images_unchanged: false,
-            id: 1,
-            session_id: "session_from_stale_server".to_string(),
-            messages: vec![crate::protocol::HistoryMessage {
-                response_stats: None,
-                role: "assistant".to_string(),
-                content: "stale answer".to_string(),
-                tool_calls: None,
-                tool_data: None,
-            }],
-            images: vec![],
-            provider_name: Some("stale-provider".to_string()),
-            provider_model: Some("stale-model".to_string()),
-            subagent_model: Some("stale-subagent".to_string()),
-            agent_model_overrides: Default::default(),
-            autoreview_enabled: Some(true),
-            autojudge_enabled: Some(true),
-            available_models: vec!["stale-model".to_string()],
-            available_model_routes: vec![],
-            mcp_servers: vec!["stale-mcp:1".to_string()],
-            skills: vec!["stale-skill".to_string()],
-            total_tokens: Some((99, 100)),
-            token_usage_totals: None,
-            all_sessions: vec!["session_from_stale_server".to_string()],
-            client_count: Some(42),
-            is_canary: Some(false),
-            reload_recovery: None,
-            server_version: Some("v0.0.1-stale".to_string()),
-            server_name: Some("stale-server".to_string()),
-            server_icon: Some("🧟".to_string()),
-            server_has_update: Some(true),
-            was_interrupted: None,
-            connection_type: Some("stale-connection".to_string()),
-            status_detail: Some("stale-status".to_string()),
-            upstream_provider: Some("stale-upstream".to_string()),
-            provider_oauth_email: None,
-            provider_oauth_account_label: None,
-            resolved_credential: None,
-            reasoning_effort: Some("high".to_string()),
-            service_tier: Some("stale-tier".to_string()),
-            available_service_tiers: None,
-            compaction_mode: crate::config::CompactionMode::Reactive,
-            activity: None,
-            side_panel: crate::side_panel::SidePanelSnapshot::default(),
-            applets: Default::default(),
-        },
-        &mut remote,
-    );
+        let redraw = app.handle_server_event(
+            crate::protocol::ServerEvent::History {
+                messages_base_count: None,
+                images_unchanged: false,
+                id: 1,
+                session_id: "session_from_stale_server".to_string(),
+                messages: vec![crate::protocol::HistoryMessage {
+                    tool_duration_ms: None,
+                    attachments: Vec::new(),
+                    response_stats: None,
+                    timestamp_ms: None,
+                    role: "assistant".to_string(),
+                    content: "stale answer".to_string(),
+                    tool_calls: None,
+                    tool_data: None,
+                }],
+                images: vec![],
+                provider_name: Some("stale-provider".to_string()),
+                provider_model: Some("stale-model".to_string()),
+                subagent_model: Some("stale-subagent".to_string()),
+                pinned_skill: None,
+                pinned_skills: None,
+                agent_model_overrides: Default::default(),
+                autoreview_enabled: Some(true),
+                autojudge_enabled: Some(true),
+                available_models: vec!["stale-model".to_string()],
+                available_model_routes: vec![],
+                mcp_servers: vec!["stale-mcp:1".to_string()],
+                skills: vec!["stale-skill".to_string()],
+                total_tokens: Some((99, 100)),
+                token_usage_totals: None,
+                all_sessions: vec!["session_from_stale_server".to_string()],
+                client_count: Some(42),
+                is_canary: Some(false),
+                reload_recovery: None,
+                server_version: Some("v0.0.1-stale".to_string()),
+                server_name: Some("stale-server".to_string()),
+                server_icon: Some("🧟".to_string()),
+                server_has_update: Some(true),
+                was_interrupted: None,
+                connection_type: Some("stale-connection".to_string()),
+                status_detail: Some("stale-status".to_string()),
+                upstream_provider: Some("stale-upstream".to_string()),
+                provider_oauth_email: None,
+                provider_oauth_account_label: None,
+                resolved_credential: None,
+                reasoning_effort: Some("high".to_string()),
+                service_tier: Some("stale-tier".to_string()),
+                available_service_tiers: None,
+                compaction_mode: crate::config::CompactionMode::Reactive,
+                activity: None,
+                side_panel: crate::side_panel::SidePanelSnapshot::default(),
+                applets: Default::default(),
+            },
+            &mut remote,
+        );
 
-    assert!(!redraw);
-    assert!(app.pending_server_reload);
-    assert_eq!(app.remote_server_has_update, Some(true));
-    assert_eq!(app.remote_server_version.as_deref(), Some("v0.0.1-stale"));
-    assert_eq!(app.remote_session_id.as_deref(), Some("session_existing"));
-    assert_eq!(remote.session_id(), None);
-    assert_eq!(app.connection_type.as_deref(), Some("websocket"));
-    assert!(app.remote_skills.is_empty());
-    assert!(app.remote_sessions.is_empty());
-    assert_eq!(app.remote_client_count, None);
-    assert_eq!(app.remote_total_tokens, None);
-    assert_ne!(
-        app.session.subagent_model.as_deref(),
-        Some("stale-subagent")
-    );
-    let content = app.display_messages().last().unwrap().content.clone();
-    assert!(
-        content.contains("Reloading the server before applying remote session state"),
-        "{content}"
-    );
+        assert!(!redraw);
+        assert!(app.pending_server_reload);
+        assert_eq!(app.remote_server_has_update, Some(true));
+        assert_eq!(app.remote_server_version.as_deref(), Some("v0.0.1-stale"));
+        assert_eq!(app.remote_session_id.as_deref(), Some("session_existing"));
+        assert_eq!(remote.session_id(), None);
+        assert_eq!(app.connection_type.as_deref(), Some("websocket"));
+        assert!(app.remote_skills.is_empty());
+        assert!(app.remote_sessions.is_empty());
+        assert_eq!(app.remote_client_count, None);
+        assert_eq!(app.remote_total_tokens, None);
+        assert_ne!(
+            app.session.subagent_model.as_deref(),
+            Some("stale-subagent")
+        );
+        let content = app.display_messages().last().unwrap().content.clone();
+        assert!(
+            content.contains("Reloading the server before applying remote session state"),
+            "{content}"
+        );
+    });
 }
 
 #[test]
@@ -1444,7 +1568,10 @@ fn deferred_stale_server_history_captures_session_id_for_reload_handoff() {
             id: 1,
             session_id: "session_real_server_owned".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
+                tool_duration_ms: None,
+                attachments: Vec::new(),
                 response_stats: None,
+                timestamp_ms: None,
                 role: "assistant".to_string(),
                 content: "stale answer".to_string(),
                 tool_calls: None,
@@ -1454,6 +1581,8 @@ fn deferred_stale_server_history_captures_session_id_for_reload_handoff() {
             provider_name: Some("stale-provider".to_string()),
             provider_model: Some("stale-model".to_string()),
             subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -1534,7 +1663,10 @@ fn ancient_server_history_is_deferred_via_client_side_release_check() {
             id: 1,
             session_id: "session_from_ancient_server".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
+                tool_duration_ms: None,
+                attachments: Vec::new(),
                 response_stats: None,
+                timestamp_ms: None,
                 role: "assistant".to_string(),
                 content: "ancient answer".to_string(),
                 tool_calls: None,
@@ -1544,6 +1676,8 @@ fn ancient_server_history_is_deferred_via_client_side_release_check() {
             provider_name: Some("ancient-provider".to_string()),
             provider_model: Some("ancient-model".to_string()),
             subagent_model: Some("ancient-subagent".to_string()),
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: Some(true),
             autojudge_enabled: Some(true),
@@ -1633,6 +1767,8 @@ fn older_server_reporting_no_update_is_still_deferred_via_client_check() {
             provider_name: Some("p".to_string()),
             provider_model: Some("m".to_string()),
             subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -1744,6 +1880,8 @@ fn older_server_history_repairs_stale_shared_server_channel_end_to_end() {
             provider_name: Some("p".to_string()),
             provider_model: Some("m".to_string()),
             subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -1827,6 +1965,8 @@ fn current_release_server_history_is_not_deferred_by_client_check() {
             provider_name: Some("p".to_string()),
             provider_model: Some("m".to_string()),
             subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -1942,3 +2082,7 @@ include!("tests/kv_cache_provider_identity.rs");
 include!("tests/cache_retention_routes.rs");
 
 include!("tests/cache_prompt_accounting.rs");
+
+include!("tests/voice_transcript_mode.rs");
+#[path = "tests_additional_tests.rs"]
+mod additional_materialized_provider_messages_share_payload_and_detach_on_edit;

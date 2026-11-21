@@ -7,18 +7,10 @@
 //! effect. The goal is to prove no action panics or silently misbehaves.
 
 use super::*;
-use jcode_tool_core::{ToolContext, ToolExecutionMode};
+use jcode_tool_core::ToolContext;
 
 fn ctx() -> ToolContext {
-    ToolContext {
-        session_id: "cov".into(),
-        message_id: "cov".into(),
-        tool_call_id: "cov".into(),
-        working_dir: None,
-        stdin_request_tx: None,
-        graceful_shutdown_signal: None,
-        execution_mode: ToolExecutionMode::Direct,
-    }
+    super::tests::approved_ctx()
 }
 
 async fn act(v: Value) -> Result<ToolOutput> {

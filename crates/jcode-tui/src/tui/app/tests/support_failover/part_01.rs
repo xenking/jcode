@@ -411,18 +411,9 @@ fn ensure_test_jcode_home_if_unset() {
     if std::env::var_os("JCODE_HOME").is_some() {
         return;
     }
-
-    // Serialize the unset -> set transition against tests that scope their
-    // own JCODE_HOME under `lock_test_env`. The mutex is not reentrant and
-    // several tests hold it while calling `create_test_app` (e.g. the
-    // pinned-todo-band test), so a blocking `lock_test_env()` here would
-    // self-deadlock whenever a preceding test removed JCODE_HOME on drop.
-    // `try_lock` keeps the serialization when the lock is free and degrades
-    // to the caller's own exclusion when this thread already holds it: if
-    // try_lock fails because *we* hold the lock, no other thread can race
-    // this read-modify-write anyway.
-    let _env_lock = crate::storage::test_env_lock().try_lock();
-
+    let Ok(_env_lock) = crate::storage::test_env_lock().try_lock() else {
+        return;
+    };
     if std::env::var_os("JCODE_HOME").is_some() {
         return;
     }
@@ -664,7 +655,8 @@ fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
             "{}",
             added[0].content
         );
-        assert!(added[0].content.ends_with(". Retrying."));
+        assert!(added[0].content.contains(". Retrying. "), "{}", added[0].content);
+        assert!(added[0].content.contains("OAuth usage exhausted"));
         assert!(!added[0].content.contains('\n'));
         let last = app.display_messages.last().expect("display message");
         assert!(!last.content.contains("cross_provider_failover"));
@@ -679,7 +671,7 @@ fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
 }
 
 #[test]
-fn test_definitive_exhaustion_immediate_switch_and_manual_safety() {
+fn test_first_failure_immediate_switch_and_manual_safety() {
     for (mode, enabled, reason, immediate) in [
         ("countdown", true, "OAuth usage exhausted", true),
         ("countdown", false, "OAuth usage exhausted", false),
@@ -687,8 +679,10 @@ fn test_definitive_exhaustion_immediate_switch_and_manual_safety() {
         (
             "countdown",
             true,
+            // Since 1cf6c1402 the first automatic failover is instant for any
+            // cause. Only later hops wait for the countdown.
             "429 rate_limit_error: This request would exceed your account's rate limit. Please try again later.",
-            false,
+            true,
         ),
     ] {
         with_temp_jcode_home(|| {
@@ -710,7 +704,8 @@ fn test_definitive_exhaustion_immediate_switch_and_manual_safety() {
             ));
             assert_eq!(
                 active.lock().unwrap().as_str(),
-                if immediate { "openai" } else { "claude" }
+                if immediate { "openai" } else { "claude" },
+                "{mode} enabled={enabled} reason={reason}"
             );
             assert_eq!(app.pending_turn, immediate);
             assert_eq!(

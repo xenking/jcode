@@ -3,21 +3,15 @@ use jcode_storage as storage;
 mod concurrency;
 mod desktop;
 pub use desktop::{record_desktop_active, record_desktop_update};
-mod oauth_account;
-pub use oauth_account::{
-    OAUTH_ACCOUNT_NOTICE_TEXT, OAuthAccountNotice, acknowledge_oauth_account_notice_displayed,
-    enqueue_oauth_account, pending_oauth_account_notice,
-};
 mod categories;
 pub use categories::{TelemetryCategory, category_settings, set_category_settings};
 mod lifecycle;
 pub use concurrency::{ConcurrencySession, begin_concurrency_session};
 pub mod onboarding_trace;
 mod state_support;
-mod usage_outbox;
 use chrono::{DateTime, NaiveDate, Utc};
 use jcode_usage_types::{
-    AuthEvent, DiscoveryEvent, ErrorCounts, FeedbackEvent, InstallEvent, OnboardingStepEvent,
+    AuthEvent, ErrorCounts, FeedbackEvent, InstallEvent, OnboardingStepEvent,
     SessionLifecycleEvent, SessionStartEvent, TelemetryProjectProfile as ProjectProfile,
     TelemetryToolCategory as ToolCategory, TelemetryWorkflowCounts, TodoSessionEvent, TurnEndEvent,
     UpgradeEvent, UsageReportEvent, classify_telemetry_tool_category as classify_tool_category,
@@ -31,67 +25,14 @@ use serde_json::Value;
 use state_support::*;
 use std::collections::HashSet;
 use std::sync::Mutex;
-#[cfg(not(test))]
-use std::sync::OnceLock;
-#[cfg(not(test))]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(not(test))]
-use std::sync::mpsc::TrySendError;
-use std::sync::mpsc::{SyncSender, sync_channel};
 use std::time::{Duration, Instant};
 
-const TELEMETRY_ENDPOINT: &str = "https://telemetry.jcode.sh/v1/event";
-const TELEMETRY_USAGE_ENDPOINT: &str = "https://telemetry.jcode.sh/v2/usage";
-
-fn telemetry_endpoint(payload: &serde_json::Value) -> &'static str {
-    // An old worker must reject new retryable usage without mutating legacy
-    // aggregates. Never fall back to /v1/event when this endpoint is absent.
-    if payload["event"] == "usage_report" {
-        TELEMETRY_USAGE_ENDPOINT
-    } else {
-        TELEMETRY_ENDPOINT
-    }
-}
-const TRANSCRIPT_ENDPOINT: &str = "https://telemetry.jcode.sh/v1/transcript";
-#[cfg(not(test))]
-const ASYNC_SEND_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(not(test))]
-const BACKGROUND_QUEUE_CAPACITY: usize = 2048;
 const BLOCKING_INSTALL_TIMEOUT: Duration = Duration::from_millis(1200);
 const BLOCKING_LIFECYCLE_TIMEOUT: Duration = Duration::from_millis(800);
 const BLOCKING_FIRST_PROMPT_TIMEOUT: Duration = Duration::from_millis(500);
 const TELEMETRY_SCHEMA_VERSION: u32 = 6;
-const DEFAULT_DISCOVERY_ENDPOINT: &str = "https://api.jcode.sh/v1/discovery";
-#[cfg(not(test))]
-static TELEMETRY_PERMANENTLY_REJECTED: AtomicBool = AtomicBool::new(false);
-#[cfg(not(test))]
-static TELEMETRY_QUEUE_OVERFLOW_WARNED: AtomicBool = AtomicBool::new(false);
-#[cfg(not(test))]
-static TELEMETRY_BACKGROUND_SENDER: OnceLock<SyncSender<Value>> = OnceLock::new();
-#[cfg(not(test))]
-static TRANSCRIPT_BACKGROUND_SENDER: OnceLock<SyncSender<Value>> = OnceLock::new();
-#[cfg(not(test))]
-static TELEMETRY_HTTP_CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
 #[cfg(test)]
 static TEST_EMITTED_PAYLOADS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
-
-#[derive(Debug, Clone)]
-pub struct DiscoveryTelemetry<'a> {
-    pub request_id: &'a str,
-    pub phase: &'a str,
-    pub category: Option<&'a str>,
-    pub selected_tool: Option<&'a str>,
-    pub outcome: &'a str,
-    pub failure_reason: Option<&'a str>,
-    pub http_status: Option<u16>,
-    pub latency_ms: u64,
-    pub response_bytes: Option<u64>,
-    pub result_count: Option<u32>,
-    pub query_present: bool,
-    pub reason_present: bool,
-    pub benchmark_run: bool,
-    pub endpoint: &'a str,
-}
 
 /// A distribution-safe numeric summary. Callers provide only scores, never the
 /// todo, goal, plan, or feedback-loop text those scores describe.
@@ -442,6 +383,7 @@ impl TurnTelemetry {
 #[derive(Debug, Clone, Copy)]
 enum DeliveryMode {
     Background,
+    #[cfg_attr(not(test), allow(dead_code))] // delivery is compiled out in this fork
     Blocking(Duration),
 }
 
@@ -482,7 +424,7 @@ pub fn opt_out_source() -> Option<TelemetryOptOutSource> {
 pub fn status() -> TelemetryStatus {
     let opt_out_source = opt_out_source();
     TelemetryStatus {
-        enabled: opt_out_source.is_none(),
+        enabled: is_enabled(),
         content_sharing_enabled: content_sharing_enabled(),
         opt_out_source,
         telemetry_id: read_existing_id(),
@@ -490,16 +432,15 @@ pub fn status() -> TelemetryStatus {
 }
 
 pub fn is_enabled() -> bool {
-    match opt_out_source() {
-        Some(TelemetryOptOutSource::Environment) => {
-            logging::debug("telemetry disabled by environment");
-            false
-        }
-        Some(TelemetryOptOutSource::MarkerFile) => {
-            logging::debug("telemetry disabled by no_telemetry marker");
-            false
-        }
-        None => true,
+    // This fork never sends telemetry. Unit tests keep the legacy opt-out gate so
+    // the event pipeline stays testable against the in-memory sink below.
+    #[cfg(test)]
+    {
+        opt_out_source().is_none()
+    }
+    #[cfg(not(test))]
+    {
+        false
     }
 }
 
@@ -534,10 +475,6 @@ pub fn set_usage_telemetry_enabled(enabled: bool) -> bool {
         return false;
     };
     if enabled {
-        #[cfg(not(test))]
-        if path.exists() || opt_out_forced_by_env() {
-            usage_outbox::clear_pending();
-        }
         match std::fs::remove_file(&path) {
             Ok(()) => true,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
@@ -559,8 +496,6 @@ pub fn set_usage_telemetry_enabled(enabled: bool) -> bool {
         match std::fs::write(&path, b"1") {
             Ok(()) => {
                 logging::debug("usage telemetry opted out via marker");
-                #[cfg(not(test))]
-                usage_outbox::clear_pending();
                 true
             }
             Err(err) => {
@@ -839,60 +774,6 @@ pub fn record_feedback(text: &str) {
     }
 }
 
-/// Emit one completed discovery attempt. This intentionally excludes query and
-/// reason text, endpoint URLs, and all transcript content.
-pub fn record_discovery_event(data: DiscoveryTelemetry<'_>) {
-    if !is_enabled() {
-        return;
-    }
-    let Some(id) = get_or_create_id() else {
-        return;
-    };
-    let session_id = SESSION_STATE
-        .lock()
-        .ok()
-        .and_then(|guard| guard.as_ref().map(|state| state.session_id.clone()));
-    let (schema_version, build_channel, git_checkout, ci, from_cargo) = telemetry_envelope();
-    let event = DiscoveryEvent {
-        event_id: new_event_id(),
-        id,
-        session_id,
-        event: "discovery",
-        version: version(),
-        os: std::env::consts::OS,
-        arch: std::env::consts::ARCH,
-        request_id: sanitize_telemetry_label(data.request_id),
-        phase: sanitize_telemetry_label(data.phase),
-        category: data.category.map(sanitize_telemetry_label),
-        selected_tool: data.selected_tool.map(sanitize_telemetry_label),
-        outcome: sanitize_telemetry_label(data.outcome),
-        failure_reason: data.failure_reason.map(sanitize_telemetry_label),
-        http_status: data.http_status,
-        latency_ms: data.latency_ms,
-        response_bytes: data.response_bytes,
-        result_count: data.result_count,
-        query_present: data.query_present,
-        reason_present: data.reason_present,
-        benchmark_run: data.benchmark_run,
-        custom_endpoint: data.endpoint.trim_end_matches('/') != DEFAULT_DISCOVERY_ENDPOINT,
-        schema_version,
-        build_channel,
-        is_git_checkout: git_checkout,
-        is_ci: ci,
-        ran_from_cargo: from_cargo,
-    };
-    logging::debug(&format!(
-        "emitting telemetry discovery phase={} outcome={} request_id={}",
-        event.phase, event.outcome, event.request_id
-    ));
-    match serde_json::to_value(&event) {
-        Ok(payload) => {
-            send_payload(payload, DeliveryMode::Background);
-        }
-        Err(err) => logging::error(&format!("failed to serialize discovery telemetry: {err}")),
-    }
-}
-
 /// Return the fresh correlation UUID for the active telemetry session.
 ///
 /// This is intentionally unavailable while telemetry is disabled, so callers
@@ -919,87 +800,9 @@ pub fn record_todo_update(update: TodoTelemetryUpdate) {
     }
 }
 
-fn update_active_days(id: &str) -> (u32, u32) {
-    let Some(path) = active_days_path(id) else {
-        return (0, 0);
-    };
-    let today = Utc::now().date_naive();
-    let mut days = std::fs::read_to_string(&path)
-        .ok()
-        .into_iter()
-        .flat_map(|text| {
-            text.lines()
-                .map(str::trim)
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .filter_map(|line| NaiveDate::parse_from_str(&line, "%Y-%m-%d").ok())
-        .collect::<Vec<_>>();
-    days.push(today);
-    days.sort_unstable();
-    days.dedup();
-    let rendered = days
-        .iter()
-        .map(NaiveDate::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
-    write_private_file(&path, &rendered);
-    let days_7 = days
-        .iter()
-        .filter(|day| (today.signed_duration_since(**day).num_days()) < 7)
-        .count()
-        .min(u32::MAX as usize) as u32;
-    let days_30 = days
-        .iter()
-        .filter(|day| (today.signed_duration_since(**day).num_days()) < 30)
-        .count()
-        .min(u32::MAX as usize) as u32;
-    (days_7, days_30)
-}
-
-fn detect_project_profile() -> ProjectProfile {
-    fn keep_project_entry(entry: &walkdir::DirEntry) -> bool {
-        if !entry.file_type().is_dir() {
-            return true;
-        }
-        let name = entry.file_name().to_str().unwrap_or_default();
-        !matches!(
-            name,
-            ".git" | "target" | "node_modules" | "dist" | "build" | ".next"
-        )
-    }
-
-    let cwd = std::env::current_dir().ok();
-    let mut profile = ProjectProfile::default();
-    let Some(root) = cwd.as_deref() else {
-        return profile;
-    };
-    profile.repo_present = root.join(".git").exists() || is_jcode_repo_dir(root);
-    let mut scanned_files = 0usize;
-    for entry in walkdir::WalkDir::new(root)
-        .max_depth(3)
-        .into_iter()
-        .filter_entry(keep_project_entry)
-        .filter_map(Result::ok)
-    {
-        if scanned_files >= 400 {
-            break;
-        }
-        if entry.file_type().is_dir() {
-            continue;
-        }
-        scanned_files += 1;
-        profile.note_extension(
-            entry
-                .path()
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .unwrap_or_default(),
-        );
-    }
-    profile
-}
-
+#[path = "lib_project_profile.rs"]
+mod project_profile;
+use project_profile::*;
 fn now_ms_since(started_at: Instant) -> u64 {
     started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
@@ -1235,185 +1038,8 @@ pub fn record_command_family(command: &str) {
     maybe_emit_session_start();
 }
 
-#[cfg(not(test))]
-fn post_payload(payload: serde_json::Value, timeout: Duration) -> bool {
-    if payload["event"] == "usage_report" && !is_enabled() {
-        return false;
-    }
-    // Spend delivery must survive an unrelated activity event tripping the
-    // legacy circuit breaker. Older workers can reject newer activity schemas.
-    let breaker_exempt = payload_is_breaker_exempt(&payload);
-    if TELEMETRY_PERMANENTLY_REJECTED.load(Ordering::Relaxed) && !breaker_exempt {
-        return false;
-    }
-    // Newer event types can reach an older worker that rejects them as unknown.
-    // That must only drop the one payload, never disable all telemetry.
-    let client = TELEMETRY_HTTP_CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
-            .user_agent(jcode_provider_core::JCODE_USER_AGENT)
-            .build()
-            .expect("telemetry HTTP client should build")
-    });
-    match client
-        .post(telemetry_endpoint(&payload))
-        .timeout(timeout)
-        .json(&payload)
-        .send()
-    {
-        Ok(response) if response.status().is_success() => {
-            if payload["event"] == "usage_report" {
-                usage_outbox::acknowledged(response, &payload)
-            } else {
-                true
-            }
-        }
-        Ok(response) => {
-            let status = response.status();
-            if telemetry_status_is_permanent(status.as_u16()) && !breaker_exempt {
-                TELEMETRY_PERMANENTLY_REJECTED.store(true, Ordering::Relaxed);
-                logging::warn(&format!(
-                    "telemetry endpoint permanently rejected payload with HTTP {status}; suppressing telemetry delivery for this process"
-                ));
-            } else {
-                logging::warn(&format!(
-                    "telemetry endpoint temporarily rejected payload with HTTP {status}"
-                ));
-            }
-            false
-        }
-        Err(err) => {
-            logging::warn(&format!("telemetry payload send failed: {err}"));
-            false
-        }
-    }
-}
-
-#[cfg(not(test))]
-fn post_payload_with_retry(payload: serde_json::Value, timeout: Duration) -> bool {
-    const RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(200), Duration::from_millis(800)];
-    if post_payload(payload.clone(), timeout) {
-        return true;
-    }
-    for delay in RETRY_DELAYS {
-        if TELEMETRY_PERMANENTLY_REJECTED.load(Ordering::Relaxed)
-            && !payload_is_breaker_exempt(&payload)
-        {
-            return false;
-        }
-        std::thread::sleep(delay);
-        if post_payload(payload.clone(), timeout) {
-            return true;
-        }
-    }
-    false
-}
-
-#[cfg(not(test))]
-fn post_transcript_payload(payload: serde_json::Value, timeout: Duration) -> bool {
-    let client = TELEMETRY_HTTP_CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
-            .user_agent(jcode_provider_core::JCODE_USER_AGENT)
-            .build()
-            .expect("telemetry HTTP client should build")
-    });
-    match client
-        .post(TRANSCRIPT_ENDPOINT)
-        .timeout(timeout)
-        .json(&payload)
-        .send()
-    {
-        Ok(response) if response.status().is_success() => true,
-        Ok(response) => {
-            logging::warn(&format!(
-                "transcript endpoint rejected upload with HTTP {}",
-                response.status()
-            ));
-            false
-        }
-        Err(err) => {
-            logging::warn(&format!("transcript upload failed: {err}"));
-            false
-        }
-    }
-}
-
-fn telemetry_status_is_permanent(status: u16) -> bool {
-    (400..500).contains(&status) && !matches!(status, 408 | 425 | 429)
-}
-
-/// Event types added after the worker's validation was frozen. A 4xx for one of
-/// these means "this worker does not know the event yet", not "stop sending".
-fn payload_is_breaker_exempt(payload: &serde_json::Value) -> bool {
-    matches!(
-        payload.get("event").and_then(|value| value.as_str()),
-        Some("usage_report" | "desktop_active" | "desktop_upgrade" | "desktop_update")
-    )
-}
-
-/// Background payloads queued but not yet delivered (or abandoned).
-static TELEMETRY_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// Block until queued background telemetry has been delivered, or `timeout`
-/// elapses. For short-lived processes, such as `jcode-desktop --update`, that
-/// exit right after recording an event.
-pub fn flush_pending(timeout: std::time::Duration) {
-    let deadline = std::time::Instant::now() + timeout;
-    #[cfg(not(test))]
-    usage_outbox::wake();
-    while (TELEMETRY_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire) > 0
-        || durable_usage_pending())
-        && std::time::Instant::now() < deadline
-    {
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-}
-
-fn durable_usage_pending() -> bool {
-    #[cfg(not(test))]
-    {
-        usage_outbox::has_pending()
-    }
-    #[cfg(test)]
-    {
-        false
-    }
-}
-
-fn spawn_background_worker<F>(capacity: usize, mut deliver: F) -> std::io::Result<SyncSender<Value>>
-where
-    F: FnMut(Value) + Send + 'static,
-{
-    let (sender, receiver) = sync_channel(capacity);
-    std::thread::Builder::new()
-        .name("jcode-telemetry".to_string())
-        .spawn(move || {
-            while let Ok(payload) = receiver.recv() {
-                deliver(payload);
-            }
-        })?;
-    Ok(sender)
-}
-
-#[cfg(not(test))]
-fn background_sender() -> &'static SyncSender<Value> {
-    TELEMETRY_BACKGROUND_SENDER.get_or_init(|| {
-        spawn_background_worker(BACKGROUND_QUEUE_CAPACITY, |payload| {
-            let _ = post_payload_with_retry(payload, ASYNC_SEND_TIMEOUT);
-            TELEMETRY_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
-        })
-        .expect("telemetry background worker should start")
-    })
-}
-
-#[cfg(not(test))]
-fn transcript_background_sender() -> &'static SyncSender<Value> {
-    TRANSCRIPT_BACKGROUND_SENDER.get_or_init(|| {
-        spawn_background_worker(64, |payload| {
-            let _ = post_transcript_payload(payload, ASYNC_SEND_TIMEOUT);
-        })
-        .expect("transcript telemetry background worker should start")
-    })
-}
+/// Kept for API compatibility: this build never queues anything for delivery.
+pub fn flush_pending(_timeout: std::time::Duration) {}
 
 #[cfg(test)]
 fn send_transcript_payload(payload: Value) -> bool {
@@ -1424,18 +1050,8 @@ fn send_transcript_payload(payload: Value) -> bool {
 }
 
 #[cfg(not(test))]
-fn send_transcript_payload(payload: Value) -> bool {
-    match transcript_background_sender().try_send(payload) {
-        Ok(()) => true,
-        Err(TrySendError::Full(_)) => {
-            logging::warn("transcript upload queue is full; dropping transcript");
-            false
-        }
-        Err(TrySendError::Disconnected(_)) => {
-            logging::warn("transcript upload worker stopped; dropping transcript");
-            false
-        }
-    }
+fn send_transcript_payload(_payload: Value) -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -1449,61 +1065,8 @@ fn send_payload(mut payload: serde_json::Value, mode: DeliveryMode) -> bool {
 }
 
 #[cfg(not(test))]
-fn send_payload(mut payload: serde_json::Value, mode: DeliveryMode) -> bool {
-    if !categories::payload_allowed(&payload) {
-        return false;
-    }
-    concurrency::mark_legacy_concurrency_unavailable(&mut payload);
-    // Usage events bypass the volatile activity queue. A process exit, queue
-    // overflow, or retry exhaustion must not discard the authoritative spend.
-    if payload["event"] == "usage_report" {
-        return usage_outbox::enqueue(payload);
-    }
-    usage_outbox::wake();
-    match mode {
-        DeliveryMode::Background => {
-            if TELEMETRY_PERMANENTLY_REJECTED.load(Ordering::Relaxed) {
-                return false;
-            }
-            logging::debug("queueing telemetry payload for background delivery");
-            TELEMETRY_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
-            match background_sender().try_send(payload) {
-                Ok(()) => {
-                    TELEMETRY_QUEUE_OVERFLOW_WARNED.store(false, Ordering::Relaxed);
-                    true
-                }
-                Err(TrySendError::Full(_)) => {
-                    TELEMETRY_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
-                    if !TELEMETRY_QUEUE_OVERFLOW_WARNED.swap(true, Ordering::Relaxed) {
-                        logging::warn(&format!(
-                            "telemetry background queue is full (capacity={BACKGROUND_QUEUE_CAPACITY}); dropping events until delivery catches up"
-                        ));
-                    }
-                    false
-                }
-                Err(TrySendError::Disconnected(_)) => {
-                    TELEMETRY_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
-                    logging::warn("telemetry background worker stopped; dropping payload");
-                    false
-                }
-            }
-        }
-        DeliveryMode::Blocking(timeout) => {
-            logging::debug(&format!(
-                "sending telemetry payload with blocking timeout={}ms",
-                timeout.as_millis()
-            ));
-            if tokio::runtime::Handle::try_current().is_ok() {
-                let (tx, rx) = std::sync::mpsc::sync_channel(1);
-                std::thread::spawn(move || {
-                    let _ = tx.send(post_payload(payload, timeout));
-                });
-                rx.recv_timeout(timeout).unwrap_or(false)
-            } else {
-                post_payload(payload, timeout)
-            }
-        }
-    }
+fn send_payload(_payload: serde_json::Value, _mode: DeliveryMode) -> bool {
+    false
 }
 
 fn current_error_counts(state: &SessionTelemetry) -> ErrorCounts {
@@ -1843,7 +1406,6 @@ pub fn record_install_if_first_run() {
     }
     if first_run {
         emit_onboarding_step_once("first_run", None, None);
-        show_first_run_notice();
     }
     mark_current_version_recorded();
 }
@@ -1988,8 +1550,6 @@ fn begin_session_with_mode(
     resumed_session: bool,
 ) {
     if !is_enabled() {
-        #[cfg(not(test))]
-        usage_outbox::clear_pending();
         return;
     }
     logging::info(&format!(
@@ -2375,7 +1935,8 @@ impl ProviderUsage {
 }
 
 /// Emit a `usage_report` for one provider response, attributed to the calling
-/// session and the model that actually served it.
+/// session and supplied model label. This legacy API does not claim the label
+/// was resolved by the provider. Use the attribution API for observed IDs.
 ///
 /// This is the authoritative spend signal. Unlike `session_end`, it does not
 /// depend on the session ending cleanly and does not read the process-global
@@ -2387,6 +1948,20 @@ pub fn record_provider_usage(
     session_id: Option<&str>,
     provider: &str,
     model: &str,
+    source: UsageSource,
+    usage: ProviderUsage,
+) {
+    record_provider_usage_with_model_attribution(session_id, provider, model, None, source, usage);
+}
+
+/// Record request attribution separately from the actual provider response ID.
+/// Only response-observed IDs belong in `resolved_model`. Unknown resolution
+/// leaves the requested label effective without claiming it was resolved.
+pub fn record_provider_usage_with_model_attribution(
+    session_id: Option<&str>,
+    provider: &str,
+    requested_model: &str,
+    resolved_model: Option<&str>,
     source: UsageSource,
     usage: ProviderUsage,
 ) {
@@ -2409,6 +1984,13 @@ pub fn record_provider_usage(
     let usage = usage.normalized(provider);
     let cache_read = usage.cache_read_input_tokens.unwrap_or(0);
     let cache_creation = usage.cache_creation_input_tokens.unwrap_or(0);
+    let requested_model = sanitize_telemetry_label(requested_model);
+    let resolved_model = resolved_model
+        .map(sanitize_telemetry_label)
+        // The ingestion contract bounds metadata by UTF-8 bytes. An oversized
+        // response label is unknown, not a truncated ID and not a poison event
+        // that would permanently block this response's durable usage delivery.
+        .filter(|value| !value.is_empty() && value.len() <= 120);
     let (schema_version, build_channel, git_checkout, ci, from_cargo) = telemetry_envelope();
     let event = UsageReportEvent {
         usage_contract_version: 2,
@@ -2422,7 +2004,10 @@ pub fn record_provider_usage(
         arch: std::env::consts::ARCH,
         source: source.as_str(),
         provider: sanitize_telemetry_label(provider),
-        model: sanitize_telemetry_label(model),
+        model: resolved_model.as_ref().unwrap_or(&requested_model).clone(),
+        requested_model: (!requested_model.is_empty() && requested_model.len() <= 120)
+            .then_some(requested_model),
+        resolved_model,
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
         cache_read_input_tokens: cache_read,
@@ -2456,10 +2041,11 @@ pub fn record_simple_completion_usage(
     if usage.is_empty() {
         return;
     }
-    record_provider_usage(
+    record_provider_usage_with_model_attribution(
         session_id,
         provider,
-        model,
+        usage.requested_model.as_deref().unwrap_or(model),
+        usage.resolved_model.as_deref(),
         source,
         ProviderUsage {
             input_tokens: usage.input_tokens.unwrap_or(0),
@@ -2483,7 +2069,7 @@ pub fn record_simple_completion_failure_usage(
             &failure.provider,
             &failure.model,
             source,
-            failure.usage,
+            failure.usage.clone(),
         );
     }
 }
@@ -2749,26 +2335,6 @@ pub fn current_provider_model() -> Option<(String, String)> {
             .as_ref()
             .map(|state| (state.provider_start.clone(), state.model_start.clone()))
     })
-}
-
-fn show_first_run_notice() {
-    // This can print before any terminal setup enables VT processing. Legacy
-    // Windows consoles (conhost without ENABLE_VIRTUAL_TERMINAL_PROCESSING,
-    // exactly the double-click-the-exe path) render raw escapes as `←[90m`
-    // garbage (issue #498), so only colorize when the console accepts ANSI
-    // (the helper also opportunistically enables VT mode on Windows).
-    let (dim, reset) = if jcode_core::console::stderr_supports_ansi() {
-        ("\x1b[90m", "\x1b[0m")
-    } else {
-        ("", "")
-    };
-    eprintln!("{dim}");
-    eprintln!("  jcode collects anonymous usage statistics (install count, version, OS,");
-    eprintln!("  session activity, tool counts, and crash/exit reasons). No code, filenames,");
-    eprintln!("  prompts, or personal data is sent.");
-    eprintln!("  To opt out: export JCODE_NO_TELEMETRY=1");
-    eprintln!("  Details: https://github.com/1jehuang/jcode/blob/master/TELEMETRY.md");
-    eprintln!("{reset}");
 }
 
 #[cfg(test)]

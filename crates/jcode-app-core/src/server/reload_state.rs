@@ -1,4 +1,3 @@
-use super::{has_live_listener, is_server_ready};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -191,6 +190,7 @@ pub enum ReloadWaitStatus {
     Ready,
     Waiting { pid: Option<u32> },
     Failed(Option<String>),
+    Unknown { reason: String },
     Idle,
 }
 
@@ -199,66 +199,123 @@ pub async fn inspect_reload_wait_status(
     max_age: Duration,
     last_known_pid: Option<u32>,
 ) -> ReloadWaitStatus {
-    if let Some(state) = recent_reload_state(max_age) {
-        let status = match state.phase {
-            ReloadPhase::SocketReady => ReloadWaitStatus::Ready,
-            ReloadPhase::Failed => ReloadWaitStatus::Failed(state.detail),
-            ReloadPhase::Starting => {
-                if reload_process_alive(state.pid) {
-                    ReloadWaitStatus::Waiting {
-                        pid: Some(state.pid),
-                    }
-                } else {
-                    ReloadWaitStatus::Failed(Some(format!(
-                        "reload process {} exited before becoming ready",
-                        state.pid
-                    )))
-                }
-            }
-        };
-        crate::logging::info(&format!(
-            "inspect_reload_wait_status: socket {} marker-driven status={:?} (last_known_pid={:?}, state={})",
-            socket_path.display(),
-            status,
-            last_known_pid,
-            reload_state_summary(max_age)
-        ));
-        return status;
-    }
+    let state = recent_reload_state(max_age);
+    inspect_reload_wait_status_for(
+        socket_path,
+        max_age,
+        last_known_pid,
+        state.as_ref().map(|state| state.request_id.as_str()),
+        None,
+    )
+    .await
+}
 
-    if is_server_ready(socket_path).await || has_live_listener(socket_path).await {
-        if last_known_pid.is_some() {
-            crate::logging::info(&format!(
-                "inspect_reload_wait_status: socket {} is ready/live without active marker (last_known_pid={:?}, state={})",
-                socket_path.display(),
-                last_known_pid,
-                reload_state_summary(max_age)
-            ));
+/// The transport adapter for daemon self-reporting. A successful connect alone
+/// deliberately supplies no identity evidence.
+pub async fn probe_serving_identity(
+    socket_path: &std::path::Path,
+) -> anyhow::Result<crate::protocol::DaemonIdentity> {
+    let socket = socket_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        jcode_build_support::runtime_generation::probe_socket_identity(
+            &socket,
+            Duration::from_millis(200),
+        )
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("serving identity observer failed: {error}"))?
+}
+
+pub async fn observe_serving_socket(
+    socket_path: &std::path::Path,
+) -> jcode_build_support::runtime_generation::SocketObservation {
+    use jcode_build_support::runtime_generation::{SocketObservation, observe_socket};
+    let socket = socket_path.to_path_buf();
+    tokio::task::spawn_blocking(move || observe_socket(&socket, Duration::from_millis(200)))
+        .await
+        .unwrap_or_else(|error| SocketObservation::Unknown {
+            reason: format!("serving observer task failed: {error}"),
+        })
+}
+
+pub async fn replacement_spawn_permission(
+    socket_path: &std::path::Path,
+    handoff_owner: Option<u32>,
+) -> Result<(), String> {
+    let observation = observe_serving_socket(socket_path).await;
+    jcode_build_support::runtime_generation::replacement_spawn_permission(
+        &observation,
+        handoff_owner.is_some_and(reload_process_alive),
+    )
+}
+
+pub async fn confirm_replacement_generation(
+    socket_path: &std::path::Path,
+    max_age: Duration,
+) -> anyhow::Result<crate::protocol::DaemonIdentity> {
+    use jcode_build_support::runtime_generation::{GenerationVerdict, assess_reconnect};
+    let serving = probe_serving_identity(socket_path).await?;
+    match assess_reconnect(&serving, max_age) {
+        GenerationVerdict::Ready(identity) => Ok(identity),
+        GenerationVerdict::Unknown { reason }
+        | GenerationVerdict::Pending { reason }
+        | GenerationVerdict::Mismatch { reason } => anyhow::bail!(reason),
+    }
+}
+
+pub async fn inspect_reload_wait_status_for(
+    socket_path: &std::path::Path,
+    max_age: Duration,
+    last_known_pid: Option<u32>,
+    reload_id: Option<&str>,
+    target: Option<&jcode_selfdev_types::ImmutableTarget>,
+) -> ReloadWaitStatus {
+    use jcode_build_support::runtime_generation::{
+        GenerationVerdict, SocketObservation, assess_handoff,
+    };
+    let state = recent_reload_state(max_age)
+        .filter(|state| reload_id.is_none_or(|id| state.request_id == id));
+    if let Some(state) = &state
+        && state.phase == ReloadPhase::Failed
+    {
+        return ReloadWaitStatus::Failed(state.detail.clone());
+    }
+    let pid = state.as_ref().map(|state| state.pid).or(last_known_pid);
+    match observe_serving_socket(socket_path).await {
+        // No live reload evidence: the reload this client remembers either
+        // finished long ago or was abandoned (its marker aged out or was
+        // removed). The daemon actually serving is then the only truth, and
+        // waiting for a confirmation that can never arrive hangs every client.
+        SocketObservation::Serving(_) if recent_reload_state(max_age).is_none() => {
+            return ReloadWaitStatus::Ready;
         }
-        return ReloadWaitStatus::Ready;
+        SocketObservation::Serving(serving) => {
+            let Some(id) = reload_id else {
+                return ReloadWaitStatus::Unknown {
+                    reason: "live listener has no correlated reload request".into(),
+                };
+            };
+            return match assess_handoff(id, target, Some(&serving)) {
+                GenerationVerdict::Ready(_) => ReloadWaitStatus::Ready,
+                GenerationVerdict::Mismatch { reason } => ReloadWaitStatus::Failed(Some(reason)),
+                GenerationVerdict::Unknown { reason } => ReloadWaitStatus::Unknown { reason },
+                GenerationVerdict::Pending { .. } => ReloadWaitStatus::Waiting {
+                    pid: pid.or(Some(serving.pid)),
+                },
+            };
+        }
+        SocketObservation::Unknown { reason } => return ReloadWaitStatus::Unknown { reason },
+        SocketObservation::Absent { .. } => {}
     }
-
-    if let Some(pid) = last_known_pid {
+    if let Some(pid) = pid {
         if reload_process_alive(pid) {
-            crate::logging::info(&format!(
-                "inspect_reload_wait_status: socket {} waiting on last known pid {} without marker",
-                socket_path.display(),
-                pid
-            ));
             return ReloadWaitStatus::Waiting { pid: Some(pid) };
         }
-        crate::logging::warn(&format!(
-            "inspect_reload_wait_status: socket {} last known pid {} is no longer alive and no reload marker remains",
-            socket_path.display(),
-            pid
-        ));
-    }
-
-    if last_known_pid.is_some() {
-        crate::logging::info(&format!(
-            "inspect_reload_wait_status: socket {} is idle after previous reload wait state",
-            socket_path.display()
-        ));
+        if state.is_some() {
+            return ReloadWaitStatus::Failed(Some(format!(
+                "reload process {pid} exited before confirming the generation"
+            )));
+        }
     }
     ReloadWaitStatus::Idle
 }
@@ -267,34 +324,49 @@ pub async fn await_reload_handoff(
     socket_path: &std::path::Path,
     max_age: Duration,
 ) -> ReloadWaitStatus {
-    let mut last_known_pid = None;
-    crate::logging::info(&format!(
-        "await_reload_handoff: begin socket={} max_age_ms={} state={}",
-        socket_path.display(),
-        max_age.as_millis(),
-        reload_state_summary(max_age)
-    ));
+    let state = recent_reload_state(max_age);
+    let Some(state) = state else {
+        return ReloadWaitStatus::Unknown {
+            reason: "no reload request identity was supplied and no recent request is recorded"
+                .into(),
+        };
+    };
+    await_reload_handoff_for(socket_path, max_age, &state.request_id, None).await
+}
 
+pub async fn await_reload_handoff_for(
+    socket_path: &std::path::Path,
+    max_age: Duration,
+    reload_id: &str,
+    target: Option<&jcode_selfdev_types::ImmutableTarget>,
+) -> ReloadWaitStatus {
+    let deadline = tokio::time::Instant::now() + max_age;
+    let mut last_known_pid = None;
     loop {
-        match inspect_reload_wait_status(socket_path, max_age, last_known_pid).await {
+        let status = inspect_reload_wait_status_for(
+            socket_path,
+            max_age,
+            last_known_pid,
+            Some(reload_id),
+            target,
+        )
+        .await;
+        if tokio::time::Instant::now() >= deadline {
+            return ReloadWaitStatus::Unknown {
+                reason: format!(
+                    "reload {reload_id} did not confirm its serving generation before deadline (last status: {status:?})"
+                ),
+            };
+        }
+        match status {
             ReloadWaitStatus::Waiting { pid } => {
                 last_known_pid = pid;
-                crate::logging::info(&format!(
-                    "await_reload_handoff: waiting for reload event socket={} pid={:?}",
-                    socket_path.display(),
-                    pid
-                ));
                 wait_for_reload_handoff_event(pid, socket_path).await;
             }
-            other => {
-                crate::logging::info(&format!(
-                    "await_reload_handoff: completed socket={} result={:?} state={}",
-                    socket_path.display(),
-                    other,
-                    reload_state_summary(max_age)
-                ));
-                return other;
+            ReloadWaitStatus::Unknown { .. } | ReloadWaitStatus::Idle => {
+                wait_for_reload_handoff_event(last_known_pid, socket_path).await;
             }
+            other => return other,
         }
     }
 }
@@ -446,6 +518,7 @@ fn wait_for_reload_handoff_event_blocking(
 
 #[derive(Clone, Debug)]
 pub struct ReloadSignal {
+    pub target: Option<jcode_selfdev_types::ImmutableTarget>,
     pub hash: String,
     pub triggering_session: Option<String>,
     pub prefer_selfdev_binary: bool,
@@ -558,8 +631,59 @@ pub fn send_reload_signal(
         prefer_selfdev_binary,
         std::process::id()
     ));
+    let target = super::reload_exec_target(prefer_selfdev_binary)
+        .ok_or_else(|| anyhow::anyhow!("no selected reload target"))
+        // Admission pins file/payload identity without running a subprocess on
+        // the daemon's control loop. Explicit version selections are resolved
+        // and hash-checked by their caller before send_reload_signal_target.
+        .and_then(|(path, _)| jcode_build_support::runtime_generation::pin_path(&path));
+    let target = match target {
+        Ok(target) => target,
+        Err(error) => {
+            write_reload_state(
+                &request_id,
+                &hash,
+                ReloadPhase::Failed,
+                Some(format!("{error:#}")),
+            );
+            return request_id;
+        }
+    };
+    publish_reload_signal(
+        hash,
+        triggering_session,
+        prefer_selfdev_binary,
+        target,
+        request_id,
+    )
+}
+
+pub fn send_reload_signal_target(
+    hash: String,
+    triggering_session: Option<String>,
+    prefer_selfdev_binary: bool,
+    target: jcode_selfdev_types::ImmutableTarget,
+) -> anyhow::Result<String> {
+    jcode_build_support::runtime_generation::validate_target(&target)?;
+    Ok(publish_reload_signal(
+        hash,
+        triggering_session,
+        prefer_selfdev_binary,
+        target,
+        crate::id::new_id("reload"),
+    ))
+}
+
+fn publish_reload_signal(
+    hash: String,
+    triggering_session: Option<String>,
+    prefer_selfdev_binary: bool,
+    target: jcode_selfdev_types::ImmutableTarget,
+    request_id: String,
+) -> String {
     let (tx, _) = reload_signal();
     let _ = tx.send(Some(ReloadSignal {
+        target: Some(target),
         hash,
         triggering_session,
         prefer_selfdev_binary,
@@ -688,7 +812,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn inspect_reload_wait_status_returns_ready_for_socket_ready_marker() {
+    async fn socket_ready_marker_without_listener_confirmation_remains_waiting() {
         let _lock = crate::storage::lock_test_env();
         let temp = tempfile::tempdir().expect("tempdir");
         let _guard = EnvGuard::set_runtime_dir(temp.path());
@@ -707,7 +831,12 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, ReloadWaitStatus::Ready);
+        assert_eq!(
+            status,
+            ReloadWaitStatus::Waiting {
+                pid: Some(std::process::id())
+            }
+        );
     }
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
@@ -754,7 +883,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn inspect_reload_wait_status_handles_repeated_ready_markers() {
+    async fn repeated_ready_markers_do_not_replace_listener_confirmation() {
         let _lock = crate::storage::lock_test_env();
         let temp = tempfile::tempdir().expect("tempdir");
         let _guard = EnvGuard::set_runtime_dir(temp.path());
@@ -770,7 +899,12 @@ mod tests {
 
             let status =
                 inspect_reload_wait_status(&socket_path, Duration::from_secs(5), None).await;
-            assert_eq!(status, ReloadWaitStatus::Ready);
+            assert_eq!(
+                status,
+                ReloadWaitStatus::Waiting {
+                    pid: Some(std::process::id())
+                }
+            );
         }
     }
 

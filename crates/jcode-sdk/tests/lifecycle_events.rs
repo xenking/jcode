@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 fn session(id: &str) -> SessionInfo {
     SessionInfo {
         edit_stats: None,
+        context: None,
         user_connected: false,
         parent_session_id: (id == "persisted-2").then(|| "persisted-1".into()),
         agent_label: (id == "persisted-2").then(|| "API reviewer".into()),
@@ -192,6 +193,7 @@ fn serve_connection(
             ApiRequest::Hello { .. } => reply(
                 frame.id,
                 ApiEvent::HelloOk {
+                    runtime_identity: None,
                     version: API_VERSION_MAJOR,
                     server: "fake-global/1.0".into(),
                     capabilities: vec!["sessions".into()],
@@ -211,7 +213,10 @@ fn serve_connection(
                     .collect();
                 reply(
                     frame.id,
-                    ApiEvent::Sessions { sessions: listed },
+                    ApiEvent::Sessions {
+                        sessions: listed,
+                        workers: Default::default(),
+                    },
                     &mut writer,
                 );
             }

@@ -1,9 +1,15 @@
 mod response_stats;
 
 #[cfg(test)]
+mod final_text_original;
+#[cfg(test)]
+mod image_context_original;
+#[cfg(test)]
+mod image_context_tests;
+#[cfg(test)]
 mod prompt_count_tests;
 
-use super::{Session, StoredDisplayRole};
+use super::{Session, StoredDisplayRole, StoredMemoryInjection};
 use crate::message::{ContentBlock, Role, ToolCall};
 use jcode_config_types::ReasoningDisplayMode;
 pub use jcode_session_types::{
@@ -144,6 +150,33 @@ fn stored_message_is_user_turn(msg: &super::StoredMessage) -> bool {
     !text.is_empty() && !crate::message::is_background_task_notification_content(&text)
 }
 
+fn stored_user_turn_count(
+    msg: &super::StoredMessage,
+    ask_ids: &std::collections::HashSet<&str>,
+) -> usize {
+    let prompt = usize::from(stored_message_is_user_turn(msg));
+    if !matches!(msg.role, Role::User) || msg.display_role.is_some() {
+        return prompt;
+    }
+    prompt
+        + msg
+            .content
+            .iter()
+            .filter(|block| match block {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => {
+                    *is_error != Some(true)
+                        && ask_ids.contains(tool_use_id.as_str())
+                        && jcode_session_types::stored_ask_answer_text(content).is_some()
+                }
+                _ => false,
+            })
+            .count()
+}
+
 fn compacted_history_render_window(
     messages: &[super::StoredMessage],
     compacted_count: usize,
@@ -151,14 +184,24 @@ fn compacted_history_render_window(
 ) -> (usize, RenderedCompactedHistoryInfo) {
     let compacted_count = compacted_count.min(messages.len());
     let compacted_prefix = &messages[..compacted_count];
+    let ask_ids: std::collections::HashSet<&str> = messages
+        .iter()
+        .flat_map(|msg| msg.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { id, name, .. } if name == "ask" && !id.is_empty() => {
+                Some(id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
     let total_renderable = compacted_prefix
         .iter()
         .filter(|msg| stored_message_renders_visible_message(msg))
         .count();
     let total_turns = compacted_prefix
         .iter()
-        .filter(|msg| stored_message_is_user_turn(msg))
-        .count();
+        .map(|msg| stored_user_turn_count(msg, &ask_ids))
+        .sum::<usize>();
 
     // Guardrails: only truncate when the prefix is BOTH very long AND has more
     // than a handful of turns. Otherwise show everything. This avoids cutting a
@@ -214,8 +257,8 @@ fn compacted_history_render_window(
     let remaining_renderable = total_renderable.saturating_sub(visible_renderable);
     let hidden_user_prompts = compacted_prefix[..render_start_idx]
         .iter()
-        .filter(|msg| stored_message_is_user_turn(msg))
-        .count();
+        .map(|msg| stored_user_turn_count(msg, &ask_ids))
+        .sum();
 
     (
         render_start_idx,
@@ -370,7 +413,36 @@ pub fn render_messages_and_images_with_compacted_history(
     Vec<RenderedImage>,
     Option<RenderedCompactedHistoryInfo>,
 ) {
+    let (messages, images, info, _) =
+        render_messages_and_images_internal(session, compacted_history_visible, false);
+    (messages, images, info)
+}
+
+/// Render history together with the stable identity of each rendered image.
+pub fn render_messages_and_images_with_ids(
+    session: &Session,
+    compacted_history_visible: usize,
+) -> (
+    Vec<RenderedMessage>,
+    Vec<RenderedImage>,
+    Option<RenderedCompactedHistoryInfo>,
+    Vec<String>,
+) {
+    render_messages_and_images_internal(session, compacted_history_visible, true)
+}
+
+fn render_messages_and_images_internal(
+    session: &Session,
+    compacted_history_visible: usize,
+    include_archived: bool,
+) -> (
+    Vec<RenderedMessage>,
+    Vec<RenderedImage>,
+    Option<RenderedCompactedHistoryInfo>,
+    Vec<String>,
+) {
     let mut rendered: Vec<RenderedMessage> = Vec::new();
+    let mut image_ids = Vec::new();
     let mut images: Vec<RenderedImage> = Vec::new();
     let mut tool_map: HashMap<String, ToolCall> = HashMap::new();
     // 0-based ordinal of the next rendered user prompt, used to anchor pasted
@@ -427,6 +499,7 @@ pub fn render_messages_and_images_with_compacted_history(
             ));
         }
         rendered.push(RenderedMessage {
+            attachments: Vec::new(),
             response_stats: None,
             tool_duration_ms: None,
             role: "system".to_string(),
@@ -434,12 +507,17 @@ pub fn render_messages_and_images_with_compacted_history(
             tool_calls: Vec::new(),
             tool_data: None,
             stored_index: None,
+            timestamp_ms: None,
         });
     }
 
     // Error replay records are display-only: never turn provider diagnostics
     // into assistant/user context. Merge them at their original turn boundary
     // so a reconnect shows the failure beneath its wake, not at the latest turn.
+    //
+    // Completed compactions ride the same channel: they are transcript rows for
+    // humans only, and deriving them from the stored session is what makes the
+    // divider survive reloads instead of living in one client's memory.
     let mut errors: Vec<_> = session
         .replay_events
         .iter()
@@ -447,7 +525,7 @@ pub fn render_messages_and_images_with_compacted_history(
             super::StoredReplayEventKind::DisplayMessage { role, content, .. }
                 if role == "error" =>
             {
-                Some((event.timestamp, content))
+                Some((event.timestamp, content.clone()))
             }
             _ => None,
         })
@@ -462,7 +540,37 @@ pub fn render_messages_and_images_with_compacted_history(
         .collect();
     errors.sort_by_key(|(timestamp, _)| *timestamp);
     let mut errors = errors.into_iter().peekable();
-    let render_error = |content: &String| RenderedMessage {
+    // Automatic memory injections are transcript rows for humans only, exactly
+    // like errors: the recalled text reached the model as a system reminder, so
+    // re-rendering it here must not turn it into user context. Deriving the row
+    // from the stored session is what lets a reload show the same
+    // "auto-recalled …" line the live client painted.
+    // An injection recorded inside the compacted prefix was folded into the
+    // summary with the turns around it. Rebuilding the compacted window must
+    // not resurrect a stale recall row, even when the guardrail chooses to
+    // paint the old messages themselves.
+    let compacted_boundary = session
+        .compaction
+        .as_ref()
+        .map(|state| state.compacted_count.min(session.messages.len()))
+        .unwrap_or(0);
+    let mut memory_rows: Vec<&StoredMemoryInjection> = session
+        .memory_injections
+        .iter()
+        .filter(|injection| {
+            injection
+                .before_message
+                .is_none_or(|before| before >= render_start_idx)
+                && (compacted_boundary == 0
+                    || injection
+                        .before_message
+                        .is_none_or(|before| before > compacted_boundary))
+        })
+        .collect();
+    memory_rows.sort_by_key(|injection| injection.before_message.unwrap_or(usize::MAX));
+    let mut memory_rows = memory_rows.into_iter().peekable();
+    let render_error = |content: String| RenderedMessage {
+        attachments: Vec::new(),
         response_stats: None,
         tool_duration_ms: None,
         role: "error".to_string(),
@@ -470,8 +578,18 @@ pub fn render_messages_and_images_with_compacted_history(
         tool_calls: Vec::new(),
         tool_data: None,
         stored_index: None,
+        timestamp_ms: None,
     };
     for (stored_index, msg) in session.messages.iter().enumerate().skip(render_start_idx) {
+        while memory_rows.peek().is_some_and(|injection| {
+            injection
+                .before_message
+                .is_none_or(|before| before <= stored_index)
+        }) {
+            if let Some(injection) = memory_rows.next() {
+                rendered.push(memory_injection_row(injection));
+            }
+        }
         while errors
             .peek()
             .is_some_and(|(timestamp, _)| msg.timestamp.is_some_and(|next| *timestamp < next))
@@ -483,10 +601,12 @@ pub fn render_messages_and_images_with_compacted_history(
         if is_internal_system_reminder(msg) {
             continue;
         }
+        let msg_timestamp_ms = msg.timestamp.map(|at| at.timestamp_millis());
 
         let role = match msg.display_role {
             Some(StoredDisplayRole::System) => "system",
             Some(StoredDisplayRole::BackgroundTask) => "background_task",
+            Some(StoredDisplayRole::FileActivity) => "file_activity",
             None if is_auto_poke_user_message(msg) => "system",
             None if super::is_scheduled_task_message(msg) => "system",
             None => match msg.role {
@@ -499,6 +619,7 @@ pub fn render_messages_and_images_with_compacted_history(
         // check happened, so replace the body with a one-liner.
         if let Some(summary) = auto_poke_user_message_display_summary(msg) {
             rendered.push(RenderedMessage {
+                attachments: Vec::new(),
                 response_stats: None,
                 tool_duration_ms: None,
                 role: "system".to_string(),
@@ -506,6 +627,7 @@ pub fn render_messages_and_images_with_compacted_history(
                 tool_calls: Vec::new(),
                 tool_data: None,
                 stored_index: Some(stored_index),
+                timestamp_ms: msg_timestamp_ms,
             });
             continue;
         }
@@ -518,16 +640,50 @@ pub fn render_messages_and_images_with_compacted_history(
         // *after* the answer on resume/re-render.
         let mut reasoning = String::new();
         let mut tool_calls: Vec<String> = Vec::new();
-        let mut current_tool: Option<ToolCall> = None;
+        // Keep the owning row, not a second copy of its potentially large input.
+        // Native result rows intentionally do not replace this association.
+        let mut current_tool: Option<usize> = None;
         let mut last_image_idx: Option<usize> = None;
         // Images from blocks with no owning tool result (e.g. a pasted user
         // screenshot). Their user-prompt ordinal is only known once we know the
         // message actually renders a user prompt, so patch them afterwards.
         let mut pending_prompt_image_indices: Vec<usize> = Vec::new();
+        let mut image_ordinal = 0usize;
 
         for block in &msg.content {
             match block {
                 ContentBlock::Text { text: t, .. } => {
+                    if super::images::is_archive_marker(t) {
+                        let id = super::images::image_id(&session.id, &msg.id, image_ordinal);
+                        image_ordinal += 1;
+                        if include_archived
+                            && let Some(media_type) =
+                                super::images::archived_image_media_type(t, &id)
+                        {
+                            image_ids.push(id.clone());
+                            let current_tool =
+                                current_tool.and_then(|index| rendered[index].tool_data.as_ref());
+                            let anchor =
+                                image_anchor_for_message(role, current_tool, user_prompt_count);
+                            let is_pending_prompt_anchor = current_tool.is_none() && role == "user";
+                            images.push(RenderedImage {
+                                history_message_index: current_tool.map(|_| rendered.len()),
+                                media_type,
+                                data: format!("jcode-lazy:{id}"),
+                                label: current_tool.and_then(fallback_image_label_for_tool),
+                                source: image_source_for_message(
+                                    message_role.clone(),
+                                    current_tool,
+                                ),
+                                anchor,
+                            });
+                            last_image_idx = Some(images.len() - 1);
+                            if is_pending_prompt_anchor {
+                                pending_prompt_image_indices.push(images.len() - 1);
+                            }
+                            continue;
+                        }
+                    }
                     // The `[Attached image associated with the preceding tool
                     // result: ...]` block is synthetic metadata jcode injects so
                     // the model can associate a label with the image. It lives in
@@ -544,7 +700,7 @@ pub fn render_messages_and_images_with_compacted_history(
                         }
                         continue;
                     }
-                    text.push_str(t);
+                    text.push_str(super::strip_reload_interruption_marker(t));
                 }
                 ContentBlock::ToolUse {
                     id,
@@ -565,7 +721,7 @@ pub fn render_messages_and_images_with_compacted_history(
                 ContentBlock::ToolResult {
                     tool_use_id,
                     content,
-                    ..
+                    is_error,
                 } => {
                     let combined = format!("{}{}", reasoning, text);
                     if !combined.is_empty() {
@@ -575,6 +731,7 @@ pub fn render_messages_and_images_with_compacted_history(
                         text.clear();
                         reasoning.clear();
                         rendered.push(RenderedMessage {
+                            attachments: Vec::new(),
                             response_stats: None,
                             tool_duration_ms: None,
                             role: role.to_string(),
@@ -582,6 +739,7 @@ pub fn render_messages_and_images_with_compacted_history(
                             tool_calls: tool_calls.clone(),
                             tool_data: None,
                             stored_index: Some(stored_index),
+                            timestamp_ms: msg_timestamp_ms,
                         });
                     }
 
@@ -594,9 +752,20 @@ pub fn render_messages_and_images_with_compacted_history(
                             thought_signature: None,
                         })
                     });
-                    current_tool = tool_data.clone();
+                    current_tool = Some(rendered.len());
+
+                    // This is a durable recovery marker, not an answer. The
+                    // original ask is re-presented after reconnect and its
+                    // result replaces the marker in the stored conversation.
+                    if is_error.unwrap_or(false)
+                        && tool_data.as_ref().is_some_and(|tool| tool.name == "ask")
+                        && content.starts_with("[Tool 'ask' interrupted by server reload after ")
+                    {
+                        continue;
+                    }
 
                     rendered.push(RenderedMessage {
+                        attachments: Vec::new(),
                         response_stats: None,
                         tool_duration_ms: msg.tool_duration_ms,
                         role: "tool".to_string(),
@@ -604,6 +773,7 @@ pub fn render_messages_and_images_with_compacted_history(
                         tool_calls: Vec::new(),
                         tool_data,
                         stored_index: Some(stored_index),
+                        timestamp_ms: msg_timestamp_ms,
                     });
                 }
                 ContentBlock::Reasoning { text: t } | ContentBlock::ReasoningTrace { text: t } => {
@@ -611,20 +781,18 @@ pub fn render_messages_and_images_with_compacted_history(
                 }
                 ContentBlock::AnthropicThinking { .. } | ContentBlock::OpenAIReasoning { .. } => {}
                 ContentBlock::Image { media_type, data } => {
-                    let anchor =
-                        image_anchor_for_message(role, current_tool.as_ref(), user_prompt_count);
+                    image_ids.push(super::images::image_id(&session.id, &msg.id, image_ordinal));
+                    image_ordinal += 1;
+                    let current_tool =
+                        current_tool.and_then(|index| rendered[index].tool_data.as_ref());
+                    let anchor = image_anchor_for_message(role, current_tool, user_prompt_count);
                     let is_pending_prompt_anchor = current_tool.is_none() && role == "user";
                     images.push(RenderedImage {
-                        history_message_index: current_tool.as_ref().map(|_| rendered.len()),
+                        history_message_index: current_tool.map(|_| rendered.len()),
                         media_type: media_type.clone(),
                         data: data.clone(),
-                        label: current_tool
-                            .as_ref()
-                            .and_then(fallback_image_label_for_tool),
-                        source: image_source_for_message(
-                            message_role.clone(),
-                            current_tool.as_ref(),
-                        ),
+                        label: current_tool.and_then(fallback_image_label_for_tool),
+                        source: image_source_for_message(message_role.clone(), current_tool),
                         anchor,
                     });
                     last_image_idx = Some(images.len().saturating_sub(1));
@@ -658,6 +826,7 @@ pub fn render_messages_and_images_with_compacted_history(
                         text.clear();
                         reasoning.clear();
                         rendered.push(RenderedMessage {
+                            attachments: Vec::new(),
                             response_stats: None,
                             tool_duration_ms: None,
                             role: role.to_string(),
@@ -665,6 +834,7 @@ pub fn render_messages_and_images_with_compacted_history(
                             tool_calls: std::mem::take(&mut tool_calls),
                             tool_data: None,
                             stored_index: Some(stored_index),
+                            timestamp_ms: msg_timestamp_ms,
                         });
                     }
                     let tool_data = tool_map.get(&display.id).cloned().unwrap_or_else(|| {
@@ -678,6 +848,7 @@ pub fn render_messages_and_images_with_compacted_history(
                         }
                     });
                     rendered.push(RenderedMessage {
+                        attachments: Vec::new(),
                         response_stats: None,
                         tool_duration_ms: None,
                         role: "tool".to_string(),
@@ -685,18 +856,36 @@ pub fn render_messages_and_images_with_compacted_history(
                         tool_calls: Vec::new(),
                         tool_data: Some(tool_data),
                         stored_index: Some(stored_index),
+                        timestamp_ms: msg_timestamp_ms,
                     });
                 }
-                ContentBlock::OpenAICompaction { .. } | ContentBlock::ToolReference { .. } => {}
+                ContentBlock::OpenAICompaction { .. }
+                | ContentBlock::ToolReference { .. }
+                | ContentBlock::Unknown => {}
             }
         }
 
-        let combined = format!("{}{}", reasoning, text);
-        if !combined.is_empty() {
+        if !reasoning.is_empty() || !text.is_empty() || msg.attachment_data.is_some() {
             if role == "user" && !is_attached_image_label_text(&text) {
                 user_prompt_count += 1;
             }
+            // At EOF the buffers are no longer reused. Move the sole nonempty
+            // buffer rather than copying it into a new allocation.
+            let combined = if let Some(metadata) = &msg.attachment_data {
+                metadata.display_content.clone()
+            } else if reasoning.is_empty() {
+                text
+            } else if text.is_empty() {
+                reasoning
+            } else {
+                format!("{}{}", reasoning, text)
+            };
             rendered.push(RenderedMessage {
+                attachments: msg
+                    .attachment_data
+                    .as_ref()
+                    .map(|metadata| metadata.items.clone())
+                    .unwrap_or_default(),
                 response_stats: None,
                 tool_duration_ms: None,
                 role: role.to_string(),
@@ -704,6 +893,7 @@ pub fn render_messages_and_images_with_compacted_history(
                 tool_calls,
                 tool_data: None,
                 stored_index: Some(stored_index),
+                timestamp_ms: msg_timestamp_ms,
             });
         } else if !pending_prompt_image_indices.is_empty() {
             // The message carried images but produced no rendered user prompt;
@@ -717,7 +907,318 @@ pub fn render_messages_and_images_with_compacted_history(
         }
     }
 
+    // Injections recorded after the last stored message (and those whose
+    // position was never recorded) close the transcript.
+    for injection in memory_rows {
+        rendered.push(memory_injection_row(injection));
+    }
     rendered.extend(errors.map(|(_, content)| render_error(content)));
+    insert_compaction_rows(session, &mut rendered, render_start_idx);
     response_stats::attach(&session.messages, &mut rendered);
-    (rendered, images, compacted_info)
+    (rendered, images, compacted_info, image_ids)
+}
+
+/// One stored memory injection as a transcript row.
+///
+/// The body is the shared label-plus-display text, so the reloaded row and the
+/// live `memory_injected` event a client received cannot disagree about what was
+/// recalled.
+fn memory_injection_row(injection: &StoredMemoryInjection) -> RenderedMessage {
+    RenderedMessage {
+        attachments: Vec::new(),
+        response_stats: None,
+        tool_duration_ms: None,
+        role: "memory".to_string(),
+        content: jcode_session_types::memory_injection_content(
+            injection.count as usize,
+            &injection.content,
+        ),
+        tool_calls: Vec::new(),
+        tool_data: None,
+        stored_index: None,
+        timestamp_ms: Some(injection.timestamp.timestamp_millis()),
+    }
+}
+
+/// Divider method for a request sent on an expired prompt cache with nothing
+/// trimmed. It is a notice, not a compaction.
+pub const CACHE_COLD_DIVIDER_METHOD: &str = "cache_cold";
+
+/// The transcript divider body for a compaction: `label` + blank line + detail.
+///
+/// The label is what a collapsed divider shows (`compacted · snapcompact ·
+/// 180k→26k · 12s`); the detail is what a click or expand reveals. Live clients
+/// call this for the divider they paint when a compaction completes, and the
+/// stored-session renderer calls it for the row that survives reload, so the two
+/// can never drift apart.
+#[allow(clippy::too_many_arguments)]
+pub fn compaction_divider_content(
+    method: Option<&str>,
+    trigger: Option<&str>,
+    pre_tokens: Option<u64>,
+    post_tokens: Option<u64>,
+    duration_ms: Option<u64>,
+    messages_compacted: Option<usize>,
+    messages_dropped: Option<usize>,
+    active_messages: Option<usize>,
+    summary: Option<&str>,
+    idle: bool,
+) -> String {
+    // String writes cannot fail, and these format arguments are only built-in
+    // strings and integers, whose Display implementations cannot return Err.
+    use std::fmt::Write as _;
+    let method = method.unwrap_or("summary");
+    if method == CACHE_COLD_DIVIDER_METHOD {
+        // Nothing was compacted: the provider's prompt cache expired and the
+        // whole prompt is written to it again.
+        let size = pre_tokens.map(compact_token_count);
+        let label = match &size {
+            Some(size) => format!("cache cold · {size} re-cached"),
+            None => "cache cold".to_string(),
+        };
+        return format!(
+            "{label}\n\nThe provider's prompt cache expired while this session was idle, so \
+             this request writes the whole prompt to the cache again. Nothing was removed \
+             from the conversation."
+        );
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if idle {
+        parts.push("compacted while waiting".to_string());
+    } else {
+        parts.push("compacted".to_string());
+    }
+    parts.push(method.replace('_', " "));
+    match (pre_tokens, post_tokens) {
+        (Some(pre), Some(post)) => parts.push(format!(
+            "{}→{}",
+            compact_token_count(pre),
+            compact_token_count(post)
+        )),
+        (Some(pre), None) => parts.push(format!("{}→?", compact_token_count(pre))),
+        _ => {}
+    }
+    if let Some(duration_ms) = duration_ms {
+        parts.push(compaction_duration_label(duration_ms));
+    }
+    let label = parts.join(" · ");
+
+    let mut detail = String::new();
+    if let Some(trigger) = trigger {
+        let _ = writeln!(detail, "trigger: {trigger}");
+    }
+    let _ = writeln!(detail, "method: {method}");
+    if let Some(pre) = pre_tokens {
+        let _ = writeln!(detail, "tokens: {pre} before");
+    }
+    if let Some(post) = post_tokens {
+        let _ = writeln!(detail, "tokens: {post} after");
+    }
+    if let Some(count) = messages_compacted {
+        let action = if method == "snapcompact" {
+            "archived"
+        } else {
+            "summarized"
+        };
+        let _ = writeln!(detail, "messages {action}: {count}");
+    }
+    if let Some(count) = messages_dropped {
+        let _ = writeln!(detail, "messages dropped: {count}");
+    }
+    if let Some(count) = active_messages {
+        let _ = writeln!(detail, "messages kept verbatim: {count}");
+    }
+    // Snapcompact's summary is a reading guide for the model, not a recap.
+    if method == "snapcompact" {
+        detail.push_str("\nScroll up to read earlier messages.");
+    } else if let Some(summary) = summary.map(str::trim).filter(|summary| !summary.is_empty()) {
+        detail.push('\n');
+        detail.push_str(summary);
+    }
+    if detail.trim().is_empty() {
+        label
+    } else {
+        format!("{label}\n\n{detail}")
+    }
+}
+
+#[test]
+fn snapcompact_divider_explains_how_to_read_older_messages_without_model_instructions() {
+    let content = compaction_divider_content(
+        Some("snapcompact"),
+        Some("automatic"),
+        Some(524_000),
+        Some(100_000),
+        None,
+        Some(89),
+        None,
+        Some(10),
+        Some(
+            "Resume prior conversation.\n\nArchived transcript scopes:\n\nReading HISTORY:\n\nHISTORY\n===================\n",
+        ),
+        false,
+    );
+    let (label, detail) = content.split_once("\n\n").unwrap();
+    assert_eq!(label, "compacted · snapcompact · 524k→100k");
+    assert!(detail.contains("tokens: 524000 before"), "{detail}");
+    assert!(detail.contains("messages archived: 89"), "{detail}");
+    assert!(
+        detail.contains("Scroll up to read earlier messages."),
+        "{detail}"
+    );
+    assert!(
+        !detail.contains("Resume prior conversation") && !detail.contains("HISTORY"),
+        "{detail}"
+    );
+}
+
+#[test]
+fn summary_divider_still_shows_the_conversation_recap() {
+    let content = compaction_divider_content(
+        Some("summary"),
+        None,
+        None,
+        None,
+        None,
+        Some(2),
+        None,
+        None,
+        Some("The user chose the smaller build."),
+        false,
+    );
+    assert!(content.contains("messages summarized: 2"), "{content}");
+    assert!(
+        content.ends_with("The user chose the smaller build."),
+        "{content}"
+    );
+}
+
+/// Insert one divider row per persisted compaction at its original timestamp.
+///
+/// The row body is `label` + blank line + `detail`, the same split both clients
+/// use: the label is what a collapsed divider shows, and the detail is what a
+/// click reveals. Keeping the composition here means the TUI and Desktop can
+/// never disagree about what a compaction says.
+fn insert_compaction_rows(
+    session: &Session,
+    rendered: &mut Vec<RenderedMessage>,
+    render_start_idx: usize,
+) {
+    let window_start = session
+        .messages
+        .get(render_start_idx)
+        .and_then(|msg| msg.timestamp);
+    let mut rows: Vec<(i64, RenderedMessage)> = session
+        .replay_events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            super::StoredReplayEventKind::Compaction {
+                method,
+                trigger,
+                pre_tokens,
+                post_tokens,
+                duration_ms,
+                messages_compacted,
+                messages_dropped,
+                active_messages,
+                summary,
+                idle,
+            } => {
+                if window_start.is_some_and(|start| event.timestamp < start) {
+                    return None;
+                }
+                Some((
+                    event.timestamp.timestamp_millis(),
+                    compaction_divider_row(
+                        method.as_deref(),
+                        trigger.as_deref(),
+                        *pre_tokens,
+                        *post_tokens,
+                        *duration_ms,
+                        *messages_compacted,
+                        *messages_dropped,
+                        *active_messages,
+                        summary.as_deref(),
+                        *idle,
+                    ),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+    rows.sort_by_key(|(at, _)| *at);
+    for (at, mut row) in rows {
+        // Divider rows carry the compaction's own time so the meta line and the
+        // insertion point agree.
+        row.timestamp_ms = Some(at);
+        let index = rendered
+            .iter()
+            .position(|existing| existing.timestamp_ms.is_some_and(|other| other > at))
+            .unwrap_or(rendered.len());
+        rendered.insert(index, row);
+    }
+}
+
+/// One transcript divider row for a completed compaction.
+#[allow(clippy::too_many_arguments)]
+fn compaction_divider_row(
+    method: Option<&str>,
+    trigger: Option<&str>,
+    pre_tokens: Option<u64>,
+    post_tokens: Option<u64>,
+    duration_ms: Option<u64>,
+    messages_compacted: Option<usize>,
+    messages_dropped: Option<usize>,
+    active_messages: Option<usize>,
+    summary: Option<&str>,
+    idle: bool,
+) -> RenderedMessage {
+    RenderedMessage {
+        attachments: Vec::new(),
+        response_stats: None,
+        tool_duration_ms: None,
+        role: "compaction".to_string(),
+        content: compaction_divider_content(
+            method,
+            trigger,
+            pre_tokens,
+            post_tokens,
+            duration_ms,
+            messages_compacted,
+            messages_dropped,
+            active_messages,
+            summary,
+            idle,
+        ),
+        tool_calls: Vec::new(),
+        tool_data: None,
+        stored_index: None,
+        timestamp_ms: Some(0),
+    }
+}
+
+/// `180k`-style token count for compact labels.
+fn compact_token_count(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{}k", tokens / 1_000)
+    } else {
+        tokens.to_string()
+    }
+}
+
+/// `12s` / `12.4s` / `2m14s` for compact labels.
+fn compaction_duration_label(duration_ms: u64) -> String {
+    if duration_ms >= 60_000 {
+        format!(
+            "{}m{}s",
+            duration_ms / 60_000,
+            (duration_ms % 60_000) / 1_000
+        )
+    } else if duration_ms >= 10_000 {
+        format!("{}s", duration_ms / 1_000)
+    } else {
+        format!("{:.1}s", duration_ms as f64 / 1_000.0)
+    }
 }

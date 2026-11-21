@@ -1,6 +1,346 @@
 use super::*;
 
+fn worker_effort_cap<'a>(
+    agents: &'a crate::config::AgentsConfig,
+    provider_key: Option<&str>,
+    provider_name: &str,
+    model: &str,
+) -> Option<&'a String> {
+    let unpinned = model.split_once('@').map_or(model, |(model, _)| model);
+    [model, unpinned]
+        .into_iter()
+        .flat_map(|model| {
+            let route = provider_key.map(|key| format!("{key}:{model}"));
+            let provider_route = format!("{}:{model}", provider_name.to_ascii_lowercase());
+            [
+                agents.swarm_effort_caps.get(model),
+                route
+                    .as_ref()
+                    .and_then(|key| agents.swarm_effort_caps.get(key)),
+                agents.swarm_effort_caps.get(&provider_route),
+            ]
+            .into_iter()
+            .flatten()
+        })
+        .min_by_key(|cap| jcode_provider_core::reasoning_effort_rank(cap))
+}
+
+/// Whether a worker on `provider_key`/`model` is inside the allowlist. An entry
+/// `prefix:model` matches the exact model on that provider or one of its auth
+/// variants (`openai` covers `openai-oauth`). An empty list is unrestricted.
+pub(super) fn worker_route_allowed(allowed: &[String], provider_key: &str, model: &str) -> bool {
+    if allowed.is_empty() {
+        return true;
+    }
+    let model = model
+        .split_once('@')
+        .map_or(model, |(model, _)| model)
+        .trim();
+    let provider_key = provider_key.trim();
+    allowed
+        .iter()
+        .any(|entry| match entry.trim().split_once(':') {
+            Some((prefix, allowed_model)) => {
+                allowed_model == model
+                    && (provider_key == prefix
+                        || provider_key
+                            .strip_prefix(prefix)
+                            .is_some_and(|rest| rest.starts_with('-')))
+            }
+            None => entry.trim() == model,
+        })
+        || (provider_key.is_empty()
+            && allowed.iter().any(|entry| {
+                entry
+                    .trim()
+                    .split_once(':')
+                    .is_some_and(|(_, allowed_model)| allowed_model == model)
+            }))
+}
+
+fn capped_worker_effort(
+    agents: &crate::config::AgentsConfig,
+    provider_key: Option<&str>,
+    provider_name: &str,
+    model: &str,
+    requested: &str,
+    available: &[&str],
+) -> Result<String> {
+    let capped = capped_worker_effort_by_cap(
+        agents,
+        provider_key,
+        provider_name,
+        model,
+        requested,
+        available,
+    )?;
+    let pool_key = provider_key
+        .filter(|key| !key.trim().is_empty())
+        .unwrap_or(provider_name)
+        .to_ascii_lowercase();
+    let Some(pool) = agents.swarm_pool_efforts(&pool_key, model) else {
+        return Ok(capped);
+    };
+    let capped = crate::prompt::swarm_root_reasoning_effort(&capped).unwrap_or(&capped);
+    let cap = worker_effort_cap(agents, provider_key, provider_name, model)
+        .and_then(|cap| jcode_provider_core::reasoning_effort_rank(cap));
+    pool_effort(pool, capped, available, cap).ok_or_else(|| {
+        anyhow::anyhow!("No effort in agents.swarm_pool {pool:?} is supported by {model} within its swarm effort cap")
+    })
+}
+
+/// Nearest effort the pool allows for `requested`: the request itself, else the
+/// closest allowed level above it, else the closest below. Levels the model does
+/// not support are skipped.
+fn pool_effort(
+    pool: &[String],
+    requested: &str,
+    available: &[&str],
+    cap: Option<u8>,
+) -> Option<String> {
+    let supported = |level: &str| {
+        available.is_empty() || available.iter().any(|a| a.eq_ignore_ascii_case(level))
+    };
+    let allowed: Vec<(u8, String)> = pool
+        .iter()
+        .map(|level| level.trim().to_ascii_lowercase())
+        .filter(|level| supported(level))
+        .filter_map(|level| jcode_provider_core::reasoning_effort_rank(&level).map(|r| (r, level)))
+        .filter(|(rank, _)| cap.is_none_or(|cap| *rank <= cap))
+        .collect();
+    let wanted = jcode_provider_core::reasoning_effort_rank(requested)?;
+    allowed
+        .iter()
+        .filter(|(rank, _)| *rank >= wanted)
+        .min_by_key(|(rank, _)| *rank)
+        .or_else(|| allowed.iter().max_by_key(|(rank, _)| *rank))
+        .map(|(_, level)| level.clone())
+}
+
+fn capped_worker_effort_by_cap(
+    agents: &crate::config::AgentsConfig,
+    provider_key: Option<&str>,
+    provider_name: &str,
+    model: &str,
+    requested: &str,
+    available: &[&str],
+) -> Result<String> {
+    let cap = worker_effort_cap(agents, provider_key, provider_name, model);
+    let Some(cap) = cap else {
+        return Ok(requested.to_string());
+    };
+    let cap_rank = jcode_provider_core::reasoning_effort_rank(cap)
+        .ok_or_else(|| anyhow::anyhow!("Invalid swarm effort cap {cap:?} for {model}"))?;
+    let requested_rank = jcode_provider_core::reasoning_effort_rank(requested)
+        .or_else(|| crate::prompt::is_swarm_mode_effort(requested).then_some(u8::MAX))
+        .ok_or_else(|| anyhow::anyhow!("Invalid reasoning effort {requested:?}"))?;
+    if requested_rank <= cap_rank && (available.is_empty() || available.contains(&requested)) {
+        return Ok(requested.to_string());
+    }
+    if available.is_empty() {
+        return Ok(cap.trim().to_ascii_lowercase());
+    }
+    let limit = cap_rank.min(requested_rank);
+    available
+        .iter()
+        .filter_map(|level| {
+            jcode_provider_core::reasoning_effort_rank(level)
+                .filter(|rank| *rank <= limit)
+                .map(|rank| (rank, *level))
+        })
+        .max_by_key(|(rank, _)| *rank)
+        .map(|(_, level)| level.to_string())
+        .ok_or_else(|| {
+            anyhow::anyhow!("No supported effort at or below swarm cap {cap:?} for {model}")
+        })
+}
+
 impl Agent {
+    pub(crate) fn worker_effort_for_provider(
+        provider: &dyn Provider,
+        provider_key: Option<&str>,
+        requested: &str,
+    ) -> Result<String> {
+        let model = provider.model();
+        let model = provider
+            .explicit_provider_pin_for_current_model()
+            .map(|pin| format!("{model}@{pin}"))
+            .unwrap_or(model);
+        capped_worker_effort(
+            &crate::config::config().agents,
+            provider_key,
+            provider.name(),
+            &model,
+            requested,
+            &provider.available_efforts(),
+        )
+    }
+
+    pub(crate) fn mark_swarm_worker(&mut self) -> Result<()> {
+        if self.session.is_swarm_worker {
+            return Ok(());
+        }
+        self.session.is_swarm_worker = true;
+        self.session.save_prepared()
+    }
+
+    pub(crate) fn prepare_swarm_worker(
+        &mut self,
+        provider_key: Option<String>,
+        route_api_method: Option<String>,
+        approval: Option<crate::session::WorkerModelApproval>,
+    ) -> Result<()> {
+        if provider_key.is_some() {
+            self.session.provider_key = provider_key;
+        }
+        self.session.route_api_method = route_api_method;
+        self.session.reasoning_effort = self.provider.reasoning_effort();
+        self.session.set_worker_model_approval(approval);
+        crate::session_effort::record_session_effort(
+            &self.session.id,
+            self.session.reasoning_effort.as_deref(),
+        );
+        self.mark_swarm_worker()
+    }
+
+    /// Whether this session was created as a swarm worker. Persisted with the
+    /// session, so a resumed or pre-existing worker is still recognized.
+    pub(crate) fn is_swarm_worker(&self) -> bool {
+        self.session.is_swarm_worker
+    }
+
+    pub(crate) fn has_worker_effort_cap(&self) -> bool {
+        self.session.is_swarm_worker
+            && Self::worker_effort_is_constrained(
+                self.provider.as_ref(),
+                self.session.provider_key.as_deref(),
+                &self.provider_model(),
+            )
+    }
+
+    pub(crate) fn worker_effort_is_constrained(
+        provider: &dyn Provider,
+        provider_key: Option<&str>,
+        model: &str,
+    ) -> bool {
+        let agents = &crate::config::config().agents;
+        worker_effort_cap(agents, provider_key, provider.name(), model).is_some()
+            || agents
+                .swarm_pool_efforts(
+                    &provider_key
+                        .unwrap_or_else(|| provider.name())
+                        .to_ascii_lowercase(),
+                    model,
+                )
+                .is_some()
+    }
+
+    fn worker_effort(&self, requested: &str) -> Result<String> {
+        if !self.session.is_swarm_worker {
+            return Ok(requested.to_string());
+        }
+        capped_worker_effort(
+            &crate::config::config().agents,
+            self.session.provider_key.as_deref(),
+            self.provider.name(),
+            &self.provider_model(),
+            requested,
+            &self.provider.available_efforts(),
+        )
+    }
+
+    /// Refuse a swarm worker turn on a route outside `agents.spawn_allowed_models`.
+    /// Every switch path (spawn, account failover, model fallback, resume of an
+    /// older session) ends here before a request, so a worker can never spend
+    /// on a model the user did not allow, whatever moved it there.
+    pub(super) fn enforce_worker_model(&self) -> Result<()> {
+        if !self.session.is_swarm_worker {
+            return Ok(());
+        }
+        let provider_key = self
+            .session
+            .provider_key
+            .as_deref()
+            .unwrap_or(self.provider.name());
+        Self::validate_worker_route(provider_key, &self.provider_model())
+    }
+
+    pub(crate) fn validate_worker_route(provider_key: &str, model: &str) -> Result<()> {
+        let allowed = &crate::config::config().agents.spawn_allowed_models;
+        if worker_route_allowed(allowed, provider_key, model) {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "Swarm worker refused to run on {provider_key}:{model}: not in agents.spawn_allowed_models ({})",
+            allowed.join(", ")
+        )
+    }
+
+    pub(crate) fn enforce_worker_request(&self) -> Result<()> {
+        if !self.session.is_swarm_worker {
+            return Ok(());
+        }
+        self.enforce_worker_model()?;
+        self.enforce_worker_effort()?;
+        let model = self.provider_model();
+        if !crate::session::WorkerModelApproval::required_for(&model) {
+            return Ok(());
+        }
+        let effort = self.provider.reasoning_effort();
+        anyhow::ensure!(
+            self.session
+                .is_worker_model_approved(&model, self.provider.name(), effort.as_deref()),
+            "Swarm worker refused to run {model} at {} without matching owner approval",
+            effort.as_deref().unwrap_or("unknown effort")
+        );
+        Ok(())
+    }
+
+    pub(super) fn enforce_worker_effort(&self) -> Result<()> {
+        if !self.session.is_swarm_worker {
+            return Ok(());
+        }
+        if let Some(current) = self.provider.reasoning_effort() {
+            let clamped = self.worker_effort(&current)?;
+            if clamped != current {
+                self.provider.set_reasoning_effort(&clamped)?;
+                anyhow::ensure!(
+                    self.provider.reasoning_effort().as_deref() == Some(clamped.as_str()),
+                    "Provider did not apply the required swarm effort {clamped}"
+                );
+                crate::session_effort::record_session_effort(&self.session.id, Some(&clamped));
+            }
+        } else {
+            anyhow::ensure!(
+                !self.has_worker_effort_cap(),
+                "Provider did not report its effort, so the swarm effort cap cannot be enforced"
+            );
+        }
+        Ok(())
+    }
+
+    fn clamp_worker_effort_after_model_switch(&mut self, previous: Option<String>) -> Result<()> {
+        if !self.session.is_swarm_worker {
+            return Ok(());
+        }
+        if !self.has_worker_effort_cap() {
+            return Ok(());
+        }
+        if let Some(requested) = previous.or_else(|| self.provider.reasoning_effort()) {
+            let effort = self.worker_effort(&requested)?;
+            if effort != requested
+                || self.provider.reasoning_effort().as_deref() != Some(effort.as_str())
+            {
+                self.provider.set_reasoning_effort(&effort)?;
+            }
+            self.session.reasoning_effort = self.provider.reasoning_effort();
+            crate::session_effort::record_session_effort(
+                &self.session.id,
+                self.session.reasoning_effort.as_deref(),
+            );
+        }
+        Ok(())
+    }
     pub fn set_premium_mode(&self, mode: crate::provider::copilot::PremiumMode) {
         self.provider.set_premium_mode(mode);
     }
@@ -284,11 +624,13 @@ impl Agent {
         selection: &crate::provider::RouteSelection,
         source: crate::provider::ProviderModelSelectionSource,
     ) -> Result<()> {
+        let previous_effort = self.provider.reasoning_effort();
         self.provider.set_route_selection(selection)?;
         let resolved_model = self.provider.model();
         self.session.provider_key = Some(selection.runtime_key.stable_id());
         self.session.route_api_method = Some(selection.api_method.clone());
         self.session.model = Some(self.provider_model());
+        self.clamp_worker_effort_after_model_switch(previous_effort)?;
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
         self.refresh_compaction_budget();
@@ -309,6 +651,7 @@ impl Agent {
         model: &str,
         source: crate::provider::ProviderModelSelectionSource,
     ) -> Result<()> {
+        let previous_effort = self.provider.reasoning_effort();
         crate::provider::set_model_with_auth_refresh(self.provider.as_ref(), model)?;
         let resolved_model = self.provider.model();
         self.session.provider_key =
@@ -333,6 +676,7 @@ impl Agent {
             self.session.route_api_method = None;
         }
         self.session.model = Some(self.provider_model());
+        self.clamp_worker_effort_after_model_switch(previous_effort)?;
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
         self.refresh_compaction_budget();
@@ -350,15 +694,46 @@ impl Agent {
     }
 
     pub fn restore_reasoning_effort_from_session(&mut self) {
+        // A choice made while the previous daemon's turn held the agent was
+        // never applied there. It is newer than the saved effort.
+        if let Some(pending) = crate::session_effort::take_pending_effort(&self.session.id) {
+            crate::logging::info(&format!(
+                "Adopting reasoning effort '{pending}' chosen before the restart for {}",
+                self.session.id
+            ));
+            self.session.reasoning_effort = Some(pending);
+            self.restore_saved_reasoning_effort();
+            if let Err(error) = self.session.save_prepared() {
+                crate::logging::warn(&format!(
+                    "Could not persist adopted reasoning effort: {error}"
+                ));
+            }
+            return;
+        }
+        self.restore_saved_reasoning_effort();
+    }
+
+    fn restore_saved_reasoning_effort(&mut self) {
         if let Some(effort) = self.session.reasoning_effort.clone() {
-            if let Err(e) = self.provider.set_reasoning_effort(&effort) {
-                crate::logging::error(&format!(
+            match self
+                .worker_effort(&effort)
+                .and_then(|effort| self.provider.set_reasoning_effort(&effort))
+            {
+                Ok(()) => self.session.reasoning_effort = self.provider.reasoning_effort(),
+                Err(e) => crate::logging::error(&format!(
                     "Failed to restore session reasoning effort '{}': {}",
                     effort, e
-                ));
+                )),
             }
         } else {
             self.session.reasoning_effort = self.provider.reasoning_effort();
+            if let Some(effort) = self.session.reasoning_effort.clone()
+                && let Ok(clamped) = self.worker_effort(&effort)
+                && clamped != effort
+                && self.provider.set_reasoning_effort(&clamped).is_ok()
+            {
+                self.session.reasoning_effort = self.provider.reasoning_effort();
+            }
         }
         // Mirror the effort into the deadlock-free side-table so server handlers
         // (e.g. the swarm seed handler) can learn this session's effort without
@@ -370,14 +745,51 @@ impl Agent {
     }
 
     pub fn set_reasoning_effort(&mut self, effort: &str) -> Result<Option<String>> {
-        self.provider.set_reasoning_effort(effort)?;
+        let effort = self.worker_effort(effort)?;
+        self.provider.set_reasoning_effort(&effort)?;
+        // This choice supersedes any older one still waiting for a busy turn.
+        crate::session_effort::clear_pending_effort(&self.session.id);
         let current = self.provider.reasoning_effort();
         self.session.reasoning_effort = current.clone();
         // Keep the side-table in sync (see `restore_reasoning_effort_from_session`).
         crate::session_effort::record_session_effort(&self.session.id, current.as_deref());
         self.log_env_snapshot("set_reasoning_effort");
-        self.session.save()?;
+        // Effort is explicit session state: persist it even before the first
+        // visible message, like the model and title. `save()` skips that case,
+        // which silently dropped an effort chosen during a new session's first
+        // turn (the deferred busy-turn path has no other way to persist it).
+        self.session.save_prepared()?;
         Ok(current)
+    }
+
+    /// Apply an effort a client chose while this turn held the agent, so it
+    /// governs the next provider request instead of waiting for the turn to
+    /// end. Called at each request boundary.
+    pub(crate) fn apply_pending_reasoning_effort(&mut self) {
+        let Some(effort) = crate::session_effort::take_pending_effort(&self.session.id) else {
+            return;
+        };
+        match self.set_reasoning_effort(&effort) {
+            Ok(current) => crate::logging::info(&format!(
+                "Applied reasoning effort '{}' chosen during the turn",
+                current.as_deref().unwrap_or(&effort)
+            )),
+            Err(error) => crate::logging::warn(&format!(
+                "Could not apply reasoning effort '{effort}' chosen during the turn: {error}"
+            )),
+        }
+    }
+
+    /// Persist a setting already applied through the live provider handle.
+    /// Read the latest value rather than replaying a stale queued request.
+    pub(crate) fn persist_current_reasoning_effort(&mut self) -> Result<()> {
+        self.session.reasoning_effort = self.provider.reasoning_effort();
+        crate::session_effort::record_session_effort(
+            &self.session.id,
+            self.session.reasoning_effort.as_deref(),
+        );
+        self.session.save_prepared()?;
+        Ok(())
     }
 
     pub fn set_agent_model_override(&mut self, target: &str, model: Option<String>) -> Result<()> {
@@ -510,5 +922,152 @@ impl Agent {
     /// Get the stored messages (for transcript export)
     pub fn messages(&self) -> &[StoredMessage] {
         &self.session.messages
+    }
+}
+
+#[cfg(test)]
+mod worker_effort_cap_tests {
+    use super::*;
+
+    #[test]
+    fn worker_route_must_match_an_allowlist_entry_on_its_provider() {
+        let allowed = [
+            "opencode-go:deepseek-v4.1-flash".to_string(),
+            "openai:gpt-6.2-sol".to_string(),
+        ];
+        assert!(worker_route_allowed(
+            &allowed,
+            "opencode-go",
+            "deepseek-v4.1-flash"
+        ));
+        assert!(worker_route_allowed(
+            &allowed,
+            "openai-oauth",
+            "gpt-6.2-sol"
+        ));
+        assert!(worker_route_allowed(
+            &allowed,
+            "openai",
+            "gpt-6.2-sol@openai-otter"
+        ));
+        // The account router moved a worker here: never allowed.
+        assert!(!worker_route_allowed(
+            &allowed,
+            "claude-oauth",
+            "claude-fable-5-2"
+        ));
+        // Same model id on another provider is a different route.
+        assert!(!worker_route_allowed(&allowed, "openrouter", "gpt-6.2-sol"));
+        assert!(!worker_route_allowed(&allowed, "openaix", "gpt-6.2-sol"));
+        // A legacy worker with no recorded provider is judged by model alone.
+        assert!(worker_route_allowed(&allowed, "", "gpt-6.2-sol"));
+        assert!(!worker_route_allowed(&allowed, "", "claude-fable-5-2"));
+        assert!(worker_route_allowed(
+            &[],
+            "claude-oauth",
+            "claude-fable-5-2"
+        ));
+    }
+    #[test]
+    fn pool_effort_moves_to_the_nearest_allowed_level() {
+        let pool = |levels: &[&str]| levels.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+        let all = ["low", "medium", "high", "xhigh", "max"];
+        let sonnet = pool(&["high", "xhigh"]);
+        assert_eq!(
+            pool_effort(&sonnet, "low", &all, None).as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            pool_effort(&sonnet, "xhigh", &all, None).as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            pool_effort(&sonnet, "max", &all, None).as_deref(),
+            Some("xhigh")
+        );
+        let opus = pool(&["medium", "high", "xhigh"]);
+        assert_eq!(
+            pool_effort(&opus, "max", &all, None).as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            pool_effort(&opus, "low", &all, None).as_deref(),
+            Some("medium")
+        );
+        // A level the model cannot serve is skipped.
+        assert_eq!(
+            pool_effort(&sonnet, "low", &["low", "medium", "high"], None).as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            pool_effort(&pool(&["xhigh"]), "low", &["low", "high"], None),
+            None
+        );
+    }
+
+    #[test]
+    fn pool_applies_per_route_and_overrides_requested_effort() {
+        let mut agents = crate::config::AgentsConfig::default();
+        agents.swarm_pool.insert(
+            "claude:claude-sonnet-5-5".into(),
+            vec!["high".into(), "xhigh".into()],
+        );
+        agents
+            .swarm_pool
+            .insert("opencode-go:deepseek-v4.1-flash".into(), Vec::new());
+        let levels = ["low", "medium", "high", "xhigh", "max"];
+        let resolve = |key: &str, model: &str, request: &str| {
+            capped_worker_effort(&agents, Some(key), "Claude", model, request, &levels).unwrap()
+        };
+        assert_eq!(resolve("claude-oauth", "claude-sonnet-5-5", "low"), "high");
+        assert_eq!(resolve("claude", "claude-sonnet-5-5", "max"), "xhigh");
+        // Empty list: every level allowed.
+        assert_eq!(resolve("opencode-go", "deepseek-v4.1-flash", "low"), "low");
+        // Not in the pool: untouched here (the route guard refuses it).
+        assert_eq!(resolve("claude", "claude-opus-5-5", "low"), "low");
+        agents.apply_swarm_pool();
+        assert!(agents.worker_may_use_model("claude:claude-sonnet-5-5"));
+        assert!(!agents.worker_may_use_model("claude:claude-fable-5-2"));
+        assert!(
+            agents
+                .validate_swarm_model_request(Some("claude:claude-sonnet-5-5"))
+                .is_ok()
+        );
+
+        // The exact inline-table form written to the user's config.toml.
+        let parsed: crate::config::Config = toml::from_str(
+            "[agents]\nswarm_pool = { \"claude:claude-opus-5-5\" = [\"medium\", \"high\", \"xhigh\"], \"openai:gpt-6-luna\" = [\"high\", \"xhigh\"] }\n",
+        )
+        .unwrap();
+        let opus = parsed
+            .agents
+            .swarm_pool_efforts("claude-oauth", "claude-opus-5-5")
+            .unwrap();
+        assert_eq!(opus, ["medium", "high", "xhigh"]);
+    }
+
+    #[test]
+    fn model_caps_choose_supported_rung_and_leave_other_routes_unrestricted() {
+        let mut agents = crate::config::AgentsConfig::default();
+        agents
+            .swarm_effort_caps
+            .insert("openai:gpt-6.1-sol".into(), "xhigh".into());
+        let levels = ["low", "medium", "high", "xhigh", "max"];
+        let resolve = |provider, model, request, available: &[&str]| {
+            capped_worker_effort(&agents, Some(provider), provider, model, request, available)
+                .unwrap()
+        };
+        assert_eq!(resolve("openai", "gpt-6.1-sol", "max", &levels), "xhigh");
+        assert_eq!(
+            resolve("openai", "gpt-6.1-sol@account", "max", &levels),
+            "xhigh"
+        );
+        assert_eq!(resolve("openai", "gpt-6.1-sol", "high", &levels), "high");
+        assert_eq!(
+            resolve("openai", "gpt-6.1-sol", "max", &["low", "high", "max"]),
+            "high"
+        );
+        assert_eq!(resolve("openrouter", "gpt-6.1-sol", "max", &levels), "max");
+        assert_eq!(resolve("openai", "other", "max", &levels), "max");
     }
 }

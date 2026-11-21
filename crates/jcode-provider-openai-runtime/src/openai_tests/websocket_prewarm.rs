@@ -27,7 +27,8 @@ fn prewarm_user_message(text: &str) -> ChatMessage {
         content: vec![ContentBlock::Text {
             text: text.to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }
@@ -90,7 +91,11 @@ async fn websocket_v2_prewarm_is_adopted_by_complete_without_losing_request_stat
         assert_eq!(warm["instructions"], "preserve this system prompt");
         assert_eq!(warm["input"], serde_json::json!([]));
         assert_eq!(warm["generate"], false);
-        assert!(warm["prompt_cache_key"].as_str().is_some_and(|key| !key.is_empty()));
+        assert!(
+            warm["prompt_cache_key"]
+                .as_str()
+                .is_some_and(|key| !key.is_empty())
+        );
         assert_eq!(warm["reasoning"]["effort"], "high");
         assert_eq!(warm["tools"][0]["name"], "lookup");
         socket
@@ -131,12 +136,16 @@ async fn websocket_v2_prewarm_is_adopted_by_complete_without_losing_request_stat
         assert!(input.iter().any(|item| item["type"] == "reasoning"
             && item["id"] == "rs_history"
             && item["encrypted_content"] == "encrypted-history"));
-        assert!(input
-            .iter()
-            .any(|item| item.to_string().contains("first user turn")));
-        assert!(input
-            .iter()
-            .any(|item| item.to_string().contains("current user turn")));
+        assert!(
+            input
+                .iter()
+                .any(|item| item.to_string().contains("first user turn"))
+        );
+        assert!(
+            input
+                .iter()
+                .any(|item| item.to_string().contains("current user turn"))
+        );
 
         socket
             .send(WsMessage::Text(
@@ -185,7 +194,8 @@ async fn websocket_v2_prewarm_is_adopted_by_complete_without_losing_request_stat
                     text: "prior answer".to_string(),
                     cache_control: None,
                 },
-            ],
+            ]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -234,7 +244,7 @@ async fn unfinished_or_incompatible_prewarm_is_cancelled_without_foreground_wait
             Ok(None) | Ok(Some(Ok(WsMessage::Close(_)))) | Ok(Some(Err(_)))
         ));
     });
-    slot.start(Arc::new(RwLock::new(credentials.clone())), &request);
+    slot.start(Arc::new(RwLock::new(credentials.clone())), &request, Arc::new(StdMutex::new(None)));
     accepted.notified().await;
 
     let incompatible = serde_json::json!({
@@ -276,7 +286,7 @@ async fn ready_prewarm_with_different_settings_is_invalidated() {
         )).await.unwrap();
         let _ = socket.next().await;
     });
-    slot.start(Arc::new(RwLock::new(credentials.clone())), &request);
+    slot.start(Arc::new(RwLock::new(credentials.clone())), &request, Arc::new(StdMutex::new(None)));
     wait_for_prewarm(&slot).await;
     let changed = serde_json::json!({
         "model": "gpt-5.6-sol", "instructions": "changed", "tools": [], "input": []
@@ -309,7 +319,7 @@ async fn rejected_warmup_is_not_adopted() {
             r#"{"type":"response.completed","response":{"id":"resp_rejected","status":"failed","output":[]}}"#.into(),
         )).await.unwrap();
     });
-    slot.start(Arc::new(RwLock::new(credentials.clone())), &request);
+    slot.start(Arc::new(RwLock::new(credentials.clone())), &request, Arc::new(StdMutex::new(None)));
     server.await.expect("rejection server");
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(slot.take_ready(&request, &credentials).is_none());

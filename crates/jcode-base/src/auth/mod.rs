@@ -532,7 +532,7 @@ impl AuthStatus {
                 }
             }
             crate::provider_catalog::LoginProviderTarget::OpenRouter => {
-                if api_key_available("OPENROUTER_API_KEY", "openrouter.env") {
+                if crate::provider::openrouter::standard_openrouter_api_key().is_some() {
                     AuthState::Available
                 } else {
                     AuthState::NotConfigured
@@ -636,14 +636,16 @@ impl AuthStatus {
                 )
             }
             crate::provider_catalog::LoginProviderTarget::OpenRouter => {
+                let own_key = crate::provider::openrouter::standard_openrouter_api_key().is_some();
                 let (source, detail) = summarize_sources(vec![
-                    env_source("OPENROUTER_API_KEY"),
+                    env_source("OPENROUTER_API_KEY").filter(|_| own_key),
                     config_source(
                         "OPENROUTER_API_KEY",
                         "openrouter.env",
                         "~/.config/jcode/openrouter.env",
-                    ),
-                    external_api_key_source("OPENROUTER_API_KEY"),
+                    )
+                    .filter(|_| own_key),
+                    external_api_key_source("OPENROUTER_API_KEY").filter(|_| own_key),
                 ]);
                 (
                     source,

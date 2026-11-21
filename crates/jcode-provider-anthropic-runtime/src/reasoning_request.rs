@@ -42,6 +42,7 @@ pub(super) fn with_binding_beta(base: &str, thinking: &Option<ApiThinking>) -> S
 /// Preserve caller preferences, not the original model's resolved defaults.
 /// Both fallback paths use this snapshot to rebuild the next wire request.
 pub(super) struct RetrySettings {
+    pub(super) worker_request_is_pinned: bool,
     effort: Option<String>,
     show_thinking: bool,
     max_tokens_override: Option<u32>,
@@ -51,6 +52,7 @@ pub(super) struct RetrySettings {
 impl RetrySettings {
     pub(super) fn from_provider(provider: &AnthropicProvider) -> Self {
         Self {
+            worker_request_is_pinned: jcode_provider_core::worker_request_is_pinned(),
             effort: provider.stored_reasoning_effort(),
             show_thinking: jcode_base::config::config().display.show_thinking,
             max_tokens_override: provider.max_tokens_override,
@@ -63,6 +65,11 @@ impl RetrySettings {
     }
 
     pub(super) fn reshape(&self, request: &mut ApiRequest, model: &str, is_oauth: bool) {
+        // Controls and the top-level effort they pin belong to the original
+        // model's cache. The fallback model starts its own cache at the
+        // caller's effort, and may not accept per-message effort at all.
+        jcode_provider_anthropic::effort_controls::strip_effort_controls(&mut request.messages);
+        request.effort_record = None;
         request.model = super::strip_1m_suffix(model).to_string();
         request.max_tokens = self
             .max_tokens_override
@@ -97,15 +104,19 @@ pub(super) fn recover_rejected_reasoning(
     model: &str,
     is_oauth: bool,
 ) -> bool {
+    // A rejected effort or thinking shape also rules out per-message effort.
+    let had_controls =
+        jcode_provider_anthropic::effort_controls::strip_effort_controls(&mut request.messages);
+    request.effort_record = None;
     if anthropic_thinking_always_on(model) {
         if request.output_config.take().is_none() {
-            return false;
+            return had_controls;
         }
         request.thinking = Some(adaptive_thinking(model));
         request.temperature = None;
     } else {
         if request.thinking.is_none() && request.output_config.is_none() {
-            return false;
+            return had_controls;
         }
         request.thinking = None;
         request.output_config = None;
@@ -132,11 +143,13 @@ mod tests {
             temperature: None,
             service_tier: None,
             stream: true,
+            effort_record: None,
         }
     }
 
     fn settings(effort: Option<&str>) -> RetrySettings {
         RetrySettings {
+            worker_request_is_pinned: false,
             effort: effort.map(str::to_string),
             show_thinking: false,
             max_tokens_override: None,

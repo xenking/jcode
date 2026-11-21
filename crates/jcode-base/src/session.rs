@@ -16,6 +16,33 @@ use std::path::Path;
 pub use streaming::StreamingGuard;
 pub use window_closures::{clear_window_closed, recent_window_closures, record_window_closed};
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkerModelApproval {
+    pub model: String,
+    pub provider: String,
+    pub effort: String,
+}
+
+impl WorkerModelApproval {
+    pub fn required_for(model: &str) -> bool {
+        let model = model.to_ascii_lowercase();
+        model.split([':', '/']).any(|id| {
+            let id = id.split(['@', '[']).next().unwrap_or_default().trim();
+            id == "fable"
+                || id == "astra"
+                || id == "claude-fable"
+                || id.starts_with("claude-fable-")
+                || (id.starts_with("gpt-") && id.split('-').any(|part| part == "astra"))
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct AuthorizedWorkerModel {
+    worker_id: String,
+    selection: WorkerModelApproval,
+}
+
 mod agent_models;
 mod crash;
 pub use agent_models::AgentModelOverrides;
@@ -26,7 +53,9 @@ mod memory_profile;
 mod model;
 mod parallel_messages;
 mod persistence;
+mod pinned_skill;
 pub mod prewarm;
+mod prompt_inputs;
 mod render;
 mod storage_paths;
 pub use crash::{
@@ -34,21 +63,25 @@ pub use crash::{
     find_session_by_name_or_id, recover_crashed_sessions, recover_crashed_sessions_by_ids,
 };
 pub use jcode_session_types::{
-    EnvSnapshot, GitState, SessionImproveMode, SessionStatus, StoredCompactionState,
-    StoredDisplayRole, StoredMemoryInjection, StoredMessage, StoredTokenUsage,
+    EnvSnapshot, GitState, RELOAD_INTERRUPTED_MARKER, SessionImproveMode, SessionStatus,
+    StoredCompactionState, StoredDisplayRole, StoredMemoryInjection, StoredMessage,
+    StoredTokenUsage, strip_reload_interruption_marker,
 };
 use journal::{PersistVectorMode, SessionJournalMeta, SessionPersistState};
 pub use maintenance::prune_old_session_backups;
 pub use memory_profile::SessionMemoryProfileSnapshot;
 use memory_profile::{
-    ContentBlockMemoryStats, SessionMemoryProfileCache, summarize_blocks, summarize_message_content,
+    ContentBlockMemoryStats, SessionMemoryProfileCache, stored_message_json_bytes,
+    summarize_blocks, summarize_message_content,
 };
-use model::SESSION_CONTEXT_PREFIX;
+pub(crate) use model::SESSION_CONTEXT_PREFIX;
 pub use model::{StoredReplayEvent, StoredReplayEventKind};
+pub use prompt_inputs::{PersistedPromptInputs, load_prompt_inputs, save_prompt_inputs};
 pub use render::{
-    RenderedCompactedHistoryInfo, RenderedImage, RenderedImageAnchor, RenderedImageSource,
-    RenderedMessage, has_rendered_images, is_attached_image_label_text, render_images,
-    render_messages, render_messages_and_images, render_messages_and_images_with_compacted_history,
+    CACHE_COLD_DIVIDER_METHOD, RenderedCompactedHistoryInfo, RenderedImage, RenderedImageAnchor,
+    RenderedImageSource, RenderedMessage, compaction_divider_content, has_rendered_images,
+    is_attached_image_label_text, render_images, render_messages, render_messages_and_images,
+    render_messages_and_images_with_compacted_history, render_messages_and_images_with_ids,
     summarize_tool_calls,
 };
 pub use storage_paths::session_journal_path_from_snapshot;
@@ -59,46 +92,10 @@ use storage_paths::{estimate_json_bytes, persist_vector_mode_label};
 pub use storage_paths::{session_exists, session_journal_path, session_path};
 pub use {jcode_session_types::prompt_title, persistence::drain_saves_for_shutdown};
 
-fn stored_messages_to_messages(messages: &[StoredMessage]) -> Vec<Message> {
-    messages.iter().map(StoredMessage::to_message).collect()
-}
-
-fn message_has_tool_image(content: &[ContentBlock]) -> bool {
-    content
-        .iter()
-        .any(|block| matches!(block, ContentBlock::Image { .. }))
-        && content
-            .iter()
-            .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
-}
-
-fn is_internal_system_reminder_message(message: &StoredMessage) -> bool {
-    message
-        .content
-        .iter()
-        .find_map(|block| match block {
-            ContentBlock::Text { text, .. } => Some(text.trim_start()),
-            _ => None,
-        })
-        .is_some_and(|text| text.starts_with("<system-reminder>"))
-}
-
-fn is_visible_conversation_message(message: &StoredMessage) -> bool {
-    message.display_role.is_none()
-        && !is_internal_system_reminder_message(message)
-        && !is_scheduled_task_message(message)
-}
-
-/// Recognize scheduler prompts persisted before they received an explicit
-/// system display role. This keeps old sessions from treating them as user
-/// prompts after resume.
-pub fn is_scheduled_task_message(message: &StoredMessage) -> bool {
-    message.role == Role::User
-        && message.content.iter().any(|block| {
-            matches!(block, ContentBlock::Text { text, .. } if text.trim_start().starts_with("[Scheduled task]\n"))
-        })
-}
-
+#[path = "session/message_helpers.rs"]
+mod message_helpers;
+pub(crate) use message_helpers::is_visible_conversation_message;
+pub use message_helpers::{derive_session_provider_key, is_scheduled_task_message};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -113,13 +110,19 @@ pub struct Session {
     /// Full assembled system prompt replacement, including an intentionally empty prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_skill: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pinned_skills: Vec<String>,
     /// Durable logical input turn identity for per-route usage deduplication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_usage_turn_id: Option<String>,
     /// Persisted compacted-view state so reload/resume can continue using the
     /// active summary + recent tail instead of re-sending the full transcript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compaction: Option<StoredCompactionState>,
+    /// Shared with persistence metadata and session clones. Mutation must use
+    /// Arc::make_mut so exported/redacted or forked views remain isolated.
+    pub compaction: Option<std::sync::Arc<StoredCompactionState>>,
     /// Provider-specific session ID (e.g., Claude Code CLI session for resume)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_session_id: Option<String>,
@@ -137,6 +140,12 @@ pub struct Session {
     /// Provider reasoning/thinking effort for this session (e.g., OpenAI low|medium|high|xhigh).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// This session was spawned as a swarm worker, not a user-started session.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_swarm_worker: bool,
+    /// Owner approval for one effective model and effort on this worker only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worker_model_approval: Option<AuthorizedWorkerModel>,
     /// Per-session context ceiling. Missing values follow the global cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_cap: Option<usize>,
@@ -179,9 +188,24 @@ pub struct Session {
     /// Last time the session was marked active
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_active_at: Option<DateTime<Utc>>,
+    /// Wall-clock time of the last provider request that wrote or refreshed the
+    /// prompt cache. Persisted (unlike the compaction manager's in-memory
+    /// clock) so the cold-cache shake still fires after a daemon reload, exec,
+    /// or session resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_provider_request_at: Option<DateTime<Utc>>,
+    /// Cache touch already handled by a completed cold-cache compaction.
+    /// Unfinished work can be retried after reload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_cache_expiry_compaction_for: Option<DateTime<Utc>>,
     /// Whether this is a debug/test session (created via debug socket)
     #[serde(default)]
     pub is_debug: bool,
+    /// A hidden session is a `/btw` side-question fork: it lives on disk and
+    /// can be resumed by id, but the session list skips it until the user
+    /// promotes it to a real chat.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
     /// Whether this session has been saved/bookmarked by the user
     #[serde(default)]
     pub saved: bool,
@@ -218,8 +242,15 @@ pub struct Session {
 }
 
 #[derive(Debug, Deserialize)]
+struct SessionMessageId {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct SessionStartupStub {
     id: String,
+    #[serde(default)]
+    messages: Vec<SessionMessageId>,
     #[serde(default)]
     parent_id: Option<String>,
     #[serde(default)]
@@ -228,10 +259,14 @@ struct SessionStartupStub {
     custom_title: Option<String>,
     #[serde(default)]
     system_prompt: Option<String>,
+    #[serde(default)]
+    pinned_skill: Option<String>,
+    #[serde(default)]
+    pinned_skills: Vec<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     #[serde(default)]
-    compaction: Option<StoredCompactionState>,
+    compaction: Option<std::sync::Arc<StoredCompactionState>>,
     #[serde(default)]
     provider_session_id: Option<String>,
     #[serde(default)]
@@ -242,6 +277,10 @@ struct SessionStartupStub {
     route_api_method: Option<String>,
     #[serde(default)]
     reasoning_effort: Option<String>,
+    #[serde(default)]
+    is_swarm_worker: bool,
+    #[serde(default)]
+    worker_model_approval: Option<AuthorizedWorkerModel>,
     #[serde(default)]
     context_cap: Option<usize>,
     #[serde(default)]
@@ -272,6 +311,8 @@ struct SessionStartupStub {
     last_active_at: Option<DateTime<Utc>>,
     #[serde(default)]
     is_debug: bool,
+    #[serde(default)]
+    hidden: bool,
     #[serde(default)]
     saved: bool,
     #[serde(default)]
@@ -308,53 +349,34 @@ fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
 
-pub fn derive_session_provider_key(provider_name: &str) -> Option<String> {
-    let normalized_name = provider_name.trim().to_ascii_lowercase();
-    if normalized_name == "jcode" {
-        return Some("jcode".to_string());
-    }
-
-    if let Ok(runtime_provider) = std::env::var("JCODE_RUNTIME_PROVIDER") {
-        let runtime_provider = runtime_provider.trim().to_ascii_lowercase();
-        if !runtime_provider.is_empty() && runtime_provider != "openai-compatible" {
-            return Some(runtime_provider);
-        }
-    }
-
-    if let Ok(namespace) = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE") {
-        let namespace = namespace.trim().to_ascii_lowercase();
-        if !namespace.is_empty() {
-            return Some(namespace);
-        }
-    }
-
-    if let Ok(active) = std::env::var("JCODE_ACTIVE_PROVIDER") {
-        let active = active.trim().to_ascii_lowercase();
-        if !active.is_empty() {
-            return Some(active);
-        }
-    }
-
-    let fallback = match normalized_name.as_str() {
-        "anthropic" | "claude" | "claude cli" => "claude",
-        "openai" => "openai",
-        "github copilot" | "copilot" => "copilot",
-        "openrouter" => "openrouter",
-        "cursor" => "cursor",
-        "gemini" => "gemini",
-        "antigravity" => "antigravity",
-        "" => return None,
-        other => other,
-    };
-
-    Some(fallback.to_string())
-}
-
 impl Session {
+    pub fn set_worker_model_approval(&mut self, approval: Option<WorkerModelApproval>) {
+        self.worker_model_approval = approval.map(|selection| AuthorizedWorkerModel {
+            worker_id: self.id.clone(),
+            selection,
+        });
+    }
+
+    pub fn is_worker_model_approved(
+        &self,
+        model: &str,
+        provider: &str,
+        effort: Option<&str>,
+    ) -> bool {
+        self.worker_model_approval.as_ref().is_some_and(|approved| {
+            approved.worker_id == self.id
+                && approved.selection.model == model
+                && approved.selection.provider == provider
+                && Some(approved.selection.effort.as_str()) == effort
+        })
+    }
+
     fn session_from_startup_stub(stub: SessionStartupStub) -> Self {
         let mut session = Self::create_with_id(stub.id, stub.parent_id, stub.title);
         session.custom_title = stub.custom_title;
         session.system_prompt = stub.system_prompt;
+        session.pinned_skill = stub.pinned_skill;
+        session.pinned_skills = stub.pinned_skills;
         session.created_at = stub.created_at;
         session.updated_at = stub.updated_at;
         session.compaction = stub.compaction;
@@ -363,6 +385,8 @@ impl Session {
         session.model = stub.model;
         session.route_api_method = stub.route_api_method;
         session.reasoning_effort = stub.reasoning_effort;
+        session.is_swarm_worker = stub.is_swarm_worker;
+        session.worker_model_approval = stub.worker_model_approval;
         session.context_cap = stub.context_cap;
         session.subagent_model = stub.subagent_model;
         session.agent_model_overrides = stub.agent_model_overrides;
@@ -378,6 +402,7 @@ impl Session {
         session.last_pid = stub.last_pid;
         session.last_active_at = stub.last_active_at;
         session.is_debug = stub.is_debug;
+        session.hidden = stub.hidden;
         session.saved = stub.saved;
         session.save_label = stub.save_label;
         session.migration_epoch = stub.migration_epoch;
@@ -395,6 +420,8 @@ impl Session {
         let mut session = Self::create_with_id(snapshot.id, snapshot.parent_id, snapshot.title);
         session.custom_title = snapshot.custom_title;
         session.system_prompt = snapshot.system_prompt;
+        session.pinned_skill = snapshot.pinned_skill;
+        session.pinned_skills = snapshot.pinned_skills;
         session.created_at = snapshot.created_at;
         session.updated_at = snapshot.updated_at;
         session.messages = snapshot.messages;
@@ -404,6 +431,8 @@ impl Session {
         session.model = snapshot.model;
         session.route_api_method = snapshot.route_api_method;
         session.reasoning_effort = snapshot.reasoning_effort;
+        session.is_swarm_worker = snapshot.is_swarm_worker;
+        session.worker_model_approval = snapshot.worker_model_approval;
         session.context_cap = snapshot.context_cap;
         session.subagent_model = snapshot.subagent_model;
         session.agent_model_overrides = snapshot.agent_model_overrides;
@@ -419,9 +448,10 @@ impl Session {
         session.last_pid = snapshot.last_pid;
         session.last_active_at = snapshot.last_active_at;
         session.is_debug = snapshot.is_debug;
+        session.hidden = snapshot.hidden;
         session.saved = snapshot.saved;
         session.save_label = snapshot.save_label;
-        session.replay_events.clear();
+        session.replay_events = snapshot.replay_events;
         session.env_snapshots.clear();
         session.memory_injections.clear();
         session.mark_memory_profile_dirty();
@@ -432,19 +462,26 @@ impl Session {
 
     pub fn debug_memory_profile(&self) -> serde_json::Value {
         let message_stats =
-            summarize_message_content(self.messages.iter().map(|message| &message.content));
+            summarize_message_content(self.messages.iter().map(|message| &*message.content));
 
-        let session_message_json_bytes: usize = self.messages.iter().map(estimate_json_bytes).sum();
+        let session_message_json_bytes: usize =
+            self.messages.iter().map(stored_message_json_bytes).sum();
         let provider_cache_stats = summarize_message_content(
             self.provider_messages_cache
                 .iter()
-                .map(|message| &message.content),
+                .map(|message| &*message.content),
         );
         let provider_messages_cache_json_bytes: usize = self
             .provider_messages_cache
             .iter()
-            .map(estimate_json_bytes)
+            .map(Message::serialized_json_bytes)
             .sum();
+        let provider_cache_shared_content_count = self
+            .provider_messages_cache
+            .iter()
+            .zip(&self.messages)
+            .filter(|(cached, source)| cached.content.shares_storage_with(&source.content))
+            .count();
         let env_snapshots_json_bytes: usize =
             self.env_snapshots.iter().map(estimate_json_bytes).sum();
         let memory_injections_json_bytes: usize =
@@ -452,10 +489,9 @@ impl Session {
         let replay_events_json_bytes: usize =
             self.replay_events.iter().map(estimate_json_bytes).sum();
         let compaction_json_bytes = self
-            .compaction
-            .as_ref()
-            .map(estimate_json_bytes)
-            .unwrap_or(0);
+            .memory_profile_cache
+            .compaction_json_bytes
+            .bytes(self.compaction.as_ref());
         let compaction_summary_bytes = self
             .compaction
             .as_ref()
@@ -467,9 +503,60 @@ impl Session {
             .and_then(|c| c.openai_encrypted_content.as_ref())
             .map(|text| text.len())
             .unwrap_or(0);
+        let metadata_payload_capacity = self
+            .persist_state
+            .last_meta
+            .as_ref()
+            .and_then(|meta| meta.compaction.as_ref())
+            .filter(|stored| {
+                !self
+                    .compaction
+                    .as_ref()
+                    .is_some_and(|canonical| std::sync::Arc::ptr_eq(canonical, stored))
+            })
+            .map(|stored| {
+                let encrypted_bytes = stored
+                    .openai_encrypted_content
+                    .as_ref()
+                    .filter(|body| {
+                        !self
+                            .compaction
+                            .as_ref()
+                            .and_then(|canonical| canonical.openai_encrypted_content.as_ref())
+                            .is_some_and(|canonical| std::sync::Arc::ptr_eq(canonical, body))
+                    })
+                    .map_or(0, |body| body.len());
+                stored.summary_text.capacity() + encrypted_bytes
+            })
+            .unwrap_or(0);
+
+        // Diagnostic-only traversal of both retained roots. One accounting pass
+        // avoids charging shared canonical/provider payload allocations twice.
+        let mut capacity = jcode_message_types::content_capacity::ContentCapacityAccounting::new();
+        capacity.record_vec_allocation(&self.messages);
+        capacity.record_vec_allocation(&self.provider_messages_cache);
+        for message in &self.messages {
+            capacity.record_shared(&message.content);
+        }
+        for message in &self.provider_messages_cache {
+            capacity.record_shared(&message.content);
+        }
+        let capacity = capacity.finish();
 
         serde_json::json!({
             "session_id": self.id,
+            "retained_transcript_capacity": {
+                "scope": "canonical messages and provider message cache, shared backing counted once",
+                "known_heap_bytes": capacity.known_heap_bytes(),
+                "string_len_bytes": capacity.string_len_bytes,
+                "string_capacity_bytes": capacity.string_capacity_bytes,
+                "vec_capacity_bytes": capacity.vec_capacity_bytes,
+                "shared_backings": capacity.shared_backings,
+                "shared_references": capacity.shared_references,
+                "json_object_entries": capacity.json_object_entries,
+                "is_lower_bound": true,
+                "excluded_overhead": "JSON map nodes/buckets, Arc headers, allocator metadata/rounding/fragmentation, and non-content message fields",
+            },
             "messages": {
                 "count": self.messages.len(),
                 "json_bytes": session_message_json_bytes,
@@ -494,6 +581,10 @@ impl Session {
                     .unwrap_or(0),
                 "json_bytes": compaction_json_bytes,
                 "summary_text_bytes": compaction_summary_bytes,
+                "retained_payload_capacity_bytes": self.compaction.as_ref().map(|c| {
+                    c.summary_text.capacity() + c.openai_encrypted_content.as_ref().map_or(0, |body| body.len())
+                }).unwrap_or(0),
+                "persisted_metadata_payload_capacity_bytes": metadata_payload_capacity,
                 "encrypted_content_bytes": compaction_encrypted_bytes,
             },
             "env_snapshots": {
@@ -513,6 +604,7 @@ impl Session {
                 "source_len": self.provider_messages_cache_len,
                 "mode": persist_vector_mode_label(self.provider_messages_cache_mode),
                 "json_bytes": provider_messages_cache_json_bytes,
+                "content_shared_with_source_count": provider_cache_shared_content_count,
                 "memory": provider_cache_stats.to_json(),
             },
             "totals": {
@@ -533,12 +625,49 @@ impl Session {
         })
     }
 
+    /// Models that only mean "not resolved yet". Persisting one makes the
+    /// session resume on a placeholder name (unroutable, and shown as
+    /// "unknown" in swarm/session lists), so they are dropped instead.
+    pub fn is_placeholder_model(model: &str) -> bool {
+        let model = model.trim();
+        model.is_empty() || model.eq_ignore_ascii_case("unknown")
+    }
+
+    /// Drop a placeholder model so an attach re-resolves it from the provider
+    /// instead of resuming as "unknown".
+    ///
+    /// Route metadata only falls with the placeholder when it merely named the
+    /// provider (`claude-oauth`, `openai-api`). A route that names an observed
+    /// account (`openai-oauth@work`) is a fact about the session's account, not
+    /// about the model, so it survives: dropping it would make a resumed
+    /// session forget which account it was bound to and route elsewhere.
+    pub fn normalize_placeholder_model(&mut self) {
+        if self
+            .model
+            .as_deref()
+            .is_some_and(Self::is_placeholder_model)
+        {
+            let observed_account = self
+                .route_api_method
+                .as_deref()
+                .and_then(jcode_provider_core::oauth_account_label)
+                .is_some();
+            self.model = None;
+            if !observed_account {
+                self.provider_key = None;
+                self.route_api_method = None;
+            }
+        }
+    }
+
     fn journal_meta(&self) -> SessionJournalMeta {
         SessionJournalMeta {
             parent_id: self.parent_id.clone(),
             title: self.title.clone(),
             custom_title: self.custom_title.clone(),
             system_prompt: self.system_prompt.clone(),
+            pinned_skill: self.pinned_skill.clone(),
+            pinned_skills: self.pinned_skills.clone(),
             updated_at: self.updated_at,
             compaction: self.compaction.clone(),
             compaction_unchanged: false,
@@ -549,6 +678,8 @@ impl Session {
             route_api_method_present: true,
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
+            is_swarm_worker: self.is_swarm_worker,
+            worker_model_approval: self.worker_model_approval.clone(),
             context_cap: self.context_cap,
             subagent_model: self.subagent_model.clone(),
             agent_model_overrides: self.agent_model_overrides.clone(),
@@ -563,7 +694,10 @@ impl Session {
             status: self.status.clone(),
             last_pid: self.last_pid,
             last_active_at: self.last_active_at,
+            last_provider_request_at: self.last_provider_request_at,
+            last_cache_expiry_compaction_for: self.last_cache_expiry_compaction_for,
             is_debug: self.is_debug,
+            hidden: self.hidden,
             saved: self.saved,
             save_label: self.save_label.clone(),
         }
@@ -621,7 +755,7 @@ impl Session {
             .map(|prev| crate::message::extend_stable_hash(prev, message_hash))
             .unwrap_or(message_hash);
         self.memory_profile_cache.provider_cache_count += 1;
-        self.memory_profile_cache.provider_cache_json_bytes += estimate_json_bytes(&message);
+        self.memory_profile_cache.provider_cache_json_bytes += message.serialized_json_bytes();
         self.memory_profile_cache
             .provider_cache_stats
             .merge_from(&summarize_blocks(&message.content));
@@ -635,16 +769,17 @@ impl Session {
 
     fn rebuild_memory_profile_cache(&mut self) {
         let message_stats =
-            summarize_message_content(self.messages.iter().map(|message| &message.content));
+            summarize_message_content(self.messages.iter().map(|message| &*message.content));
         let provider_cache_stats = summarize_message_content(
             self.provider_messages_cache
                 .iter()
-                .map(|message| &message.content),
+                .map(|message| &*message.content),
         );
 
         self.memory_profile_cache = SessionMemoryProfileCache {
+            compaction_json_bytes: self.memory_profile_cache.compaction_json_bytes.clone(),
             messages_count: self.messages.len(),
-            messages_json_bytes: self.messages.iter().map(estimate_json_bytes).sum(),
+            messages_json_bytes: self.messages.iter().map(stored_message_json_bytes).sum(),
             message_stats,
             env_snapshots_count: self.env_snapshots.len(),
             env_snapshots_json_bytes: self.env_snapshots.iter().map(estimate_json_bytes).sum(),
@@ -660,7 +795,7 @@ impl Session {
             provider_cache_json_bytes: self
                 .provider_messages_cache
                 .iter()
-                .map(estimate_json_bytes)
+                .map(Message::serialized_json_bytes)
                 .sum(),
             provider_cache_stats,
         };
@@ -676,10 +811,9 @@ impl Session {
     pub fn memory_profile_snapshot(&mut self) -> SessionMemoryProfileSnapshot {
         self.ensure_memory_profile_cache();
         let compaction_json_bytes = self
-            .compaction
-            .as_ref()
-            .map(estimate_json_bytes)
-            .unwrap_or(0);
+            .memory_profile_cache
+            .compaction_json_bytes
+            .bytes(self.compaction.as_ref());
 
         SessionMemoryProfileSnapshot {
             message_count: self.memory_profile_cache.messages_count,
@@ -745,6 +879,8 @@ impl Session {
         self.title = meta.title;
         self.custom_title = meta.custom_title;
         self.system_prompt = meta.system_prompt;
+        self.pinned_skill = meta.pinned_skill;
+        self.pinned_skills = meta.pinned_skills;
         self.updated_at = meta.updated_at;
         if !meta.compaction_unchanged {
             self.compaction = meta.compaction;
@@ -756,7 +892,10 @@ impl Session {
             self.route_api_method = meta.route_api_method;
         }
         self.model = meta.model;
+        self.normalize_placeholder_model();
         self.reasoning_effort = meta.reasoning_effort;
+        self.is_swarm_worker = meta.is_swarm_worker;
+        self.worker_model_approval = meta.worker_model_approval;
         self.context_cap = meta.context_cap;
         self.subagent_model = meta.subagent_model;
         self.agent_model_overrides = meta.agent_model_overrides;
@@ -771,7 +910,15 @@ impl Session {
         self.status = meta.status;
         self.last_pid = meta.last_pid;
         self.last_active_at = meta.last_active_at;
+        // Pre-cache-expiry journals did not record these timestamps.
+        self.last_provider_request_at = meta
+            .last_provider_request_at
+            .or(self.last_provider_request_at);
+        self.last_cache_expiry_compaction_for = meta
+            .last_cache_expiry_compaction_for
+            .or(self.last_cache_expiry_compaction_for);
         self.is_debug = meta.is_debug;
+        self.hidden = meta.hidden;
         self.saved = meta.saved;
         self.save_label = meta.save_label;
         self.mark_memory_profile_dirty();
@@ -795,6 +942,8 @@ impl Session {
             updated_at: now,
             messages: Vec::new(),
             system_prompt: None,
+            pinned_skill: None,
+            pinned_skills: Vec::new(),
             model_usage_turn_id: None,
             compaction: None,
             provider_session_id: None,
@@ -802,6 +951,8 @@ impl Session {
             model: None,
             route_api_method: None,
             reasoning_effort: None,
+            is_swarm_worker: false,
+            worker_model_approval: None,
             context_cap: None,
             subagent_model: None,
             agent_model_overrides: AgentModelOverrides::new(),
@@ -816,7 +967,10 @@ impl Session {
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),
             last_active_at: Some(now),
+            last_provider_request_at: None,
+            last_cache_expiry_compaction_for: None,
             is_debug,
+            hidden: false,
             saved: false,
             save_label: None,
             env_snapshots: Vec::new(),
@@ -855,6 +1009,8 @@ impl Session {
             updated_at: now,
             messages: Vec::new(),
             system_prompt: None,
+            pinned_skill: None,
+            pinned_skills: Vec::new(),
             model_usage_turn_id: None,
             compaction: None,
             provider_session_id: None,
@@ -862,6 +1018,8 @@ impl Session {
             model: None,
             route_api_method: None,
             reasoning_effort: None,
+            is_swarm_worker: false,
+            worker_model_approval: None,
             context_cap: None,
             subagent_model: None,
             agent_model_overrides: AgentModelOverrides::new(),
@@ -876,7 +1034,10 @@ impl Session {
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),
             last_active_at: Some(now),
+            last_provider_request_at: None,
+            last_cache_expiry_compaction_for: None,
             is_debug,
+            hidden: false,
             saved: false,
             save_label: None,
             env_snapshots: Vec::new(),
@@ -1235,35 +1396,11 @@ request in this new forked session, using the inherited conversation only as con
             *title = crate::message::redact_secrets(title);
         }
         if let Some(compaction) = redacted.compaction.as_mut() {
+            let compaction = std::sync::Arc::make_mut(compaction);
             compaction.summary_text = crate::message::redact_secrets(&compaction.summary_text);
         }
         for msg in &mut redacted.messages {
-            for block in &mut msg.content {
-                match block {
-                    ContentBlock::Text { text, .. }
-                    | ContentBlock::Reasoning { text }
-                    | ContentBlock::ReasoningTrace { text } => {
-                        *text = crate::message::redact_secrets(text);
-                    }
-                    ContentBlock::AnthropicThinking { thinking, .. } => {
-                        *thinking = crate::message::redact_secrets(thinking);
-                    }
-                    ContentBlock::OpenAIReasoning { summary, .. } => {
-                        for item in summary {
-                            *item = crate::message::redact_secrets(item);
-                        }
-                    }
-                    ContentBlock::ToolResult { content, .. } => {
-                        *content = crate::message::redact_secrets(content);
-                    }
-                    ContentBlock::ToolUse { input, .. } => redact_json_value(input),
-                    // Export copy only: the stored item stays verbatim for
-                    // replay, but queries can carry pasted credentials.
-                    ContentBlock::ProviderNative { item, .. } => redact_json_value(item),
-                    ContentBlock::Image { .. } => {}
-                    ContentBlock::OpenAICompaction { .. } | ContentBlock::ToolReference { .. } => {}
-                }
-            }
+            redaction::redact_shared_content(&mut msg.content);
         }
         for event in &mut redacted.replay_events {
             match &mut event.kind {
@@ -1288,6 +1425,14 @@ request in this new forked session, using the inherited conversation only as con
                         item.content = crate::message::redact_secrets(&item.content);
                     }
                 }
+                StoredReplayEventKind::Compaction { summary, .. } => {
+                    // A folded conversation summary can quote anything the user
+                    // pasted earlier, including credentials.
+                    if let Some(summary) = summary.as_mut() {
+                        *summary = crate::message::redact_secrets(summary);
+                    }
+                }
+                StoredReplayEventKind::Unknown => {}
             }
         }
         redacted
@@ -1326,14 +1471,55 @@ request in this new forked session, using the inherited conversation only as con
         totals
     }
 
-    pub fn add_message(&mut self, role: Role, content: Vec<ContentBlock>) -> String {
+    /// Provider-reported prompt occupancy of the transcript the next request
+    /// will carry.
+    ///
+    /// A client that attaches after a daemon restart has no live usage report
+    /// yet, so the server replays this figure instead of leaving the context
+    /// meter blank until the next turn. Only a report recorded after the newest
+    /// compaction describes the active prompt: the messages a compaction keeps
+    /// verbatim still carry the usage of the pre-compaction prompt. When the
+    /// compaction is newer, its post-token estimate is the honest figure, and
+    /// it is the same one its transcript divider shows.
+    pub fn context_occupancy_tokens(&self) -> Option<u64> {
+        let newest_report = self.messages.iter().rev().find_map(|message| {
+            let prompt_tokens = message.token_usage.as_ref()?.prompt_tokens?;
+            Some((message.timestamp, prompt_tokens))
+        });
+        let newest_compaction =
+            self.replay_events
+                .iter()
+                .rev()
+                .find_map(|event| match &event.kind {
+                    StoredReplayEventKind::Compaction { post_tokens, .. } => {
+                        Some((event.timestamp, *post_tokens))
+                    }
+                    _ => None,
+                });
+        match (newest_report, newest_compaction) {
+            (Some((reported_at, prompt_tokens)), Some((compacted_at, post_tokens)))
+                if !reported_at.is_some_and(|reported_at| reported_at > compacted_at) =>
+            {
+                post_tokens.or(Some(prompt_tokens))
+            }
+            (Some((_, prompt_tokens)), _) => Some(prompt_tokens),
+            (None, Some((_, post_tokens))) => post_tokens,
+            (None, None) => None,
+        }
+    }
+
+    pub fn add_message(
+        &mut self,
+        role: Role,
+        content: impl Into<crate::message::SharedContent>,
+    ) -> String {
         self.add_message_ext_with_display_role(role, content, None, None, None)
     }
 
     pub fn add_message_with_duration(
         &mut self,
         role: Role,
-        content: Vec<ContentBlock>,
+        content: impl Into<crate::message::SharedContent>,
         tool_duration_ms: Option<u64>,
     ) -> String {
         self.add_message_ext_with_display_role(role, content, tool_duration_ms, None, None)
@@ -1342,7 +1528,7 @@ request in this new forked session, using the inherited conversation only as con
     pub fn add_message_with_display_role(
         &mut self,
         role: Role,
-        content: Vec<ContentBlock>,
+        content: impl Into<crate::message::SharedContent>,
         display_role: Option<StoredDisplayRole>,
     ) -> String {
         self.add_message_ext_with_display_role(role, content, None, None, display_role)
@@ -1351,7 +1537,7 @@ request in this new forked session, using the inherited conversation only as con
     pub fn add_message_ext(
         &mut self,
         role: Role,
-        content: Vec<ContentBlock>,
+        content: impl Into<crate::message::SharedContent>,
         tool_duration_ms: Option<u64>,
         token_usage: Option<StoredTokenUsage>,
     ) -> String {
@@ -1361,16 +1547,17 @@ request in this new forked session, using the inherited conversation only as con
     pub fn add_message_ext_with_display_role(
         &mut self,
         role: Role,
-        content: Vec<ContentBlock>,
+        content: impl Into<crate::message::SharedContent>,
         tool_duration_ms: Option<u64>,
         token_usage: Option<StoredTokenUsage>,
         display_role: Option<StoredDisplayRole>,
     ) -> String {
         let id = new_id("message");
         self.append_stored_message(StoredMessage {
+            attachment_data: None,
             id: id.clone(),
             role,
-            content,
+            content: content.into(),
             display_role,
             timestamp: Some(Utc::now()),
             tool_duration_ms,
@@ -1379,19 +1566,75 @@ request in this new forked session, using the inherited conversation only as con
         id
     }
 
-    pub fn append_stored_message(&mut self, message: StoredMessage) {
+    pub fn append_stored_message(&mut self, mut message: StoredMessage) {
+        // Persist the model-visible identity once, so all later provider views
+        // can share the same image buffers with the transcript.
+        images::annotate_message(&self.id, &mut message);
         self.memory_profile_cache.messages_count += 1;
-        self.memory_profile_cache.messages_json_bytes += estimate_json_bytes(&message);
+        self.memory_profile_cache.messages_json_bytes += stored_message_json_bytes(&message);
         self.memory_profile_cache
             .message_stats
             .merge_from(&summarize_blocks(&message.content));
         self.adopt_prompt_title(&message);
-        let adds_tool_image = message_has_tool_image(&message.content);
         self.messages.push(message);
         self.mark_messages_append_dirty();
-        if adds_tool_image {
-            self.decay_old_tool_images();
+    }
+
+    pub fn set_last_message_attachments(
+        &mut self,
+        attachments: jcode_session_types::MessageAttachments,
+    ) {
+        if let Some(message) = self.messages.last_mut() {
+            message.attachment_data = Some(attachments);
+            self.mark_memory_profile_dirty();
+            self.mark_messages_full_dirty();
         }
+    }
+
+    pub(super) fn migrate_image_markers(&mut self) {
+        let mut changed = false;
+        for message in &mut self.messages {
+            changed |= images::annotate_message(&self.id, message);
+        }
+        if changed {
+            self.mark_memory_profile_dirty();
+            self.mark_messages_full_dirty();
+        }
+    }
+
+    /// Assign the queued delivery identity while keeping image markers consistent.
+    pub fn rename_last_message(&mut self, id: String) {
+        let Some(message) = self.messages.last_mut() else {
+            return;
+        };
+        let image_count = message
+            .content
+            .iter()
+            .filter(|block| matches!(block, ContentBlock::Image { .. }))
+            .count();
+        let replacements: Vec<_> = (0..image_count)
+            .map(|ordinal| {
+                (
+                    format!("[#{}]", images::image_id(&self.id, &message.id, ordinal)),
+                    format!("[#{}]", images::image_id(&self.id, &id, ordinal)),
+                )
+            })
+            .collect();
+        for block in &mut message.content {
+            let text = match block {
+                ContentBlock::Text { text, .. } => text,
+                ContentBlock::ToolResult { content, .. } => content,
+                _ => continue,
+            };
+            for (old, new) in &replacements {
+                if text.contains(old) {
+                    *text = text.replace(old, new);
+                }
+            }
+        }
+        message.id = id;
+        self.mark_memory_profile_dirty();
+        self.mark_messages_full_dirty();
     }
 
     /// Replace inline screenshots from older tool results with short text
@@ -1400,9 +1643,7 @@ request in this new forked session, using the inherited conversation only as con
     /// newest screenshots keep their data and are still sent to the provider.
     /// Returns the number of images replaced.
     pub fn decay_old_tool_images(&mut self) -> usize {
-        let mut contents: Vec<&mut Vec<ContentBlock>> =
-            self.messages.iter_mut().map(|m| &mut m.content).collect();
-        let stripped = jcode_compaction_core::decay_old_tool_images_in_contents(&mut contents);
+        let stripped = image_archive::archive_and_decay(self);
         if stripped > 0 {
             self.mark_memory_profile_dirty();
             self.mark_messages_full_dirty();
@@ -1441,7 +1682,8 @@ request in this new forked session, using the inherited conversation only as con
         }
     }
 
-    pub fn insert_message(&mut self, index: usize, message: StoredMessage) {
+    pub fn insert_message(&mut self, index: usize, mut message: StoredMessage) {
+        images::annotate_message(&self.id, &mut message);
         self.messages.insert(index, message);
         self.mark_memory_profile_dirty();
         self.mark_messages_full_dirty();
@@ -1449,6 +1691,7 @@ request in this new forked session, using the inherited conversation only as con
 
     pub fn replace_messages(&mut self, messages: Vec<StoredMessage>) {
         self.messages = messages;
+        self.migrate_image_markers();
         self.mark_memory_profile_dirty();
         self.mark_messages_full_dirty();
     }
@@ -1472,12 +1715,7 @@ request in this new forked session, using the inherited conversation only as con
     /// cache so the next API call reflects the reduced payload. Returns the
     /// number of images that were stripped.
     pub fn strip_oversized_images(&mut self, target_total_chars: usize) -> usize {
-        let mut contents: Vec<&mut Vec<ContentBlock>> =
-            self.messages.iter_mut().map(|m| &mut m.content).collect();
-        let stripped = jcode_compaction_core::strip_large_images_in_contents(
-            &mut contents,
-            target_total_chars,
-        );
+        let stripped = image_archive::archive_to_budget(self, target_total_chars);
         if stripped > 0 {
             self.mark_memory_profile_dirty();
             self.mark_messages_full_dirty();
@@ -1598,6 +1836,43 @@ request in this new forked session, using the inherited conversation only as con
         self.mark_replay_events_append_dirty();
     }
 
+    /// Record a completed compaction in the persisted replay log.
+    ///
+    /// This is what makes the transcript divider survive reloads and reach
+    /// every client: the row is derived from the stored session, not from a
+    /// transient event a single connection happened to witness.
+    pub fn record_compaction_event(
+        &mut self,
+        event: &crate::compaction::CompactionEvent,
+        method: Option<&str>,
+        summary: Option<&str>,
+    ) {
+        let summary = summary
+            .map(str::trim)
+            .filter(|summary| !summary.is_empty())
+            .map(|summary| crate::util::truncate_str(summary, 20_000).to_string());
+        let kind = StoredReplayEventKind::Compaction {
+            method: method.map(str::to_string),
+            trigger: Some(event.trigger.clone()),
+            pre_tokens: event.pre_tokens,
+            post_tokens: event.post_tokens,
+            duration_ms: event.duration_ms,
+            messages_compacted: event.messages_compacted,
+            messages_dropped: event.messages_dropped,
+            active_messages: event.active_messages,
+            summary,
+            idle: event.trigger == crate::compaction::IDLE_PRECOMPACTION_TRIGGER,
+        };
+        let event = StoredReplayEvent {
+            timestamp: Utc::now(),
+            kind,
+        };
+        self.memory_profile_cache.replay_events_count += 1;
+        self.memory_profile_cache.replay_events_json_bytes += estimate_json_bytes(&event);
+        self.replay_events.push(event);
+        self.mark_replay_events_append_dirty();
+    }
+
     pub fn record_swarm_status_event(&mut self, members: Vec<crate::protocol::SwarmMemberStatus>) {
         let kind = StoredReplayEventKind::SwarmStatus { members };
         if self
@@ -1683,7 +1958,7 @@ request in this new forked session, using the inherited conversation only as con
             self.provider_message_prefix_hashes_cache
                 .reserve(self.messages.len());
             for index in 0..self.messages.len() {
-                let message = self.messages[index].to_message();
+                let message = images::provider_message(&self.id, &self.messages[index]);
                 self.push_provider_message_cache_entry(message);
             }
             self.provider_messages_cache_len = self.messages.len();
@@ -1699,7 +1974,7 @@ request in this new forked session, using the inherited conversation only as con
             self.provider_message_prefix_hashes_cache
                 .reserve(appended_len);
             for index in self.provider_messages_cache_len..self.messages.len() {
-                let message = self.messages[index].to_message();
+                let message = images::provider_message(&self.id, &self.messages[index]);
                 self.push_provider_message_cache_entry(message);
             }
             self.provider_messages_cache_len = self.messages.len();
@@ -1715,7 +1990,10 @@ request in this new forked session, using the inherited conversation only as con
     }
 
     pub fn messages_for_provider_uncached(&self) -> Vec<Message> {
-        stored_messages_to_messages(&self.messages)
+        self.messages
+            .iter()
+            .map(|message| images::provider_message(&self.id, message))
+            .collect()
     }
 
     pub fn messages_for_provider(&mut self) -> Vec<Message> {
@@ -1755,6 +2033,7 @@ request in this new forked session, using the inherited conversation only as con
 
 #[path = "session_redaction.rs"]
 mod redaction;
+#[cfg(test)]
 use redaction::redact_json_value;
 
 #[derive(Debug, Deserialize)]
@@ -1768,12 +2047,18 @@ struct RemoteStartupSessionSnapshot {
     custom_title: Option<String>,
     #[serde(default)]
     system_prompt: Option<String>,
+    #[serde(default)]
+    pinned_skill: Option<String>,
+    #[serde(default)]
+    pinned_skills: Vec<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     #[serde(default, deserialize_with = "parallel_messages::deserialize")]
     messages: Vec<StoredMessage>,
     #[serde(default)]
-    compaction: Option<StoredCompactionState>,
+    replay_events: Vec<StoredReplayEvent>,
+    #[serde(default)]
+    compaction: Option<std::sync::Arc<StoredCompactionState>>,
     #[serde(default)]
     provider_session_id: Option<String>,
     #[serde(default)]
@@ -1784,6 +2069,10 @@ struct RemoteStartupSessionSnapshot {
     route_api_method: Option<String>,
     #[serde(default)]
     reasoning_effort: Option<String>,
+    #[serde(default)]
+    is_swarm_worker: bool,
+    #[serde(default)]
+    worker_model_approval: Option<AuthorizedWorkerModel>,
     #[serde(default)]
     context_cap: Option<usize>,
     #[serde(default)]
@@ -1815,11 +2104,36 @@ struct RemoteStartupSessionSnapshot {
     #[serde(default)]
     is_debug: bool,
     #[serde(default)]
+    hidden: bool,
+    #[serde(default)]
     saved: bool,
     #[serde(default)]
     save_label: Option<String>,
 }
 
+#[path = "session/image_archive.rs"]
+mod image_archive;
+#[path = "session/images.rs"]
+mod images;
+pub(crate) use images::is_image_annotation;
+pub use images::{SessionImage, SessionImageInfo, image_id};
+
+#[cfg(test)]
+#[path = "session/image_ids_tests.rs"]
+mod image_ids_tests;
+
 #[cfg(test)]
 #[path = "session_tests/mod.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "session_tests/shared_compaction.rs"]
+mod shared_compaction_tests;
+
+#[cfg(test)]
+#[path = "session_tests/context_occupancy.rs"]
+mod context_occupancy_tests;
+
+#[cfg(test)]
+#[path = "session_tests/shared_payload.rs"]
+mod shared_payload_tests;

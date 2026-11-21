@@ -57,6 +57,29 @@ fn run_search(home: &Path, query: &str, options: &SearchOptions) -> Vec<SearchRe
 }
 
 #[test]
+fn current_message_index_reads_snapshot_and_journal_without_guessing() {
+    with_temp_home(|_| {
+        let mut session = save_test_session(
+            "indexed-message",
+            vec![(Role::User, vec![text("Never force push")])],
+        );
+        session.add_message(Role::Assistant, vec![text("commit 06a64d9d8")]);
+        session.save().unwrap();
+        let first = current_message_by_index("indexed-message", 0).unwrap();
+        let second = current_message_by_index("indexed-message", 1).unwrap();
+        assert!(first.contains("Never force push"));
+        assert!(second.contains("06a64d9d8"));
+        assert!(
+            current_message_by_index("indexed-message", 2)
+                .unwrap()
+                .contains("UNKNOWN")
+        );
+        let params: SearchInput = serde_json::from_value(json!({"message_index": 1})).unwrap();
+        assert_eq!(params.message_index, Some(1));
+    });
+}
+
+#[test]
 fn token_overlap_matches_when_exact_phrase_is_absent() {
     with_temp_home(|home| {
         save_test_session(
@@ -76,6 +99,40 @@ fn token_overlap_matches_when_exact_phrase_is_absent() {
         assert!(results[0].snippet.to_lowercase().contains("airpods"));
         assert_eq!(results[0].kind, SearchResultKind::Message);
         assert_eq!(results[0].message_index, Some(0));
+    });
+}
+
+#[test]
+fn ask_answer_is_recalled_as_user_without_tool_results() {
+    with_temp_home(|home| {
+        save_test_session(
+            "ask-recall",
+            vec![
+                (
+                    Role::Assistant,
+                    vec![ContentBlock::ToolUse {
+                        id: "ask-1".into(),
+                        name: "ask".into(),
+                        input: json!({"questions":[]}),
+                        thought_signature: None,
+                    }],
+                ),
+                (
+                    Role::User,
+                    vec![ContentBlock::ToolResult {
+                        tool_use_id: "ask-1".into(),
+                        content: "User answers:\n1. Which? -> papaya (comment: ripe)\n".into(),
+                        is_error: None,
+                    }],
+                ),
+            ],
+        );
+        let mut options = SearchOptions::for_test("current-session");
+        options.role_filter = Some(RoleFilter::User);
+        let results = run_search(home, "papaya", &options);
+        assert_eq!(results.len(), 1, "{results:?}");
+        assert_eq!(results[0].role, "user");
+        assert!(results[0].snippet.contains("papaya"));
     });
 }
 

@@ -2,8 +2,8 @@
 
 use super::client_lifecycle::process_reserved_message_streaming_mpsc;
 use super::{
-    ClientConnectionInfo, SessionInterruptQueues, SwarmEvent, SwarmMember, SwarmState,
-    VersionedPlan, broadcast_swarm_status, fanout_session_event, persist_swarm_state_for,
+    SessionInterruptQueues, SwarmEvent, SwarmMember, SwarmState, VersionedPlan,
+    broadcast_swarm_status, fanout_session_event, persist_swarm_state_for,
     queue_soft_interrupt_for_session, remove_session_channel_subscriptions,
     remove_session_from_swarm, swarm_id_for_session, truncate_detail, update_member_status,
 };
@@ -39,7 +39,6 @@ use input_shell_output::{build_input_shell_command, combine_input_shell_output};
 pub(super) struct NotifySessionContext<'a> {
     pub sessions: &'a SessionAgents,
     pub soft_interrupt_queues: &'a SessionInterruptQueues,
-    pub client_connections: &'a Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     pub swarm_members: &'a Arc<RwLock<HashMap<String, SwarmMember>>>,
     pub swarms_by_id: &'a Arc<RwLock<HashMap<String, HashSet<String>>>>,
     pub event_history: &'a Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
@@ -54,30 +53,19 @@ pub(super) async fn handle_notify_session(
     message: String,
     ctx: NotifySessionContext<'_>,
 ) {
-    let target_has_client = {
-        let connections = ctx.client_connections.read().await;
-        connections
-            .values()
-            .any(|connection| connection.session_id == session_id)
-    };
-
-    let ran_immediately = if target_has_client {
-        super::live_turn::run_live_system_turn_if_idle(
-            &session_id,
-            &message,
-            ctx.sessions,
-            super::live_turn::LiveTurnSwarmContext::new(
-                ctx.swarm_members,
-                ctx.swarms_by_id,
-                ctx.event_history,
-                ctx.event_counter,
-                ctx.swarm_event_tx,
-            ),
-        )
-        .await
-    } else {
-        false
-    };
+    let ran_immediately = super::live_turn::run_live_system_turn_if_idle(
+        &session_id,
+        &message,
+        ctx.sessions,
+        super::live_turn::LiveTurnSwarmContext::new(
+            ctx.swarm_members,
+            ctx.swarms_by_id,
+            ctx.event_history,
+            ctx.event_counter,
+            ctx.swarm_event_tx,
+        ),
+    )
+    .await;
 
     let notified = if ran_immediately {
         false
@@ -773,92 +761,9 @@ pub(super) async fn handle_trigger_memory_extraction(
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
 
-fn clone_split_session(
-    parent_session_id: &str,
-    live_parent: Option<&Session>,
-) -> anyhow::Result<(String, String)> {
-    // Keep the persisted snapshot authoritative, including while the parent is
-    // busy. A brand-new Agent may not have saved anything yet, however. Only a
-    // missing snapshot permits an in-memory fallback, never corrupt/unreadable
-    // history or a session belonging to a different client.
-    let parent = Session::load(parent_session_id).or_else(|error| {
-        let missing = error
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound);
-        match live_parent.filter(|parent| missing && parent.id == parent_session_id) {
-            Some(parent) => Ok(parent.clone()),
-            None => Err(error),
-        }
-    })?;
-
-    let mut child = Session::create(Some(parent_session_id.to_string()), None);
-    child.replace_messages(parent.messages.clone());
-    child.compaction = parent.compaction.clone();
-    child.system_prompt = parent.system_prompt.clone();
-    child.working_dir = parent.working_dir.clone();
-    child.model = parent.model.clone();
-    // Keep the same provider account. Replayed provider-native blocks (Anthropic
-    // web search `encrypted_content`) are bound to the account that produced
-    // them, and another account rejects the whole request with a 400.
-    child.provider_key = parent.provider_key.clone();
-    child.route_api_method = parent.route_api_method.clone();
-    child.status = crate::session::SessionStatus::Closed;
-    // The parent agent keeps ownership of any in-flight request; tell the
-    // forked agent so it treats the next prompt as fresh work instead of
-    // continuing (and duplicating) the parent's current turn.
-    child.append_fork_notice(parent_session_id, parent.display_name());
-    child.save()?;
-
-    crate::session_env::inherit_session_env(parent_session_id, &child.id);
-    let name = child.display_name().to_string();
-    Ok((child.id.clone(), name))
-}
-
-fn transfer_active_messages(session: &Session) -> Vec<crate::message::Message> {
-    let start = session
-        .compaction
-        .as_ref()
-        .map(|state| state.compacted_count.min(session.messages.len()))
-        .unwrap_or(0);
-    session.messages[start..]
-        .iter()
-        .map(crate::session::StoredMessage::to_message)
-        .collect()
-}
-
-fn create_transfer_child_session(
-    parent_session_id: &str,
-    parent: &Session,
-    compaction: Option<crate::session::StoredCompactionState>,
-) -> anyhow::Result<(String, String)> {
-    let mut todos = crate::todo::load_todos(parent_session_id)?;
-    // Background tasks belong to the source session. A fresh session must
-    // reassess those results, not inherit foreign task IDs or their wakes.
-    for todo in &mut todos {
-        todo.waiting_on.clear();
-        todo.waiting_reason = None;
-    }
-    let mut child = Session::create(Some(parent_session_id.to_string()), None);
-    child.messages.clear();
-    child.compaction = compaction;
-    child.system_prompt = parent.system_prompt.clone();
-    child.working_dir = parent.working_dir.clone();
-    child.model = parent.model.clone();
-    child.provider_key = parent.provider_key.clone();
-    child.route_api_method = parent.route_api_method.clone();
-    child.subagent_model = parent.subagent_model.clone();
-    child.improve_mode = parent.improve_mode;
-    child.autoreview_enabled = parent.autoreview_enabled;
-    child.autojudge_enabled = parent.autojudge_enabled;
-    child.is_canary = parent.is_canary;
-    child.testing_build = parent.testing_build.clone();
-    child.provider_session_id = None;
-    child.status = crate::session::SessionStatus::Closed;
-    child.save()?;
-    crate::todo::save_todos(&child.id, &todos)?;
-    crate::session_env::inherit_session_env(parent_session_id, &child.id);
-    Ok((child.id.clone(), child.display_name().to_string()))
-}
+#[path = "session_transfer_snapshot.rs"]
+mod session_transfer_snapshot;
+use session_transfer_snapshot::*;
 
 pub(super) async fn handle_split(
     id: u64,
@@ -968,7 +873,7 @@ pub(super) async fn handle_transfer(
     let transfer_compaction = match crate::compaction::build_transfer_compaction_state(
         provider,
         transfer_active_messages(&parent),
-        parent.compaction.clone(),
+        parent.compaction.as_deref().cloned(),
     )
     .await
     {
@@ -993,28 +898,31 @@ pub(super) async fn handle_transfer(
         }
     };
 
-    let (new_session_id, new_session_name) =
-        match create_transfer_child_session(client_session_id, &parent, transfer_compaction) {
-            Ok(result) => result,
-            Err(error) => {
-                crate::logging::event_warn(
-                    "SESSION_LIFECYCLE",
-                    vec![
-                        ("phase", "transfer_create_error".to_string()),
-                        ("request_id", id.to_string()),
-                        ("session_id", client_session_id.to_string()),
-                        ("error", crate::util::format_error_chain(&error)),
-                        ("elapsed_ms", started.elapsed().as_millis().to_string()),
-                    ],
-                );
-                let _ = client_event_tx.send(ServerEvent::Error {
-                    id,
-                    message: format!("Failed to create transfer session: {error}"),
-                    retry_after_secs: None,
-                });
-                return;
-            }
-        };
+    let (new_session_id, new_session_name) = match create_transfer_child_session(
+        client_session_id,
+        &parent,
+        transfer_compaction.map(Arc::new),
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            crate::logging::event_warn(
+                "SESSION_LIFECYCLE",
+                vec![
+                    ("phase", "transfer_create_error".to_string()),
+                    ("request_id", id.to_string()),
+                    ("session_id", client_session_id.to_string()),
+                    ("error", crate::util::format_error_chain(&error)),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: format!("Failed to create transfer session: {error}"),
+                retry_after_secs: None,
+            });
+            return;
+        }
+    };
     crate::logging::event_info(
         "SESSION_LIFECYCLE",
         vec![
@@ -1083,10 +991,10 @@ pub(super) async fn handle_resume_all_sessions(
     id: u64,
     sessions: &SessionAgents,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
-    event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
-    event_counter: &Arc<std::sync::atomic::AtomicU64>,
-    swarm_event_tx: &broadcast::Sender<SwarmEvent>,
+    _swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    _event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
+    _event_counter: &Arc<std::sync::atomic::AtomicU64>,
+    _swarm_event_tx: &broadcast::Sender<SwarmEvent>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     // Snapshot live sessions (those with at least one live client attachment).
@@ -1133,34 +1041,32 @@ pub(super) async fn handle_resume_all_sessions(
             .map(str::to_string)
             .unwrap_or_else(|| session_id[..8.min(session_id.len())].to_string());
 
-        // Best-effort: record that the durable recovery intent was delivered.
-        if let Err(error) = super::reload_recovery::mark_delivered_if_matching_continuation(
-            &session_id,
-            &reminder,
-            "resume_all_sessions",
-        ) {
-            crate::logging::warn(&format!(
-                "resume_all_sessions: failed to mark recovery intent delivered for {}: {}",
-                session_id, error
-            ));
+        // Manual resume submits intent, just like reload capture. It must not
+        // create a competing client-owned continuation path.
+        if super::reload_recovery::peek_for_session(&session_id)
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            let reload_id = format!("manual-resume-{}", uuid::Uuid::new_v4());
+            if let Err(error) = super::reload_recovery::persist_intent(
+                &reload_id,
+                &session_id,
+                super::reload_recovery::ReloadRecoveryRole::InterruptedPeer,
+                crate::tool::selfdev::ReloadRecoveryDirective {
+                    continuation_message: reminder,
+                    reconnect_notice: None,
+                },
+                "explicit resume-all request",
+            ) {
+                crate::logging::warn(&format!(
+                    "Cannot schedule manual recovery for {session_id}: {error}"
+                ));
+                skipped += 1;
+                continue;
+            }
         }
-
-        super::live_turn::spawn_tracked_live_turn(
-            &session_id,
-            agent_guard,
-            String::new(),
-            Some(reminder),
-            None,
-            Some("resuming interrupted session".to_string()),
-            super::live_turn::LiveTurnSwarmContext::new(
-                swarm_members,
-                swarms_by_id,
-                event_history,
-                event_counter,
-                swarm_event_tx,
-            ),
-        )
-        .await;
+        drop(agent_guard);
 
         resumed_sessions.push(display_name);
     }
@@ -1198,12 +1104,26 @@ pub(super) fn handle_compact(
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
+    // An active turn can hold the agent for longer than the client's RPC
+    // deadline. Acknowledge queuing, not the eventual compaction outcome.
+    let _ = client_event_tx.send(ServerEvent::CompactResult {
+        id,
+        message: "Context compaction queued.".into(),
+        success: true,
+    });
     let agent = Arc::clone(agent);
     let tx = client_event_tx.clone();
     crate::runtime_activity::spawn(async move {
         let mut agent_guard = agent.lock().await;
         let session_id = agent_guard.session_id().to_string();
         let (message, success) = agent_guard.request_manual_compaction();
+        // Send start before releasing the agent, so completion cannot overtake it.
+        if success {
+            let _ = tx.send(ServerEvent::CompactionStarted {
+                trigger: "manual".into(),
+                pre_tokens: 0,
+            });
+        }
         drop(agent_guard);
 
         if success {
@@ -1215,14 +1135,13 @@ pub(super) fn handle_compact(
                 .with_session_id(session_id)
                 .force_attribution(),
             );
+        } else {
+            let _ = tx.send(ServerEvent::CompactResult {
+                id: 0,
+                message,
+                success: false,
+            });
         }
-
-        let result = ServerEvent::CompactResult {
-            id,
-            message,
-            success,
-        };
-        let _ = tx.send(result);
     });
 }
 
@@ -1233,10 +1152,20 @@ pub(super) async fn handle_stdin_response(
     stdin_responses: &Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
-    if let Some(tx) = stdin_responses.lock().await.remove(&request_id) {
-        let _ = tx.send(input);
-    }
-    let _ = client_event_tx.send(ServerEvent::Done { id });
+    let accepted = match stdin_responses.lock().await.remove(&request_id) {
+        Some(tx) => tx.send(input).is_ok(),
+        None => false,
+    };
+    let event = if accepted {
+        ServerEvent::Done { id }
+    } else {
+        ServerEvent::Error {
+            id,
+            message: "The input request is no longer pending on this connection; your answer was not accepted".into(),
+            retry_after_secs: None,
+        }
+    };
+    let _ = client_event_tx.send(event);
 }
 
 pub(super) struct AgentTaskContext<'a> {
@@ -1292,6 +1221,8 @@ pub(super) async fn handle_agent_task(
         vec![],
         None,
         events.sender(),
+        None,
+        None,
     )
     .await;
     match result {

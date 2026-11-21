@@ -8,6 +8,31 @@ pub const ASK_MAX_OPTIONS: usize = 6;
 /// Tool output returned when the user dismisses the prompt.
 pub const ASK_DECLINED_MESSAGE: &str = "User declined to answer the questions.";
 
+/// Project a successful persisted ask result into a compact human turn.
+/// Errors and unrelated tool outputs are not user answers.
+pub fn stored_ask_answer_text(content: &str) -> Option<String> {
+    let content = content.trim();
+    if content == ASK_DECLINED_MESSAGE {
+        return Some(content.to_owned());
+    }
+    let body = content.strip_prefix("User answers:\n")?;
+    let mut lines = Vec::new();
+    let mut has_question = false;
+    for line in body.lines() {
+        let question = line.split_once(". ").and_then(|(number, rest)| {
+            number.parse::<usize>().ok()?;
+            Some(rest)
+        });
+        if let Some(question) = question {
+            has_question = true;
+            lines.push(format!("Q: {}", question.replacen(" -> ", " → ", 1)));
+        } else {
+            lines.push(line.replacen(" -> ", " → ", 1));
+        }
+    }
+    has_question.then(|| lines.join("\n"))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AskOption {
     pub label: String,
@@ -36,6 +61,15 @@ pub struct AskAnswer {
     pub selected: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub other: Option<String>,
+    /// Optional notes keyed by the selected option label. Older clients omit this.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub comments: std::collections::BTreeMap<String, String>,
+    /// Images attached to the free-text answer, as (media type, base64).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub other_images: Vec<(String, String)>,
+    /// Images attached to option comments, keyed by option label.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub comment_images: std::collections::BTreeMap<String, Vec<(String, String)>>,
 }
 
 /// Client reply. `answers` is `None` when the user declined (Esc/cancel).
@@ -94,8 +128,23 @@ pub fn format_ask_answers(questions: &[AskQuestion], response: &AskResponse) -> 
     };
     let mut out = String::from("User answers:\n");
     for (i, q) in questions.iter().enumerate() {
-        let answer = answers.get(i).cloned().unwrap_or_default();
-        let mut parts: Vec<String> = answer.selected.clone();
+        let empty_answer = AskAnswer::default();
+        let answer = answers.get(i).unwrap_or(&empty_answer);
+        let mut parts: Vec<String> = answer
+            .selected
+            .iter()
+            .map(|label| {
+                match answer
+                    .comments
+                    .get(label)
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                {
+                    Some(comment) => format!("{label} (comment: {comment})"),
+                    None => label.clone(),
+                }
+            })
+            .collect();
         if let Some(other) = answer
             .other
             .as_deref()
@@ -112,4 +161,27 @@ pub fn format_ask_answers(questions: &[AskQuestion], response: &AskResponse) -> 
         out.push_str(&format!("{}. {} -> {}\n", i + 1, q.question, text));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selected_comments_are_rendered_for_the_model() {
+        let questions = vec![AskQuestion {
+            question: "Which?".into(),
+            header: None,
+            options: vec![AskOption {
+                label: "A".into(),
+                description: None,
+            }],
+            multi_select: false,
+            allow_other: false,
+        }];
+        let response: AskResponse =
+            serde_json::from_str(r#"{"answers":[{"selected":["A"],"comments":{"A":"because"}}]}"#)
+                .unwrap();
+        assert!(format_ask_answers(&questions, &response).contains("because"));
+    }
 }

@@ -142,7 +142,8 @@ fn test_generated_image_event_roundtrip() -> Result<()> {
         metadata_path,
         output_format,
         revised_prompt,
-    } = decoded else {
+    } = decoded
+    else {
         return Err(anyhow!("wrong event type"));
     };
     assert_eq!(id, "ig_123");
@@ -205,7 +206,9 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         id: 101,
         session_id: "ses_test_456".to_string(),
         messages: vec![HistoryMessage {
+            attachments: Vec::new(),
             response_stats: None,
+            timestamp_ms: None,
             role: "assistant".to_string(),
             content: "hello".to_string(),
             tool_calls: None,
@@ -247,6 +250,8 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         reasoning_effort: None,
         service_tier: None,
         subagent_model: None,
+        pinned_skill: None,
+        pinned_skills: None,
         autoreview_enabled: None,
         autojudge_enabled: None,
         compaction_mode: crate::config::CompactionMode::Reactive,
@@ -304,7 +309,9 @@ fn test_compacted_history_event_roundtrip() -> Result<()> {
         id: 77,
         session_id: "ses_compact_123".to_string(),
         messages: vec![HistoryMessage {
+            attachments: Vec::new(),
             response_stats: None,
+            timestamp_ms: None,
             role: "assistant".to_string(),
             content: "older response".to_string(),
             tool_calls: None,

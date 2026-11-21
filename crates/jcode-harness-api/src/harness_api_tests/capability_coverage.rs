@@ -51,16 +51,23 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("CancelSoftInterrupts", Covered),
     ("Clear", Covered),
     ("ClientDebugResponse", ClientInternal),
+    // Window-focus report that lets the server batch its stream coarsely for a
+    // hidden TUI. Unacknowledged and purely a wakeup optimization.
+    ("ClientFocus", ClientInternal),
     ("Compact", Covered),
     ("ConfigureTools", Covered),
     ("CycleModel", ClientInternal),
+    ("EditQueuedPrompt", Covered),
+    ("ForceStopTurn", Covered),
     ("GetCompactedHistory", ClientInternal),
     ("GetHistory", Covered),
     ("GetModelCatalog", Covered),
+    ("GetQueuedPrompts", Covered),
     // Create/attach session bootstrap requests state through the API bridge.
     ("GetState", Covered),
     ("GetTodos", Covered),
     ("InputShell", ClientInternal),
+    ("InterruptQueuedPrompt", Covered),
     ("InvalidateAnthropicUsage", Covered),
     ("InvalidateOpenAiUsage", Covered),
     ("Message", Covered),
@@ -68,6 +75,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("PersistSession", ClientInternal),
     // SDK ping/pong also supports the TUI's transport readiness probe.
     ("Ping", Covered),
+    ("QueuePrompt", Covered),
     ("RefreshModels", ClientInternal),
     ("Reload", ClientInternal),
     ("RenameSession", Covered),
@@ -78,11 +86,21 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("RunSubagent", ClientInternal),
     // The same typed runtime-command gateway is exposed by ApiRequest.
     ("RuntimeCommand", Covered),
+    (
+        "ScreenContext",
+        Gap(
+            "clients cannot lease the session's passive screen-metadata feed, so a \
+             third-party desktop shell cannot tell the agent which window the user \
+             is looking at the way the TUI's opted-in Niri feed does",
+        ),
+    ),
     ("SetAgentModel", Covered),
     ("SetCompactionMode", ClientInternal),
     ("SetFeature", ClientInternal),
     ("SetModel", Covered),
     ("SetPremiumMode", ClientInternal),
+    ("SetQueuedPromptEditing", Covered),
+    ("SetQueuedPromptMode", Covered),
     ("SetReasoningEffort", Covered),
     ("SetRoute", ClientInternal),
     ("SetServiceTier", ClientInternal),

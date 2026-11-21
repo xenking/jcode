@@ -9,6 +9,7 @@ use super::text::clip;
 use super::{DirtyFile, GitInfo, InfoWidgetData};
 use crate::tui::color_support::rgb;
 use ratatui::prelude::*;
+use unicode_width::UnicodeWidthStr;
 
 /// Maximum file rows before collapsing the rest into a `+N more` row.
 pub(super) const CHANGES_MAX_FILES: usize = 5;
@@ -216,7 +217,7 @@ fn changes_file_lines(
     // One shared column width for `+N −M`, so the counts line up.
     let count_w = shown
         .iter()
-        .map(|f| line_counts(f).map_or(0, |(a, r)| a.chars().count() + 1 + r.chars().count()))
+        .map(|f| line_counts(f).map_or(0, |(a, r)| a.width() + 1 + r.width()))
         .max()
         .unwrap_or(0);
     let root = info.repo_root.as_deref();
@@ -258,8 +259,8 @@ pub(super) fn render_git_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<
         let mut spans = vec![Span::styled(format!("  +{hidden} more"), dim)];
         if info.added_total + info.removed_total > 0 {
             let totals = format!("+{} −{} all", info.added_total, info.removed_total);
-            let used = 2 + format!("+{hidden} more").chars().count();
-            let pad = w.saturating_sub(used + totals.chars().count());
+            let used = 2 + format!("+{hidden} more").width();
+            let pad = w.saturating_sub(used + totals.width());
             if pad >= 1 {
                 spans.push(Span::raw(" ".repeat(pad)));
                 spans.push(Span::styled(
@@ -437,7 +438,7 @@ fn changes_file_line(file: &DirtyFile, agent: bool, count_w: usize, width: usize
         let this_w = if a.is_empty() {
             0
         } else {
-            a.chars().count() + 1 + r.chars().count()
+            a.width() + 1 + r.width()
         };
         let pad = width.saturating_sub(PREFIX + name_len + this_w);
         spans.push(Span::raw(" ".repeat(pad)));

@@ -26,6 +26,7 @@ futures = "0.3"
 async-trait = "0.1"
 
 # HTTP client
+bytes = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "blocking", "charset", "http2", "system-proxy", "rustls-tls", "rustls-tls-native-roots"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 
@@ -44,6 +45,8 @@ anyhow = "1"
 libc = "0.2"             # Unix system calls (flock)
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
+aho-corasick = "1"
+memchr = "2"
 rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 urlencoding = "2"        # URL encoding for web search
 uuid = { version = "1", features = ["v4", "v5"] }
@@ -68,7 +71,7 @@ jcode-azure-auth = { path = "../jcode-azure-auth" }
 jcode-agent-runtime = { path = "../jcode-agent-runtime" }
 jcode-provider-metadata = { path = "../jcode-provider-metadata" }
 jcode-provider-env = { path = "../jcode-provider-env" }
-jcode-provider-core = { path = "../jcode-provider-core" }
+jcode-provider-core = { path = "../jcode-provider-core", features = ["blocking-http"] }
 # default-features=false so this crate's `bedrock` feature (below) controls the
 # AWS SDK stack; the pure model-metadata/credential-detection layer is always on.
 jcode-provider-bedrock = { path = "../jcode-provider-bedrock", default-features = false }
@@ -96,7 +99,7 @@ jcode-usage-types = { path = "../jcode-usage-types" }
 # NOTE: no terminal crates (crossterm, ratatui, qrcode). Interactive login
 # prompts and QR rendering are client concerns: the CLI installs a presenter
 # from `jcode-terminal-prompt` into `auth::login_ui`.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "ico", "tiff"] }  # PNG/JPEG plus BMP/ICO/TIFF decoding so they can be re-encoded to PNG for providers (#1712). Skip avif/rav1e, exr, etc.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff"] }  # Provider formats and mobile GIF/WebP thumbnails. Skip avif/rav1e, exr, etc.
 
 # NOTE: PDF text extraction (jcode-pdf) lives in the upper jcode-app-core crate
 # (tool/read.rs), not here.
@@ -131,7 +134,12 @@ default = ["bedrock"]
 # `pub` so downstream crates' test targets can reach them. Enabled as a
 # dev-dependency feature by jcode-app-core / jcode / etc.; never in normal
 # (non-test) builds.
-test-support = []
+test-support = ["test-isolated-hooks"]
+# Suppress the machine's hooks in test builds unless a test opts in with
+# `hooks::TestHooksGuard::allow`. Enabled as a dev-dependency feature by
+# jcode-app-core, so it applies to test/bench/example builds only: unit tests must
+# not inherit the developer's ~/.jcode/config.toml hooks (see hooks::hooks_suppressed).
+test-isolated-hooks = []
 jemalloc = [
     "dep:tikv-jemalloc-ctl",
     "dep:tikv-jemalloc-sys",
@@ -162,4 +170,3 @@ jcode-terminal-prompt = { path = "../jcode-terminal-prompt" }
 jcode-provider-openrouter-runtime = { path = "../jcode-provider-openrouter-runtime" }
 # Paused-time (auto-advancing virtual clock) tests for the background stall watchdog.
 tokio = { version = "1", features = ["test-util"] }
-

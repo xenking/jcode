@@ -8,6 +8,7 @@ use crossterm::event::KeyCode;
 #[derive(Debug, Clone)]
 pub(crate) struct AskPickerState {
     pub request_id: String,
+    pub tool_call_id: String,
     pub questions: Vec<AskQuestion>,
     /// Index of the question currently shown.
     pub current: usize,
@@ -29,6 +30,7 @@ impl AskPickerState {
         let n = questions.len();
         Self {
             request_id,
+            tool_call_id: String::new(),
             questions,
             current: 0,
             cursor: 0,
@@ -86,6 +88,8 @@ impl AskPickerState {
                         .filter_map(|i| question.options.get(i).map(|o| o.label.clone()))
                         .collect(),
                     other: Some(self.other[q].trim().to_string()).filter(|s| !s.is_empty()),
+                    comments: Default::default(),
+                    ..Default::default()
                 }
             })
             .collect();
@@ -198,6 +202,44 @@ impl AskPickerState {
     }
 }
 
+impl super::App {
+    pub(super) fn open_ask_picker(
+        &mut self,
+        request_id: String,
+        tool_call_id: String,
+        questions: Vec<AskQuestion>,
+    ) {
+        if questions.is_empty() {
+            return;
+        }
+        let mut picker = AskPickerState::new(request_id, questions);
+        picker.tool_call_id = tool_call_id;
+        self.inline_interactive_state = None;
+        self.set_inline_view(picker.view());
+        self.ask_picker = Some(picker);
+        self.set_status_notice("The agent is asking you a question");
+    }
+
+    /// Route a key to the open ask picker. Returns the reply once finished.
+    pub(super) fn handle_ask_picker_key(&mut self, code: KeyCode) -> Option<(String, AskResponse)> {
+        let picker = self.ask_picker.as_mut()?;
+        match picker.handle_key(code) {
+            AskKeyOutcome::Pending => {
+                let view = picker.view();
+                self.set_inline_view(view);
+                None
+            }
+            AskKeyOutcome::Done(response) => {
+                let request_id = picker.request_id.clone();
+                self.ask_picker = None;
+                self.clear_inline_view();
+                self.sync_btw_card();
+                Some((request_id, response))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,35 +313,5 @@ mod tests {
             AskKeyOutcome::Pending
         ));
         assert_eq!(done(s.handle_key(KeyCode::Esc)), AskResponse::declined());
-    }
-}
-
-impl super::App {
-    pub(super) fn open_ask_picker(&mut self, request_id: String, questions: Vec<AskQuestion>) {
-        if questions.is_empty() {
-            return;
-        }
-        let picker = AskPickerState::new(request_id, questions);
-        self.inline_interactive_state = None;
-        self.inline_view_state = Some(picker.view());
-        self.ask_picker = Some(picker);
-        self.set_status_notice("The agent is asking you a question");
-    }
-
-    /// Route a key to the open ask picker. Returns the reply once finished.
-    pub(super) fn handle_ask_picker_key(&mut self, code: KeyCode) -> Option<(String, AskResponse)> {
-        let picker = self.ask_picker.as_mut()?;
-        match picker.handle_key(code) {
-            AskKeyOutcome::Pending => {
-                self.inline_view_state = Some(picker.view());
-                None
-            }
-            AskKeyOutcome::Done(response) => {
-                let request_id = picker.request_id.clone();
-                self.ask_picker = None;
-                self.inline_view_state = None;
-                Some((request_id, response))
-            }
-        }
     }
 }

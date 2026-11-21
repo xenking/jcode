@@ -21,57 +21,11 @@ use super::{
 };
 use provider_init::ProviderChoice;
 
-#[cfg(any(target_os = "linux", test))]
-fn is_file_controlled_debug_client() -> bool {
-    std::env::var_os("JCODE_DEBUG_CMD_PATH").is_some()
-}
-
-#[cfg(target_os = "linux")]
-fn is_orphan_adopter_name(name: &str) -> bool {
-    matches!(name.trim(), "init" | "systemd")
-}
-
-#[cfg(target_os = "linux")]
-fn parent_is_orphan_adopter(parent_pid: libc::pid_t) -> bool {
-    if parent_pid <= 1 {
-        return true;
-    }
-    std::fs::read_to_string(format!("/proc/{parent_pid}/comm"))
-        .is_ok_and(|name| is_orphan_adopter_name(&name))
-}
-
-/// Tie file-controlled debug clients to the process that launched them.
-///
-/// These clients are automation helpers, not user-owned terminals. Without a
-/// parent-death signal they are reparented to init when a verification script
-/// or debug server exits, retaining a full TUI and session history indefinitely.
-#[cfg(target_os = "linux")]
-fn arm_debug_client_parent_death_signal() {
-    if !is_file_controlled_debug_client() {
-        return;
-    }
-
-    // Capture the parent first, then check it again after prctl. This closes the
-    // race where the launcher exits immediately before the signal is armed.
-    // Safety: getppid has no preconditions and does not dereference pointers.
-    let parent_pid = unsafe { libc::getppid() };
-    // Safety: PR_SET_PDEATHSIG accepts a signal number as its scalar argument.
-    let armed = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) } == 0;
-    // Safety: getppid has no preconditions and does not dereference pointers.
-    let current_parent_pid = unsafe { libc::getppid() };
-    if armed
-        && (parent_is_orphan_adopter(parent_pid)
-            || current_parent_pid != parent_pid
-            || parent_is_orphan_adopter(current_parent_pid))
-    {
-        std::process::exit(0);
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn arm_debug_client_parent_death_signal() {}
-
+#[path = "dispatch_debug_parent.rs"]
+mod debug_parent;
+use debug_parent::*;
 pub(crate) async fn run_main(mut args: Args) -> Result<()> {
+    adopt_runtime_handoff_env(args.command.as_ref());
     arm_debug_client_parent_death_signal();
     if args.ssh.is_some() {
         // A remote session ID and working directory belong to the remote host.
@@ -177,12 +131,13 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             ));
             server.run().await?;
         }
-        Some(Command::Acp) => {
+        Some(Command::Acp { session_env }) => {
             acp::run_acp_command(
                 args.provider,
                 args.model.clone(),
                 args.provider_profile.clone(),
                 args.tool_profile.is_some(),
+                session_env,
             )
             .await?;
         }
@@ -384,8 +339,13 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Version { json }) => {
             commands::run_version_command(json)?;
         }
+        #[cfg(unix)]
+        Some(Command::Rollout(args)) => super::rollout_host::run_cli(args)?,
         Some(Command::Usage { json }) => {
             commands::run_usage_command(json).await?;
+        }
+        Some(Command::Titles { action }) => {
+            commands::run_titles_command(action).await?;
         }
         Some(Command::Telemetry(action)) => super::telemetry::run(action)?,
         Some(Command::SelfDev { build }) => {
@@ -498,6 +458,8 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             no_voice,
             no_voice_waveform,
             no_voice_notifications,
+            no_jarvis_fn_key,
+            no_jarvis_fn_launch,
             no_open,
             no_spawn_terminal,
             no_lid,
@@ -509,6 +471,8 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                     no_voice,
                     no_voice_waveform,
                     no_voice_notifications,
+                    no_jarvis_fn_key,
+                    no_jarvis_fn_launch,
                     no_open,
                     no_spawn_terminal,
                     no_lid,
@@ -526,12 +490,12 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             listen_windows_hotkey,
             uninstall,
         }) => {
-            setup_hints::run_setup_hotkey(
-                listen_macos_hotkey,
-                listen_windows_hotkey,
-                uninstall,
-                notify_cli_launch.as_deref(),
-            )?;
+            // Stale hooks from older versions land here; they must stay a no-op.
+            if notify_cli_launch.is_some() {
+                setup_hints::remove_legacy_cli_launch_hooks();
+                return Ok(());
+            }
+            setup_hints::run_setup_hotkey(listen_macos_hotkey, listen_windows_hotkey, uninstall)?;
         }
         Some(Command::SetupLauncher) => {
             setup_hints::run_setup_launcher()?;
@@ -687,6 +651,30 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     Ok(())
 }
 
+/// Take the daemon-private exec-handoff variables out of this process
+/// environment before anything can spawn a child.
+///
+/// `serve` is the only process a reload hands a target to, so it consumes them
+/// into its immutable identity here (this is the capture every later pong and
+/// rollout decision reads). Every other invocation merely inherited them from a
+/// parent that was itself a daemon child; a stale target describes another
+/// image and must never reject a CLI, so those are ignored outright.
+fn adopt_runtime_handoff_env(command: Option<&Command>) {
+    use crate::build::runtime_generation;
+    if matches!(command, Some(Command::Serve { .. })) {
+        if let Err(error) = runtime_generation::serving_identity(jcode_build_meta::git_hash()) {
+            crate::logging::warn(&format!(
+                "runtime handoff: serving identity unknown: {error:#}"
+            ));
+        } else if let Some(warning) = runtime_generation::identity_warning() {
+            crate::logging::warn(&format!(
+                "runtime handoff: dropped the inherited runtime target: {warning}"
+            ));
+        }
+    }
+    runtime_generation::forget_inherited_handoff_env();
+}
+
 /// Transport for `--provider-profile <name>` (issue #1560: this used to force
 /// OpenAI-compatible unconditionally). Anthropic-compatible profiles go
 /// through `Auto`, the same path as `default_provider = "<name>"`: the env
@@ -713,82 +701,10 @@ fn auth_doctor_provider_arg<'a>(
     })
 }
 
-fn resolve_resume_arg(args: &mut Args) -> Result<()> {
-    if let Some(ref resume_id) = args.resume {
-        let resume_id = resume_id.clone();
-        match resolve_resume_id(&resume_id) {
-            Ok(full_id) => {
-                args.resume = Some(full_id);
-            }
-            Err(e) => {
-                match resume_resolution_failure_action(&resume_id, |key| std::env::var_os(key)) {
-                    // During a reload/update/restart handoff the client re-execs
-                    // itself with `--resume <id>` and `JCODE_RESUMING=1`. In the
-                    // client/server architecture the shared server is the authority
-                    // for session lifecycle, so an id that is not in the local store
-                    // can still be valid server-side. Hard-exiting here dumped the
-                    // user back to a shell with "No session found matching ...",
-                    // making jcode unusable after an auto-update (issue #328).
-                    // Instead, keep the raw id and let the remote connection resolve
-                    // it; if the server cannot find it either, the TUI surfaces a
-                    // recoverable message and falls back to a fresh session rather
-                    // than killing the process.
-                    ResumeResolutionFailureAction::DeferToServer => {
-                        crate::logging::warn(&format!(
-                            "Resume id '{}' not found locally during reload handoff ({}); deferring resolution to the server instead of exiting",
-                            resume_id, e
-                        ));
-                        // Leave args.resume as the raw id for the server to resolve.
-                    }
-                    ResumeResolutionFailureAction::Exit => {
-                        eprintln!("Error: {}", e);
-                        if !output::quiet_enabled() {
-                            eprintln!("\nUse `jcode --resume` to list available sessions.");
-                        }
-                        std::process::exit(1);
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// What to do when a `--resume <id>` cannot be resolved from the local session
-/// store. Extracted as a pure function so the reload-handoff recovery path can
-/// be unit-tested without invoking `std::process::exit` (issue #328).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ResumeResolutionFailureAction {
-    /// Keep the raw id and let the shared server resolve it (reload handoff).
-    DeferToServer,
-    /// No live handoff in progress; the id is genuinely bad, so exit.
-    Exit,
-}
-
-fn resume_resolution_failure_action<F, V>(
-    _resume_id: &str,
-    var_os: F,
-) -> ResumeResolutionFailureAction
-where
-    F: Fn(&str) -> Option<V>,
-{
-    if var_os("JCODE_RESUMING").is_some() {
-        ResumeResolutionFailureAction::DeferToServer
-    } else {
-        ResumeResolutionFailureAction::Exit
-    }
-}
-
-fn resolve_resume_id(resume_id: &str) -> Result<String> {
-    match session::find_session_by_name_or_id(resume_id) {
-        Ok(full_id) => Ok(full_id),
-        Err(native_err) => match crate::import::import_external_resume_id(resume_id)? {
-            Some(imported_id) => Ok(imported_id),
-            None => Err(native_err),
-        },
-    }
-}
+mod resume;
+use resume::resolve_resume_arg;
+#[cfg(test)]
+use resume::{ResumeResolutionFailureAction, resolve_resume_id, resume_resolution_failure_action};
 
 mod subcommand_mapping;
 use subcommand_mapping::*;
@@ -817,22 +733,6 @@ async fn run_default_command(args: Args) -> Result<()> {
     let startup_hints = if args.fresh_spawn {
         None
     } else {
-        // One-time: bake per-repo launch hotkeys from session history into config,
-        // then reinstall so the new chords take effect. Scanning session history
-        // can take a few hundred ms, so run it on a detached thread to keep it off
-        // the first-frame critical path. It is gated by an `imported` flag, so it
-        // does real work at most once and no-ops on every later launch.
-        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-            std::thread::Builder::new()
-                .name("launch-hotkey-bake".to_string())
-                .spawn(|| {
-                    if crate::config::Config::bake_launch_hotkeys_once() {
-                        setup_hints::reinstall_launch_hotkeys_after_config_change();
-                    }
-                })
-                .ok();
-        }
-
         // Prefer existing setup hints (alignment/welcome/terminal nudges); only
         // surface the keybinding-conflict heads-up when nothing else is queued,
         // so we never clobber an early-launch tip. The conflict hint is
@@ -1058,7 +958,9 @@ pub(crate) async fn wait_for_reloading_server() -> bool {
             false
         }
         server::ReloadWaitStatus::Idle => false,
-        server::ReloadWaitStatus::Waiting { .. } => false,
+        server::ReloadWaitStatus::Waiting { .. } | server::ReloadWaitStatus::Unknown { .. } => {
+            false
+        }
     }
 }
 
@@ -1369,7 +1271,12 @@ async fn spawn_server_with_lifetime(
     // The reload marker describes the shared daemon's handoff. An owned server
     // has no predecessor to wait for, and waiting on a marker written by the
     // shared daemon would stall this run for the handoff timeout.
-    let awaits_reload_handoff = lifetime == ServerLifetime::Shared;
+    let rollback_binary = if lifetime == ServerLifetime::Shared {
+        server::rollout::reconcile_before_spawn(&socket_path)?
+    } else {
+        None
+    };
+    let awaits_reload_handoff = lifetime == ServerLifetime::Shared && rollback_binary.is_none();
 
     if awaits_reload_handoff && wait_for_existing_reload_server("server spawn").await {
         startup_profile::mark("server_ready");
@@ -1398,13 +1305,16 @@ async fn spawn_server_with_lifetime(
         )),
     }
     let client_requested_selfdev = selfdev::client_selfdev_requested();
-    let exe = executable
+    let exe = rollback_binary
+        .or(executable)
         .or_else(|| {
             build::shared_server_update_candidate(client_requested_selfdev).map(|(path, _)| path)
         })
         .or_else(|| std::env::current_exe().ok())
         .ok_or_else(|| anyhow::anyhow!("Could not determine executable path for server spawn"))?;
-    let mut cmd = ProcessCommand::new(&exe);
+    let target = crate::build::runtime_generation::pin_path(&exe)?;
+    let mut cmd = ProcessCommand::new(&target.binary_path);
+    crate::build::runtime_generation::prepare_launch(&mut cmd, &target)?;
     cmd.env_remove(selfdev::CLIENT_SELFDEV_ENV);
     if client_requested_selfdev {
         cmd.env("JCODE_DEBUG_CONTROL", "1");

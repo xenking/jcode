@@ -1,9 +1,9 @@
 // Onboarding flow: telemetry settings page and recent-project prefetch.
 
 #[test]
-fn telemetry_pill_opens_settings_page_and_commits_choice() {
+fn telemetry_page_is_informational_and_returns_to_summary() {
     use crate::external_auth::ExternalAuthReviewCandidate;
-    use crate::tui::app::onboarding_flow::ImportReview;
+    use crate::tui::app::onboarding_flow::{ImportReview, SummaryPill};
 
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
@@ -18,121 +18,25 @@ fn telemetry_pill_opens_settings_page_and_commits_choice() {
             };
         }
 
-        // Right twice: Subscription -> Import less -> Telemetry settings.
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Right));
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Right));
+        // t opens the page; Esc returns without touching anything.
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('t')));
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Esc));
+        // Enter on the page returns to the summary with Continue focused.
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('t')));
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
-
-        // The page opens with Continue focused, content sharing unchecked,
-        // and every other category checked.
-        match app.onboarding_phase() {
-            Some(OnboardingPhase::Login {
-                import: Some(review),
-            }) => {
-                let page = review.telemetry.expect("telemetry page open");
-                assert_eq!(page.cursor, 0);
-                if !crate::telemetry::opt_out_forced_by_env() {
-                    assert_eq!(page.checked, [false, true, true, true, true, true]);
-                }
-            }
-            other => panic!("expected telemetry page open, got {other:?}"),
-        }
-        // The import countdown is paused while the page is open, so the screen
-        // cannot commit the import out from under the user.
-        assert!(!app.onboarding_flow.as_ref().unwrap().decision_timed_out());
-
-        // `a` checks everything, then Enter on Continue commits: usage on,
-        // content sharing on.
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('a')));
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
-        if !crate::telemetry::opt_out_forced_by_env() {
-            assert!(crate::telemetry::is_enabled());
-            assert!(crate::telemetry::content_sharing_enabled());
-        }
-        let no_telemetry_marker = std::path::Path::new(
-            &std::env::var_os("JCODE_HOME").expect("temporary JCODE_HOME"),
-        )
-        .join("no_telemetry");
-        assert!(
-            !no_telemetry_marker.exists(),
-            "Checking everything must remove the persisted opt-out marker"
-        );
-        // We are back on the summary screen with the import still pending.
         match app.onboarding_phase() {
             Some(OnboardingPhase::Login {
                 import: Some(review),
             }) => {
                 assert!(review.telemetry.is_none());
-                assert!(!review.choosing);
-                assert_eq!(
-                    review.summary_pill,
-                    crate::tui::app::onboarding_flow::SummaryPill::Continue,
-                    "saving telemetry settings refocuses Continue"
-                );
+                assert_eq!(review.summary_pill, SummaryPill::Continue);
             }
             other => panic!("expected import summary, got {other:?}"),
         }
-        assert!(app.onboarding_import_in_progress.is_none());
-    });
-}
-
-#[test]
-fn telemetry_page_send_nothing_disables_telemetry_and_esc_goes_back() {
-    use crate::external_auth::ExternalAuthReviewCandidate;
-    use crate::tui::app::onboarding_flow::ImportReview;
-
-    with_temp_jcode_home(|| {
-        let mut app = create_test_app();
-        app.onboarding_flow = None;
-        app.begin_onboarding_flow_at_login();
-        let review =
-            ImportReview::new(vec![ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "Codex auth.json")])
-                .unwrap();
-        if let Some(flow) = app.onboarding_flow.as_mut() {
-            flow.phase = OnboardingPhase::Login {
-                import: Some(review),
-            };
-        }
-
-        // t is the direct shortcut onto the telemetry page; Esc returns without
-        // changing anything and keeps onboarding active.
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('t')));
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Esc));
-        assert!(matches!(
-            app.onboarding_phase(),
-            Some(OnboardingPhase::Login { import: Some(_) })
-        ));
-        if !crate::telemetry::opt_out_forced_by_env() {
-            assert!(crate::telemetry::is_enabled());
-        }
-
-        // Reopen (Continue focused), uncheck everything with `n`, then
-        // toggle the first category back on and off to exercise Space.
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('t')));
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('n')));
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Down));
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char(' ')));
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char(' ')));
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Up));
-        // In the dependency build used by this crate, telemetry-core is not
-        // compiled with cfg(test), so the in-app opt-out event would otherwise
-        // use the real delivery path. Keep the UI preconditions above free of
-        // inherited opt-out env, then force opt-out only for the commit action:
-        // telemetry-core sees delivery blocked by env while still writing the
-        // no_telemetry marker that this test verifies after the guard drops.
-        let delivery_block = EnvRestoreGuard::set("JCODE_NO_TELEMETRY", "1");
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
-        drop(delivery_block);
         assert!(!crate::telemetry::is_enabled());
-        assert!(!crate::telemetry::content_sharing_enabled());
-        let no_telemetry_marker = std::path::Path::new(
-            &std::env::var_os("JCODE_HOME").expect("temporary JCODE_HOME"),
-        )
-        .join("no_telemetry");
-        assert!(
-            no_telemetry_marker.exists(),
-            "Unchecking everything must persist the opt-out marker"
-        );
+        let marker = std::path::Path::new(&std::env::var_os("JCODE_HOME").unwrap())
+            .join("no_telemetry");
+        assert!(!marker.exists(), "the page must not persist any telemetry state");
     });
 }
 

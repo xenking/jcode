@@ -67,7 +67,7 @@ pub(crate) fn occasional_status_tip(max_width: usize, elapsed_secs: u64) -> Opti
     }
 
     let prefix = "💡 ";
-    let available = max_width.saturating_sub(prefix.chars().count());
+    let available = max_width.saturating_sub(prefix.width());
     if available < 12 {
         return None;
     }

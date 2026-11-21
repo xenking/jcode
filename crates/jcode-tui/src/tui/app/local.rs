@@ -84,7 +84,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     app.expire_presumed_focus();
     crate::tui::window_visibility::poll(app.client_focused(), app.is_processing);
     app.refresh_terminal_title_metrics();
-    app.sync_herdr_agent_state();
+    app.sync_terminal_agent_state();
     // Liveness breadcrumb: if the UI loop wedges, the watchdog reports this as
     // the last phase that made progress.
     crate::logging::watchdog::beat("tui.idle_tick");
@@ -96,7 +96,6 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     let mut needs_redraw = reset_redraw
         | crate::tui::periodic_redraw_required(app)
         | crate::tui::terminal_events::theme_redraw_pending();
-    needs_redraw |= app.poll_oauth_account_telemetry();
     needs_redraw |= app.retire_expired_status_notice();
     needs_redraw |= app.flush_pending_resize_redraw();
     app.maybe_capture_runtime_memory_heartbeat();
@@ -110,6 +109,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.update_pinned_images_auto_hide();
     // Dissolve stale (off-screen) reasoning traces with zero visible motion.
     needs_redraw |= app.gc_offscreen_reasoning_traces();
+    needs_redraw |= app.maybe_backfill_expanded_prompt_history();
     // Adopt the resolved scroll position once a frame containing newly loaded
     // older history has rendered, so manual scrolling resumes seamlessly.
     needs_redraw |= app.reconcile_history_anchor();
@@ -338,6 +338,13 @@ pub(super) fn handle_bus_event(
         }
         Ok(BusEvent::VoiceInputWake) => app.handle_voice_input_wake_local(),
         Ok(BusEvent::CompactionFinished) => app.poll_compaction_completion(),
+        Ok(BusEvent::CompactionStarted {
+            trigger,
+            pre_tokens,
+        }) => {
+            app.show_compaction_running(trigger, pre_tokens);
+            true
+        }
         Ok(BusEvent::SidePanelUpdated(update)) => {
             if update.session_id == app.session.id {
                 app.set_side_panel_snapshot(update.snapshot);
@@ -521,7 +528,8 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
             content: vec![ContentBlock::Text {
                 text: notification,
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         });
@@ -566,14 +574,21 @@ fn handle_background_task_stalled(app: &mut App, task: crate::bus::BackgroundTas
         ),
         percent,
     );
-    app.set_status_notice(format!(
-        "Background task stalled · {} · no output for {}s",
-        crate::message::background_task_display_label(
-            &task.tool_name,
-            task.display_name.as_deref()
-        ),
-        task.stall_wake_seconds
-    ));
+    let label = crate::message::background_task_display_label(
+        &task.tool_name,
+        task.display_name.as_deref(),
+    );
+    app.set_status_notice(if task.elapsed_review {
+        format!(
+            "Background task review · {label} · running {:.0}s",
+            task.running_secs
+        )
+    } else {
+        format!(
+            "Background task stalled · {label} · no output for {}s",
+            task.stall_wake_seconds
+        )
+    });
 
     if !app.is_processing {
         app.push_display_message(DisplayMessage::background_task(notification.clone()));
@@ -582,7 +597,8 @@ fn handle_background_task_stalled(app: &mut App, task: crate::bus::BackgroundTas
             content: vec![ContentBlock::Text {
                 text: notification.clone(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         });

@@ -43,7 +43,7 @@ impl Tool for DesktopSelfDevTool {
     fn parameters_schema(&self) -> Value {
         json!({"type":"object", "required":["action"], "properties": {
             "intent": super::intent_schema_property(),
-            "action": {"type":"string", "enum":["status","build","reload","build-reload","reload-bridge","test","screenshot","inspect"], "description":"reload-bridge restarts the harness API bridge onto this checkout's newest build. Never restart the bridge by hand from bash: this session talks through it."},
+            "action": {"type":"string", "enum":["status","build","reload","reload-bridge","test","screenshot","inspect"], "description":"reload rebuilds/reloads Desktop. reload-bridge restarts the harness API bridge onto this checkout's newest build. Never restart the bridge by hand from bash: this session talks through it."},
             "instance": {"type":"string", "enum":INSTANCES, "description":"Required if several Desktops run. single-panel hosts all --single-panel windows."},
             "command": {"type":"string", "description":"Test command, run in the Desktop checkout. Default cargo test."},
             "output": {"type":"string", "description":"Screenshot path under target/. Default desktop-selfdev.png. Uses private Xvfb."},
@@ -69,9 +69,7 @@ impl Tool for DesktopSelfDevTool {
             #[cfg(unix)]
             "reload-bridge" => {
                 let launch = super::bridge_reload::desktop_bridge_launch(&root)?;
-                return Ok(
-                    super::bridge_reload::spawn_bridge_reload(&ctx.session_id, launch).await,
-                );
+                return super::bridge_reload::spawn_bridge_reload(&ctx.session_id, launch).await;
             }
             "status" | "reload" | "build-reload" | "inspect" | "build" => (),
             "test" | "screenshot" => {
@@ -93,6 +91,8 @@ impl Tool for DesktopSelfDevTool {
                 "note":"Instance metadata only. Host R protocol acknowledges enqueueing, not build/reload completion. Inspect lists UI preview states, not full app state."
             }))?));
         }
+        // Desktop's R protocol always rebuilds and reloads. Keep build-reload
+        // callable for older transcripts without advertising a duplicate action.
         if matches!(input.action.as_str(), "reload" | "build-reload") {
             let host = host.as_mut().context(
                 "No Desktop instance is running. Start Desktop from this checkout first.",
@@ -306,7 +306,7 @@ async fn connect_host(root: &Path, path: &Path) -> Result<Host> {
 }
 
 #[cfg(target_os = "linux")]
-fn peer_process(stream: &tokio::net::UnixStream) -> Result<(u32, PathBuf)> {
+pub(crate) fn peer_process(stream: &tokio::net::UnixStream) -> Result<(u32, PathBuf)> {
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     let pid = stream
         .peer_cred()?
@@ -325,7 +325,7 @@ fn peer_process(stream: &tokio::net::UnixStream) -> Result<(u32, PathBuf)> {
 }
 
 #[cfg(target_os = "macos")]
-fn peer_process(stream: &tokio::net::UnixStream) -> Result<(u32, PathBuf)> {
+pub(crate) fn peer_process(stream: &tokio::net::UnixStream) -> Result<(u32, PathBuf)> {
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStringExt;
     let mut pid: libc::pid_t = 0;

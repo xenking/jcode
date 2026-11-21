@@ -754,6 +754,7 @@ mod tests {
         serde_json::to_string(&ServerFrame::reply(
             1,
             ApiEvent::HelloOk {
+                runtime_identity: None,
                 version: API_VERSION_MAJOR,
                 server: "fake-ssh".into(),
                 capabilities: vec![],

@@ -1,23 +1,21 @@
 //! Turn-end follow-up policy: auto-poke and the todo quality gates.
 //!
-//! This is the client-side state machine that decides, after a turn ends, what
-//! (if anything) to send next: the incomplete-todo poke, the one-shot
-//! long-session review, the ownership gate, the completion-confidence and
-//! confidence-spike checks, and the final-response
-//! handoff. It is a faithful port of the TUI's `schedule_auto_poke_followup`
-//! so every client (TUI, Desktop, SDK users) runs the same policy.
+//! This state machine decides, after a model turn ends, what (if anything)
+//! should run next: incomplete-todo pokes, the one-shot long-session review,
+//! ownership, completion-confidence and confidence-spike checks, and the final
+//! response handoff. The daemon owns it for connected sessions, so clients must
+//! not independently dispatch these follow-ups. Standalone embeddings may use
+//! the same pure policy when they own their agent runtime.
 //!
-//! It is pure: callers fetch a [`TodoSnapshot`] (the SDK's `todo_state`),
-//! call [`FollowUpPolicy::decide`], send the returned message, and apply the
-//! returned [`TodoEffects`] (the SDK's `ack_todo_follow_up`).
+//! Callers load a [`TodoSnapshot`], call [`FollowUpPolicy::decide`], run the
+//! returned message, and apply [`TodoEffects`] before deciding again.
 
 use crate::{
     ConfidenceState, GateObservation, TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE,
     TODO_LONG_SESSION_REVIEW_MESSAGE, TodoGoal, TodoItem, TodoPlan, build_actionable_poke_message,
-    build_todo_completion_continuation_message, build_todo_confidence_spike_continuation_message,
-    build_todo_ownership_continuation_message, completed_groups_have_sufficient_delivery,
-    completion_confidence_passes, spike_completed_todos, todo_status_is_cancelled,
-    todo_status_is_completed,
+    build_todo_confidence_spike_continuation_message, build_todo_ownership_continuation_message,
+    completed_groups_have_sufficient_delivery, completion_confidence_passes, spike_completed_todos,
+    todo_status_is_cancelled, todo_status_is_completed,
 };
 use serde::{Deserialize, Serialize};
 
@@ -26,13 +24,16 @@ use serde::{Deserialize, Serialize};
 pub const MAX_GATE_ATTEMPTS: u8 = 5;
 
 /// Automatic incomplete-todo follow-ups allowed for one unchanged open state.
-pub const INCOMPLETE_TODO_MAX_ATTEMPTS: u8 = 3;
+pub const INCOMPLETE_TODO_MAX_ATTEMPTS: u8 = 1;
 
 /// Shared retry budget for clients that handle their own turn-end loop.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IncompleteTodoBudget {
     fingerprint: Option<Vec<TodoItem>>,
     attempts: u8,
+    /// A follow-up was granted and the turn it started has not been reported.
+    #[serde(default)]
+    awaiting_outcome: bool,
 }
 
 impl IncompleteTodoBudget {
@@ -48,7 +49,8 @@ impl IncompleteTodoBudget {
             return true;
         }
         // Compare the actual policy inputs instead of fallible JSON serialization.
-        let fingerprint: Vec<TodoItem> = incomplete.into_iter().cloned().collect();
+        let mut fingerprint: Vec<TodoItem> = incomplete.into_iter().cloned().collect();
+        fingerprint.sort_by(|a, b| a.id.cmp(&b.id));
         if self.fingerprint.as_ref() != Some(&fingerprint) {
             self.fingerprint = Some(fingerprint);
             self.attempts = 0;
@@ -57,8 +59,28 @@ impl IncompleteTodoBudget {
             return false;
         }
         self.attempts += 1;
+        self.awaiting_outcome = true;
         true
     }
+
+    /// Report the turn the last granted follow-up started. One that made no
+    /// tool calls changed nothing, so asking again for the same open state only
+    /// loops on "nothing to do" replies. Spend the rest of the budget: a
+    /// different todo set (or a wait, which clears the budget) pokes again.
+    pub fn record_turn(&mut self, had_tool_calls: bool) {
+        if std::mem::take(&mut self.awaiting_outcome) && !had_tool_calls {
+            self.attempts = INCOMPLETE_TODO_MAX_ATTEMPTS;
+        }
+    }
+}
+
+/// A swarm member that will still report back: its completion wakes the
+/// session that spawned it, so that session has nothing to poke about.
+pub fn swarm_member_is_working(status: &str) -> bool {
+    matches!(
+        status,
+        "queued" | "running" | "running_stale" | "streaming" | "thinking"
+    )
 }
 
 /// Everything the policy reads about a session's todo state at turn end.
@@ -80,6 +102,28 @@ pub struct TodoSnapshot {
     /// or terminal task IDs must not suppress actionable work.
     #[serde(default)]
     pub running_background_tasks: Vec<String>,
+    /// Whether the runtime has a live, wake-enabled swarm await for this session.
+    /// Unknown when read from disk alone or from an older harness bridge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_swarm_await: Option<bool>,
+    /// The session these todos belong to. A todo assigned to any other session
+    /// is that session's work and is never actionable here.
+    #[serde(default)]
+    pub session_id: String,
+    /// Swarm members spawned by this session that are still working. Their
+    /// completion wakes the session, so poking meanwhile only burns turns.
+    #[serde(default)]
+    pub running_swarm_members: Vec<String>,
+}
+
+/// A todo handed to another session (a swarm worker). The owner works it and
+/// reports back, so it is not this session's to continue. `@self`, an empty
+/// owner and this session's own id are this session's work.
+pub fn todo_assigned_elsewhere(todo: &TodoItem, session_id: &str) -> bool {
+    todo.assigned_to
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|owner| !owner.is_empty() && owner != "@self" && owner != session_id)
 }
 
 /// A dependency blocks a todo only while the referenced task is running.
@@ -255,6 +299,14 @@ impl FollowUpPolicy {
         self.gate_digest_enabled = gate_digest_enabled;
     }
 
+    /// Report how the turn after the last decision went. A poke that produced
+    /// no tool calls achieved nothing, so asking again for the same open state
+    /// would only loop ("nothing to do" replies). Callers that can observe tool
+    /// calls should call this before the next [`Self::decide`].
+    pub fn record_turn(&mut self, had_tool_calls: bool) {
+        self.incomplete_budget.record_turn(had_tool_calls);
+    }
+
     /// Decide the next follow-up after a turn ended. The caller must already
     /// have checked that no user prompt or other follow-up is pending.
     pub fn decide(&mut self, snapshot: &TodoSnapshot) -> Decision {
@@ -301,6 +353,7 @@ impl FollowUpPolicy {
             .copied()
             .filter(|todo| {
                 !todo_requires_user_auth(todo)
+                    && !todo_assigned_elsewhere(todo, &snapshot.session_id)
                     && !todo_goal_cannot_complete(todo, goals)
                     && !todo_waits_on_running_task(todo, |id| {
                         snapshot
@@ -310,10 +363,13 @@ impl FollowUpPolicy {
                     })
             })
             .collect();
-        if !incomplete.is_empty() && actionable.is_empty() {
-            // Waiting is not resistance or completion. A completion wake will
-            // re-enter the policy with fresh runtime facts and a fresh budget.
-            self.incomplete_budget = IncompleteTodoBudget::default();
+        if !incomplete.is_empty()
+            && (actionable.is_empty()
+                || !snapshot.running_swarm_members.is_empty()
+                || snapshot.pending_swarm_await == Some(true))
+        {
+            // Waiting is not a new todo set. The completion wake is enough,
+            // and must not reset the fingerprint of an earlier poke.
             return Decision::default();
         }
 
@@ -330,7 +386,7 @@ impl FollowUpPolicy {
         }
 
         if !incomplete.is_empty() {
-            return self.poke_incomplete(&actionable);
+            return self.poke_incomplete(&actionable, todos);
         }
 
         // Completing or removing the list ends the prior poke cycle.
@@ -388,13 +444,16 @@ impl FollowUpPolicy {
         let summary = ConfidenceSummary::of(todos);
         let needs_spike_challenge =
             self.gate_digest_enabled && summary.spike_detected && !self.spike_challenged;
-        let needs_validation = self.gate_digest_enabled && summary.needs_validation;
+        // Goals that document why validation stopped exempt their todos:
+        // asking again cannot change an exhausted constraint.
+        let validation_targets = crate::todos_needing_validation(todos, goals);
+        let needs_validation = self.gate_digest_enabled && !validation_targets.is_empty();
         if (needs_validation || needs_spike_challenge) && gate_budget_left {
             self.gate_attempts = self.gate_attempts.saturating_add(1);
-            let decision = if summary.needs_validation {
+            let decision = if needs_validation {
                 Decision::send(
                     FollowUpKind::CompletionValidation,
-                    build_todo_completion_continuation_message(todos),
+                    crate::build_todo_validation_continuation_message(&validation_targets),
                     "🔍 Double-checking confidence for you...",
                 )
             } else {
@@ -447,7 +506,7 @@ impl FollowUpPolicy {
         Decision::default().with_effects(effects)
     }
 
-    fn poke_incomplete(&mut self, incomplete: &[&TodoItem]) -> Decision {
+    fn poke_incomplete(&mut self, incomplete: &[&TodoItem], all_todos: &[TodoItem]) -> Decision {
         self.final_response_requested = false;
         // Open work begins a new completion cycle.
         self.gate_digest_delivered = false;
@@ -455,8 +514,8 @@ impl FollowUpPolicy {
         self.last_ownership_fingerprint = None;
         let todos: Vec<_> = incomplete.iter().map(|todo| (*todo).clone()).collect();
         let message = build_actionable_poke_message(&todos);
-        if !self.incomplete_budget.allow_follow_up(&todos) {
-            // Stop after three automatic retries without progress. Keep the
+        if !self.incomplete_budget.allow_follow_up(all_todos) {
+            // Stop after one automatic reminder. Keep the
             // configured enablement so changed work can start a fresh budget.
             return Decision::default();
         }

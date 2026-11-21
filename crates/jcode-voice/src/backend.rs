@@ -6,6 +6,7 @@ use super::{SONIOX_URL, nari, nari_api_key, soniox_api_key};
 pub enum StreamingBackend {
     Nari,
     Soniox,
+    ElevenLabs,
 }
 
 impl StreamingBackend {
@@ -14,6 +15,7 @@ impl StreamingBackend {
         match self {
             Self::Nari => nari::URL,
             Self::Soniox => SONIOX_URL,
+            Self::ElevenLabs => super::elevenlabs::URL,
         }
     }
 
@@ -23,6 +25,10 @@ impl StreamingBackend {
         match self {
             Self::Nari => nari_api_key(),
             Self::Soniox => soniox_api_key(),
+            Self::ElevenLabs => {
+                let (var, file) = self.key_location();
+                jcode_provider_env::load_api_key_from_env_or_config(var, file)
+            }
         }
     }
 
@@ -31,6 +37,7 @@ impl StreamingBackend {
         match self {
             Self::Nari => ("NARI_API_KEY", "nari.env"),
             Self::Soniox => ("SONIOX_API_KEY", "soniox.env"),
+            Self::ElevenLabs => ("ELEVENLABS_API_KEY", "elevenlabs.env"),
         }
     }
 

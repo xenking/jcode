@@ -73,6 +73,16 @@ async fn emit_external_wake(
     true
 }
 
+/// Scan only after the attachment is established, without holding up its socket.
+pub(super) fn schedule_detached_completion_replay(session_id: &str) {
+    let session_id = session_id.to_owned();
+    tokio::spawn(async move {
+        crate::background::global()
+            .replay_detached_completions_for(&session_id)
+            .await;
+    });
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "background task completion needs session, interrupt, and swarm status state"
@@ -87,9 +97,29 @@ pub(super) async fn dispatch_background_task_completion(
     event_counter: &Arc<AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
 ) {
+    let manager = crate::background::global();
+    let detached_delivery = manager.detached_completion_delivered(&task.task_id).await;
+    if detached_delivery == Some(true) {
+        // A reconnect can republish while the original event is already queued.
+        return;
+    }
+    let headless = if detached_delivery == Some(false) {
+        let members = swarm_members.read().await;
+        let Some(member) = members.get(&task.session_id) else {
+            return;
+        };
+        // Resume will replay after sending history. Starting a wake now could
+        // either lose it completely or leave it dormant until the next prompt.
+        if !member.is_headless && !member.event_txs.values().any(|sender| !sender.is_closed()) {
+            return;
+        }
+        member.is_headless
+    } else {
+        false
+    };
     let notification = format_background_task_notification_markdown(task);
 
-    if fanout_session_event(
+    let notified = fanout_session_event(
         swarm_members,
         &task.session_id,
         ServerEvent::Notification {
@@ -111,23 +141,23 @@ pub(super) async fn dispatch_background_task_completion(
         },
     )
     .await
-        == 0
-    {
+        > 0;
+    if !notified && !headless {
         crate::logging::warn(&format!(
             "Failed to notify attached clients for background task completion on session {}",
             task.session_id
         ));
     }
 
-    if task.wake
-        && !emit_external_wake(
+    let woke = !task.wake
+        || emit_external_wake(
             &task.session_id,
             "background_task_completed",
             &notification,
             swarm_members,
         )
         .await
-        && !run_live_turn_if_idle(
+        || run_live_turn_if_idle(
             &task.session_id,
             &notification,
             Some(
@@ -144,7 +174,7 @@ pub(super) async fn dispatch_background_task_completion(
             ),
         )
         .await
-        && !queue_soft_interrupt_for_session(
+        || queue_soft_interrupt_for_session(
             &task.session_id,
             notification.clone(),
             false,
@@ -152,12 +182,17 @@ pub(super) async fn dispatch_background_task_completion(
             soft_interrupt_queues,
             sessions,
         )
-        .await
-    {
+        .await;
+    if !woke {
         crate::logging::warn(&format!(
             "Failed to deliver background task completion to session {}",
             task.session_id
         ));
+    }
+    if detached_delivery == Some(false) && (notified || headless) && woke {
+        manager
+            .mark_detached_completion_delivered(&task.task_id)
+            .await;
     }
 }
 
@@ -209,7 +244,7 @@ pub(super) async fn dispatch_background_task_stalled(
     if task.wake
         && !emit_external_wake(
             &task.session_id,
-            "background_task_stalled",
+            if task.elapsed_review { "background_task_elapsed_review" } else { "background_task_stalled" },
             &notification,
             swarm_members,
         )
@@ -217,10 +252,12 @@ pub(super) async fn dispatch_background_task_stalled(
         && !run_live_turn_if_idle(
             &task.session_id,
             &notification,
-            Some(
+            Some(if task.elapsed_review {
+                "Review elapsed runtime and diagnose any avoidable delay. Leave healthy work running without restarting it.".to_string()
+            } else {
                 "A background task for this session has produced no output or progress for its stall window. Inspect it and decide whether to keep waiting, fix it, or cancel it."
-                    .to_string(),
-            ),
+                    .to_string()
+            }),
             sessions,
             LiveTurnSwarmContext::new(
                 swarm_members,
@@ -376,7 +413,7 @@ pub(super) async fn dispatch_swarm_worker_report(
     ).await {
         let queued = queue_soft_interrupt_for_session(
             &event.session_id,
-            format!("{}\n\nReview this worker report and continue coordinating the remaining actionable plan, including assigning available workers their next work.", event.notification),
+            format!("{}\n\nIntegrate results. Continue actionable work or stop idle workers.", event.notification),
             false,
             SoftInterruptSource::System,
             soft_interrupt_queues,
@@ -750,6 +787,64 @@ pub(super) async fn dispatch_ui_activity(
             "Failed to notify attached clients for UI activity on session {}",
             session_id
         ));
+    }
+}
+
+/// A headless worker parked on `ask`. Wake the coordinator so its model sees
+/// the question and answers with `swarm action="answer"` (or re-asks the human
+/// with its own `ask`). Unlike a worker report, the coordinator's turn is
+/// expected to end with an answer, not with more fan-out.
+pub(super) async fn dispatch_swarm_ask_escalated(
+    event: &crate::bus::SwarmAskEscalated,
+    sessions: &SessionAgents,
+    soft_interrupt_queues: &SessionInterruptQueues,
+    swarm: LiveTurnSwarmContext,
+) {
+    if !super::ask_escalation::is_pending(&event.request_id) {
+        return;
+    }
+    // Never revive a coordinator the user explicitly stopped.
+    if swarm
+        .members
+        .read()
+        .await
+        .get(&event.session_id)
+        .is_none_or(|member| matches!(member.status.as_str(), "stopped" | "crashed" | "failed"))
+    {
+        return;
+    }
+    if emit_external_wake(
+        &event.session_id,
+        "swarm_ask_escalated",
+        &event.notification,
+        &swarm.members,
+    )
+    .await
+    {
+        return;
+    }
+    let reminder = "A worker is parked on ask waiting for your decision. Answer it with the `swarm` tool action=\"answer\" (to_session = the worker session id, answers = one object per question). If the human owner must decide, call `ask` yourself first. The worker will resume with your answer.".to_string();
+    if !run_live_turn_if_idle(
+        &event.session_id,
+        &event.notification,
+        Some(reminder.clone()),
+        sessions,
+        swarm,
+    )
+    .await
+    {
+        let queued = queue_soft_interrupt_for_session(
+            &event.session_id,
+            format!("{}\n\n{reminder}", event.notification),
+            false,
+            SoftInterruptSource::System,
+            soft_interrupt_queues,
+            sessions,
+        )
+        .await;
+        if !queued {
+            crate::logging::warn("Could not queue escalated ask for coordinator session");
+        }
     }
 }
 

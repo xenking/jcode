@@ -252,9 +252,9 @@ pub(super) async fn handle_comm_list(
             status_age_secs: u64,
         }
 
+        let touches = file_touch.reverse_snapshot().await;
         let statics: Vec<MemberStatic> = {
             let members = swarm_members.read().await;
-            let touches = file_touch.reverse_snapshot().await;
             swarm_session_ids
                 .iter()
                 .filter_map(|sid| {

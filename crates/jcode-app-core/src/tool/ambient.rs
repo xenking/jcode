@@ -83,7 +83,7 @@ pub fn unregister_ambient_session(session_id: &str) {
     }
 }
 
-fn is_ambient_session_registered(session_id: &str) -> bool {
+pub(crate) fn is_ambient_session_registered(session_id: &str) -> bool {
     ambient_session_ids()
         .lock()
         .map(|ids| ids.contains(session_id))

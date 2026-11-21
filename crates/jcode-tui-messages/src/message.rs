@@ -1,8 +1,36 @@
 use jcode_message_types::ToolCall;
 use jcode_session_types::RenderedMessage;
+
+pub fn format_attachment_chips(
+    mut content: String,
+    attachments: &[jcode_session_types::StoredAttachment],
+) -> String {
+    for attachment in attachments {
+        let label = match attachment {
+            jcode_session_types::StoredAttachment::File { name, .. } => format!("[{name}]"),
+            jcode_session_types::StoredAttachment::PastedText { text } => {
+                format!("[Pasted text, {} lines]", text.lines().count().max(1))
+            }
+            jcode_session_types::StoredAttachment::Unknown => continue,
+        };
+        if !content.is_empty() {
+            content.push('\n');
+        }
+        content.push_str(&label);
+    }
+    content
+}
 use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+
+/// Collapse state for a completed-compaction divider, held in `title` so it
+/// survives transcript rebuilds without a side table keyed by row index.
+pub const COMPACTION_COLLAPSED_TITLE: &str = "compaction:collapsed";
+/// Expanded state for a completed-compaction divider.
+pub const COMPACTION_EXPANDED_TITLE: &str = "compaction:expanded";
+/// Marks the transient divider shown while a compaction is running.
+pub const COMPACTION_RUNNING_TITLE: &str = "compaction:running";
 
 /// A message in the conversation for TUI display.
 #[derive(Clone, Debug)]
@@ -17,6 +45,22 @@ pub struct DisplayMessage {
 }
 
 impl DisplayMessage {
+    /// An ask result records a human decision, even though it is stored as a tool result.
+    pub fn is_ask_decision(&self) -> bool {
+        self.role == "tool"
+            && self
+                .tool_data
+                .as_ref()
+                .is_some_and(|tool| tool.name == "ask")
+    }
+
+    pub fn is_answered_ask(&self) -> bool {
+        self.is_ask_decision()
+            && (self.content.starts_with("User answers:")
+                || self.content.contains(" -> ")
+                || self.content.contains("declined"))
+    }
+
     /// Create an error message.
     pub fn error(content: impl Into<String>) -> Self {
         Self {
@@ -92,6 +136,65 @@ impl DisplayMessage {
             title: Some("Todos".to_string()),
             tool_data: None,
         }
+    }
+
+    /// Create a completed-compaction divider row.
+    ///
+    /// `content` is the shared divider body (`label` + blank line + detail) the
+    /// server also renders into stored history. The title carries the collapse
+    /// state so a reload cannot lose it: `compaction:collapsed` by default.
+    pub fn compaction(content: impl Into<String>) -> Self {
+        Self {
+            role: "compaction".to_string(),
+            content: content.into(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: Some(COMPACTION_COLLAPSED_TITLE.to_string()),
+            tool_data: None,
+        }
+    }
+
+    /// Create the running divider shown while a compaction summarizes.
+    pub fn compaction_running(content: impl Into<String>) -> Self {
+        Self {
+            role: "compaction".to_string(),
+            content: content.into(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: Some(COMPACTION_RUNNING_TITLE.to_string()),
+            tool_data: None,
+        }
+    }
+
+    /// Whether this row is a compaction divider rather than a chat message.
+    pub fn is_compaction(&self) -> bool {
+        self.role == "compaction"
+    }
+
+    /// Whether the divider is expanded to show its detail.
+    pub fn compaction_is_expanded(&self) -> bool {
+        self.is_compaction() && self.title.as_deref() == Some(COMPACTION_EXPANDED_TITLE)
+    }
+
+    /// Whether this divider represents a compaction still in progress.
+    pub fn compaction_is_running(&self) -> bool {
+        self.is_compaction() && self.title.as_deref() == Some(COMPACTION_RUNNING_TITLE)
+    }
+
+    /// Flip a completion divider between collapsed and expanded.
+    pub fn toggle_compaction_expanded(&mut self) -> bool {
+        if !self.is_compaction() || self.compaction_is_running() {
+            return false;
+        }
+        self.title = Some(
+            if self.compaction_is_expanded() {
+                COMPACTION_COLLAPSED_TITLE
+            } else {
+                COMPACTION_EXPANDED_TITLE
+            }
+            .to_string(),
+        );
+        true
     }
 
     /// Create a memory injection message (bordered box display).
@@ -228,12 +331,15 @@ impl DisplayMessage {
                     .or_else(|| Self::tool_duration_from_output(&item.content))
             })
             .flatten();
+        // Stored compaction rows carry no title; the collapse state lives in the
+        // title, so rehydrated dividers start collapsed like live ones.
+        let title = (item.role == "compaction").then(|| COMPACTION_COLLAPSED_TITLE.to_string());
         Self {
             role: item.role,
-            content: item.content,
+            content: format_attachment_chips(item.content, &item.attachments),
             tool_calls: item.tool_calls,
             duration_secs,
-            title: None,
+            title,
             tool_data: item.tool_data,
         }
     }
@@ -445,6 +551,20 @@ fn hash_json_value(value: &Value, hasher: &mut DefaultHasher) {
     }
 }
 
+/// Reject malformed or partial timing fields without dropping their diagnostics.
+fn parse_timing_number<T: std::str::FromStr>(value: &str) -> Option<T>
+where
+    T::Err: std::fmt::Display,
+{
+    match value.parse() {
+        Ok(number) => Some(number),
+        Err(error) => {
+            jcode_logging::debug(&format!("Ignoring malformed tool timing number: {error}"));
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,7 +636,9 @@ mod tests {
     #[test]
     fn tool_duration_restored_metadata_wins_and_missing_stays_unknown() {
         let mut row = RenderedMessage {
+            attachments: Vec::new(),
             response_stats: None,
+            timestamp_ms: None,
             tool_duration_ms: Some(1234),
             role: "tool".into(),
             content: "[tool timing: duration=2s] body".into(),
@@ -547,9 +669,40 @@ mod tests {
     }
 
     #[test]
+    fn rendered_attachments_are_collapsed_in_transcript() {
+        let rendered = RenderedMessage {
+            attachments: vec![
+                jcode_session_types::StoredAttachment::File {
+                    name: "main.rs".into(),
+                    mime: "text/plain".into(),
+                    size: 3,
+                    path: None,
+                },
+                jcode_session_types::StoredAttachment::PastedText {
+                    text: "one\ntwo\nthree".into(),
+                },
+            ],
+            response_stats: None,
+            timestamp_ms: None,
+            tool_duration_ms: None,
+            role: "user".into(),
+            content: "Review".into(),
+            tool_calls: vec![],
+            tool_data: None,
+            stored_index: None,
+        };
+        let display = DisplayMessage::from_rendered_message(rendered);
+        assert!(display.content.contains("main.rs"));
+        assert!(display.content.contains("Pasted text, 3 lines"));
+        assert!(!display.content.contains("one\ntwo\nthree"));
+    }
+
+    #[test]
     fn rendered_messages_convert_to_display_messages() {
         let rendered = RenderedMessage {
+            attachments: Vec::new(),
             response_stats: None,
+            timestamp_ms: None,
             tool_duration_ms: None,
             role: "assistant".to_string(),
             content: "done".to_string(),
@@ -589,19 +742,5 @@ mod tests {
             latest_user_transcript_preview(messages.iter().copied(), 20),
             Some("hello world".to_string())
         );
-    }
-}
-
-/// Reject malformed or partial timing fields without dropping their diagnostics.
-fn parse_timing_number<T: std::str::FromStr>(value: &str) -> Option<T>
-where
-    T::Err: std::fmt::Display,
-{
-    match value.parse() {
-        Ok(number) => Some(number),
-        Err(error) => {
-            jcode_logging::debug(&format!("Ignoring malformed tool timing number: {error}"));
-            None
-        }
     }
 }

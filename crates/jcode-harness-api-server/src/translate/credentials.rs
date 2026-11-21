@@ -5,26 +5,37 @@ use super::*;
 impl BridgeState {
     pub(super) fn credential_binding(
         provider: &str,
-    ) -> Option<(&'static str, &'static [&'static str], &'static str)> {
-        match provider.trim().to_ascii_lowercase().as_str() {
-            "claude-api" | "anthropic-api" | "anthropic-key" | "claude-key" => {
-                Some(("claude-api", &["ANTHROPIC_API_KEY"], "anthropic.env"))
-            }
-            "openai-api" | "openai-key" | "openai-apikey" => {
-                Some(("openai-api", &["OPENAI_API_KEY"], "openai.env"))
-            }
-            "openrouter" => Some(("openrouter", &["OPENROUTER_API_KEY"], "openrouter.env")),
-            "cursor" => Some(("cursor", &["CURSOR_API_KEY"], "cursor.env")),
-            "gemini" | "gemini-api" | "google-gemini" => Some((
-                "gemini",
-                &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-                "gemini.env",
-            )),
-            "jcode" | "subscription" | "jcode-subscription" => {
-                Some(("jcode", &["JCODE_API_KEY"], "jcode-subscription.env"))
-            }
-            _ => None,
+    ) -> Option<(&'static str, Vec<&'static str>, &'static str)> {
+        let normalized = provider.trim().to_ascii_lowercase();
+        let fixed: Option<(&'static str, &'static [&'static str], &'static str)> =
+            match normalized.as_str() {
+                "claude-api" | "anthropic-api" | "anthropic-key" | "claude-key" => {
+                    Some(("claude-api", &["ANTHROPIC_API_KEY"], "anthropic.env"))
+                }
+                "openai-api" | "openai-key" | "openai-apikey" => {
+                    Some(("openai-api", &["OPENAI_API_KEY"], "openai.env"))
+                }
+                "openrouter" => Some(("openrouter", &["OPENROUTER_API_KEY"], "openrouter.env")),
+                "cursor" => Some(("cursor", &["CURSOR_API_KEY"], "cursor.env")),
+                "gemini" | "gemini-api" | "google-gemini" => Some((
+                    "gemini",
+                    &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+                    "gemini.env",
+                )),
+                "jcode" | "subscription" | "jcode-subscription" => {
+                    Some(("jcode", &["JCODE_API_KEY"], "jcode-subscription.env"))
+                }
+                _ => None,
+            };
+        if let Some((id, keys, file)) = fixed {
+            return Some((id, keys.to_vec(), file));
         }
+        // Every other API-key catalog provider (OpenCode Go, DeepSeek, ...)
+        // keeps its key in its own profile env file, never in a neighbour's.
+        jcode_provider_metadata::openai_compatible_profiles()
+            .iter()
+            .find(|profile| profile.requires_api_key && profile.id == normalized)
+            .map(|profile| (profile.id, vec![profile.api_key_env], profile.env_file))
     }
 
     pub(super) fn write_credential(

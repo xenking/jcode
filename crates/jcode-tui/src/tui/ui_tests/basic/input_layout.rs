@@ -48,6 +48,24 @@ fn first_prompt_preserves_welcome_header_spacing() {
 }
 
 #[test]
+fn pinned_mode_chrome_is_visible_when_it_fits_and_omitted_when_it_does_not() {
+    let _lock = viewport_snapshot_test_lock();
+    let mode = "工作😀".repeat(8);
+    let state = TestState {
+        active_skill: Some(mode.clone()),
+        suppress_info_widgets: true,
+        ..Default::default()
+    };
+    let wide = buffer_to_text(&render_full(&state, 240, 48));
+    let mode_rows: Vec<_> = wide.lines().filter(|line| line.contains("mode:")).collect();
+    assert_eq!(mode_rows.len(), 1, "{wide}");
+    let cells: String = mode_rows[0].chars().filter(|ch| !ch.is_whitespace()).collect();
+    assert!(cells.ends_with(&format!("mode:{mode}")), "{wide}");
+    let narrow = buffer_to_text(&render_full(&state, 30, 48));
+    assert!(!narrow.contains("mode:"), "mode label must be omitted, not clipped or wrapped: {narrow}");
+}
+
+#[test]
 fn first_prompt_stays_visible_with_widgets_during_processing_at_47x51() {
     let _lock = viewport_snapshot_test_lock();
     pin_full_tier();
@@ -415,6 +433,36 @@ fn test_expand_badge_reserves_right_margin_for_info_widgets() {
         40 - collapsed,
         "reservation should shrink the row's free width by exactly the badge width"
     );
+}
+
+#[test]
+fn streaming_code_blocks_have_visible_copy_shortcuts_before_turn_finishes() {
+    let _env = crate::storage::lock_test_env();
+    let _lock = viewport_snapshot_test_lock();
+    for centered in [false, true] {
+        for width in [40, 100] {
+            crate::tui::ui::clear_test_render_state_for_tests();
+            let mut state = TestState {
+                status: ProcessingStatus::Streaming,
+                streaming_text: "Here is the command:\n\n```sh\nprintf 'hello'\n```\n\nThe explanation is still streaming".into(),
+                centered_mode: centered,
+                suppress_info_widgets: true,
+                ..Default::default()
+            };
+            for suffix in ["", " and continues with more words"] {
+                state.streaming_text.push_str(suffix);
+                let frame = buffer_to_text(&render_full(&state, width, 40));
+                let target = visible_copy_target_for_key('s')
+                    .unwrap_or_else(|| panic!("missing streaming copy shortcut: {frame}"));
+                assert_eq!(target.content, "printf 'hello'");
+                assert!(frame.contains(&format!("[{}⇧S]", viewport::copy_badge_alt_label())), "{frame}");
+                assert!(state.is_processing());
+            }
+            let preview = super::prepare::prepare_body(&state, width, true);
+            assert_eq!(preview.copy_targets.len(), 1);
+            assert_eq!(preview.copy_targets[0].content, "printf 'hello'");
+        }
+    }
 }
 
 #[test]

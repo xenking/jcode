@@ -26,10 +26,56 @@ pub struct ToolConfiguration {
     pub custom: Vec<SessionToolDefinition>,
 }
 
+/// Delivery point for a prompt queued while a turn is running.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedPromptMode {
+    Steer,
+    AfterYield,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedPromptRemovalOutcome {
+    Removed,
+    InFlight,
+    AlreadyDelivered,
+    NotFound,
+}
+
+/// Result of replacing a still-queued prompt's content in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedPromptEditOutcome {
+    Edited,
+    InFlight,
+    AlreadyDelivered,
+    NotFound,
+}
+
+/// A daemon-owned queued user prompt, including its optional active skill.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueuedPrompt {
+    pub client_id: String,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<jcode_session_types::Attachment>,
+    pub mode: QueuedPromptMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_skill: Option<String>,
+    /// True while a client holds this prompt open for editing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub editing: bool,
+}
+
 /// Curated request surface. Internally-tagged on `"req"`.
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "req", rename_all = "snake_case")]
 pub enum ApiRequest {
+    /// Discover routes for a new local conversation without creating it.
+    ListDraftModels,
     /// Version negotiation. Must be the first frame on a connection.
     Hello {
         min_version: u32,
@@ -53,10 +99,14 @@ pub enum ApiRequest {
 
     /// Reversibly hide a session from the default list. Its transcript remains
     /// on disk and can be restored at any time.
-    ArchiveSession { session_id: String },
+    ArchiveSession {
+        session_id: String,
+    },
 
     /// Put an archived session back in the default list.
-    RestoreSession { session_id: String },
+    RestoreSession {
+        session_id: String,
+    },
 
     /// Configure automatic archival of inactive sessions. `None` disables it.
     SetRetentionPolicy {
@@ -75,17 +125,25 @@ pub enum ApiRequest {
     },
 
     /// Attach to an existing session and subscribe to its event stream.
-    AttachSession { session_id: String },
+    AttachSession {
+        session_id: String,
+    },
 
     /// Clone an attached session's transcript into a new, idle session.
-    ForkSession { session_id: String },
+    ForkSession {
+        session_id: String,
+    },
 
     /// Create a fresh session containing a runtime-compacted handoff.
     /// The parent remains unchanged. Replies with `SessionForked`.
-    TransferSession { session_id: String },
+    TransferSession {
+        session_id: String,
+    },
 
     /// Detach from the currently attached session.
-    DetachSession { session_id: String },
+    DetachSession {
+        session_id: String,
+    },
 
     /// Send a user message to the attached session.
     SendMessage {
@@ -97,9 +155,24 @@ pub enum ApiRequest {
         /// (media_type, base64_data) pairs.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<jcode_session_types::Attachment>,
         /// Persist the message as context without starting a model turn.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         no_reply: bool,
+    },
+
+    /// Send a user message with a daemon-resolved skill, preserving TUI journal semantics.
+    SendSkillMessage {
+        session_id: String,
+        content: String,
+        active_skill: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_reminder: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<jcode_session_types::Attachment>,
     },
 
     /// Replace the attached session's tool configuration.
@@ -109,7 +182,9 @@ pub enum ApiRequest {
     },
 
     /// List the effective tools available to the attached session.
-    ListTools { session_id: String },
+    ListTools {
+        session_id: String,
+    },
 
     /// Complete a client-executed custom tool call. Acknowledged with `Ok`.
     ToolResult {
@@ -121,7 +196,14 @@ pub enum ApiRequest {
     },
 
     /// Cancel the in-flight generation.
-    Cancel { session_id: String },
+    Cancel {
+        session_id: String,
+    },
+
+    /// Abort a nonresponsive turn. Requires `force_stop_turn_v1`.
+    ForceStopTurn {
+        session_id: String,
+    },
 
     /// Inject a message at the next safe point without cancelling.
     SoftInterrupt {
@@ -139,8 +221,101 @@ pub enum ApiRequest {
         client_id: Option<String>,
     },
 
+    /// Queue a prompt using the daemon's persistent session queue.
+    QueuePrompt {
+        session_id: String,
+        client_id: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<jcode_session_types::Attachment>,
+        mode: QueuedPromptMode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_reminder: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_skill: Option<String>,
+    },
+    SetQueuedPromptMode {
+        session_id: String,
+        client_id: String,
+        mode: QueuedPromptMode,
+    },
+    InterruptQueuedPrompt {
+        session_id: String,
+        client_id: String,
+    },
+    /// Requires queued_prompt_batch_interrupt_v1.
+    InterruptQueuedPrompts {
+        session_id: String,
+        ids: Vec<String>,
+    },
+    GetQueuedPrompts {
+        session_id: String,
+    },
+    RemoveQueuedPrompt {
+        session_id: String,
+        client_id: String,
+        prompt_id: String,
+    },
+    ReorderQueuedPrompts {
+        session_id: String,
+        client_id: String,
+        order: Vec<String>,
+    },
+    /// Requires queued_prompt_editing. Hold a queued prompt open for editing so
+    /// the daemon cannot deliver it until it is saved, cancelled, or the
+    /// holding connection drops.
+    SetQueuedPromptEditing {
+        session_id: String,
+        client_id: String,
+        prompt_id: String,
+        editing: bool,
+    },
+    /// Requires queued_prompt_editing. Replace a still-queued prompt in place,
+    /// preserving its queue position, mode, and active skill.
+    EditQueuedPrompt {
+        session_id: String,
+        client_id: String,
+        prompt_id: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<jcode_session_types::Attachment>,
+    },
+
     /// Fetch conversation history.
-    GetHistory { session_id: String },
+    GetHistory {
+        session_id: String,
+    },
+
+    GetHistoryPage {
+        session_id: String,
+        before: Option<String>,
+        limit: usize,
+    },
+
+    GetHistoryImageChunk {
+        session_id: String,
+        key: String,
+        offset: usize,
+    },
+
+    ListSessionImages {
+        session_id: String,
+    },
+    GetSessionImage {
+        session_id: String,
+        image_id: String,
+        offset: usize,
+    },
+
+    /// Expand the archived portion of an attached session's transcript.
+    GetCompactedHistory {
+        session_id: String,
+        visible_messages: usize,
+    },
 
     /// Fetch the tail of *any* session's conversation, attached or not.
     ///
@@ -158,12 +333,20 @@ pub enum ApiRequest {
     },
 
     /// Clear conversation history.
-    Clear { session_id: String },
+    Clear {
+        session_id: String,
+    },
 
     /// Rewind history to the given 1-based message index.
     Rewind {
         session_id: String,
         message_index: usize,
+    },
+
+    /// Rewind through a rendered transcript row. Reject a missing or ambiguous target.
+    RewindTranscript {
+        session_id: String,
+        target: crate::RewindAnchor,
     },
 
     /// Reply to an `AskRequest` event.
@@ -185,10 +368,14 @@ pub enum ApiRequest {
     /// A client that cannot enumerate models cannot offer a model picker, so
     /// it is stuck on whatever the daemon defaulted to. Served from the
     /// catalog the daemon already reports on attach.
-    ListModels { session_id: String },
+    ListModels {
+        session_id: String,
+    },
 
     /// Provider routes and active runtime identity for the attached session.
-    GetRuntimeInfo { session_id: String },
+    GetRuntimeInfo {
+        session_id: String,
+    },
 
     /// Execute a runtime-backed command without a model turn. Requires
     /// `runtime_commands`. Invalid or unavailable actions return an error.
@@ -201,14 +388,21 @@ pub enum ApiRequest {
 
     /// Persist an API-key credential in jcode's owner-only provider store and
     /// notify the daemon to reload it. OAuth tokens are intentionally excluded.
-    SetApiKey { provider: String, api_key: String },
+    SetApiKey {
+        provider: String,
+        api_key: String,
+    },
 
     /// Remove a previously persisted API-key credential.
-    ClearApiKey { provider: String },
+    ClearApiKey {
+        provider: String,
+    },
 
     /// Reload provider credentials already saved outside the harness (e.g. OAuth).
     /// No tokens or callback input travel in this request.
-    NotifyAuthChanged { provider: String },
+    NotifyAuthChanged {
+        provider: String,
+    },
 
     /// Drop the daemon's cached quota and quota cooldown for one subscription
     /// login after the client redeemed a banked usage reset out of band.
@@ -247,12 +441,17 @@ pub enum ApiRequest {
     },
 
     /// Read safe filesystem metadata for a path under the session root.
-    FileStatus { session_id: String, path: String },
+    FileStatus {
+        session_id: String,
+        path: String,
+    },
 
     /// Read the session's todo state (todos, plan, goals, deferred gate
     /// observations, long-session review clock) for client-side auto-poke and
     /// quality gates. Replies with `TodoState`. Requires `todo_state`.
-    GetTodoState { session_id: String },
+    GetTodoState {
+        session_id: String,
+    },
 
     /// Apply the persistent effects of a follow-up decision made with
     /// `jcode_todo_policy::FollowUpPolicy` (consume the gate observation log,
@@ -266,7 +465,10 @@ pub enum ApiRequest {
     ///
     /// `model` is an id from `ListModels`, e.g. `claude-opus-5`. A route
     /// suffix like `claude-opus-4-6[1m]` selects a specific context variant.
-    SetModel { session_id: String, model: String },
+    SetModel {
+        session_id: String,
+        model: String,
+    },
 
     /// Override the session context budget. Null or zero restores the default.
     SetContextCap {
@@ -279,13 +481,18 @@ pub enum ApiRequest {
     /// The cost/quality dial: `minimal`, `low`, `medium`, `high`, `xhigh`, or
     /// `max`, depending on what the provider supports. Providers that do not
     /// support it answer with an error rather than silently ignoring it.
-    SetReasoningEffort { session_id: String, effort: String },
+    SetReasoningEffort {
+        session_id: String,
+        effort: String,
+    },
 
     /// Summarize the transcript so far, freeing context.
     ///
     /// Without this a long-lived client eventually hits the context limit and
     /// has no recourse but to clear the conversation and lose everything.
-    Compact { session_id: String },
+    Compact {
+        session_id: String,
+    },
 
     /// Set a session's title, or clear it to restore the generated one.
     RenameSession {
@@ -331,7 +538,9 @@ pub enum ApiRequest {
     ///
     /// `Rewind` is destructive, so without an undo a client cannot offer it
     /// safely: a mis-click costs the user their conversation.
-    RewindUndo { session_id: String },
+    RewindUndo {
+        session_id: String,
+    },
 
     /// Drop soft interrupts that have been queued but not yet delivered.
     ///
@@ -351,7 +560,36 @@ pub enum ApiRequest {
     /// continue without waiting for it. The TUI's Alt+B. Replies
     /// `BackgroundToolResult` when the bridge advertises
     /// `background_tool_result`, otherwise `Ok` whether or not a tool ran.
-    BackgroundTool { session_id: String },
+    BackgroundTool {
+        session_id: String,
+    },
+
+    /// Subscribe on this connection and return the current session snapshot.
+    /// A second call changes the one task whose bounded output tail is included.
+    WatchBackgroundTasks {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
+    },
+
+    /// Cancel an owned task if its snapshot indicates that cancellation is available.
+    CancelBackgroundTask {
+        session_id: String,
+        task_id: String,
+    },
+
+    /// Search every stored session's transcript and titles.
+    ///
+    /// Answers from the daemon's own full-text index, so a client can offer
+    /// global recall without re-reading gigabytes of session files. Carries no
+    /// `session_id`: the search is cross-session by definition and must work
+    /// before the client attaches to anything. Replies `SessionSearch`.
+    SearchSessions {
+        query: String,
+        /// Cap for each section (titles, messages).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
 
     /// Liveness check.
     Ping,

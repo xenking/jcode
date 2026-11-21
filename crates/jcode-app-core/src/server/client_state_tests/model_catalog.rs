@@ -41,6 +41,9 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
         None,
     )));
     let busy_guard = if busy { Some(agent.lock().await) } else { None };
+    if busy {
+        crate::session_effort::record_session_effort(session_id, Some("medium"));
+    }
 
     let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
     let (_reader_a, writer_a) = stream_a.into_split();
@@ -104,10 +107,15 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
                     Vec::new()
                 })
             );
-            assert_eq!(reasoning_effort.as_deref(), Some("high"));
+            assert_eq!(
+                reasoning_effort.as_deref(),
+                Some(if busy { "medium" } else { "high" })
+            );
         }
         other => panic!("expected history event, got {:?}", other),
     }
+
+    crate::session_effort::forget_session_effort(session_id);
 
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);

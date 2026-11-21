@@ -972,7 +972,9 @@ async fn comm_message_cross_swarm_dm_by_label() {
 
     let (alpha, _alpha_rx) = member("alpha", "coordinator", "swarm-a");
     let (beta_coord, mut beta_coord_rx) = member("beta-coord", "coordinator", "swarm-b");
-    let (beta_worker, mut beta_worker_rx) = member("beta-worker", "agent", "swarm-b");
+    let (mut beta_worker, mut beta_worker_rx) = member("beta-worker", "agent", "swarm-b");
+    // A spawned worker is never reachable from outside its swarm without `to_swarm`.
+    beta_worker.report_back_to_session_id = Some("beta-coord".to_string());
     let swarm_members = Arc::new(RwLock::new(HashMap::from([
         ("alpha".to_string(), alpha),
         ("beta-coord".to_string(), beta_coord),
@@ -1081,4 +1083,257 @@ async fn comm_message_cross_swarm_dm_by_label() {
     ));
 
     crate::server::swarm_labels::reset_swarm_labels_for_test();
+}
+
+fn root_or_worker_member(
+    session_id: &str,
+    friendly_name: &str,
+    swarm_id: &str,
+    report_back_to: Option<&str>,
+) -> (SwarmMember, mpsc::UnboundedReceiver<ServerEvent>) {
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    (
+        SwarmMember {
+            session_id: session_id.to_string(),
+            event_tx,
+            event_txs: HashMap::new(),
+            working_dir: None,
+            swarm_id: Some(swarm_id.to_string()),
+            swarm_enabled: true,
+            status: "ready".to_string(),
+            detail: None,
+            friendly_name: Some(friendly_name.to_string()),
+            report_back_to_session_id: report_back_to.map(str::to_string),
+            latest_completion_report: None,
+            role: if report_back_to.is_some() {
+                "agent".to_string()
+            } else {
+                "coordinator".to_string()
+            },
+            joined_at: Instant::now(),
+            last_status_change: Instant::now(),
+            is_headless: false,
+            output_tail: None,
+            todo_progress: None,
+            todo_items: Vec::new(),
+            runtime: crate::protocol::SwarmMemberRuntime::default(),
+            task_label: None,
+        },
+        event_rx,
+    )
+}
+
+/// A root (user-driven) session can DM any other live session on the daemon by
+/// exact session id or unique friendly name, without knowing its swarm. Spawned
+/// workers stay confined to their own swarm.
+#[tokio::test]
+async fn comm_message_root_session_reaches_unrelated_session_by_name_or_id() {
+    let (alpha, _alpha_rx) =
+        root_or_worker_member("session_alpha_1", "alpha", "session:alpha", None);
+    let (worker, _worker_rx) = root_or_worker_member(
+        "session_worker_1",
+        "worker",
+        "session:alpha",
+        Some("session_alpha_1"),
+    );
+    let (beta, mut beta_rx) = root_or_worker_member("session_beta_1", "beta", "session:beta", None);
+    let (twin_a, _twin_a_rx) =
+        root_or_worker_member("session_twin_a", "twin", "session:twin-a", None);
+    let (twin_b, _twin_b_rx) =
+        root_or_worker_member("session_twin_b", "twin", "session:twin-b", None);
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([
+        ("session_alpha_1".to_string(), alpha),
+        ("session_worker_1".to_string(), worker),
+        ("session_beta_1".to_string(), beta),
+        ("session_twin_a".to_string(), twin_a),
+        ("session_twin_b".to_string(), twin_b),
+    ])));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::from([
+        (
+            "session:alpha".to_string(),
+            HashSet::from([
+                "session_alpha_1".to_string(),
+                "session_worker_1".to_string(),
+            ]),
+        ),
+        (
+            "session:beta".to_string(),
+            HashSet::from(["session_beta_1".to_string()]),
+        ),
+        (
+            "session:twin-a".to_string(),
+            HashSet::from(["session_twin_a".to_string()]),
+        ),
+        (
+            "session:twin-b".to_string(),
+            HashSet::from(["session_twin_b".to_string()]),
+        ),
+    ])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
+    let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
+    let channel_subscriptions = Arc::new(RwLock::new(HashMap::new()));
+    let event_history: Arc<RwLock<std::collections::VecDeque<SwarmEvent>>> =
+        Arc::new(RwLock::new(std::collections::VecDeque::new()));
+    let event_counter = Arc::new(AtomicU64::new(0));
+    let (swarm_event_tx, _) = broadcast::channel(16);
+    let client_connections = Arc::new(RwLock::new(HashMap::new()));
+    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+
+    macro_rules! send {
+        ($id:expr, $from:expr, $to:expr) => {
+            handle_comm_message(
+                $id,
+                $from.to_string(),
+                "ping from outside".to_string(),
+                Some($to.to_string()),
+                None,
+                Some(CommDeliveryMode::Notify),
+                None,
+                None,
+                None,
+                true,
+                &client_event_tx,
+                &sessions,
+                &soft_interrupt_queues,
+                &swarm_members,
+                &swarms_by_id,
+                &channel_subscriptions,
+                &event_history,
+                &event_counter,
+                &swarm_event_tx,
+                &client_connections,
+            )
+            .await
+        };
+    }
+
+    // Unique friendly name in another swarm.
+    send!(1, "session_alpha_1", "beta");
+    assert!(matches!(
+        client_event_rx.recv().await,
+        Some(ServerEvent::Done { id: 1 })
+    ));
+    match beta_rx.try_recv() {
+        Ok(ServerEvent::Notification { message, .. }) => {
+            assert!(message.contains("ping from outside"), "{message}");
+        }
+        other => panic!("expected DM to unrelated session, got {other:?}"),
+    }
+
+    // Exact session id in another swarm.
+    send!(2, "session_alpha_1", "session_beta_1");
+    assert!(matches!(
+        client_event_rx.recv().await,
+        Some(ServerEvent::Done { id: 2 })
+    ));
+    assert!(matches!(
+        beta_rx.try_recv(),
+        Ok(ServerEvent::Notification { .. })
+    ));
+
+    // Ambiguous friendly name across swarms must not guess.
+    send!(3, "session_alpha_1", "twin");
+    match client_event_rx.recv().await {
+        Some(ServerEvent::Error { id: 3, message, .. }) => {
+            assert!(message.contains("ambiguous"), "{message}");
+        }
+        other => panic!("expected ambiguity error, got {other:?}"),
+    }
+
+    // A spawned worker stays confined to its own swarm.
+    send!(4, "session_worker_1", "session_beta_1");
+    assert!(matches!(
+        client_event_rx.recv().await,
+        Some(ServerEvent::Error { id: 4, .. })
+    ));
+    assert!(beta_rx.try_recv().is_err());
+
+    // Unknown targets still fail.
+    send!(5, "session_alpha_1", "nobody");
+    assert!(matches!(
+        client_event_rx.recv().await,
+        Some(ServerEvent::Error { id: 5, .. })
+    ));
+}
+
+/// `comm_list_sessions` lists root sessions across swarms (never workers, never
+/// the requester) and `comm_focus_session` raises the target by name or id.
+#[tokio::test]
+async fn comm_list_and_focus_sessions_across_swarms() {
+    use crate::server::client_comm_swarms::{handle_comm_focus_session, handle_comm_list_sessions};
+
+    let (alpha, _alpha_rx) =
+        root_or_worker_member("session_alpha_1", "alpha", "session:alpha", None);
+    let (worker, _worker_rx) = root_or_worker_member(
+        "session_worker_1",
+        "worker",
+        "session:alpha",
+        Some("session_alpha_1"),
+    );
+    let (beta, mut beta_rx) = root_or_worker_member("session_beta_1", "beta", "session:beta", None);
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([
+        ("session_alpha_1".to_string(), alpha),
+        ("session_worker_1".to_string(), worker),
+        ("session_beta_1".to_string(), beta),
+    ])));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+
+    handle_comm_list_sessions(1, "session_alpha_1".to_string(), &tx, &swarm_members).await;
+    match rx.recv().await {
+        Some(ServerEvent::CommMembers { id: 1, members }) => {
+            let ids: Vec<&str> = members.iter().map(|m| m.session_id.as_str()).collect();
+            assert_eq!(ids, vec!["session_beta_1"], "no self, no workers");
+        }
+        other => panic!("expected CommMembers, got {other:?}"),
+    }
+
+    handle_comm_focus_session(
+        2,
+        "session_alpha_1".to_string(),
+        "beta".to_string(),
+        &tx,
+        &swarm_members,
+    )
+    .await;
+    assert!(matches!(rx.recv().await, Some(ServerEvent::Done { id: 2 })));
+    match beta_rx.try_recv() {
+        Ok(ServerEvent::FocusRequested {
+            session_id,
+            from_session,
+            from_name,
+        }) => {
+            assert_eq!(session_id, "session_beta_1");
+            assert_eq!(from_session.as_deref(), Some("session_alpha_1"));
+            assert_eq!(from_name.as_deref(), Some("alpha"));
+        }
+        other => panic!("expected FocusRequested, got {other:?}"),
+    }
+
+    handle_comm_focus_session(
+        3,
+        "session_alpha_1".to_string(),
+        "nobody".to_string(),
+        &tx,
+        &swarm_members,
+    )
+    .await;
+    assert!(matches!(
+        rx.recv().await,
+        Some(ServerEvent::Error { id: 3, .. })
+    ));
+    // Workers are not raisable by name from outside.
+    handle_comm_focus_session(
+        4,
+        "session_alpha_1".to_string(),
+        "worker".to_string(),
+        &tx,
+        &swarm_members,
+    )
+    .await;
+    assert!(matches!(
+        rx.recv().await,
+        Some(ServerEvent::Error { id: 4, .. })
+    ));
 }

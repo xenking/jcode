@@ -2,13 +2,18 @@
 //!
 //! Requests go straight to the Grok CLI chat proxy
 //! (`https://cli-chat-proxy.grok.com/v1`, OpenAI-compatible chat completions)
-//! using the Grok CLI OIDC session from `$GROK_HOME/auth.json` /
-//! `~/.grok/auth.json`, presenting the official Grok CLI client identity (see
+//! using a Grok CLI OIDC session from `~/.jcode/grok_build_auth.json` or, if the
+//! user trusted it, `$GROK_HOME/auth.json` / `~/.grok/auth.json`, presenting the official Grok CLI client identity (see
 //! `jcode_base::auth::grok_build`). No `grok` subprocess is ever launched.
 //!
 //! Streaming, request building, and SSE parsing reuse the OpenAI-compatible
 //! runtime. Jcode owns tool execution. This wrapper adds the Grok Build route
 //! identity, model selection, and a single refresh-and-retry on HTTP 401.
+//!
+//! Actual response model attribution is forwarded unchanged from the shared
+//! OpenAI-compatible parser's upstream `model` field. When the proxy omits
+//! that field, attribution remains unresolved. The selected model and catalog
+//! must never be used to synthesize `StreamEvent::ResolvedModel`.
 
 use anyhow::{Result, bail};
 use async_trait::async_trait;
@@ -425,6 +430,36 @@ mod tests {
 
     fn stream_of(items: Vec<Result<StreamEvent>>) -> EventStream {
         Box::pin(futures::stream::iter(items))
+    }
+
+    #[tokio::test]
+    async fn resolved_model_is_forwarded_without_request_inference() {
+        let stream = AuthRetryStream {
+            inner: stream_of(vec![
+                Ok(StreamEvent::ResolvedModel {
+                    model: "grok-actual-upstream".into(),
+                }),
+                Ok(StreamEvent::TextDelta("hello".into())),
+            ]),
+            retry: None,
+            pending: None,
+            saw_output: false,
+        };
+        let items: Vec<_> = stream.collect().await;
+        assert!(matches!(&items[0], Ok(StreamEvent::ResolvedModel { model })
+            if model == "grok-actual-upstream"));
+        let stream = AuthRetryStream {
+            inner: stream_of(vec![Ok(StreamEvent::TextDelta("hello".into()))]),
+            retry: None,
+            pending: None,
+            saw_output: false,
+        };
+        let items: Vec<_> = stream.collect().await;
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, Ok(StreamEvent::ResolvedModel { .. })))
+        );
     }
 
     #[tokio::test]

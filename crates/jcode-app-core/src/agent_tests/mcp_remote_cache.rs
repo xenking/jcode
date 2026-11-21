@@ -109,6 +109,17 @@ async fn serve_request(
         ("405 Method Not Allowed", String::new())
     } else if headers.starts_with("DELETE ") || request.get("id").is_none() {
         ("204 No Content", String::new())
+    } else if request["method"] == "server/discover" {
+        // A current client probes the stateless 2026-07-28 era first. This peer
+        // only speaks the initialize-based revisions, and an answered error is
+        // what makes the client fall back to `initialize` instead of hanging on
+        // an unanswered probe.
+        (
+            "200 OK",
+            json!({"jsonrpc": "2.0", "id": request["id"],
+                "error": {"code": -32601, "message": "Method not found"}})
+            .to_string(),
+        )
     } else {
         let result = match request["method"].as_str().unwrap() {
             "initialize" => {

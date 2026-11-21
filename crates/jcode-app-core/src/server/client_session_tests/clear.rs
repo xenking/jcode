@@ -325,11 +325,16 @@ async fn exercise_clear_session(shared_source: bool) -> Result<()> {
         .lock()
         .map_err(|_| anyhow!("old queue lock"))?
         .push(jcode_agent_runtime::SoftInterruptMessage {
+            attachments: Vec::new(),
+            active_skill: None,
+            system_reminder: None,
             content: "stale queued message".to_string(),
             images: Vec::new(),
             urgent: false,
             source: jcode_agent_runtime::SoftInterruptSource::User,
+            mode: jcode_agent_runtime::QueuedMessageMode::Steer,
             client_id: None,
+            editing_by: None,
         });
     old_background_signal.fire();
     old_cancel_signal.fire();

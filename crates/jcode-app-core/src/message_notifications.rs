@@ -77,6 +77,7 @@ fn format_background_task_status(status: &BackgroundTaskStatus) -> &'static str 
     match status {
         BackgroundTaskStatus::Completed => "✓ completed",
         BackgroundTaskStatus::Superseded => "↻ superseded",
+        BackgroundTaskStatus::Interrupted => "interrupted",
         BackgroundTaskStatus::Failed => "✗ failed",
         BackgroundTaskStatus::Running => "running",
     }
@@ -208,5 +209,8 @@ pub fn background_task_status_notice(task: &BackgroundTaskCompleted) -> String {
             None => format!("Background task failed · {}", task.tool_name),
         },
         BackgroundTaskStatus::Running => format!("Background task running · {}", task.tool_name),
+        BackgroundTaskStatus::Interrupted => {
+            format!("Background task interrupted · {}", task.tool_name)
+        }
     }
 }

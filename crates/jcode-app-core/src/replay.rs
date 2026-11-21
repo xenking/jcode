@@ -324,6 +324,7 @@ pub fn export_timeline(session: &Session) -> Vec<TimelineEvent> {
             .num_milliseconds()
             .max(0) as u64;
         let kind = match &replay_event.kind {
+            StoredReplayEventKind::Unknown => continue,
             StoredReplayEventKind::DisplayMessage {
                 role,
                 title,
@@ -348,6 +349,35 @@ pub fn export_timeline(session: &Session) -> Vec<TimelineEvent> {
                 items: items.clone(),
                 participants: participants.clone(),
                 reason: reason.clone(),
+            },
+            // A compaction divider replays as the display row it is: the demo
+            // timeline shows the same label the transcript shows.
+            StoredReplayEventKind::Compaction {
+                method,
+                trigger,
+                pre_tokens,
+                post_tokens,
+                duration_ms,
+                messages_compacted,
+                messages_dropped,
+                active_messages,
+                summary,
+                idle,
+            } => TimelineEventKind::DisplayMessage {
+                role: "compaction".to_string(),
+                title: None,
+                content: crate::session::compaction_divider_content(
+                    method.as_deref(),
+                    trigger.as_deref(),
+                    *pre_tokens,
+                    *post_tokens,
+                    *duration_ms,
+                    *messages_compacted,
+                    *messages_dropped,
+                    *active_messages,
+                    summary.as_deref(),
+                    *idle,
+                ),
             },
         };
         events.push(TimelineEvent { t: offset, kind });

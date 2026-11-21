@@ -55,6 +55,14 @@ test("event tags match the Rust ApiEvent enum", () => {
   assert.deepEqual([...KNOWN_EVENT_KINDS].sort(), rust);
 });
 
+test("runtime command names match the Rust RuntimeCommand enum", () => {
+  const source = fs.readFileSync(path.resolve(here, "../src/protocol.ts"), "utf8");
+  const declaration = /export type RuntimeCommand = ([^;]+);/.exec(source);
+  assert.ok(declaration, "RuntimeCommand union not found");
+  const names = [...declaration[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(names.sort(), enumVariants("runtime_commands.rs", "RuntimeCommand").sort());
+});
+
 test("send_message no_reply field matches the Rust schema", () => {
   const rust = fs.readFileSync(path.join(rustCrate, "requests.rs"), "utf8");
   const typescript = fs.readFileSync(path.resolve(here, "../src/protocol.ts"), "utf8");

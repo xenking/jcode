@@ -1,55 +1,4 @@
 #[test]
-fn test_local_bus_dictation_completion_ignores_other_session() {
-    let mut app = create_test_app();
-    let session_id = app.session.id.clone();
-    app.input = "draft".to_string();
-    app.cursor_pos = app.input.len();
-    app.dictation_in_flight = true;
-    app.dictation_request_id = Some("dictation_123".to_string());
-    app.dictation_target_session_id = Some(session_id);
-
-    let handled = crate::tui::app::local::handle_bus_event(
-        &mut app,
-        Ok(crate::bus::BusEvent::DictationCompleted {
-            dictation_id: "dictation_other".to_string(),
-            session_id: Some("session_other".to_string()),
-            text: " dictated text".to_string(),
-            mode: crate::protocol::TranscriptMode::Append,
-        }),
-    );
-
-    assert!(!handled);
-    assert_eq!(app.input, "draft");
-    assert!(app.dictation_in_flight);
-}
-
-#[test]
-fn test_remote_bus_dictation_completion_ignores_other_session() {
-    let mut app = create_test_app();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let mut remote = rt.block_on(async { crate::tui::backend::RemoteConnection::dummy() });
-    app.is_remote = true;
-    app.remote_session_id = Some("session_remote".to_string());
-    app.dictation_in_flight = true;
-    app.dictation_request_id = Some("dictation_123".to_string());
-    app.dictation_target_session_id = Some("session_remote".to_string());
-
-    rt.block_on(crate::tui::app::remote::handle_bus_event(
-        &mut app,
-        &mut remote,
-        Ok(crate::bus::BusEvent::DictationCompleted {
-            dictation_id: "dictation_other".to_string(),
-            session_id: Some("session_other".to_string()),
-            text: " dictated text".to_string(),
-            mode: crate::protocol::TranscriptMode::Append,
-        }),
-    ));
-
-    assert!(app.dictation_in_flight);
-    assert_eq!(app.dictation_request_id.as_deref(), Some("dictation_123"));
-}
-
-#[test]
 fn test_remote_bus_productivity_failure_clears_refresh_state() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -194,6 +143,8 @@ fn test_handle_server_event_history_clears_connection_type_on_session_change_whe
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -254,6 +205,8 @@ fn test_handle_server_event_history_preserves_connection_type_for_same_session_w
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -314,6 +267,8 @@ fn test_handle_server_event_history_preserves_reasoning_effort_for_same_session_
             provider_name: Some("anthropic".to_string()),
             provider_model: Some("claude-opus-4-1".to_string()),
             subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -401,6 +356,8 @@ fn test_handle_server_event_history_session_change_clears_streaming_preview_diag
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -500,7 +457,10 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
             id: 2,
             session_id: "session_rewind_preview".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
+                tool_duration_ms: None,
+                attachments: Vec::new(),
                 response_stats: None,
+                timestamp_ms: None,
                 role: "user".to_string(),
                 content: "first message kept by the rewind".to_string(),
                 tool_calls: None,
@@ -510,6 +470,8 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -617,7 +579,10 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
             id: 3,
             session_id: "session_midstream_dup".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
+                tool_duration_ms: None,
+                attachments: Vec::new(),
                 response_stats: None,
+                timestamp_ms: None,
                 role: "user".to_string(),
                 content: "truncated payload from another client's rewind".to_string(),
                 tool_calls: None,
@@ -627,6 +592,8 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -706,7 +673,10 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
                 id: 3,
                 session_id: "session_midstream_dup".to_string(),
                 messages: vec![crate::protocol::HistoryMessage {
+                    tool_duration_ms: None,
+                    attachments: Vec::new(),
                     response_stats: None,
+                    timestamp_ms: None,
                     role: "user".to_string(),
                     content: "truncated payload from another client's rewind".to_string(),
                     tool_calls: None,
@@ -716,6 +686,8 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
                 provider_name: Some("claude".to_string()),
                 provider_model: Some("claude-sonnet-4-20250514".to_string()),
                 subagent_model: None,
+                pinned_skill: None,
+                pinned_skills: None,
                 agent_model_overrides: Default::default(),
                 autoreview_enabled: None,
                 autojudge_enabled: None,
@@ -815,7 +787,10 @@ fn test_handle_server_event_history_same_session_rewind_then_late_done_does_not_
             id: 2,
             session_id: "session_rewind_done_race".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
+                tool_duration_ms: None,
+                attachments: Vec::new(),
                 response_stats: None,
+                timestamp_ms: None,
                 role: "user".to_string(),
                 content: "first message kept by the rewind".to_string(),
                 tool_calls: None,
@@ -825,6 +800,8 @@ fn test_handle_server_event_history_same_session_rewind_then_late_done_does_not_
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -917,6 +894,8 @@ fn test_handle_server_event_history_session_change_clears_pending_interleaves() 
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -1075,7 +1054,7 @@ fn test_handle_post_connect_defers_reload_followup_to_server_history_payload() {
 }
 
 #[test]
-fn test_handle_post_connect_clears_deferred_dispatch_before_reload_followup() {
+fn test_handle_post_connect_does_not_dispatch_daemon_reload_recovery() {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
     let prev_home = std::env::var_os("JCODE_HOME");
@@ -1120,16 +1099,13 @@ fn test_handle_post_connect_clears_deferred_dispatch_before_reload_followup() {
 
     assert!(matches!(outcome, super::remote::PostConnectOutcome::Ready));
     assert!(
-        !app.pending_queued_dispatch,
-        "post-connect should clear deferred dispatch before sending reload continuation"
+        app.pending_queued_dispatch,
+        "recovery observation does not consume queued user dispatch"
     );
     assert!(app.hidden_queued_system_messages.is_empty());
-    assert!(
-        app.is_processing,
-        "reload continuation should still dispatch"
-    );
-    assert!(matches!(app.status, ProcessingStatus::Sending));
-    assert!(app.current_message_id.is_some());
+    assert!(!app.is_processing);
+    assert!(matches!(app.status, ProcessingStatus::Idle));
+    assert!(app.current_message_id.is_none());
 
     cleanup_reload_context_file(session_id);
     if let Some(prev_home) = prev_home {
@@ -1373,7 +1349,7 @@ fn test_remote_done_recovers_stranded_soft_interrupt_as_queued_followup() {
 }
 
 #[test]
-fn test_remote_done_auto_pokes_again_when_todos_remain() {
+fn test_remote_done_does_not_duplicate_daemon_pokes() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1414,9 +1390,9 @@ fn test_remote_done_auto_pokes_again_when_todos_remain() {
             app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
 
         assert!(needs_redraw);
-        assert!(app.pending_queued_dispatch);
-        assert_eq!(app.queued_messages().len(), 1);
-        assert!(app.queued_messages()[0].contains("Continue working, or update the todo tool."));
+        assert!(!app.pending_queued_dispatch);
+        assert!(app.queued_messages().is_empty());
+        assert!(!app.is_processing);
     });
 }
 
@@ -1653,6 +1629,8 @@ fn test_pending_startup_notice_survives_history_bootstrap_for_fresh_session() {
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -1701,7 +1679,7 @@ fn test_pending_startup_notice_survives_history_bootstrap_for_fresh_session() {
 }
 
 #[test]
-fn test_reload_recovery_turn_runs_before_user_queued_followups() {
+fn test_reload_recovery_notice_does_not_block_queued_user_followup() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -1715,7 +1693,7 @@ fn test_reload_recovery_turn_runs_before_user_queued_followups() {
         reconnect_notice: None,
         continuation_message: "continue interrupted turn".to_string(),
     };
-    assert!(remote::queue_reload_continuation_once(
+    assert!(remote::show_reload_recovery_notice_once(
         &mut app,
         "session_reload_queue_order",
         directive,
@@ -1723,12 +1701,14 @@ fn test_reload_recovery_turn_runs_before_user_queued_followups() {
     ));
 
     rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
-    assert!(app.is_processing, "recovery continuation should start a turn");
-    assert!(app.hidden_queued_system_messages.is_empty());
-    assert_eq!(
-        app.queued_messages(),
-        &["queued before reload"],
-        "user follow-up must wait for the recovery turn to finish"
+    assert!(
+        app.is_processing,
+        "queued user follow-up should start a turn"
     );
+    assert!(app.hidden_queued_system_messages.is_empty());
+    assert!(app.queued_messages().is_empty());
     assert!(!app.reload_recovery_blocks_queue());
 }
+
+#[path = "part_01_additional_tests.rs"]
+mod additional_test_local_bus_dictation_completion_ignores_other_session;

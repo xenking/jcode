@@ -120,6 +120,17 @@ impl NotificationDispatcher {
 
     /// Send a cycle summary notification (after ambient cycle completes).
     pub fn dispatch_cycle_summary(&self, transcript: &AmbientTranscript) {
+        if transcript.status != crate::safety::TranscriptStatus::Complete {
+            let (title, body) = cycle_failure_notification(transcript);
+            self.send_all(
+                &title,
+                "Ambient cycle failed. Check jcode for details.",
+                &body,
+                Priority::High,
+                Some(&transcript.session_id),
+            );
+            return;
+        }
         let title = format!(
             "Ambient cycle: {} memories, {} compactions",
             transcript.memories_modified, transcript.compactions
@@ -139,6 +150,16 @@ impl NotificationDispatcher {
             &detailed_body,
             priority,
             Some(&transcript.session_id),
+        );
+    }
+
+    pub fn dispatch_cycle_failure(&self, reason: &str) {
+        self.send_all(
+            "Ambient cycle failed",
+            "Ambient cycle failed. Check jcode for details.",
+            reason,
+            Priority::High,
+            None,
         );
     }
 
@@ -971,6 +992,16 @@ pub async fn imap_reply_loop(config: SafetyConfig) {
 // ---------------------------------------------------------------------------
 // Formatting helpers
 // ---------------------------------------------------------------------------
+
+fn cycle_failure_notification(transcript: &AmbientTranscript) -> (String, String) {
+    let reason = transcript
+        .summary
+        .as_deref()
+        .unwrap_or("Cycle ended unexpectedly");
+    let short = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    let short: String = short.chars().take(160).collect();
+    ("Ambient cycle failed".to_string(), short)
+}
 
 /// Sanitized body for potentially public channels (ntfy.sh).
 /// Only includes counts and status — no model-generated text.

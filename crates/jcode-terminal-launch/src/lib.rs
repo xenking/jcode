@@ -129,6 +129,10 @@ pub const CLIENT_TERMINAL_ENV_VARS: &[&str] = &[
     "HERDR_BIN_PATH",
     "HERDR_SESSION",
     "HERDR_AGENT",
+    "REX_SESSION",
+    "REX_BLOCK",
+    "REX_SERVER",
+    "REX_BIN_PATH",
     // Terminal emulators
     "TERM",
     "TERM_PROGRAM",
@@ -247,6 +251,9 @@ fn detected_resume_terminal_with_client_env(
     // emulator. Prefer it even when the pane also advertises kitty/wezterm.
     if is_set("HERDR_ENV") && is_set("HERDR_PANE_ID") {
         return Some("herdr".to_string());
+    }
+    if is_set("REX_BLOCK") {
+        return Some("rex".to_string());
     }
     if is_set("HANDTERM_SESSION") || is_set("HANDTERM_PID") {
         return Some("handterm".to_string());
@@ -398,9 +405,8 @@ fn resume_terminal_candidates_with_client_env(
     // A tmux client already owns the user's terminal layout. Prefer a pane in
     // that exact client over opening another emulator window. Explicit
     // JCODE_TERMINAL and configured spawn hooks still take precedence.
-    let in_herdr = terminal_env_value(client_terminal_env, "HERDR_ENV").is_some()
-        && terminal_env_value(client_terminal_env, "HERDR_PANE_ID").is_some();
-    let in_inner_multiplexer = in_herdr
+    let detected = detected_resume_terminal_with_client_env(client_terminal_env);
+    let in_inner_multiplexer = matches!(detected.as_deref(), Some("herdr" | "rex"))
         || terminal_env_value(client_terminal_env, "ZELLIJ").is_some()
         || terminal_env_value(client_terminal_env, "STY").is_some();
     if !in_inner_multiplexer
@@ -409,7 +415,7 @@ fn resume_terminal_candidates_with_client_env(
     {
         push_unique_terminal(&mut candidates, "tmux");
     }
-    if let Some(term) = detected_resume_terminal_with_client_env(client_terminal_env) {
+    if let Some(term) = detected {
         push_unique_terminal(&mut candidates, term);
     }
 
@@ -522,88 +528,10 @@ fn spawn_command_with_candidates(
     }
 }
 
-/// Parse an external spawn-hook command line into argv parts.
-///
-/// Supports basic POSIX-style word splitting: whitespace separates arguments,
-/// single and double quotes group words, and backslash escapes the next
-/// character (outside single quotes). Errors on empty input, unterminated
-/// quotes, and trailing escapes.
-pub fn parse_hook_command(raw: &str) -> Result<Vec<String>> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut token_started = false;
-
-    for ch in raw.chars() {
-        if escaped {
-            current.push(ch);
-            token_started = true;
-            escaped = false;
-            continue;
-        }
-
-        if let Some(quote_ch) = quote {
-            if ch == quote_ch {
-                quote = None;
-            } else if ch == '\\' && quote_ch == '"' {
-                escaped = true;
-            } else {
-                current.push(ch);
-                token_started = true;
-            }
-            continue;
-        }
-
-        match ch {
-            '\\' => {
-                escaped = true;
-                token_started = true;
-            }
-            '\'' | '"' => {
-                quote = Some(ch);
-                token_started = true;
-            }
-            ch if ch.is_whitespace() => {
-                if token_started {
-                    parts.push(std::mem::take(&mut current));
-                    token_started = false;
-                }
-            }
-            ch => {
-                current.push(ch);
-                token_started = true;
-            }
-        }
-    }
-
-    if escaped {
-        anyhow::bail!("spawn hook command ends with an escape character");
-    }
-    if quote.is_some() {
-        anyhow::bail!("spawn hook command has an unterminated quote");
-    }
-    if token_started {
-        parts.push(current);
-    }
-    if parts.is_empty() {
-        anyhow::bail!("spawn hook command is empty");
-    }
-
-    Ok(parts)
-}
-
-/// Expand a leading `~/` in a hook program path to the user's home directory,
-/// since the hook is executed directly (no shell) and would otherwise fail.
-pub fn expand_home(program: &str) -> PathBuf {
-    if let Some(rest) = program.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(rest);
-    }
-    PathBuf::from(program)
-}
-
+#[path = "lib_hook_commands.rs"]
+mod hook_commands;
+pub use hook_commands::expand_home;
+pub use hook_commands::parse_hook_command;
 /// The `JCODE_SPAWN_*` metadata env exported to spawn hooks and to terminals
 /// launched by the built-in fallback:
 ///
@@ -721,185 +649,9 @@ pub fn build_hook_spawn_command(
     Ok(cmd)
 }
 
-fn build_spawn_command(term: &str, command: &TerminalCommand, cwd: &Path) -> Option<Command> {
-    let title = command.title.as_deref().unwrap_or("jcode");
-    let mut cmd = Command::new(term);
-    cmd.current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    if command.fresh_spawn {
-        cmd.env("JCODE_FRESH_SPAWN", "1");
-    }
-
-    match term {
-        #[cfg(unix)]
-        "herdr" => {
-            // `pane split` deliberately creates a shell and returns its pane id;
-            // `pane run` is the atomic, bracketed-paste-aware way to start a
-            // command in that shell. Keep the small composition here rather
-            // than requiring every user to configure an equivalent spawn hook.
-            let herdr = terminal_env_value(&command.client_terminal_env, "HERDR_BIN_PATH")
-                .unwrap_or_else(|| "herdr".to_string());
-            // Unlike tmux/zellij, herdr runs the command inside an interactive
-            // shell, which would outlive jcode and leave an empty pane behind
-            // (e.g. after `swarm stop`). Exit that shell when jcode exits
-            // cleanly so the pane closes, but keep it open after a failure so
-            // the error stays readable.
-            // The server may start a clean shell that does not inherit this
-            // process's env, so serialize runtime allowlist values only when a
-            // runtime context was explicitly supplied.
-            let command_line = format!("{} && exit", shell_command(&command_parts(command)));
-            let script = concat!(
-                "set -eu; ",
-                "response=\"$(\"$1\" pane split --current --direction right --cwd \"$2\" --focus)\"; ",
-                "pane_id=\"$(printf '%s\\n' \"$response\" | sed -n '",
-                "s/.*\\\"pane_id\\\"[[:space:]]*:[[:space:]]*\\\"\\([^\\\"]*\\)\\\".*/\\1/p' | head -n 1)\"; ",
-                "test -n \"$pane_id\"; ",
-                "exec \"$1\" pane run \"$pane_id\" \"$3\""
-            );
-            cmd = Command::new("sh");
-            cmd.current_dir(cwd)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .args(["-c", script, "jcode-herdr-spawn", &herdr])
-                .arg(cwd)
-                .arg(command_line);
-            if command.fresh_spawn {
-                cmd.env("JCODE_FRESH_SPAWN", "1");
-            }
-        }
-        #[cfg(unix)]
-        "tmux" => {
-            cmd.args(["split-window", "-h"]);
-            if let Some(pane) = terminal_env_value(&command.client_terminal_env, "TMUX_PANE") {
-                cmd.args(["-t", &pane]);
-            }
-            cmd.arg("-c").arg(cwd).args(command_parts(command));
-        }
-        #[cfg(unix)]
-        "zellij" => {
-            cmd.args(["action", "new-pane", "--direction", "right", "--cwd"])
-                .arg(cwd)
-                .arg("--")
-                .args(command_parts(command));
-        }
-        #[cfg(unix)]
-        "screen" => {
-            let inner = format!(
-                "cd {} && exec {}",
-                sh_escape(&cwd.to_string_lossy()),
-                shell_command(&command_parts(command))
-            );
-            if let Some(sty) = terminal_env_value(&command.client_terminal_env, "STY") {
-                cmd.args(["-S", &sty]);
-            }
-            cmd.args(["-X", "screen", "sh", "-lc"]).arg(inner);
-        }
-        #[cfg(unix)]
-        "handterm" => {
-            let shell = shell_command(&command_parts(command));
-            cmd.args(["--backend", "gpu", "--exec", &shell]);
-        }
-        #[cfg(target_os = "macos")]
-        "ghostty" => {
-            // Ghostty 1.3+ exposes a native AppleScript API. Use it instead of
-            // `open -na`, which always creates a separate app instance/window
-            // and therefore made `/fork` ignore Ghostty's tabbed workflow.
-            // Run AppleScript synchronously inside a detached helper so errors
-            // (Ghostty <1.3, disabled AppleScript, denied Automation access)
-            // can fall back to the older, universally supported new-window
-            // launch. Spawning `osascript` directly reports success before the
-            // script runs and would silently lose the fork on those versions.
-            cmd = Command::new("sh");
-            cmd.current_dir(cwd)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .args([
-                    "-c",
-                    macos_ghostty_spawn_wrapper(),
-                    "jcode-ghostty-spawn",
-                    &macos_ghostty_applescript(command, cwd),
-                    &macos_terminal_inner_script(command, cwd),
-                ]);
-        }
-        #[cfg(all(unix, not(target_os = "macos")))]
-        "ghostty" => {
-            cmd.arg(format!("--working-directory={}", cwd.to_string_lossy()))
-                .arg("-e")
-                .args(command_parts(command));
-        }
-        "kitty" => {
-            cmd.args(["--title", title, "-e"])
-                .args(command_parts(command));
-        }
-        "wezterm" => {
-            cmd.args(["start", "--always-new-process", "--"])
-                .args(command_parts(command));
-        }
-        "alacritty" => {
-            cmd.args(["--title", title, "-e"])
-                .args(command_parts(command));
-        }
-        "gnome-terminal" => {
-            cmd.arg("--title").arg(title);
-            cmd.arg("--").args(command_parts(command));
-        }
-        "konsole" | "xterm" | "foot" => {
-            cmd.args(["-e"]).args(command_parts(command));
-        }
-        #[cfg(target_os = "macos")]
-        "iterm2" => {
-            let shell = shell_command(&command_parts(command));
-            cmd = Command::new("osascript");
-            cmd.args([
-                "-e",
-                &format!(
-                    r#"tell application "iTerm2"
-                        create window with default profile command "{}"
-                    end tell"#,
-                    shell.replace('"', "\\\"")
-                ),
-            ]);
-        }
-        #[cfg(target_os = "macos")]
-        "terminal" => {
-            // `open -a Terminal <binary> --args ...` does NOT execute the binary with
-            // arguments; it asks Terminal to open the file as a document. On a default
-            // macOS install (where Apple Terminal is the only available terminal), that
-            // means split/resume spawns silently fail to launch jcode. Use AppleScript's
-            // `do script` so the command actually runs in a new Terminal window.
-            cmd = Command::new("osascript");
-            cmd.args(["-e", &macos_terminal_applescript(command, cwd)]);
-        }
-        #[cfg(any(not(unix), test))]
-        "wt" => {
-            cmd.args(["new-tab", "--title", title]);
-            cmd.arg(&command.program).args(&command.args);
-            apply_runtime_env(&mut cmd, &command.runtime_env);
-        }
-        #[cfg(any(not(unix), test))]
-        "cmd" => {
-            cmd.args(["/C", "start", title, "cmd.exe", "/K"]);
-            cmd.arg(windows_command_line(&command_parts(command)));
-        }
-        _ => return None,
-    }
-
-    // Export spawn metadata to the terminal process so programs running
-    // inside (shells, multiplexers) can also see why the window was opened.
-    // Note: terminals launched indirectly (macOS `open`/`osascript` paths) do
-    // not inherit this env, matching the existing JCODE_FRESH_SPAWN caveat.
-    for (key, value) in spawn_metadata_env(command, cwd) {
-        cmd.env(key, value);
-    }
-    apply_runtime_env(&mut cmd, &command.runtime_env);
-
-    Some(cmd)
-}
-
+#[path = "lib_spawn_command.rs"]
+mod spawn_command;
+use spawn_command::*;
 #[cfg(any(not(unix), test))]
 fn windows_arg_quote(arg: &str) -> String {
     if arg.is_empty()
@@ -1262,6 +1014,145 @@ mod tests {
         let candidates = resume_terminal_candidates_with_client_env(&client_env, None);
         assert_eq!(candidates.first().map(String::as_str), Some("herdr"));
         assert!(!candidates.iter().any(|candidate| candidate == "tmux"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rex_context_preserves_override_and_herdr_precedence() {
+        let mut client_env = vec![
+            ("REX_BLOCK".to_string(), "block-42".to_string()),
+            ("KITTY_PID".to_string(), "1234".to_string()),
+            ("TMUX".to_string(), "/tmp/tmux,1,0".to_string()),
+            ("TMUX_PANE".to_string(), "%3".to_string()),
+        ];
+        let candidates = resume_terminal_candidates_with_client_env(&client_env, None);
+        assert_eq!(candidates.first().map(String::as_str), Some("rex"));
+        assert!(!candidates.iter().any(|candidate| candidate == "tmux"));
+        let candidates = resume_terminal_candidates_with_client_env(&client_env, Some("wezterm"));
+        assert_eq!(&candidates[..2], ["wezterm", "rex"]);
+        client_env.extend([
+            ("HERDR_ENV".to_string(), "1".to_string()),
+            ("HERDR_PANE_ID".to_string(), "pane-1".to_string()),
+        ]);
+        assert_eq!(
+            detected_resume_terminal_with_client_env(&client_env).as_deref(),
+            Some("herdr")
+        );
+        let outside_rex = vec![("TERM_PROGRAM".to_string(), "kitty".to_string())];
+        assert_eq!(
+            detected_resume_terminal_with_client_env(&outside_rex).as_deref(),
+            Some("kitty")
+        );
+    }
+
+    #[test]
+    fn rex_env_is_allowlisted_forwarded_and_scrubbed() {
+        let client_env: Vec<_> = [
+            ("REX_SESSION", "session-1"),
+            ("REX_BLOCK", "block-1"),
+            ("REX_SERVER", "localhost:1234"),
+            ("REX_BIN_PATH", "/opt/Rex Server/rex"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+        let mut hook = Command::new("hook");
+        apply_client_terminal_env(&mut hook, &client_env);
+        let command = TerminalCommand::new("jcode", vec![]).client_terminal_env(client_env.clone());
+        let spawn = build_hook_spawn_command("hook", &command, Path::new("/work")).unwrap();
+        for (key, value) in &client_env {
+            assert!(CLIENT_TERMINAL_ENV_VARS.contains(&key.as_str()));
+            for cmd in [&hook, &spawn] {
+                assert_eq!(env_value(cmd, key).as_deref(), Some(value.as_str()));
+                assert_eq!(
+                    env_value(cmd, &format!("JCODE_CLIENT_{key}")).as_deref(),
+                    Some(value.as_str())
+                );
+            }
+        }
+        apply_client_terminal_env(&mut hook, &[]);
+        for (key, _) in &client_env {
+            assert!(
+                hook.get_envs()
+                    .any(|(name, value)| name == key.as_str() && value.is_none())
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rex_spawn_splits_requesting_block_with_literal_argv() {
+        let command = TerminalCommand::new(
+            "/opt/Jcode App/jcode",
+            vec!["--resume".to_string(), "session with 'quotes'".to_string()],
+        )
+        .client_terminal_env(vec![
+            ("REX_BLOCK".to_string(), "block-42".to_string()),
+            ("REX_SERVER".to_string(), "localhost:1234".to_string()),
+            (
+                "REX_BIN_PATH".to_string(),
+                "/opt/Rex Server/rex".to_string(),
+            ),
+        ])
+        .fresh_spawn();
+        let cmd = build_spawn_command("rex", &command, Path::new("/work/a b")).unwrap();
+        assert_eq!(cmd.get_program(), "/opt/Rex Server/rex");
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            [
+                "-S",
+                "localhost:1234",
+                "split",
+                "-b",
+                "block-42",
+                "--split",
+                "right",
+                "-c",
+                "/work/a b",
+                "--",
+                "/opt/Jcode App/jcode",
+                "--resume",
+                "session with 'quotes'",
+            ]
+        );
+        assert_eq!(env_value(&cmd, "JCODE_FRESH_SPAWN").as_deref(), Some("1"));
+        assert_eq!(env_value(&cmd, "REX_BLOCK").as_deref(), Some("block-42"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rex_spawn_uses_path_and_serializes_runtime_context() {
+        let command = TerminalCommand::new("jcode", vec![])
+            .client_terminal_env(vec![("REX_BLOCK".to_string(), "block-1".to_string())])
+            .runtime_env(vec![(
+                "JCODE_SOCKET".to_string(),
+                "/private/rex.sock".to_string(),
+            )]);
+        let cmd = build_spawn_command("rex", &command, Path::new("/work")).unwrap();
+        assert_eq!(cmd.get_program(), "rex");
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            [
+                "split",
+                "-b",
+                "block-1",
+                "--split",
+                "right",
+                "-c",
+                "/work",
+                "--",
+                "env",
+                "-u",
+                "JCODE_API_SOCKET",
+                "-u",
+                "JCODE_NO_AUTO_UPDATE",
+                "JCODE_SOCKET=/private/rex.sock",
+                "jcode",
+            ]
+        );
+        let outside_rex = TerminalCommand::new("jcode", vec![])
+            .client_terminal_env(vec![("TERM".to_string(), "xterm".to_string())]);
+        assert!(build_spawn_command("rex", &outside_rex, Path::new("/work")).is_none());
     }
 
     #[test]

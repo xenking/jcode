@@ -8,11 +8,23 @@ use async_trait::async_trait;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+#[path = "agent_tests/pinned_mode.rs"]
+mod pinned_mode;
+
 #[path = "agent_tests/cache_session_affinity.rs"]
 mod cache_session_affinity;
 
+#[path = "agent_tests/worker_http_capture.rs"]
+mod worker_http_capture;
+
+#[path = "agent_tests/worker_tool_capture.rs"]
+mod worker_tool_capture;
+
 #[path = "agent_tests/tool_streaming.rs"]
 mod tool_streaming;
+
+#[path = "agent_tests/pending_effort.rs"]
+mod pending_effort;
 
 #[path = "agent_tests/concurrency.rs"]
 mod concurrency;
@@ -29,6 +41,15 @@ mod compile_remote;
 #[path = "agent_tests/mcp_remote_cache.rs"]
 mod mcp_remote_cache;
 
+#[path = "agent_tests/cold_cache.rs"]
+mod cold_cache;
+
+#[path = "agent_tests/prompt_inputs_reload.rs"]
+mod prompt_inputs_reload;
+
+#[path = "agent_tests/restart_cache.rs"]
+mod restart_cache;
+
 struct DelayedProvider {
     open_delay: Duration,
     first_event_delay: Duration,
@@ -36,77 +57,37 @@ struct DelayedProvider {
 
 struct NativeAutoCompactionProvider;
 
+struct ArchiveVisionProvider;
+
+#[async_trait]
+impl Provider for ArchiveVisionProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        panic!("this offline request preparation test must not call a provider")
+    }
+    fn name(&self) -> &str {
+        "archive-vision-test"
+    }
+    fn model(&self) -> String {
+        "claude-opus-5-5".into()
+    }
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+    fn supports_image_input(&self) -> bool {
+        true
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+}
+
 struct BoundSavedAccountProvider;
-
-#[tokio::test]
-async fn working_directory_moves_preserve_first_active_session_origin() {
-    let mut agent = Agent::new(Arc::new(BoundSavedAccountProvider), Registry::empty());
-    agent.session.messages.clear();
-    agent.session.working_dir = Some("/daemon".into());
-    agent.set_working_dir("/projects/start");
-    assert_eq!(
-        agent.session.original_working_dir, None,
-        "initial subscription is not a move"
-    );
-    agent.session.add_message(
-        Role::User,
-        vec![ContentBlock::Text {
-            text: "hello".into(),
-            cache_control: None,
-        }],
-    );
-    agent.set_working_dir("/projects/second");
-    agent.set_working_dir_for_pending_context(Some("/projects/third".into()));
-    assert_eq!(
-        agent.session.original_working_dir.as_deref(),
-        Some("/projects/start")
-    );
-    assert_eq!(agent.working_dir(), Some("/projects/third"));
-    agent.set_working_dir("/projects/start");
-    assert_eq!(
-        agent.session.original_working_dir.as_deref(),
-        Some("/projects/start")
-    );
-}
-
-#[tokio::test]
-async fn user_response_capability_updates_locked_tool_surface() {
-    let mut agent = Agent::new(Arc::new(BoundSavedAccountProvider), Registry::empty());
-    assert!(
-        !agent
-            .tool_definitions()
-            .await
-            .iter()
-            .any(|d| d.name == "user_response")
-    );
-    assert!(agent.locked_tools.is_some());
-    assert!(!agent.tool_names().await.iter().any(|n| n == "applet"));
-    agent.set_desktop_response_capability(true).await;
-    assert!(agent.locked_tools.is_none());
-    assert!(agent.tool_names().await.iter().any(|n| n == "applet"));
-    assert!(
-        agent
-            .tool_definitions()
-            .await
-            .iter()
-            .any(|d| d.name == "user_response")
-    );
-    agent.set_desktop_response_capability(true).await;
-    assert!(
-        agent.locked_tools.is_some(),
-        "unchanged capability preserves the cache"
-    );
-    agent.set_desktop_response_capability(false).await;
-    assert!(agent.locked_tools.is_none());
-    assert!(!agent.tool_names().await.iter().any(|n| n == "applet"));
-    assert!(
-        !agent
-            .tool_definitions()
-            .await
-            .iter()
-            .any(|d| d.name == "user_response")
-    );
-}
 
 #[async_trait]
 impl Provider for BoundSavedAccountProvider {
@@ -131,67 +112,6 @@ impl Provider for BoundSavedAccountProvider {
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self)
     }
-}
-
-#[tokio::test]
-async fn saved_account_observed_binding_is_persisted() {
-    let _guard = crate::storage::lock_test_env();
-    let home = tempfile::tempdir().unwrap();
-    struct RestoreHome(Option<std::ffi::OsString>);
-    impl Drop for RestoreHome {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(home) => crate::env::set_var("JCODE_HOME", home),
-                None => crate::env::remove_var("JCODE_HOME"),
-            }
-            crate::config::Config::invalidate_cache();
-        }
-    }
-    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
-    crate::env::set_var("JCODE_HOME", home.path());
-    crate::config::Config::invalidate_cache();
-    let provider: Arc<dyn Provider> = Arc::new(BoundSavedAccountProvider);
-    let mut agent = Agent::new(provider, Registry::empty());
-    agent.session.route_api_method = None;
-    agent.session.save_prepared().unwrap();
-    agent.sync_bound_account_route();
-    assert_eq!(
-        agent.session.route_api_method.as_deref(),
-        Some("openai-oauth@work")
-    );
-    let saved = crate::session::Session::load(&agent.session.id).unwrap();
-    assert_eq!(saved.route_api_method.as_deref(), Some("openai-oauth@work"));
-    assert_eq!(saved.provider_key.as_deref(), Some("openai-oauth"));
-    agent.sync_bound_account_route();
-    assert_eq!(agent.session.route_api_method, saved.route_api_method);
-    crate::provider::clear_openai_provider_unavailability_for_account_label(Some("work"));
-    crate::provider::clear_openai_provider_unavailability_for_account_label(Some("personal"));
-    agent.record_failed_account_route("429 rate limit reached");
-    assert!(
-        crate::provider::provider_unavailability_detail_for_account_label("openai", Some("work"))
-            .is_some()
-    );
-    assert!(
-        crate::provider::provider_unavailability_detail_for_account_label(
-            "openai",
-            Some("personal")
-        )
-        .is_none()
-    );
-    crate::provider::clear_openai_provider_unavailability_for_account_label(Some("work"));
-    agent.session.route_api_method = Some("openai-oauth@personal".to_string());
-    agent.sync_bound_account_route();
-    assert_eq!(
-        agent.session.route_api_method.as_deref(),
-        Some("openai-oauth@personal")
-    );
-    assert!(
-        agent
-            .ensure_session_lease()
-            .unwrap_err()
-            .to_string()
-            .contains("personal")
-    );
 }
 
 #[tokio::test]
@@ -775,6 +695,150 @@ async fn queued_soft_interrupt_images_are_injected_as_image_blocks() {
 }
 
 #[tokio::test]
+async fn steering_recovery_filters_committed_ids_after_crash_window() {
+    use jcode_agent_runtime::{QueuedMessageMode, SoftInterruptMessage};
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    let queue = agent.soft_interrupt_queue();
+    let initial: Vec<_> = [
+        ("steer-a", QueuedMessageMode::Steer),
+        ("steer-b", QueuedMessageMode::Steer),
+        ("later", QueuedMessageMode::AfterYield),
+    ]
+    .into_iter()
+    .map(|(id, mode)| SoftInterruptMessage {
+        attachments: Vec::new(),
+        active_skill: None,
+        system_reminder: None,
+        content: id.into(),
+        images: vec![],
+        urgent: false,
+        source: SoftInterruptSource::User,
+        mode,
+        client_id: Some(id.into()),
+        editing_by: None,
+    })
+    .collect();
+    *queue.lock().unwrap() = initial.clone();
+    crate::soft_interrupt_store::overwrite(agent.session_id(), &initial).unwrap();
+    assert_eq!(agent.inject_soft_interrupts().len(), 1);
+    // Crash immediately after the session commit, before the queue rename.
+    crate::soft_interrupt_store::overwrite(agent.session_id(), &initial).unwrap();
+    queue.lock().unwrap().clear();
+    assert_eq!(agent.restore_persisted_soft_interrupts(), 1);
+    let pending = crate::soft_interrupt_store::load(agent.session_id()).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].client_id.as_deref(), Some("later"));
+    assert!(agent.inject_soft_interrupts().is_empty());
+    let saved = crate::session::Session::load(agent.session_id()).unwrap();
+    assert_eq!(
+        saved
+            .messages
+            .iter()
+            .filter(|message| message.id.starts_with("queued:"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn steering_injection_preserves_after_yield_messages_in_order() {
+    use jcode_agent_runtime::{QueuedMessageMode, SoftInterruptMessage};
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = Agent::new(provider, registry);
+    let queue = agent.soft_interrupt_queue();
+    for (content, mode) in [
+        ("later one", QueuedMessageMode::AfterYield),
+        ("steer", QueuedMessageMode::Steer),
+        ("later two", QueuedMessageMode::AfterYield),
+    ] {
+        queue.lock().unwrap().push(SoftInterruptMessage {
+            attachments: Vec::new(),
+            active_skill: None,
+            system_reminder: None,
+            content: content.into(),
+            images: vec![],
+            urgent: false,
+            source: SoftInterruptSource::User,
+            mode,
+            client_id: None,
+            editing_by: None,
+        });
+    }
+    let injected = agent.inject_soft_interrupts();
+    assert_eq!(injected.len(), 1);
+    assert_eq!(injected[0].content, "steer");
+    assert!(!agent.has_soft_interrupts());
+    let queue = queue.lock().unwrap();
+    assert_eq!(
+        queue
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["later one", "later two"]
+    );
+}
+
+#[tokio::test]
+async fn queued_image_prompts_keep_independent_session_markers() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    for (text, image, id) in [
+        ("first [#image 1]", "first-image", "one"),
+        ("second [#image 1]", "second-image", "two"),
+    ] {
+        agent.queue_soft_interrupt_with_id(
+            text.into(),
+            vec![("image/png".into(), image.into())],
+            false,
+            SoftInterruptSource::User,
+            Some(id.into()),
+        );
+    }
+    let injected = agent.inject_soft_interrupts();
+    let images = agent.session.session_images();
+    assert_eq!(images.len(), 2);
+    assert_eq!(injected.len(), 2);
+    let events = Agent::build_soft_interrupt_events(injected, "D", None);
+    let mapped: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            ServerEvent::UserImageIds {
+                content, image_ids, ..
+            } => Some((content, image_ids)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(mapped.len(), 2);
+    for ((content, ids), image) in mapped.iter().zip(&images) {
+        assert_eq!(ids.as_slice(), std::slice::from_ref(&image.image_id));
+        assert!(
+            content.contains(&format!("[#{}]", image.image_id)),
+            "{content}"
+        );
+        assert!(!content.contains("[#image 1]"));
+    }
+}
+
+#[tokio::test]
 async fn injected_soft_interrupts_report_client_ids_per_group_in_queue_order() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let registry = Registry::new(provider.clone()).await;
@@ -816,6 +880,33 @@ async fn injected_soft_interrupts_report_client_ids_per_group_in_queue_order() {
             ("[Background Task Completed]".to_string(), vec![]),
             ("three".to_string(), vec!["f3".into()]),
         ]
+    );
+}
+
+#[tokio::test]
+async fn file_activity_interrupt_keeps_typed_identity_without_model_prefix() {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = Agent::new(provider, registry);
+    let content = "moss edited src/parser.rs +3-1: fix parser";
+    agent.queue_soft_interrupt(
+        content.into(),
+        vec![],
+        false,
+        SoftInterruptSource::FileActivity,
+    );
+    let injected = agent.inject_soft_interrupts();
+    let stored = agent.session.messages.last().unwrap();
+    assert_eq!(
+        stored.display_role,
+        Some(crate::session::StoredDisplayRole::FileActivity)
+    );
+    assert!(matches!(&stored.content[0], ContentBlock::Text { text, .. } if text == content));
+    let events = Agent::build_soft_interrupt_events(injected, "D", None);
+    assert!(
+        matches!(&events[0], ServerEvent::SoftInterruptInjected { content: text, display_role: Some(role), .. }
+        if text == content && role == "file_activity")
     );
 }
 
@@ -919,6 +1010,30 @@ async fn run_turn_streaming_mpsc_emits_keepalive_while_provider_is_quiet() {
     task.await.unwrap().unwrap();
 }
 
+#[test]
+fn compaction_usage_event_is_a_plain_post_compaction_report() {
+    assert!(
+        crate::agent::compaction_context_usage_event(None, Some(1)).is_none(),
+        "no post-compaction count means no usage refresh"
+    );
+    match crate::agent::compaction_context_usage_event(Some(58_400), Some(1_000_000)) {
+        Some(ServerEvent::TokenUsage {
+            input,
+            output,
+            cache_read_input,
+            cache_creation_input,
+            effective_budget,
+        }) => {
+            assert_eq!(input, 58_400);
+            assert_eq!(output, 0);
+            assert_eq!(cache_read_input, Some(0));
+            assert_eq!(cache_creation_input, Some(0));
+            assert_eq!(effective_budget, Some(1_000_000));
+        }
+        other => panic!("expected a usage report, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn run_turn_streaming_mpsc_emits_native_compaction_for_client_cache_reset() {
     let _guard = crate::storage::lock_test_env();
@@ -937,7 +1052,18 @@ async fn run_turn_streaming_mpsc_emits_native_compaction_for_client_cache_reset(
     agent.run_turn_streaming_mpsc(tx).await.unwrap();
 
     let mut saw_native_compaction = false;
+    let mut compaction_post_tokens: Option<u64> = None;
+    let mut usage_after_compaction: Vec<(u64, Option<u64>)> = Vec::new();
     while let Ok(event) = rx.try_recv() {
+        if let ServerEvent::TokenUsage {
+            input,
+            cache_read_input,
+            ..
+        } = &event
+            && compaction_post_tokens.is_some()
+        {
+            usage_after_compaction.push((*input, *cache_read_input));
+        }
         if let ServerEvent::Compaction {
             trigger,
             pre_tokens,
@@ -963,12 +1089,24 @@ async fn run_turn_streaming_mpsc_emits_native_compaction_for_client_cache_reset(
                 messages_compacted.is_some_and(|count| count > 0),
                 "native compaction should report a non-empty compacted prefix"
             );
+            compaction_post_tokens = Some(post);
             saw_native_compaction = true;
         }
     }
     assert!(
         saw_native_compaction,
         "native provider compaction must reach clients so they clear KV baselines"
+    );
+    // Clients derive the context percentage from the last usage report, so the
+    // post-compaction size must arrive as its own report immediately after the
+    // compaction event, or the composer pill keeps the pre-compaction figure
+    // until the next provider call rewrites it (the 2026-11-15 07:20Z incident:
+    // the pill sat at 45% for eight minutes after a compaction to ~58K).
+    let post = compaction_post_tokens.expect("compaction post count");
+    assert_eq!(
+        usage_after_compaction.first(),
+        Some(&(post, Some(0))),
+        "the first usage report after compaction must be the new context size"
     );
 }
 
@@ -1155,6 +1293,54 @@ async fn run_turn_streaming_mpsc_emits_account_only_change_without_email() {
 }
 
 #[tokio::test]
+async fn messages_for_provider_caps_restored_snapcompact_pages() {
+    let provider: Arc<dyn Provider> = Arc::new(ArchiveVisionProvider);
+    let mut agent = Agent::new(provider, Registry::empty());
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "live tail".into(),
+            cache_control: None,
+        }],
+    );
+    agent.session.compaction = Some(Arc::new(crate::session::StoredCompactionState {
+        summary_text: "archive".into(),
+        plan_context: None,
+        openai_encrypted_content: None,
+        snapcompact: Some(jcode_message_types::SnapcompactArchive {
+            source: "history".into(),
+            pages: (0..74).map(|i| format!("page{i}")).collect(),
+            index: "[message 0, page 1 | user] old fact\n".into(),
+            decisions: String::new(),
+            deferred_decisions: String::new(),
+            page_ranges: Vec::new(),
+            render_key: String::new(),
+        }),
+        covers_up_to_turn: 0,
+        original_turn_count: 0,
+        compacted_count: 0,
+    }));
+    agent.seed_compaction_from_session();
+    let (request, event) = agent.messages_for_provider(None).await.unwrap();
+    assert!(event.is_none());
+    let images: Vec<_> = request
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| match b {
+            ContentBlock::Image { data, .. } => Some(data.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(images, ["page70", "page71", "page72", "page73"]);
+    assert!(
+        request
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .any(|b| matches!(b, ContentBlock::Text { text, .. } if text.contains("old fact")))
+    );
+}
+
+#[tokio::test]
 async fn messages_for_provider_replays_persisted_native_compaction_in_auto_mode() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let registry = Registry::new(provider.clone()).await;
@@ -1179,7 +1365,7 @@ async fn messages_for_provider_replays_persisted_native_compaction_in_auto_mode(
         .apply_openai_native_compaction("enc_auto".to_string(), 1)
         .expect("persist native compaction");
 
-    let (messages, event) = agent.messages_for_provider();
+    let (messages, event) = agent.messages_for_provider(None).await.unwrap();
     assert!(event.is_none());
     assert!(!messages.is_empty());
     match &messages[0].content[0] {
@@ -1234,7 +1420,7 @@ async fn oversized_openai_native_compaction_is_persisted_as_text_fallback() {
             .contains("OpenAI native compaction state was discarded")
     );
 
-    let (messages, event) = agent.messages_for_provider();
+    let (messages, event) = agent.messages_for_provider(None).await.unwrap();
     assert!(event.is_none());
     assert!(!messages.is_empty());
     assert!(messages.iter().all(|message| {
@@ -1276,7 +1462,6 @@ async fn messages_for_provider_applies_manual_compaction_in_native_auto_mode() {
     agent.provider_session_id = Some("stale-provider-session".to_string());
     agent.session.provider_session_id = Some("stale-provider-session".to_string());
 
-    let provider_messages = agent.provider_messages();
     let (message, success) = agent.request_manual_compaction();
     assert!(success, "manual compaction should start: {message}");
 
@@ -1284,7 +1469,7 @@ async fn messages_for_provider_applies_manual_compaction_in_native_auto_mode() {
     let mut event = None;
     let mut compacted_messages = Vec::new();
     while Instant::now() < deadline {
-        let (messages, maybe_event) = agent.messages_for_provider();
+        let (messages, maybe_event) = agent.messages_for_provider(None).await.unwrap();
         if maybe_event.is_some() {
             event = maybe_event;
             compacted_messages = messages;
@@ -1298,7 +1483,15 @@ async fn messages_for_provider_applies_manual_compaction_in_native_auto_mode() {
     assert!(agent.session.compaction.is_some());
     assert!(agent.provider_session_id.is_none());
     assert!(agent.session.provider_session_id.is_none());
-    assert!(compacted_messages.len() < provider_messages.len());
+    assert!(agent.session.compaction.as_ref().unwrap().compacted_count > 0);
+    let last_user_message = format!("turn 29 {}", "x".repeat(120));
+    assert!(
+        compacted_messages
+            .iter()
+            .any(|message| message.content.iter().any(|block| {
+                matches!(block, ContentBlock::Text { text, .. } if text == &last_user_message)
+            }))
+    );
     match &compacted_messages[0].content[0] {
         ContentBlock::Text { text, .. } => {
             assert!(text.contains("Previous Conversation Summary"));
@@ -1799,7 +1992,8 @@ async fn build_memory_prompt_nonblocking_defers_pending_memory_during_tool_loop(
                 name: "bash".to_string(),
                 input: serde_json::json!({}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         },
@@ -1827,7 +2021,7 @@ async fn build_memory_prompt_nonblocking_defers_pending_memory_during_tool_loop(
 }
 
 #[tokio::test]
-async fn memory_injection_message_defaults_to_ephemeral_history() {
+async fn memory_injection_message_can_opt_out_of_persisting_to_history() {
     let _guard = crate::storage::lock_test_env();
     let previous = std::env::var_os("JCODE_PERSIST_MEMORY_INJECTIONS");
     crate::env::set_var("JCODE_PERSIST_MEMORY_INJECTIONS", "false");
@@ -1845,7 +2039,9 @@ async fn memory_injection_message_defaults_to_ephemeral_history() {
         memory_ids: vec!["mem-ephemeral".to_string()],
     };
 
-    let (message, persisted) = agent.prepare_memory_injection_message(&memory);
+    let (message, persisted) = agent
+        .prepare_memory_injection_message(&[], &memory)
+        .unwrap();
 
     assert!(!persisted);
     assert_eq!(agent.session.messages.len(), before);
@@ -1878,7 +2074,9 @@ async fn memory_injection_message_can_persist_to_history() {
         memory_ids: vec!["mem-persisted".to_string()],
     };
 
-    let (message, persisted) = agent.prepare_memory_injection_message(&memory);
+    let (message, persisted) = agent
+        .prepare_memory_injection_message(&[], &memory)
+        .unwrap();
 
     assert!(persisted);
     assert_eq!(agent.session.messages.len(), before + 1);
@@ -1925,11 +2123,11 @@ async fn mark_closed_persists_soft_interrupts_for_restore_after_reload() {
 
     assert_eq!(restored.soft_interrupt_count(), 1);
     assert!(restored.has_urgent_interrupt());
-    assert!(
-        crate::soft_interrupt_store::load(&session_id)
-            .expect("store should be readable after restore")
-            .is_empty()
-    );
+    // Restore copies the queue into memory but must not erase its durable
+    // copy before delivery and history persistence, or a second crash loses it.
+    let persisted = crate::soft_interrupt_store::load(&session_id)
+        .expect("store should be readable after restore");
+    assert_eq!(persisted.len(), 1);
 
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);
@@ -1954,12 +2152,14 @@ async fn env_snapshot_detail_is_minimal_for_empty_sessions_and_full_after_histor
     agent
         .session
         .append_stored_message(crate::session::StoredMessage {
+            attachment_data: None,
             id: "msg_env_snapshot_detail".to_string(),
             role: crate::message::Role::User,
             content: vec![ContentBlock::Text {
                 text: "hello".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -2771,6 +2971,7 @@ mod system_prompt_reminder;
 struct FableGuardrailProvider {
     calls: Arc<std::sync::Mutex<usize>>,
     prompts_seen: Arc<std::sync::Mutex<Vec<String>>>,
+    reusable_inputs: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
 }
 
 #[async_trait]
@@ -2787,6 +2988,21 @@ impl Provider for FableGuardrailProvider {
             *calls += 1;
             *calls
         };
+        let (input, (item_count, block_count)) =
+            jcode_provider_anthropic::format_messages_for_request_with_boundary(
+                messages,
+                false,
+                &[],
+                true,
+                "",
+                true,
+            );
+        let mut input = serde_json::to_value(&input[..item_count]).unwrap();
+        input[item_count - 1]["content"]
+            .as_array_mut()
+            .unwrap()
+            .truncate(block_count);
+        self.reusable_inputs.lock().unwrap().push(input);
         if call > 1 {
             let prompt = messages
                 .last()
@@ -2839,6 +3055,7 @@ async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
     let fable = FableGuardrailProvider::default();
     let calls = fable.calls.clone();
     let prompts_seen = fable.prompts_seen.clone();
+    let reusable_inputs = fable.reusable_inputs.clone();
     let provider: Arc<dyn Provider> = Arc::new(fable);
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider, registry);
@@ -2850,13 +3067,27 @@ async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
         .expect("turn should recover from the guardrail");
 
     let mut text = String::new();
+    let mut retry_notices = Vec::new();
     while let Ok(event) = rx.try_recv() {
-        if let ServerEvent::TextDelta { text: delta } = event {
-            text.push_str(&delta);
+        match event {
+            ServerEvent::TextDelta { text: delta } => text.push_str(&delta),
+            ServerEvent::ProviderGuardrailRetry {
+                turn_id,
+                attempt,
+                max_attempts,
+            } => retry_notices.push((turn_id, attempt, max_attempts)),
+            ServerEvent::ProviderGuardrail { .. } => panic!("successful retry is not a stop"),
+            _ => {}
         }
     }
 
     assert_eq!(*calls.lock().unwrap(), 4);
+    assert_eq!(retry_notices.len(), 3);
+    for (index, (turn_id, attempt, max_attempts)) in retry_notices.iter().enumerate() {
+        assert_eq!(turn_id, &retry_notices[0].0);
+        assert_eq!(*attempt, u32::try_from(index).unwrap() + 1);
+        assert_eq!(*max_attempts, 3);
+    }
     let prompts = prompts_seen.lock().unwrap();
     assert_eq!(prompts.len(), 3);
     assert!(prompts[0].contains("concrete harmful action"));
@@ -2865,6 +3096,21 @@ async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
     assert!(
         text.contains("Reconsidered and completed safely"),
         "{text:?}"
+    );
+    let reusable_inputs = reusable_inputs.lock().unwrap();
+    assert!(
+        reusable_inputs.windows(2).all(|pair| pair[0] == pair[1]),
+        "the guardrail prompt must not rewrite the already cached wire blocks"
+    );
+    let session = crate::session::Session::load(agent.session_id()).unwrap();
+    assert!(
+        !session
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .any(
+                |block| matches!(block, ContentBlock::Text { text, .. } if prompts.contains(text))
+            )
     );
 }
 
@@ -2881,6 +3127,7 @@ async fn sdk_custom_compile_remote_schema_survives_locked_refresh() {
         crate::protocol::SessionToolConfig {
             enabled: Some(vec![]),
             disabled: vec![],
+            system_prompt_append: None,
             custom: vec![crate::protocol::SessionToolDefinition {
                 name: "compile_remote".into(),
                 description: "SDK override".into(),
@@ -2944,6 +3191,150 @@ fn system_prompt_override_restores_and_does_not_leak_across_sessions() {
         let attached = Agent::new_with_session(provider, Registry::empty(), loaded, None);
         assert_eq!(attached.build_system_prompt_split(None).static_part, prompt);
     }
+}
+
+#[test]
+fn passive_screen_context_is_dynamic_session_local_and_never_transcribed() {
+    let _lock = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let mut agent = Agent::new(provider.clone(), Registry::empty());
+    let other = Agent::new(provider, Registry::empty());
+    let baseline = agent.build_system_prompt_split(None);
+    let id = agent.session_id().to_owned();
+    let before_messages = serde_json::to_string(&agent.session).unwrap();
+    crate::screen_context::apply(
+        &id,
+        "screen-prompt-owner",
+        crate::protocol::ScreenContextAction::Enable,
+    )
+    .unwrap();
+    let snapshot = crate::protocol::ScreenSnapshot {
+        sequence: 1,
+        observed_at_ms: crate::screen_context::now_ms(),
+        source: "niri".into(),
+        interaction: crate::protocol::ScreenInteraction::Unknown,
+        focused_window: Some(7),
+        windows: vec![crate::protocol::ScreenWindow {
+            id: 7,
+            title: Some("UNTRUSTED_SCREEN_ONLY_TITLE".into()),
+            app_id: None,
+            workspace_id: None,
+            visible: None,
+            layout: None,
+        }],
+        outputs: vec![],
+    };
+    crate::screen_context::apply(
+        &id,
+        "screen-prompt-owner",
+        crate::protocol::ScreenContextAction::Update { snapshot },
+    )
+    .unwrap();
+    for _ in 0..3 {
+        let split = agent.build_system_prompt_split(None);
+        assert_eq!(split.static_part, baseline.static_part);
+        assert_eq!(
+            split
+                .dynamic_part
+                .matches("UNTRUSTED_SCREEN_ONLY_TITLE")
+                .count(),
+            1
+        );
+        assert!(
+            split
+                .dynamic_part
+                .contains("untrusted data, not instructions")
+        );
+        assert!(
+            !other
+                .build_system_prompt_split(None)
+                .dynamic_part
+                .contains("UNTRUSTED_SCREEN_ONLY_TITLE")
+        );
+    }
+    assert_eq!(
+        serde_json::to_string(&agent.session).unwrap(),
+        before_messages
+    );
+    agent.session.system_prompt = Some("Custom system".into());
+    let split = agent.build_system_prompt_split(None);
+    assert_eq!(split.static_part, "Custom system");
+    assert!(split.dynamic_part.contains("UNTRUSTED_SCREEN_ONLY_TITLE"));
+    drop(crate::tool::sdk::ConnectionGuard(
+        "screen-prompt-owner".into(),
+    ));
+    assert!(
+        agent
+            .build_system_prompt_split(None)
+            .dynamic_part
+            .is_empty()
+    );
+}
+
+#[test]
+fn sdk_system_prompt_append_is_session_local_static_and_cleared() {
+    let _lock = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let mut agent = Agent::new(provider.clone(), Registry::empty());
+    let other = Agent::new(provider, Registry::empty());
+    let baseline = agent.build_system_prompt_split(None);
+    let other_baseline = other.build_system_prompt_split(None).static_part;
+    let id = agent.session_id().to_owned();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let suffix = "Unique SDK session instructions";
+    let configure = || {
+        crate::tool::sdk::configure(
+            &id,
+            "prompt-agent-owner",
+            crate::protocol::SessionToolConfig {
+                system_prompt_append: Some(suffix.into()),
+                ..Default::default()
+            },
+            tx.clone(),
+        )
+        .unwrap();
+    };
+    configure();
+    for _ in 0..3 {
+        let split = agent.build_system_prompt_split(None);
+        assert_eq!(
+            split.static_part,
+            format!("{}\n\n{suffix}", baseline.static_part)
+        );
+        assert_eq!(split.static_part.matches(suffix).count(), 1);
+        assert_eq!(split.dynamic_part, baseline.dynamic_part);
+    }
+    assert_eq!(
+        other.build_system_prompt_split(None).static_part,
+        other_baseline
+    );
+    assert!(agent.session.system_prompt.is_none());
+    assert!(
+        !serde_json::to_string(&agent.session)
+            .unwrap()
+            .contains(suffix)
+    );
+    agent.session.system_prompt = Some("Explicit override".into());
+    let split = agent.build_system_prompt_split(Some("do not add memory to override"));
+    assert_eq!(split.static_part, format!("Explicit override\n\n{suffix}"));
+    assert!(split.dynamic_part.is_empty());
+    agent.session.system_prompt = Some(String::new());
+    assert_eq!(agent.build_system_prompt_split(None).static_part, suffix);
+    agent.session.system_prompt = None;
+    crate::tool::sdk::configure(&id, "prompt-agent-owner", Default::default(), tx.clone()).unwrap();
+    assert_eq!(
+        agent.build_system_prompt_split(None).static_part,
+        baseline.static_part
+    );
+    configure();
+    drop(crate::tool::sdk::ConnectionGuard(
+        "prompt-agent-owner".into(),
+    ));
+    assert!(crate::tool::sdk::config(&id).is_none());
+    assert_eq!(
+        agent.build_system_prompt_split(None).static_part,
+        baseline.static_part
+    );
 }
 
 /// Test provider advertising provider-native deferred tool loading.
@@ -3222,3 +3613,6 @@ async fn resume_heals_stale_credential_route_after_credential_type_change() {
         "workers inheriting the healed session must target the live credential"
     );
 }
+
+#[path = "agent_tests_additional_tests.rs"]
+mod additional_working_directory_moves_preserve_first_active_session_origin;

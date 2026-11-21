@@ -9,6 +9,103 @@ struct CompactionCacheProvider {
     discard_compaction: bool,
 }
 
+#[derive(Clone)]
+struct RequestUsageProvider;
+
+#[async_trait]
+impl Provider for RequestUsageProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        let usage = |input, output, read, write| {
+            Ok(StreamEvent::TokenUsage {
+                input_tokens: Some(input),
+                output_tokens: Some(output),
+                cache_read_input_tokens: read,
+                cache_creation_input_tokens: write,
+            })
+        };
+        Ok(Box::pin(futures::stream::iter([
+            usage(900, 2, Some(800), Some(5)),
+            Ok(StreamEvent::RetryRollback { attempt: 1, max: 2 }),
+            usage(100, 0, Some(0), None),
+            usage(100, 3, Some(0), None),
+            usage(100, 5, Some(0), None),
+            Ok(StreamEvent::ResolvedModel {
+                model: "served-model".into(),
+            }),
+            Ok(StreamEvent::TextDelta("answer".into())),
+            Ok(StreamEvent::MessageEnd {
+                stop_reason: Some("end_turn".into()),
+            }),
+        ])))
+    }
+
+    fn name(&self) -> &str {
+        "openai"
+    }
+
+    fn model(&self) -> String {
+        "configured-model".into()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[tokio::test]
+async fn request_usage_counts_completed_calls_not_stream_snapshots() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let provider: Arc<dyn Provider> = Arc::new(RequestUsageProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    for text in ["first", "second"] {
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: text.into(),
+                cache_control: None,
+            }],
+        );
+        agent.run_turn_streaming_mpsc(tx.clone()).await.unwrap();
+    }
+    let mut ids = Vec::new();
+    let mut snapshots = 0;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            ServerEvent::TokenUsage { .. } => snapshots += 1,
+            ServerEvent::RequestUsage {
+                session_id,
+                request_id,
+                provider,
+                model,
+                input,
+                output,
+                cache_read_input,
+                cache_creation_input,
+            } => {
+                assert_eq!(session_id, agent.session.id);
+                assert!(!request_id.is_empty());
+                assert_eq!(provider, "openai");
+                assert_eq!(model, "served-model");
+                assert_eq!((input, output), (Some(100), Some(5)));
+                assert_eq!((cache_read_input, cache_creation_input), (Some(0), None));
+                ids.push(request_id);
+            }
+            _ => {}
+        }
+    }
+    assert!(snapshots > 2, "legacy consumers still receive snapshots");
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1], "equal counters are not duplicate requests");
+}
+
 #[async_trait]
 impl Provider for CompactionCacheProvider {
     async fn complete(
@@ -19,8 +116,11 @@ impl Provider for CompactionCacheProvider {
         _: Option<&str>,
     ) -> Result<crate::provider::EventStream> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        // The second request does not shrink: a request that carries fewer
+        // tokens than the baseline is a content drop, not a cache miss, so the
+        // fixture keeps the prefix size while still reading nothing.
         let mut events = vec![Ok(StreamEvent::TokenUsage {
-            input_tokens: Some(if call == 0 { 216_517 } else { 204_393 }),
+            input_tokens: Some(if call == 0 { 216_517 } else { 216_000 }),
             output_tokens: Some(5),
             cache_read_input_tokens: Some(if call == 0 { 216_064 } else { 0 }),
             cache_creation_input_tokens: None,
@@ -39,7 +139,7 @@ impl Provider for CompactionCacheProvider {
             if self.discard_compaction {
                 events.push(Ok(StreamEvent::RetryRollback { attempt: 1, max: 2 }));
                 events.push(Ok(StreamEvent::TokenUsage {
-                    input_tokens: Some(204_393),
+                    input_tokens: Some(216_000),
                     output_tokens: Some(5),
                     cache_read_input_tokens: Some(0),
                     cache_creation_input_tokens: None,
@@ -146,7 +246,7 @@ async fn native_compaction_cache_refresh_is_classified_before_compaction_is_anno
                     // response's input usage is not a pre-compaction count.
                     let pre = pre_tokens.expect("local pre-compaction estimate");
                     let post = post_tokens.expect("local post-compaction estimate");
-                    assert_ne!(pre, 204_393, "response input is not a pre-compaction count");
+                    assert_ne!(pre, 216_000, "response input is not a pre-compaction count");
                     assert_eq!(tokens_saved, Some(pre.saturating_sub(post)));
                     assert_eq!(summary_chars, None);
                     assert!(
@@ -298,7 +398,7 @@ async fn same_account_zero_read_explains_what_was_ruled_out() {
     eprintln!("same-account zero read notice: {message}");
     assert_eq!(reason, "zero_read");
     assert!(
-        message.contains("read 0 of the 33.1K-token prefix"),
+        message.contains("read 0 against a 33.1K-token prior cache baseline"),
         "{message}"
     );
     assert!(message.contains("after the previous call"), "{message}");

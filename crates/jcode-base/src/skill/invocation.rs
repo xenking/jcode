@@ -55,9 +55,11 @@ mod tests {
         for name in names {
             registry.skills.insert(
                 (*name).to_string(),
-                Skill {
+                std::sync::Arc::new(Skill {
                     name: (*name).to_string(),
                     description: "Test skill".to_string(),
+                    icon: None,
+                    mode: None,
                     allowed_tools: None,
                     content: "content".to_string(),
                     path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
@@ -66,7 +68,7 @@ mod tests {
                         "Test skill",
                         "content",
                     )),
-                },
+                }),
             );
         }
         registry

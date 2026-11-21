@@ -2,12 +2,12 @@ use super::*;
 use crate::session::SessionCounts;
 
 #[test]
-fn title_no_sessions_is_icon_only() {
+fn title_no_sessions_remains_visible_without_an_icon() {
     let title = format_menubar_title(SessionCounts {
         total: 0,
         streaming: 0,
     });
-    assert_eq!(title, "");
+    assert_eq!(title, "0/0");
 }
 
 #[test]
@@ -73,7 +73,7 @@ fn session_menu_item_title_is_icon_only_without_meaningful_title() {
 }
 
 #[test]
-fn session_menu_item_title_loads_persisted_todo_title() {
+fn session_menu_item_title_prefers_generated_title_then_persisted_todo_title() {
     let _guard = crate::storage::lock_test_env();
     let previous_home = std::env::var_os("JCODE_HOME");
     let temp = tempfile::tempdir().expect("create temporary JCODE_HOME");
@@ -110,6 +110,12 @@ fn session_menu_item_title_loads_persisted_todo_title() {
     )
     .expect("save todos");
 
+    assert_eq!(
+        format_session_menu_item_title(session_id, false),
+        "🐃 Generated session title"
+    );
+    session.title = None;
+    session.save().expect("clear generated session title");
     assert_eq!(
         format_session_menu_item_title(session_id, false),
         "🐃 Meaningful menu labels"

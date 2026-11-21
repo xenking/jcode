@@ -59,7 +59,11 @@ const LEGACY_INDEX_FILE_NAME: &str = "session_search_recent_index_v1.json";
 
 #[derive(Debug, Deserialize)]
 struct SearchInput {
+    #[serde(default)]
     query: String,
+    /// Read one zero-based message from the current session, including journal replay.
+    #[serde(default)]
+    message_index: Option<usize>,
     #[serde(default)]
     working_dir: Option<String>,
     #[serde(default)]
@@ -306,6 +310,11 @@ impl Tool for SessionSearchTool {
                     "type": "string",
                     "description": "Distinctive keywords; stop-word-only queries are rejected."
                 },
+                "message_index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Read this zero-based message from the current session, including tool content. Alternative to query."
+                },
                 "working_dir": {
                     "type": "string",
                     "description": "Working directory path prefix, case-insensitive."
@@ -399,12 +408,19 @@ impl Tool for SessionSearchTool {
                     "description": "Search every session, not just the recent indexed subset. Slower."
                 }
             },
-            "required": ["query"]
+            "required": []
         })
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: SearchInput = serde_json::from_value(input)?;
+        if let Some(index) = params.message_index {
+            let session_id = ctx.session_id.clone();
+            let message =
+                tokio::task::spawn_blocking(move || current_message_by_index(&session_id, index))
+                    .await??;
+            return Ok(ToolOutput::new(message).with_title("session_search"));
+        }
         let limit = match validate_bounded_usize(params.limit, DEFAULT_LIMIT, 1, MAX_LIMIT, "limit")
         {
             Ok(limit) => limit,
@@ -532,77 +548,39 @@ impl Tool for SessionSearchTool {
     }
 }
 
-fn validate_bounded_usize(
-    value: Option<i64>,
-    default: usize,
-    min: usize,
-    max: usize,
-    name: &str,
-) -> std::result::Result<usize, String> {
-    let Some(value) = value else {
-        return Ok(default);
+fn current_message_by_index(session_id: &str, index: usize) -> Result<String> {
+    let session = Session::load(session_id)?;
+    let Some(message) = session.messages.get(index) else {
+        return Ok(format!(
+            "UNKNOWN: message {index} is unavailable in the current session ({} messages).",
+            session.messages.len()
+        ));
     };
-    if value < min as i64 || value > max as i64 {
-        return Err(format!(
-            "{name} must be between {min} and {max}; received {value}."
+    let mut value = serde_json::to_value(message)?;
+    if let Some(blocks) = value.get_mut("content").and_then(Value::as_array_mut) {
+        for block in blocks {
+            if block.get("type").and_then(Value::as_str) == Some("image")
+                && let Some(object) = block.as_object_mut()
+            {
+                object.insert("data".into(), Value::String("[image data omitted]".into()));
+            }
+        }
+    }
+    let serialized = serde_json::to_string_pretty(&value)?;
+    if serialized.len() > 1_000_000 {
+        let prefix: String = serialized.chars().take(500_000).collect();
+        return Ok(format!(
+            "Message {index} is too large; truncated, do not treat as complete:\n{prefix}"
         ));
     }
-    Ok(value as usize)
-}
-
-fn parse_role_filter(raw: Option<&str>) -> std::result::Result<Option<RoleFilter>, String> {
-    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
-        return Ok(None);
-    };
-    if raw.eq_ignore_ascii_case("all") {
-        return Ok(None);
-    }
-    RoleFilter::parse(raw).map(Some).ok_or_else(|| {
-        format!("role must be one of all, user, assistant, or metadata; received {raw}.")
-    })
-}
-
-fn normalize_optional_filter(raw: Option<String>) -> Option<String> {
-    raw.map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-}
-
-fn normalize_source_filter(raw: Option<&str>) -> std::result::Result<Option<String>, String> {
-    let Some(source) = raw.map(str::trim).filter(|source| !source.is_empty()) else {
-        return Ok(None);
-    };
-    let normalized = source.to_ascii_lowercase();
-    match normalized.as_str() {
-        "all" => Ok(None),
-        "jcode" | "claude" | "claude-code" | "codex" | "pi" | "opencode" | "cursor" => {
-            Ok(Some(normalized.replace("claude-code", "claude")))
-        }
-        _ => Err(format!(
-            "source must be one of all, jcode, claude, codex, pi, opencode, or cursor; received {source}."
-        )),
-    }
-}
-
-fn parse_datetime_filter(
-    raw: Option<&str>,
-    name: &str,
-) -> std::result::Result<Option<DateTime<Utc>>, String> {
-    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
-        return Ok(None);
-    };
-    if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
-        return Ok(Some(dt.with_timezone(&Utc)));
-    }
-    if let Ok(date) = NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
-        let Some(naive) = date.and_hms_opt(0, 0, 0) else {
-            return Err(format!("{name} has an invalid date: {raw}."));
-        };
-        return Ok(Some(DateTime::from_naive_utc_and_offset(naive, Utc)));
-    }
-    Err(format!(
-        "{name} must be an RFC3339 timestamp or YYYY-MM-DD date; received {raw}."
+    Ok(format!(
+        "Current session message {index} (zero-based, image data omitted):\n{serialized}"
     ))
 }
+
+#[path = "session_search_filters.rs"]
+mod session_search_filters;
+use session_search_filters::*;
 
 /// Synchronous search across session files with parallel raw pre-filtering and
 /// journal-aware session loading.
@@ -1546,6 +1524,7 @@ fn append_session_results(
         });
     }
 
+    let ask_ids = ask_tool_ids(&session.messages);
     for (message_index, msg) in session.messages.iter().enumerate() {
         if !options.include_system && is_system_like_message(msg) {
             continue;
@@ -1561,7 +1540,7 @@ fn append_session_results(
             continue;
         }
 
-        let text = searchable_message_text(msg, options.include_tools);
+        let text = searchable_message_text(msg, options.include_tools, &ask_ids);
         if text.is_empty() {
             continue;
         }
@@ -1571,7 +1550,7 @@ fn append_session_results(
         };
 
         let mut score = match_score.score;
-        if is_tool_only_message(msg) {
+        if is_tool_only_message(msg) && !has_ask_answer(msg, &ask_ids) {
             score *= 0.4;
         }
 
@@ -1738,6 +1717,7 @@ fn build_jcode_context(
     if options.context_before == 0 && options.context_after == 0 {
         return Vec::new();
     }
+    let ask_ids = ask_tool_ids(messages);
     let start = hit_index.saturating_sub(options.context_before);
     let end = (hit_index + options.context_after + 1).min(messages.len());
     (start..end)
@@ -1747,7 +1727,7 @@ fn build_jcode_context(
             if !options.include_system && is_system_like_message(msg) {
                 return None;
             }
-            let text = searchable_message_text(msg, options.include_tools);
+            let text = searchable_message_text(msg, options.include_tools, &ask_ids);
             if text.trim().is_empty() {
                 return None;
             }
@@ -1772,6 +1752,30 @@ fn truncate_context_text(text: &str) -> String {
 
 mod searchable_text;
 use searchable_text::searchable_message_text;
+
+fn ask_tool_ids(messages: &[StoredMessage]) -> std::collections::HashSet<&str> {
+    messages
+        .iter()
+        .flat_map(|msg| msg.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { id, name, .. } if name == "ask" => Some(id.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn has_ask_answer(msg: &StoredMessage, ask_ids: &std::collections::HashSet<&str>) -> bool {
+    msg.content.iter().any(|block| match block {
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } if *is_error != Some(true) && ask_ids.contains(tool_use_id.as_str()) => {
+            jcode_session_types::stored_ask_answer_text(content).is_some()
+        }
+        _ => false,
+    })
+}
 
 fn is_system_like_message(msg: &StoredMessage) -> bool {
     msg.display_role.is_some()
@@ -1805,6 +1809,7 @@ fn role_label(msg: &StoredMessage) -> &'static str {
         return match display_role {
             crate::session::StoredDisplayRole::System => "system",
             crate::session::StoredDisplayRole::BackgroundTask => "background",
+            crate::session::StoredDisplayRole::FileActivity => "file_activity",
         };
     }
 

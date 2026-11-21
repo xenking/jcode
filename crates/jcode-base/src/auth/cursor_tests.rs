@@ -409,3 +409,21 @@ fn find_vscdb_missing_returns_error() {
         assert!(err.to_string().contains("not found"));
     }
 }
+
+#[test]
+fn merge_auth_file_tokens_preserves_unknown_keys() {
+    let tokens = CursorDirectTokens {
+        access_token: "new-access".into(),
+        refresh_token: None,
+        source: "cursor_auth_file",
+    };
+    let existing =
+        br#"{"accessToken":"old","refreshToken":"keep-me","cachedEmail":"a@b.c","nested":{"x":1}}"#;
+    let merged: serde_json::Value =
+        serde_json::from_slice(&merge_auth_file_tokens(existing, &tokens).unwrap()).unwrap();
+    assert_eq!(merged["accessToken"], "new-access");
+    assert_eq!(merged["refreshToken"], "keep-me");
+    assert_eq!(merged["cachedEmail"], "a@b.c");
+    assert_eq!(merged["nested"]["x"], 1);
+    assert!(merge_auth_file_tokens(b"[]", &tokens).is_err());
+}

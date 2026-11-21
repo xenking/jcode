@@ -93,6 +93,7 @@ async fn handle_resume_session_allows_multiple_live_tui_attach() -> Result<()> {
         target_session_id.to_string(),
         None,
         None,
+        None,
         false,
         None,
         false,

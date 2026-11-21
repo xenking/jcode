@@ -2,12 +2,17 @@
 //!
 //! Uses newline-delimited JSON over Unix socket.
 //! Server streams events back to clients during message processing.
+//! Session images can be listed and fetched by stable identity.
+//! Queued skill delivery is negotiated by the queued_prompt_active_skill capability.
 //!
 //! Socket types:
 //! - Main socket: TUI/client communication with agent
 //! - Agent socket: Inter-agent communication (AI-to-AI)
 
 use serde::{Deserialize, Serialize};
+
+#[cfg(test)]
+mod image_requests_tests;
 
 /// Selected model-provider OAuth identity for the telemetry notice handshake.
 /// Debug formatting must never disclose this personal information.
@@ -35,10 +40,10 @@ impl std::fmt::Debug for ProviderOAuthEmail {
     }
 }
 
-mod comm_format;
+mod screen;
+pub use screen::*;
 mod notifications;
 
-pub use comm_format::*;
 pub use jcode_session_types::TurnStopReason;
 pub use jcode_session_types::{
     ASK_DECLINED_MESSAGE, ASK_MAX_OPTIONS, ASK_MAX_QUESTIONS, ASK_MIN_OPTIONS, AskAnswer,
@@ -275,10 +280,18 @@ impl<'a> From<&'a HistoryMessage> for HistoryMessageRef<'a> {
 /// A message in conversation history (for sync)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryMessage {
+    /// Unix epoch milliseconds when the stored message was recorded, so
+    /// clients show when it arrived rather than when they rendered it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_stats: Option<jcode_session_types::ResponseStats>,
     pub role: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<jcode_session_types::StoredAttachment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -403,8 +416,13 @@ impl AuthChanged {
 pub type ReloadRecoverySnapshot = jcode_selfdev_types::ReloadRecoveryDirective;
 
 mod wire;
-pub use wire::{AccountUsageSnapshot, AccountUsageWindow, Request, ServerEvent, TurnIdentity};
-pub use wire::{SessionToolConfig, SessionToolDefinition};
+pub use wire::{
+    AccountUsageSnapshot, AccountUsageWindow, DaemonIdentity, Request, ServerEvent, TurnIdentity,
+};
+pub use wire::{
+    QueuedPrompt, QueuedPromptEditOutcome, QueuedPromptMode, QueuedPromptRejection,
+    QueuedPromptRemovalOutcome, SessionToolConfig, SessionToolDefinition,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallSummary {
@@ -711,6 +729,10 @@ pub struct SwarmMemberStatus {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SwarmMemberRuntime {
+    /// Daemon publication order as monotonic Unix milliseconds. This versions
+    /// the whole swarm snapshot, not a transcript or a liveness heartbeat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_at_unix_ms: Option<u64>,
     /// Current turn's event-derived status. Absent for older producers and
     /// sessions that have not emitted live telemetry. Never session totals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -744,6 +766,9 @@ pub struct SwarmMemberRuntime {
     /// tell a working agent from one that has gone quiet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_age_secs: Option<u64>,
+    /// Silence duration when the server watchdog considers this worker stalled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled_secs: Option<u64>,
     /// Tokens in the worker's context window as of its latest response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_tokens: Option<u64>,
@@ -757,7 +782,8 @@ pub struct SwarmMemberRuntime {
 
 impl SwarmMemberRuntime {
     fn is_empty(&self) -> bool {
-        self.live_status.is_none()
+        self.snapshot_at_unix_ms.is_none()
+            && self.live_status.is_none()
             && self.wait_reason.is_none()
             && self.todo_blocked_reason.is_none()
             && self.wait_age_secs.is_none()
@@ -768,6 +794,7 @@ impl SwarmMemberRuntime {
             && self.effort.is_none()
             && self.elapsed_secs.is_none()
             && self.activity_age_secs.is_none()
+            && self.stalled_secs.is_none()
             && self.context_tokens.is_none()
             && self.context_limit.is_none()
             && self.output_tokens.is_none()
@@ -848,16 +875,29 @@ impl Request {
     pub fn id(&self) -> u64 {
         match self {
             Request::RuntimeCommand { id, .. } => *id,
-            Request::ConfigureTools { id, .. }
+            Request::ScreenContext { id, .. }
+            | Request::ConfigureTools { id, .. }
             | Request::ListTools { id }
             | Request::ToolResult { id, .. } => *id,
             Request::Message { id, .. } => *id,
             Request::Cancel { id } => *id,
+            Request::ForceStopTurn { id, .. } => *id,
             Request::BackgroundTool { id } => *id,
+            Request::BackgroundTasks { id, .. } => *id,
+            Request::QueuePrompt { id, .. }
+            | Request::SetQueuedPromptMode { id, .. }
+            | Request::InterruptQueuedPrompt { id, .. }
+            | Request::InterruptQueuedPrompts { id, .. }
+            | Request::RemoveQueuedPrompt { id, .. }
+            | Request::ReorderQueuedPrompts { id, .. }
+            | Request::SetQueuedPromptEditing { id, .. }
+            | Request::EditQueuedPrompt { id, .. }
+            | Request::GetQueuedPrompts { id } => *id,
             Request::SoftInterrupt { id, .. } => *id,
             Request::CancelSoftInterrupts { id, .. } => *id,
             Request::Clear { id } => *id,
             Request::Rewind { id, .. } => *id,
+            Request::RewindTranscript { id, .. } => *id,
             Request::RewindUndo { id } => *id,
             Request::Ping { id } => *id,
             Request::GetState { id } => *id,
@@ -870,6 +910,9 @@ impl Request {
             Request::GetHistory { id } => *id,
             Request::GetModelCatalog { id, .. } => *id,
             Request::GetCompactedHistory { id, .. } => *id,
+            Request::GetHistoryPage { id, .. } => *id,
+            Request::GetHistoryImageChunk { id, .. } => *id,
+            Request::ListSessionImages { id, .. } | Request::GetSessionImage { id, .. } => *id,
             Request::Reload { id, .. } => *id,
             Request::UpgradeRuntime { id, .. } => *id,
             Request::ResumeSession { id, .. } => *id,
@@ -919,6 +962,8 @@ impl Request {
             Request::CommList { id, .. } => *id,
             Request::CommListChannels { id, .. } => *id,
             Request::CommListSwarms { id, .. } => *id,
+            Request::CommListSessions { id, .. } => *id,
+            Request::CommFocusSession { id, .. } => *id,
             Request::CommSetSwarmLabel { id, .. } => *id,
             Request::CommChannelMembers { id, .. } => *id,
             Request::CommProposePlan { id, .. } => *id,
@@ -940,6 +985,7 @@ impl Request {
             Request::CommSubscribeChannel { id, .. } => *id,
             Request::CommUnsubscribeChannel { id, .. } => *id,
             Request::CommAwaitMembers { id, .. } => *id,
+            Request::CommAnswerEscalatedAsk { id, .. } => *id,
         }
     }
 
@@ -966,6 +1012,8 @@ impl Request {
                 | Request::CommList { .. }
                 | Request::CommListChannels { .. }
                 | Request::CommListSwarms { .. }
+                | Request::CommListSessions { .. }
+                | Request::CommFocusSession { .. }
                 | Request::CommSetSwarmLabel { .. }
                 | Request::CommChannelMembers { .. }
                 | Request::CommProposePlan { .. }
@@ -987,6 +1035,7 @@ impl Request {
                 | Request::CommSubscribeChannel { .. }
                 | Request::CommUnsubscribeChannel { .. }
                 | Request::CommAwaitMembers { .. }
+                | Request::CommAnswerEscalatedAsk { .. }
         )
     }
 }

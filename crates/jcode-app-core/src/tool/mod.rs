@@ -4,9 +4,18 @@ mod agentgrep;
 pub mod ambient;
 mod apply_patch;
 mod ask;
+pub(crate) use ask::{ask_client, ask_for_real_answer};
 mod bash;
+pub(crate) use bash::{BASH_HANDOFF, BashHandoff};
+#[cfg(unix)]
+pub(crate) use bash::{BASH_SUPERVISED, follow_detached_task, restore_detached_task_monitoring};
+// The bash tool is the only place a turn cancel has to kill a process group,
+// so its behaviour is exercised from the agent-side cancel tests too.
+#[cfg(test)]
+pub(crate) use bash::BashTool as TestBashTool;
 mod batch;
 mod bg;
+pub(crate) use bg::replay_wait_input as replay_bg_wait_input;
 #[cfg(unix)]
 pub(crate) mod bridge_reload;
 mod browser;
@@ -18,9 +27,10 @@ mod computer;
 mod config_edit_notice;
 mod conversation_search;
 mod debug_socket;
+mod desktop;
 mod desktop_selfdev;
-mod discover;
-mod discover_secrets;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use desktop_selfdev::peer_process;
 mod edit;
 mod edit_stats;
 mod feedback;
@@ -32,9 +42,12 @@ pub mod applet;
 #[allow(dead_code)]
 mod goal;
 pub mod inflight;
+pub(crate) mod interactive;
 mod jcode_docs;
 pub(crate) mod load_tools;
 pub use jcode_docs::{BundledDocs, bundled_docs, register_bundled_docs};
+#[cfg(unix)]
+pub mod background_worker;
 pub mod mcp;
 mod memory;
 mod name_suggestions;
@@ -55,7 +68,10 @@ mod todo;
 mod user_response;
 mod webfetch;
 mod websearch;
+mod withheld_identity;
 mod write;
+
+use withheld_identity::withheld_call_key;
 
 use crate::compaction::CompactionManager;
 use crate::provider::Provider;
@@ -70,6 +86,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[path = "name_policy.rs"]
 mod name_policy;
 pub(crate) use name_policy::tool_name_is_allowed;
+
+fn parse_tool_args<T: serde::de::DeserializeOwned>(input: Value, example: &str) -> Result<T> {
+    serde_path_to_error::deserialize(input).map_err(|err| {
+        if err.path().iter().next().is_some() {
+            anyhow::anyhow!(
+                "Invalid parameter `{}`. Example: {example}\n{}",
+                err.path(),
+                err.inner()
+            )
+        } else {
+            anyhow::anyhow!("Invalid arguments: {}. Example: {example}", err.inner())
+        }
+    })
+}
+
 /// The unified schema may be exposed for a restricted MCP allowlist. That
 /// must not grant management privileges or bypass a disabled legacy surface.
 fn ensure_mcp_action_allowed(session_id: &str, surface: &str) -> Result<()> {
@@ -105,6 +136,7 @@ fn is_mcp_tool_name(name: &str) -> bool {
 use std::sync::{LazyLock, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
+pub use communicate::working_members_spawned_by;
 pub(crate) use jcode_tool_core::intent_schema_property;
 pub use jcode_tool_core::{StdinInputRequest, Tool, ToolContext, ToolExecutionMode};
 pub use jcode_tool_types::{ToolImage, ToolOutput};
@@ -140,6 +172,7 @@ impl Drop for SessionToolPolicyRegistration {
             .is_some_and(|policy| policy.owner == Some(self.owner))
         {
             policies.remove(&self.session_id);
+            bash::clear_read_hint_session(&self.session_id);
             sdk::remove_session(&self.session_id);
         }
     }
@@ -292,49 +325,44 @@ const OUTPUT_WITHHELD_MARKER: &str = "⚠️ OUTPUT WITHHELD";
 /// Strict-schema providers cannot send a key the schema does not declare, so
 /// the flag alone would leave them with no way to opt in. An immediate,
 /// identical repeat is an equally unambiguous yes and needs no schema.
-static WITHHELD_CALLS: LazyLock<StdRwLock<HashMap<String, Vec<u64>>>> =
+type WithheldCalls = HashMap<String, Vec<(u64, String)>>;
+static WITHHELD_CALLS: LazyLock<StdRwLock<WithheldCalls>> =
     LazyLock::new(|| StdRwLock::new(HashMap::new()));
 
 /// Withheld calls remembered per session. A batch can have several sub-calls
 /// withheld at once, so one slot is not enough.
 const WITHHELD_CALLS_PER_SESSION: usize = 8;
 
-/// Identity of a call for repeat detection. `intent` is a display label the
-/// model rewords freely, so it is not part of the identity.
-fn withheld_call_key(tool: &str, input: &Value) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut input = input.clone();
-    if let Some(object) = input.as_object_mut() {
-        object.remove("intent");
-        object.remove(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY);
-        object.retain(|_, value| !value.is_null());
-    }
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    tool.hash(&mut hasher);
-    input.to_string().hash(&mut hasher);
-    hasher.finish()
-}
-
 /// True when this call repeats one that was withheld for the session. The
 /// record is consumed, so each refusal buys exactly one accepted repeat.
-fn take_repeated_withheld_call(session_id: &str, key: u64) -> bool {
+///
+/// A record only counts for a *later* invocation than the one that earned it.
+/// Sibling sub-calls of one `batch` or `codemode` call share a root invocation
+/// and an identical key (`intent` is not identifying), so without this check the
+/// second of two identical sub-calls would spend the first one's refusal and be
+/// accepted instead of withheld. Which of the two ran second is a race, which
+/// made the outcome of a batch depend on sub-call completion order.
+fn take_repeated_withheld_call(session_id: &str, key: u64, invocation: &str) -> bool {
     let mut calls = WITHHELD_CALLS
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let Some(keys) = calls.get_mut(session_id) else {
+    let Some(records) = calls.get_mut(session_id) else {
         return false;
     };
-    let Some(position) = keys.iter().position(|seen| *seen == key) else {
+    let Some(position) = records
+        .iter()
+        .position(|(seen, earned_by)| *seen == key && earned_by != invocation)
+    else {
         return false;
     };
-    keys.remove(position);
-    if keys.is_empty() {
+    records.remove(position);
+    if records.is_empty() {
         calls.remove(session_id);
     }
     true
 }
 
-fn remember_withheld_call(session_id: &str, key: u64) {
+fn remember_withheld_call(session_id: &str, key: u64, invocation: &str) {
     let mut calls = WITHHELD_CALLS
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -342,12 +370,12 @@ fn remember_withheld_call(session_id: &str, key: u64) {
     if calls.len() >= 4096 && !calls.contains_key(session_id) {
         calls.clear();
     }
-    let keys = calls.entry(session_id.to_string()).or_default();
-    keys.retain(|seen| *seen != key);
-    if keys.len() >= WITHHELD_CALLS_PER_SESSION {
-        keys.remove(0);
+    let records = calls.entry(session_id.to_string()).or_default();
+    records.retain(|(seen, _)| *seen != key);
+    if records.len() >= WITHHELD_CALLS_PER_SESSION {
+        records.remove(0);
     }
-    keys.push(key);
+    records.push((key, invocation.to_string()));
 }
 
 /// Aliases are surface-dependent, but policy follows original identities for
@@ -405,6 +433,12 @@ impl Clone for Registry {
     }
 }
 
+#[path = "registry_touched_paths.rs"]
+mod registry_touched_paths;
+
+#[path = "registry_lifecycle.rs"]
+mod registry_lifecycle;
+
 impl Registry {
     /// Desktop opts in through its inline response renderer capability.
     /// Keep Desktop-only UI tools out of the base map so terminal/headless
@@ -422,6 +456,25 @@ impl Registry {
         } else {
             self.unregister("user_response").await;
             self.unregister("applet").await;
+        }
+    }
+
+    /// A view for a *tool* sub-call (`batch`, `codemode`): same tool map, same
+    /// session compaction state.
+    ///
+    /// [`Clone`] deliberately starts a fresh `CompactionManager`, because a
+    /// parallel *agent* must not share a parent's message history. A tool
+    /// sub-call is not an agent: it reports into the caller's transcript, so the
+    /// context guard has to judge it against the caller's budget and usage.
+    /// Cloning there made every sub-call see a default budget and a synthetic
+    /// usage count, so a batch could refuse or admit outputs on numbers that had
+    /// nothing to do with the session.
+    fn for_tool_subcall(&self) -> Self {
+        Self {
+            tools: self.tools.clone(),
+            mcp_policy: Arc::clone(&self.mcp_policy),
+            skills: Arc::clone(&self.skills),
+            compaction: Arc::clone(&self.compaction),
         }
     }
 
@@ -562,6 +615,7 @@ impl Registry {
                 calendar::CalendarTool::new,
             );
             Self::insert_tool_timed(&mut m, &mut timings, "schedule", ambient::ScheduleTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "desktop", desktop::DesktopTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "selfdev", selfdev::SelfDevTool::new);
             Self::insert_tool_timed(
                 &mut m,
@@ -638,16 +692,6 @@ impl Registry {
                 &mut tools_map,
                 "codemode",
                 codemode::CodemodeTool::new(registry.downgrade()),
-            );
-        }
-        // Integration discovery is opt-in via `[sponsors] enabled = true`; when disabled the
-        // tool is never registered and no discovery endpoint is ever
-        // contacted.
-        if crate::config::config().sponsors.enabled {
-            Self::insert_tool(
-                &mut tools_map,
-                "integration_tools",
-                discover::DiscoverToolsTool::new(),
             );
         }
         let session_tools_ms = session_tools_start.elapsed().as_millis();
@@ -750,244 +794,6 @@ impl Registry {
         crate::util::estimate_tokens(s)
     }
 
-    /// Paths a tool call names in its input, labelled by the input key they
-    /// came from, resolved against the session working directory. Covers the
-    /// common path keys, `paths` arrays (first 8), and `apply_patch` file
-    /// headers (Codex envelope and unified diff).
-    fn touched_paths(input: &Value, ctx: &ToolContext) -> Vec<(&'static str, std::path::PathBuf)> {
-        let mut touched = Vec::new();
-        let Some(object) = input.as_object() else {
-            return touched;
-        };
-        let resolve = |path: &str| ctx.resolve_path(std::path::Path::new(path));
-        for key in [
-            "file_path",
-            "path",
-            "target",
-            "target_path",
-            "old_path",
-            "new_path",
-        ] {
-            if let Some(path) = object.get(key).and_then(Value::as_str) {
-                touched.push((key, resolve(path)));
-            }
-        }
-        if let Some(paths) = object.get("paths").and_then(Value::as_array) {
-            for path in paths.iter().filter_map(Value::as_str).take(8) {
-                touched.push(("paths", resolve(path)));
-            }
-        }
-        if let Some(patch) = object.get("patch_text").and_then(Value::as_str) {
-            for path in Self::patch_paths(patch) {
-                if !touched
-                    .iter()
-                    .any(|(_, existing)| *existing == resolve(path))
-                {
-                    touched.push(("patch", resolve(path)));
-                }
-            }
-        }
-        touched
-    }
-
-    /// File paths named in patch headers. Deletions are included because the
-    /// path was still touched; `/dev/null` sides of unified diffs are not.
-    fn patch_paths(patch: &str) -> Vec<&str> {
-        let mut paths = Vec::new();
-        for line in patch.lines() {
-            let path = [
-                "*** Add File: ",
-                "*** Update File: ",
-                "*** Delete File: ",
-                "*** Move to: ",
-            ]
-            .iter()
-            .find_map(|prefix| line.strip_prefix(prefix))
-            .or_else(|| {
-                let header = line
-                    .strip_prefix("+++ ")
-                    .or_else(|| line.strip_prefix("--- "))?;
-                let header = header.split('\t').next().unwrap_or(header).trim();
-                if header == "/dev/null" {
-                    return None;
-                }
-                Some(
-                    header
-                        .strip_prefix("a/")
-                        .or_else(|| header.strip_prefix("b/"))
-                        .unwrap_or(header),
-                )
-            });
-            if let Some(path) = path.map(str::trim).filter(|path| !path.is_empty())
-                && !paths.contains(&path)
-            {
-                paths.push(path);
-            }
-        }
-        paths
-    }
-
-    fn tool_lifecycle_fields(
-        phase: &str,
-        requested_name: &str,
-        resolved_name: &str,
-        input: &Value,
-        ctx: &ToolContext,
-    ) -> Vec<(String, String)> {
-        let cwd = ctx
-            .working_dir
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "none".to_string());
-        let input_json = serde_json::to_string(input).unwrap_or_default();
-        let mut fields = vec![
-            ("phase".to_string(), phase.to_string()),
-            ("tool_name".to_string(), requested_name.to_string()),
-            ("resolved_tool_name".to_string(), resolved_name.to_string()),
-            ("session_id".to_string(), ctx.session_id.clone()),
-            ("message_id".to_string(), ctx.message_id.clone()),
-            ("tool_call_id".to_string(), ctx.tool_call_id.clone()),
-            (
-                "execution_mode".to_string(),
-                format!("{:?}", ctx.execution_mode),
-            ),
-            ("cwd".to_string(), cwd),
-            ("input_json_bytes".to_string(), input_json.len().to_string()),
-        ];
-
-        if let Some(object) = input.as_object() {
-            let mut keys = object.keys().cloned().collect::<Vec<_>>();
-            keys.sort();
-            fields.push(("input_keys".to_string(), keys.join(",")));
-
-            let touched_paths = Self::touched_paths(input, ctx)
-                .into_iter()
-                .map(|(key, path)| format!("{key}:{}", path.display()))
-                .collect::<Vec<_>>();
-            if !touched_paths.is_empty() {
-                fields.push(("touched_paths".to_string(), touched_paths.join(",")));
-                fields.push((
-                    "touched_path_count".to_string(),
-                    touched_paths.len().to_string(),
-                ));
-            }
-
-            for text_key in ["command", "prompt", "task", "query", "content"] {
-                if let Some(text) = object.get(text_key).and_then(Value::as_str) {
-                    fields.push((format!("{text_key}_bytes"), text.len().to_string()));
-                    fields.push((
-                        format!("{text_key}_chars"),
-                        text.chars().count().to_string(),
-                    ));
-                }
-            }
-        }
-
-        fields
-    }
-
-    /// Maximum fraction of context budget a single tool output may consume.
-    /// Outputs that would push total context beyond this are truncated.
-    const CONTEXT_GUARD_THRESHOLD: f32 = 0.90;
-
-    /// Event payload shared by the `post_tool` observer and the
-    /// `post_tool_feedback` hook.
-    fn post_tool_event(
-        event_name: &'static str,
-        resolved_name: &str,
-        input: &Value,
-        ctx: &ToolContext,
-        result: std::result::Result<&ToolOutput, &anyhow::Error>,
-        latency_ms: u64,
-    ) -> crate::hooks::HookEvent {
-        let mut unique_paths: Vec<String> = Vec::new();
-        for (_, path) in Self::touched_paths(input, ctx) {
-            let path = path.display().to_string();
-            if !unique_paths.contains(&path) {
-                unique_paths.push(path);
-            }
-        }
-        let mut event = crate::hooks::HookEvent::new(event_name)
-            .session_id(ctx.session_id.clone())
-            .field("TOOL_NAME", resolved_name)
-            .field("TOOL_CALL_ID", ctx.tool_call_id.clone())
-            .field(
-                "TOOL_INPUT",
-                crate::hooks::truncate_tool_input(&input.to_string()),
-            )
-            .field("TOUCHED_PATHS", unique_paths.join("\n"))
-            .field("STATUS", if result.is_ok() { "ok" } else { "error" })
-            .field("DURATION_MS", latency_ms.to_string());
-        if let Some(dir) = &ctx.working_dir {
-            event = event.cwd(dir.display().to_string());
-        }
-        match result {
-            Ok(output) => {
-                event = event.field("OUTPUT_BYTES", output.output.len().to_string());
-            }
-            Err(error) => {
-                const ERROR_LIMIT: usize = 1000;
-                let message: String = error.to_string().chars().take(ERROR_LIMIT).collect();
-                event = event.field("ERROR", message);
-            }
-        }
-        event
-    }
-
-    /// Fire the `post_tool` observer hook with tool outcome metadata.
-    /// No-op (without building the payload) when the hook is not configured.
-    fn fire_post_tool_hook(
-        resolved_name: &str,
-        input: &Value,
-        ctx: &ToolContext,
-        result: &Result<ToolOutput>,
-        latency_ms: u64,
-    ) {
-        if !crate::hooks::hook_configured("post_tool") {
-            return;
-        }
-        crate::hooks::dispatch_observer(Self::post_tool_event(
-            "post_tool",
-            resolved_name,
-            input,
-            ctx,
-            result.as_ref(),
-            latency_ms,
-        ));
-    }
-
-    /// Run the synchronous `post_tool_feedback` hooks after a successful tool
-    /// call and append whatever they print to the tool result, so linters and
-    /// checkers can feed findings straight back to the model.
-    async fn apply_post_tool_feedback(
-        resolved_name: &str,
-        input: &Value,
-        ctx: &ToolContext,
-        latency_ms: u64,
-        output: &mut ToolOutput,
-    ) {
-        if !crate::hooks::hook_configured("post_tool_feedback") {
-            return;
-        }
-        let event = Self::post_tool_event(
-            "post_tool_feedback",
-            resolved_name,
-            input,
-            ctx,
-            Ok(output),
-            latency_ms,
-        );
-        if let Some(feedback) =
-            crate::hooks::run_post_tool_feedback(&event, &input.to_string()).await
-        {
-            if !output.output.is_empty() && !output.output.ends_with('\n') {
-                output.output.push('\n');
-            }
-            output.output.push_str("\n[post_tool_feedback]\n");
-            output.output.push_str(&feedback);
-        }
-    }
-
     /// Maximum fraction of context budget a single tool output may occupy.
     /// Even if we have room, a single output shouldn't dominate the context.
     const SINGLE_OUTPUT_MAX_FRACTION: f32 = 0.30;
@@ -1062,6 +868,7 @@ impl Registry {
         let _in_flight = inflight::mark_tool_in_flight(&ctx.tool_call_id);
         let tools = self.tools.read().await;
         let resolved_name = Self::resolve_tool_name_for_session(&ctx.session_id, name);
+        let _turn_activity = crate::turn_activity::global().in_tool(&ctx.session_id, resolved_name);
         let is_custom = sdk::custom(&ctx.session_id, resolved_name);
         if is_custom && let Some(config) = sdk::config(&ctx.session_id) {
             let disabled = config.disabled.into_iter().collect();
@@ -1226,12 +1033,13 @@ impl Registry {
         // Context overflow guard: check if this output would push us over the limit
         // Opt in with the flag, or by repeating a call that was just withheld.
         let call_key = withheld_call_key(resolved_name, &input);
-        let accepted =
-            accepts_large_output(&input) | take_repeated_withheld_call(&ctx.session_id, call_key);
+        let invocation = ctx.root_invocation_id();
+        let accepted = accepts_large_output(&input)
+            | take_repeated_withheld_call(&ctx.session_id, call_key, invocation);
         let already_marked = output.output.starts_with(OUTPUT_WITHHELD_MARKER);
         output = self.guard_context_overflow(name, output, accepted).await;
         if !already_marked && output.output.starts_with(OUTPUT_WITHHELD_MARKER) {
-            remember_withheld_call(&ctx.session_id, call_key);
+            remember_withheld_call(&ctx.session_id, call_key, invocation);
         }
 
         let mut fields = Self::tool_lifecycle_fields("done", name, resolved_name, &input, &ctx);
@@ -1246,6 +1054,10 @@ impl Registry {
 
         Ok(output)
     }
+
+    /// Maximum fraction of context budget a single tool output may consume.
+    /// Outputs that would push total context beyond this are truncated.
+    const CONTEXT_GUARD_THRESHOLD: f32 = 0.90;
 
     /// Check if a tool output would overflow the context window and truncate if needed.
     /// Returns the (possibly truncated) output.
@@ -1616,9 +1428,7 @@ impl Registry {
         let mut tools = self.tools.write().await;
         let mut removed = Vec::new();
         tools.retain(|name, tool| {
-            let keep = !tool
-                .mcp_identity()
-                .is_some_and(|(owner, _)| owner == server);
+            let keep = tool.mcp_identity().is_none_or(|(owner, _)| owner != server);
             if !keep {
                 removed.push(name.clone());
             }

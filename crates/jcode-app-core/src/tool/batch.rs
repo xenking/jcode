@@ -1,4 +1,4 @@
-use super::{Registry, Tool, ToolContext, ToolOutput, WeakRegistry};
+use super::{Registry, Tool, ToolContext, ToolOutput, WeakRegistry, accepts_large_output};
 use crate::bus::{BatchSubcallProgress, BatchSubcallState};
 use crate::message::ToolCall;
 use anyhow::Result;
@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 const MAX_PARALLEL: usize = 10;
 
-const BATCH_DESCRIPTION: &str = "Run independent tool calls in parallel (1-10). Each tool_calls entry contains tool, intent, and the tool's normal arguments as sibling fields. Do not batch dependent calls or nest batch.";
+const BATCH_DESCRIPTION: &str = "Run independent tool calls in parallel (1-10). Each tool_calls entry contains tool, intent, and the tool's normal arguments as sibling fields. Do not batch dependent calls or nest batch. For dependent chains, loops over results, or 10+ calls use `codemode`.";
 
 pub(crate) fn generic_batch_schema() -> Value {
     json!({
@@ -200,6 +200,11 @@ impl Tool for BatchTool {
             .upgrade()
             .ok_or_else(|| anyhow::anyhow!("Batch tool registry is no longer available"))?;
         let input = normalize_batch_input(input);
+        // A batch-level opt-in covers the calls it contains. Without this, a model
+        // that accepted the cost once was still refused by every sub-call, and
+        // only a flag typed inside an individual entry (or a repeat after a
+        // refusal) had any effect.
+        let batch_opt_in = accepts_large_output(&input);
         let params: BatchInput = serde_json::from_value(input)?;
 
         if params.tool_calls.is_empty() {
@@ -228,7 +233,12 @@ impl Tool for BatchTool {
             .into_iter()
             .enumerate()
             .map(|(i, tc)| {
-                let (tool_name, parameters) = tc.resolved_parameters();
+                let (tool_name, mut parameters) = tc.resolved_parameters();
+                if batch_opt_in && let Some(object) = parameters.as_object_mut() {
+                    object
+                        .entry(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY)
+                        .or_insert(Value::Bool(true));
+                }
                 // Display and dispatch the canonical name (e.g. `functions.bash`
                 // -> `bash`) while keeping SDK custom tool names intact.
                 let tool_name =
@@ -269,7 +279,10 @@ impl Tool for BatchTool {
         let mut stream: futures::stream::FuturesUnordered<_> = subcalls
             .iter()
             .map(|(i, tool_name, parameters)| {
-                let registry = registry.clone();
+                // Share compaction with the caller: the context guard inside the
+                // sub-call must see the session's budget and usage, not a fresh
+                // default manager.
+                let registry = registry.for_tool_subcall();
                 let i = *i;
                 let tool_name = tool_name.clone();
                 let parameters = parameters.clone();

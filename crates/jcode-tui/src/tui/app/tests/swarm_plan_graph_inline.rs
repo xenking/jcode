@@ -522,7 +522,9 @@ fn history_event_for_session_with_messages(
 
 fn user_history_message(content: &str) -> crate::protocol::HistoryMessage {
     crate::protocol::HistoryMessage {
+        attachments: Vec::new(),
         response_stats: None,
+        timestamp_ms: None,
         role: "user".to_string(),
         content: content.to_string(),
         tool_calls: None,
@@ -539,6 +541,8 @@ fn history_event_for_session(session_id: &str) -> crate::protocol::ServerEvent {
         provider_name: Some("claude".to_string()),
         provider_model: Some("claude-sonnet-4-20250514".to_string()),
         subagent_model: None,
+        pinned_skill: None,
+        pinned_skills: None,
         agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,

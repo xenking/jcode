@@ -15,7 +15,34 @@
 //! - **Semantic**: compact based on embedding-detected topic shifts and
 //!   relevance scoring. Falls back to proactive if embeddings are unavailable.
 
+mod replay;
+mod snap_decisions;
+mod snap_index;
+pub use replay::{format_compaction_plan, native_compaction_transcript_summary};
+use snap_index::build_snapcompact_index;
+
 use crate::message::{ContentBlock, Message, Role};
+
+pub const MISSING_NATIVE_SUMMARY: &str = "This provider cannot read the OpenAI compaction checkpoint, and no readable summary or original compacted history was available. Earlier context may be incomplete.";
+
+pub struct CompactionReplay {
+    pub messages: Vec<Message>,
+    pub checkpoint_changed: bool,
+    pub warn_missing_native_summary: bool,
+}
+
+pub fn openai_native_replay_route(provider: &str, model: &str) -> bool {
+    provider.eq_ignore_ascii_case("openai")
+        && model.trim() != jcode_provider_core::CHATGPT_WEB_MODEL
+}
+
+pub fn oversized_native_summary(encrypted_content_len: usize, readable: Option<String>) -> String {
+    let warning = openai_encrypted_content_fallback_summary(encrypted_content_len);
+    match readable {
+        Some(text) => format!("{warning}\n\n{text}"),
+        None => warning,
+    }
+}
 use crate::provider::Provider;
 use crate::provider::openai_request::{
     openai_encrypted_content_fallback_summary, openai_encrypted_content_is_sendable,
@@ -24,24 +51,32 @@ use anyhow::Result;
 use base64::Engine as _;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::task::JoinHandle;
 
-pub use jcode_compaction_core::shake::{ShakeConfig, ShakeOutcome};
+pub use jcode_compaction_core::shake::{ShakeConfig, ShakeOutcome, shake_savings};
 pub use jcode_compaction_core::{
     CHARS_PER_TOKEN, COMPACTION_THRESHOLD, CRITICAL_THRESHOLD, CompactionAction, CompactionEvent,
     CompactionStats, DEFAULT_TOKEN_BUDGET, EMBED_MAX_CHARS_PER_MSG, EMBEDDING_HISTORY_WINDOW,
     EMERGENCY_IMAGE_MAX_CHARS, EMERGENCY_TOOL_RESULT_MAX_CHARS, MANUAL_COMPACT_MIN_THRESHOLD,
-    MIN_TURNS_TO_KEEP, PAYLOAD_IMAGE_CHAR_BUDGET, RECENT_TURNS_TO_KEEP,
-    SEMANTIC_EMBED_CACHE_CAPACITY, SUMMARY_PROMPT, SYSTEM_OVERHEAD_TOKENS, Summary,
-    TOKEN_HISTORY_WINDOW, build_compaction_prompt, build_emergency_summary_text,
-    compacted_summary_text_block, content_char_count, effective_context_tokens_from_usage,
-    emergency_strip_large_images, emergency_truncate_large_payloads, estimate_compaction_tokens,
-    is_image_rejection_error, is_request_payload_too_large_error, mean_embedding,
-    message_char_count, reusable_cache_tokens_from_usage, safe_compaction_cutoff,
-    semantic_cache_key, semantic_goal_text, semantic_message_text, strip_large_images_in_contents,
-    summary_payload_char_count,
+    MIN_TURNS_TO_KEEP, OUTBOUND_IMAGE_TRIM_STEP_CHARS, PAYLOAD_IMAGE_CHAR_BUDGET,
+    RECENT_TURNS_TO_KEEP, SEMANTIC_EMBED_CACHE_CAPACITY, SUMMARY_PROMPT, SYSTEM_OVERHEAD_TOKENS,
+    Summary, TOKEN_HISTORY_WINDOW, TOOL_IMAGE_DECAY_KEEP_CHARS, build_compaction_prompt,
+    build_emergency_summary_text, compacted_summary_text_block, content_char_count,
+    effective_context_tokens_from_usage, emergency_strip_large_images,
+    emergency_truncate_large_payloads, estimate_compaction_tokens, is_image_rejection_error,
+    is_request_payload_too_large_error, mean_embedding, message_char_count,
+    reusable_cache_tokens_from_usage, safe_compaction_cutoff, semantic_cache_key,
+    semantic_goal_text, semantic_message_text, strip_large_images_in_contents,
+    strip_oldest_images_in_steps, summary_payload_char_count,
 };
+
+/// Models with measured poor dense-page recall use the text index even if they
+/// support ordinary images. Unknown models follow the provider catalog.
+pub fn snapcompact_pages_usable(supports_image_input: bool, model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    supports_image_input && !model.contains("gpt-6-luna") && !model.contains("claude-haiku-5-5")
+}
 
 const HARD_THRESHOLD_PENDING_WAIT_MS: u64 = 15_000;
 const HARD_THRESHOLD_PENDING_POLL_MS: u64 = 50;
@@ -50,8 +85,27 @@ const HARD_THRESHOLD_PENDING_POLL_MS: u64 = 50;
 /// even if it alone exceeds this target.
 const MANUAL_RECENT_TAIL_TOKENS: usize = 40_000;
 
+/// Real tokens per estimated token that the harness is willing to believe when
+/// the estimate did not grow. The estimate charges one token per four characters
+/// of text, while dense content (base64 inside tool output, CJK) tokenizes near
+/// 1.3 characters per token, so three times the estimate is the plausible
+/// extreme. The 2026-11-15 incident reported 3.14x.
+const REPORT_DENSITY_CEILING: u64 = 3;
+
+/// Ceiling for the first report of a session, where there is no accepted report
+/// to measure growth against. Four times the estimate rejects only absurd
+/// numbers.
+const FIRST_REPORT_DENSITY_CEILING: u64 = 4;
+
+/// Slack band for tokenizer density and provider rounding, in tokens, so normal
+/// reports are never trimmed. Also scaled up as 5% of the estimate.
+const REPORT_SLACK_TOKENS: u64 = 4_096;
+
 /// Result from background compaction task
 struct CompactionResult {
+    completed_at: Instant,
+    decisions_job: Option<snap_decisions::DecisionsJob>,
+    pending_decisions: Option<snap_decisions::PendingDecisions>,
     summary_text: String,
     openai_encrypted_content: Option<String>,
     snapcompact: Option<jcode_message_types::SnapcompactArchive>,
@@ -146,6 +200,8 @@ pub struct CompactionManager {
 
     /// Active summary (if we've compacted before)
     active_summary: Option<Summary>,
+    plan_context: Option<String>,
+    warned_missing_native_summary: bool,
 
     /// Rolling char estimate for the active (non-compacted) message suffix.
     ///
@@ -157,6 +213,8 @@ pub struct CompactionManager {
 
     /// Background compaction task handle
     pending_task: Option<JoinHandle<Result<CompactionResult>>>,
+    pending_decisions: Vec<snap_decisions::PendingDecisions>,
+    decisions_updated: bool,
 
     /// User-facing trigger label for the currently running background compaction.
     pending_trigger: Option<String>,
@@ -184,6 +242,12 @@ pub struct CompactionManager {
     /// Provider-reported input token usage from the latest request.
     /// Used to trigger compaction with real token counts instead of only heuristics.
     observed_input_tokens: Option<u64>,
+
+    /// The harness's own token estimate for the request whose usage produced
+    /// [`Self::observed_input_tokens`]. Provider reports are checked against the
+    /// growth of this estimate, so a report cannot claim context the harness
+    /// never sent (see [`Self::update_observed_input_tokens_with_estimate`]).
+    observed_estimate_tokens: Option<u64>,
 
     /// Last compaction event (if any)
     last_compaction: Option<CompactionEvent>,
@@ -226,10 +290,133 @@ pub struct CompactionManager {
     /// Monotonic recency counter for the semantic embedding cache LRU.
     semantic_embed_cache_counter: u64,
 
-    /// When the previous successful provider response completed. Drives the cache-expiry
-    /// shake: a prefix older than the provider cache TTL is cold anyway.
-    last_response_at: Option<Instant>,
+    /// When the previous successful provider request touched the prompt cache.
+    /// Wall clock on purpose: it is seeded from the persisted session after a
+    /// daemon reload or resume, when no `Instant` from the old process exists.
+    /// Drives the cache-expiry shake: a prefix older than the provider cache
+    /// TTL is cold anyway.
+    last_response_at: Option<SystemTime>,
     last_response_cache_read: bool,
+    /// Response timestamp whose cold stretch already got a cache-expiry
+    /// snapcompact, so a failed or skipped attempt does not repeat every turn.
+    cache_expiry_compacted_for: Option<SystemTime>,
+    idle_cache_expiry_checked_for: Option<SystemTime>,
+}
+
+/// Trigger label for snapcompact started by an expired prompt cache.
+pub const CACHE_EXPIRY_COMPACTION_TRIGGER: &str = "snapcompact_cache_expiry";
+
+/// Trigger label for compaction started while the session was idle but still
+/// waiting (swarm members, `bg` wait, `await_members` dependency).
+pub const IDLE_PRECOMPACTION_TRIGGER: &str = "idle_precompact";
+
+/// Protocol event for a completed compaction.
+///
+/// The divider body is formatted here, next to the compaction state that knows
+/// the method and token counts, so every client and every stored row renders the
+/// same label; the harness bridge has no application foundation linked in and
+/// must therefore not re-derive it.
+pub fn compaction_server_event(event: &CompactionEvent) -> crate::protocol::ServerEvent {
+    let idle = event.trigger == IDLE_PRECOMPACTION_TRIGGER;
+    let divider = crate::session::compaction_divider_content(
+        event.method.as_deref(),
+        Some(event.trigger.as_str()),
+        event.pre_tokens,
+        event.post_tokens,
+        event.duration_ms,
+        event.messages_compacted,
+        event.messages_dropped,
+        event.active_messages,
+        None,
+        idle,
+    );
+    crate::protocol::ServerEvent::Compaction {
+        trigger: event.trigger.clone(),
+        method: event.method.clone(),
+        pre_tokens: event.pre_tokens,
+        post_tokens: event.post_tokens,
+        tokens_saved: event.tokens_saved,
+        duration_ms: event.duration_ms,
+        messages_dropped: event.messages_dropped,
+        messages_compacted: event.messages_compacted,
+        summary_chars: event.summary_chars,
+        active_messages: event.active_messages,
+        divider: Some(divider),
+    }
+}
+
+/// Token count at which reactive compaction fires for `model` with a
+/// `context_window`-token window, after per-provider/per-model overrides.
+/// Context indicators show this as the denominator (e.g. `233k/500k`).
+/// `None` for non-reactive modes or an unknown window.
+pub fn compaction_threshold_tokens(
+    provider: Option<&str>,
+    model: Option<&str>,
+    context_window: usize,
+) -> Option<usize> {
+    let cfg = crate::config::config().compaction.resolve(provider, model);
+    threshold_tokens_for(&cfg, context_window)
+}
+
+fn threshold_tokens_for(
+    cfg: &crate::config::CompactionConfig,
+    context_window: usize,
+) -> Option<usize> {
+    if cfg.mode != crate::config::CompactionMode::Reactive {
+        return None;
+    }
+    threshold_tokens_after_overrides(cfg, context_window)
+}
+
+/// The reactive trigger arithmetic, independent of the configured mode.
+///
+/// Idle pre-compaction asks "how full is full enough" even in proactive or
+/// semantic mode, so the per-model threshold must be available without the
+/// reactive-only gate.
+fn threshold_tokens_after_overrides(
+    cfg: &crate::config::CompactionConfig,
+    context_window: usize,
+) -> Option<usize> {
+    if context_window == 0 {
+        return None;
+    }
+    let budget = if cfg.max_context_tokens > 0 {
+        context_window.min(cfg.max_context_tokens)
+    } else {
+        context_window
+    };
+    let by_ratio = (budget as f64 * f64::from(cfg.reactive_threshold.clamp(0.0, 1.0))) as usize;
+    let threshold = if cfg.reactive_threshold_tokens > 0 {
+        by_ratio.min(cfg.reactive_threshold_tokens)
+    } else {
+        by_ratio
+    };
+    (threshold > 0).then_some(threshold)
+}
+
+#[cfg(test)]
+#[test]
+fn threshold_tokens_takes_the_earlier_trigger() {
+    let mut cfg = crate::config::CompactionConfig {
+        reactive_threshold: 1.0,
+        reactive_threshold_tokens: 500_000,
+        max_context_tokens: 1_000_000,
+        ..Default::default()
+    };
+    assert_eq!(threshold_tokens_for(&cfg, 1_000_000), Some(500_000));
+    cfg.max_context_tokens = 0;
+    cfg.reactive_threshold = 0.8;
+    assert_eq!(threshold_tokens_for(&cfg, 200_000), Some(160_000));
+    cfg.mode = crate::config::CompactionMode::Semantic;
+    assert_eq!(threshold_tokens_for(&cfg, 200_000), None);
+}
+
+/// Wall-clock elapsed time, tolerant of a backwards clock jump.
+///
+/// `SystemTime::saturating_duration_since` is still unstable, and the prompt
+/// cache clock is a wall clock precisely so it survives a process restart.
+fn wall_clock_elapsed(now: SystemTime, earlier: SystemTime) -> Duration {
+    now.duration_since(earlier).unwrap_or_default()
 }
 
 /// Why a shake pass is allowed to rewrite the prompt prefix.
@@ -260,8 +447,12 @@ impl CompactionManager {
         Self {
             compacted_count: 0,
             active_summary: None,
+            plan_context: None,
+            warned_missing_native_summary: false,
             active_chars: ActiveCharEstimate::default(),
             pending_task: None,
+            pending_decisions: Vec::new(),
+            decisions_updated: false,
             pending_trigger: None,
             pending_cutoff: 0,
             total_turns: 0,
@@ -270,6 +461,7 @@ impl CompactionManager {
             model_token_budget: DEFAULT_TOKEN_BUDGET,
             context_cap_override: None,
             observed_input_tokens: None,
+            observed_estimate_tokens: None,
             last_compaction: None,
             last_compaction_error: None,
             mode,
@@ -283,6 +475,8 @@ impl CompactionManager {
             semantic_embed_cache_counter: 0,
             last_response_at: None,
             last_response_cache_read: false,
+            cache_expiry_compacted_for: None,
+            idle_cache_expiry_checked_for: None,
         }
     }
 
@@ -418,6 +612,26 @@ impl CompactionManager {
         self.active_chars.reset_pending(count > 0);
     }
 
+    /// Keep a bounded recent suffix even when individual tool results are huge.
+    /// The minimum pair remains protected, including its tool dependencies.
+    fn bounded_recent_cutoff(&self, active: &[Message]) -> usize {
+        let mut keep = MIN_TURNS_TO_KEEP.min(active.len());
+        let mut tail_chars: usize = active[active.len() - keep..]
+            .iter()
+            .map(message_char_count)
+            .sum();
+        let tail_limit = MANUAL_RECENT_TAIL_TOKENS.min(self.token_budget / 10);
+        while keep < RECENT_TURNS_TO_KEEP && keep < active.len().saturating_sub(1) {
+            let next = message_char_count(&active[active.len() - keep - 1]);
+            if tail_chars.saturating_add(next) / CHARS_PER_TOKEN > tail_limit {
+                break;
+            }
+            tail_chars = tail_chars.saturating_add(next);
+            keep += 1;
+        }
+        active.len().saturating_sub(keep)
+    }
+
     /// Seed the manager from already-existing history with an exact rolling char
     /// estimate for the active suffix.
     pub fn seed_restored_messages_with(&mut self, all_messages: &[Message]) {
@@ -448,9 +662,12 @@ impl CompactionManager {
         total_messages: usize,
     ) {
         self.pending_task = None;
+        self.pending_decisions.clear();
+        self.decisions_updated = false;
         self.pending_trigger = None;
         self.pending_cutoff = 0;
         self.observed_input_tokens = None;
+        self.observed_estimate_tokens = None;
         self.last_compaction = None;
         self.token_history.clear();
         self.turns_since_last_compact = 0;
@@ -468,6 +685,8 @@ impl CompactionManager {
             covers_up_to_turn: state.covers_up_to_turn,
             original_turn_count: state.original_turn_count,
         });
+        self.plan_context.clone_from(&state.plan_context);
+        self.warned_missing_native_summary = false;
         self.suppress_compaction_until_new_message = total_messages > 0;
     }
 
@@ -502,12 +721,34 @@ impl CompactionManager {
         );
     }
 
+    /// Compare the persisted view exactly without cloning its potentially large
+    /// encrypted payload. This must track every field exported by persisted_state.
+    pub fn persisted_state_matches(
+        &self,
+        state: Option<&crate::session::StoredCompactionState>,
+    ) -> bool {
+        match (self.active_summary.as_ref(), state) {
+            (None, None) => true,
+            (Some(summary), Some(state)) => {
+                summary.text == state.summary_text
+                    && self.plan_context == state.plan_context
+                    && summary.openai_encrypted_content == state.openai_encrypted_content
+                    && summary.snapcompact == state.snapcompact
+                    && summary.covers_up_to_turn == state.covers_up_to_turn
+                    && summary.original_turn_count == state.original_turn_count
+                    && self.compacted_count == state.compacted_count
+            }
+            _ => false,
+        }
+    }
+
     /// Export the currently active compacted view for persistence.
     pub fn persisted_state(&self) -> Option<crate::session::StoredCompactionState> {
         self.active_summary
             .as_ref()
             .map(|summary| crate::session::StoredCompactionState {
                 summary_text: summary.text.clone(),
+                plan_context: self.plan_context.clone(),
                 openai_encrypted_content: summary.openai_encrypted_content.clone(),
                 snapcompact: summary.snapcompact.clone(),
                 covers_up_to_turn: summary.covers_up_to_turn,
@@ -548,6 +789,7 @@ impl CompactionManager {
             summary.text.push_str(&fallback);
         }
         self.observed_input_tokens = None;
+        self.observed_estimate_tokens = None;
         true
     }
 
@@ -938,42 +1180,113 @@ impl CompactionManager {
             min_elidable_tokens: cfg.shake_min_region_tokens,
             min_savings_tokens: cfg.shake_min_savings_tokens,
             code_blocks: cfg.shake_code_blocks,
+            protected_tools: jcode_compaction_core::shake::PROTECTED_TOOLS_DEFAULT,
         })
     }
 
-    /// Decide whether shake may rewrite history before this request.
-    ///
-    /// Shake invalidates the prompt cache from the first elided message, so it
-    /// only runs when the prefix is cold or about to be rewritten: when LLM
-    /// compaction would trigger, or when `cache_ttl_secs` (None = persistent or
-    /// unknown cache, never shake) elapsed since the last successful response. Never
-    /// while the cache is warm.
+    /// Plan a shake. Only `CacheExpiry` allows a journal rewrite.
     pub fn plan_shake(
         &self,
         all_messages: &[Message],
-        now: Instant,
+        now: SystemTime,
         cache_ttl_secs: Option<u64>,
     ) -> Option<(ShakeReason, ShakeConfig)> {
+        self.plan_shake_with(all_messages, now, cache_ttl_secs, false)
+    }
+
+    /// [`Self::plan_shake`] with omp's `methodOrder` preference: when
+    /// snapcompact can archive this compaction, the archive wins over shake
+    /// (omp orders `snapcompact` before `shake`), so no pre-compaction shake is
+    /// planned.
+    ///
+    /// `PreCompact` is valid while the cache is warm because it is only a
+    /// summarizer projection. The foreground history stays untouched until
+    /// the replacement checkpoint is ready.
+    pub fn plan_shake_with(
+        &self,
+        all_messages: &[Message],
+        now: SystemTime,
+        cache_ttl_secs: Option<u64>,
+        snapcompact_preferred: bool,
+    ) -> Option<(ShakeReason, ShakeConfig)> {
         let cfg = self.shake_config()?;
-        if self.last_response_cache_read
-            && let (Some(last), Some(ttl)) =
-                (self.last_response_at, cache_ttl_secs.filter(|t| *t > 0))
-            && now.saturating_duration_since(last) < Duration::from_secs(ttl)
+        // Prefer the cheap cold-cache pass over ordinary pre-compaction.
+        if self.compaction_config.shake_cache_expiry
+            && self.expired_cache_response(now, cache_ttl_secs).is_some()
         {
-            return None;
+            return Some((ShakeReason::CacheExpiry, cfg));
         }
         if self.should_compact_with(all_messages) {
+            if snapcompact_preferred {
+                return None;
+            }
             return Some((ShakeReason::PreCompact, cfg));
         }
         let ttl = cache_ttl_secs.filter(|t| *t > 0)?;
+        if self.last_response_cache_read
+            && let Some(last) = self.last_response_at
+            && wall_clock_elapsed(now, last) < Duration::from_secs(ttl)
+        {
+            return None;
+        }
         let last = self.last_response_at?;
         (self.compaction_config.shake_cache_expiry
-            && now.saturating_duration_since(last).as_secs() >= ttl)
+            && wall_clock_elapsed(now, last).as_secs() >= ttl)
             .then_some((ShakeReason::CacheExpiry, cfg))
     }
 
+    pub fn expired_cache_response(
+        &self,
+        now: SystemTime,
+        cache_ttl_secs: Option<u64>,
+    ) -> Option<SystemTime> {
+        let ttl = cache_ttl_secs.filter(|ttl| *ttl > 0)?;
+        let last = self.last_response_at?;
+        (wall_clock_elapsed(now, last) >= Duration::from_secs(ttl)).then_some(last)
+    }
+
+    pub fn attempted_cache_expiry_compaction(&self) -> bool {
+        self.last_response_at.is_some() && self.cache_expiry_compacted_for == self.last_response_at
+    }
+
+    /// Claim one cold-cache evaluation per expiry for idle clients sharing
+    /// this manager. No-op checks do not need a session write.
+    pub fn claim_idle_cache_expiry(
+        &mut self,
+        now: SystemTime,
+        ttl: Option<u64>,
+        persisted: Option<SystemTime>,
+    ) -> bool {
+        let Some(last) = self.expired_cache_response(now, ttl) else {
+            return false;
+        };
+        if self.is_compacting()
+            || self.idle_cache_expiry_checked_for == Some(last)
+            || self.attempted_cache_expiry_compaction()
+            || persisted == Some(last)
+        {
+            return false;
+        }
+        self.idle_cache_expiry_checked_for = Some(last);
+        true
+    }
+
+    /// Seed the cache-expiry clock from persisted session state.
+    ///
+    /// A daemon reload, `exec` or session resume builds a fresh manager, so the
+    /// `Instant` of the last request is gone. Without this seed the cold-cache
+    /// check sees no previous request and silently skips the shake, which is
+    /// how a warm-looking, fully cold 409K request was re-sent at full price.
+    /// The previous response's cache-hit flag is deliberately not restored: a
+    /// restored request is history, not an observed hit, so the TTL decides.
+    pub fn seed_last_provider_request_at(&mut self, at: Option<SystemTime>) {
+        if self.last_response_at.is_none() {
+            self.last_response_at = at;
+        }
+    }
+
     /// Record the end of a successful provider response, the latest cache touch.
-    pub fn note_provider_response(&mut self, now: Instant, cache_read_tokens: Option<u64>) {
+    pub fn note_provider_response(&mut self, now: SystemTime, cache_read_tokens: Option<u64>) {
         self.last_response_at = Some(now);
         self.last_response_cache_read = cache_read_tokens.unwrap_or(0) > 0;
     }
@@ -993,6 +1306,7 @@ impl CompactionManager {
             return;
         };
         self.observed_input_tokens = None;
+        self.observed_estimate_tokens = None;
         self.active_chars.invalidate();
         crate::logging::info(&format!(
             "[compaction] {}: elided {} regions, ~{} tokens saved",
@@ -1015,9 +1329,71 @@ impl CompactionManager {
         outcome
     }
 
-    /// Store provider-reported input token usage for compaction decisions.
+    /// Store provider-reported input token usage, without a plausibility check.
+    ///
+    /// Prefer [`Self::update_observed_input_tokens_with_estimate`]: an unchecked
+    /// number is trusted for both the context percentage and the compaction
+    /// trigger, so one over-reported usage doubles the apparent context.
+    ///
+    /// This form drops the estimate anchor, because the new value no longer
+    /// describes the request that anchor was recorded for (callers use it to
+    /// force a full context during context-limit recovery). The next checked
+    /// report starts a fresh anchor instead of being measured against stale
+    /// numbers.
     pub fn update_observed_input_tokens(&mut self, tokens: u64) {
         self.observed_input_tokens = Some(tokens);
+        self.observed_estimate_tokens = None;
+    }
+
+    /// Store provider-reported usage, refusing growth the harness's own estimate
+    /// cannot explain.
+    ///
+    /// A provider can report more input tokens than the request contained. On
+    /// 2026-11-15 07:22Z Anthropic reported 883_966 tokens (cache read 871_082 +
+    /// write 12_741) for a request that held ~447_000, and the very next report
+    /// for the same content was 447_092. Taken at face value that figure doubled
+    /// the context percentage the composer showed and pushed the ratio
+    /// threshold to where compaction fires early.
+    ///
+    /// The estimate is content the harness sent, so a large jump in the estimate
+    /// is exactly what a large jump in the report looks like. Growth the estimate
+    /// does not see is the anomaly, so the accepted value is capped at the last
+    /// accepted report plus `DENSITY_CEILING` times that unseen growth (plus a
+    /// slack band for tokenizer density and rounding). A first report arrives
+    /// with nothing to measure against and is capped at
+    /// `FIRST_REPORT_DENSITY_CEILING` times the estimate, which only rejects
+    /// absurd numbers.
+    ///
+    /// Returns the accepted value.
+    pub fn update_observed_input_tokens_with_estimate(
+        &mut self,
+        reported: u64,
+        estimate: usize,
+    ) -> u64 {
+        let estimate = u64::try_from(estimate).unwrap_or(0);
+        let accepted = if estimate == 0 {
+            reported
+        } else if let Some(previous_estimate) = self.observed_estimate_tokens {
+            let unseen_growth = estimate.saturating_sub(previous_estimate);
+            let slack = (estimate / 20).max(REPORT_SLACK_TOKENS);
+            let ceiling = self
+                .observed_input_tokens
+                .unwrap_or(0)
+                .saturating_add(unseen_growth.saturating_mul(REPORT_DENSITY_CEILING))
+                .saturating_add(slack);
+            reported.min(ceiling)
+        } else {
+            reported.min(estimate.saturating_mul(FIRST_REPORT_DENSITY_CEILING))
+        };
+        if accepted < reported {
+            crate::logging::warn(&format!(
+                "[compaction] implausible provider usage: reported={reported} accepted={accepted} estimate={estimate} previous_report={:?} previous_estimate={:?}; the report claims context this request did not carry, so the harness keeps its own bound",
+                self.observed_input_tokens, self.observed_estimate_tokens
+            ));
+        }
+        self.observed_input_tokens = Some(accepted);
+        self.observed_estimate_tokens = Some(estimate);
+        accepted
     }
 
     /// Best-effort current token count using the caller's messages.
@@ -1085,14 +1461,242 @@ impl CompactionManager {
         if !self.should_compact_with(all_messages) {
             return;
         }
+        let label = self.mode_trigger_label().to_string();
+        self.start_background_compaction(all_messages, provider, label);
+    }
 
+    /// Decide whether the cold-cache snapcompact trigger fires for this request.
+    ///
+    /// Mirrors omp idle compaction: only after the provider prompt cache TTL
+    /// elapsed since the last response (never while warm), only for a known TTL,
+    /// only when context is at or above `cache_expiry_threshold_tokens`, and at
+    /// most once per cold stretch.
+    pub fn plan_cache_expiry_compaction(
+        &self,
+        all_messages: &[Message],
+        now: SystemTime,
+        cache_ttl_secs: Option<u64>,
+    ) -> bool {
+        let cfg = &self.compaction_config;
+        if !cfg.snapcompact || !cfg.snapcompact_cache_expiry {
+            return false;
+        }
+        if self.pending_task.is_some() {
+            return false;
+        }
+        if self
+            .cache_expiry_request_target(all_messages, now, cache_ttl_secs)
+            .is_none()
+        {
+            return false;
+        }
+        if self.attempted_cache_expiry_compaction() {
+            return false;
+        }
+        self.active_messages(all_messages).len() > RECENT_TURNS_TO_KEEP
+    }
+
+    /// Whether the cold-cache shake alone brings `all_messages` under the
+    /// cold-cache request target, judged before anything is rewritten.
+    ///
+    /// One cold cache gets one reduction and one chat notice. When the cheap
+    /// local shake reaches the target, the fold is not needed. When it cannot,
+    /// the fold runs instead of after it: shaking first rewrote the prefix,
+    /// posted its own notice, and then the fold rewrote it again (2026-11-19:
+    /// `shake 423k→283k` followed by `snapcompact 284k→78k`). omp likewise
+    /// picks a single method per pass from `methodOrder`.
+    pub fn cold_shake_reaches_request_target(
+        &self,
+        all_messages: &[Message],
+        target: usize,
+    ) -> bool {
+        let Some(cfg) = self.shake_config() else {
+            return false;
+        };
+        let active = self.active_messages(all_messages);
+        let saved = jcode_compaction_core::shake::shake_savings(active, &cfg);
+        if saved < cfg.min_savings_tokens {
+            return false;
+        }
+        self.effective_token_count_with(all_messages)
+            .saturating_sub(saved)
+            < target
+    }
+
+    /// A cold request must reach this target before it can leave the daemon.
+    /// Unlike the background-task planner this remains armed while work runs.
+    pub fn cache_expiry_request_target(
+        &self,
+        all_messages: &[Message],
+        now: SystemTime,
+        cache_ttl_secs: Option<u64>,
+    ) -> Option<usize> {
+        let cfg = &self.compaction_config;
+        (cfg.snapcompact
+            && cfg.snapcompact_cache_expiry
+            && cfg.cache_expiry_threshold_tokens > 0
+            && self.expired_cache_response(now, cache_ttl_secs).is_some()
+            && self.effective_token_count_with(all_messages) >= cfg.cache_expiry_threshold_tokens)
+            .then_some(cfg.cache_expiry_threshold_tokens)
+    }
+
+    /// Start snapcompact because the prompt cache went cold. Returns whether a
+    /// background task started.
+    pub fn start_cache_expiry_compaction(
+        &mut self,
+        all_messages: &[Message],
+        provider: Arc<dyn Provider>,
+    ) -> bool {
+        self.cache_expiry_compacted_for = self.last_response_at;
+        self.start_background_compaction(
+            all_messages,
+            provider,
+            CACHE_EXPIRY_COMPACTION_TRIGGER.to_string(),
+        );
+        self.pending_task.is_some()
+    }
+
+    /// Prefer the local archive when it can be sent verbatim. Attached
+    /// sessions may still use the ordinary fallback if the archive fails.
+    pub fn start_idle_cache_expiry_compaction(
+        &mut self,
+        all_messages: &[Message],
+        provider: Arc<dyn Provider>,
+    ) -> bool {
+        self.cache_expiry_compacted_for = self.last_response_at;
+        let prefer_local =
+            snapcompact_pages_usable(provider.supports_image_input(), &provider.model());
+        self.start_background_compaction_with(
+            all_messages,
+            provider,
+            CACHE_EXPIRY_COMPACTION_TRIGGER.to_string(),
+            prefer_local,
+        );
+        self.pending_task.is_some()
+    }
+
+    /// Resolved reactive trigger in tokens for the active model, regardless of
+    /// the configured compaction mode.
+    pub fn resolved_compaction_threshold_tokens(&self) -> Option<usize> {
+        threshold_tokens_after_overrides(&self.compaction_config, self.model_token_budget)
+    }
+
+    /// Token count at which idle pre-compaction fires: `idle_precompact_ratio`
+    /// of the resolved per-model compaction threshold. `None` when the feature
+    /// is disabled or the model window is unknown.
+    ///
+    /// The ratio is applied in basis points so the trigger is an exact integer:
+    /// a threshold of 400_000 at 0.95 arms at 380_000, not 379_999.
+    pub fn idle_precompaction_tokens(&self) -> Option<usize> {
+        let cfg = &self.compaction_config;
+        if !cfg.idle_precompact {
+            return None;
+        }
+        let basis_points =
+            (f64::from(cfg.idle_precompact_ratio.clamp(0.0, 1.0)) * 10_000.0).round() as u128;
+        self.resolved_compaction_threshold_tokens()
+            .map(|threshold| (threshold as u128 * basis_points / 10_000) as usize)
+    }
+
+    /// Whether the prompt cache is still warm enough that rewriting the prefix
+    /// would throw away a cache we are about to reuse.
+    ///
+    /// Idle pre-compaction is the one trigger that runs while the agent has
+    /// nothing else to do, so it must not pay the cache loss a live turn would
+    /// avoid. It waits the TTL out instead: a cold cache (a long wait) or a
+    /// provider without a cache estimate (nothing to lose) both arm it.
+    fn prompt_cache_is_warm(&self, now: SystemTime, cache_ttl_secs: Option<u64>) -> bool {
+        let Some(ttl) = cache_ttl_secs.filter(|ttl| *ttl > 0) else {
+            return false;
+        };
+        let Some(last) = self.last_response_at else {
+            return false;
+        };
+        wall_clock_elapsed(now, last) < Duration::from_secs(ttl)
+    }
+
+    /// Whether an idle-waiting session should compact right now.
+    ///
+    /// `waiting` is the caller's verdict that the session is parked on
+    /// something external (a swarm member, a background task, an await
+    /// dependency), which is the only window where compacting early costs
+    /// nothing: the user cannot send a message that would have done it anyway.
+    pub fn plan_idle_precompaction_with(
+        &self,
+        all_messages: &[Message],
+        now: SystemTime,
+        cache_ttl_secs: Option<u64>,
+    ) -> bool {
+        // `suppress_compaction_until_new_message` is deliberately NOT consulted.
+        // It exists so restoring history, or finishing a compaction, cannot
+        // re-trigger compaction on the same content. Idle pre-compaction is the
+        // one trigger whose whole purpose is to run before the next message, so
+        // waiting for that message would defeat it. The token target below is the
+        // real guard: once a fold lands, the transcript drops under the ratio and
+        // this returns false until the context fills again.
+        if self.pending_task.is_some() {
+            return false;
+        }
+        let Some(target) = self.idle_precompaction_tokens() else {
+            return false;
+        };
+        if self.prompt_cache_is_warm(now, cache_ttl_secs) {
+            return false;
+        }
+        self.active_messages(all_messages).len() > RECENT_TURNS_TO_KEEP
+            && self.effective_token_count_with(all_messages) >= target
+    }
+
+    /// Start the idle pre-compaction. Returns whether a background task started.
+    pub fn start_idle_precompaction(
+        &mut self,
+        all_messages: &[Message],
+        provider: Arc<dyn Provider>,
+    ) -> bool {
+        self.start_background_compaction(
+            all_messages,
+            provider,
+            IDLE_PRECOMPACTION_TRIGGER.to_string(),
+        );
+        self.pending_task.is_some()
+    }
+
+    fn start_background_compaction(
+        &mut self,
+        all_messages: &[Message],
+        provider: Arc<dyn Provider>,
+        mode_label: String,
+    ) {
+        self.start_background_compaction_with(all_messages, provider, mode_label, false);
+    }
+
+    fn start_background_compaction_with(
+        &mut self,
+        all_messages: &[Message],
+        provider: Arc<dyn Provider>,
+        mode_label: String,
+        prefer_local: bool,
+    ) {
         let active = self.active_messages(all_messages);
 
         // Calculate cutoff within active messages.
         // Semantic mode uses relevance scoring; other modes use recency.
+        let bounded_cutoff = self.bounded_recent_cutoff(active);
         let mut cutoff = match self.mode {
-            crate::config::CompactionMode::Semantic => self.semantic_cutoff(active),
-            _ => active.len().saturating_sub(RECENT_TURNS_TO_KEEP),
+            crate::config::CompactionMode::Semantic => {
+                let semantic = self.semantic_cutoff(active);
+                let tail_tokens = active[semantic..]
+                    .iter()
+                    .map(message_char_count)
+                    .sum::<usize>()
+                    / CHARS_PER_TOKEN;
+                if tail_tokens > MANUAL_RECENT_TAIL_TOKENS.min(self.token_budget / 10) {
+                    semantic.max(bounded_cutoff)
+                } else {
+                    semantic
+                }
+            }
+            _ => bounded_cutoff,
         };
         if cutoff == 0 {
             return;
@@ -1106,10 +1710,24 @@ impl CompactionManager {
 
         // Snapshot messages to summarize (must clone for the async task)
         let messages_to_summarize: Vec<Message> = active[..cutoff].to_vec();
+        let archive_history =
+            all_messages[..self.compacted_count.min(all_messages.len()) + cutoff].to_vec();
         let msg_count = messages_to_summarize.len();
         let existing_summary = self.active_summary.clone();
         let snapcompact_enabled = self.compaction_config.snapcompact;
-        let mode_label = self.mode_trigger_label().to_string();
+        let snapcompact_shape = Some(self.compaction_config.snapcompact_shape.clone())
+            .filter(|shape| !shape.trim().is_empty() && !shape.trim().eq_ignore_ascii_case("auto"));
+        let shake_config = self.shake_config();
+        let remaining_chars: usize = active[cutoff..].iter().map(message_char_count).sum();
+        let token_budget = if mode_label == CACHE_EXPIRY_COMPACTION_TRIGGER {
+            self.token_budget.min(
+                self.compaction_config
+                    .cache_expiry_threshold_tokens
+                    .saturating_mul(2),
+            )
+        } else {
+            self.token_budget
+        };
         let estimated_tokens = self.effective_token_count_with(all_messages);
         crate::logging::info(&format!(
             "[TIMING] compaction_start: trigger={}, active_messages={}, cutoff={}, estimated_tokens={}, has_existing_summary={}",
@@ -1124,20 +1742,48 @@ impl CompactionManager {
         self.pending_trigger = Some(mode_label.clone());
         self.last_compaction_error = None;
 
+        // Clients render a running divider from this event and replace it with
+        // the persisted completion row, so the transcript never looks idle
+        // while a summary is being generated.
+        crate::bus::Bus::global().publish(crate::bus::BusEvent::CompactionStarted {
+            trigger: mode_label.clone(),
+            pre_tokens: estimated_tokens as u64,
+        });
+
         // Spawn background task that notifies via Bus when done
+        let decisions_model = self.compaction_config.snapcompact_decisions_model.clone();
+        let decisions_count = self.compacted_count.saturating_add(cutoff);
         self.pending_task = crate::runtime_activity::spawn(async move {
             let start = std::time::Instant::now();
-            let result = generate_compaction_artifact(
+            let result = generate_effective_compaction_artifact(
                 provider,
                 messages_to_summarize,
+                archive_history,
                 existing_summary,
                 snapcompact_enabled,
+                snapcompact_shape,
+                shake_config,
+                remaining_chars,
+                token_budget,
+                prefer_local,
             )
             .await;
+            let result = match result {
+                // Automatic enrichment is optional; don't make a provider
+                // call just because an idle archive was rendered locally.
+                Ok(result) if prefer_local && decisions_model.eq_ignore_ascii_case("auto") => {
+                    Ok(result)
+                }
+                Ok(result) => {
+                    Ok(snap_decisions::prepare(result, decisions_model, decisions_count).await)
+                }
+                Err(error) => Err(error),
+            };
             let duration_ms = start.elapsed().as_millis() as u64;
             crate::logging::info(&format!(
-                "Compaction ({}) finished in {:.2}s ({} messages summarized)",
+                "Compaction ({}) {} in {:.2}s ({} messages processed)",
                 mode_label,
+                if result.is_ok() { "finished" } else { "failed" },
                 duration_ms as f64 / 1000.0,
                 msg_count,
             ));
@@ -1328,20 +1974,7 @@ impl CompactionManager {
             ));
         }
 
-        let mut keep = MIN_TURNS_TO_KEEP;
-        let mut tail_chars: usize = active[active.len() - keep..]
-            .iter()
-            .map(message_char_count)
-            .sum();
-        while keep < RECENT_TURNS_TO_KEEP && keep < active.len().saturating_sub(1) {
-            let next = message_char_count(&active[active.len() - keep - 1]);
-            if tail_chars.saturating_add(next) / CHARS_PER_TOKEN > MANUAL_RECENT_TAIL_TOKENS {
-                break;
-            }
-            tail_chars = tail_chars.saturating_add(next);
-            keep += 1;
-        }
-        let mut cutoff = active.len().saturating_sub(keep);
+        let mut cutoff = self.bounded_recent_cutoff(active);
         if cutoff == 0 {
             return Err("No messages available to compact after keeping recent turns".to_string());
         }
@@ -1352,26 +1985,48 @@ impl CompactionManager {
         }
 
         let messages_to_summarize: Vec<Message> = active[..cutoff].to_vec();
+        let archive_history =
+            all_messages[..self.compacted_count.min(all_messages.len()) + cutoff].to_vec();
         let msg_count = messages_to_summarize.len();
         let existing_summary = self.active_summary.clone();
         let snapcompact_enabled = self.compaction_config.snapcompact;
+        let snapcompact_shape = Some(self.compaction_config.snapcompact_shape.clone())
+            .filter(|shape| !shape.trim().is_empty() && !shape.trim().eq_ignore_ascii_case("auto"));
+        let shake_config = self.shake_config();
+        let remaining_chars: usize = active[cutoff..].iter().map(message_char_count).sum();
+        let token_budget = self.token_budget;
 
         self.pending_cutoff = cutoff;
         self.pending_trigger = Some("manual".to_string());
         self.last_compaction_error = None;
 
+        let decisions_model = self.compaction_config.snapcompact_decisions_model.clone();
+        let decisions_count = self.compacted_count.saturating_add(cutoff);
         self.pending_task = crate::runtime_activity::spawn(async move {
             let start = std::time::Instant::now();
-            let result = generate_compaction_artifact(
+            let result = generate_effective_compaction_artifact(
                 provider,
                 messages_to_summarize,
+                archive_history,
                 existing_summary,
                 snapcompact_enabled,
+                snapcompact_shape,
+                shake_config,
+                remaining_chars,
+                token_budget,
+                false,
             )
             .await;
+            let result = match result {
+                Ok(result) => {
+                    Ok(snap_decisions::prepare(result, decisions_model, decisions_count).await)
+                }
+                Err(error) => Err(error),
+            };
             let duration_ms = start.elapsed().as_millis() as u64;
             crate::logging::info(&format!(
-                "Compaction finished in {:.2}s ({} messages summarized)",
+                "Compaction {} in {:.2}s ({} messages processed)",
+                if result.is_ok() { "finished" } else { "failed" },
                 duration_ms as f64 / 1000.0,
                 msg_count,
             ));
@@ -1389,6 +2044,7 @@ impl CompactionManager {
     /// Check if background compaction is done and apply it, updating rolling
     /// token-estimate state from the provided full message list.
     pub fn check_and_apply_compaction_with(&mut self, all_messages: &[Message]) {
+        self.poll_decisions();
         self.clamp_compacted_count_to_messages(all_messages, "check_and_apply_start");
         let task = match self.pending_task.take() {
             Some(task) => task,
@@ -1405,6 +2061,10 @@ impl CompactionManager {
         // Get result
         match futures::executor::block_on(task) {
             Ok(Ok(result)) => {
+                crate::logging::info(&format!(
+                    "[TIMING] snapcompact_apply_wait: elapsed_ms={}",
+                    result.completed_at.elapsed().as_millis()
+                ));
                 let trigger = self
                     .pending_trigger
                     .clone()
@@ -1453,12 +2113,22 @@ impl CompactionManager {
                 let remaining_chars = self
                     .active_message_chars_with(all_messages)
                     .saturating_sub(compacted_chars);
-                let summary = Summary {
+                let mut summary = Summary {
                     text: result.summary_text,
-                    openai_encrypted_content: result.openai_encrypted_content,
+                    openai_encrypted_content: result.openai_encrypted_content.map(Into::into),
                     snapcompact: result.snapcompact,
                     covers_up_to_turn: result.covers_up_to_turn,
                     original_turn_count: self.pending_cutoff,
+                };
+                // The artifact kind is what a reader of the transcript divider
+                // needs: a folded summary, a bitmap snapcompact archive, or a
+                // provider-native compaction item.
+                let method = if summary.snapcompact.is_some() {
+                    "snapcompact"
+                } else if summary.openai_encrypted_content.is_some() {
+                    "native"
+                } else {
+                    "summary"
                 };
 
                 // Advance the compacted count — these messages are now summarized
@@ -1467,14 +2137,36 @@ impl CompactionManager {
                     self.compacted_count = self.compacted_count.min(all_messages.len());
                 }
                 self.active_chars.set_exact(remaining_chars);
+                self.plan_context = None;
+                self.warned_missing_native_summary = false;
 
                 // Store summary
+                if let (Some(previous), Some(next)) = (
+                    self.active_summary
+                        .as_ref()
+                        .and_then(|s| s.snapcompact.as_ref()),
+                    summary.snapcompact.as_mut(),
+                ) {
+                    let late =
+                        snap_decisions::retag_supported(&previous.deferred_decisions, &next.index);
+                    for line in late.lines() {
+                        if !next.decisions.lines().any(|existing| existing == line) {
+                            next.decisions.push_str(line);
+                            next.decisions.push('\n');
+                        }
+                    }
+                }
                 self.active_summary = Some(summary);
+                if let Some(pending) = result.pending_decisions {
+                    self.pending_decisions.push(pending);
+                }
                 self.discard_oversized_openai_native_compaction();
                 self.observed_input_tokens = None;
+                self.observed_estimate_tokens = None;
                 let post_tokens = self.effective_token_count_with(all_messages) as u64;
                 self.last_compaction = Some(CompactionEvent {
                     trigger: trigger.clone(),
+                    method: Some(method.to_string()),
                     pre_tokens: Some(pre_tokens),
                     post_tokens: Some(post_tokens),
                     tokens_saved: Some(pre_tokens.saturating_sub(post_tokens)),
@@ -1564,7 +2256,132 @@ impl CompactionManager {
     ) -> Vec<Message> {
         self.check_and_apply_compaction_with(all_messages);
         self.discard_oversized_openai_native_compaction();
+        let accepts_native = self.active_route.0.as_deref().is_none_or(|provider| {
+            openai_native_replay_route(provider, self.active_route.1.as_deref().unwrap_or_default())
+        });
+        self.recover_native_text(all_messages, accepts_native);
+        self.project_messages(
+            all_messages,
+            supports_image_input,
+            accepts_native,
+            Vec::new(),
+        )
+    }
 
+    /// Restore text from legacy checkpoints before another provider starts a
+    /// fold, or the next summary would be based only on the active tail.
+    pub fn recover_native_text(&mut self, all_messages: &[Message], accepts_native: bool) -> bool {
+        let cutoff = self.active_start(all_messages);
+        let Some(summary) = self.active_summary.as_mut() else {
+            return false;
+        };
+        if accepts_native
+            || summary.openai_encrypted_content.is_none()
+            || !summary.text.trim().is_empty()
+        {
+            return false;
+        }
+        let Some(text) = native_compaction_transcript_summary(&all_messages[..cutoff]) else {
+            return false;
+        };
+        summary.text = text;
+        true
+    }
+
+    pub fn messages_for_api_session(
+        &mut self,
+        session: &mut crate::session::Session,
+        supports_image_input: bool,
+        accepts_native: bool,
+    ) -> CompactionReplay {
+        let session_id = session.id.clone();
+        let (checkpoint_changed, warn_missing_native_summary) =
+            self.prepare_checkpoint(&session_id, session.provider_messages(), accepts_native);
+        let retained =
+            replay::retained_checkpoint_messages(&session.messages, self.compacted_count);
+        let messages = self.project_messages(
+            session.provider_messages(),
+            supports_image_input,
+            accepts_native,
+            retained,
+        );
+        CompactionReplay {
+            messages,
+            checkpoint_changed,
+            warn_missing_native_summary,
+        }
+    }
+
+    /// Use the caller's materialized suffix when it owns a separate history.
+    pub fn messages_for_api_session_with(
+        &mut self,
+        session: &crate::session::Session,
+        all_messages: &[Message],
+        supports_image_input: bool,
+        accepts_native: bool,
+    ) -> CompactionReplay {
+        let (checkpoint_changed, warn_missing_native_summary) =
+            self.prepare_checkpoint(&session.id, all_messages, accepts_native);
+        let retained = if all_messages.len() == session.messages.len() {
+            replay::retained_checkpoint_messages(&session.messages, self.compacted_count)
+        } else {
+            Vec::new()
+        };
+        let messages =
+            self.project_messages(all_messages, supports_image_input, accepts_native, retained);
+        CompactionReplay {
+            messages,
+            checkpoint_changed,
+            warn_missing_native_summary,
+        }
+    }
+
+    fn prepare_checkpoint(
+        &mut self,
+        session_id: &str,
+        all_messages: &[Message],
+        accepts_native: bool,
+    ) -> (bool, bool) {
+        self.check_and_apply_compaction_with(all_messages);
+        let discarded = self.discard_oversized_openai_native_compaction();
+        let mut checkpoint_changed = self.recover_native_text(all_messages, accepts_native);
+        checkpoint_changed |= discarded || self.decisions_updated || self.last_compaction.is_some();
+        if self.active_summary.is_some() && self.plan_context.is_none() {
+            match format_compaction_plan(session_id) {
+                Ok(plan) => {
+                    self.plan_context = Some(plan);
+                    checkpoint_changed = true;
+                }
+                Err(error) => {
+                    crate::logging::warn(&format!(
+                        "[compaction] Could not load plan for {session_id}: {error}"
+                    ));
+                    // Avoid rewriting the same checkpoint if the store later
+                    // becomes readable. The next compaction can retry.
+                    self.plan_context = Some(String::new());
+                    checkpoint_changed = true;
+                }
+            }
+        }
+        let warn_missing_native_summary = self.take_missing_native_summary_warning(accepts_native);
+        (checkpoint_changed, warn_missing_native_summary)
+    }
+
+    pub fn take_missing_native_summary_warning(&mut self, accepts_native: bool) -> bool {
+        !accepts_native
+            && self.active_summary.as_ref().is_some_and(|summary| {
+                summary.openai_encrypted_content.is_some() && summary.text.trim().is_empty()
+            })
+            && !std::mem::replace(&mut self.warned_missing_native_summary, true)
+    }
+
+    fn project_messages(
+        &self,
+        all_messages: &[Message],
+        supports_image_input: bool,
+        accepts_native: bool,
+        retained: Vec<Message>,
+    ) -> Vec<Message> {
         let active = self.active_messages(all_messages);
 
         match &self.active_summary {
@@ -1572,37 +2389,114 @@ impl CompactionManager {
                 let summary_block = summary
                     .openai_encrypted_content
                     .as_ref()
+                    .filter(|_| accepts_native)
                     .map(|encrypted_content| ContentBlock::OpenAICompaction {
-                        encrypted_content: encrypted_content.clone(),
+                        encrypted_content: encrypted_content.to_string(),
                     })
                     .unwrap_or_else(|| ContentBlock::Text {
-                        text: compacted_summary_text_block(&summary.text),
+                        text: compacted_summary_text_block(
+                            if summary.text.trim().is_empty()
+                                && summary.openai_encrypted_content.is_some()
+                            {
+                                MISSING_NATIVE_SUMMARY
+                            } else {
+                                &summary.text
+                            },
+                        ),
                         cache_control: None,
                     });
 
                 let mut content = vec![summary_block];
                 if let Some(archive) = &summary.snapcompact {
+                    let ranges: Vec<_> = if archive.page_ranges.is_empty() {
+                        jcode_compaction_core::snapcompact::legacy_page_ranges(
+                            &archive.source,
+                            &summary.text,
+                            archive.pages.len(),
+                        )
+                    } else {
+                        archive
+                            .page_ranges
+                            .iter()
+                            .enumerate()
+                            .map(|(index, &(source_start, source_end))| {
+                                jcode_compaction_core::snapcompact::FrameRange {
+                                    index: index as u32,
+                                    source_start,
+                                    source_end,
+                                }
+                            })
+                            .collect()
+                    };
+                    let generated;
+                    let index = if archive.index.is_empty() {
+                        generated = build_snapcompact_index(
+                            &all_messages[..self.compacted_count.min(all_messages.len())],
+                            0,
+                            &archive.source,
+                            &ranges,
+                        );
+                        &generated
+                    } else {
+                        &archive.index
+                    };
+                    let mut text = String::from(
+                        "ARCHIVE INDEX (zero-based message indices, one-based pages): Prefer exact values from the index. Cite page and message. Verify exact details with session_search(message_index=N) for the current session. If evidence is missing or uncertain, answer UNKNOWN instead of guessing. Index omissions do not prove absence.\n",
+                    );
+                    text.push_str(index);
+                    if !archive.decisions.is_empty() {
+                        text.push_str("\nLLM-EXTRACTED DECISIONS AND RULES (derived, verify against source):\n");
+                        text.push_str(&archive.decisions);
+                    }
+                    if !supports_image_input && index.is_empty() {
+                        text.push_str("\nLegacy archive excerpt (may be truncated):\n");
+                        text.extend(
+                            archive
+                                .source
+                                .replace('\u{2588}', "\n")
+                                .replace(['\u{e}', '\u{f}'], "")
+                                .chars()
+                                .take(120_000),
+                        );
+                    }
+                    content.push(ContentBlock::Text {
+                        text,
+                        cache_control: None,
+                    });
                     if supports_image_input {
+                        let first = archive
+                            .pages
+                            .len()
+                            .saturating_sub(jcode_compaction_core::SNAPCOMPACT_REQUEST_PAGE_LIMIT);
                         content.push(ContentBlock::Text {
-                            text: "The following PNG pages contain earlier conversation history in chronological order.".to_string(),
+                            text: format!("Only archive pages {} through {} are included below, in chronological order. {} older pages are omitted from this request; use the index and session_search to retrieve their details. Page numbers in the index refer to the full archive, not the position in this request.", first + 1, archive.pages.len(), first),
                             cache_control: None,
                         });
-                        content.extend(archive.pages.iter().map(|data| ContentBlock::Image {
-                            media_type: "image/png".to_string(),
-                            data: data.clone(),
-                        }));
+                        for (i, data) in archive.pages.iter().enumerate().skip(first) {
+                            content.push(ContentBlock::Text {
+                                text: format!("Archive page {}:", i + 1),
+                                cache_control: None,
+                            });
+                            content.push(ContentBlock::Image {
+                                media_type: "image/png".to_string(),
+                                data: data.clone(),
+                            });
+                        }
                     }
                 }
-                let mut result = Vec::with_capacity(active.len() + 1);
+                let mut result = Vec::with_capacity(active.len() + retained.len() + 2);
 
                 result.push(Message {
                     role: Role::User,
-                    content,
+                    content: content.into(),
                     timestamp: None,
                     tool_duration_ms: None,
                 });
 
-                // Clone only the active (non-compacted) messages
+                result.extend(retained);
+                if let Some(plan) = self.plan_context.as_deref().filter(|plan| !plan.is_empty()) {
+                    result.push(replay::checkpoint_text(plan));
+                }
                 result.extend(active.iter().cloned());
 
                 result
@@ -1821,10 +2715,14 @@ impl CompactionManager {
             .min(all_messages.len());
         self.active_chars.set_exact(remaining_suffix_chars[cutoff]);
         self.active_summary = Some(summary);
+        self.plan_context = None;
+        self.warned_missing_native_summary = false;
         self.observed_input_tokens = None;
+        self.observed_estimate_tokens = None;
         let post_tokens = self.effective_token_count_with(all_messages) as u64;
         self.last_compaction = Some(CompactionEvent {
             trigger: "hard_compact".to_string(),
+            method: Some("drop".to_string()),
             pre_tokens: Some(pre_tokens),
             post_tokens: Some(post_tokens),
             tokens_saved: Some(pre_tokens.saturating_sub(post_tokens)),
@@ -1868,6 +2766,7 @@ impl CompactionManager {
 
         if truncated > 0 {
             self.observed_input_tokens = None;
+            self.observed_estimate_tokens = None;
             self.active_chars.invalidate();
         }
         truncated
@@ -1981,215 +2880,11 @@ impl Default for CompactionManager {
     }
 }
 
-/// Generate summary using the provider
-async fn generate_compaction_artifact(
-    provider: Arc<dyn Provider>,
-    messages: Vec<Message>,
-    mut existing_summary: Option<Summary>,
-    snapcompact_enabled: bool,
-) -> Result<CompactionResult> {
-    let start = Instant::now();
-    if let Some(summary) = existing_summary.as_mut()
-        && let Some(encrypted_content) = summary.openai_encrypted_content.as_ref()
-        && !openai_encrypted_content_is_sendable(encrypted_content)
-    {
-        let encrypted_content_len = encrypted_content.len();
-        crate::logging::warn(&format!(
-            "[compaction] Existing OpenAI native compaction payload is oversized ({} chars); falling back to text summary",
-            encrypted_content_len,
-        ));
-        summary.openai_encrypted_content = None;
-        let fallback = openai_encrypted_content_fallback_summary(encrypted_content_len);
-        if summary.text.trim().is_empty() {
-            summary.text = fallback;
-        } else if !summary
-            .text
-            .contains("OpenAI native compaction state was discarded")
-        {
-            summary.text.push_str("\n\n");
-            summary.text.push_str(&fallback);
-        }
-    }
-
-    if existing_summary
-        .as_ref()
-        .is_none_or(|s| s.snapcompact.is_none())
-        && let Ok(native) = provider
-            .native_compact(
-                &messages,
-                existing_summary
-                    .as_ref()
-                    .map(|summary| summary.text.as_str()),
-                existing_summary
-                    .as_ref()
-                    .and_then(|summary| summary.openai_encrypted_content.as_deref()),
-            )
-            .await
-    {
-        if let Some(usage) = native.usage {
-            crate::telemetry::record_simple_completion_usage(
-                None,
-                provider.name(),
-                &provider.model(),
-                crate::telemetry::UsageSource::Compaction,
-                usage,
-            );
-        }
-        if let Some(encrypted_content) = native.openai_encrypted_content.as_ref()
-            && !openai_encrypted_content_is_sendable(encrypted_content)
-        {
-            crate::logging::warn(&format!(
-                "[compaction] OpenAI native compaction returned oversized encrypted_content ({} chars); falling back to text summary",
-                encrypted_content.len(),
-            ));
-        } else if native.openai_encrypted_content.is_some() || native.summary_text.is_some() {
-            return Ok(CompactionResult {
-                summary_text: native.summary_text.unwrap_or_default(),
-                openai_encrypted_content: native.openai_encrypted_content,
-                snapcompact: None,
-                covers_up_to_turn: messages.len(),
-                duration_ms: start.elapsed().as_millis() as u64,
-                summarized_messages: messages.len(),
-            });
-        }
-    }
-
-    let mut snapcompact = None;
-    if snapcompact_enabled
-        && provider.supports_image_input()
-        && existing_summary
-            .as_ref()
-            .is_none_or(|s| s.openai_encrypted_content.is_none())
-    {
-        let input = messages.clone();
-        let previous = existing_summary.as_ref().map(|summary| {
-            summary
-                .snapcompact
-                .as_ref()
-                .map(|archive| archive.source.clone())
-                .unwrap_or_else(|| jcode_compaction_core::snapcompact::normalize(&summary.text))
-        });
-        let model_id = provider.model();
-        let rendered = tokio::task::spawn_blocking(move || {
-            use jcode_compaction_core::snapcompact::{CompactOptions, compact, prepare_messages};
-            let preparation = prepare_messages(&input, previous.as_deref(), usize::MAX)?;
-            compact(
-                &preparation,
-                &CompactOptions {
-                    model_id,
-                    ..Default::default()
-                },
-            )
-        })
-        .await;
-        match rendered {
-            Ok(Ok(result)) => {
-                let pages = result
-                    .frames
-                    .into_iter()
-                    .map(|frame| base64::engine::general_purpose::STANDARD.encode(frame.bytes))
-                    .collect();
-                snapcompact = Some(jcode_message_types::SnapcompactArchive {
-                    source: result.source_text,
-                    pages,
-                });
-            }
-            Ok(Err(error)) => crate::logging::warn(&format!(
-                "[compaction] Snapcompact failed; falling back to LLM: {error}"
-            )),
-            Err(error) => crate::logging::warn(&format!(
-                "[compaction] Snapcompact worker failed; falling back to LLM: {error}"
-            )),
-        }
-    }
-
-    // Include the archive source when falling back to text-only compaction.
-    if snapcompact.is_none()
-        && let Some(summary) = existing_summary.as_mut()
-        && let Some(archive) = summary.snapcompact.take()
-    {
-        summary.text = archive
-            .source
-            .replace('\u{2588}', "\n")
-            .replace(['\u{e}', '\u{f}'], "");
-    }
-
-    let max_prompt_chars = provider.context_window().saturating_sub(4000) * CHARS_PER_TOKEN;
-    let prompt = build_compaction_prompt(&messages, existing_summary.as_ref(), max_prompt_chars);
-
-    // Generate summary using simple completion
-    let (summary, usage) = provider
-        .complete_simple_with_usage(
-            &prompt,
-            "You are a helpful assistant that summarizes conversations.",
-        )
-        .await
-        .inspect_err(|error| {
-            crate::telemetry::record_simple_completion_failure_usage(
-                None,
-                crate::telemetry::UsageSource::Compaction,
-                error,
-            );
-        })?;
-    crate::telemetry::record_simple_completion_usage(
-        None,
-        provider.name(),
-        &provider.model(),
-        crate::telemetry::UsageSource::Compaction,
-        usage,
-    );
-
-    Ok(CompactionResult {
-        summary_text: validate_compaction_summary(summary)?,
-        openai_encrypted_content: None,
-        snapcompact,
-        covers_up_to_turn: messages.len(),
-        duration_ms: start.elapsed().as_millis() as u64,
-        summarized_messages: messages.len(),
-    })
-}
-
-/// Reject summaries that cannot stand in for the messages they replace, such
-/// as empty output or a provider refusal (issue #2089). Returning an error makes
-/// compaction keep the original messages instead of dropping them.
-fn validate_compaction_summary(summary: String) -> Result<String> {
-    let trimmed = summary.trim();
-    if trimmed.is_empty() {
-        anyhow::bail!("compaction summary rejected: provider returned empty text");
-    }
-    if looks_like_refusal(trimmed) {
-        let preview: String = trimmed.chars().take(120).collect();
-        anyhow::bail!(
-            "compaction summary rejected: provider refusal: {:?}",
-            preview
-        );
-    }
-    Ok(summary)
-}
-
-fn looks_like_refusal(text: &str) -> bool {
-    // Only inspect the opening so a real summary that mentions an earlier
-    // refusal later on is still accepted.
-    let head: String = text.chars().take(160).collect::<String>().to_lowercase();
-    let head = head.replace('\u{2019}', "'");
-    const PATTERNS: [&str; 8] = [
-        "i'm sorry, but i can",
-        "i am sorry, but i can",
-        "sorry, but i can't",
-        "sorry, i can't",
-        "i cannot assist with",
-        "i can't assist with",
-        "i can't help with",
-        "i'm unable to help with",
-    ];
-    // Short replies are refusals if they contain a pattern anywhere. Longer
-    // ones only if they open with it.
-    if text.chars().count() < 300 {
-        PATTERNS.iter().any(|pattern| head.contains(pattern))
-    } else {
-        PATTERNS.iter().any(|pattern| head.starts_with(pattern))
-    }
-}
+#[path = "compaction/summary_generation.rs"]
+mod summary_generation;
+#[cfg(test)]
+use summary_generation::{extract_snapcompact_decisions, validate_compaction_summary};
+use summary_generation::{generate_compaction_artifact, generate_effective_compaction_artifact};
 
 #[path = "compaction_transfer.rs"]
 mod transfer;
@@ -2198,3 +2893,11 @@ pub use transfer::build_transfer_compaction_state;
 #[cfg(test)]
 #[path = "compaction_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "compaction_speed_tests.rs"]
+mod speed_tests;
+
+#[cfg(test)]
+#[path = "compaction_usage_plausibility_tests.rs"]
+mod usage_plausibility_tests;

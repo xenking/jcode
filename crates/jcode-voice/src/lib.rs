@@ -18,7 +18,10 @@ use std::{fmt, time::Duration};
 
 mod backend;
 #[cfg(feature = "desktop-config")]
+pub mod continuous;
+#[cfg(feature = "desktop-config")]
 pub mod dictation;
+mod elevenlabs;
 #[cfg(feature = "desktop-config")]
 pub mod global;
 mod nari;
@@ -26,8 +29,10 @@ mod soniox;
 pub use backend::StreamingBackend;
 #[cfg(feature = "desktop-config")]
 pub use backend::configured_backend;
+pub use elevenlabs::ElevenLabsSession;
 #[cfg(feature = "desktop-config")]
 pub use jcode_base::config::DictationBackend;
+pub mod speech;
 pub mod timing;
 pub use nari::{
     NARI_PCM_CHUNK_SAMPLES, NARI_USD_PER_AUDIO_HOUR, NariEvent, NariSession, correct_transcript,
@@ -76,6 +81,8 @@ pub enum VoiceError {
     Cancelled,
     SonioxNotConfigured,
     SonioxRejected,
+    ElevenLabsNotConfigured,
+    ElevenLabsRejected,
 }
 impl fmt::Display for VoiceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -114,6 +121,12 @@ impl fmt::Display for VoiceError {
             ),
             Self::SonioxRejected => f.write_str(
                 "Soniox rejected the voice session. Check your key, balance, and settings",
+            ),
+            Self::ElevenLabsNotConfigured => f.write_str(
+                "Configure a valid ElevenLabs API key (ELEVENLABS_API_KEY or <jcode config dir>/elevenlabs.env)",
+            ),
+            Self::ElevenLabsRejected => f.write_str(
+                "ElevenLabs rejected the voice session. Check your Scribe access and balance",
             ),
         }
     }

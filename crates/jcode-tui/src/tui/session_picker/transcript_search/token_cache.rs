@@ -583,11 +583,10 @@ mod tests {
         let never = |_: &Segments, _: &str, _: &AtomicBool, _: bool| -> Option<Option<Hit>> {
             panic!("extension must reuse its prefix's segments")
         };
-        let resolve_one =
-            |token: &str,
-             scan: &dyn Fn(&Segments, &str, &AtomicBool, bool) -> Option<Option<Hit>>| {
-                resolve(&cache, &text, &tokens(&[token]), &cancel, false, scan).unwrap()[0]
-            };
+        type Scanner = dyn Fn(&Segments, &str, &AtomicBool, bool) -> Option<Option<Hit>>;
+        let resolve_one = |token: &str, scan: &Scanner| {
+            resolve(&cache, &text, &tokens(&[token]), &cancel, false, scan).unwrap()[0]
+        };
         let user = Some(Hit {
             score: 0,
             source: Source::User,

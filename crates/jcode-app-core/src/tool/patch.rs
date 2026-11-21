@@ -151,7 +151,7 @@ fn parse_patch(text: &str) -> Result<Vec<FilePatch>> {
             let is_new = old_file == "/dev/null";
             let is_delete = new_file == "/dev/null";
             anyhow::ensure!(
-                !old_file.is_empty() && !new_file.is_empty() && !(is_new && is_delete),
+                !(old_file.is_empty() || new_file.is_empty() || is_new && is_delete),
                 "invalid unified file headers"
             );
             anyhow::ensure!(

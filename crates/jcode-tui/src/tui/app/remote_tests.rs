@@ -53,6 +53,51 @@ fn create_test_app() -> crate::tui::app::App {
     app
 }
 
+#[test]
+fn live_ask_result_preserves_questions_without_tool_input_event() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let questions = serde_json::from_value(serde_json::json!([
+        {"question":"Which?", "options":[{"label":"A"},{"label":"B"}]}
+    ]))
+    .unwrap();
+    handle_server_event(
+        &mut app,
+        ServerEvent::AskUserRequest {
+            request_id: "request-not-derived-from-tool".into(),
+            tool_call_id: "call-1".into(),
+            questions,
+        },
+        &mut remote,
+    );
+    handle_server_event(
+        &mut app,
+        ServerEvent::ToolDone {
+            id: "call-1".into(),
+            name: "ask".into(),
+            output: "User answers:\n1. Which? -> B\n".into(),
+            error: None,
+        },
+        &mut remote,
+    );
+    assert!(
+        app.ask_picker.is_none(),
+        "peer answer must close the picker"
+    );
+    let result = app
+        .display_messages()
+        .iter()
+        .find(|message| message.is_ask_decision())
+        .unwrap();
+    assert_eq!(
+        result.tool_data.as_ref().unwrap().input["questions"][0]["question"],
+        "Which?"
+    );
+    assert!(result.is_answered_ask());
+}
+
 /// Point JCODE_HOME at a per-process temp dir when the environment does not
 /// already pin one, so tests never read the developer's real `~/.jcode`
 /// state (e.g. a populated ambient queue turns `has_notification()` on and
@@ -66,6 +111,12 @@ fn ensure_test_jcode_home_if_unset() {
     if std::env::var_os("JCODE_HOME").is_some() {
         return;
     }
+    let Ok(_env_lock) = crate::storage::test_env_lock().try_lock() else {
+        return;
+    };
+    if std::env::var_os("JCODE_HOME").is_some() {
+        return;
+    }
 
     let path = TEST_HOME.get_or_init(|| {
         let path = std::env::temp_dir().join(format!("jcode-test-home-{}", std::process::id()));
@@ -73,56 +124,6 @@ fn ensure_test_jcode_home_if_unset() {
         path
     });
     crate::env::set_var("JCODE_HOME", path);
-}
-
-#[test]
-fn reload_handoff_active_when_server_flag_is_set() {
-    let state = RemoteRunState {
-        server_reload_in_progress: true,
-        ..RemoteRunState::default()
-    };
-
-    assert!(reconnect::reload_handoff_active(&state));
-}
-
-#[test]
-fn client_focus_defaults_to_true() {
-    let app = create_test_app();
-    assert!(
-        app.client_focused(),
-        "a freshly created client should start focused so terminals that never \
-         report focus events still animate/redraw normally"
-    );
-}
-
-#[test]
-fn presumed_focus_expires_only_while_unconfirmed() {
-    let timeout = crate::tui::app::App::PRESUMED_FOCUS_TIMEOUT + std::time::Duration::from_secs(1);
-    let old = std::time::Instant::now() - timeout;
-
-    // Fresh client: focus is presumed and stays so inside the grace period.
-    let mut app = create_test_app();
-    app.expire_presumed_focus();
-    assert!(app.client_focused());
-
-    // Never touched and never told about focus: stop presuming.
-    app.app_started = old;
-    app.expire_presumed_focus();
-    assert!(!app.client_focused());
-
-    // Input proves focus and restores it immediately, for good.
-    app.note_client_interaction();
-    assert!(app.client_focused());
-    app.expire_presumed_focus();
-    assert!(app.client_focused());
-
-    // A focus report alone also confirms, so a reporting terminal that says
-    // "focused" is trusted however long the user only watches.
-    let mut app = create_test_app();
-    app.app_started = old;
-    app.set_client_focused(true);
-    app.expire_presumed_focus();
-    assert!(app.client_focused());
 }
 
 #[test]
@@ -310,6 +311,7 @@ fn submit_prepared_remote_input_defers_until_history_loads() {
     assert!(!remote.has_loaded_history());
 
     let prepared = crate::tui::app::input::PreparedInput {
+        pasted_contents: Vec::new(),
         raw_input: "hi".to_string(),
         expanded: "hi".to_string(),
         images: vec![],
@@ -379,6 +381,7 @@ fn remote_skill_invocation_with_prompt_sends_remote_turn() {
         &mut app,
         &mut remote,
         crate::tui::app::input::PreparedInput {
+            pasted_contents: Vec::new(),
             raw_input: "/remote-skill explain the change".to_string(),
             expanded: "/remote-skill explain the change".to_string(),
             images: vec![],
@@ -589,6 +592,8 @@ fn startup_history(session_id: &str) -> ServerEvent {
         provider_name: None,
         provider_model: None,
         subagent_model: None,
+        pinned_skill: None,
+        pinned_skills: None,
         agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,
@@ -868,7 +873,7 @@ fn process_remote_followups_pauses_auto_reload_after_repeated_attempts() {
 }
 
 #[test]
-fn handle_post_connect_dispatches_reload_followup_even_if_history_snapshot_looks_busy() {
+fn handle_post_connect_preserves_daemon_activity_without_dispatching_reload_input() {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
     let prev_home = std::env::var_os("JCODE_HOME");
@@ -925,10 +930,10 @@ fn handle_post_connect_dispatches_reload_followup_even_if_history_snapshot_looks
     );
     assert!(matches!(
         app.status,
-        crate::tui::app::ProcessingStatus::Sending
+        crate::tui::app::ProcessingStatus::RunningTool(_)
     ));
-    assert!(app.current_message_id.is_some());
-    assert!(app.rate_limit_pending_message.is_some());
+    assert!(app.current_message_id.is_none());
+    assert!(app.rate_limit_pending_message.is_none());
 
     if let Ok(path) = crate::tool::selfdev::ReloadContext::path_for_session(session_id) {
         let _ = std::fs::remove_file(path);
@@ -1242,6 +1247,7 @@ fn remote_dropped_file_path_is_sent_as_a_prompt_not_a_slash_command() {
         &mut app,
         &mut remote,
         crate::tui::app::input::PreparedInput {
+            pasted_contents: Vec::new(),
             raw_input: dropped.clone(),
             expanded: dropped.clone(),
             images: vec![],
@@ -1279,6 +1285,7 @@ fn remote_embedded_known_slash_commands_are_sent_as_prompt_text() {
         &mut app,
         &mut remote,
         crate::tui::app::input::PreparedInput {
+            pasted_contents: Vec::new(),
             raw_input: prompt.to_string(),
             expanded: prompt.to_string(),
             images: vec![],
@@ -1315,6 +1322,7 @@ fn remote_multiple_known_slash_commands_use_the_local_command_boundary() {
         &mut app,
         &mut remote,
         crate::tui::app::input::PreparedInput {
+            pasted_contents: Vec::new(),
             raw_input: "/help compact /test help".to_string(),
             expanded: "/help compact /test help".to_string(),
             images: vec![],
@@ -1357,3 +1365,6 @@ fn remote_submit_input_never_strands_a_local_pending_turn() {
 include!("remote_tests/swarm_delivery.rs");
 
 include!("remote_tests/recall_cancellation.rs");
+
+#[path = "remote_tests_additional_tests.rs"]
+mod additional_reload_handoff_active_when_server_flag_is_set;

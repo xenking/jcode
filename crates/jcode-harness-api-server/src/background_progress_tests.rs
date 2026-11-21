@@ -41,6 +41,13 @@ fn completion_is_reported_as_done() {
     assert_eq!(progress.task_id, "t1");
     assert_eq!(progress.label, "bash");
     assert!(progress.summary.starts_with("✓ completed"));
+    assert!(
+        progress
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("No output captured")
+    );
 }
 
 #[test]

@@ -220,21 +220,30 @@ fn in_flight_count_excludes_foreign_queued_session() {
 fn latest_assistant_report_uses_last_non_empty_assistant_message() {
     let messages = vec![
         HistoryMessage {
+            tool_duration_ms: None,
+            attachments: Vec::new(),
             response_stats: None,
+            timestamp_ms: None,
             role: "assistant".to_string(),
             content: " earlier ".to_string(),
             tool_calls: None,
             tool_data: None,
         },
         HistoryMessage {
+            tool_duration_ms: None,
+            attachments: Vec::new(),
             response_stats: None,
+            timestamp_ms: None,
             role: "user".to_string(),
             content: "ignored".to_string(),
             tool_calls: None,
             tool_data: None,
         },
         HistoryMessage {
+            tool_duration_ms: None,
+            attachments: Vec::new(),
             response_stats: None,
+            timestamp_ms: None,
             role: "assistant".to_string(),
             content: " final report ".to_string(),
             tool_calls: None,
@@ -458,6 +467,7 @@ impl RawClient {
             id,
             content: content.to_string(),
             images: vec![],
+            attachments: vec![],
             system_reminder: None,
             active_skill: None,
             no_reply: false,
@@ -636,4 +646,26 @@ async fn wait_for_member_presence(
 
 include!("communicate_tests/input_format.rs");
 include!("communicate_tests/end_to_end.rs");
+include!("communicate_tests/await_two_socket.rs");
 include!("communicate_tests/assignment.rs");
+
+#[test]
+fn spawned_working_member_ids_counts_only_the_spawners_working_members() {
+    let member = |id: &str, status: &str, parent: Option<&str>| AgentInfo {
+        session_id: id.into(),
+        status: Some(status.into()),
+        report_back_to_session_id: parent.map(str::to_string),
+        ..Default::default()
+    };
+    let members = vec![
+        member("coord", "ready", None),
+        member("w-run", "running", Some("coord")),
+        member("w-queued", "queued", Some("coord")),
+        member("w-done", "completed", Some("coord")),
+        member("other", "running", Some("elsewhere")),
+    ];
+    assert_eq!(
+        super::spawned_working_member_ids(&members, "coord"),
+        vec!["w-queued".to_string(), "w-run".to_string()]
+    );
+}

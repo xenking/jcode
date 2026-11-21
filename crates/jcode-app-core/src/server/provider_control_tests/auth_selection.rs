@@ -188,8 +188,10 @@ async fn auth_model_first_prompt_e2e_state_space_is_bounded_by_selection_source(
             .lock()
             .unwrap()
             .clone();
+        // The scenario's own request is the first completion. A session-title side
+        // turn runs on a forked provider after it, so `last()` names a title call.
         assert_eq!(
-            completed_models.last().map(String::as_str),
+            completed_models.first().map(String::as_str),
             Some(scenario.expected_first_prompt_model),
             "{}: first provider request used wrong model; all completions: {:?}",
             scenario.name,

@@ -29,6 +29,31 @@ fn enabled_state() -> LoopState {
 }
 
 #[test]
+fn unchanged_open_todos_are_poked_only_once_even_after_restart() {
+    let snapshot = open_snapshot();
+    let mut state = enabled_state();
+    assert!(next_followup(&mut state, &snapshot).follow_up.is_some());
+    state = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+    assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
+}
+
+#[test]
+fn reload_continuation_does_not_trigger_an_immediate_auto_poke() {
+    let mut state = enabled_state();
+    let snapshot = open_snapshot();
+    assert!(
+        next_followup_after_turn(&mut state, &snapshot, true)
+            .follow_up
+            .is_none()
+    );
+    assert!(
+        next_followup_after_turn(&mut state, &snapshot, false)
+            .follow_up
+            .is_some()
+    );
+}
+
+#[test]
 fn persisted_policy_keeps_unchanged_todo_retry_budget_across_reload() {
     let mut state = enabled_state();
     let snapshot = open_snapshot();
@@ -80,14 +105,14 @@ fn blockers_and_running_tasks_pause_without_consuming_retry_budget() {
     });
     assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
     snapshot.todos[0].requires_user_auth = None;
-    assert!(next_followup(&mut state, &snapshot).follow_up.is_some());
+    assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
     snapshot.goals = vec![todo::TodoGoal {
         cannot_complete: Some("Target host was decommissioned".into()),
         ..Default::default()
     }];
     assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
     snapshot.goals.clear();
-    assert!(next_followup(&mut state, &snapshot).follow_up.is_some());
+    assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
 }
 
 #[test]
@@ -162,13 +187,13 @@ impl Provider for RecordingProvider {
         _: Option<&str>,
     ) -> Result<EventStream> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
-        if call <= self.progress_turns {
-            if let Some(session_id) = self.progress_session.lock().unwrap().as_ref() {
-                let mut snapshot = open_snapshot();
-                snapshot.todos[0].content =
-                    format!("Complete remaining campaign work after step {call}");
-                todo::save_todos(session_id, &snapshot.todos)?;
-            }
+        if call <= self.progress_turns
+            && let Some(session_id) = self.progress_session.lock().unwrap().as_ref()
+        {
+            let mut snapshot = open_snapshot();
+            snapshot.todos[0].content =
+                format!("Complete remaining campaign work after step {call}");
+            todo::save_todos(session_id, &snapshot.todos)?;
         }
         Ok(Box::pin(futures::stream::iter([
             Ok(StreamEvent::TextDelta(
@@ -191,6 +216,16 @@ impl Provider for RecordingProvider {
 }
 
 struct RestoreHome(Option<std::ffi::OsString>);
+struct RestoreRuntime(Option<std::ffi::OsString>);
+impl Drop for RestoreRuntime {
+    fn drop(&mut self) {
+        if let Some(value) = &self.0 {
+            crate::env::set_var("JCODE_RUNTIME_DIR", value);
+        } else {
+            crate::env::remove_var("JCODE_RUNTIME_DIR");
+        }
+    }
+}
 impl Drop for RestoreHome {
     fn drop(&mut self) {
         if let Some(home) = &self.0 {
@@ -200,6 +235,89 @@ impl Drop for RestoreHome {
         }
         crate::config::Config::invalidate_cache();
     }
+}
+
+#[tokio::test]
+async fn delivered_reload_turn_does_not_launch_followup() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+    let provider = RecordingProvider::default();
+    let mut agent = Agent::new_with_initial_working_dir(
+        Arc::new(provider.clone()),
+        crate::tool::Registry::empty(),
+        home.path().to_str(),
+    );
+    let id = agent.session_id().to_string();
+    todo::save_todos(&id, &open_snapshot().todos).unwrap();
+    initialize_remote_session(&id, true).unwrap();
+    let notice = "Your session was interrupted by a server reload. Continue where you left off.";
+    super::super::reload_recovery::persist_intent(
+        "reload-test",
+        &id,
+        super::super::reload_recovery::ReloadRecoveryRole::Headless,
+        crate::tool::selfdev::ReloadRecoveryDirective {
+            reconnect_notice: None,
+            continuation_message: notice.into(),
+        },
+        "test",
+    )
+    .unwrap();
+    assert!(
+        super::super::reload_recovery::mark_delivered_if_matching_continuation(&id, notice, "test")
+            .unwrap()
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    super::super::turn_failover::process_locked_message_with_server_failover(
+        &mut agent,
+        "",
+        vec![],
+        Some(notice.into()),
+        tx.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    run_followups(&mut agent, tx).await.unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn headless_startup_does_not_resume_a_lane_waiting_on_a_pending_await() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    let _restore_runtime = RestoreRuntime(std::env::var_os("JCODE_RUNTIME_DIR"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::set_var("JCODE_RUNTIME_DIR", runtime.path());
+    let session = "headless-pending-await-test";
+    let now = super::super::durable_state::now_unix_ms();
+    let state = super::super::await_members_state::PersistedAwaitMembersState {
+        key: format!("{session}-{now}"),
+        session_id: session.into(),
+        swarm_id: "swarm".into(),
+        requested_ids: vec!["worker".into()],
+        stopped_members: Vec::new(),
+        target_status: vec!["completed".into()],
+        mode: None,
+        created_at_unix_ms: now,
+        deadline_unix_ms: now + 60_000,
+        background: true,
+        notify: true,
+        wake: true,
+        final_response: None,
+    };
+    super::super::await_members_state::save_state(&state);
+    let mut task = open_snapshot().todos.remove(0);
+    task.waiting_on = vec![state.dependency_id()];
+    todo::save_todos(session, &[task]).unwrap();
+    assert!(super::super::worker_revive::has_open_lane(session));
+    assert!(super::super::worker_revive::open_lane_continuation(session).is_none());
+    super::super::await_members_state::persist_final_response(&state, true, vec![], "done".into());
+    assert!(super::super::worker_revive::open_lane_continuation(session).is_some());
 }
 
 #[tokio::test]
@@ -229,21 +347,22 @@ async fn productive_remote_campaign_exceeds_old_turn_cap_then_stops_on_no_progre
     let (tx, rx) = mpsc::unbounded_channel();
     drop(rx);
     run_followups(&mut agent, tx.clone()).await.unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst), 43);
+    // 40 productive pokes, then one tool-less reply ends the cycle at once.
+    assert_eq!(calls.load(Ordering::SeqCst), 41);
     let state = read_state(&state_path(&session_id).unwrap()).unwrap();
     assert!(state.poke_enabled, "productive work must not disable poke");
-    assert_eq!(state.turns, 43);
+    assert_eq!(state.turns, 41);
     initialize_remote_session(&session_id, true).unwrap();
     run_followups(&mut agent, tx).await.unwrap();
     assert_eq!(
         calls.load(Ordering::SeqCst),
-        43,
+        41,
         "no-progress budget survives reattach"
     );
 }
 
 #[tokio::test]
-async fn remote_subscription_enables_real_followups_without_manual_poke() {
+async fn ordinary_session_enables_real_followups_without_client_opt_in() {
     let _lock = crate::storage::lock_test_env();
     let home = tempfile::tempdir().unwrap();
     let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
@@ -257,13 +376,13 @@ async fn remote_subscription_enables_real_followups_without_manual_poke() {
     );
     let session_id = agent.session_id().to_string();
     todo::save_todos(&session_id, &open_snapshot().todos).unwrap();
-    initialize_remote_session(&session_id, true).unwrap();
+    assert!(!state_path(&session_id).unwrap().exists());
     let (tx, rx) = mpsc::unbounded_channel();
-    // The cloud runtime must continue with no observer attached, not just
-    // enqueue work for a live laptop client to dispatch.
+    // The daemon must continue with no observer attached and without a
+    // client-specific subscription or an explicit /poke command.
     drop(rx);
     run_followups(&mut agent, tx.clone()).await.unwrap();
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     let persisted = std::fs::read(state_path(&session_id).unwrap()).unwrap();
     initialize_remote_session(&session_id, true).unwrap();
     assert_eq!(
@@ -273,7 +392,7 @@ async fn remote_subscription_enables_real_followups_without_manual_poke() {
     run_followups(&mut agent, tx.clone()).await.unwrap();
     assert_eq!(
         provider.calls.load(Ordering::SeqCst),
-        3,
+        1,
         "reattaching must not reset retry budgets"
     );
 
@@ -287,7 +406,7 @@ async fn remote_subscription_enables_real_followups_without_manual_poke() {
             .poke_enabled
     );
     run_followups(&mut agent, tx.clone()).await.unwrap();
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 
     // Arming needs no Agent lock and does not launch an overlapping turn.
     let (data, _) = control(&session_id, "poke", &["on".into()])
@@ -296,7 +415,7 @@ async fn remote_subscription_enables_real_followups_without_manual_poke() {
     assert_eq!(data["poke_enabled"], true);
     assert!(data.get("next_prompt").is_none());
     run_followups(&mut agent, tx).await.unwrap();
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 6);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
 
     initialize_remote_session("remote-disabled", false).unwrap();
     initialize_remote_session("remote-disabled", true).unwrap();
@@ -304,6 +423,85 @@ async fn remote_subscription_enables_real_followups_without_manual_poke() {
         !read_state(&state_path("remote-disabled").unwrap())
             .unwrap()
             .poke_enabled
+    );
+}
+
+#[tokio::test]
+async fn ordinary_session_respects_host_default_off_and_explicit_on() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[features]\nauto_poke = false\n",
+    )
+    .unwrap();
+    crate::config::Config::invalidate_cache();
+    let provider = RecordingProvider::default();
+    let mut agent = Agent::new_with_initial_working_dir(
+        Arc::new(provider.clone()),
+        crate::tool::Registry::empty(),
+        home.path().to_str(),
+    );
+    let session_id = agent.session_id().to_string();
+    todo::save_todos(&session_id, &open_snapshot().todos).unwrap();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    run_followups(&mut agent, tx.clone()).await.unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    assert!(
+        !read_state(&state_path(&session_id).unwrap())
+            .unwrap()
+            .poke_enabled
+    );
+    assert!(rx.try_recv().is_err(), "disabled continuation is silent");
+
+    control(&session_id, "poke", &["on".into()])
+        .unwrap()
+        .unwrap();
+    run_followups(&mut agent, tx).await.unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    let mut notices = 0;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            ServerEvent::Notification { from_name, .. }
+                if from_name.as_deref() == Some("daemon continuation") =>
+            {
+                notices += 1
+            }
+            ServerEvent::Done { .. } => panic!("internal continuation must not publish Done"),
+            _ => {}
+        }
+    }
+    assert_eq!(notices, 3, "observers see every daemon-owned continuation");
+}
+
+#[tokio::test]
+async fn cancelled_session_does_not_restart_for_unfinished_todos() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+    let provider = RecordingProvider::default();
+    let mut agent = Agent::new_with_initial_working_dir(
+        Arc::new(provider.clone()),
+        crate::tool::Registry::empty(),
+        home.path().to_str(),
+    );
+    let session_id = agent.session_id().to_string();
+    todo::save_todos(&session_id, &open_snapshot().todos).unwrap();
+    agent.request_graceful_shutdown();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    run_followups(&mut agent, tx).await.unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        read_state(&state_path(&session_id).unwrap()).unwrap().turns,
+        0
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "cancel must not announce another poke"
     );
 }
 
@@ -322,11 +520,15 @@ async fn remote_loop_runtime_executes_turns_persists_controls_and_recovers_actua
     );
     let session_id = agent.session_id().to_string();
     let (tx, _rx) = mpsc::unbounded_channel();
-    // An ordinary/local session has no remote state and must not gain loops.
+    // Ordinary sessions now delegate to the daemon without a special subscribe.
+    // Disable explicitly here so the workflow assertions below start fresh.
+    control(&session_id, "poke", &["off".into()])
+        .unwrap()
+        .unwrap();
     todo::save_todos(&session_id, &open_snapshot().todos).unwrap();
     run_followups(&mut agent, tx.clone()).await.unwrap();
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
-    assert!(!state_path(&session_id).unwrap().exists());
+    assert!(state_path(&session_id).unwrap().exists());
 
     let (start, _) = execute(&mut agent, "improve", &["parser reliability".into()])
         .await
@@ -346,12 +548,12 @@ async fn remote_loop_runtime_executes_turns_persists_controls_and_recovers_actua
     )
     .await
     .unwrap();
-    // One launch plus three bounded real follow-up turns.
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    // One launch plus one follow-up: a tool-less reply blocks further pokes.
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
     run_followups(&mut agent, tx.clone()).await.unwrap();
     assert_eq!(
         provider.calls.load(Ordering::SeqCst),
-        4,
+        2,
         "persisted budget cannot reset at each turn"
     );
 
@@ -374,7 +576,7 @@ async fn remote_loop_runtime_executes_turns_persists_controls_and_recovers_actua
             .active
     );
     run_followups(&mut guard, tx.clone()).await.unwrap();
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
     let (resumed, _) = execute(&mut guard, "improve", &["resume".into()])
         .await
         .unwrap();
@@ -398,7 +600,7 @@ async fn remote_loop_runtime_executes_turns_persists_controls_and_recovers_actua
             .contains("Do not edit files")
     );
     run_followups(&mut guard, tx.clone()).await.unwrap();
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
     // Stopping an unrelated workflow must not clobber the active refactor.
     control(&session_id, "improve", &["stop".into()])
         .unwrap()
@@ -448,4 +650,103 @@ async fn remote_loop_runtime_executes_turns_persists_controls_and_recovers_actua
     let (other_status, _) = control(other, "poke", &["status".into()]).unwrap().unwrap();
     assert_eq!(other_status["poke_enabled"], false);
     assert!(!state_path(other).unwrap().exists(), "status is read-only");
+}
+
+#[test]
+fn live_background_merge_keeps_running_await_dependencies() {
+    let mut snapshot = open_snapshot();
+    snapshot.todos[0].waiting_on = vec!["await-swarm-1".into()];
+    // load_snapshot already resolved the durable await as running.
+    snapshot.running_background_tasks = vec!["await-swarm-1".into()];
+    merge_live_background_tasks(&mut snapshot, vec!["bg-other".into()]);
+    assert!(
+        snapshot
+            .running_background_tasks
+            .iter()
+            .any(|id| id == "await-swarm-1")
+    );
+    let mut state = enabled_state();
+    assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
+}
+
+fn assigned_snapshot(owner: &str) -> todo::followup::TodoSnapshot {
+    let mut snapshot = open_snapshot();
+    snapshot.session_id = "coordinator".into();
+    snapshot.todos[0].assigned_to = Some(owner.into());
+    snapshot
+}
+
+#[test]
+fn todo_assigned_to_a_worker_is_never_poked_by_the_server_loop() {
+    let mut state = enabled_state();
+    let snapshot = assigned_snapshot("swarm-worker");
+    for _ in 0..10 {
+        assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
+    }
+    assert!(
+        next_followup(&mut enabled_state(), &assigned_snapshot("coordinator"))
+            .follow_up
+            .is_some()
+    );
+}
+
+#[test]
+fn running_swarm_members_defer_the_server_loop_poke() {
+    let mut state = enabled_state();
+    let mut snapshot = open_snapshot();
+    snapshot.running_swarm_members = vec!["worker".into()];
+    for _ in 0..10 {
+        assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
+    }
+    snapshot.running_swarm_members.clear();
+    assert!(next_followup(&mut state, &snapshot).follow_up.is_some());
+}
+
+#[test]
+fn server_loop_stops_after_a_poke_turn_without_tool_calls() {
+    let mut state = enabled_state();
+    let snapshot = open_snapshot();
+    assert!(next_followup(&mut state, &snapshot).follow_up.is_some());
+    state.policy.record_turn(false);
+    // The record must survive the persisted state round trip.
+    state = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+    for _ in 0..5 {
+        assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
+    }
+}
+
+fn stored(content: Vec<ContentBlock>) -> crate::session::StoredMessage {
+    crate::session::StoredMessage {
+        attachment_data: None,
+        id: "m".into(),
+        role: Role::Assistant,
+        content: content.into(),
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    }
+}
+
+#[test]
+fn turn_tool_call_detection_only_looks_at_new_messages() {
+    let text = || ContentBlock::Text {
+        text: "nothing to do".into(),
+        cache_control: None,
+    };
+    let tool = || ContentBlock::ToolUse {
+        id: "t".into(),
+        name: "bash".into(),
+        input: json!({}),
+        thought_signature: None,
+    };
+    let history = vec![stored(vec![tool()]), stored(vec![text()])];
+    assert!(!turn_had_tool_calls(&history, 2), "no new messages");
+    let mut with_text = history.clone();
+    with_text.push(stored(vec![text()]));
+    assert!(!turn_had_tool_calls(&with_text, 2), "old tool use ignored");
+    let mut with_tool = with_text.clone();
+    with_tool.push(stored(vec![tool()]));
+    assert!(turn_had_tool_calls(&with_tool, 2));
+    assert!(turn_had_tool_calls(&history, 5), "compaction is progress");
 }

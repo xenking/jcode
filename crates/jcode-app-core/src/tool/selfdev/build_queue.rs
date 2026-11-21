@@ -1,5 +1,84 @@
 use super::*;
 
+#[derive(Serialize, Deserialize)]
+pub(crate) enum QueueJob {
+    Build(PathBuf, SelfDevBuildCommand, String),
+    Test(PathBuf, SelfDevBuildCommand, String),
+    Watch(String),
+}
+
+impl QueueJob {
+    fn task_names(&self) -> (&'static str, &'static str) {
+        match self {
+            Self::Build(..) => ("selfdev-build", "selfdev build"),
+            Self::Test(..) => ("selfdev-test", "selfdev test"),
+            Self::Watch(..) => ("selfdev-build-watch", "build watch"),
+        }
+    }
+
+    pub(crate) async fn run(self, request_id: String, output: PathBuf) -> Result<TaskResult> {
+        match self {
+            Self::Build(repo, command, reason) => {
+                SelfDevTool::run_build_request(request_id, repo, command, reason, output).await
+            }
+            Self::Test(repo, command, reason) => {
+                SelfDevTool::run_test_request(request_id, repo, command, reason, output).await
+            }
+            Self::Watch(existing) => {
+                SelfDevTool::follow_existing_build(request_id, existing, output).await
+            }
+        }
+    }
+}
+
+async fn start_queue_job(
+    request: &mut BuildRequest,
+    ctx: &ToolContext,
+    job: QueueJob,
+    notify: bool,
+    wake: bool,
+) -> Result<background::BackgroundTaskInfo> {
+    let manager = background::global();
+    let (tool, name) = job.task_names();
+    let request_id = request.request_id.clone();
+    #[cfg(unix)]
+    if super::super::background_worker::available() {
+        use super::super::background_worker::{Job, start};
+        let info = manager.reserve_task_info();
+        request.background_task_id = Some(info.task_id.clone());
+        request.output_file = Some(info.output_file.display().to_string());
+        request.status_file = Some(info.status_file.display().to_string());
+        request.save()?;
+        start(
+            &info,
+            tool,
+            name.to_string(),
+            &ctx.session_id,
+            notify,
+            wake,
+            Job::SelfDev { request_id, job },
+        )
+        .await?;
+        return Ok(info);
+    }
+
+    let info = manager
+        .spawn_with_notify(
+            tool,
+            Some(name.to_string()),
+            &ctx.session_id,
+            notify,
+            wake,
+            |output| job.run(request_id, output),
+        )
+        .await;
+    request.background_task_id = Some(info.task_id.clone());
+    request.output_file = Some(info.output_file.display().to_string());
+    request.status_file = Some(info.status_file.display().to_string());
+    request.save()?;
+    Ok(info)
+}
+
 impl SelfDevTool {
     pub(super) fn optimized_test_shell_command(command: &str) -> String {
         format!(
@@ -233,7 +312,9 @@ export -f cargo
         {
             BackgroundTaskStatus::Completed => BuildRequestState::Completed,
             BackgroundTaskStatus::Superseded => BuildRequestState::Superseded,
-            BackgroundTaskStatus::Failed => BuildRequestState::Failed,
+            BackgroundTaskStatus::Failed | BackgroundTaskStatus::Interrupted => {
+                BuildRequestState::Failed
+            }
             BackgroundTaskStatus::Running => BuildRequestState::Building,
         };
         request.error = result.error.clone();
@@ -373,6 +454,7 @@ export -f cargo
         let result = if Self::is_test_session() {
             Self::run_test_build(output_path.clone(), &reason).await?
         } else {
+            let prerelease = build::linux_prerelease_candidate(&repo_dir, &actual_source);
             let result =
                 Self::stream_build_command(repo_dir.clone(), command.clone(), output_path.clone())
                     .await?;
@@ -396,6 +478,13 @@ export -f cargo
                         request.validated = true;
                         request.last_progress = Some("published and smoke-tested".to_string());
                         request.save()?;
+                        if prerelease && result.status == Some(BackgroundTaskStatus::Completed) {
+                            build::dispatch_linux_prerelease(
+                                &repo_dir,
+                                &source_after_build,
+                                request.public_build_notes().as_deref(),
+                            );
+                        }
                         result
                     }
                     Err(err) => {
@@ -427,7 +516,9 @@ export -f cargo
         {
             BackgroundTaskStatus::Completed => BuildRequestState::Completed,
             BackgroundTaskStatus::Superseded => BuildRequestState::Superseded,
-            BackgroundTaskStatus::Failed => BuildRequestState::Failed,
+            BackgroundTaskStatus::Failed | BackgroundTaskStatus::Interrupted => {
+                BuildRequestState::Failed
+            }
             BackgroundTaskStatus::Running => BuildRequestState::Building,
         };
         request.error = result.error.clone();
@@ -450,6 +541,7 @@ export -f cargo
     pub(super) async fn do_build(
         &self,
         reason: Option<String>,
+        release_notes: Option<String>,
         target: Option<String>,
         notify: Option<bool>,
         wake: Option<bool>,
@@ -463,6 +555,10 @@ export -f cargo
                     "`selfdev build` requires a non-empty `reason` so other queued agents can see why the build is needed."
                 )
             })?;
+        let release_notes = release_notes
+            .map(|notes| notes.trim().to_owned())
+            .filter(|notes| !notes.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("`selfdev build` and `build-reload` require nonblank `release_notes` suitable for public release."))?;
         let repo_dir =
             SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref()).ok_or_else(|| {
                 anyhow::anyhow!("Could not find the jcode repository directory for selfdev build")
@@ -491,6 +587,7 @@ export -f cargo
                 repo_dir: repo_dir.display().to_string(),
                 repo_scope: requested_source.repo_scope.clone(),
                 worktree_scope: requested_source.worktree_scope.clone(),
+                release_notes: Some(release_notes),
                 command: command.display.clone(),
                 requested_at: Utc::now().to_rfc3339(),
                 started_at: None,
@@ -510,30 +607,14 @@ export -f cargo
             };
             request.save()?;
 
-            let request_id_for_task = request_id.clone();
-            let existing_request_id = existing.request_id.clone();
-            let info = background::global()
-                .spawn_with_notify(
-                    "selfdev-build-watch",
-                    Some("build watch".to_string()),
-                    &ctx.session_id,
-                    notify,
-                    wake,
-                    move |output_path| async move {
-                        SelfDevTool::follow_existing_build(
-                            request_id_for_task,
-                            existing_request_id,
-                            output_path,
-                        )
-                        .await
-                    },
-                )
-                .await;
-
-            request.background_task_id = Some(info.task_id.clone());
-            request.output_file = Some(info.output_file.display().to_string());
-            request.status_file = Some(info.status_file.display().to_string());
-            request.save()?;
+            let info = start_queue_job(
+                &mut request,
+                ctx,
+                QueueJob::Watch(existing.request_id.clone()),
+                notify,
+                wake,
+            )
+            .await?;
 
             let delivery = if wake {
                 "The requesting agent will be woken when the existing build finishes."
@@ -588,6 +669,7 @@ export -f cargo
             repo_dir: repo_dir.display().to_string(),
             repo_scope: requested_source.repo_scope.clone(),
             worktree_scope: requested_source.worktree_scope.clone(),
+            release_notes: Some(release_notes),
             command: command.display.clone(),
             requested_at: Utc::now().to_rfc3339(),
             started_at: None,
@@ -611,34 +693,14 @@ export -f cargo
             SelfDevTool::current_queue_position(&request_id, &requested_source.worktree_scope)?
                 .unwrap_or(1);
 
-        let request_id_for_task = request_id.clone();
-        let repo_dir_for_task = repo_dir.clone();
-        let command_for_task = command.clone();
-        let reason_for_task = reason.clone();
-        let info = background::global()
-            .spawn_with_notify(
-                "selfdev-build",
-                Some("selfdev build".to_string()),
-                &ctx.session_id,
-                notify,
-                wake,
-                move |output_path| async move {
-                    SelfDevTool::run_build_request(
-                        request_id_for_task,
-                        repo_dir_for_task,
-                        command_for_task,
-                        reason_for_task,
-                        output_path,
-                    )
-                    .await
-                },
-            )
-            .await;
-
-        request.background_task_id = Some(info.task_id.clone());
-        request.output_file = Some(info.output_file.display().to_string());
-        request.status_file = Some(info.status_file.display().to_string());
-        request.save()?;
+        let info = start_queue_job(
+            &mut request,
+            ctx,
+            QueueJob::Build(repo_dir.clone(), command.clone(), reason.clone()),
+            notify,
+            wake,
+        )
+        .await?;
         let delivery = if wake {
             "The requesting agent will be woken when the build completes."
         } else if notify {
@@ -702,6 +764,7 @@ export -f cargo
     pub(super) async fn do_build_reload(
         &self,
         reason: Option<String>,
+        release_notes: Option<String>,
         target: Option<String>,
         context: Option<String>,
         ctx: &ToolContext,
@@ -710,7 +773,7 @@ export -f cargo
         // waits inline for completion, so a separate completion notification
         // would be redundant noise.
         let build_output = self
-            .do_build(reason, target, Some(false), Some(false), ctx)
+            .do_build(reason, release_notes, target, Some(false), Some(false), ctx)
             .await?;
 
         let metadata = build_output.metadata.clone().unwrap_or_else(|| json!({}));
@@ -898,6 +961,7 @@ export -f cargo
             repo_dir: repo_dir.display().to_string(),
             repo_scope: requested_source.repo_scope.clone(),
             worktree_scope: requested_source.worktree_scope.clone(),
+            release_notes: None,
             command: shell_command.display.clone(),
             requested_at: Utc::now().to_rfc3339(),
             started_at: None,
@@ -920,34 +984,14 @@ export -f cargo
             SelfDevTool::current_queue_position(&request_id, &requested_source.worktree_scope)?
                 .unwrap_or(1);
 
-        let request_id_for_task = request_id.clone();
-        let repo_dir_for_task = repo_dir.clone();
-        let command_for_task = shell_command.clone();
-        let reason_for_task = reason.clone();
-        let info = background::global()
-            .spawn_with_notify(
-                "selfdev-test",
-                Some("selfdev test".to_string()),
-                &ctx.session_id,
-                notify,
-                wake,
-                move |output_path| async move {
-                    SelfDevTool::run_test_request(
-                        request_id_for_task,
-                        repo_dir_for_task,
-                        command_for_task,
-                        reason_for_task,
-                        output_path,
-                    )
-                    .await
-                },
-            )
-            .await;
-
-        request.background_task_id = Some(info.task_id.clone());
-        request.output_file = Some(info.output_file.display().to_string());
-        request.status_file = Some(info.status_file.display().to_string());
-        request.save()?;
+        let info = start_queue_job(
+            &mut request,
+            ctx,
+            QueueJob::Test(repo_dir.clone(), shell_command.clone(), reason.clone()),
+            notify,
+            wake,
+        )
+        .await?;
         let delivery = if wake {
             "The requesting agent will be woken when the test completes."
         } else if notify {

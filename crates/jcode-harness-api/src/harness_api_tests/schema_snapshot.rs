@@ -3,6 +3,173 @@
 use crate::*;
 
 #[test]
+fn todo_state_pending_swarm_await_is_optional_for_older_bridges() {
+    let legacy = serde_json::to_value(ApiEvent::TodoState {
+        session_id: "s".into(),
+        state: Default::default(),
+    })
+    .unwrap();
+    assert!(legacy["state"].get("pending_swarm_await").is_none());
+    for value in [None, Some(false), Some(true)] {
+        let mut wire = legacy.clone();
+        if let Some(value) = value {
+            wire["state"]["pending_swarm_await"] = serde_json::json!(value);
+        }
+        let event: ApiEvent = serde_json::from_value(wire.clone()).unwrap();
+        assert!(
+            matches!(&event, ApiEvent::TodoState { state, .. } if state.pending_swarm_await == value)
+        );
+        assert_eq!(serde_json::to_value(event).unwrap(), wire);
+    }
+}
+
+#[test]
+fn queued_skill_wire_is_optional_and_round_trips() {
+    let legacy = serde_json::json!({"req":"queue_prompt", "session_id":"s", "client_id":"p", "content":"hello", "mode":"after_yield"});
+    let parsed: ApiRequest = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), legacy);
+    let mut modern = legacy;
+    modern["active_skill"] = "verification".into();
+    let parsed: ApiRequest = serde_json::from_value(modern.clone()).unwrap();
+    assert_eq!(serde_json::to_value(parsed).unwrap(), modern);
+    let prompt: QueuedPrompt = serde_json::from_value(serde_json::json!({"client_id":"p", "content":"hello", "mode":"after_yield", "active_skill":"verification"})).unwrap();
+    assert_eq!(prompt.active_skill.as_deref(), Some("verification"));
+    assert_eq!(
+        serde_json::to_value(prompt).unwrap()["active_skill"],
+        "verification"
+    );
+}
+
+#[test]
+fn queued_attachment_wire_roundtrip() {
+    for request in [
+        serde_json::json!({"req":"queue_prompt", "session_id":"s", "client_id":"p", "content":"", "mode":"after_yield", "attachments":[{"type":"pasted_text","text":"one\ntwo"}]}),
+        serde_json::json!({"req":"edit_queued_prompt", "session_id":"s", "client_id":"ui", "prompt_id":"p", "content":"", "attachments":[{"type":"file","name":"a.txt","mime":"text/plain","size":3,"data":"YWJj"}]}),
+    ] {
+        let decoded: ApiRequest = serde_json::from_value(request.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), request);
+    }
+}
+
+#[test]
+fn queued_prompt_mutations_wire_shape() {
+    let remove = ClientFrame::new(
+        7,
+        ApiRequest::RemoveQueuedPrompt {
+            session_id: "s".into(),
+            client_id: "ui".into(),
+            prompt_id: "p".into(),
+        },
+    );
+    assert_eq!(
+        serde_json::to_value(remove).unwrap(),
+        serde_json::json!({"v":1,"id":7,"req":"remove_queued_prompt","session_id":"s","client_id":"ui","prompt_id":"p"})
+    );
+    let reorder = ClientFrame::new(
+        8,
+        ApiRequest::ReorderQueuedPrompts {
+            session_id: "s".into(),
+            client_id: "ui".into(),
+            order: vec!["b".into(), "a".into()],
+        },
+    );
+    assert_eq!(
+        serde_json::to_value(reorder).unwrap(),
+        serde_json::json!({"v":1,"id":8,"req":"reorder_queued_prompts","session_id":"s","client_id":"ui","order":["b","a"]})
+    );
+    for (outcome, wire) in [
+        (QueuedPromptRemovalOutcome::Removed, "removed"),
+        (QueuedPromptRemovalOutcome::InFlight, "in_flight"),
+        (
+            QueuedPromptRemovalOutcome::AlreadyDelivered,
+            "already_delivered",
+        ),
+        (QueuedPromptRemovalOutcome::NotFound, "not_found"),
+    ] {
+        let frame = ServerFrame::reply(
+            7,
+            ApiEvent::QueuedPromptRemoved {
+                session_id: "s".into(),
+                prompt_id: "p".into(),
+                outcome,
+            },
+        );
+        let value = serde_json::to_value(&frame).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"v":1,"reply_to":7,"ev":"queued_prompt_removed","session_id":"s","prompt_id":"p","outcome":wire})
+        );
+        assert_eq!(serde_json::from_value::<ServerFrame>(value).unwrap(), frame);
+    }
+}
+
+#[test]
+fn queued_prompt_edit_wire_shape() {
+    let hold = ClientFrame::new(
+        9,
+        ApiRequest::SetQueuedPromptEditing {
+            session_id: "s".into(),
+            client_id: "ui".into(),
+            prompt_id: "p".into(),
+            editing: true,
+        },
+    );
+    assert_eq!(
+        serde_json::to_value(hold).unwrap(),
+        serde_json::json!({"v":1,"id":9,"req":"set_queued_prompt_editing","session_id":"s","client_id":"ui","prompt_id":"p","editing":true})
+    );
+    let edit = ClientFrame::new(
+        10,
+        ApiRequest::EditQueuedPrompt {
+            session_id: "s".into(),
+            client_id: "ui".into(),
+            prompt_id: "p".into(),
+            content: "new text".into(),
+            images: Vec::new(),
+            attachments: Vec::new(),
+        },
+    );
+    assert_eq!(
+        serde_json::to_value(edit).unwrap(),
+        serde_json::json!({"v":1,"id":10,"req":"edit_queued_prompt","session_id":"s","client_id":"ui","prompt_id":"p","content":"new text"})
+    );
+    for (outcome, wire) in [
+        (QueuedPromptEditOutcome::Edited, "edited"),
+        (QueuedPromptEditOutcome::InFlight, "in_flight"),
+        (
+            QueuedPromptEditOutcome::AlreadyDelivered,
+            "already_delivered",
+        ),
+        (QueuedPromptEditOutcome::NotFound, "not_found"),
+    ] {
+        let frame = ServerFrame::reply(
+            10,
+            ApiEvent::QueuedPromptEdited {
+                session_id: "s".into(),
+                prompt_id: "p".into(),
+                outcome,
+            },
+        );
+        let value = serde_json::to_value(&frame).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"v":1,"reply_to":10,"ev":"queued_prompt_edited","session_id":"s","prompt_id":"p","outcome":wire})
+        );
+        assert_eq!(serde_json::from_value::<ServerFrame>(value).unwrap(), frame);
+    }
+    // Queued prompt snapshots carry the editing hold only when held.
+    let prompt: QueuedPrompt = serde_json::from_value(serde_json::json!({
+        "client_id": "p", "content": "hello", "mode": "after_yield"
+    }))
+    .unwrap();
+    assert!(!prompt.editing);
+    assert_eq!(
+        serde_json::to_value(&prompt).unwrap(),
+        serde_json::json!({"client_id":"p","content":"hello","mode":"after_yield"})
+    );
+}
+
+#[test]
 fn create_session_system_prompt_roundtrip_and_legacy_default() {
     let legacy = serde_json::json!({"req": "create_session"});
     let decoded: ApiRequest = serde_json::from_value(legacy.clone()).unwrap();
@@ -48,6 +215,40 @@ fn token_usage_preserves_cache_creation_and_accepts_legacy_frames() {
 }
 
 #[test]
+fn completed_request_usage_keeps_zero_separate_from_unreported() {
+    let wire = serde_json::json!({
+        "v": 1, "ev": "request_usage", "session_id": "s1", "request_id": "r1",
+        "provider": "openai", "model": "served-model", "input": 100, "output": null,
+        "cache_read_input": 0
+    });
+    let decoded: ServerFrame = serde_json::from_value(wire.clone()).unwrap();
+    assert!(matches!(
+        decoded.event,
+        ApiEvent::RequestUsage {
+            input: Some(100),
+            output: None,
+            cache_read_input: Some(0),
+            cache_creation_input: None,
+            ..
+        }
+    ));
+    assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+}
+
+#[test]
+fn send_message_preserves_attachments() {
+    let input = serde_json::json!({"v":1,"id":1,"req":"send_message","session_id":"s1","content":"hello","attachments":[
+        {"type":"file","name":"a.txt","mime":"text/plain","size":3,"data":"YWJj"},
+        {"type":"pasted_text","text":"one\ntwo"},
+        {"type":"future_attachment"}
+    ]});
+    let frame: ClientFrame = serde_json::from_value(input).unwrap();
+    let output = serde_json::to_value(frame).unwrap();
+    assert_eq!(output["attachments"][0]["name"], "a.txt");
+    assert_eq!(output["attachments"][1]["text"], "one\ntwo");
+}
+
+#[test]
 fn client_frame_wire_shape() {
     let frame = ClientFrame::new(
         7,
@@ -55,6 +256,7 @@ fn client_frame_wire_shape() {
             session_id: "s1".into(),
             content: "hi".into(),
             images: vec![],
+            attachments: vec![],
             system_reminder: None,
             no_reply: false,
         },
@@ -74,6 +276,7 @@ fn send_message_no_reply_wire_shape_and_legacy_default() {
             session_id: "s1".into(),
             content: "context".into(),
             images: vec![],
+            attachments: vec![],
             system_reminder: None,
             no_reply: true,
         },
@@ -171,6 +374,7 @@ fn soft_interrupt_ids_requests_and_events_wire_shape() {
 
     let injected = ServerFrame::event(ApiEvent::SoftInterruptInjected {
         session_id: "s1".into(),
+        content: None,
         client_ids: vec!["f1".into(), "f2".into()],
         point: "D".into(),
         tools_skipped: None,
@@ -222,6 +426,7 @@ fn server_frame_wire_shape() {
     let frame = ServerFrame::reply(
         3,
         ApiEvent::HelloOk {
+            runtime_identity: None,
             version: 1,
             server: "jcode/0.55.1".into(),
             capabilities: vec![],
@@ -257,6 +462,7 @@ fn unknown_fields_are_ignored() {
 #[test]
 fn request_roundtrip() {
     let reqs = [
+        ApiRequest::ListDraftModels,
         ApiRequest::Hello {
             min_version: 1,
             max_version: 1,
@@ -347,6 +553,7 @@ fn client_handshake_over_in_memory_pipe() {
     let reply = serde_json::to_string(&ServerFrame::reply(
         1,
         ApiEvent::HelloOk {
+            runtime_identity: None,
             version: 1,
             server: "jcode/test".into(),
             capabilities: vec!["sessions".into()],
@@ -370,7 +577,8 @@ fn client_handshake_over_in_memory_pipe() {
 /// leaves every JS client unable to name the new frame. Checking from the
 /// Rust side means the guard runs in the normal `cargo test` suite, where
 /// the change is actually being made, rather than only in the SDK's own
-/// Node tests which a Rust-only contributor never runs.
+/// Node tests which a Rust-only contributor never runs. This reads the current
+/// workspace's SDK rather than a published package.
 #[test]
 fn typescript_sdk_lists_every_variant() {
     let Some(sdk) = sdk_protocol_source() else {
@@ -602,6 +810,7 @@ fn hidden_system_reminder_wire_shape_and_legacy_default() {
             content: String::new(),
             system_reminder: Some("continue task".into()),
             images: vec![],
+            attachments: vec![],
             no_reply: false,
         },
     );
@@ -770,4 +979,94 @@ fn turn_stopped_schema_and_future_reason_compatibility() {
         serde_json::from_value(serde_json::json!({"v":1,"ev":"turn_done","session_id":"s1"}))
             .unwrap();
     assert!(matches!(done.event, ApiEvent::TurnDone { .. }));
+}
+
+#[test]
+fn context_occupancy_wire_shape() {
+    let frame = ServerFrame::event(ApiEvent::ContextOccupancy {
+        session_id: "s".into(),
+        prompt_tokens: 41_000,
+    });
+    let wire = serde_json::to_value(&frame).unwrap();
+    assert_eq!(
+        wire,
+        serde_json::json!({
+            "v": 1,
+            "ev": "context_occupancy",
+            "session_id": "s",
+            "prompt_tokens": 41_000
+        })
+    );
+    assert_eq!(serde_json::from_value::<ServerFrame>(wire).unwrap(), frame);
+}
+
+#[test]
+fn memory_events_wire_shape() {
+    let injected = ServerFrame::event(ApiEvent::MemoryInjected {
+        session_id: "s".into(),
+        count: 2,
+        content: "auto-recalled 2 memories\n\n- [fact] the build uses mold".into(),
+    });
+    let wire = serde_json::to_value(&injected).unwrap();
+    assert_eq!(
+        wire,
+        serde_json::json!({
+            "v": 1,
+            "ev": "memory_injected",
+            "session_id": "s",
+            "count": 2,
+            "content": "auto-recalled 2 memories\n\n- [fact] the build uses mold"
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<ServerFrame>(wire).unwrap(),
+        injected
+    );
+
+    let activity = ServerFrame::event(ApiEvent::MemoryActivity {
+        session_id: "s".into(),
+        activity: MemoryActivitySnapshot {
+            state: MemoryState::FoundRelevant { count: 3 },
+            state_age_ms: 12,
+            pipeline: Some(MemoryPipeline {
+                search: MemoryStepStatus::Done,
+                search_result: Some(MemoryStepResult {
+                    summary: "3 matches".into(),
+                    latency_ms: 4,
+                }),
+                verify: MemoryStepStatus::Running,
+                verify_result: None,
+                verify_progress: Some((1, 3)),
+                inject: MemoryStepStatus::Pending,
+                inject_result: None,
+                maintain: MemoryStepStatus::Skipped,
+                maintain_result: None,
+            }),
+        },
+    });
+    let wire = serde_json::to_value(&activity).unwrap();
+    assert_eq!(
+        wire,
+        serde_json::json!({
+            "v": 1,
+            "ev": "memory_activity",
+            "session_id": "s",
+            "activity": {
+                "state": {"found_relevant": {"count": 3}},
+                "state_age_ms": 12,
+                "pipeline": {
+                    "search": "done",
+                    "search_result": {"summary": "3 matches", "latency_ms": 4},
+                    "verify": "running",
+                    "verify_progress": [1, 3],
+                    "inject": "pending",
+                    "maintain": "skipped"
+                }
+            }
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<ServerFrame>(wire).unwrap(),
+        activity
+    );
 }

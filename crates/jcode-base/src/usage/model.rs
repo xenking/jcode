@@ -182,6 +182,8 @@ pub struct ModelScopedUsageWindow {
 pub(super) struct UsageResponse {
     /// Read reset eligibility with the quota response, never a second poll.
     pub juniper_tide: Option<serde_json::Value>,
+    /// Saved limit resets, evaluated only when `cedar_ember=1` is requested.
+    pub cedar_ember: Option<serde_json::Value>,
     pub(super) five_hour: Option<UsageWindow>,
     pub(super) seven_day: Option<UsageWindow>,
     pub(super) seven_day_opus: Option<UsageWindow>,
@@ -238,6 +240,8 @@ pub struct OpenAIUsageData {
     pub seven_day: Option<OpenAIUsageWindow>,
     pub spark: Option<OpenAIUsageWindow>,
     pub hard_limit_reached: bool,
+    /// Paid credits keep serving after the plan window is spent.
+    pub credit_overage: bool,
     pub openai_reset_credits: Option<jcode_usage_types::OpenAiResetCredits>,
     pub fetched_at: Option<Instant>,
     pub last_error: Option<String>,
@@ -284,8 +288,24 @@ impl OpenAIUsageData {
     }
 
     pub fn exhausted(&self) -> bool {
+        // A spent plan window funded by paid credits still serves requests
+        // (Codex CLI and omp keep using it). Live usage_limit_reached errors
+        // stay authoritative for blocking.
+        if self.credit_overage {
+            return false;
+        }
         if self.hard_limit_reached {
             return true;
+        }
+        // OpenAI reports rounded 99-100% windows while still serving requests
+        // (e.g. from credits); its explicit allowed flag beats the heuristic.
+        if self
+            .openai_reset_credits
+            .as_ref()
+            .and_then(|credits| credits.ordinary_usage_allowed)
+            == Some(true)
+        {
+            return false;
         }
 
         if !self.has_limits() {
@@ -447,6 +467,34 @@ impl AccountUsageSnapshot {
         } else {
             parts.join(", ")
         }
+    }
+
+    /// Windows as (utilization 0.0..=1.0, reset time) for reset policy.
+    ///
+    /// The snapshot carries one shared display deadline (the five-hour one
+    /// first), so a full weekly window can only borrow it when no five-hour
+    /// window exists. A full window without its own time is an unknown wait,
+    /// never a zero one. Callers that can read the raw cached report should
+    /// prefer [`crate::usage::cached_account_usage_windows`], which keeps each
+    /// window's own deadline.
+    pub fn window_ratios(&self) -> Vec<(f32, Option<String>)> {
+        let mut out = Vec::new();
+        if let Some(ratio) = self.five_hour_ratio {
+            out.push((ratio, self.resets_at.clone()));
+        }
+        if let Some(ratio) = self.seven_day_ratio {
+            let at = self
+                .five_hour_ratio
+                .is_none()
+                .then(|| self.resets_at.clone());
+            out.push((ratio, at.flatten()));
+        }
+        out.extend(
+            self.additional_windows
+                .iter()
+                .map(|window| (window.usage_ratio, window.resets_at.clone())),
+        );
+        out
     }
 
     fn preference_score(&self) -> f32 {

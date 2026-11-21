@@ -34,10 +34,10 @@ async fn worker_report_publishes_one_owner_wake_without_explicit_await() {
     }
     let mut reports = Vec::new();
     while let Ok(event) = bus.try_recv() {
-        if let crate::bus::BusEvent::SwarmWorkerReported(report) = event {
-            if report.worker_session_id == worker_id {
-                reports.push(report);
-            }
+        if let crate::bus::BusEvent::SwarmWorkerReported(report) = event
+            && report.worker_session_id == worker_id
+        {
+            reports.push(report);
         }
     }
     assert_eq!(
@@ -731,7 +731,7 @@ async fn forced_stop_does_not_promote_gallery_activity_to_final_response() {
             })
             .collect();
         assert_eq!(notifications.len(), 1, "{status}: {notifications:?}");
-        assert!(notifications[0].contains("No final assistant response was captured."));
+        assert!(notifications[0].contains("No report captured."));
         assert!(!notifications[0].contains("Applied fix, running validation"));
         assert!(!notifications[0].contains("stale previous turn"));
     }

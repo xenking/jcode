@@ -9,6 +9,12 @@ use ratatui::{
 use serde_json::{Value, json};
 
 impl App {
+    /// Expand the pinned plan for an offline export, without changing saved state.
+    pub fn with_expanded_replay_todos(mut self) -> Self {
+        self.pinned_todos_expanded = true;
+        self
+    }
+
     pub(super) fn restore_replay_todos_json(&mut self, output: &str) {
         if let Some(payload) = todo_snapshot_from_output(output) {
             self.pinned_todos_payload = Some(payload);
@@ -177,16 +183,13 @@ pub(super) fn normalize_todo_snapshot(value: Value) -> Result<String> {
         serde_json::from_value::<crate::todo::TodoItem>(todo.clone())
             .context("invalid todo item")?;
     }
-    payload
+    let fields = payload
         .as_object_mut()
-        .context("todo snapshot must be an object")?
+        .context("todo snapshot must be an object")?;
+    fields
         .entry("plan")
         .or_insert_with(|| json!(crate::todo::TodoPlan::default()));
-    payload
-        .as_object_mut()
-        .unwrap()
-        .entry("goals")
-        .or_insert_with(|| json!([]));
+    fields.entry("goals").or_insert_with(|| json!([]));
     let _: crate::todo::TodoPlan =
         serde_json::from_value(payload["plan"].clone()).context("invalid todo plan")?;
     let _: Vec<crate::todo::TodoGoal> =
@@ -196,10 +199,18 @@ pub(super) fn normalize_todo_snapshot(value: Value) -> Result<String> {
 
 /// Todo tools historically returned a JSON array followed by labeled JSON
 /// sections. Decode those sections without interpreting model-generated prose.
+/// Non-JSON prose, older incompatible cards and incomplete tool outputs are not
+/// snapshots. Reject them as a whole rather than partially overwriting replay state.
 pub(super) fn todo_snapshot_from_output(output: &str) -> Option<String> {
     let output = crate::tui::ui::strip_todo_tool_output_headers(output);
     let mut stream = serde_json::Deserializer::from_str(output.trim_start()).into_iter::<Value>();
-    let first = stream.next()?.ok()?;
+    let first = match stream.next()? {
+        Ok(value) => value,
+        Err(error) => {
+            crate::logging::debug(&format!("Cannot decode replay todo snapshot: {error}"));
+            return None;
+        }
+    };
     let mut payload = if first.is_array() {
         json!({"todos": first})
     } else {
@@ -207,14 +218,26 @@ pub(super) fn todo_snapshot_from_output(output: &str) -> Option<String> {
     };
     for (label, field) in [("\n\nPlan:\n", "plan"), ("\n\nGoals:\n", "goals")] {
         if let Some((_, rest)) = output.split_once(label) {
-            let value = serde_json::Deserializer::from_str(rest)
+            let value = match serde_json::Deserializer::from_str(rest)
                 .into_iter::<Value>()
                 .next()?
-                .ok()?;
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    crate::logging::debug(&format!("Cannot decode replay todo {field}: {error}"));
+                    return None;
+                }
+            };
             payload.as_object_mut()?.insert(field.into(), value);
         }
     }
-    normalize_todo_snapshot(payload).ok()
+    match normalize_todo_snapshot(payload) {
+        Ok(snapshot) => Some(snapshot),
+        Err(error) => {
+            crate::logging::debug(&format!("Invalid replay todo snapshot: {error}"));
+            None
+        }
+    }
 }
 
 #[cfg(test)]

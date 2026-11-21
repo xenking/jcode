@@ -114,6 +114,19 @@ mod tests {
     }
 
     #[test]
+    fn unreadable_journal_cannot_supply_successful_startup_metadata() {
+        with_temp_home(|_| {
+            let mut session = Session::create_with_id("unreadable_journal".into(), None, None);
+            session.save_prepared().unwrap();
+            let snapshot = super::super::storage_paths::session_path(&session.id).unwrap();
+            let journal =
+                super::super::storage_paths::session_journal_path_from_snapshot(&snapshot);
+            std::fs::create_dir(&journal).unwrap();
+            assert!(Session::load_startup_stub(&session.id).is_err());
+        });
+    }
+
+    #[test]
     fn override_writes_keep_transcript_backup_intact() {
         with_temp_home(|_| {
             let mut session = Session::create_with_id("bak_owner".into(), None, None);

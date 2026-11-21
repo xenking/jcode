@@ -89,8 +89,8 @@ pub use active_pids::{
 
 mod session_lease;
 pub use session_lease::{
-    SessionLease, SessionLeaseBlock, read_session_lease, remove_session_lease, session_lease_block,
-    session_leases_dir, write_session_lease,
+    GroupReturnCommit, SessionLease, SessionLeaseBlock, read_session_lease, remove_session_lease,
+    session_lease_block, session_leases_dir, write_session_lease,
 };
 
 /// Serialize this crate's tests that mutate `JCODE_HOME`.
@@ -103,7 +103,10 @@ pub(crate) fn test_jcode_home_lock() -> std::sync::MutexGuard<'static, ()> {
 /// Platform-aware runtime directory for sockets and ephemeral state.
 ///
 /// - Linux: `$XDG_RUNTIME_DIR` (typically `/run/user/<uid>`)
-/// - macOS: `$TMPDIR` (per-user, e.g. `/var/folders/xx/.../T/`)
+/// - macOS: the per-user Darwin temp dir (`confstr(_CS_DARWIN_USER_TEMP_DIR)`,
+///   e.g. `/var/folders/xx/.../T/`). Not `$TMPDIR`: jcode points tool
+///   subprocesses' `TMPDIR` at a scratch dir, and launchd agents may set their
+///   own, so `$TMPDIR` would split one user into several daemons.
 /// - Fallback: `std::env::temp_dir()`
 ///
 /// Can be overridden with `$JCODE_RUNTIME_DIR`.
@@ -116,6 +119,9 @@ pub fn runtime_dir() -> PathBuf {
     }
     #[cfg(target_os = "macos")]
     {
+        if let Some(dir) = darwin_user_temp_dir() {
+            return dir;
+        }
         if let Ok(dir) = std::env::var("TMPDIR") {
             return PathBuf::from(dir);
         }
@@ -124,6 +130,20 @@ pub fn runtime_dir() -> PathBuf {
     let dir = fallback_runtime_dir();
     ensure_private_runtime_dir(&dir);
     dir
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_user_temp_dir() -> Option<PathBuf> {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStrExt;
+    let mut buf = vec![0 as libc::c_char; libc::PATH_MAX as usize];
+    let len = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buf.as_mut_ptr(), buf.len()) };
+    if len == 0 || len > buf.len() {
+        return None;
+    }
+    let path = unsafe { CStr::from_ptr(buf.as_ptr()) };
+    let path = PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes()));
+    path.is_dir().then_some(path)
 }
 
 fn fallback_runtime_dir() -> PathBuf {

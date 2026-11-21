@@ -545,7 +545,9 @@ async fn persistent_ws_does_not_reuse_response_cancelled_before_completion() {
         message_count: 1,
         last_input_item_count: 1,
         last_response_output: Vec::new(),
-        last_input_item_hashes: persistent_ws_input_item_hashes(&[
+        last_request_options: None,
+            turn_state: Arc::new(StdMutex::new(None)),
+            last_input_item_hashes: persistent_ws_input_item_hashes(&[
             serde_json::json!({"type":"message","role":"user","content":"first"}),
         ]),
     })));

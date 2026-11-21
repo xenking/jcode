@@ -1136,3 +1136,28 @@ fn plan_title_beats_lane_name_and_intention() {
         Some("implementation")
     );
 }
+
+#[test]
+fn delegated_worker_lane_never_renames_the_coordinator() {
+    // Real shape from a coordinator's todo file: its own work, then lanes
+    // whose `group` is the spawned worker's label and `assigned_to` the worker.
+    let mut lane = todo("swarm-view-fix", "pending", Some("swarm-view-fix"));
+    lane.assigned_to = Some("session_hamster_1794718698462_fa6bdd5a9eec4f73".into());
+    let mut own = todo("tests, commit, push", "completed", None);
+    own.assigned_to = Some("@self".into());
+    let plan = TodoPlan {
+        user_intention: Some("Ship the user's own forks".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        derive_session_title(&[own.clone(), lane.clone()], &plan).as_deref(),
+        Some("Ship the user's own forks")
+    );
+    let mut mine = todo("integrate", "pending", Some("integration"));
+    mine.assigned_to = Some("@self".into());
+    assert_eq!(
+        derive_session_title(&[mine, lane.clone()], &TodoPlan::default()).as_deref(),
+        Some("integration")
+    );
+    assert_eq!(derive_session_title(&[lane], &TodoPlan::default()), None);
+}

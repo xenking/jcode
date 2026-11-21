@@ -22,7 +22,23 @@ use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 struct MockProvider;
 
-struct RoutingProvider(std::sync::Mutex<String>);
+type FakeRequests = Arc<std::sync::Mutex<Vec<(String, String)>>>;
+
+struct RoutingProvider {
+    model: std::sync::Mutex<String>,
+    effort: std::sync::Mutex<String>,
+    requests: Option<FakeRequests>,
+}
+
+impl RoutingProvider {
+    fn new(model: &str) -> Self {
+        Self {
+            model: std::sync::Mutex::new(model.into()),
+            effort: std::sync::Mutex::new("medium".into()),
+            requests: None,
+        }
+    }
+}
 
 #[async_trait]
 impl Provider for RoutingProvider {
@@ -33,24 +49,52 @@ impl Provider for RoutingProvider {
         _: &str,
         _: Option<&str>,
     ) -> Result<EventStream> {
-        anyhow::bail!("routing regression must not make model calls")
+        let Some(requests) = &self.requests else {
+            anyhow::bail!("routing regression must not make model calls");
+        };
+        assert!(jcode_provider_core::worker_request_is_pinned());
+        requests
+            .lock()
+            .unwrap()
+            .push((self.model(), self.reasoning_effort().unwrap()));
+        use crate::message::StreamEvent;
+        Ok(Box::pin(futures::stream::iter([
+            Ok(StreamEvent::TextDelta("fake response".into())),
+            Ok(StreamEvent::MessageEnd {
+                stop_reason: Some("end_turn".into()),
+            }),
+        ])))
     }
     fn name(&self) -> &str {
         "mock"
     }
     fn model(&self) -> String {
-        self.0.lock().unwrap().clone()
+        self.model.lock().unwrap().clone()
     }
     fn set_model(&self, model: &str) -> Result<()> {
-        *self.0.lock().unwrap() = model
+        *self.model.lock().unwrap() = model
             .rsplit_once(':')
             .map(|(_, model)| model)
             .unwrap_or(model)
             .to_string();
         Ok(())
     }
+    fn reasoning_effort(&self) -> Option<String> {
+        Some(self.effort.lock().unwrap().clone())
+    }
+    fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+        *self.effort.lock().unwrap() = effort.into();
+        Ok(())
+    }
+    fn available_efforts(&self) -> Vec<&'static str> {
+        vec!["low", "medium", "high", "xhigh"]
+    }
     fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(Self(std::sync::Mutex::new(self.model())))
+        Arc::new(Self {
+            model: std::sync::Mutex::new(self.model()),
+            effort: std::sync::Mutex::new(self.reasoning_effort().unwrap()),
+            requests: self.requests.clone(),
+        })
     }
 }
 
@@ -120,6 +164,53 @@ async fn test_agent_with_working_dir(session_id: &str, working_dir: &str) -> Arc
 }
 
 #[tokio::test]
+async fn headless_spawn_is_running_before_its_first_turn() {
+    assert_headless_initial_status(true, "running").await;
+}
+
+#[tokio::test]
+async fn headless_session_without_a_pending_turn_is_ready() {
+    assert_headless_initial_status(false, "ready").await;
+}
+
+async fn assert_headless_initial_status(has_initial_turn: bool, expected: &str) {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    crate::env::set_var("JCODE_HOME", home.path());
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
+    let members = Arc::new(RwLock::new(HashMap::new()));
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let result = super::create_headless_session(
+        &sessions,
+        &Arc::new(RwLock::new(String::new())),
+        &provider,
+        "create_session:",
+        &members,
+        &Arc::new(RwLock::new(HashMap::new())),
+        &Arc::new(RwLock::new(HashMap::new())),
+        &Arc::new(RwLock::new(HashMap::new())),
+        &Arc::new(RwLock::new(HashMap::new())),
+        false,
+        None,
+        None,
+        Some("owner".into()),
+        has_initial_turn,
+        crate::server::headless::HeadlessMemoryScope::IsolatedTest,
+    )
+    .await;
+    crate::env::remove_var("JCODE_HOME");
+    let result: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+    let members = members.read().await;
+    let worker = &members[result["session_id"].as_str().unwrap()];
+    assert_eq!(
+        worker.status, expected,
+        "only a pending first turn makes a fresh worker running"
+    );
+}
+
+#[tokio::test]
 async fn resolve_spawn_working_dir_prefers_explicit_then_spawner_agent_dir() {
     let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
         HashMap::new(),
@@ -141,12 +232,14 @@ async fn resolve_spawn_working_dir_prefers_explicit_then_spawner_agent_dir() {
             &swarm_members,
         )
         .await
+        .unwrap()
         .as_deref(),
         Some("/tmp/explicit")
     );
     assert_eq!(
         resolve_spawn_working_dir(None, "req", &sessions, &swarm_members)
             .await
+            .unwrap()
             .as_deref(),
         Some("/tmp/spawner-agent")
     );
@@ -168,8 +261,61 @@ async fn resolve_spawn_working_dir_falls_back_to_member_dir() {
     assert_eq!(
         resolve_spawn_working_dir(None, "req", &sessions, &swarm_members)
             .await
+            .unwrap()
             .as_deref(),
         Some("/tmp/member-dir")
+    );
+}
+
+#[tokio::test]
+async fn resolve_spawn_working_dir_uses_persisted_session_when_agent_busy() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::TempDir::new().unwrap();
+    crate::env::set_var("JCODE_HOME", home.path());
+    let mut session = crate::session::Session::create_with_id("cwd_busy".into(), None, None);
+    session.working_dir = Some("/tmp/persisted-project".into());
+    session.save_prepared().unwrap();
+    let agent = test_agent_with_working_dir("cwd_busy", "/tmp/persisted-project").await;
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
+    sessions
+        .register_new("cwd_busy".into(), Arc::clone(&agent))
+        .await
+        .unwrap();
+    let _held = agent.lock().await;
+    let members = Arc::new(RwLock::new(HashMap::new()));
+    assert_eq!(
+        resolve_spawn_working_dir(None, "cwd_busy", &sessions, &members)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("/tmp/persisted-project")
+    );
+    crate::env::remove_var("JCODE_HOME");
+}
+
+#[tokio::test]
+async fn resolve_spawn_working_dir_rejects_corrupt_persisted_parent() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    let path = crate::session::session_path("corrupt_spawn_cwd").unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, "{broken").unwrap();
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
+    let members = Arc::new(RwLock::new(HashMap::new()));
+    let result = resolve_spawn_working_dir(None, "corrupt_spawn_cwd", &sessions, &members).await;
+    match previous {
+        Some(previous) => crate::env::set_var("JCODE_HOME", previous),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    assert!(
+        result.is_err(),
+        "corrupt parent cwd must not silently become the daemon cwd"
     );
 }
 
@@ -293,6 +439,7 @@ fn prepare_visible_spawn_session_persists_startup_before_launch() {
         None,
         None,
         None,
+        None,
         false,
         Some(startup),
         |session_id, _cwd: &std::path::Path, _selfdev, provider_key| {
@@ -336,6 +483,7 @@ fn prepare_visible_spawn_session_cleans_startup_when_launch_not_started() {
 
     let (session_id, launched) = prepare_visible_spawn_session(
         Some(worktree.path().to_str().expect("utf8 worktree path")),
+        None,
         None,
         None,
         None,
@@ -384,6 +532,7 @@ fn prepare_visible_spawn_session_cleans_session_when_launch_errors() {
         None,
         None,
         None,
+        None,
         false,
         Some("Do the thing."),
         |_session_id, _cwd: &std::path::Path, _selfdev, _provider_key| {
@@ -420,6 +569,7 @@ fn prepare_visible_spawn_session_persists_and_launches_provider_key_for_openrout
         None,
         None,
         None,
+        None,
         false,
         None,
         |_session_id, _cwd: &std::path::Path, _selfdev, provider_key| {
@@ -438,6 +588,58 @@ fn prepare_visible_spawn_session_persists_and_launches_provider_key_for_openrout
 }
 
 #[test]
+fn visible_selfdev_spawn_inherits_session_model_overrides_before_launch() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::TempDir::new().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    let mut parent = crate::session::Session::create_with_id("visible-parent".into(), None, None);
+    parent.set_canary("self-dev");
+    parent
+        .set_agent_model_override("review", Some("review-override".into()))
+        .unwrap();
+    parent.save_prepared().unwrap();
+    let (id, launched) = prepare_visible_spawn_session(
+        Some(home.path().to_str().unwrap()),
+        None,
+        None,
+        None,
+        None,
+        None,
+        true,
+        None,
+        |id, _, selfdev, _| {
+            assert!(selfdev);
+            super::inherit_visible_spawn_preferences(&parent.id, id)?;
+            let child = crate::session::Session::load_startup_stub(id)?;
+            assert!(child.is_canary);
+            assert_eq!(
+                child
+                    .effective_agent_model("review", Some("global".into()))
+                    .as_deref(),
+                Some("review-override")
+            );
+            Ok(true)
+        },
+    )
+    .unwrap();
+    assert!(launched);
+    assert_eq!(
+        crate::session::Session::load_startup_stub(&id)
+            .unwrap()
+            .agent_model_overrides
+            .get("review")
+            .map(String::as_str),
+        Some("review-override")
+    );
+    if let Some(previous) = previous {
+        crate::env::set_var("JCODE_HOME", previous);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
 fn prepare_visible_spawn_session_persists_requested_effort() {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
@@ -450,6 +652,7 @@ fn prepare_visible_spawn_session_persists_requested_effort() {
         None,
         None,
         Some("low"),
+        None,
         false,
         None,
         |_session_id, _cwd: &std::path::Path, _selfdev, _provider_key| Ok(true),
@@ -459,6 +662,7 @@ fn prepare_visible_spawn_session_persists_requested_effort() {
     assert!(launched);
     let session = crate::session::Session::load(&session_id).expect("prepared session should save");
     assert_eq!(session.model.as_deref(), Some("gpt-5.5"));
+    assert!(session.is_swarm_worker);
     assert_eq!(
         session.reasoning_effort.as_deref(),
         Some("low"),
@@ -479,6 +683,7 @@ fn prepare_visible_spawn_session_prefers_parent_provider_key_over_model_guess() 
         Some(worktree.path().to_str().expect("utf8 worktree path")),
         Some("gpt-5.4"),
         Some("ollama"),
+        None,
         None,
         None,
         false,
@@ -906,6 +1111,294 @@ async fn global_agent_model_request_updates_server_config_not_session() {
 }
 
 #[tokio::test]
+async fn premium_worker_requires_owner_before_allocation_and_only_runs_approved_pair() {
+    assert_premium_worker_approval("gpt-6.2-astra", false).await;
+}
+
+#[tokio::test]
+async fn premium_worker_requires_owner_for_an_auto_todo_lane_on_capped_fable() {
+    assert_premium_worker_approval("claude-fable-5-2", true).await;
+}
+
+async fn assert_premium_worker_approval(model: &str, auto_lane: bool) {
+    let _env = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!("[agents]\nswarm_effort_caps = {{ \"{model}\" = \"high\" }}\n"),
+    )
+    .unwrap();
+    crate::config::invalidate_config_cache();
+    let coordinator = "session_lead_1_test";
+    let lane = auto_lane.then(|| {
+        let task = crate::todo::TodoItem {
+            id: "premium-task".into(),
+            content: "Exercise premium automatic lane".into(),
+            status: "pending".into(),
+            stage: Some(1),
+            group: Some("premium-lane".into()),
+            lane_owner: Some("worker".into()),
+            ..Default::default()
+        };
+        let lane = crate::todo::stages::lane_id(&task);
+        crate::todo::save_todos(coordinator, &[task]).unwrap();
+        lane
+    });
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
+    let requests = FakeRequests::default();
+    let provider: Arc<dyn Provider> = Arc::new(RoutingProvider {
+        requests: Some(requests.clone()),
+        ..RoutingProvider::new(model)
+    });
+    let (parent, _receiver) = member(coordinator, Some("swarm"), "coordinator");
+    let state = crate::server::SwarmState::new(
+        HashMap::from([(coordinator.into(), parent)]),
+        HashMap::from([("swarm".into(), HashSet::from([coordinator.into()]))]),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let pool = Arc::new(crate::mcp::SharedMcpPool::new(Default::default()));
+    let global = Arc::new(RwLock::new(String::new()));
+    let history = Arc::new(RwLock::new(VecDeque::new()));
+    let counter = Arc::new(AtomicU64::new(0));
+    let events = broadcast::channel(16).0;
+    let queues = Arc::new(RwLock::new(HashMap::new()));
+    let clients = Arc::new(RwLock::new(HashMap::new()));
+    let (automation, mut automation_rx) = mpsc::unbounded_channel();
+    let _automation = crate::tool::interactive::attach_client(coordinator, automation, false);
+    let spawn = |key: &'static str| {
+        super::spawn_swarm_agent(
+            coordinator,
+            "swarm",
+            lane.clone(),
+            Some(home.path().to_string_lossy().into_owned()),
+            Some("Execute isolated fake turn".into()),
+            Some(crate::config::SwarmSpawnMode::Headless),
+            None,
+            Some("xhigh".into()),
+            None,
+            key,
+            &sessions,
+            &global,
+            &provider,
+            &state.members,
+            &state.swarms_by_id,
+            &state.coordinators,
+            &state.plans,
+            &history,
+            &counter,
+            &events,
+            &pool,
+            &queues,
+            &clients,
+        )
+    };
+    let unattended = spawn("premium-fake-test").await.unwrap_err();
+    assert!(
+        unattended.to_string().contains("explicit owner approval"),
+        "{unattended:#}"
+    );
+    for choice in ["Deny", "Allow this worker"] {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let attachment = crate::tool::interactive::attach_client(coordinator, tx, true);
+        let reply = async {
+            let ask = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let question = ask.ask_questions.unwrap().to_string();
+            assert!(question.contains(model), "{question}");
+            assert!(question.contains("effort high"), "{question}");
+            assert!(sessions.read().await.is_empty());
+            assert_eq!(state.members.read().await.len(), 1);
+            assert!(requests.lock().unwrap().is_empty());
+            assert!(
+                automation_rx.try_recv().is_err(),
+                "automation must not receive owner approval"
+            );
+            assert!(!crate::tool::interactive::answer_with_text(
+                coordinator,
+                "Allow this worker",
+                vec![]
+            ));
+            ask.response_tx
+                .send(
+                    serde_json::json!({
+                        "answers": [{"selected": [choice]}]
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+        };
+        let (result, ()) = tokio::join!(spawn("premium-fake-test"), reply);
+        drop(attachment);
+        if choice == "Deny" {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("explicit owner approval")
+            );
+            continue;
+        }
+        let sid = result.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(4), async {
+            while requests.lock().unwrap().is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let agent = sessions.read().await.get(&sid).cloned().unwrap();
+            drop(agent.lock().await);
+        })
+        .await
+        .unwrap();
+        let expected = (model.into(), "high".into());
+        let startup_count = requests.lock().unwrap().len();
+        assert!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|observed| observed == &expected)
+        );
+        if !auto_lane {
+            assert_eq!(startup_count, 1);
+        }
+        let saved = crate::session::Session::load(&sid).unwrap();
+        assert!(saved.is_worker_model_approved(model, "mock", Some("high")));
+        assert!(!saved.is_worker_model_approved(model, "mock", Some("xhigh")));
+        assert!(!saved.is_worker_model_approved("gpt-5.4", "mock", Some("high")));
+        assert_eq!(
+            spawn("premium-fake-test").await.unwrap(),
+            sid,
+            "same spawn after UI detaches"
+        );
+        if auto_lane {
+            assert_eq!(spawn("new-dispatch-nonce").await.unwrap(), sid);
+        }
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            startup_count,
+            "no replayed startup request"
+        );
+        let runtime = provider.fork();
+        runtime.set_reasoning_effort("medium").unwrap();
+        let registry = Registry::new(runtime.clone()).await;
+        let mut resumed = Agent::new_with_session(runtime.clone(), registry, saved, None);
+        runtime.set_reasoning_effort("medium").unwrap();
+        assert!(
+            resumed
+                .run_once_capture("Unapproved effort")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("matching owner approval")
+        );
+        runtime.set_reasoning_effort("high").unwrap();
+        assert!(
+            resumed
+                .run_once_capture("Approved continuation")
+                .await
+                .unwrap()
+                .contains("fake response")
+        );
+        assert_eq!(requests.lock().unwrap().len(), startup_count + 1);
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[agents]\nspawn_allowed_models = [\"gpt-5.4\"]\n",
+        )
+        .unwrap();
+        crate::config::invalidate_config_cache();
+        let denied = resumed
+            .run_once_capture("Route removed from allowlist")
+            .await
+            .unwrap_err();
+        assert!(
+            denied.to_string().contains("spawn_allowed_models"),
+            "{denied:#}"
+        );
+        assert_eq!(requests.lock().unwrap().len(), startup_count + 1);
+    }
+    if let Some(previous) = previous {
+        crate::env::set_var("JCODE_HOME", previous);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+#[tokio::test]
+async fn auto_lane_worker_publishes_a_task_label_without_a_spawn_prompt() {
+    let _env = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    let coordinator = "session_lead_1_test";
+    let todo = crate::todo::TodoItem {
+        id: "test".into(),
+        content: "Open side questions".into(),
+        status: "pending".into(),
+        stage: Some(1),
+        group: Some("btw-enter".into()),
+        lane_owner: Some("worker".into()),
+        ..Default::default()
+    };
+    let lane = crate::todo::stages::lane_id(&todo);
+    crate::todo::save_todos(coordinator, &[todo]).unwrap();
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
+    let provider: Arc<dyn Provider> = Arc::new(RoutingProvider::new("mock"));
+    let (parent, _receiver) = member(coordinator, Some("swarm"), "coordinator");
+    let state = crate::server::SwarmState::new(
+        HashMap::from([(coordinator.into(), parent)]),
+        HashMap::from([("swarm".into(), HashSet::from([coordinator.into()]))]),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let pool = Arc::new(crate::mcp::SharedMcpPool::new(Default::default()));
+    let result = super::spawn_swarm_agent(
+        coordinator,
+        "swarm",
+        Some(lane),
+        Some(home.path().to_string_lossy().into_owned()),
+        None,
+        Some(crate::config::SwarmSpawnMode::Headless),
+        None,
+        None,
+        None,
+        "auto-lane-test",
+        &sessions,
+        &Arc::new(RwLock::new(String::new())),
+        &provider,
+        &state.members,
+        &state.swarms_by_id,
+        &state.coordinators,
+        &state.plans,
+        &Arc::new(RwLock::new(VecDeque::new())),
+        &Arc::new(AtomicU64::new(0)),
+        &broadcast::channel(16).0,
+        &pool,
+        &Arc::new(RwLock::new(HashMap::new())),
+        &Arc::new(RwLock::new(HashMap::new())),
+    )
+    .await;
+    let worker = result.unwrap();
+    let todo_title = crate::todo::load_session_title(&worker);
+    let live_label = state.members.read().await[&worker].task_label.clone();
+    if let Some(previous) = previous {
+        crate::env::set_var("JCODE_HOME", previous);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    assert_eq!(todo_title.as_deref(), Some("btw-enter"));
+    assert_eq!(live_label.as_deref(), Some("btw-enter"));
+}
+
+#[tokio::test]
 async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
     let _env = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().unwrap();
@@ -916,6 +1409,20 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
     session.model = Some("claude-opus-4-6".into());
     session.provider_key = Some("claude-api".into());
     session.route_api_method = Some("claude-api".into());
+    session.set_canary("self-dev");
+    session
+        .set_agent_model_override("review", Some("review-override".into()))
+        .unwrap();
+    let mut value = serde_json::to_value(&session).unwrap();
+    value["pinned_skill"] = serde_json::json!("pinned-probe");
+    session = serde_json::from_value(value).unwrap();
+    let skill_dir = temp.path().join(".jcode/skills/pinned-probe");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: pinned-probe\ndescription: Inherited mode\n---\nINHERITED_MODE_BODY\n",
+    )
+    .unwrap();
     session.save_prepared().unwrap();
     let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
         HashMap::from([("routing_busy".to_string(), agent.clone())]),
@@ -939,9 +1446,7 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
     let selection = resolve_swarm_spawn_selection(None, configured, &coordinator);
     assert_eq!(selection.model.as_deref(), Some("gpt-5.5"));
     assert_eq!(selection.provider_key.as_deref(), Some("openai-api-key"));
-    let provider: Arc<dyn Provider> = Arc::new(RoutingProvider(std::sync::Mutex::new(
-        "initial-model".into(),
-    )));
+    let provider: Arc<dyn Provider> = Arc::new(RoutingProvider::new("initial-model"));
     let state = crate::server::SwarmState::new(
         HashMap::new(),
         HashMap::new(),
@@ -963,6 +1468,7 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
             None,
             None,
             Some("routing test".into()),
+            "coordinator-route-test",
             &sessions,
             &Arc::new(RwLock::new(String::new())),
             &provider,
@@ -983,8 +1489,32 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
     .unwrap();
     let child = sessions.read().await.get(&child_id).cloned().unwrap();
     let child = child.lock().await;
+    assert_eq!(
+        child.runtime_skills_snapshot()["active_skill"],
+        "pinned-probe"
+    );
+    let stored_child = crate::session::Session::load(&child_id).unwrap();
+    assert_eq!(
+        serde_json::to_value(&stored_child).unwrap()["pinned_skill"],
+        "pinned-probe"
+    );
+    assert_eq!(stored_child.messages.iter().flat_map(|m| &m.content).filter(|b| matches!(b,
+        crate::message::ContentBlock::Text { text, .. } if text.contains("INHERITED_MODE_BODY")
+    )).count(), 1, "worker receives the announcement before any turn");
     assert_eq!(child.provider_model(), "gpt-5.5");
     assert_eq!(child.session_provider_key().as_deref(), Some("openai-api"));
+    assert!(
+        child.is_canary(),
+        "selfdev coordinator must spawn a selfdev worker"
+    );
+    assert_eq!(
+        child
+            .session_for_split()
+            .effective_agent_model("review", Some("global-review".into()))
+            .as_deref(),
+        Some("review-override"),
+        "session routing overrides must follow the coordinator into its worker"
+    );
     drop(child);
     crate::server::client_actions::set_session_agent_model(
         &agent,
@@ -1329,6 +1859,38 @@ fn swarm_model_fallback_skips_unavailable_primary() {
         &routes,
     );
     assert_eq!(picked.as_deref(), Some("openai-api:gpt-6.1-terra"));
+}
+
+#[test]
+fn swarm_automatic_fallback_skips_opus_but_keeps_explicit_primary() {
+    let _guard = crate::storage::lock_test_env();
+    let fallbacks = vec![
+        "claude:claude-opus-5-5".to_string(),
+        "openai:gpt-6.1-terra".to_string(),
+    ];
+    let routes = vec![
+        route("missing-model", false),
+        route("claude-opus-5-5", true),
+        route("gpt-6.1-terra", true),
+    ];
+    assert_eq!(
+        super::pick_available_swarm_model(Some("missing-model".into()), &fallbacks, &routes)
+            .as_deref(),
+        Some("openai:gpt-6.1-terra")
+    );
+    assert_eq!(
+        super::pick_available_swarm_model(
+            Some("claude:claude-opus-5-5".into()),
+            &fallbacks,
+            &routes
+        )
+        .as_deref(),
+        Some("claude:claude-opus-5-5")
+    );
+    assert_eq!(
+        super::spawn_model_selection::worker_allowed_fallbacks(&[], &fallbacks),
+        vec!["openai:gpt-6.1-terra"]
+    );
 }
 
 #[test]

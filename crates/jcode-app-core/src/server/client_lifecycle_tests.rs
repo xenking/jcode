@@ -7,6 +7,300 @@ use futures::stream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+#[tokio::test]
+async fn compaction_completion_reaches_each_attached_client() {
+    let bus = crate::bus::Bus::new_isolated_for_tests();
+    let mut first = bus.subscribe();
+    let mut second = bus.subscribe();
+    let event = crate::compaction::compaction_server_event(&crate::compaction::CompactionEvent {
+        trigger: "idle_precompact".into(),
+        method: Some("snapcompact".into()),
+        pre_tokens: Some(513_000),
+        post_tokens: Some(135_000),
+        tokens_saved: Some(378_000),
+        duration_ms: None,
+        messages_dropped: None,
+        messages_compacted: None,
+        summary_chars: None,
+        active_messages: None,
+    });
+    publish_compaction_completion(&bus, "target", event);
+    for receiver in [&mut first, &mut second] {
+        let event = receiver.recv().await.unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        forward_compaction_completion(&event, "other", &tx);
+        assert!(rx.try_recv().is_err());
+        forward_compaction_completion(&event, "target", &tx);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ServerEvent::Compaction {
+                post_tokens: Some(135_000),
+                ..
+            }
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ServerEvent::TokenUsage { input: 135_000, .. }
+        ));
+    }
+}
+
+#[test]
+fn queue_remove_and_reorder_are_atomic_against_claim() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let control =
+        SessionControlHandle::cancel_only("queue_atomic_test", queue, InterruptSignal::new());
+    for id in ["a", "b", "c"] {
+        control
+            .enqueue_user_prompt(
+                id.into(),
+                id.into(),
+                vec![],
+                jcode_agent_runtime::QueuedMessageMode::AfterYield,
+                None,
+            )
+            .unwrap();
+    }
+    assert!(
+        control
+            .reorder_user_prompts(&["a".into(), "a".into(), "c".into()])
+            .is_err()
+    );
+    control
+        .reorder_user_prompts(&["c".into(), "a".into(), "b".into()])
+        .unwrap();
+    assert_eq!(
+        control
+            .take_next_user_prompt(false)
+            .unwrap()
+            .unwrap()
+            .client_id
+            .as_deref(),
+        Some("c")
+    );
+    assert_eq!(
+        control.remove_user_prompt("c").unwrap(),
+        crate::protocol::QueuedPromptRemovalOutcome::InFlight
+    );
+    assert_eq!(
+        control.remove_user_prompt("a").unwrap(),
+        crate::protocol::QueuedPromptRemovalOutcome::Removed
+    );
+    assert_eq!(
+        control.remove_user_prompt("missing").unwrap(),
+        crate::protocol::QueuedPromptRemovalOutcome::NotFound
+    );
+    assert_eq!(
+        control
+            .queued_user_prompts()
+            .unwrap()
+            .iter()
+            .map(|p| p.client_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["b"]
+    );
+}
+
+#[test]
+fn queued_edit_hold_survives_turn_end_and_saves_in_place_once() {
+    use crate::protocol::QueuedPromptEditOutcome;
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let control =
+        SessionControlHandle::cancel_only("queue_edit_test", queue, InterruptSignal::new());
+    for (id, mode) in [
+        ("a", jcode_agent_runtime::QueuedMessageMode::Steer),
+        ("b", jcode_agent_runtime::QueuedMessageMode::AfterYield),
+        ("c", jcode_agent_runtime::QueuedMessageMode::Steer),
+    ] {
+        control
+            .enqueue_user_prompt(id.into(), format!("text {id}"), vec![], mode, None)
+            .unwrap();
+    }
+    control
+        .set_user_prompt_editing("b", "conn-1", true)
+        .unwrap();
+    let prompts = control.queued_user_prompts().unwrap();
+    assert_eq!(
+        prompts
+            .iter()
+            .map(|prompt| prompt.client_id.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b", "c"]
+    );
+    assert!(prompts[1].editing, "the held item is marked editing");
+
+    // The turn ends while the edit is open: the held prompt stays queued.
+    let batch = control.take_user_prompt_batch(false).unwrap();
+    assert_eq!(
+        batch
+            .iter()
+            .filter_map(|prompt| prompt.client_id.as_deref())
+            .collect::<Vec<_>>(),
+        ["a", "c"],
+        "a held prompt must never be drained"
+    );
+    let remaining = control.queued_user_prompts().unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].client_id, "b");
+
+    // Another connection cannot release someone else's hold.
+    control.release_user_prompt_edits("conn-2");
+    assert!(control.queued_user_prompts().unwrap()[0].editing);
+
+    assert_eq!(
+        control
+            .edit_user_prompt("b", "text b edited".into(), vec![], vec![])
+            .unwrap(),
+        QueuedPromptEditOutcome::Edited
+    );
+    let prompts = control.queued_user_prompts().unwrap();
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0].content, "text b edited");
+    assert_eq!(
+        prompts[0].mode,
+        crate::protocol::QueuedPromptMode::AfterYield,
+        "saving an edit keeps the delivery mode"
+    );
+    assert!(!prompts[0].editing, "a saved edit releases the hold");
+
+    // The next turn start delivers the edited text exactly once.
+    let next = control.take_next_user_prompt(false).unwrap().unwrap();
+    assert_eq!(next.content, "text b edited");
+    assert!(control.take_next_user_prompt(false).unwrap().is_none());
+    assert_eq!(
+        control
+            .edit_user_prompt("b", "late".into(), vec![], vec![])
+            .unwrap(),
+        QueuedPromptEditOutcome::InFlight
+    );
+}
+
+#[test]
+fn remove_racing_turn_claim_has_exactly_one_winner() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    for n in 0..32 {
+        let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let control = SessionControlHandle::cancel_only(
+            format!("queue_race_{n}"),
+            queue.clone(),
+            InterruptSignal::new(),
+        );
+        control
+            .enqueue_user_prompt(
+                "p".into(),
+                "message".into(),
+                vec![],
+                jcode_agent_runtime::QueuedMessageMode::AfterYield,
+                None,
+            )
+            .unwrap();
+        let guard = queue.lock().unwrap();
+        let gate = Arc::new(std::sync::Barrier::new(3));
+        std::thread::scope(|scope| {
+            let remove_control = control.clone();
+            let remove_gate = gate.clone();
+            let remove = scope.spawn(move || {
+                remove_gate.wait();
+                remove_control.remove_user_prompt("p").unwrap()
+            });
+            let claim_control = control.clone();
+            let claim_gate = gate.clone();
+            let claim = scope.spawn(move || {
+                claim_gate.wait();
+                claim_control.take_next_user_prompt(false).unwrap()
+            });
+            gate.wait();
+            drop(guard);
+            let outcome = remove.join().unwrap();
+            let claimed = claim.join().unwrap();
+            use crate::protocol::QueuedPromptRemovalOutcome as Outcome;
+            assert!(matches!(
+                (outcome, claimed),
+                (Outcome::Removed, None) | (Outcome::InFlight, Some(_))
+            ));
+        });
+    }
+}
+
+#[test]
+fn remove_does_not_hide_corrupt_delivery_history() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let sid = "queue_bad_history";
+    let path = crate::session::session_path(sid).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, b"not a session").unwrap();
+    let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let control = SessionControlHandle::cancel_only(sid, queue, InterruptSignal::new());
+    assert!(control.remove_user_prompt("p").is_err());
+}
+
+#[test]
+fn enqueue_does_not_hide_corrupt_delivery_history() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let sid = "queue_bad_enqueue_history";
+    let path = crate::session::session_path(sid).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, b"not a session").unwrap();
+    let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let control = SessionControlHandle::cancel_only(sid, queue.clone(), InterruptSignal::new());
+    assert!(
+        control
+            .enqueue_user_prompt(
+                "p".into(),
+                "retry".into(),
+                vec![],
+                jcode_agent_runtime::QueuedMessageMode::AfterYield,
+                None,
+            )
+            .is_err()
+    );
+    assert!(queue.lock().unwrap().is_empty());
+}
+
+#[test]
+fn durable_steer_wakes_blocking_wait_but_follow_up_does_not() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let sid = "session_durable_steer_wakeup";
+    let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let control = SessionControlHandle::cancel_only(sid, queue, InterruptSignal::new());
+    let watch = crate::incoming_message::watch(sid);
+    control
+        .enqueue_user_prompt(
+            "follow".into(),
+            "later".into(),
+            vec![],
+            jcode_agent_runtime::QueuedMessageMode::AfterYield,
+            None,
+        )
+        .unwrap();
+    assert!(
+        !watch.is_pending(),
+        "follow-up must not interrupt a blocking wait"
+    );
+    control
+        .enqueue_user_prompt(
+            "steer".into(),
+            "now".into(),
+            vec![],
+            jcode_agent_runtime::QueuedMessageMode::Steer,
+            None,
+        )
+        .unwrap();
+    assert!(
+        watch.is_pending(),
+        "durable steer must wake a blocking wait"
+    );
+    crate::incoming_message::forget(sid);
+}
+
 #[test]
 fn identity_transport_negotiation_preserves_legacy_payload_shape() {
     let identity = crate::protocol::TurnIdentity {
@@ -44,6 +338,8 @@ fn identity_transport_negotiation_preserves_legacy_payload_shape() {
         .is_none()
     );
 }
+#[path = "client_lifecycle_daemon_continuation_socket_tests.rs"]
+mod daemon_continuation_socket_tests;
 
 fn turn_payload(event: ServerEvent) -> ServerEvent {
     match event {
@@ -66,11 +362,178 @@ struct IsolatedRuntimeDir {
     _temp: tempfile::TempDir,
 }
 
+#[test]
+fn queued_skill_validation_does_not_fallback_after_session_read_error() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = IsolatedReloadRecoveryEnv::new();
+    let session = crate::session::Session::create(None, None);
+    let path = crate::session::session_path(&session.id).unwrap();
+    std::fs::create_dir_all(path).unwrap();
+    assert!(queued_skill_working_dir(&session.id, "/wrong-project").is_err());
+}
+
 struct IsolatedReloadRecoveryEnv {
     prev_home: Option<std::ffi::OsString>,
     prev_runtime: Option<std::ffi::OsString>,
     _home: tempfile::TempDir,
     _runtime: tempfile::TempDir,
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_fetches_complete_background_output_through_runtime() {
+    use crate::server::runtime::ServerRuntime;
+    let _lock = crate::storage::lock_test_env();
+    let home = IsolatedReloadRecoveryEnv::new();
+    let daemon_socket = home._runtime.path().join("bg-daemon.sock");
+    let api_socket = home._runtime.path().join("bg-api.sock");
+    let server = crate::server::Server::new_with_paths(
+        Arc::new(CompleteImmediatelyProvider),
+        daemon_socket.clone(),
+        home._runtime.path().join("bg-debug.sock"),
+    );
+    let runtime = ServerRuntime::from_server(&server);
+    let daemon =
+        runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&daemon_socket).unwrap());
+    let mut bridge = tokio::spawn(jcode_harness_api_server::run_bridge(
+        api_socket.clone(),
+        daemon_socket,
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !api_socket.exists() {
+            if bridge.is_finished() {
+                panic!("bridge exited: {:?}", (&mut bridge).await);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::task::spawn_blocking(move || {
+        let client = jcode_sdk::JcodeClient::connect(jcode_sdk::ConnectOptions {
+            socket_path: Some(api_socket), client_name: "desktop-bg-test".into(),
+            request_timeout: Some(Duration::from_secs(5)), ensure_runtime: false, ..Default::default()
+        }).unwrap();
+        let session = client.create_session(None).unwrap();
+        let manager = crate::background::global();
+        let status = serde_json::json!({"task_id":"bgtest123", "tool_name":"bash", "session_id":session.session_id, "status":"completed", "exit_code":0, "error":null, "started_at":"2026-01-01T00:00:00Z", "completed_at":null, "duration_secs":1.0});
+        std::fs::write(manager.status_path_for("bgtest123"), status.to_string()).unwrap();
+        let output = format!("{}last complete line", "line\n".repeat(300));
+        std::fs::write(manager.output_path_for("bgtest123"), &output).unwrap();
+        let result = client.runtime_command(&session.session_id, jcode_sdk::api::RuntimeCommand::BackgroundOutput, vec!["bgtest123".into()]).unwrap();
+        assert_eq!(result.data["output"], output);
+        assert!(client.runtime_command(&session.session_id, jcode_sdk::api::RuntimeCommand::BackgroundOutput, vec!["../other".into()]).is_err());
+    }).await.unwrap();
+    bridge.abort();
+    runtime.shutdown().await;
+    daemon.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_queued_skill_crosses_real_bridge_and_daemon_into_journal() {
+    use crate::server::runtime::ServerRuntime;
+    let _lock = crate::storage::lock_test_env();
+    let home = IsolatedReloadRecoveryEnv::new();
+    let project = tempfile::tempdir().unwrap();
+    let skill = project.path().join(".jcode/skills/poteto-mode");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: poteto-mode\ndescription: Test skill\n---\n\nBe concise.\n",
+    )
+    .unwrap();
+    let daemon_socket = home._runtime.path().join("skill-daemon.sock");
+    let api_socket = home._runtime.path().join("skill-api.sock");
+    let server = crate::server::Server::new_with_paths(
+        Arc::new(CompleteImmediatelyProvider),
+        daemon_socket.clone(),
+        home._runtime.path().join("skill-debug.sock"),
+    );
+    let runtime = ServerRuntime::from_server(&server);
+    let daemon =
+        runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&daemon_socket).unwrap());
+    let bridge = tokio::spawn(jcode_harness_api_server::run_bridge(
+        api_socket.clone(),
+        daemon_socket,
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !api_socket.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let project_path = project.path().to_string_lossy().into_owned();
+    let session_id = tokio::task::spawn_blocking(move || {
+        let client = jcode_sdk::JcodeClient::connect(jcode_sdk::ConnectOptions {
+            socket_path: Some(api_socket),
+            client_name: "jcode-desktop-test".into(),
+            request_timeout: Some(Duration::from_secs(5)),
+            ensure_runtime: false,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(client.supports("skill_message_v1"));
+        assert!(client.supports("queued_prompt_active_skill"));
+        let session = client.create_session(Some(project_path)).unwrap();
+        let catalog = client
+            .runtime_command(
+                &session.session_id,
+                jcode_sdk::api::RuntimeCommand::Skills,
+                vec![],
+            )
+            .unwrap();
+        assert!(
+            catalog.data["skills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|skill| skill["name"] == "poteto-mode")
+        );
+        let events = client.events(Some(&session.session_id));
+        client
+            .queue_prompt(
+                &session.session_id,
+                jcode_sdk::api::QueuedPrompt {
+                    client_id: "desktop-skill-1".into(),
+                    content: "fix this please".into(),
+                    images: vec![],
+                    attachments: vec![],
+                    mode: jcode_sdk::api::QueuedPromptMode::AfterYield,
+                    active_skill: Some("poteto-mode".into()),
+                    editing: false,
+                },
+            )
+            .unwrap();
+        loop {
+            match events
+                .next_timeout(Duration::from_secs(5))
+                .expect("turn event timeout")
+            {
+                jcode_sdk::ApiEvent::TurnDone { .. } => break,
+                jcode_sdk::ApiEvent::Error { message, .. } => {
+                    panic!("skill turn failed: {message}")
+                }
+                _ => {}
+            }
+        }
+        session.session_id
+    })
+    .await
+    .unwrap();
+    let persisted = crate::session::Session::load(&session_id).unwrap();
+    let reminder = persisted.messages.iter().position(|message| {
+        message.display_role == Some(crate::session::StoredDisplayRole::System)
+            && message.content.iter().any(|block| matches!(block, ContentBlock::Text { text, .. } if text.contains("# Active Skill") && text.contains("Be concise.")))
+    }).expect("skill reminder in journal");
+    assert!(persisted.messages.iter().skip(reminder + 1).any(|message| {
+        matches!(message.role, crate::message::Role::User) && message.display_role.is_none()
+            && message.content.iter().any(|block| matches!(block, ContentBlock::Text { text, .. } if text == "fix this please"))
+    }));
+    bridge.abort();
+    runtime.shutdown().await;
+    daemon.await.unwrap();
 }
 
 #[path = "client_lifecycle_tests/control_requests.rs"]
@@ -132,6 +595,141 @@ impl Drop for IsolatedRuntimeDir {
             crate::env::remove_var("JCODE_RUNTIME_DIR");
         }
     }
+}
+
+#[derive(Clone)]
+struct AskCancelProvider;
+
+#[async_trait]
+impl Provider for AskCancelProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> anyhow::Result<EventStream> {
+        Ok(Box::pin(stream::iter(vec![
+            Ok(StreamEvent::ToolUseStart {
+                id: "ask-1".into(),
+                name: "ask".into(),
+            }),
+            Ok(StreamEvent::ToolInputDelta(
+                r#"{"questions":[{"question":"Which?","options":[{"label":"A"},{"label":"B"}]}]}"#
+                    .into(),
+            )),
+            Ok(StreamEvent::ToolUseEnd),
+            Ok(StreamEvent::MessageEnd {
+                stop_reason: Some("tool_use".into()),
+            }),
+        ])))
+    }
+    fn name(&self) -> &str {
+        "ask-cancel-test"
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[test]
+fn detached_cancel_and_reload_during_ask_have_distinct_labels() -> anyhow::Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        for is_reload in [false, true] {
+            let session_id = if is_reload {
+                "reload-ask-label"
+            } else {
+                "cancel-ask-label"
+            };
+            let provider: Arc<dyn Provider> = Arc::new(AskCancelProvider);
+            let registry = Registry::new(provider.clone()).await;
+            let session = crate::session::Session::create_with_id(session_id.into(), None, None);
+            let mut agent = Agent::new_with_session(provider, registry, session, None);
+            let shutdown = agent.graceful_shutdown_signal();
+            let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+            agent.set_stdin_request_tx(input_tx);
+            let agent = Arc::new(Mutex::new(agent));
+            let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+            let task = tokio::spawn(process_message_streaming_mpsc(
+                agent.clone(),
+                "ask",
+                Vec::new(),
+                None,
+                event_tx,
+            ));
+            let _pending_question = tokio::time::timeout(Duration::from_secs(5), input_rx.recv())
+                .await?
+                .expect("ask must be waiting");
+            let control = SessionControlHandle::cancel_only(
+                session_id,
+                Arc::new(std::sync::Mutex::new(Vec::new())),
+                InterruptSignal::new(),
+            );
+            if is_reload {
+                crate::server::reload::signal_session_for_reload(session_id, &shutdown);
+            } else {
+                let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel();
+                let members = Arc::new(RwLock::new(HashMap::new()));
+                let swarms = Arc::new(RwLock::new(HashMap::new()));
+                let history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+                let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+                let (swarm_tx, _) = broadcast::channel(8);
+                let mut processing = false;
+                let mut message_id = None;
+                let mut cancel_session = None;
+                let mut local_task = None;
+                cancel_processing_message(
+                    &mut ProcessingState {
+                        client_is_processing: &mut processing,
+                        message_id: &mut message_id,
+                        session_id: &mut cancel_session,
+                        task: &mut local_task,
+                    },
+                    &control,
+                    &client_event_tx,
+                    &SwarmStatusRefs {
+                        members: &members,
+                        swarms_by_id: &swarms,
+                        event_history: &history,
+                        event_counter: &counter,
+                        event_tx: &swarm_tx,
+                    },
+                    Some(1),
+                    None,
+                    None,
+                )
+                .await;
+            }
+            tokio::time::timeout(Duration::from_secs(5), task).await???;
+            let mut result = None;
+            while let Ok(event) = event_rx.try_recv() {
+                if let ServerEvent::ToolDone { name, output, .. } = event
+                    && name == "ask"
+                {
+                    result = Some(output);
+                }
+            }
+            if is_reload {
+                assert!(
+                    result.is_none(),
+                    "a recoverable ask must not appear completed: {result:?}"
+                );
+            } else {
+                let result = result.expect("cancelled ask result");
+                assert!(result.contains("cancelled by the user"), "{result}");
+                assert!(!result.contains("server reload"), "{result}");
+            }
+            let guard = agent.lock().await;
+            assert_eq!(
+                crate::server::client_session::session_was_interrupted_by_reload(&guard),
+                is_reload
+            );
+        }
+        Ok::<(), anyhow::Error>(())
+    })
 }
 
 /// Regression for issue #428: a turn actively streaming in this session but
@@ -604,6 +1202,8 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
 
         start_processing_message(
             ProcessingMessage {
+                attachment_data: None,
+                queued_client_id: None,
                 id: 42,
                 content: "do not start during reload".to_string(),
                 images: Vec::new(),
@@ -636,7 +1236,13 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
             .recv()
             .await
             .expect("reload event should be sent to client");
-        assert!(matches!(event, ServerEvent::Reloading { new_socket: None }));
+        assert!(matches!(
+            event,
+            ServerEvent::Reloading {
+                new_socket: None,
+                ..
+            }
+        ));
         assert!(
             client_event_rx.try_recv().is_err(),
             "reload guard should only emit the reload notification"
@@ -706,6 +1312,8 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
 
     start_processing_message(
         ProcessingMessage {
+            attachment_data: None,
+            queued_client_id: None,
             id: 479,
             content: "stream to every attachment".to_string(),
             images: Vec::new(),
@@ -931,6 +1539,8 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
     let other_connection = agent.lock().await.claim_server_turn().unwrap();
     start_processing_message(
         ProcessingMessage {
+            attachment_data: None,
+            queued_client_id: None,
             id: 1,
             content: "must not enter transcript".into(),
             images: Vec::new(),
@@ -958,6 +1568,8 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
     for (id, content) in [(1, "first turn"), (2, "acceptance back on laptop")] {
         request_tx
             .send(ProcessingMessage {
+                attachment_data: None,
+                queued_client_id: None,
                 id,
                 content: content.into(),
                 images: Vec::new(),
@@ -1235,6 +1847,8 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
 
         start_processing_message(
             ProcessingMessage {
+                attachment_data: None,
+                queued_client_id: None,
                 id: 77,
                 content: "continue after reload".to_string(),
                 images: Vec::new(),
@@ -1296,6 +1910,8 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
         // delivered_replay_is_reminder_only), so it is not a no-op.
         start_processing_message(
             ProcessingMessage {
+                attachment_data: None,
+                queued_client_id: None,
                 id: 78,
                 content: String::new(),
                 images: Vec::new(),
@@ -1360,6 +1976,8 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             }
             start_processing_message(
                 ProcessingMessage {
+                    attachment_data: None,
+                    queued_client_id: None,
                     id,
                     content: continuation.to_string(),
                     images: Vec::new(),
@@ -1454,6 +2072,8 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
 
             start_processing_message(
                 ProcessingMessage {
+                    attachment_data: None,
+                    queued_client_id: None,
                     id: message_id,
                     content: format!("do not start {session_id} during reload"),
                     images: Vec::new(),
@@ -1490,7 +2110,13 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
             .expect("reload guard should emit promptly for every session")
             .expect("reload event should be sent to client");
             assert!(
-                matches!(event, ServerEvent::Reloading { new_socket: None }),
+                matches!(
+                    event,
+                    ServerEvent::Reloading {
+                        new_socket: None,
+                        ..
+                    }
+                ),
                 "expected Reloading event for {session_id}, got {event:?}"
             );
             assert!(
@@ -1657,6 +2283,13 @@ fn soft_interrupt_dispatch_starts_idle_session_and_queues_busy_session() {
 #[path = "client_lifecycle_socket_tests.rs"]
 mod socket_workflows;
 
+#[cfg(unix)]
+#[path = "effort_oauth_socket_tests.rs"]
+mod effort_oauth_socket_tests;
+
+#[path = "ask_reload_socket_tests.rs"]
+mod ask_reload_socket_tests;
+
 #[path = "client_lifecycle_tests/system_prompt.rs"]
 mod system_prompt;
 
@@ -1760,3 +2393,6 @@ async fn streamed_text_is_coalesced_only_when_every_client_is_unfocused() {
         crate::stream_batching::forget_connection(&connection);
     }
 }
+
+#[path = "client_lifecycle_tests_additional_tests.rs"]
+mod additional_identity_transport_negotiation_preserves_legacy_payload_shape;

@@ -18,6 +18,27 @@ fn attach_test_image(app: &mut App) {
 }
 
 #[test]
+fn live_image_ids_update_echo_with_collapsed_paste() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.push_display_message(DisplayMessage::user("[pasted 50 lines] [image 1]"));
+    app.handle_server_event(
+        crate::protocol::ServerEvent::UserImageIds {
+            original_content: "expanded paste [image 1]".into(),
+            content: "expanded paste [#img_test]".into(),
+            image_ids: vec!["img_test".into()],
+        },
+        &mut remote,
+    );
+    assert_eq!(
+        app.display_messages()[0].content,
+        "[pasted 50 lines] [#img_test]"
+    );
+}
+
+#[test]
 fn submitted_image_previews_anchor_and_deduplicate_per_prompt() {
     use crate::session::{RenderedImageAnchor, RenderedImageSource};
     use crate::tui::TuiState;
@@ -88,12 +109,34 @@ fn test_image_attachment_backspace_detaches_payload_and_reports_status() {
         Some("Detached 1 image · 0 attached".to_string())
     );
     assert!(!crate::tui::TuiState::input_image_attached(&app, 1));
-    // Undoing the text cannot falsely claim that the released payload exists.
+    // Submitting without the marker sends no image.
+    let mut detached = create_test_app();
+    attach_test_image(&mut detached);
+    detached.set_input_for_test("no marker");
+    detached.sync_model_picker_preview_from_input();
+    let prepared = crate::tui::app::input::take_prepared_input(&mut detached);
+    assert!(prepared.images.is_empty());
+    // Undoing the text restores the marker together with its payload.
     app.undo_input_change();
     assert_eq!(app.input(), "[image 1]");
-    assert!(!crate::tui::TuiState::input_image_attached(&app, 1));
+    assert!(crate::tui::TuiState::input_image_attached(&app, 1));
     let prepared = crate::tui::app::input::take_prepared_input(&mut app);
-    assert!(prepared.images.is_empty());
+    assert_eq!(prepared.images.len(), 1);
+}
+
+#[test]
+fn test_escape_then_undo_keeps_pasted_image_attached() {
+    let mut app = create_test_app();
+    attach_test_image(&mut app);
+    app.handle_key(KeyCode::Esc, KeyModifiers::NONE).unwrap();
+    assert_eq!(app.input(), "");
+    assert!(!crate::tui::TuiState::input_image_attached(&app, 1));
+    app.undo_input_change();
+    assert_eq!(app.input(), "[image 1]");
+    assert!(crate::tui::TuiState::input_image_attached(&app, 1));
+    let prepared = crate::tui::app::input::take_prepared_input(&mut app);
+    assert_eq!(prepared.images.len(), 1);
+    assert!(app.detached_images.is_empty());
 }
 
 #[test]
@@ -115,10 +158,14 @@ fn test_image_placeholder_before_text_submits_as_user_turn_with_image() {
         matches!(submitted.content.first(), Some(ContentBlock::Image { .. })),
         "image block must be attached"
     );
+    let images = app.session.session_images();
+    assert_eq!(images.len(), 1);
+    assert_eq!(prompt, "[image 1] describe this");
+    let expected_prompt = format!("[#{}] describe this", images[0].image_id);
     assert!(matches!(
         submitted.content.last(),
-        Some(ContentBlock::Text { text, .. }) if text == &prompt
-    ));
+        Some(ContentBlock::Text { text, .. }) if text == &expected_prompt
+    ), "submitted content: {:?}", submitted.content);
 }
 
 #[test]

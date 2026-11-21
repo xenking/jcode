@@ -231,31 +231,10 @@ pub(super) fn dispatch_local_command(app: &mut App, trimmed: &str) -> bool {
 fn dispatch_command_sequence(
     app: &mut App,
     input: &str,
-    matches: &[super::slash_command_parser::SlashCommandMatch],
+    matches: &[super::slash_command_parser::Match],
 ) -> bool {
-    let prefix = input[..matches[0].start].trim();
     let mut handled = false;
-
-    for (index, command) in matches.iter().enumerate() {
-        let end = matches
-            .get(index + 1)
-            .map_or(input.len(), |next| next.start);
-        let args = input[command.name_end..end].trim();
-        let command_text = if index == 0 && !prefix.is_empty() {
-            if args.is_empty() {
-                format!("{} {}", &input[command.start..command.name_end], prefix)
-            } else {
-                format!(
-                    "{} {} {}",
-                    &input[command.start..command.name_end],
-                    prefix,
-                    args
-                )
-            }
-        } else {
-            input[command.start..end].trim().to_string()
-        };
-
+    for command_text in super::slash_command_parser::split_command_sequence(input, matches) {
         handled |= dispatch_single_local_command(app, &command_text);
     }
 
@@ -278,7 +257,8 @@ fn dispatch_single_local_command(app: &mut App, trimmed: &str) -> bool {
         }
         return false;
     }
-    super::commands::handle_cancel_command(app, trimmed)
+    app.handle_mode_command(trimmed)
+        || super::commands::handle_cancel_command(app, trimmed)
         || super::commands::handle_help_command(app, trimmed)
         || super::commands::handle_keys_command(app, trimmed)
         || super::commands::handle_ssh_command(app, trimmed)

@@ -9,10 +9,30 @@ use jcode_agent_runtime::{
 };
 use std::sync::Arc;
 
+fn frozen_snapshot_memory_profile(
+    locked_tools: Option<&[crate::message::ToolDefinition]>,
+    agents_md: Option<&String>,
+    skills: &[crate::prompt::SkillInfo],
+) -> serde_json::Value {
+    // Serialized schemas are an attribution proxy, not an allocation bound or
+    // capacity. The prompt strings report capacity without copying their text.
+    serde_json::json!({
+        "locked_tools_count": locked_tools.map_or(0, <[_]>::len),
+        "locked_tools_json_bytes": locked_tools
+            .map_or(0, |tools| crate::process_memory::estimate_json_bytes(&tools)),
+        "agents_md_snapshot_capacity_bytes": agents_md.map_or(0, String::capacity),
+        "prompt_skills_snapshot_count": skills.len(),
+        "prompt_skills_snapshot_capacity_bytes": skills.iter()
+            .map(|skill| skill.name.capacity().saturating_add(skill.description.capacity()))
+            .fold(0usize, usize::saturating_add),
+    })
+}
+
 fn soft_interrupt_session_display_role(source: SoftInterruptSource) -> Option<StoredDisplayRole> {
     match source {
         SoftInterruptSource::User => None,
         SoftInterruptSource::System => Some(StoredDisplayRole::System),
+        SoftInterruptSource::FileActivity => Some(StoredDisplayRole::FileActivity),
         SoftInterruptSource::BackgroundTask => Some(StoredDisplayRole::BackgroundTask),
     }
 }
@@ -22,6 +42,7 @@ fn soft_interrupt_protocol_display_role(source: SoftInterruptSource) -> Option<S
         SoftInterruptSource::User => None,
         SoftInterruptSource::System => Some("system".to_string()),
         SoftInterruptSource::BackgroundTask => Some("background_task".to_string()),
+        SoftInterruptSource::FileActivity => Some("file_activity".to_string()),
     }
 }
 
@@ -29,6 +50,7 @@ fn soft_interrupt_protocol_display_role(source: SoftInterruptSource) -> Option<S
 pub(super) struct InjectedSoftInterrupt {
     pub(super) content: String,
     pub(super) source: SoftInterruptSource,
+    image_ids_event: Option<ServerEvent>,
     /// Caller ids of the queued messages combined into this injection, in
     /// queue order. Messages queued without an id contribute nothing.
     pub(super) client_ids: Vec<String>,
@@ -53,7 +75,14 @@ pub(super) enum PostToolInterruptOutcome {
 
 impl Agent {
     pub fn restore_persisted_soft_interrupts(&self) -> usize {
-        let restored = match crate::soft_interrupt_store::take(self.session_id()) {
+        let Ok(mut queue) = self.soft_interrupt_queue.lock() else {
+            logging::warn(&format!(
+                "Failed to restore soft interrupts for {} because queue lock was poisoned",
+                self.session_id()
+            ));
+            return 0;
+        };
+        let restored = match crate::soft_interrupt_store::load(self.session_id()) {
             Ok(items) => items,
             Err(err) => {
                 logging::warn(&format!(
@@ -69,15 +98,44 @@ impl Agent {
             return 0;
         }
 
-        let restored_count = restored.len();
-        if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
-            queue.extend(restored);
-        } else {
-            logging::warn(&format!(
-                "Failed to restore persisted soft interrupts for {} because queue lock was poisoned",
-                self.session_id()
-            ));
-            return 0;
+        let receipts = self
+            .session
+            .messages
+            .iter()
+            .filter_map(|message| message.id.strip_prefix("queued:"))
+            .map(serde_json::from_str::<Vec<String>>)
+            .collect::<std::result::Result<Vec<_>, _>>();
+        let delivered: std::collections::HashSet<String> = match receipts {
+            Ok(receipts) => receipts.into_iter().flatten().collect(),
+            Err(error) => {
+                logging::warn(&format!(
+                    "Cannot restore queued prompts for {} with invalid delivery receipts: {error}",
+                    self.session_id()
+                ));
+                return 0;
+            }
+        };
+        let mut restored_count = 0;
+        {
+            for item in restored {
+                if item.client_id.as_ref().is_some_and(|id| {
+                    delivered.contains(id)
+                        || queue
+                            .iter()
+                            .any(|queued| queued.client_id.as_ref() == Some(id))
+                }) {
+                    continue;
+                }
+                queue.push(item);
+                restored_count += 1;
+            }
+            if let Err(err) = crate::soft_interrupt_store::overwrite(self.session_id(), &queue) {
+                logging::warn(&format!(
+                    "Failed to persist restored queue for {}: {}",
+                    self.session_id(),
+                    err
+                ));
+            }
         }
 
         logging::info(&format!(
@@ -90,7 +148,7 @@ impl Agent {
 
     pub fn persist_soft_interrupt_snapshot(&self) {
         let pending = match self.soft_interrupt_queue.lock() {
-            Ok(queue) => queue.clone(),
+            Ok(queue) => queue,
             Err(_) => {
                 logging::warn(&format!(
                     "Failed to snapshot soft interrupts for {} because queue lock was poisoned",
@@ -148,11 +206,16 @@ impl Agent {
         if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
             let pending_before = queue.len();
             queue.push(SoftInterruptMessage {
+                attachments: Vec::new(),
+                active_skill: None,
+                system_reminder: None,
                 content,
                 images,
                 urgent,
                 source,
+                mode: jcode_agent_runtime::QueuedMessageMode::Steer,
                 client_id,
+                editing_by: None,
             });
             logging::info(&format!(
                 "AGENT_SOFT_INTERRUPT_QUEUE_PUSH session={} source={:?} urgent={} content_bytes={} content_chars={} image_count={} pending_before={} pending_after={}",
@@ -165,6 +228,9 @@ impl Agent {
                 pending_before,
                 queue.len()
             ));
+            drop(queue);
+            crate::incoming_message::bind(self.session_id(), &self.soft_interrupt_queue);
+            crate::incoming_message::notify_if_user(self.session_id(), source);
         } else {
             logging::warn(&format!(
                 "AGENT_SOFT_INTERRUPT_QUEUE_PUSH_FAILED session={} source={:?} urgent={} content_bytes={} content_chars={} image_count={} reason=queue_lock_poisoned",
@@ -206,7 +272,10 @@ impl Agent {
     pub fn has_soft_interrupts(&self) -> bool {
         self.soft_interrupt_queue
             .lock()
-            .map(|q| !q.is_empty())
+            .map(|q| {
+                q.iter()
+                    .any(|message| message.mode == jcode_agent_runtime::QueuedMessageMode::Steer)
+            })
             .unwrap_or(false)
     }
 
@@ -214,7 +283,10 @@ impl Agent {
     pub fn has_urgent_interrupt(&self) -> bool {
         self.soft_interrupt_queue
             .lock()
-            .map(|q| q.iter().any(|m| m.urgent))
+            .map(|q| {
+                q.iter()
+                    .any(|m| m.mode == jcode_agent_runtime::QueuedMessageMode::Steer && m.urgent)
+            })
             .unwrap_or(false)
     }
 
@@ -307,6 +379,11 @@ impl Agent {
                 "pending_alert_text_bytes": pending_alert_text_bytes,
             },
             "agent": {
+                "frozen_snapshots": frozen_snapshot_memory_profile(
+                    self.locked_tools.as_deref(),
+                    self.agents_md_snapshot.0.as_ref(),
+                    &self.prompt_skills_snapshot,
+                ),
                 "memory_enabled": self.memory_enabled,
                 "allowed_tools_count": self.allowed_tools.as_ref().map(|tools| tools.len()),
                 "disabled_tools_count": self.disabled_tools.len(),
@@ -360,17 +437,22 @@ impl Agent {
             }
             return Vec::new();
         }
+        let queue_handle = self.soft_interrupt_queue.clone();
+        let mut queue = match queue_handle.lock() {
+            Ok(queue) => queue,
+            Err(_) => {
+                logging::warn(&format!(
+                    "AGENT_SOFT_INTERRUPT_INJECT_LOCK_FAILED session={}",
+                    self.session_id()
+                ));
+                return Vec::new();
+            }
+        };
+        let previous_queue = queue.clone();
+        let initial_message_count = self.session.messages.len();
+        let initial_active_skill = self.active_skill.clone();
+        let initial_pinned_skills = self.session.pinned_skill_names().to_vec();
         let messages: Vec<SoftInterruptMessage> = {
-            let mut queue = match self.soft_interrupt_queue.lock() {
-                Ok(queue) => queue,
-                Err(_) => {
-                    logging::warn(&format!(
-                        "AGENT_SOFT_INTERRUPT_INJECT_LOCK_FAILED session={}",
-                        self.session_id()
-                    ));
-                    return Vec::new();
-                }
-            };
             if queue.is_empty() {
                 return Vec::new();
             }
@@ -384,7 +466,18 @@ impl Agent {
                     .map(|message| message.content.len())
                     .sum::<usize>()
             ));
-            queue.drain(..).collect()
+            let (steering, waiting): (Vec<_>, Vec<_>) = queue.drain(..).partition(|message| {
+                // A prompt held open for editing stays queued: delivering it
+                // while the client still edits it would send both versions.
+                message.editing_by.is_none()
+                    && message.mode == jcode_agent_runtime::QueuedMessageMode::Steer
+                    && message
+                        .active_skill
+                        .as_ref()
+                        .is_none_or(|name| self.current_skills_snapshot().get(name).is_some())
+            });
+            *queue = waiting;
+            steering
         };
 
         let mut injected = Vec::new();
@@ -420,18 +513,106 @@ impl Agent {
                 blocks,
                 soft_interrupt_session_display_role(source),
             );
+            if !ids.is_empty() {
+                agent.session.rename_last_message(format!(
+                    "queued:{}",
+                    serde_json::Value::Array(
+                        ids.iter().cloned().map(serde_json::Value::String).collect()
+                    )
+                ));
+            }
+            let image_ids_event =
+                agent.user_image_ids_event(agent.session.messages.len() - 1, &content);
             injected.push(InjectedSoftInterrupt {
                 content,
                 source,
+                image_ids_event,
                 client_ids: std::mem::take(ids),
             });
         };
 
         for message in messages {
+            let has_skill = message.active_skill.is_some();
+            if let Some(skill) = message.active_skill.clone() {
+                if let Some(source) = current_source.take() {
+                    flush_group(
+                        self,
+                        &mut injected,
+                        source,
+                        &mut current_parts,
+                        &mut current_images,
+                        &mut current_ids,
+                    );
+                }
+                let previous_skill = self.active_skill.clone();
+                if !self.set_queued_active_skill(Some(skill)) {
+                    self.active_skill = previous_skill;
+                    queue.push(message);
+                    continue;
+                }
+            }
+            if !message.attachments.is_empty() {
+                if let Some(source) = current_source.take() {
+                    flush_group(
+                        self,
+                        &mut injected,
+                        source,
+                        &mut current_parts,
+                        &mut current_images,
+                        &mut current_ids,
+                    );
+                }
+                let prepared = crate::session::session_path(self.session_id()).and_then(|path| {
+                    crate::server::attachment::prepare(
+                        &path.with_extension("attachments"),
+                        message.attachments.clone(),
+                    )
+                });
+                let prepared = match prepared {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        logging::warn(&format!("Failed to prepare queued attachment: {error:#}"));
+                        queue.push(message);
+                        continue;
+                    }
+                };
+                let display_content = message.content.clone();
+                let mut content = message.content;
+                content.push_str(&prepared.text);
+                current_parts.push(content);
+                current_images.extend(message.images);
+                current_images.extend(prepared.images);
+                current_ids.extend(message.client_id);
+                flush_group(
+                    self,
+                    &mut injected,
+                    message.source,
+                    &mut current_parts,
+                    &mut current_images,
+                    &mut current_ids,
+                );
+                if !prepared.items.is_empty() {
+                    self.session.set_last_message_attachments(
+                        jcode_session_types::MessageAttachments {
+                            display_content: display_content.clone(),
+                            items: prepared.items,
+                        },
+                    );
+                }
+                if let Some(event) = injected.last_mut() {
+                    event.content = display_content;
+                }
+                continue;
+            }
             // User follow-ups may share a model message. Notifications must
             // retain their own delivery events and transcript entries.
             match current_source {
-                Some(source) if source != message.source || source != SoftInterruptSource::User => {
+                Some(source)
+                    if source != message.source
+                        || source != SoftInterruptSource::User
+                        || !current_images.is_empty()
+                        || (!message.images.is_empty() && !current_parts.is_empty()) =>
+                {
                     flush_group(
                         self,
                         &mut injected,
@@ -448,6 +629,17 @@ impl Agent {
             current_parts.push(message.content);
             current_images.extend(message.images);
             current_ids.extend(message.client_id);
+            if has_skill {
+                flush_group(
+                    self,
+                    &mut injected,
+                    message.source,
+                    &mut current_parts,
+                    &mut current_images,
+                    &mut current_ids,
+                );
+                current_source = None;
+            }
         }
 
         if let Some(source) = current_source {
@@ -461,7 +653,26 @@ impl Agent {
             );
         }
 
-        self.persist_session_best_effort("soft interrupt injection");
+        if let Err(err) = self.session.save() {
+            self.session.truncate_messages(initial_message_count);
+            self.active_skill = initial_active_skill;
+            self.session.set_pinned_skill_names(initial_pinned_skills);
+            *queue = previous_queue;
+            logging::warn(&format!(
+                "Failed to persist soft interrupt injection for {}: {}",
+                self.session_id(),
+                err
+            ));
+            return Vec::new();
+        }
+        if let Err(err) = crate::soft_interrupt_store::overwrite(self.session_id(), &queue) {
+            logging::warn(&format!(
+                "Failed to persist delivered queue for {}: {}",
+                self.session_id(),
+                err
+            ));
+        }
+        drop(queue);
         logging::info(&format!(
             "AGENT_SOFT_INTERRUPT_INJECT_COMMIT session={} groups={} total_content_bytes={}",
             self.session_id(),
@@ -526,13 +737,72 @@ impl Agent {
         injected
             .into_iter()
             .enumerate()
-            .map(|(idx, interrupt)| ServerEvent::SoftInterruptInjected {
-                content: interrupt.content,
-                display_role: soft_interrupt_protocol_display_role(interrupt.source),
-                point: point.to_string(),
-                tools_skipped: if idx == 0 { tools_skipped } else { None },
-                client_ids: interrupt.client_ids,
+            .flat_map(|(idx, interrupt)| {
+                let delivery = ServerEvent::SoftInterruptInjected {
+                    content: interrupt.content,
+                    display_role: soft_interrupt_protocol_display_role(interrupt.source),
+                    point: point.to_string(),
+                    tools_skipped: if idx == 0 { tools_skipped } else { None },
+                    client_ids: interrupt.client_ids,
+                };
+                std::iter::once(delivery).chain(interrupt.image_ids_event)
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod frozen_snapshot_memory_tests {
+    use super::frozen_snapshot_memory_profile;
+
+    #[test]
+    fn frozen_snapshot_memory_counts_schema_json_without_disclosing_schema() {
+        let tools = [crate::message::ToolDefinition::new(
+            "private-tool",
+            "private-description",
+            serde_json::json!({"type": "object", "properties": {"private-key": {"type": "string"}}}),
+        )];
+        let profile = frozen_snapshot_memory_profile(Some(&tools), None, &[]);
+        assert_eq!(profile["locked_tools_count"], 1);
+        assert_eq!(
+            profile["locked_tools_json_bytes"],
+            serde_json::to_vec(&tools).unwrap().len()
+        );
+        assert!(!profile.to_string().contains("private-"));
+    }
+
+    #[test]
+    fn frozen_snapshot_memory_empty_and_absent_values() {
+        let absent = frozen_snapshot_memory_profile(None, None, &[]);
+        assert_eq!(absent["locked_tools_count"], 0);
+        assert_eq!(absent["locked_tools_json_bytes"], 0);
+        assert_eq!(absent["agents_md_snapshot_capacity_bytes"], 0);
+        assert_eq!(absent["prompt_skills_snapshot_count"], 0);
+        assert_eq!(absent["prompt_skills_snapshot_capacity_bytes"], 0);
+        let empty = frozen_snapshot_memory_profile(Some(&[]), None, &[]);
+        assert_eq!(empty["locked_tools_json_bytes"], 2);
+    }
+
+    #[test]
+    fn frozen_snapshot_memory_counts_capacities_without_disclosing_content() {
+        let mut agents_md = String::with_capacity(512);
+        agents_md.push_str("private-project-instructions");
+        let mut name = String::with_capacity(128);
+        name.push_str("private-skill-name");
+        let mut description = String::with_capacity(256);
+        description.push_str("private-skill-description");
+        let expected_capacity = name.capacity() + description.capacity();
+        let skills = [crate::prompt::SkillInfo { name, description }];
+        let profile = frozen_snapshot_memory_profile(None, Some(&agents_md), &skills);
+        assert_eq!(
+            profile["agents_md_snapshot_capacity_bytes"],
+            agents_md.capacity()
+        );
+        assert_eq!(
+            profile["prompt_skills_snapshot_capacity_bytes"],
+            expected_capacity
+        );
+        assert_eq!(profile["prompt_skills_snapshot_count"], 1);
+        assert!(!profile.to_string().contains("private-"));
     }
 }

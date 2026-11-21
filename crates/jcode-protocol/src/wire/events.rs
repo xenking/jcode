@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// Self-reported process image and exec generation, never a channel selection.
+pub type DaemonIdentity = jcode_selfdev_types::ServingIdentity;
+
 /// A provider-reported account limit beyond the two legacy quota slots.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccountUsageWindow {
@@ -27,6 +30,11 @@ pub struct AccountUsageSnapshot {
     /// Banked usage resets claimable now. `None` when unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub banked_resets: Option<u64>,
+    /// Currently usable saved resets, distinct from the total.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banked_usable: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banked_cached_source: Option<String>,
     /// RFC3339 expiry of the soonest-expiring banked reset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub banked_expires_at: Option<String>,
@@ -63,6 +71,8 @@ mod account_usage_tests {
             resets_at: None,
             error: None,
             banked_resets: None,
+            banked_usable: None,
+            banked_cached_source: None,
             banked_expires_at: None,
             banked_next_at: None,
         };
@@ -147,6 +157,12 @@ pub enum ServerEvent {
         data: serde_json::Value,
         message: String,
     },
+    #[serde(rename = "background_tasks")]
+    BackgroundTasks {
+        id: u64,
+        #[serde(flatten)]
+        snapshot: jcode_background_types::BackgroundTasksSnapshot,
+    },
     #[serde(rename = "tools")]
     Tools {
         id: u64,
@@ -166,6 +182,17 @@ pub enum ServerEvent {
         session_id: String,
         reason: String,
         notification: String,
+    },
+
+    /// Another session asked the user-facing client attached to this session to
+    /// raise it (select the tab, bring the window forward). Best effort.
+    #[serde(rename = "focus_requested")]
+    FocusRequested {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_session: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_name: Option<String>,
     },
 
     /// Acknowledgment of request
@@ -286,6 +313,38 @@ pub enum ServerEvent {
         effective_budget: Option<usize>,
     },
 
+    /// Final counters for one completed provider request, not a stream snapshot.
+    #[serde(rename = "request_usage")]
+    RequestUsage {
+        session_id: String,
+        request_id: String,
+        provider: String,
+        model: String,
+        input: Option<u64>,
+        output: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_read_input: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_creation_input: Option<u64>,
+    },
+
+    /// Prompt occupancy of the session's active context, replayed when a client
+    /// attaches so a resumed client can paint its context meter before the next
+    /// provider call reports usage.
+    ///
+    /// This is a persisted snapshot of a completed request, not a completed
+    /// call of the current turn: it must never contribute to turn stats, cost,
+    /// or the live activity projection.
+    ///
+    /// It names its session because it follows the attach history directly,
+    /// before a bridging client has learned which session the connection is
+    /// bound to from the correlated state reply.
+    #[serde(rename = "context_occupancy")]
+    ContextOccupancy {
+        session_id: String,
+        prompt_tokens: u64,
+    },
+
     /// Prompt-shape signature for the API request that will later report token
     /// usage. Remote clients use this to diagnose KV-cache misses.
     #[serde(rename = "kv_cache_request")]
@@ -319,7 +378,9 @@ pub enum ServerEvent {
         reason: String,
         /// True when the harness itself changed the cached prefix.
         harness_caused: bool,
+        /// Diagnostic shortfall, or current uncached input on a provider switch.
         missed_tokens: u64,
+        /// Prior reusable input, or current input on a provider switch.
         expected_tokens: u64,
         read_tokens: u64,
         /// Documented intentional invalidation that explains the miss.
@@ -336,6 +397,19 @@ pub enum ServerEvent {
     /// Connection phase update (authenticating, connecting, waiting, etc.)
     #[serde(rename = "connection_phase")]
     ConnectionPhase { phase: String },
+
+    /// A provider quota decision, with unknown fields explicitly reported as such.
+    #[serde(rename = "usage_limit")]
+    UsageLimit {
+        provider: String,
+        model: String,
+        account: Option<String>,
+        window: String,
+        reset: String,
+        action: String,
+        target: Option<String>,
+        message: String,
+    },
 
     /// Provider-supplied human-readable transport detail for the current stream.
     #[serde(rename = "status_detail")]
@@ -402,6 +476,33 @@ pub enum ServerEvent {
         items: Vec<PlanItem>,
         summary: String,
         proposal_key: String,
+    },
+
+    /// Rejection before a queued prompt is persisted.
+    #[serde(rename = "queued_prompt_rejected")]
+    QueuedPromptRejected {
+        id: u64,
+        reason: QueuedPromptRejection,
+        skill: String,
+    },
+
+    /// Snapshot of user-authored prompts still owned by the session queue.
+    #[serde(rename = "queued_prompts")]
+    QueuedPrompts { id: u64, prompts: Vec<QueuedPrompt> },
+
+    #[serde(rename = "queued_prompt_removed")]
+    QueuedPromptRemoved {
+        id: u64,
+        prompt_id: String,
+        outcome: QueuedPromptRemovalOutcome,
+    },
+
+    /// A queued prompt's content was replaced in place.
+    #[serde(rename = "queued_prompt_edited")]
+    QueuedPromptEdited {
+        id: u64,
+        prompt_id: String,
+        outcome: QueuedPromptEditOutcome,
     },
 
     /// Soft interrupt message was injected at a safe point
@@ -483,6 +584,14 @@ pub enum ServerEvent {
         message: String,
     },
 
+    /// The provider stopped a request, but jcode is retrying within the same turn.
+    #[serde(rename = "provider_guardrail_retry")]
+    ProviderGuardrailRetry {
+        turn_id: String,
+        attempt: u32,
+        max_attempts: u32,
+    },
+
     /// Relevant memory was injected into the conversation
     #[serde(rename = "memory_injected")]
     MemoryInjected {
@@ -511,6 +620,10 @@ pub enum ServerEvent {
     Compaction {
         /// What triggered it: "background", "hard_compact", "auto_recovery"
         trigger: String,
+        /// What replaced the folded history: `summary`, `snapcompact`, `native`,
+        /// or `drop` (emergency hard compaction). Absent from older daemons.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        method: Option<String>,
         /// Token count before compaction
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pre_tokens: Option<u64>,
@@ -535,6 +648,27 @@ pub enum ServerEvent {
         /// Count of recent messages still kept verbatim after compaction
         #[serde(default, skip_serializing_if = "Option::is_none")]
         active_messages: Option<usize>,
+        /// Ready-to-render transcript divider body (`label`, blank line, detail).
+        ///
+        /// Formatted by the daemon so every client, including the harness bridge
+        /// that has no application foundation linked in, draws the exact same
+        /// row as the one stored in history. Absent from older daemons.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        divider: Option<String>,
+    },
+
+    /// Background compaction started summarizing.
+    ///
+    /// Carries no result: clients render a running divider from it and replace
+    /// it when the matching [`Self::Compaction`] arrives.
+    #[serde(rename = "compaction_started")]
+    CompactionStarted {
+        /// Compaction trigger label, e.g. `reactive` or `idle_precompact`
+        #[serde(default)]
+        trigger: String,
+        /// Estimated context tokens when the summary started
+        #[serde(default)]
+        pre_tokens: u64,
     },
 
     /// Message/turn completed
@@ -552,6 +686,14 @@ pub enum ServerEvent {
     /// prompt (or the auto-poke notice) instead of only the sender seeing it.
     #[serde(rename = "peer_user_message")]
     PeerUserMessage { content: String },
+
+    /// Replace provisional attachment markers once the message is durable.
+    #[serde(rename = "user_image_ids")]
+    UserImageIds {
+        original_content: String,
+        content: String,
+        image_ids: Vec<String>,
+    },
 
     /// Error occurred
     #[serde(rename = "error")]
@@ -575,6 +717,9 @@ pub enum ServerEvent {
         /// Authoritative connected non-headless users. None on older daemons.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         user_connected_session_ids: Option<Vec<String>>,
+        /// Absent on older daemons and on streaming keepalives.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        daemon_identity: Option<DaemonIdentity>,
     },
 
     /// Current state (debug)
@@ -724,6 +869,10 @@ pub enum ServerEvent {
         /// Session-scoped preferred model for subagents.
         #[serde(skip_serializing_if = "Option::is_none")]
         subagent_model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pinned_skill: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pinned_skills: Option<Vec<String>>,
         #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
         agent_model_overrides: std::collections::BTreeMap<String, String>,
         /// Session-scoped automatic review toggle.
@@ -744,6 +893,42 @@ pub enum ServerEvent {
         /// Session-scoped agent applet instances.
         #[serde(default, skip_serializing_if = "applets_is_empty")]
         applets: jcode_applet_types::AgentApplets,
+    },
+
+    #[serde(rename = "history_page")]
+    HistoryPage {
+        id: u64,
+        session_id: String,
+        fragments: Vec<serde_json::Value>,
+        before: Option<String>,
+    },
+
+    #[serde(rename = "history_image_chunk")]
+    HistoryImageChunk {
+        id: u64,
+        session_id: String,
+        key: String,
+        offset: usize,
+        total: usize,
+        data: String,
+    },
+
+    #[serde(rename = "session_images")]
+    SessionImages {
+        id: u64,
+        session_id: String,
+        images: Vec<serde_json::Value>,
+    },
+
+    #[serde(rename = "session_image")]
+    SessionImage {
+        id: u64,
+        session_id: String,
+        image_id: String,
+        media_type: String,
+        offset: usize,
+        total: usize,
+        data: String,
     },
 
     /// Expanded compacted-history window (response to GetCompactedHistory).
@@ -778,6 +963,9 @@ pub enum ServerEvent {
         /// New socket path to connect to (if different)
         #[serde(skip_serializing_if = "Option::is_none")]
         new_socket: Option<String>,
+        /// Correlates reconnect to the listener that completed this handoff.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reload_id: Option<String>,
     },
 
     /// Progress update during server reload
@@ -1091,6 +1279,39 @@ pub enum ServerEvent {
         request_id: String,
         questions: Vec<AskQuestion>,
         tool_call_id: String,
+    },
+
+    /// A swarm worker without an interactive client called `ask`. The question
+    /// is parked on the worker and forwarded to the swarm root coordinator,
+    /// which answers with `Request::CommAnswerEscalatedAsk` (or re-asks a human
+    /// with its own `ask`). This event is the structured form consumed by
+    /// clients and seats; the coordinator's model also receives it as a
+    /// wake-delivered notification.
+    #[serde(rename = "ask_escalated")]
+    AskEscalated {
+        /// Escalation id; pass it back to disambiguate concurrent asks.
+        request_id: String,
+        /// Worker that asked.
+        worker_session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_name: Option<String>,
+        /// Todo lane / task label the worker is running, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lane: Option<String>,
+        questions: Vec<AskQuestion>,
+        /// Seconds before the escalation auto-resolves with the recommended
+        /// options.
+        timeout_secs: u64,
+    },
+
+    /// A parked escalated `ask` was answered, declined, withdrawn, or timed
+    /// out. Clients can clear the escalation card on this event.
+    #[serde(rename = "ask_escalation_closed")]
+    AskEscalationClosed {
+        request_id: String,
+        worker_session_id: String,
+        /// "answered", "withdrawn" (worker stopped/cancelled), or "timed_out".
+        reason: String,
     },
 
     /// A running command is waiting for stdin input from the user

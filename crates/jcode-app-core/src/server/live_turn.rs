@@ -70,8 +70,7 @@ pub(super) async fn idle_live_agent(
     sessions: &SessionAgents,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) -> Option<OwnedMutexGuard<Agent>> {
-    let agent =
-        super::worker_revive::live_or_revived_agent(session_id, sessions, swarm_members).await?;
+    let agent = super::worker_revive::live_or_revived_agent(session_id, sessions).await?;
 
     // Headless workers never have a client attachment by design, and members
     // restored from disk after a server restart carry a closed placeholder
@@ -87,11 +86,10 @@ pub(super) async fn idle_live_agent(
             })
             .unwrap_or(false)
     };
-    if !can_drive {
+    let agent = agent.try_lock_owned().ok()?;
+    if !can_drive && !agent.restored_from_idle_unload {
         return None;
     }
-
-    let agent = agent.try_lock_owned().ok()?;
     // A session that moved to another machine (or a stale copy) cannot run
     // turns here. Starting one only produces a lease error per wake, so leave
     // the wake queued for whichever copy is runnable.
@@ -99,6 +97,15 @@ pub(super) async fn idle_live_agent(
         return None;
     }
     Some(agent)
+}
+
+/// Content and presentation metadata for a server-initiated turn.
+pub(super) struct LiveTurnInput {
+    pub message: String,
+    pub images: Vec<(String, String)>,
+    pub system_reminder: Option<String>,
+    pub display_role: Option<crate::session::StoredDisplayRole>,
+    pub status_detail: Option<String>,
 }
 
 /// Spawn `message` as a full tracked turn in a live session.
@@ -110,13 +117,42 @@ pub(super) async fn idle_live_agent(
 /// finish rendering the externally started turn.
 pub(super) async fn spawn_tracked_live_turn(
     session_id: &str,
-    mut agent: OwnedMutexGuard<Agent>,
+    agent: OwnedMutexGuard<Agent>,
     message: String,
     system_reminder: Option<String>,
     display_role: Option<crate::session::StoredDisplayRole>,
     status_detail: Option<String>,
     swarm: LiveTurnSwarmContext,
 ) -> bool {
+    spawn_tracked_live_turn_with_images(
+        session_id,
+        agent,
+        LiveTurnInput {
+            message,
+            images: Vec::new(),
+            system_reminder,
+            display_role,
+            status_detail,
+        },
+        swarm,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn spawn_tracked_live_turn_with_images(
+    session_id: &str,
+    mut agent: OwnedMutexGuard<Agent>,
+    input: LiveTurnInput,
+    swarm: LiveTurnSwarmContext,
+) -> bool {
+    let LiveTurnInput {
+        message,
+        images,
+        system_reminder,
+        display_role,
+        status_detail,
+    } = input;
     let Ok(_admission) = crate::runtime_activity::global().try_enter_session(session_id) else {
         return false;
     };
@@ -153,10 +189,24 @@ pub(super) async fn spawn_tracked_live_turn(
     );
     let event_tx = events.sender();
     let session_id = session_id.to_string();
+    let (force_handle, force_registration) = futures::future::AbortHandle::new_pair();
+    let force_guard = crate::turn_cancel_registry::register_force_stop(&session_id, force_handle);
     crate::runtime_activity::spawn_session(&session_id.clone(), async move {
+        let _force_guard = force_guard;
         let start_message_index = agent.message_count();
         let pending_queue = agent.soft_interrupt_queue();
-        let (result, stop_reason) = catch_live_turn_panic(async {
+        let outcome = futures::future::Abortable::new(catch_live_turn_panic(async {
+            if !images.is_empty() {
+                return super::turn_failover::process_reserved_locked_message_with_server_failover(
+                    &mut agent,
+                    &turn_lease,
+                    &message,
+                    images,
+                    system_reminder,
+                    event_tx.clone(),
+                )
+                .await;
+            }
             process_reserved_locked_context_with_server_failover(
                 &mut agent,
                 &turn_lease,
@@ -166,8 +216,27 @@ pub(super) async fn spawn_tracked_live_turn(
                 event_tx.clone(),
             )
             .await
-        })
-        .await;
+        }), force_registration).await;
+        let (result, stop_reason) = match outcome {
+            Ok(result) => result,
+            Err(_) => {
+                for (id, name) in agent.repair_force_stopped_tools(start_message_index) {
+                    let _ = event_tx.send(ServerEvent::ToolDone {
+                        id,
+                        name,
+                        output: "[Tool stopped by user]".into(),
+                        error: Some("stopped by user".into()),
+                    });
+                }
+                let _ = event_tx.send(ServerEvent::TurnStopped {
+                    reason: crate::protocol::TurnStopReason::Interrupted,
+                    message: "Turn force stopped by user".into(),
+                    provider_stop_reason: None,
+                });
+                let _ = event_tx.send(ServerEvent::Interrupted);
+                (Ok(()), crate::protocol::TurnStopReason::Interrupted)
+            }
+        };
         let completion_report = agent.recent_assistant_output_tail_after(start_message_index);
         // Keep the reservation until after the terminal status is published.
         // Releasing it earlier lets a follow-up wake reserve the agent and

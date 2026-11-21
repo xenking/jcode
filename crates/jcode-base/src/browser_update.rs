@@ -8,8 +8,9 @@
 //! browser's extension reconnects (after ~1.5s) to the new host, and a
 //! reload is requested so unpacked Chromium extensions load the new files.
 //!
-//! Set `JCODE_BROWSER_AUTO_UPDATE=0` to turn the automatic check off; explicit
-//! `jcode browser setup` still updates.
+//! The automatic check is off by default. Enable it with
+//! `[companion] browser_updates = true` or `JCODE_BROWSER_AUTO_UPDATE=1`;
+//! explicit `jcode browser setup` always updates.
 
 use super::*;
 
@@ -91,11 +92,14 @@ fn last_check_time() -> Option<std::time::SystemTime> {
         .ok()
 }
 
-fn auto_update_disabled() -> bool {
-    matches!(
-        std::env::var("JCODE_BROWSER_AUTO_UPDATE").as_deref(),
-        Ok("0") | Ok("false") | Ok("off") | Ok("no")
-    )
+/// Opt-in: `[companion] browser_updates = true`, overridable either way by
+/// `JCODE_BROWSER_AUTO_UPDATE` (1/true/on/yes vs 0/false/off/no).
+pub(super) fn auto_update_disabled() -> bool {
+    match std::env::var("JCODE_BROWSER_AUTO_UPDATE").as_deref() {
+        Ok("0" | "false" | "off" | "no") => true,
+        Ok("1" | "true" | "on" | "yes") => false,
+        _ => !crate::config::config().companion.browser_updates,
+    }
 }
 
 /// Fetch the latest bridge release JSON.

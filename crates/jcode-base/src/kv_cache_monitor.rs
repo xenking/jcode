@@ -12,10 +12,17 @@
 //!    the stream completes. Returns a [`KvCacheMiss`] when a meaningful part of
 //!    the previously cached prefix was not read back.
 
-use std::time::{Duration, Instant};
+use jcode_provider_core::fingerprint::CanonicalInput;
+use std::time::{Duration, Instant, SystemTime};
 
 /// Misses smaller than this are noise (provider cache block granularity).
 pub const MIN_MISSED_TOKENS: u64 = 1_024;
+
+/// How much smaller a request may be than the baseline before the difference
+/// stops being rounding noise. A request that carries fewer tokens than the
+/// previous one cannot read the missing tokens back, so the shortfall is not
+/// evidence of cache loss.
+pub const SHRINK_NOISE_TOKENS: u64 = 1_024;
 
 /// OpenAI reports cache reads in 128-token blocks and routinely leaves the
 /// last ~1024 tokens of the previous request uncached, so a byte-identical
@@ -59,7 +66,7 @@ pub fn utc_day_of(time: std::time::SystemTime) -> i64 {
 }
 
 /// Prompt-shape signature for one provider request.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RequestSignature {
     pub system_static_hash: u64,
     pub tools_hash: u64,
@@ -98,7 +105,7 @@ impl RequestSignature {
 }
 
 /// Provider identity and cache retention for one request.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RequestRoute {
     pub provider: String,
     pub model: String,
@@ -111,6 +118,9 @@ pub struct RequestRoute {
     pub cache_ttl_secs: Option<u64>,
     /// Whether `cache_ttl_secs` is only an estimate (never treat as hard expiry).
     pub ttl_is_estimate: bool,
+    /// Reasoning effort the request was sent with, when the provider has one.
+    /// Some providers key their prompt cache on it.
+    pub reasoning_effort: Option<String>,
 }
 
 /// Why a request missed the cache.
@@ -120,11 +130,14 @@ pub enum MissReason {
     AccountSwitch,
     ModelSwitch,
     UpstreamSwitch,
+    EffortChange,
     Expired,
     DailyRollover,
     SystemChanged,
     ToolsChanged,
     PrefixChanged,
+    RequestOptionsChanged,
+    ProviderCachePartial,
     Compaction,
     ZeroRead,
     LowRead,
@@ -138,11 +151,14 @@ impl MissReason {
             Self::AccountSwitch => "account_switch",
             Self::ModelSwitch => "model_switch",
             Self::UpstreamSwitch => "upstream_switch",
+            Self::EffortChange => "effort_change",
             Self::Expired => "expired",
             Self::DailyRollover => "daily_rollover",
             Self::SystemChanged => "system_changed",
             Self::ToolsChanged => "tools_changed",
             Self::PrefixChanged => "prefix_changed",
+            Self::RequestOptionsChanged => "request_options_changed",
+            Self::ProviderCachePartial => "provider_cache_partial",
             Self::Compaction => "compaction",
             Self::ZeroRead => "zero_read",
             Self::LowRead => "low_read",
@@ -156,6 +172,7 @@ impl MissReason {
             Self::AccountSwitch => "account changed; prompt caches are per account",
             Self::ModelSwitch => "model changed",
             Self::UpstreamSwitch => "upstream provider changed",
+            Self::EffortChange => "reasoning effort changed",
             Self::Expired => "cache expired",
             Self::DailyRollover => {
                 "provider resets its prompt cache at 00:00 UTC; not avoidable by the harness"
@@ -163,6 +180,10 @@ impl MissReason {
             Self::SystemChanged => "system prompt changed mid-session",
             Self::ToolsChanged => "tool set changed mid-session",
             Self::PrefixChanged => "an earlier message was modified",
+            Self::RequestOptionsChanged => "provider request options changed",
+            Self::ProviderCachePartial => {
+                "provider reported partial cache on an unchanged continuation"
+            }
             Self::Compaction => "provider automatically compacted the context",
             Self::ZeroRead => "provider reported no cache read",
             Self::LowRead => "provider read only part of the cache",
@@ -174,7 +195,10 @@ impl MissReason {
     pub fn harness_caused(self) -> bool {
         matches!(
             self,
-            Self::SystemChanged | Self::ToolsChanged | Self::PrefixChanged
+            Self::SystemChanged
+                | Self::ToolsChanged
+                | Self::PrefixChanged
+                | Self::RequestOptionsChanged
         )
     }
 }
@@ -186,12 +210,14 @@ pub struct KvCacheMiss {
     /// Checked system, tool and prior-message fingerprints are unchanged.
     /// This is evidence about the prefix, not proof of a provider-side cause.
     pub prefix_unchanged: bool,
-    /// Tokens expected to be served from cache (previous reusable boundary).
+    /// First changed Responses input item outside the stable history.
+    pub wire_suffix_change: Option<usize>,
+    /// Prior reusable boundary, or the new provider's own input on a switch.
     pub expected_tokens: u64,
     /// Tokens the provider reported as read from cache.
     pub read_tokens: u64,
-    /// Estimated shortfall against the previous reusable prefix. A compaction
-    /// changes that prefix, so this is not measured resent or avoidable input.
+    /// Estimated shortfall against the previous boundary, or measured uncached
+    /// input on a provider switch. Neither measures avoidable input or wire bytes.
     pub missed_tokens: u64,
     /// Documented intentional invalidation that explains a harness-caused miss.
     pub documented_cause: Option<String>,
@@ -210,7 +236,9 @@ impl KvCacheMiss {
             );
         }
         let tokens = format_token_count(self.missed_tokens);
-        let prefix_tag = if self.prefix_unchanged {
+        let prefix_tag = if self.wire_suffix_change.is_some() {
+            " [wire suffix changed]"
+        } else if self.prefix_unchanged {
             " [prefix unchanged]"
         } else {
             ""
@@ -228,10 +256,21 @@ impl KvCacheMiss {
                 "KV cache miss [{}]: ~{tokens} tokens resent ({detail}). This is likely a harness bug.",
                 self.reason.id()
             ),
-            (None, false) => format!(
-                "KV cache miss [{}]{prefix_tag}: ~{tokens} tokens resent ({detail}).",
-                self.reason.id()
-            ),
+            (None, false) => match self.reason {
+                MissReason::ProviderSwitch => format!(
+                    "KV cache miss [provider_switch]: ~{tokens} tokens uncached on the new provider ({detail})."
+                ),
+                MissReason::LowRead | MissReason::ZeroRead | MissReason::ProviderCachePartial => {
+                    format!(
+                        "KV cache miss [{}]{prefix_tag}: ~{tokens} tokens below prior cache baseline ({detail}).",
+                        self.reason.id()
+                    )
+                }
+                _ => format!(
+                    "KV cache miss [{}]: ~{tokens} tokens resent ({detail}).",
+                    self.reason.id()
+                ),
+            },
         }
     }
 }
@@ -295,6 +334,8 @@ pub struct MissContext<'a> {
     pub new_account: Option<&'a str>,
     pub old_upstream: Option<&'a str>,
     pub new_upstream: Option<&'a str>,
+    pub old_effort: Option<&'a str>,
+    pub new_effort: Option<&'a str>,
     /// Seconds between the previous request completing and this one starting.
     pub idle_secs: Option<u64>,
     pub ttl_secs: Option<u64>,
@@ -354,6 +395,11 @@ pub fn describe_miss(reason: MissReason, ctx: &MissContext<'_>) -> String {
             or_unknown(ctx.old_upstream),
             or_unknown(ctx.new_upstream)
         ),
+        MissReason::EffortChange => format!(
+            "reasoning effort changed {} -> {}; this provider keys its prompt cache on the effort",
+            or_unknown(ctx.old_effort),
+            or_unknown(ctx.new_effort)
+        ),
         MissReason::Expired => match (ctx.idle_secs, ctx.ttl_secs) {
             (Some(idle), Some(ttl)) => format!(
                 "idle {} exceeded the {} cache TTL",
@@ -375,6 +421,13 @@ pub fn describe_miss(reason: MissReason, ctx: &MissContext<'_>) -> String {
             None => "an earlier message was modified".to_string(),
         },
         MissReason::Compaction => "provider automatically compacted the context".to_string(),
+        MissReason::RequestOptionsChanged => {
+            "effective provider request settings outside input, instructions and tools changed"
+                .to_string()
+        }
+        MissReason::ProviderCachePartial => format!(
+            "OpenAI reported {read} of the {prefix}-token prefix on a persistent WS delta; previous input, instructions, tools and request options matched; backend cause unverified"
+        ),
         MissReason::ZeroRead | MissReason::LowRead => {
             let timing = ctx.timing();
             let timing = if timing.is_empty() {
@@ -388,18 +441,22 @@ pub fn describe_miss(reason: MissReason, ctx: &MissContext<'_>) -> String {
                 "provider, model"
             };
             format!(
-                "provider read {read} of the {prefix}-token prefix{timing}; no detected change to {same}, system prompt, tools or message prefix; cause unconfirmed (possible provider routing, eviction or cache-boundary differences)"
+                "provider read {read} against a {prefix}-token prior cache baseline{timing}; no detected change to {same}, system prompt, tools or stable message history; cache-read cause unconfirmed"
             )
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct Baseline {
     route: RequestRoute,
     signature: RequestSignature,
+    canonical_input: Option<CanonicalInput>,
     reusable_cache_tokens: u64,
-    completed_at: Instant,
+    completed_at: SystemTime,
+    /// Local invalidation events and monotonic time do not survive exec.
+    #[serde(skip)]
+    completed_in_process: Option<Instant>,
     /// UTC day on which the baseline request was sent (its cache was written).
     utc_day: i64,
 }
@@ -408,9 +465,12 @@ struct Baseline {
 struct Pending {
     route: RequestRoute,
     signature: RequestSignature,
+    canonical_input: Option<CanonicalInput>,
     provider_compaction: bool,
+    openai_ws_delta: bool,
     utc_day: i64,
     started_at: Instant,
+    started_at_wall: SystemTime,
 }
 
 /// Per-session miss detector. Reset whenever the provider-facing transcript is
@@ -431,6 +491,23 @@ impl KvCacheMonitor {
         self.pending = None;
     }
 
+    /// Read only on session restoration. Within a process, intentional resets
+    /// must not bring an old baseline back on the next request.
+    pub fn restore_checkpoint(&mut self, session_id: &str) {
+        self.baseline = baseline_path(session_id)
+            .ok()
+            .and_then(|path| crate::storage::read_json::<Baseline>(&path).ok());
+    }
+
+    pub fn save_checkpoint(&self, session_id: &str) -> anyhow::Result<()> {
+        if let Some(baseline) = &self.baseline {
+            let path = baseline_path(session_id)?;
+            crate::storage::assert_not_real_home(&path);
+            crate::storage::write_json_secret(&path, baseline)?;
+        }
+        Ok(())
+    }
+
     pub fn begin_request(&mut self, route: RequestRoute, signature: RequestSignature) {
         self.begin_request_on_day(route, signature, utc_day_now());
     }
@@ -445,10 +522,25 @@ impl KvCacheMonitor {
         self.pending = Some(Pending {
             route,
             signature,
+            canonical_input: None,
             provider_compaction: false,
+            openai_ws_delta: false,
             utc_day,
             started_at: Instant::now(),
+            started_at_wall: SystemTime::now(),
         });
+    }
+
+    pub fn note_canonical_input(&mut self, input: CanonicalInput) {
+        if let Some(pending) = self.pending.as_mut() {
+            pending.canonical_input = Some(input);
+        }
+    }
+
+    pub fn note_openai_ws_delta(&mut self) {
+        if let Some(pending) = self.pending.as_mut() {
+            pending.openai_ws_delta = true;
+        }
     }
 
     /// Mark compaction evidenced by the completed provider stream, not by a
@@ -459,26 +551,49 @@ impl KvCacheMonitor {
         }
     }
 
-    /// Record completed usage. `reusable_cache_tokens` is the reusable cache
-    /// boundary (read plus write, excluding uncached input for split accounting).
-    /// `read_tokens` is `None` when the provider did not report cache reads,
-    /// which is never treated as a miss.
+    /// Record completed usage.
+    ///
+    /// `reusable_cache_tokens` is the reusable cache boundary (read plus write,
+    /// excluding uncached input for split accounting). `read_tokens` is `None`
+    /// when the provider did not report cache reads, which is never treated as
+    /// a miss.
+    ///
+    /// The prefix size this request actually carried is unknown here, so this
+    /// form cannot tell a cache loss apart from a request that simply sent less
+    /// content. Production callers use [`Self::finish_request_with_prefix`].
     pub fn finish_request(
         &mut self,
         reusable_cache_tokens: u64,
+        read_tokens: Option<u64>,
+    ) -> Option<KvCacheMiss> {
+        self.finish_request_with_prefix(reusable_cache_tokens, None, read_tokens)
+    }
+
+    /// [`Self::finish_request`] with the whole prefix the request carried
+    /// (uncached input plus read plus write).
+    ///
+    /// The miss check needs it because a request can never read back more cache
+    /// than the content it sent: when the current request is materially smaller
+    /// than the baseline, the unread tokens were never part of it.
+    pub fn finish_request_with_prefix(
+        &mut self,
+        reusable_cache_tokens: u64,
+        prefix_tokens: Option<u64>,
         read_tokens: Option<u64>,
     ) -> Option<KvCacheMiss> {
         let pending = self.pending.take()?;
         let miss = self
             .baseline
             .as_ref()
-            .and_then(|baseline| classify(baseline, &pending, read_tokens));
+            .and_then(|baseline| classify(baseline, &pending, prefix_tokens, read_tokens));
         if reusable_cache_tokens > 0 {
             self.baseline = Some(Baseline {
                 route: pending.route,
                 signature: pending.signature,
+                canonical_input: pending.canonical_input,
                 reusable_cache_tokens,
-                completed_at: Instant::now(),
+                completed_at: SystemTime::now(),
+                completed_in_process: Some(Instant::now()),
                 utc_day: pending.utc_day,
             });
         }
@@ -486,34 +601,126 @@ impl KvCacheMonitor {
     }
 }
 
+fn baseline_path(session_id: &str) -> anyhow::Result<std::path::PathBuf> {
+    anyhow::ensure!(
+        !session_id.is_empty() && !session_id.contains(['/', '\\']) && !session_id.starts_with('.'),
+        "invalid session ID for cache baseline"
+    );
+    Ok(crate::session::session_path(session_id)?.with_extension("kv-cache"))
+}
+
+fn idle_duration(baseline: &Baseline, pending: &Pending) -> Option<Duration> {
+    baseline.completed_in_process.map_or_else(
+        || {
+            pending
+                .started_at_wall
+                .duration_since(baseline.completed_at)
+                .ok()
+        },
+        |completed| Some(pending.started_at.saturating_duration_since(completed)),
+    )
+}
+
+#[derive(Clone, Copy)]
+enum CanonicalChange {
+    System,
+    Tools,
+    Item(usize),
+}
+
+fn comparable_canonical_inputs<'a>(
+    baseline: &'a Baseline,
+    pending: &'a Pending,
+) -> Option<(&'a CanonicalInput, &'a CanonicalInput)> {
+    let old = baseline.canonical_input.as_ref()?;
+    let new = pending.canonical_input.as_ref()?;
+    ((&old.provider, &old.format, &old.model) == (&new.provider, &new.format, &new.model))
+        .then_some((old, new))
+}
+
+fn canonical_change(baseline: &Baseline, pending: &Pending) -> Option<CanonicalChange> {
+    let (old, new) = comparable_canonical_inputs(baseline, pending)?;
+    if old.system_hash != new.system_hash {
+        return Some(CanonicalChange::System);
+    }
+    if old.tools_hash != new.tools_hash {
+        return Some(CanonicalChange::Tools);
+    }
+    let common = old
+        .item_hashes
+        .iter()
+        .zip(&new.item_hashes)
+        .take_while(|(a, b)| a == b)
+        .count();
+    (common < old.item_hashes.len()).then_some(CanonicalChange::Item(common))
+}
+
+fn responses_wire_suffix_change(baseline: &Baseline, pending: &Pending) -> Option<usize> {
+    let (old, new) = comparable_canonical_inputs(baseline, pending)?;
+    let old_suffix = old.responses_request_only_suffix.as_deref()?;
+    let new_suffix = new.responses_request_only_suffix.as_deref()?;
+    let next_items = new.item_hashes.get(old.item_hashes.len()..)?;
+    let common = old_suffix
+        .iter()
+        .zip(next_items.iter().chain(new_suffix))
+        .take_while(|(a, b)| a == b)
+        .count();
+    (common < old_suffix.len()).then_some(old.item_hashes.len() + common)
+}
+
 fn classify(
     baseline: &Baseline,
     pending: &Pending,
+    prefix_tokens: Option<u64>,
     read_tokens: Option<u64>,
 ) -> Option<KvCacheMiss> {
     let read_tokens = read_tokens?;
-    let expected = baseline.reusable_cache_tokens;
-    if expected == 0 {
+    if baseline.reusable_cache_tokens == 0 {
         return None;
     }
+    // Cache domains and token counts are not comparable across providers.
+    let expected = if baseline.route.provider != pending.route.provider {
+        prefix_tokens?
+    } else {
+        baseline.reusable_cache_tokens
+    };
     let missed = expected.saturating_sub(read_tokens);
     if missed < min_missed_tokens_for_provider(&pending.route.provider) {
         return None;
     }
-    let reason = reason(baseline, pending, read_tokens)?;
+    let canonical_change = canonical_change(baseline, pending);
+    let reason = reason(baseline, pending, read_tokens, canonical_change)?;
+    // A request cannot read back more cache than the content it carried. Known
+    // causes above stay actionable (a routing or system-prompt change is real
+    // even when the request also shrank). Only for an otherwise unexplained low
+    // read does the request's own size decide: when this request is materially
+    // smaller than the baseline, the unread tokens were never part of it, so
+    // nothing was lost.
+    if matches!(
+        reason,
+        MissReason::LowRead | MissReason::ZeroRead | MissReason::ProviderCachePartial
+    ) && let Some(prefix_tokens) = prefix_tokens
+        && prefix_tokens.saturating_add(SHRINK_NOISE_TOKENS) < expected
+    {
+        crate::logging::info(&format!(
+            "KV_CACHE_SHRINK expected={} prefix={} read={}; this request is smaller than the previous one (content dropped or the previous report overstated the prefix), not a miss",
+            expected, prefix_tokens, read_tokens,
+        ));
+        return None;
+    }
     let documented_cause = if reason == MissReason::Compaction {
         Some("provider_auto_compaction".to_string())
     } else if reason == MissReason::DailyRollover {
         Some("provider_daily_rollover".to_string())
     } else {
-        reason
-            .harness_caused()
-            .then(|| crate::cache_invalidation::most_recent_since(baseline.completed_at))
-            .flatten()
+        baseline
+            .completed_in_process
+            .filter(|_| reason.harness_caused())
+            .and_then(crate::cache_invalidation::most_recent_since)
             .map(|cause| cause.source.to_string())
     };
     let (old, new) = (&baseline.route, &pending.route);
-    let detail = describe_miss(
+    let mut detail = describe_miss(
         reason,
         &MissContext {
             old_provider: &old.provider,
@@ -524,30 +731,63 @@ fn classify(
             new_account: new.account.as_deref(),
             old_upstream: old.upstream_provider.as_deref(),
             new_upstream: new.upstream_provider.as_deref(),
-            idle_secs: Some(
-                pending
-                    .started_at
-                    .saturating_duration_since(baseline.completed_at)
-                    .as_secs(),
-            ),
+            old_effort: old.reasoning_effort.as_deref(),
+            new_effort: new.reasoning_effort.as_deref(),
+            idle_secs: idle_duration(baseline, pending).map(|idle| idle.as_secs()),
             ttl_secs: old.cache_ttl_secs,
             ttl_is_estimate: old.ttl_is_estimate,
             expected_tokens: expected,
             read_tokens,
-            first_changed_message: pending
-                .signature
-                .message_hashes
-                .iter()
-                .zip(baseline.signature.message_hashes.iter())
-                .position(|(a, b)| a != b),
+            first_changed_message: baseline.completed_in_process.and_then(|_| {
+                pending
+                    .signature
+                    .message_hashes
+                    .iter()
+                    .zip(baseline.signature.message_hashes.iter())
+                    .position(|(a, b)| a != b)
+            }),
         },
     );
+    if reason == MissReason::PrefixChanged
+        && let Some(CanonicalChange::Item(index)) = canonical_change
+    {
+        detail.push_str(&format!(
+            "; first changed canonical input item index {index} (zero-based)"
+        ));
+    }
+    let comparable_input = comparable_canonical_inputs(baseline, pending).is_some();
+    let low_read = matches!(
+        reason,
+        MissReason::LowRead | MissReason::ZeroRead | MissReason::ProviderCachePartial
+    );
+    let wire_suffix_change = if low_read {
+        responses_wire_suffix_change(baseline, pending)
+    } else {
+        None
+    };
+    if let Some(index) = wire_suffix_change {
+        detail.push_str(&format!(
+            "; Responses wire input changed at item {index} (zero-based) after stable history"
+        ));
+    }
+    if baseline.completed_in_process.is_none()
+        && !comparable_input
+        && matches!(reason, MissReason::LowRead | MissReason::ZeroRead)
+    {
+        detail.push_str("; comparable canonical provider input unavailable across restart");
+    }
     Some(KvCacheMiss {
         reason,
-        prefix_unchanged: matches!(reason, MissReason::LowRead | MissReason::ZeroRead)
-            && pending
-                .signature
-                .checked_prefix_unchanged(&baseline.signature),
+        prefix_unchanged: low_read
+            && wire_suffix_change.is_none()
+            && if baseline.completed_in_process.is_some() {
+                pending
+                    .signature
+                    .checked_prefix_unchanged(&baseline.signature)
+            } else {
+                comparable_input && canonical_change.is_none()
+            },
+        wire_suffix_change,
         expected_tokens: expected,
         read_tokens,
         missed_tokens: missed,
@@ -556,7 +796,12 @@ fn classify(
     })
 }
 
-fn reason(baseline: &Baseline, pending: &Pending, read: u64) -> Option<MissReason> {
+fn reason(
+    baseline: &Baseline,
+    pending: &Pending,
+    read: u64,
+    canonical_change: Option<CanonicalChange>,
+) -> Option<MissReason> {
     let (old, new) = (&baseline.route, &pending.route);
     if old.provider != new.provider {
         return Some(MissReason::ProviderSwitch);
@@ -573,17 +818,31 @@ fn reason(baseline: &Baseline, pending: &Pending, read: u64) -> Option<MissReaso
     {
         return Some(MissReason::UpstreamSwitch);
     }
+    if old.reasoning_effort.is_some()
+        && new.reasoning_effort.is_some()
+        && old.reasoning_effort != new.reasoning_effort
+    {
+        return Some(MissReason::EffortChange);
+    }
     if let Some(ttl) = old.cache_ttl_secs
         && !old.ttl_is_estimate
-        && baseline.completed_at.elapsed() >= Duration::from_secs(ttl)
+        && idle_duration(baseline, pending).is_some_and(|idle| idle >= Duration::from_secs(ttl))
     {
         return Some(MissReason::Expired);
     }
     let (prev, cur) = (&baseline.signature, &pending.signature);
-    if prev.system_static_hash != cur.system_static_hash {
+    // A restored projection alone cannot prove a wire change. The formatter,
+    // its fingerprint version, or a provider fallback may differ after exec.
+    let allow_projected_reason = baseline.completed_in_process.is_some();
+    if (allow_projected_reason && prev.system_static_hash != cur.system_static_hash)
+        || matches!(canonical_change, Some(CanonicalChange::System))
+    {
         return Some(MissReason::SystemChanged);
     }
-    if prev.tools_hash != cur.tools_hash || prev.tool_count != cur.tool_count {
+    if (allow_projected_reason
+        && (prev.tools_hash != cur.tools_hash || prev.tool_count != cur.tool_count))
+        || matches!(canonical_change, Some(CanonicalChange::Tools))
+    {
         return Some(MissReason::ToolsChanged);
     }
     // Route, expiry, system and tools changes remain independently actionable.
@@ -591,8 +850,28 @@ fn reason(baseline: &Baseline, pending: &Pending, read: u64) -> Option<MissReaso
     if pending.provider_compaction {
         return Some(MissReason::Compaction);
     }
-    if !cur.extends(prev) {
+    if (allow_projected_reason && !cur.extends(prev))
+        || matches!(canonical_change, Some(CanonicalChange::Item(_)))
+    {
         return Some(MissReason::PrefixChanged);
+    }
+    let options_match = match (
+        baseline.canonical_input.as_ref(),
+        pending.canonical_input.as_ref(),
+    ) {
+        (Some(old), Some(new))
+            if old.format == "openai_responses_full"
+                && old.format == new.format
+                && old.model == new.model =>
+        {
+            old.request_options_hash
+                .zip(new.request_options_hash)
+                .map(|(old, new)| old == new)
+        }
+        _ => None,
+    };
+    if options_match == Some(false) {
+        return Some(MissReason::RequestOptionsChanged);
     }
     // Harness-caused changes above stay visible as bugs. Only an otherwise
     // clean append that straddles 00:00 UTC is attributed to the provider.
@@ -604,6 +883,9 @@ fn reason(baseline: &Baseline, pending: &Pending, read: u64) -> Option<MissReaso
     }
     // The absolute tolerance was already checked against the reusable boundary.
     // A large warm prefix must not hide a real small cache loss.
+    if pending.openai_ws_delta && options_match == Some(true) {
+        return Some(MissReason::ProviderCachePartial);
+    }
     Some(MissReason::LowRead)
 }
 
@@ -619,6 +901,7 @@ mod tests {
             account: None,
             cache_ttl_secs: Some(300),
             ttl_is_estimate: false,
+            reasoning_effort: None,
         }
     }
 
@@ -633,6 +916,190 @@ mod tests {
         }
     }
 
+    #[test]
+    fn provider_switch_uses_the_new_providers_uncached_input() {
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request(route(), sig(&[10]));
+        assert!(monitor.finish_request(205_894, Some(203_137)).is_none());
+        monitor.begin_request(
+            RequestRoute {
+                provider: "openai-oauth".into(),
+                model: "fixture".into(),
+                ..RequestRoute::default()
+            },
+            sig(&[10, 11]),
+        );
+        let miss = monitor
+            .finish_request_with_prefix(142_275, Some(142_275), Some(4_352))
+            .unwrap();
+        assert_eq!(miss.reason, MissReason::ProviderSwitch);
+        assert_eq!(
+            (miss.expected_tokens, miss.read_tokens, miss.missed_tokens),
+            (142_275, 4_352, 137_923)
+        );
+        let message = miss.message();
+        assert!(message.contains("138K tokens uncached"), "{message}");
+        assert!(message.contains("caches are not shared"), "{message}");
+        assert!(!message.contains("resent"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn low_read_reports_wire_suffix_change_without_blame_or_resend_claim() {
+        use jcode_provider_core::fingerprint::{
+            capture_canonical_input, log_provider_canonical_input, note_responses_stable_item_count,
+        };
+        use serde_json::json;
+
+        let route = RequestRoute {
+            provider: "openai-oauth".into(),
+            model: "fixture".into(),
+            ..RequestRoute::default()
+        };
+        let mut monitor = KvCacheMonitor::new();
+        for (items, stable_count, projected, total, read) in [
+            (
+                vec!["user", "request-only nudge"],
+                1,
+                vec![10],
+                142_275,
+                4_352,
+            ),
+            (
+                vec!["user", "assistant", "next user"],
+                3,
+                vec![10, 11, 12],
+                142_566,
+                19_968,
+            ),
+        ] {
+            monitor.begin_request(route.clone(), sig(&projected));
+            let (_, canonical) = capture_canonical_input(async {
+                let body = json!({"input": items});
+                log_provider_canonical_input(
+                    "openai",
+                    &route.model,
+                    "openai_responses_full",
+                    &body,
+                    body["input"].as_array().unwrap(),
+                    None,
+                    None,
+                    None,
+                    &[],
+                );
+                note_responses_stable_item_count(stable_count);
+            })
+            .await;
+            monitor.note_canonical_input(canonical.unwrap());
+            let miss = monitor.finish_request_with_prefix(total, Some(total), Some(read));
+            if read == 4_352 {
+                assert!(miss.is_none());
+            } else {
+                let miss = miss.unwrap();
+                assert_eq!(miss.reason, MissReason::LowRead);
+                assert_eq!(miss.missed_tokens, 122_307);
+                let message = miss.message();
+                assert!(message.contains("[wire suffix changed]"), "{message}");
+                assert!(message.contains("stable history"), "{message}");
+                assert!(!message.contains("[prefix unchanged]"), "{message}");
+                assert!(!message.contains("resent"), "{message}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn identifies_drift_in_actual_responses_input_despite_stable_agent_prefix() {
+        use jcode_provider_core::fingerprint::{
+            capture_canonical_input, log_provider_canonical_input,
+        };
+        use serde_json::json;
+
+        let route = RequestRoute {
+            provider: "openai".into(),
+            model: "gpt-6.2-sol".into(),
+            ..RequestRoute::default()
+        };
+        let mut monitor = KvCacheMonitor::new();
+        for (messages, input, read) in [
+            (vec![10], vec![json!("user"), json!("ephemeral")], 0),
+            (
+                vec![10, 11],
+                vec![json!("user"), json!("tool result")],
+                5_000,
+            ),
+        ] {
+            monitor.begin_request(route.clone(), sig(&messages));
+            let (_, canonical) = capture_canonical_input(async {
+                let body = json!({"input":input});
+                log_provider_canonical_input(
+                    "openai",
+                    &route.model,
+                    "openai_responses_full",
+                    &body,
+                    body["input"].as_array().unwrap(),
+                    None,
+                    None,
+                    None,
+                    &[],
+                );
+            })
+            .await;
+            monitor.note_canonical_input(canonical.unwrap());
+            let miss = monitor.finish_request(20_000, Some(read));
+            if read > 0 {
+                let miss = miss.unwrap();
+                assert_eq!(miss.reason, MissReason::PrefixChanged);
+                assert!(
+                    miss.detail.contains("canonical input item index 1"),
+                    "{}",
+                    miss.detail
+                );
+            } else {
+                assert!(miss.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_options_and_response_chain_distinguish_partial_read() {
+        let route = RequestRoute {
+            provider: "openai".into(),
+            model: "gpt-6.2-sol".into(),
+            ..RequestRoute::default()
+        };
+        for (delta, options, expected) in [
+            (true, Some(5), MissReason::ProviderCachePartial),
+            (false, Some(5), MissReason::LowRead),
+            (true, None, MissReason::LowRead),
+            (true, Some(6), MissReason::RequestOptionsChanged),
+        ] {
+            let mut monitor = KvCacheMonitor::new();
+            let snapshot = |items, request_options_hash| CanonicalInput {
+                provider: "openai".into(),
+                format: "openai_responses_full".into(),
+                model: route.model.clone(),
+                item_hashes: items,
+                responses_request_only_suffix: None,
+                system_hash: Some(2),
+                tools_hash: Some(3),
+                request_options_hash,
+            };
+            monitor.begin_request(route.clone(), sig(&[10]));
+            monitor.note_canonical_input(snapshot(vec![10], Some(5)));
+            assert!(monitor.finish_request(20_000, Some(0)).is_none());
+            monitor.begin_request(route.clone(), sig(&[10, 11]));
+            monitor.note_canonical_input(snapshot(vec![10, 11], options));
+            if delta {
+                monitor.note_openai_ws_delta();
+            }
+            let miss = monitor.finish_request(22_000, Some(5_000)).unwrap();
+            assert_eq!(miss.reason, expected);
+            assert_eq!(
+                miss.reason.harness_caused(),
+                expected == MissReason::RequestOptionsChanged
+            );
+        }
+    }
+
     fn warm(monitor: &mut KvCacheMonitor) {
         monitor.begin_request(route(), sig(&[10, 11]));
         assert_eq!(
@@ -640,6 +1107,37 @@ mod tests {
             None,
             "no baseline yet"
         );
+    }
+
+    #[test]
+    fn effort_change_is_attributed_with_from_to_detail() {
+        let mut monitor = KvCacheMonitor::new();
+        let mut medium = route();
+        medium.reasoning_effort = Some("medium".into());
+        monitor.begin_request(medium, sig(&[10, 11]));
+        monitor.finish_request(111_000, Some(110_000));
+        let mut high = route();
+        high.reasoning_effort = Some("high".into());
+        monitor.begin_request(high, sig(&[10, 11, 12]));
+        let miss = monitor.finish_request(112_000, Some(29_200)).expect("miss");
+        assert_eq!(miss.reason, MissReason::EffortChange);
+        assert!(!miss.reason.harness_caused());
+        assert!(
+            miss.message().contains("effort_change"),
+            "{}",
+            miss.message()
+        );
+        assert!(miss.detail.contains("medium -> high"), "{}", miss.detail);
+
+        // An unchanged or unknown effort never claims to be the cause.
+        let mut monitor = KvCacheMonitor::new();
+        let mut known = route();
+        known.reasoning_effort = Some("high".into());
+        monitor.begin_request(known, sig(&[10, 11]));
+        monitor.finish_request(111_000, Some(110_000));
+        monitor.begin_request(route(), sig(&[10, 11, 12]));
+        let miss = monitor.finish_request(112_000, Some(29_200)).expect("miss");
+        assert_eq!(miss.reason, MissReason::LowRead);
     }
 
     #[test]
@@ -681,7 +1179,8 @@ mod tests {
         let miss = monitor.finish_request(52_000, Some(0)).expect("miss");
         assert_eq!(miss.reason, MissReason::ZeroRead);
         assert!(
-            miss.detail.contains("read 0 of the 50K-token prefix"),
+            miss.detail
+                .contains("read 0 against a 50K-token prior cache baseline"),
             "{}",
             miss.detail
         );
@@ -779,6 +1278,7 @@ mod tests {
             account: None,
             cache_ttl_secs: Some(1800),
             ttl_is_estimate: true,
+            reasoning_effort: None,
         }
     }
 
@@ -1031,6 +1531,68 @@ mod tests {
         monitor.begin_request_on_day(route(), sig(&[10, 99, 12]), 2);
         let miss = monitor.finish_request(52_000, Some(2_000)).expect("miss");
         assert_eq!(miss.reason, MissReason::PrefixChanged);
+    }
+
+    /// Real incident (2026-11-15 07:22Z, claude-opus-5-5): a turn reported
+    /// prompt_tokens=883966 for a request whose serialized content is ~447K
+    /// tokens, and the request one second later reported 447092 of its own.
+    /// The second request was compared against the inflated 883823 baseline and
+    /// alarmed "KV cache miss [low_read] [prefix unchanged]: ~446K resent".
+    /// Nothing was evicted: the smaller request never carried those tokens.
+    #[test]
+    fn a_request_smaller_than_an_inflated_baseline_is_not_a_cache_miss() {
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request(route(), sig(&[10, 11]));
+        monitor.finish_request(433_676, Some(430_021));
+
+        // Inflated report (server-side tool accounting doubles the prefix).
+        monitor.begin_request(route(), sig(&[10, 11, 12]));
+        assert_eq!(
+            monitor.finish_request_with_prefix(883_823, Some(883_966), Some(871_082)),
+            None
+        );
+
+        // The next request carries its real 447K prefix and reads 98% of it.
+        monitor.begin_request(route(), sig(&[10, 11, 12, 13]));
+        assert_eq!(
+            monitor.finish_request_with_prefix(446_774, Some(447_092), Some(437_406)),
+            None,
+            "a request that carries less content cannot miss cache it never sent"
+        );
+
+        // The baseline followed the real figure, so the next genuine loss is
+        // still reported.
+        monitor.begin_request(route(), sig(&[10, 11, 12, 13, 14]));
+        let miss = monitor
+            .finish_request_with_prefix(9_000, Some(450_000), Some(0))
+            .expect("real miss");
+        assert_eq!(miss.reason, MissReason::ZeroRead);
+    }
+
+    #[test]
+    fn shrink_guard_does_not_mask_a_total_miss_on_the_same_prefix() {
+        let mut monitor = KvCacheMonitor::new();
+        warm(&mut monitor);
+        monitor.begin_request(route(), sig(&[10, 11, 12]));
+        // Writes are small next to the prefix; the request itself did not shrink.
+        let miss = monitor
+            .finish_request_with_prefix(9_368, Some(52_000), Some(0))
+            .expect("miss");
+        assert_eq!(miss.reason, MissReason::ZeroRead);
+    }
+
+    #[test]
+    fn harness_causes_still_report_when_the_request_also_shrank() {
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request(route(), sig(&[10, 11]));
+        monitor.finish_request(400_000, Some(400_000));
+        let mut other_model = route();
+        other_model.model = "claude-haiku".into();
+        monitor.begin_request(other_model, sig(&[10, 11, 12]));
+        let miss = monitor
+            .finish_request_with_prefix(50_000, Some(52_000), Some(0))
+            .expect("model switch");
+        assert_eq!(miss.reason, MissReason::ModelSwitch);
     }
 
     #[test]

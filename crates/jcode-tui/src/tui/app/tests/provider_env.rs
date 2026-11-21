@@ -1,9 +1,17 @@
 // Test-only provider isolation. Callers must hold storage::lock_test_env().
-pub(super) struct ProviderEnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+pub(super) struct ProviderEnvGuard(Vec<(String, Option<std::ffi::OsString>)>);
+
+/// Agent sessions export their own provider routing (`JCODE_ACTIVE_PROVIDER`,
+/// `JCODE_OPENROUTER_*`, `*_API_KEY`, ...). Tests must not inherit it.
+fn inherited_agent_env_key(key: &str) -> bool {
+    (key.starts_with("JCODE_")
+        && !matches!(key, "JCODE_HOME" | "JCODE_SCRATCH_DIR" | "JCODE_TEST_HOME"))
+        || key.ends_with("_API_KEY")
+}
 
 impl ProviderEnvGuard {
     pub(super) fn clear() -> Self {
-        let mut keys = vec![
+        let mut keys: Vec<String> = [
             "JCODE_NAMED_PROVIDER_PROFILE",
             "JCODE_OPENAI_COMPAT_API_BASE",
             "JCODE_OPENAI_COMPAT_API_KEY_NAME",
@@ -12,15 +20,28 @@ impl ProviderEnvGuard {
             "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
             "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
             "OPENAI_COMPAT_API_KEY",
-        ];
+        ]
+        .map(str::to_owned)
+        .to_vec();
         for profile in crate::provider_catalog::openai_compatible_profiles() {
-            if !keys.contains(&profile.api_key_env) {
-                keys.push(profile.api_key_env);
+            if !keys.iter().any(|key| key == profile.api_key_env) {
+                keys.push(profile.api_key_env.to_owned());
+            }
+        }
+        for (key, _) in std::env::vars_os() {
+            if let Some(key) = key.to_str()
+                && inherited_agent_env_key(key)
+                && !keys.iter().any(|known| known == key)
+            {
+                keys.push(key.to_owned());
             }
         }
         let guard = Self(
             keys.into_iter()
-                .map(|key| (key, std::env::var_os(key)))
+                .map(|key| {
+                    let value = std::env::var_os(&key);
+                    (key, value)
+                })
                 .collect(),
         );
         for (key, _) in &guard.0 {

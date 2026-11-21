@@ -74,7 +74,7 @@ impl App {
         })
         .collect();
 
-        self.inline_view_state = None;
+        self.clear_inline_view();
         self.inline_interactive_state = Some(InlineInteractiveState {
             kind: PickerKind::Model,
             filtered: (0..5).collect(),
@@ -199,7 +199,7 @@ impl App {
             );
         }
 
-        self.inline_view_state = None;
+        self.clear_inline_view();
         self.inline_interactive_state = Some(InlineInteractiveState {
             kind: PickerKind::Login,
             filtered: (0..models.len()).collect(),

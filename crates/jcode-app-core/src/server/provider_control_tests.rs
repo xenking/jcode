@@ -377,9 +377,33 @@ impl Provider for AuthChangeMockProvider {
         self.state.auth_refresh_pending.load(Ordering::Acquire) > 0
     }
 
+    /// A fork owns its model selection and its own recordings, as a production
+    /// fork does (`Provider::fork` builds a new provider around the same
+    /// credentials). Sharing `state` here made a session-title side turn change the
+    /// session's selected model and append its cheap calls to the turn's list, so
+    /// the auth catalog activity afterwards announced the title model instead of the
+    /// model the user selected.
     fn fork(&self) -> Arc<dyn Provider> {
+        let state = &self.state;
         Arc::new(Self {
-            state: Arc::clone(&self.state),
+            state: Arc::new(AuthChangeMockState {
+                logged_in: StdRwLock::new(*state.logged_in.read().unwrap()),
+                selected_model: StdRwLock::new(state.selected_model.read().unwrap().clone()),
+                route_provider: StdRwLock::new(state.route_provider.read().unwrap().clone()),
+                route_api_method: StdRwLock::new(state.route_api_method.read().unwrap().clone()),
+                routes_override: StdRwLock::new(state.routes_override.read().unwrap().clone()),
+                expose_selected_model_in_routes: StdRwLock::new(
+                    *state.expose_selected_model_in_routes.read().unwrap(),
+                ),
+                auth_refresh_delay_ms: AtomicUsize::new(
+                    state.auth_refresh_delay_ms.load(Ordering::SeqCst),
+                ),
+                auth_refresh_pending: AtomicUsize::new(
+                    state.auth_refresh_pending.load(Ordering::SeqCst),
+                ),
+                complete_calls: AtomicUsize::new(0),
+                complete_models: StdMutex::new(Vec::new()),
+            }),
         })
     }
 }

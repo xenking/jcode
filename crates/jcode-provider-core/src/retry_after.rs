@@ -19,7 +19,7 @@ pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 /// arbitrarily long digit string is safe. Invalid values are ignored and let
 /// the caller fall back to its normal exponential backoff.
 pub fn retry_after(headers: &HeaderMap) -> Option<RetryAfter> {
-    retry_after_delay_at(headers, SystemTime::now()).map(RetryAfter::new)
+    retry_after_raw_delay_at(headers, SystemTime::now()).map(RetryAfter::from_raw_delay)
 }
 
 /// Parse a bounded retry delay from a provider JSON error body.
@@ -51,7 +51,8 @@ pub fn retry_after_body_seconds(body: &str) -> Option<u64> {
 /// Body counterpart of [`retry_after`]: parse a JSON error body for a
 /// server-requested delay and wrap it as a monotonic retry hint.
 pub fn retry_after_body(body: &str) -> Option<RetryAfter> {
-    retry_after_body_delay(body).map(RetryAfter::new)
+    retry_after_body_seconds(body)
+        .map(|seconds| RetryAfter::from_raw_delay(Duration::from_secs(seconds)))
 }
 
 /// Depth-first search for the first numeric, positive `retry_after_seconds`.
@@ -74,42 +75,47 @@ fn positive_seconds(value: &serde_json::Value) -> Option<u64> {
     (seconds.is_finite() && seconds > 0.0).then(|| seconds.ceil() as u64)
 }
 
+#[cfg(test)]
 fn retry_after_delay_at(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
+    retry_after_raw_delay_at(headers, now).map(|delay| delay.min(MAX_RETRY_AFTER))
+}
+
+fn retry_after_raw_delay_at(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
     let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
     if value.is_empty() {
         return None;
     }
 
     if value.bytes().all(|byte| byte.is_ascii_digit()) {
-        let max_secs = MAX_RETRY_AFTER.as_secs();
         let seconds = value.bytes().fold(0u64, |seconds, byte| {
             seconds
                 .saturating_mul(10)
                 .saturating_add(u64::from(byte - b'0'))
-                .min(max_secs)
         });
         return Some(Duration::from_secs(seconds));
     }
 
     let retry_at = httpdate::parse_http_date(value).ok()?;
-    Some(
-        retry_at
-            .duration_since(now)
-            .unwrap_or(Duration::ZERO)
-            .min(MAX_RETRY_AFTER),
-    )
+    Some(retry_at.duration_since(now).unwrap_or(Duration::ZERO))
 }
 
 /// A bounded server retry hint represented as a monotonic deadline.
 #[derive(Clone, Copy, Debug)]
 pub struct RetryAfter {
     deadline: Instant,
+    exceeds_max: bool,
 }
 
 impl RetryAfter {
+    #[cfg(test)]
     fn new(delay: Duration) -> Self {
+        Self::from_raw_delay(delay)
+    }
+
+    fn from_raw_delay(delay: Duration) -> Self {
         Self {
-            deadline: Instant::now() + delay,
+            deadline: Instant::now() + delay.min(MAX_RETRY_AFTER),
+            exceeds_max: delay > MAX_RETRY_AFTER,
         }
     }
 
@@ -157,6 +163,14 @@ pub fn retry_after_from_error(error: &Error) -> Option<Duration> {
         .map(|error| error.retry_after.remaining())
 }
 
+/// Whether a server requested a wait longer than this runtime can safely hold.
+pub fn retry_after_exceeds_max(error: &Error) -> bool {
+    error
+        .chain()
+        .find_map(|source| source.downcast_ref::<RetryAfterError>())
+        .is_some_and(|error| error.retry_after.exceeds_max)
+}
+
 /// Select the delay before a retry, preferring a validated server hint over
 /// the provider's normal jittered exponential backoff.
 pub fn retry_delay(attempt: u32, base_ms: u64, server_hint: Option<Duration>) -> Duration {
@@ -172,6 +186,13 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(RETRY_AFTER, value);
         headers
+    }
+
+    #[test]
+    fn oversized_retry_after_is_not_silently_shortened() {
+        let hint = retry_after(&headers(HeaderValue::from_static("3600"))).unwrap();
+        let error = error_with_retry_after("rate limited".into(), Some(hint));
+        assert!(retry_after_exceeds_max(&error));
     }
 
     #[test]
@@ -329,6 +350,7 @@ mod tests {
     fn elapsed_hint_does_not_add_another_wait() {
         let retry_after = RetryAfter {
             deadline: Instant::now() - Duration::from_secs(1),
+            exceeds_max: false,
         };
         let error = error_with_retry_after("rate limited".to_string(), Some(retry_after));
         assert_eq!(retry_after_from_error(&error), Some(Duration::ZERO));

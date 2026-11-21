@@ -1,35 +1,13 @@
 //! Permission setup: check, request, deep-link, and poll the macOS TCC grants
 //! needed for desktop control.
 
-use super::osa;
+use super::native::{capture_trusted as screen_recording_ok, trusted as accessibility_ok};
 use anyhow::Result;
 use jcode_tool_types::ToolOutput;
 use serde_json::json;
 use std::process::Command;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
-
-fn accessibility_ok() -> bool {
-    // System Events reports whether assistive access is enabled for us.
-    osa::run_applescript("tell application \"System Events\" to return UI elements enabled")
-        .map(|s| s.trim() == "true")
-        .unwrap_or(false)
-}
-
-fn screen_recording_ok() -> bool {
-    let tmp = std::env::temp_dir().join(format!("jcode_setup_{}.png", std::process::id()));
-    let ok = Command::new("/usr/sbin/screencapture")
-        .arg("-x")
-        .arg(&tmp)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-        && std::fs::metadata(&tmp)
-            .map(|m| m.len() > 0)
-            .unwrap_or(false);
-    let _ = std::fs::remove_file(&tmp);
-    ok
-}
 
 fn yes_no(b: bool) -> &'static str {
     if b { "granted" } else { "NOT granted" }
@@ -73,10 +51,6 @@ pub fn setup() -> Result<ToolOutput> {
         ax0, screen0
     ));
 
-    // Trigger the Screen Recording prompt by attempting a capture (already done
-    // in screen_recording_ok). For Accessibility, prompt + pre-add jcode by
-    // opening the pane; the trust prompt itself is shown by the host process the
-    // first time it calls an AX API.
     if !ax0 {
         // Deep-link to the exact Accessibility pane.
         let _ = Command::new("/usr/bin/open")

@@ -1,5 +1,204 @@
 use super::*;
 
+#[path = "history_paging_bounded.rs"]
+mod bounded;
+
+#[cfg(test)]
+#[path = "history_paging_bounded_tests.rs"]
+mod bounded_tests;
+
+pub(in crate::server) async fn handle_history_page(
+    id: u64,
+    session_id: &str,
+    agent: &Arc<Mutex<Agent>>,
+    writer: &Arc<Mutex<WriteHalf>>,
+    before: Option<String>,
+    limit: usize,
+) -> Result<()> {
+    let (rows, context_occupancy) = if let Ok(guard) = agent.try_lock() {
+        let session = guard.session_for_history();
+        (
+            bounded::records(session),
+            session.context_occupancy_tokens(),
+        )
+    } else {
+        crate::session::Session::load_for_remote_startup(session_id)
+            .or_else(|_| crate::session::Session::load_startup_stub(session_id))
+            .map_err(|e| e.to_string())
+            .map(|session| {
+                (
+                    bounded::records(&session),
+                    session.context_occupancy_tokens(),
+                )
+            })
+            .unwrap_or_else(|error| (Err(error), None))
+    };
+    let page = rows
+        .and_then(|rows| bounded::page_records(&rows, before.as_deref(), limit))
+        .and_then(|page| {
+            let fragments = page
+                .fragments
+                .into_iter()
+                .map(serde_json::to_value)
+                .collect::<serde_json::Result<Vec<_>>>()
+                .map_err(|error| format!("serialize history page: {error}"))?;
+            Ok((fragments, page.before))
+        });
+    let event = match page {
+        Ok((fragments, before)) => ServerEvent::HistoryPage {
+            id,
+            session_id: session_id.to_owned(),
+            fragments,
+            before,
+        },
+        Err(message) => ServerEvent::Error {
+            id,
+            message,
+            retry_after_secs: None,
+        },
+    };
+    let page_built = matches!(&event, ServerEvent::HistoryPage { .. });
+    let sent = super::super::client_writer::write_direct_event(writer, &event).await;
+    // The initial page answers an attach; scrollback pages carry no new state.
+    if page_built
+        && before.is_none()
+        && sent.is_ok()
+        && let Some(occupancy) = super::context_occupancy_event(session_id, context_occupancy)
+    {
+        return super::super::client_writer::write_direct_event(writer, &occupancy).await;
+    }
+    sent
+}
+
+pub(in crate::server) async fn handle_session_images(
+    id: u64,
+    requested_session_id: &str,
+    session_id: &str,
+    agent: &Arc<Mutex<Agent>>,
+    writer: &Arc<Mutex<WriteHalf>>,
+    image_request: Option<(String, usize)>,
+) -> Result<()> {
+    let event = if requested_session_id != session_id {
+        ServerEvent::Error {
+            id,
+            message: "session is not attached".into(),
+            retry_after_secs: None,
+        }
+    } else {
+        let build =
+            |session: &crate::session::Session| -> std::result::Result<ServerEvent, String> {
+                if let Some((image_id, offset)) = image_request.as_ref() {
+                    let image = session
+                        .session_image(image_id)
+                        .ok_or("session image not found")?;
+                    if *offset > image.data.len() || !image.data.is_char_boundary(*offset) {
+                        return Err("invalid image offset".into());
+                    }
+                    let mut end = offset.saturating_add(512 * 1024).min(image.data.len());
+                    while !image.data.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    Ok(ServerEvent::SessionImage {
+                        id,
+                        session_id: session_id.into(),
+                        image_id: image_id.clone(),
+                        media_type: image.info.media_type,
+                        offset: *offset,
+                        total: image.data.len(),
+                        data: image.data[*offset..end].to_owned(),
+                    })
+                } else {
+                    Ok(ServerEvent::SessionImages {
+                        id,
+                        session_id: session_id.into(),
+                        images: session
+                            .session_images()
+                            .into_iter()
+                            .map(serde_json::to_value)
+                            .collect::<serde_json::Result<Vec<_>>>()
+                            .map_err(|error| format!("serialize session images: {error}"))?,
+                    })
+                }
+            };
+        let result = if let Ok(guard) = agent.try_lock() {
+            build(guard.session_for_history())
+        } else {
+            crate::session::Session::load_for_remote_startup(session_id)
+                .map_err(|e| e.to_string())
+                .and_then(|session| build(&session))
+        };
+        result.unwrap_or_else(|message| ServerEvent::Error {
+            id,
+            message,
+            retry_after_secs: None,
+        })
+    };
+    super::super::client_writer::write_direct_event(writer, &event).await
+}
+
+fn image_chunk(
+    session: &crate::session::Session,
+    key: &str,
+    offset: usize,
+) -> std::result::Result<(usize, String), String> {
+    let data = if key.starts_with("img_") {
+        session
+            .session_image(key)
+            .ok_or("history image no longer exists")?
+            .data
+    } else {
+        let (_, images, _) =
+            crate::session::render_messages_and_images_with_compacted_history(session, usize::MAX);
+        images
+            .into_iter()
+            .find(|image| bounded::image_key(&image.data) == key)
+            .ok_or("history image no longer exists")?
+            .data
+    };
+    if offset > data.len() || !data.is_char_boundary(offset) {
+        return Err("invalid image offset".into());
+    }
+    let mut end = offset.saturating_add(512 * 1024).min(data.len());
+    while !data.is_char_boundary(end) {
+        end -= 1;
+    }
+    Ok((data.len(), data[offset..end].to_owned()))
+}
+
+pub(in crate::server) async fn handle_history_image_chunk(
+    id: u64,
+    session_id: &str,
+    agent: &Arc<Mutex<Agent>>,
+    writer: &Arc<Mutex<WriteHalf>>,
+    key: String,
+    offset: usize,
+) -> Result<()> {
+    let result = if let Ok(guard) = agent.try_lock() {
+        image_chunk(guard.session_for_history(), &key, offset)
+    } else {
+        crate::session::Session::load_for_remote_startup(session_id)
+            .or_else(|_| crate::session::Session::load_startup_stub(session_id))
+            .map_err(|e| e.to_string())
+            .and_then(|session| image_chunk(&session, &key, offset))
+    };
+    let event = match result {
+        Ok((total, data)) => ServerEvent::HistoryImageChunk {
+            id,
+            session_id: session_id.into(),
+            key,
+            offset,
+            total,
+            data,
+        },
+        Err(message) => ServerEvent::Error {
+            id,
+            message,
+            retry_after_secs: None,
+        },
+    };
+    super::super::client_writer::write_direct_event(writer, &event).await
+}
+
 pub(in crate::server) async fn handle_get_compacted_history(
     id: u64,
     session_id: &str,

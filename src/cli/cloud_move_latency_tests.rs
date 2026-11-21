@@ -10,6 +10,7 @@ fn bundle_fixture(root: &Path, stage: &Path) -> (RepoManifest, String) {
     git(root, &["init", "--quiet"]).unwrap();
     git(root, &["config", "user.name", "Latency Test"]).unwrap();
     git(root, &["config", "user.email", "latency@example.invalid"]).unwrap();
+    git(root, &["config", "commit.gpgsign", "false"]).unwrap();
     git(root, &["commit", "--quiet", "--allow-empty", "-m", "base"]).unwrap();
     let base = git(root, &["rev-parse", "HEAD"]).unwrap();
     git(root, &["commit", "--quiet", "--allow-empty", "-m", "head"]).unwrap();

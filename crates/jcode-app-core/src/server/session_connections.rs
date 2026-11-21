@@ -19,30 +19,56 @@ fn connected_user_ids(
 
 /// Snapshot connections without taking any agent lock, including during a turn.
 /// Bare loaded agents and headless swarm workers do not imply an open user client.
-pub(super) async fn connection_presence_pong(
+pub(super) fn connection_presence_pong(
     id: u64,
     connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) -> ServerEvent {
-    // Resume and disconnect also use these registries. Never hold both locks.
-    let connected = connections
-        .read()
-        .await
-        .values()
-        .map(|info| info.session_id.clone())
-        .collect::<Vec<_>>();
-    let user_connected_session_ids = connected_user_ids(connected, &*members.read().await);
+    // Presence is optional. A liveness probe must not wait behind attachment
+    // or recovery, and must not report an empty snapshot when none was taken.
+    let user_connected_session_ids = (|| {
+        let connected = connections
+            .try_read()
+            .ok()?
+            .values()
+            .map(|info| info.session_id.clone())
+            .collect::<Vec<_>>();
+        let members = members.try_read().ok()?;
+        Some(connected_user_ids(connected, &members))
+    })();
     ServerEvent::Pong {
         id,
         native_ssh_protocol: Some(1),
         capabilities: vec![
             "session_tools".into(),
+            jcode_background_types::BACKGROUND_TASKS_CAPABILITY.into(),
+            "force_stop_turn_v1".into(),
             "soft_interrupt_ids".into(),
+            "queued_prompts".into(),
+            "queued_prompt_batch_interrupt_v1".into(),
+            "queued_prompt_mutations_v1".into(),
+            "queued_prompt_editing".into(),
+            "queued_prompt_active_skill".into(),
+            jcode_session_types::FILE_ATTACHMENTS_CAPABILITY.into(),
+            "bounded_history_v1".into(),
+            "ask_response_images".into(),
             "runtime_commands".into(),
             "session_connections".into(),
             crate::protocol::CLIENT_FOCUS_CAPABILITY.into(),
         ],
-        user_connected_session_ids: Some(user_connected_session_ids),
+        user_connected_session_ids,
+        daemon_identity: jcode_build_support::runtime_generation::serving_identity(
+            jcode_build_meta::git_hash(),
+        )
+        .map_or_else(
+            |error| {
+                crate::logging::warn(&format!(
+                    "Failed to read daemon identity for pong {id}: {error:#}"
+                ));
+                None
+            },
+            Some,
+        ),
     }
 }
 

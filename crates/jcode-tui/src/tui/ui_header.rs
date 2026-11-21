@@ -7,6 +7,7 @@ use crate::auth::{AuthState, AuthStatus};
 use crate::tui::color_support::rgb;
 use crate::tui::connection_type_icon;
 use ratatui::prelude::*;
+use unicode_width::UnicodeWidthStr;
 #[path = "ui_header/account_router.rs"]
 mod account_router;
 
@@ -615,23 +616,8 @@ fn abbreviate_home(path: &str) -> String {
 
 #[cfg(test)]
 fn truncate_to_width(text: &str, width: usize) -> String {
-    let char_count = text.chars().count();
-    if char_count <= width {
-        return text.to_string();
-    }
-    if width == 0 {
-        return String::new();
-    }
-    if width == 1 {
-        return "…".to_string();
-    }
-
-    let mut truncated = text
-        .chars()
-        .take(width.saturating_sub(1))
-        .collect::<String>();
-    truncated.push('…');
-    truncated
+    jcode_tui_render::truncate_line_with_ellipsis_to_width(&Line::from(text.to_owned()), width)
+        .to_string()
 }
 
 #[cfg(test)]
@@ -641,7 +627,7 @@ fn choose_header_candidate(width: usize, candidates: Vec<String>) -> String {
         .into_iter()
         .filter(|candidate| !candidate.trim().is_empty())
     {
-        if candidate.chars().count() <= width {
+        if candidate.width() <= width {
             return candidate;
         }
         last_non_empty = candidate;
@@ -797,7 +783,7 @@ fn build_persistent_header_with_auth(
         )];
         if let Some(version) = server_version_label.as_deref() {
             let suffix = format!(" · {}", version);
-            if server_text.chars().count() + suffix.chars().count() <= w {
+            if server_text.width() + suffix.width() <= w {
                 spans.push(Span::styled(suffix, version_style));
             }
         }
@@ -812,7 +798,7 @@ fn build_persistent_header_with_auth(
         )];
         if let Some(version) = client_version_label.as_deref() {
             let suffix = format!(" · {}", version);
-            if client_text.chars().count() + suffix.chars().count() <= w {
+            if client_text.width() + suffix.width() <= w {
                 spans.push(Span::styled(suffix, version_style));
             }
         }
@@ -948,7 +934,7 @@ fn build_header_lines_with_auth(
         if mcps.len() > MAX_MCPS {
             mcp_text.push_str(&format!(" +{} more", mcps.len() - MAX_MCPS));
         }
-        if mcp_text.chars().count() > w {
+        if mcp_text.width() > w {
             mcp_text = format!("mcp: {} servers", mcps.len());
         }
         lines.push(
@@ -968,7 +954,7 @@ fn build_header_lines_with_auth(
         if skills.len() > MAX_SKILLS {
             skills_text.push_str(&format!(" +{} more", skills.len() - MAX_SKILLS));
         }
-        if skills_text.chars().count() > w {
+        if skills_text.width() > w {
             skills_text = format!("skills: {} loaded", skills.len());
         }
         lines.push(
@@ -982,7 +968,7 @@ fn build_header_lines_with_auth(
         let mut text = display_dir;
         if let Some(branch) = app.git_branch() {
             let with_branch = format!("{} ({})", text, branch);
-            if with_branch.chars().count() <= w {
+            if with_branch.width() <= w {
                 text = with_branch;
             }
         }

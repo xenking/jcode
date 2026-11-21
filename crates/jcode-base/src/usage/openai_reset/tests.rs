@@ -292,6 +292,7 @@ async fn auth_rate_limit_and_unsupported_errors_have_actionable_safe_messages() 
 
 #[test]
 fn reset_cache_invalidation_is_scoped_to_target_account() {
+    let _shared = super::super::cache::lock_usage_cache_tests();
     let key = openai_usage_cache_key("test-token-reset", Some("reset-target-test"));
     let other_key = openai_usage_cache_key("test-token-other", Some("reset-other-test"));
     let data = OpenAIUsageData {
@@ -317,6 +318,7 @@ fn provider_text_cannot_inject_terminal_controls() {
 #[tokio::test]
 async fn reset_generation_prevents_old_fetches_from_repopulating_usage() {
     let _guard = crate::storage::lock_test_env();
+    let _shared = super::super::cache::lock_usage_cache_tests();
     let generation = openai_usage_generation();
     let key = openai_usage_cache_key("old-request", Some("reset-race-test"));
     let exhausted = OpenAIUsageData {

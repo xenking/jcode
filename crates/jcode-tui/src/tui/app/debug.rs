@@ -407,6 +407,7 @@ impl ProviderMessageMemoryStats {
                     self.tool_result_bytes += bytes;
                     self.record_bytes(bytes);
                 }
+                crate::message::ContentBlock::Unknown => {}
             }
         }
     }

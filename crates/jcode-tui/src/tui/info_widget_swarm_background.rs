@@ -123,10 +123,10 @@ pub(super) fn render_background_compact(info: &BackgroundInfo, width: usize) -> 
 }
 
 fn swarm_member_label(member: &SwarmMemberStatus) -> String {
-    member
-        .friendly_name
-        .clone()
-        .unwrap_or_else(|| member.session_id.chars().take(8).collect())
+    member.friendly_name.clone().unwrap_or_else(|| {
+        jcode_tui_render::truncate_line_to_width(&Line::from(member.session_id.clone()), 8)
+            .to_string()
+    })
 }
 
 fn swarm_status_style(status: &str) -> (Color, &'static str) {
@@ -382,6 +382,9 @@ fn dock_is_attention(status: &str) -> bool {
 /// The dock owns lifecycle health and alerts. Task titles and ordinary live
 /// activity belong to the todo lanes, so do not echo them here.
 fn dock_activity(member: &SwarmMemberStatus) -> String {
+    if let Some(age) = member.runtime.stalled_secs {
+        return format!("stalled {}m", age / 60);
+    }
     if let Some(note) = super::swarm_gallery::member_wait_note(member) {
         return note;
     }
