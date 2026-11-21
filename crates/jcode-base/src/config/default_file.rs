@@ -164,9 +164,10 @@ key = "off"
 # Max seconds to wait for the dictation command to finish (0 = no timeout)
 timeout_secs = 90
 
-# Built-in voice backend: auto|nari|soniox|subscription|command.
-# auto keeps the default selection. soniox reads SONIOX_API_KEY or
-# <jcode config dir>/soniox.env.
+# Built-in voice backend: auto|nari|soniox|elevenlabs|subscription|command.
+# soniox reads SONIOX_API_KEY or <jcode config dir>/soniox.env.
+# elevenlabs reads ELEVENLABS_API_KEY or <jcode config dir>/elevenlabs.env.
+# auto chooses Nari or Soniox if a key is present.
 # backend = "auto"
 # Optional streaming WebSocket URL override for nari/soniox.
 # base_url = ""

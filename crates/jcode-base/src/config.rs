@@ -1158,6 +1158,8 @@ pub enum DictationBackend {
     Auto,
     Nari,
     Soniox,
+    #[serde(rename = "elevenlabs")]
+    ElevenLabs,
     Subscription,
     Command,
 }

@@ -1737,6 +1737,7 @@ fn dictation_backend_defaults_to_auto_and_parses() {
         ("nari", DictationBackend::Nari),
         ("subscription", DictationBackend::Subscription),
         ("command", DictationBackend::Command),
+        ("elevenlabs", DictationBackend::ElevenLabs),
     ] {
         let parsed: Config =
             toml::from_str(&format!("[dictation]\nbackend = \"{name}\"\n")).unwrap();
