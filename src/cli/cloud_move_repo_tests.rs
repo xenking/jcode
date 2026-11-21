@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn cloud_return_preserves_local_staged_changes_without_head_move() {
+    let (root, _stage, _) = repository();
+    std::fs::write(root.path().join("file.txt"), "staged\n").unwrap();
+    git(root.path(), &["add", "file.txt"]).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let ours = snapshot_worktree_tree(root.path(), scratch.path()).unwrap();
+    std::fs::write(root.path().join("remote.txt"), "cloud\n").unwrap();
+    let tree = snapshot_worktree_tree(root.path(), scratch.path()).unwrap();
+    std::fs::remove_file(root.path().join("remote.txt")).unwrap();
+    let head = git(root.path(), &["rev-parse", "HEAD"]).unwrap();
+    let plan = CheckoutMerge {
+        local_head: head.clone(),
+        new_head: head,
+        branch: git(root.path(), &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok(),
+        ours,
+        tree,
+    };
+    apply_checkout_merge(root.path(), &plan).unwrap();
+    assert_eq!(git(root.path(), &["show", ":file.txt"]).unwrap(), "staged");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("remote.txt")).unwrap(),
+        "cloud\n"
+    );
+}
+
+#[test]
 fn portable_workspace_preserves_subdirectory_and_is_stable() {
     let (_root, _stage, mut repo) = repository();
     repo.root = "/private/tmp/project".into();

@@ -2421,7 +2421,9 @@ fn apply_checkout_merge(root: &Path, plan: &CheckoutMerge) -> Result<()> {
             ],
         )?;
     }
-    git(root, &["reset", "--quiet", "--mixed", &plan.new_head])?;
+    if plan.new_head != plan.local_head {
+        git(root, &["reset", "--quiet", "--mixed", &plan.new_head])?;
+    }
     Ok(())
 }
 
