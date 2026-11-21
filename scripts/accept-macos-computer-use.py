@@ -22,6 +22,7 @@ import time
 TOOL = "macos_computer_use"
 MODEL = "fixture-model"
 ORIGINAL = "JCODE TEXT ORIGINAL"
+INTERMEDIATE = "JCODE TEXT FIRST UPDATE"
 UPDATED = "JCODE TEXT UPDATED"
 DECOY = "JCODE DECOY ORIGINAL"
 BLOCKED = 77
@@ -242,8 +243,15 @@ def live(active, fixture, binary, root, scope, snapshot, ax, screen):
 
     ref = check_snapshot(snapshot, fixture.pid, window, ORIGINAL)
     action = active.receipt("act", verb="set_value", snapshot_id=snapshot["snapshot_id"],
-                            element_ref=ref, value=UPDATED)
+                            element_ref=ref, value=INTERMEDIATE)
     require(action.get("delivery") == "sent" and action.get("effect") == "verified", f"AX update failed: {action}")
+    require(state(fixture) == [INTERMEDIATE, DECOY, "false"], "first AX update changed the decoy or missed the target")
+    intermediate = action.get("next_state") or {}
+    ref = check_snapshot(intermediate, fixture.pid, window, INTERMEDIATE)
+    action = active.receipt("act", verb="set_value", snapshot_id=intermediate["snapshot_id"],
+                            element_ref=ref, value=UPDATED)
+    require(action.get("delivery") == "sent" and action.get("effect") == "verified",
+            f"second AX update after the same approval failed: {action}")
     after = [UPDATED, DECOY, "false"]
     require(state(fixture) == after, "AX update activated the fixture or changed the decoy")
     updated = action.get("next_state") or {}
@@ -255,7 +263,8 @@ def live(active, fixture, binary, root, scope, snapshot, ax, screen):
                           query=UPDATED, timeout_ms=1500)
     require(wait.get("matched") is True, f"wait did not observe the changed text: {wait}")
     check_snapshot(active.receipt("observe", view="ax", **scope), fixture.pid, window, UPDATED)
-    print("PASS AX observe, background act, wait, and independent readback; decoy unchanged.", flush=True)
+    print("PASS AX observe, two background acts after one approval, wait, and independent readback; decoy unchanged.",
+          flush=True)
 
     output, images = active.tool("observe", view="image", **scope)
     capture, _ = json.JSONDecoder().raw_decode(output)
