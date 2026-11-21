@@ -1611,6 +1611,7 @@ impl App {
         };
         if let Some(cursor_pos) = clicked_input_cursor {
             self.cursor_pos = cursor_pos.min(self.input.len());
+            self.preferred_input_column = None;
             self.reset_tab_completion();
         }
 

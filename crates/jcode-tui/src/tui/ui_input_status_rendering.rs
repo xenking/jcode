@@ -336,12 +336,7 @@ pub(in super::super) fn draw_input(
     let (prompt_char, caret_color) = input_prompt(app);
     let num_str = format!("{}", next_prompt);
     let prompt_len = input_prompt_len(app, next_prompt);
-    let reserved_width = send_mode_reserved_width(app);
-    let line_width = (area.width as usize).saturating_sub(prompt_len + reserved_width);
-
-    if line_width == 0 {
-        return None;
-    }
+    let line_width = composer_line_width(app, area.width, next_prompt)?;
 
     let voice_preview = app.voice_composer_preview();
     let (all_lines, cursor_line, cursor_col) = wrap_input_text_with_ghost(

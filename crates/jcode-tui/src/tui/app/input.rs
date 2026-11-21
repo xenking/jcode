@@ -312,6 +312,7 @@ use paste_guard::load_dropped_image;
 pub(crate) use paste_guard::tiny_png_bytes_for_test;
 
 pub(super) fn handle_paste(app: &mut App, text: String) {
+    app.preferred_input_column = None;
     if app.append_ssh_login_input(&text) {
         return;
     }
@@ -858,20 +859,24 @@ fn visible_prompt_history(app: &mut App) -> Vec<String> {
     app.merged_prompt_history()
 }
 
-fn byte_offset_for_line_column(
-    input: &str,
-    line_start: usize,
-    line_end: usize,
+pub(super) struct PreferredInputColumn {
+    cursor_pos: usize,
+    line_width: usize,
     column: usize,
-) -> usize {
-    let mut offset = line_end;
-    for (idx, (byte_offset, _)) in input[line_start..line_end].char_indices().enumerate() {
-        if idx == column {
-            offset = line_start + byte_offset;
-            break;
-        }
+}
+
+fn vertical_input_step(code: KeyCode, modifiers: KeyModifiers) -> Option<isize> {
+    match (code, modifiers.is_empty()) {
+        (KeyCode::Up, true) => Some(-1),
+        (KeyCode::Down, true) => Some(1),
+        _ => None,
     }
-    offset
+}
+
+pub(super) fn reset_preferred_input_column(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    if vertical_input_step(code, modifiers).is_none() {
+        app.preferred_input_column = None;
+    }
 }
 
 pub(super) fn handle_multiline_input_navigation(
@@ -879,77 +884,37 @@ pub(super) fn handle_multiline_input_navigation(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> bool {
-    if !modifiers.is_empty() || !matches!(code, KeyCode::Up | KeyCode::Down) {
-        return false;
-    }
-
-    // Prefer true visual-row movement: with soft wrapping a single logical
-    // line can occupy several rows, and Up/Down should follow what the user
-    // sees. Falls through to history recall at the first/last visual row.
-    if let Some(target) = visual_line_move_in_composer(app, code) {
-        app.cursor_pos = target;
-        return true;
-    }
-
-    if !app.input.contains('\n') {
-        return false;
-    }
-
-    let input = app.input.as_str();
-    let cursor = app.cursor_pos.min(input.len());
-    let line_start = input[..cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
-    let line_end = input[cursor..]
-        .find('\n')
-        .map(|idx| cursor + idx)
-        .unwrap_or(input.len());
-    let column = input[line_start..cursor].chars().count();
-
-    let target = match code {
-        KeyCode::Up => {
-            if line_start == 0 {
-                return false;
-            }
-            let previous_line_end = line_start - 1;
-            let previous_line_start = input[..previous_line_end]
-                .rfind('\n')
-                .map(|idx| idx + 1)
-                .unwrap_or(0);
-            byte_offset_for_line_column(input, previous_line_start, previous_line_end, column)
-        }
-        KeyCode::Down => {
-            if line_end >= input.len() {
-                return false;
-            }
-            let next_line_start = line_end + 1;
-            let next_line_end = input[next_line_start..]
-                .find('\n')
-                .map(|idx| next_line_start + idx)
-                .unwrap_or(input.len());
-            byte_offset_for_line_column(input, next_line_start, next_line_end, column)
-        }
-        _ => return false,
-    };
-
-    app.cursor_pos = target;
-    true
-}
-
-/// Visual (wrapped-row) cursor movement using the composer's current render
-/// width. Returns `None` when the width is unknown or the cursor is already on
-/// the first/last visual row.
-fn visual_line_move_in_composer(app: &App, code: KeyCode) -> Option<usize> {
     use crate::tui::ui::input_ui;
 
-    let width = composer_area_width()?;
-    let state: &dyn crate::tui::TuiState = app;
-    let next_prompt = input_ui::next_input_prompt_number(state);
-    let line_width = input_ui::composer_line_width(state, width, next_prompt)?;
-    let delta = match code {
-        KeyCode::Up => -1,
-        KeyCode::Down => 1,
-        _ => return None,
+    let Some(delta) = vertical_input_step(code, modifiers) else {
+        return false;
     };
-    input_ui::visual_line_move(&app.input, app.cursor_pos, line_width, delta)
+    let line_width = composer_area_width()
+        .and_then(|width| {
+            input_ui::composer_line_width(app, width, input_ui::next_input_prompt_number(app))
+        })
+        .unwrap_or(usize::MAX);
+    let preferred_column = app
+        .preferred_input_column
+        .take()
+        .filter(|goal| goal.line_width == line_width && goal.cursor_pos == app.cursor_pos)
+        .map(|goal| goal.column);
+    let Some((cursor_pos, column)) = input_ui::visual_line_move(
+        &app.input,
+        app.cursor_pos,
+        line_width,
+        delta,
+        preferred_column,
+    ) else {
+        return false;
+    };
+    app.cursor_pos = cursor_pos;
+    app.preferred_input_column = Some(PreferredInputColumn {
+        cursor_pos,
+        line_width,
+        column,
+    });
+    true
 }
 
 fn composer_area_width() -> Option<u16> {
@@ -3251,6 +3216,7 @@ impl App {
     const RESIZE_REDRAW_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
 
     fn commit_resize_redraw(&mut self, now: std::time::Instant) -> bool {
+        self.preferred_input_column = None;
         self.last_resize_redraw = Some(now);
         self.resize_redraw_pending = false;
         // A paused viewport holds a wrapped line index; capture the reading

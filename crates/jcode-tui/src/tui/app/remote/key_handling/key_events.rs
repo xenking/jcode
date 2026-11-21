@@ -26,6 +26,7 @@ pub(super) async fn handle_remote_key_internal(
     let mut code = code;
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
+    input::reset_preferred_input_column(app, code, modifiers);
 
     if app.ask_picker.is_some() {
         if let Some((request_id, response)) = app.handle_ask_picker_key(code) {

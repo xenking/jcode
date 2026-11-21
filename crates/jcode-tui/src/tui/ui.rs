@@ -3087,7 +3087,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     // Count user messages to show next prompt number
     let next_prompt = input_ui::next_input_prompt_number(app);
-    let user_count = next_prompt.saturating_sub(1);
+    let user_count = next_prompt.saturating_sub(pending_count).saturating_sub(1);
 
     // Calculate input height based on the same wrapping logic used for rendering
     // (max 10 lines visible, scrolls if more).
@@ -3588,13 +3588,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         frame.render_widget(Paragraph::new(blocker_lines), chunks[6]);
     }
 
-    let _input_cursor = input_ui::draw_input(
-        frame,
-        app,
-        chunks[7],
-        user_count + pending_count + 1,
-        &mut debug_capture,
-    );
+    let _input_cursor =
+        input_ui::draw_input(frame, app, chunks[7], next_prompt, &mut debug_capture);
 
     if overscroll_height > 0 {
         input_ui::draw_overscroll_status(frame, app, chunks[8]);

@@ -313,7 +313,11 @@ pub(super) fn input_hint_line_height(app: &dyn TuiState) -> u16 {
 
 pub(super) fn send_mode_reserved_width(app: &dyn TuiState) -> usize {
     let (icon, _) = send_mode_indicator(app);
-    if icon.is_empty() { 0 } else { icon.len() + 1 }
+    if icon.is_empty() {
+        0
+    } else {
+        unicode_width::UnicodeWidthStr::width(icon) + 1
+    }
 }
 
 pub(super) fn input_prompt(app: &dyn TuiState) -> (&'static str, Color) {
@@ -334,12 +338,13 @@ pub(super) fn input_prompt(app: &dyn TuiState) -> (&'static str, Color) {
 
 pub(crate) fn input_prompt_len(app: &dyn TuiState, next_prompt: usize) -> usize {
     let (prompt_char, _) = input_prompt(app);
-    next_prompt.to_string().chars().count() + prompt_char.chars().count()
+    next_prompt.to_string().len() + unicode_width::UnicodeWidthStr::width(prompt_char)
 }
 
 pub(crate) fn next_input_prompt_number(app: &dyn TuiState) -> usize {
     app.compacted_hidden_user_prompts()
         .saturating_add(app.display_user_message_count())
+        .saturating_add(pending_prompt_count(app))
         .saturating_add(1)
 }
 
@@ -348,12 +353,10 @@ pub(super) fn wrapped_input_line_count(
     area_width: u16,
     next_prompt: usize,
 ) -> usize {
-    let reserved_width = send_mode_reserved_width(app);
-    let prompt_len = input_prompt_len(app, next_prompt);
-    let line_width = (area_width as usize).saturating_sub(prompt_len + reserved_width);
-    if line_width == 0 {
+    let Some(line_width) = composer_line_width(app, area_width, next_prompt) else {
         return 1;
-    }
+    };
+    let prompt_len = input_prompt_len(app, next_prompt);
 
     let num_str = next_prompt.to_string();
     let (prompt_char, caret_color) = input_prompt(app);
@@ -1991,85 +1994,64 @@ fn input_copy_snapshot_parts(
 }
 
 fn wrap_input_segments(input: &str, line_width: usize) -> Vec<WrappedInputSegment> {
-    use unicode_width::UnicodeWidthChar;
-
-    let chars: Vec<char> = input.chars().collect();
-    if chars.is_empty() {
-        return vec![WrappedInputSegment {
-            text: String::new(),
-            start_char: 0,
-            end_char: 0,
-            display_width: 0,
-        }];
-    }
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
 
     let mut segments = Vec::new();
-    let mut pos = 0;
-    let mut char_count = 0;
-
-    while pos <= chars.len() {
-        let newline_pos = chars[pos..].iter().position(|&c| c == '\n');
-        let segment_end = match newline_pos {
-            Some(rel_pos) => pos + rel_pos,
-            None => chars.len(),
-        };
-
-        let segment = &chars[pos..segment_end];
-        let mut seg_pos = 0;
-        loop {
-            let mut display_width = 0;
-            let mut end = seg_pos;
-            while end < segment.len() {
-                let cw = segment[end].width().unwrap_or(0);
-                if display_width + cw > line_width {
-                    break;
-                }
-                display_width += cw;
-                end += 1;
+    let mut start_char = 0;
+    for line in input.split('\n') {
+        let mut start_byte = 0;
+        let mut end_char = start_char;
+        let mut display_width = 0;
+        for (byte, grapheme) in line.grapheme_indices(true) {
+            let width = grapheme.width();
+            if byte > start_byte && display_width + width > line_width {
+                segments.push(WrappedInputSegment {
+                    text: line[start_byte..byte].to_owned(),
+                    start_char,
+                    end_char,
+                    display_width,
+                });
+                start_byte = byte;
+                start_char = end_char;
+                display_width = 0;
             }
-            if end == seg_pos && seg_pos < segment.len() {
-                end = seg_pos + 1;
-                display_width = segment[seg_pos].width().unwrap_or(0);
-            }
-
-            let text: String = segment[seg_pos..end].iter().collect();
-            let start_char = char_count;
-            let end_char = char_count + (end - seg_pos);
-            segments.push(WrappedInputSegment {
-                text,
-                start_char,
-                end_char,
-                display_width,
-            });
-            char_count = end_char;
-
-            if end >= segment.len() {
-                break;
-            }
-            seg_pos = end;
+            end_char += grapheme.chars().count();
+            display_width += width;
         }
-
-        if newline_pos.is_some() {
-            char_count += 1;
-            pos = segment_end + 1;
-        } else {
-            break;
-        }
+        segments.push(WrappedInputSegment {
+            text: line[start_byte..].to_owned(),
+            start_char,
+            end_char,
+            display_width,
+        });
+        start_char = end_char + 1;
     }
-
     segments
 }
 
-fn cursor_col_for_segment(segment: &WrappedInputSegment, cursor_char_pos: usize) -> usize {
-    use unicode_width::UnicodeWidthChar;
+fn wrapped_cursor_row(segments: &[WrappedInputSegment], cursor: usize) -> usize {
+    // A soft-wrap boundary belongs to the next visual row. A newline still
+    // owns a character offset at the end of the preceding row.
+    segments
+        .partition_point(|row| row.start_char <= cursor)
+        .saturating_sub(1)
+}
 
-    let chars_before = cursor_char_pos.saturating_sub(segment.start_char);
-    segment
-        .text
-        .chars()
-        .take(chars_before)
-        .map(|c| c.width().unwrap_or(0))
-        .sum()
+fn cursor_col_for_segment(segment: &WrappedInputSegment, cursor_char_pos: usize) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+
+    let mut remaining = cursor_char_pos.saturating_sub(segment.start_char);
+    let mut col = 0;
+    for grapheme in segment.text.graphemes(true) {
+        let Some(next) = remaining.checked_sub(grapheme.chars().count()) else {
+            break;
+        };
+        remaining = next;
+        col += grapheme.width();
+    }
+    col
 }
 
 fn char_offset_for_clicked_column(text: &str, target_col: usize, display_width: usize) -> usize {
@@ -2112,12 +2094,10 @@ pub(crate) fn input_cursor_pos_from_screen(
     }
 
     let input_text = app.input();
-    let reserved_width = send_mode_reserved_width(app);
     let prompt_len = input_prompt_len(app, next_prompt);
-    let line_width = (area.width as usize).saturating_sub(prompt_len + reserved_width);
-    if line_width == 0 {
+    let Some(line_width) = composer_line_width(app, area.width, next_prompt) else {
         return Some(app.cursor_pos().min(input_text.len()));
-    }
+    };
 
     let wrapped_lines = wrap_input_segments(input_text, line_width);
     let hint_lines = input_hint_line_height(app) as usize;
@@ -2130,12 +2110,7 @@ pub(crate) fn input_cursor_pos_from_screen(
         let available_for_input = visible_height.saturating_sub(hint_lines);
         let cursor_char_pos =
             crate::tui::core::byte_offset_to_char_index(input_text, app.cursor_pos());
-        let cursor_line = wrapped_lines
-            .iter()
-            .position(|segment| {
-                cursor_char_pos >= segment.start_char && cursor_char_pos <= segment.end_char
-            })
-            .unwrap_or_else(|| wrapped_lines.len().saturating_sub(1));
+        let cursor_line = wrapped_cursor_row(&wrapped_lines, cursor_char_pos);
         if cursor_line < available_for_input {
             0
         } else {
@@ -2264,20 +2239,10 @@ fn wrap_input_text_with_ghost<'a>(
     let cursor_char_pos = crate::tui::core::byte_offset_to_char_index(input, cursor_pos);
     let wrapped_segments = wrap_input_segments(input, line_width);
     let mut lines: Vec<Line> = Vec::new();
-    let mut cursor_line = 0;
-    let mut cursor_col = 0;
-    let mut found_cursor = false;
+    let cursor_line = wrapped_cursor_row(&wrapped_segments, cursor_char_pos);
+    let cursor_col = cursor_col_for_segment(&wrapped_segments[cursor_line], cursor_char_pos);
 
     for (idx, segment) in wrapped_segments.iter().enumerate() {
-        if !found_cursor
-            && cursor_char_pos >= segment.start_char
-            && cursor_char_pos <= segment.end_char
-        {
-            cursor_line = idx;
-            cursor_col = cursor_col_for_segment(segment, cursor_char_pos);
-            found_cursor = true;
-        }
-
         let mut spans = if idx == 0 {
             let num_color = rainbow_prompt_color(0);
             vec![
@@ -2318,14 +2283,6 @@ fn wrap_input_text_with_ghost<'a>(
             spans.push(Span::styled(text, previous_style));
         }
         lines.push(Line::from(spans));
-    }
-
-    if !found_cursor {
-        cursor_line = wrapped_segments.len().saturating_sub(1);
-        cursor_col = wrapped_segments
-            .last()
-            .map(|segment| segment.display_width)
-            .unwrap_or(0);
     }
 
     (lines, cursor_line, cursor_col)
@@ -2403,43 +2360,45 @@ pub(crate) fn composer_line_width(
 /// Move the cursor one *visual* (wrapped) row up (`delta = -1`) or down
 /// (`delta = 1`) within the composer, keeping the display column.
 ///
-/// Returns the new byte offset, or `None` when the cursor is already on the
-/// first/last visual row (so callers can fall through to prompt history).
+/// Returns the new byte offset and preferred column, or `None` when the
+/// cursor is already on the first/last visual row.
 pub(crate) fn visual_line_move(
     input: &str,
     cursor_pos: usize,
     line_width: usize,
     delta: isize,
-) -> Option<usize> {
-    use unicode_width::UnicodeWidthChar;
+    preferred_column: Option<usize>,
+) -> Option<(usize, usize)> {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
 
     if line_width == 0 {
         return None;
     }
     let cursor_char_pos = crate::tui::core::byte_offset_to_char_index(input, cursor_pos);
     let segments = wrap_input_segments(input, line_width);
-    if segments.len() < 2 {
-        return None;
-    }
-    let current = segments
-        .iter()
-        .position(|s| cursor_char_pos >= s.start_char && cursor_char_pos <= s.end_char)?;
+    let current = wrapped_cursor_row(&segments, cursor_char_pos);
     let target_idx = current.checked_add_signed(delta)?;
     let target = segments.get(target_idx)?;
-    let col = cursor_col_for_segment(&segments[current], cursor_char_pos);
+    let col = preferred_column
+        .unwrap_or_else(|| cursor_col_for_segment(&segments[current], cursor_char_pos));
+    let soft_end = segments
+        .get(target_idx + 1)
+        .is_some_and(|next| next.start_char == target.end_char);
 
-    // Walk the target row to the same display column.
-    let mut display = 0usize;
-    let mut chars_in = 0usize;
-    for ch in target.text.chars() {
-        if display >= col {
+    let mut display = 0;
+    let mut offset = target.start_char;
+    for grapheme in target.text.graphemes(true) {
+        let next_display = display + grapheme.width();
+        let next_offset = offset + grapheme.chars().count();
+        if next_display > col || (soft_end && next_offset == target.end_char) {
             break;
         }
-        display += ch.width().unwrap_or(0);
-        chars_in += 1;
+        display = next_display;
+        offset = next_offset;
     }
-    Some(crate::tui::core::char_index_to_byte_offset(
-        input,
-        target.start_char + chars_in,
+    Some((
+        crate::tui::core::char_index_to_byte_offset(input, offset),
+        col,
     ))
 }

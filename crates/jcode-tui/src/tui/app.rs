@@ -1007,6 +1007,7 @@ pub struct App {
     /// `command_suggestions_cache` to a single frame.
     command_suggestions_epoch: std::cell::Cell<u64>,
     cursor_pos: usize,
+    preferred_input_column: Option<input::PreferredInputColumn>,
     scroll_offset: usize,
     /// Pauses auto-scroll when user scrolls up during streaming
     auto_scroll_paused: bool,

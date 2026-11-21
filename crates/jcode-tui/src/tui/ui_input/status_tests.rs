@@ -608,21 +608,44 @@ fn visual_line_move_follows_soft_wrapped_rows() {
     // 20 chars, width 10 => two visual rows, no newline in the input.
     let input = "abcdefghijklmnopqrst";
     // Cursor at col 3 of row 1 (char 13) moving up lands on col 3 of row 0.
-    assert_eq!(visual_line_move(input, 13, 10, -1), Some(3));
+    assert_eq!(visual_line_move(input, 13, 10, -1, None), Some((3, 3)));
     // And back down again.
-    assert_eq!(visual_line_move(input, 3, 10, 1), Some(13));
+    assert_eq!(visual_line_move(input, 3, 10, 1, None), Some((13, 3)));
     // Already on the first/last row => None so history recall can take over.
-    assert_eq!(visual_line_move(input, 3, 10, -1), None);
-    assert_eq!(visual_line_move(input, 13, 10, 1), None);
+    assert_eq!(visual_line_move(input, 3, 10, -1, None), None);
+    assert_eq!(visual_line_move(input, 13, 10, 1, None), None);
 }
 
 #[test]
 fn visual_line_move_clamps_to_shorter_target_row() {
     let input = "abcdefghij\nxy";
     // Cursor at end of the short second row, up goes to col 2 of row 0.
-    assert_eq!(visual_line_move(input, input.len(), 10, -1), Some(2));
+    assert_eq!(
+        visual_line_move(input, input.len(), 10, -1, None),
+        Some((2, 2))
+    );
     // From far along row 0, down clamps to the end of the short row.
-    assert_eq!(visual_line_move(input, 8, 10, 1), Some(input.len()));
+    assert_eq!(
+        visual_line_move(input, 8, 10, 1, None),
+        Some((input.len(), 8))
+    );
+}
+
+#[test]
+fn soft_wrap_keeps_combined_emoji_whole_at_one_cell_width() {
+    let input = "я👩‍💻界";
+    let cursor = "я👩‍💻".len();
+    let (lines, row, col) = wrap_input_text(input, cursor, 1, "1", "> ", Color::White, 3);
+    let rendered: Vec<_> = lines
+        .iter()
+        .map(|line| line.spans.last().unwrap().content.as_ref())
+        .collect();
+    assert_eq!(rendered, ["я", "👩‍💻", "界"]);
+    assert_eq!((row, col), (2, 0));
+    assert_eq!(
+        visual_line_move(input, cursor, 1, -1, None),
+        Some(("я".len(), 0))
+    );
 }
 
 #[test]
