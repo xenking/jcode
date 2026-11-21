@@ -212,20 +212,20 @@ pub fn fit_image_for_model(image: ProviderImage) -> FittedImage {
 pub fn fit_base64_image_for_model(media_type: String, data: String) -> (String, String) {
     use base64::Engine as _;
     let engine = &base64::engine::general_purpose::STANDARD;
-    // 4 base64 chars carry 3 bytes: skip the decode when the image is small
-    // enough that only its pixel size could still be over.
-    if data.len() / 4 * 3 <= MODEL_IMAGE_MAX_BYTES / 8 {
-        return (media_type, data);
-    }
     let Ok(bytes) = engine.decode(data.trim()) else {
         return (media_type, data);
     };
+    let original_len = bytes.len();
     let Ok(image) = normalize_image_bytes(bytes) else {
         return (media_type, data);
     };
     let converted = image.converted_from.is_some();
     let fitted = fit_image_for_model(image);
-    if fitted.scaled.is_none() && !converted && fitted.image.media_type == media_type {
+    if fitted.scaled.is_none()
+        && !converted
+        && fitted.image.media_type == media_type
+        && fitted.image.data.len() == original_len
+    {
         return (media_type, data);
     }
     (
@@ -300,6 +300,46 @@ mod tests {
         let (from, to) = fitted.scaled.expect("the scaling is reported");
         assert_eq!(from, (3456, 2234));
         assert_eq!(to, (decoded.width(), decoded.height()));
+    }
+
+    #[test]
+    fn base64_model_fit_scales_large_pixels_even_when_png_is_small() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        let png = image::RgbImage::from_pixel(2400, 1200, image::Rgb([54, 81, 108]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(png)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        let bytes = out.into_inner();
+        assert!(bytes.len() <= MODEL_IMAGE_MAX_BYTES / 8);
+        let (mime, fitted) = fit_base64_image_for_model("image/png".into(), STANDARD.encode(bytes));
+        let fitted = STANDARD.decode(fitted).unwrap();
+        assert_eq!(sniff_provider_media_type(&fitted), Some(mime.as_str()));
+        let image = image::load_from_memory(&fitted).unwrap();
+        assert_eq!((image.width(), image.height()), (1568, 784));
+    }
+
+    #[test]
+    fn base64_model_fit_keeps_a_smaller_png_at_the_same_dimensions() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use image::{ImageEncoder, codecs::png};
+
+        let pixels = image::RgbaImage::from_pixel(600, 300, image::Rgba([54, 81, 108, 128]));
+        let mut bytes = Vec::new();
+        png::PngEncoder::new_with_quality(
+            &mut bytes,
+            png::CompressionType::Uncompressed,
+            png::FilterType::NoFilter,
+        )
+        .write_image(pixels.as_raw(), 600, 300, image::ExtendedColorType::Rgba8)
+        .unwrap();
+        assert!(bytes.len() > MODEL_IMAGE_MAX_BYTES);
+        let (mime, fitted) = fit_base64_image_for_model("image/png".into(), STANDARD.encode(bytes));
+        let fitted = STANDARD.decode(fitted).unwrap();
+        assert_eq!(mime, "image/png");
+        assert!(fitted.len() <= MODEL_IMAGE_MAX_BYTES);
+        assert_eq!(image::load_from_memory(&fitted).unwrap().to_rgba8(), pixels);
     }
 
     #[test]
