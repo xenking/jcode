@@ -138,18 +138,9 @@ fn truncate_chars(text: &str, max: usize) -> String {
     format!("{cut}…")
 }
 
-/// Bound the report. When it is over budget, the full text is spilled to a
-/// file under the jcode dir so nothing is silently lost.
 fn spill_report(text: &str, spill: Option<PathBuf>) -> Option<PathBuf> {
     spill.and_then(|path| {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .inspect_err(|error| {
-                    crate::logging::warn(&format!("Codemode spill directory unavailable: {error}"))
-                })
-                .ok()?;
-        }
-        std::fs::write(&path, text)
+        crate::storage::write_text_secret(&path, text)
             .inspect_err(|error| {
                 crate::logging::warn(&format!("Codemode report spill failed: {error}"))
             })
@@ -231,7 +222,7 @@ fn budget_report(
             out.receipts.len()
         ));
     }
-    footer.push_str(&call_count_footer(out));
+    footer.push_str(&call_count_footer(out, ""));
     let remaining = max_bytes.saturating_sub(diagnostics.len() + notice.len() + footer.len());
     let body = crate::util::truncate_str(&report[..body_end], remaining);
     format!("{diagnostics}{body}{notice}{footer}")
@@ -329,20 +320,19 @@ fn render_report_with_body(out: &jcode_codemode::RunOutput) -> (String, usize) {
             ));
         }
     }
-    let mut footer = call_count_footer(out);
-    footer.pop(); // Append the store keys before the closing bracket.
-    if !out.store.is_empty() {
+    let store_suffix = if out.store.is_empty() {
+        String::new()
+    } else {
         let keys: Vec<&str> = out.store.keys().map(String::as_str).take(20).collect();
-        footer.push_str(&format!(", stored: {}", keys.join(", ")));
-    }
-    footer.push(']');
-    report.push_str(&footer);
+        format!(", stored: {}", keys.join(", "))
+    };
+    report.push_str(&call_count_footer(out, &store_suffix));
     (report, body_end)
 }
 
-fn call_count_footer(out: &jcode_codemode::RunOutput) -> String {
+fn call_count_footer(out: &jcode_codemode::RunOutput, suffix: &str) -> String {
     format!(
-        "\n[{} tool call{}, {:.1}s]",
+        "\n[{} tool call{}, {:.1}s{suffix}]",
         out.tool_calls,
         if out.tool_calls == 1 { "" } else { "s" },
         out.elapsed.as_secs_f64()

@@ -178,11 +178,19 @@ async fn opt_in_budget_preserves_unbudgeted_output_and_store() {
         preview.contains("[1 tool call") && preview.contains("1 ok"),
         "{preview}"
     );
-    assert!(
-        std::fs::read_to_string(spill_path(&session, "codemode-call").unwrap())
-            .unwrap()
-            .contains("TAIL")
-    );
+    let artifact = preview
+        .lines()
+        .find_map(|line| line.strip_prefix("Full report: "))
+        .unwrap();
+    assert!(std::fs::read_to_string(artifact).unwrap().contains("TAIL"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(artifact).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
     let recovered = registry
         .execute(
             "codemode",
@@ -217,10 +225,10 @@ async fn budget_keeps_agentgrep_argument_repair_after_large_console_output() {
     let mut context = ctx("codemode-agentgrep-argument");
     context.working_dir = Some(std::env::current_dir().unwrap());
     let output = registry.execute("codemode", json!({
-        "max_output_tokens": 4000,
-        "code": "console.log('word '.repeat(5000)); await tools.agentgrep({mode:'trace', terms:['not-a-dsl-term']});"
+        "max_output_tokens": 512,
+        "code": "console.log('🦀'.repeat(5000)); await tools.agentgrep({mode:'trace', terms:['not-a-dsl-term']});"
     }), context).await.unwrap().output;
-    assert!(output.len() <= 16_000, "{} bytes", output.len());
+    assert!(output.len() <= 2048, "{} bytes", output.len());
     assert!(
         output.contains("error: Error: agentgrep:") && output.contains("parameter `terms`"),
         "{output}"
