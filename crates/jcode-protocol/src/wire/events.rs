@@ -938,6 +938,13 @@ pub enum ServerEvent {
         breakdown: jcode_session_types::ContextBreakdown,
     },
 
+    #[serde(rename = "shake_tools")]
+    ShakeTools {
+        id: u64,
+        session_id: String,
+        result: jcode_session_types::ShakeToolsResult,
+    },
+
     /// Expanded compacted-history window (response to GetCompactedHistory).
     #[serde(rename = "compacted_history")]
     CompactedHistory {

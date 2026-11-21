@@ -914,7 +914,9 @@ impl Request {
             Request::GetHistoryPage { id, .. } => *id,
             Request::GetHistoryImageChunk { id, .. } => *id,
             Request::ListSessionImages { id, .. } | Request::GetSessionImage { id, .. } => *id,
-            Request::SessionContextBreakdown { id, .. } => *id,
+            Request::SessionContextBreakdown { id, .. } | Request::SessionShakeTools { id, .. } => {
+                *id
+            }
             Request::Reload { id, .. } => *id,
             Request::UpgradeRuntime { id, .. } => *id,
             Request::ResumeSession { id, .. } => *id,
@@ -997,6 +999,7 @@ impl Request {
             Request::Ping { .. }
                 | Request::OpenrigHostIdentity { .. }
                 | Request::SessionContextBreakdown { .. }
+                | Request::SessionShakeTools { .. }
                 | Request::UpgradeRuntime { .. }
                 // Usage invalidation only touches process-wide caches, so a
                 // one-shot client can send it without subscribing to a session.

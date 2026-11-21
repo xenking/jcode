@@ -359,6 +359,7 @@ export type ApiRequest =
   | { req: "list_session_images"; session_id: string }
   | { req: "get_session_image"; session_id: string; image_id: string; offset: number }
   | { req: "session_context_breakdown"; session_id?: string | null; model?: string | null; cwd?: string | null }
+  | { req: "session_shake_tools"; session_id: string; action: ShakeToolsAction }
   | { req: "peek_session"; session_id: string; limit?: number }
   | { req: "clear"; session_id: string }
   | { req: "rewind"; session_id: string; message_index: number }
@@ -478,6 +479,20 @@ export interface ContextBreakdownCategory {
   tokens: number | null;
 }
 
+export type ShakeToolsAction =
+  | { kind: "preview" }
+  | { kind: "apply"; confirmation: string };
+
+export interface ShakeToolsStats {
+  outputs_elided: number;
+  estimated_tokens_saved: number;
+}
+
+export type ShakeToolsResult =
+  | { kind: "no_change" }
+  | { kind: "preview"; confirmation: string; cache_at_risk: boolean; stats: ShakeToolsStats }
+  | { kind: "applied"; stats: ShakeToolsStats };
+
 export type ApiEvent =
   | { ev: "draft_models"; current: string | null; routes: ModelRouteInfo[] }
   | { ev: "hello_ok"; version: number; server: string; capabilities?: string[]; runtime_identity?: { pid: number; binary_path: string; git_hash: string; version_label?: string; reload_id?: string; generation: number } }
@@ -517,6 +532,7 @@ export type ApiEvent =
       estimated: boolean;
       categories: ContextBreakdownCategory[];
     }
+  | { ev: "shake_tools"; session_id: string; result: ShakeToolsResult }
   | { ev: "user_image_ids"; session_id: string; original_content: string; content: string; image_ids: string[] }
   | { ev: "usage_limit"; session_id: string; provider: string; model: string; account: string | null; window: string; reset: string; action: string; target: string | null; message: string }
   | { ev: "tools"; session_id: string; tools: SessionToolDefinition[] }
@@ -753,6 +769,7 @@ export const KNOWN_EVENT_KINDS = [
   "session_images",
   "session_image",
   "context_breakdown",
+  "shake_tools",
   "user_image_ids",
   "usage_limit",
   "side_pane_images",
@@ -846,6 +863,7 @@ export const KNOWN_REQUEST_KINDS = [
   "list_session_images",
   "get_session_image",
   "session_context_breakdown",
+  "session_shake_tools",
   "get_history",
   "get_compacted_history",
   "get_history_page",

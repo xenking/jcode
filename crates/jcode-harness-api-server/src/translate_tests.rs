@@ -2037,6 +2037,51 @@ fn context_breakdown_round_trip_without_attaching() {
     assert_eq!(reply["total_tokens"], serde_json::Value::Null);
 }
 
+#[test]
+fn shake_tools_round_trip_does_not_attach_or_retarget() {
+    let mut bridge = BridgeState::default();
+    let apply = json!({
+        "req": "session_shake_tools", "id": 52, "session_id": "session_selected",
+        "action": {"kind": "apply", "confirmation": "bound-to-selected"},
+    });
+    let out = bridge.api_request_to_legacy(&apply);
+    let [Outbound::Legacy(request)] = out.as_slice() else {
+        panic!("shake must send exactly one scoped request without attaching");
+    };
+    assert_eq!(request["type"], "session_shake_tools");
+    assert_eq!(request["session_id"], apply["session_id"]);
+    assert_eq!(request["action"], apply["action"]);
+    let response = bridge.legacy_event_to_api(&json!({
+        "type": "shake_tools", "id": request["id"], "session_id": "session_selected",
+        "result": {"kind": "applied", "stats": {"outputs_elided": 1, "estimated_tokens_saved": 2000}},
+    }));
+    let reply = serde_json::to_value(&response[0]).unwrap();
+    assert_eq!(reply["reply_to"], 52);
+    assert_eq!(reply["ev"], "shake_tools");
+    assert_eq!(reply["session_id"], "session_selected");
+    assert_eq!(reply["result"]["stats"]["estimated_tokens_saved"], 2000);
+
+    let mut draft = apply.clone();
+    draft["session_id"] = Value::Null;
+    for rejected in [
+        draft,
+        json!({
+            "req": "session_shake_tools", "id": 53, "session_id": "session_selected",
+            "action": {"kind": "apply"},
+        }),
+    ] {
+        assert!(matches!(
+            bridge.api_request_to_legacy(&rejected).as_slice(),
+            [Outbound::Reply(_)]
+        ));
+    }
+    bridge.session_id = Some("session_neighbor".into());
+    assert!(matches!(
+        bridge.api_request_to_legacy(&apply).as_slice(),
+        [Outbound::Reply(_)]
+    ));
+}
+
 /// A client may pipeline: `create_session` then `send_message` without
 /// awaiting the attach. The subscribe is already on the wire, so the daemon
 /// will have a session by the time the message lands. Refusing here would

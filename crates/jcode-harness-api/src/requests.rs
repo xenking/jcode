@@ -320,6 +320,12 @@ pub enum ApiRequest {
         cwd: Option<String>,
     },
 
+    /// Preview or confirm local elision of old tool outputs in one open session.
+    SessionShakeTools {
+        session_id: String,
+        action: crate::ShakeToolsAction,
+    },
+
     /// Expand the archived portion of an attached session's transcript.
     GetCompactedHistory {
         session_id: String,

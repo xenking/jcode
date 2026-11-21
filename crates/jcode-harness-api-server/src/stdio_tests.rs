@@ -186,7 +186,7 @@ async fn stdio_stream_rejects_bad_hello_without_dialing_daemon() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn session_tools_negotiation_and_stream_translation() {
+async fn session_tool_capabilities_are_negotiated_before_forwarding() {
     use serde_json::json;
     for supported in [false, true] {
         let root = std::env::temp_dir().join(format!(
@@ -218,7 +218,11 @@ async fn session_tools_negotiation_and_stream_translation() {
         );
         let mut pong = json!({"type":"pong","id":0});
         if supported {
-            pong["capabilities"] = json!(["session_tools", "ask_response_images"]);
+            pong["capabilities"] = json!([
+                "session_tools",
+                "ask_response_images",
+                "session_shake_tools"
+            ]);
         }
         write_json_line(probe.get_mut(), &pong).await.unwrap();
         drop(probe);
@@ -229,6 +233,13 @@ async fn session_tools_negotiation_and_stream_translation() {
                 .as_array()
                 .unwrap()
                 .contains(&json!("session_tools")),
+            supported
+        );
+        assert_eq!(
+            hello["capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("session_shake_tools")),
             supported
         );
 
@@ -306,8 +317,39 @@ async fn session_tools_negotiation_and_stream_translation() {
         if !supported {
             assert_eq!(reply["code"], "unknown_request");
         }
+        let no_change = json!({"kind":"no_change"});
+        write_json_line(
+            &mut write,
+            &json!({"v":1,"id":4,"req":"session_shake_tools","session_id":"tool-fixture","action":{"kind":"preview"}}),
+        )
+        .await
+        .unwrap();
+        if supported {
+            read_frame(&mut daemon_read, &mut line).await.unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(
+                request,
+                json!({"type":"session_shake_tools","id":request["id"],"session_id":"tool-fixture","action":{"kind":"preview"}})
+            );
+            write_json_line(
+                &mut daemon_write,
+                &json!({"type":"shake_tools","id":request["id"],"session_id":"tool-fixture","result":no_change}),
+            )
+            .await
+            .unwrap();
+        }
+        read_frame(&mut read, &mut line).await.unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["reply_to"], 4);
+        if supported {
+            assert_eq!(reply["ev"], "shake_tools");
+            assert_eq!(reply["session_id"], "tool-fixture");
+            assert_eq!(reply["result"], no_change);
+        } else {
+            assert_eq!(reply["code"], "unknown_request");
+        }
         // A local rejection must not poison the old daemon session transport.
-        write_json_line(&mut write, &json!({"v":1,"id":4,"req":"ping"}))
+        write_json_line(&mut write, &json!({"v":1,"id":5,"req":"ping"}))
             .await
             .unwrap();
         read_frame(&mut daemon_read, &mut line).await.unwrap();

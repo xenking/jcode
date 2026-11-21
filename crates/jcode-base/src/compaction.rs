@@ -428,6 +428,7 @@ pub enum ShakeReason {
     CacheExpiry,
     /// Context overflow recovery.
     Emergency,
+    Manual,
 }
 
 impl ShakeReason {
@@ -436,6 +437,7 @@ impl ShakeReason {
             Self::PreCompact => "shake_pre_compact",
             Self::CacheExpiry => "shake_cache_expiry",
             Self::Emergency => "shake_emergency",
+            Self::Manual => "shake_manual",
         }
     }
 }
@@ -1170,18 +1172,28 @@ impl CompactionManager {
     /// Effective shake thresholds, or `None` when shake is disabled.
     /// `JCODE_COMPACTION_SHAKE=1|0` overrides `[compaction] shake`.
     pub fn shake_config(&self) -> Option<ShakeConfig> {
-        let cfg = &self.compaction_config;
         let enabled = match std::env::var("JCODE_COMPACTION_SHAKE") {
             Ok(v) => matches!(v.trim(), "1" | "true" | "on" | "yes"),
-            Err(_) => cfg.shake,
+            Err(_) => self.compaction_config.shake,
         };
-        enabled.then_some(ShakeConfig {
+        enabled.then(|| self.shake_thresholds())
+    }
+
+    /// An explicit request uses the same thresholds as automatic shake, even
+    /// when the user has not opted into rewriting history automatically.
+    pub fn manual_tool_shake_config(&self) -> ShakeConfig {
+        ShakeConfig { code_blocks: false, ..self.shake_thresholds() }
+    }
+
+    fn shake_thresholds(&self) -> ShakeConfig {
+        let cfg = &self.compaction_config;
+        ShakeConfig {
             protect_window_tokens: cfg.shake_protect_tokens,
             min_elidable_tokens: cfg.shake_min_region_tokens,
             min_savings_tokens: cfg.shake_min_savings_tokens,
             code_blocks: cfg.shake_code_blocks,
             protected_tools: jcode_compaction_core::shake::PROTECTED_TOOLS_DEFAULT,
-        })
+        }
     }
 
     /// Plan a shake. Only `CacheExpiry` allows a journal rewrite.

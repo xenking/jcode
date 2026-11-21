@@ -965,6 +965,34 @@ impl BridgeState {
                     "session_id": request["session_id"], "model": request["model"], "cwd": request["cwd"],
                 }))]
             }
+            "session_shake_tools" => {
+                let Ok(jcode_harness_api::ApiRequest::SessionShakeTools { session_id, action }) =
+                    serde_json::from_value(request.clone())
+                else {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "Shake requires a session ID and a preview or apply action",
+                    );
+                };
+                if self
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|attached| attached != &session_id)
+                {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "Shake target does not match the attached session",
+                    );
+                }
+                let id = self.legacy_id();
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::ShakeTools));
+                vec![Outbound::Legacy(json!({
+                    "type": "session_shake_tools", "id": id, "session_id": session_id, "action": action,
+                }))]
+            }
             "get_compacted_history" => {
                 let id = self.legacy_id();
                 self.pending_simple
@@ -2791,6 +2819,29 @@ impl BridgeState {
                 vec![ServerFrame::reply(
                     api_id,
                     ApiEvent::ContextBreakdown { breakdown },
+                )]
+            }
+            "shake_tools" => {
+                let Some(api_id) =
+                    self.take_simple(event["id"].as_u64().unwrap_or(0), SimpleKind::ShakeTools)
+                else {
+                    return vec![];
+                };
+                let (Some(session_id), Ok(result)) = (
+                    event["session_id"].as_str(),
+                    serde_json::from_value(event["result"].clone()),
+                ) else {
+                    return Self::invalid_daemon_event(
+                        Some(api_id),
+                        "invalid Shake tools result".into(),
+                    );
+                };
+                vec![ServerFrame::reply(
+                    api_id,
+                    ApiEvent::ShakeTools {
+                        session_id: session_id.to_owned(),
+                        result,
+                    },
                 )]
             }
             "history" => {

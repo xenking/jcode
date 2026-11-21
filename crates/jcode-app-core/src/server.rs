@@ -33,6 +33,7 @@ mod comm_session;
 mod comm_sync;
 mod configured_name;
 mod context_breakdown;
+mod shake_tools;
 use configured_name::normalize_configured_server_name;
 mod debug;
 mod debug_ambient;
@@ -145,6 +146,13 @@ use tokio::sync::{Mutex, OnceCell, RwLock, broadcast, mpsc};
 mod session_manager;
 pub(super) use session_manager::SessionManager;
 pub(super) type SessionAgents = Arc<SessionManager>;
+
+fn publish_compaction_completion(bus: &Bus, session_id: &str, event: ServerEvent) {
+    bus.publish(BusEvent::CompactionApplied {
+        session_id: session_id.to_owned(),
+        event: Box::new(event),
+    });
+}
 pub(super) type ChannelSubscriptions =
     Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 

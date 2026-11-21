@@ -606,6 +606,9 @@ where
     let context_breakdown_supported = daemon_caps
         .iter()
         .any(|cap| cap == jcode_harness_api::CONTEXT_BREAKDOWN_CAPABILITY);
+    let shake_tools_supported = daemon_caps
+        .iter()
+        .any(|cap| cap == jcode_harness_api::SHAKE_TOOLS_CAPABILITY);
     let force_stop_turn_supported = daemon_caps.iter().any(|cap| cap == "force_stop_turn_v1");
     let soft_interrupt_ids_supported = daemon_caps.iter().any(|cap| cap == "soft_interrupt_ids");
     let queued_prompts_supported = daemon_caps.iter().any(|cap| cap == "queued_prompts");
@@ -667,6 +670,10 @@ where
             .chain(
                 context_breakdown_supported
                     .then(|| jcode_harness_api::CONTEXT_BREAKDOWN_CAPABILITY.to_string()),
+            )
+            .chain(
+                shake_tools_supported
+                    .then(|| jcode_harness_api::SHAKE_TOOLS_CAPABILITY.to_string()),
             )
             .chain(force_stop_turn_supported.then(|| "force_stop_turn_v1".to_string()))
             .chain(queued_prompts_supported.then(|| "queued_prompts".to_string()))
@@ -798,6 +805,16 @@ where
                         ApiEvent::Error {
                             code: ErrorCode::UnknownRequest,
                             message: "This runtime does not support context breakdown.".into(),
+                        },
+                    )).await?;
+                    continue;
+                }
+                if request["req"] == "session_shake_tools" && !shake_tools_supported {
+                    write_json_line(&mut write_half, &ServerFrame::reply(
+                        request["id"].as_u64().unwrap_or(0),
+                        ApiEvent::Error {
+                            code: ErrorCode::UnknownRequest,
+                            message: "This runtime does not support manual Shake tools.".into(),
                         },
                     )).await?;
                     continue;

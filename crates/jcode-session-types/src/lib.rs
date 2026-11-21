@@ -9,6 +9,10 @@ pub use context_breakdown::{
     CONTEXT_BREAKDOWN_CAPABILITY, ContextBreakdown, ContextBreakdownCategory, ContextBreakdownKind,
 };
 mod memory;
+mod shake_tools;
+pub use shake_tools::{
+    SHAKE_TOOLS_CAPABILITY, ShakeToolsAction, ShakeToolsResult, ShakeToolsStats,
+};
 mod rewind;
 pub use rewind::{RewindAnchor, RewindMessageKey};
 mod title;

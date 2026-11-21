@@ -19,6 +19,7 @@ pub(super) enum SimpleKind {
     SessionImages,
     SessionImage,
     ContextBreakdown,
+    ShakeTools,
     CompactedHistory,
     /// Receipt-only controls: cancel, soft interrupts, auth/usage invalidation,
     /// and the legacy background-tool fallback. Their handlers do not reject
@@ -72,6 +73,7 @@ impl BridgeState {
                             | SimpleKind::SessionImages
                             | SimpleKind::SessionImage
                             | SimpleKind::ContextBreakdown
+                            | SimpleKind::ShakeTools
                     )
             })?;
         let (_, api_id, _) = self.pending_simple.remove(index);

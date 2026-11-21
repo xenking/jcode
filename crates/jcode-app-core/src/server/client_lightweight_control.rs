@@ -356,6 +356,15 @@ pub(super) async fn handle_lightweight_control_request(
         .await;
         return write_direct_event(&writer, &event).await;
     }
+    if let Request::SessionShakeTools {
+        id,
+        session_id,
+        action,
+    } = request
+    {
+        let event = super::shake_tools::reply(id, session_id, action, sessions).await;
+        return write_direct_event(&writer, &event).await;
+    }
     // Ping only snapshots connection presence. Reserving mutation admission here
     // races the next group-transfer RPC even after the caller receives Pong.
     // It must also remain available while a transfer owns exclusive admission.

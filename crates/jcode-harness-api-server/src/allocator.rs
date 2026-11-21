@@ -64,6 +64,7 @@ pub fn request_is_heavy(request: &serde_json::Value) -> bool {
                 | "get_history"
                 | "peek_session"
                 | "session_context_breakdown"
+                | "session_shake_tools"
                 | "read_file"
                 | "find_files"
                 | "search_text"

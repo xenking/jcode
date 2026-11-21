@@ -1924,6 +1924,21 @@ request in this new forked session, using the inherited conversation only as con
         self.mark_replay_events_append_dirty();
     }
 
+    fn shake_view(&self, start: usize) -> Vec<Message> {
+        self.messages[start.min(self.messages.len())..]
+            .iter()
+            .map(StoredMessage::to_message)
+            .collect()
+    }
+
+    pub fn preview_shake_stored_messages(
+        &self,
+        start: usize,
+        cfg: &jcode_compaction_core::shake::ShakeConfig,
+    ) -> jcode_compaction_core::shake::ShakeOutcome {
+        jcode_compaction_core::shake::preview(&self.shake_view(start), cfg)
+    }
+
     /// Apply shake elision to stored messages `[start..]` persistently, so
     /// later requests reuse byte-identical shaken prefixes.
     pub fn shake_stored_messages(
@@ -1932,10 +1947,7 @@ request in this new forked session, using the inherited conversation only as con
         cfg: &jcode_compaction_core::shake::ShakeConfig,
     ) -> jcode_compaction_core::shake::ShakeOutcome {
         let start = start.min(self.messages.len());
-        let mut view: Vec<Message> = self.messages[start..]
-            .iter()
-            .map(StoredMessage::to_message)
-            .collect();
+        let mut view = self.shake_view(start);
         let outcome = jcode_compaction_core::shake::shake(&mut view, cfg);
         if outcome != jcode_compaction_core::shake::ShakeOutcome::NoChange {
             for (stored, shaken) in self.messages[start..].iter_mut().zip(view) {

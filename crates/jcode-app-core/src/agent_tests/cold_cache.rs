@@ -167,6 +167,72 @@ fn compaction_dividers(agent: &Agent) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn manual_shake_requires_a_current_preview_and_records_only_one_reduction() {
+    use jcode_session_types::{ShakeToolsAction, ShakeToolsResult};
+
+    let _guard = crate::storage::lock_test_env();
+    let (_home, mut agent, _) = fixture(300, 1_000, 20_000).await;
+    let now = std::time::SystemTime::now();
+    let compaction = agent.registry.compaction();
+    let mut manager = compaction.write().await;
+    manager.note_provider_response(now, None);
+    agent.session.last_provider_request_at = Some(now.into());
+    let snapshot = serde_json::to_value(agent.session.provider_messages()).unwrap();
+    let busy = agent
+        .shake_tools(ShakeToolsAction::Preview, now)
+        .unwrap_err();
+    assert!(busy.to_string().contains("busy"), "{busy:#}");
+    drop(manager);
+
+    let (preview, event) = agent.shake_tools(ShakeToolsAction::Preview, now).unwrap();
+    let ShakeToolsResult::Preview {
+        confirmation,
+        cache_at_risk: true,
+        stats,
+    } = preview
+    else {
+        panic!("expected a warm preview, got {preview:?}");
+    };
+    assert!(event.is_none() && stats.estimated_tokens_saved > 0);
+
+    let cold = now + Duration::from_secs(300);
+    let stale = agent
+        .shake_tools(ShakeToolsAction::Apply { confirmation }, cold)
+        .unwrap_err();
+    assert!(stale.to_string().contains("no longer current"), "{stale:#}");
+    assert_eq!(
+        serde_json::to_value(agent.session.provider_messages()).unwrap(),
+        snapshot
+    );
+    assert!(shake_dividers(&agent).is_empty());
+
+    let (preview, _) = agent.shake_tools(ShakeToolsAction::Preview, cold).unwrap();
+    let ShakeToolsResult::Preview {
+        confirmation,
+        cache_at_risk: false,
+        stats: cold_stats,
+    } = preview
+    else {
+        panic!("expected a cold preview, got {preview:?}");
+    };
+    assert_eq!(stats, cold_stats);
+    let apply = ShakeToolsAction::Apply { confirmation };
+    let (applied, event) = agent.shake_tools(apply.clone(), cold).unwrap();
+    assert_eq!(applied, ShakeToolsResult::Applied { stats });
+    assert_eq!(event.unwrap().trigger, "shake_manual");
+    agent.session = Session::load(agent.session_id()).unwrap();
+    assert_ne!(
+        serde_json::to_value(agent.session.provider_messages()).unwrap(),
+        snapshot
+    );
+    assert_eq!(shake_dividers(&agent), ["shake_manual"]);
+    let (repeat, event) = agent.shake_tools(apply, cold).unwrap();
+    assert_eq!(repeat, ShakeToolsResult::NoChange);
+    assert!(event.is_none());
+    assert_eq!(shake_dividers(&agent), ["shake_manual"]);
+}
+
+#[tokio::test]
 async fn idle_cache_expiry_shakes_at_ttl_before_the_next_user_turn() {
     let _guard = crate::storage::lock_test_env();
     let (_home, mut agent, before) = fixture(300, 1_000, 20_000).await;

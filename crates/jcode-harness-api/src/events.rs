@@ -105,6 +105,11 @@ pub enum ApiEvent {
         breakdown: crate::ContextBreakdown,
     },
 
+    ShakeTools {
+        session_id: String,
+        result: crate::ShakeToolsResult,
+    },
+
     /// Expanded archived transcript window and its remaining history.
     CompactedHistory {
         session_id: String,

@@ -79,7 +79,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
-use super::SessionAgents;
+use super::{SessionAgents, publish_compaction_completion};
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 const RELOAD_STARTING_GUARD_MAX_AGE: Duration = Duration::from_secs(30);
 const REQUEST_HANDLER_STALL_THRESHOLDS_MS: [u64; 3] = [2_000, 10_000, 60_000];
@@ -282,6 +282,7 @@ pub(super) async fn handle_client(
                         Request::Ping { .. }
                             | Request::OpenrigHostIdentity { .. }
                             | Request::SessionContextBreakdown { .. }
+                            | Request::SessionShakeTools { .. }
                     );
                     handle_lightweight_control_request(
                         request,
@@ -1176,6 +1177,16 @@ pub(super) async fn handle_client(
             continue;
         }
 
+        if let Request::SessionShakeTools { id, session_id, action } = request {
+            let event = if session_id == client_session_id {
+                super::shake_tools::reply(id, session_id, action, &sessions).await
+            } else {
+                super::shake_tools::error(id, "Shake target does not match the attached session")
+            };
+            let _ = client_event_tx.send(event);
+            continue;
+        }
+
         // Passive screen controls must not acquire the Agent mutex or enter
         // ordinary dispatch: idle observations never start a provider turn.
         if let Request::ScreenContext { id, session_id, action } = request {
@@ -1465,7 +1476,7 @@ pub(super) async fn handle_client(
             Request::ForceStopTurn { .. } => unreachable!("force stop is dispatched before reconciliation"),
             Request::QueuePrompt { .. } | Request::SetQueuedPromptMode { .. } | Request::InterruptQueuedPrompt { .. } | Request::InterruptQueuedPrompts { .. } | Request::GetQueuedPrompts { .. } | Request::RemoveQueuedPrompt { .. } | Request::ReorderQueuedPrompts { .. } | Request::SetQueuedPromptEditing { .. } | Request::EditQueuedPrompt { .. } => unreachable!("queue controls dispatched before acknowledgment"),
             Request::ScreenContext { .. } => unreachable!("Passive screen control dispatched before acknowledgment"),
-            Request::SessionContextBreakdown { .. } => unreachable!("Context inspection dispatched before acknowledgment"),
+            Request::SessionContextBreakdown { .. } | Request::SessionShakeTools { .. } => unreachable!("Context control dispatched before acknowledgment"),
             Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. } => unreachable!("SDK controls dispatched before acknowledgment"),
             Request::Message {
                 id,

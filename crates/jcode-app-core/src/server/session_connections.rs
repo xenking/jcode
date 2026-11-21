@@ -54,6 +54,7 @@ pub(super) fn connection_presence_pong(
             "ask_response_images".into(),
             "runtime_commands".into(),
             jcode_session_types::CONTEXT_BREAKDOWN_CAPABILITY.into(),
+            jcode_session_types::SHAKE_TOOLS_CAPABILITY.into(),
             "session_connections".into(),
             "openrig_host_identity_v1".into(),
             crate::protocol::CLIENT_FOCUS_CAPABILITY.into(),

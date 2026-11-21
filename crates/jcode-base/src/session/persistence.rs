@@ -645,7 +645,7 @@ impl Session {
     }
 
     pub fn save(&mut self) -> Result<()> {
-        self.save_inner(false)
+        self.save_inner(false, false)
     }
 
     /// Write a full snapshot to an explicit path, collapsing its journal.
@@ -666,7 +666,13 @@ impl Session {
     /// another (for example visible swarm spawns), where caller-configured
     /// state such as model, provider, or effort must survive until attach.
     pub fn save_prepared(&mut self) -> Result<()> {
-        self.save_inner(true)
+        self.save_inner(true, false)
+    }
+
+    /// Commit an explicit context rewrite. A migrated transcript is an error,
+    /// not the successful no-write used by routine turn saves.
+    pub fn save_rewritten_context(&mut self) -> Result<()> {
+        self.save_inner(true, true)
     }
 
     /// Commit the current session before dropping its only in-memory owner.
@@ -717,7 +723,7 @@ impl Session {
         Ok(())
     }
 
-    fn save_inner(&mut self, force: bool) -> Result<()> {
+    fn save_inner(&mut self, force: bool, reject_lease: bool) -> Result<()> {
         // Shutdown waits for this guard so it cannot exit mid-checkpoint.
         let pre_start = Instant::now();
         let _save_guard = SAVES_IN_FLIGHT
@@ -744,6 +750,9 @@ impl Session {
             ));
         }
         if let Some(block) = lease {
+            if reject_lease {
+                bail!("Session {} not persisted: {}", self.id, block);
+            }
             crate::logging::warn(&format!("Session {} not persisted: {}", self.id, block));
             return Ok(());
         }

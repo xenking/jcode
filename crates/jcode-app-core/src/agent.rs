@@ -21,6 +21,7 @@ mod reload_resume_tests;
 mod response_recovery;
 mod runtime_recovery;
 mod session_title;
+mod shake_tools;
 mod status;
 mod streaming;
 #[cfg(test)]

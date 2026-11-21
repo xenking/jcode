@@ -132,13 +132,6 @@ pub(super) async fn poll_agent_compaction_completion(
     }
 }
 
-pub(super) fn publish_compaction_completion(bus: &Bus, session_id: &str, event: ServerEvent) {
-    bus.publish(BusEvent::CompactionApplied {
-        session_id: session_id.to_owned(),
-        event: Box::new(event),
-    });
-}
-
 pub(super) fn forward_compaction_completion(
     event: &BusEvent,
     session_id: &str,

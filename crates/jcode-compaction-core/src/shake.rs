@@ -45,7 +45,7 @@ pub const PROTECTED_TOOLS_DEFAULT: &[&str] = &["skill", "skill_manage"];
 pub const PLACEHOLDER_TOKEN_ESTIMATE: usize = 16;
 
 /// Tunable thresholds for [`shake`]. Defaults mirror omp `DEFAULT_SHAKE_CONFIG`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ShakeConfig {
     /// Most-recent tokens that must remain untouched.
     pub protect_window_tokens: usize,
@@ -432,14 +432,26 @@ pub fn shake_savings(messages: &[Message], config: &ShakeConfig) -> usize {
     collect_candidates(messages, boundary, config).1
 }
 
-/// Elide stale large regions. See module docs.
-pub fn shake(messages: &mut [Message], config: &ShakeConfig) -> ShakeOutcome {
+fn plan(messages: &[Message], config: &ShakeConfig) -> (Vec<Candidate>, ShakeOutcome) {
     let boundary = find_protect_boundary(messages, config.protect_window_tokens);
     let (candidates, saved) = collect_candidates(messages, boundary, config);
     if candidates.is_empty() || saved < config.min_savings_tokens {
-        return ShakeOutcome::NoChange;
+        return (Vec::new(), ShakeOutcome::NoChange);
     }
-    let regions = candidates.len();
+    let outcome = ShakeOutcome::Shaken {
+        regions_elided: candidates.len(),
+        tokens_saved: saved,
+    };
+    (candidates, outcome)
+}
+
+pub fn preview(messages: &[Message], config: &ShakeConfig) -> ShakeOutcome {
+    plan(messages, config).1
+}
+
+/// Elide stale large regions. See module docs.
+pub fn shake(messages: &mut [Message], config: &ShakeConfig) -> ShakeOutcome {
+    let (candidates, outcome) = plan(messages, config);
     // Apply back to front so code-block byte offsets within a block stay valid.
     for c in candidates.into_iter().rev() {
         match c {
@@ -468,10 +480,7 @@ pub fn shake(messages: &mut [Message], config: &ShakeConfig) -> ShakeOutcome {
             }
         }
     }
-    ShakeOutcome::Shaken {
-        regions_elided: regions,
-        tokens_saved: saved,
-    }
+    outcome
 }
 
 #[cfg(test)]

@@ -418,6 +418,13 @@ pub enum Request {
         cwd: Option<String>,
     },
 
+    #[serde(rename = "session_shake_tools")]
+    SessionShakeTools {
+        id: u64,
+        session_id: String,
+        action: jcode_session_types::ShakeToolsAction,
+    },
+
     /// Retrieve a bounded chunk of one session image by its stable ID.
     #[serde(rename = "get_session_image")]
     GetSessionImage {
