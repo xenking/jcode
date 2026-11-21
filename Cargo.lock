@@ -4201,11 +4201,11 @@ dependencies = [
  "chrono",
  "jcode-storage",
  "rayon",
- "resvg 0.46.0",
+ "resvg",
  "serde",
  "serde_json",
  "tempfile",
- "usvg 0.46.0",
+ "usvg",
 ]
 
 [[package]]
@@ -4927,10 +4927,10 @@ dependencies = [
  "mermaid-rs-renderer",
  "ratatui",
  "ratatui-image",
- "resvg 0.46.0",
+ "resvg",
  "serde",
  "serde_json",
- "usvg 0.46.0",
+ "usvg",
 ]
 
 [[package]]
@@ -5634,17 +5634,14 @@ version = "0.3.1"
 source = "git+https://github.com/1jehuang/mermaid-rs-renderer.git?tag=v0.3.1#2f993bd79a55235eb59a34d807852276ba25bea7"
 dependencies = [
  "anyhow",
- "clap",
  "fontdb",
  "json5",
  "once_cell",
  "regex",
- "resvg 0.47.0",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
  "ttf-parser",
- "usvg 0.47.0",
 ]
 
 [[package]]
@@ -8018,25 +8015,8 @@ dependencies = [
  "pico-args",
  "rgb",
  "svgtypes",
- "tiny-skia 0.11.4",
- "usvg 0.46.0",
- "zune-jpeg 0.5.11",
-]
-
-[[package]]
-name = "resvg"
-version = "0.47.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9be183ad6a216aa96f33e4c8033b0988b8b3ea6fd2359d19af5bac4643fd8e81"
-dependencies = [
- "gif",
- "image-webp",
- "log",
- "pico-args",
- "rgb",
- "svgtypes",
- "tiny-skia 0.12.0",
- "usvg 0.47.0",
+ "tiny-skia",
+ "usvg",
  "zune-jpeg 0.5.11",
 ]
 
@@ -9446,22 +9426,7 @@ dependencies = [
  "cfg-if",
  "log",
  "png 0.17.16",
- "tiny-skia-path 0.11.4",
-]
-
-[[package]]
-name = "tiny-skia"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47ffee5eaaf5527f630fb0e356b90ebdec84d5d18d937c5e440350f88c5a91ea"
-dependencies = [
- "arrayref",
- "arrayvec",
- "bytemuck",
- "cfg-if",
- "log",
- "png 0.18.1",
- "tiny-skia-path 0.12.0",
+ "tiny-skia-path",
 ]
 
 [[package]]
@@ -9469,17 +9434,6 @@ name = "tiny-skia-path"
 version = "0.11.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c9e7fc0c2e86a30b117d0462aa261b72b7a99b7ebd7deb3a14ceda95c5bdc93"
-dependencies = [
- "arrayref",
- "bytemuck",
- "strict-num",
-]
-
-[[package]]
-name = "tiny-skia-path"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edca365c3faccca67d06593c5980fa6c57687de727a03131735bb85f01fdeeb9"
 dependencies = [
  "arrayref",
  "bytemuck",
@@ -10313,35 +10267,7 @@ dependencies = [
  "siphasher",
  "strict-num",
  "svgtypes",
- "tiny-skia-path 0.11.4",
- "unicode-bidi",
- "unicode-script",
- "unicode-vo",
- "xmlwriter",
-]
-
-[[package]]
-name = "usvg"
-version = "0.47.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d46cf96c5f498d36b7a9693bc6a7075c0bb9303189d61b2249b0dc3d309c07de"
-dependencies = [
- "base64 0.22.1",
- "data-url",
- "flate2",
- "fontdb",
- "imagesize",
- "kurbo",
- "log",
- "pico-args",
- "roxmltree 0.21.1",
- "rustybuzz",
- "simplecss",
- "siphasher",
- "strict-num",
- "svgtypes",
- "tiny-skia-path 0.12.0",
- "ttf-parser",
+ "tiny-skia-path",
  "unicode-bidi",
  "unicode-script",
  "unicode-vo",
