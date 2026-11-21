@@ -22,6 +22,11 @@ unsafe extern "C" {
         count: CFIndex,
         out: *mut CFArrayRef,
     ) -> i32;
+    fn AXUIElementGetAttributeValueCount(
+        el: CFTypeRef,
+        attr: CFStringRef,
+        out: *mut CFIndex,
+    ) -> i32;
     fn AXUIElementCopyActionNames(el: CFTypeRef, out: *mut CFArrayRef) -> i32;
     fn AXUIElementPerformAction(el: CFTypeRef, action: CFStringRef) -> i32;
     fn AXUIElementIsAttributeSettable(el: CFTypeRef, attr: CFStringRef, settable: *mut u8) -> i32;
@@ -154,17 +159,21 @@ impl Element {
     pub(super) fn elements(&self, attr: &str, limit: usize) -> Result<Vec<Self>> {
         let strict = attr == "AXWindows";
         let attr = CFString::new(attr);
+        let key = attr.as_concrete_TypeRef();
         let mut list = ptr::null();
         let code = unsafe {
-            AXUIElementCopyAttributeValues(
-                self.raw(),
-                attr.as_concrete_TypeRef(),
-                0,
-                limit as CFIndex,
-                &mut list,
-            )
+            AXUIElementCopyAttributeValues(self.raw(), key, 0, limit as CFIndex, &mut list)
         };
         if let Err(err) = success(code) {
+            // A range starting at zero is invalid for a supported empty array.
+            if err.0 == -25201 {
+                let mut count = -1;
+                let count_status =
+                    unsafe { AXUIElementGetAttributeValueCount(self.raw(), key, &mut count) };
+                if count_status == 0 && count == 0 {
+                    return Ok(Vec::new());
+                }
+            }
             return if err.optional() && (!strict || err.0 == -25212) {
                 Ok(Vec::new())
             } else {
