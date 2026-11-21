@@ -523,6 +523,7 @@ mod finished_member_tests {
                 swarm_id: "swarm".to_string(),
                 target_status: vec!["completed".to_string()],
                 requested_ids: ids.iter().map(|s| s.to_string()).collect(),
+                stopped_members: Vec::new(),
                 mode: None,
                 created_at_unix_ms: now,
                 deadline_unix_ms: now + 600_000,

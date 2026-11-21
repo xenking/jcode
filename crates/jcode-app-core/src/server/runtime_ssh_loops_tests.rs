@@ -300,6 +300,7 @@ fn headless_startup_does_not_resume_a_lane_waiting_on_a_pending_await() {
         session_id: session.into(),
         swarm_id: "swarm".into(),
         requested_ids: vec!["worker".into()],
+        stopped_members: Vec::new(),
         target_status: vec!["completed".into()],
         mode: None,
         created_at_unix_ms: now,

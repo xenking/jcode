@@ -14,10 +14,10 @@ const FINAL_STATE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const PENDING_STATE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 static STATE_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-#[derive(Serialize, Deserialize)]
-struct StoppedMember {
-    session_id: String,
-    friendly_name: Option<String>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct StoppedMember {
+    pub session_id: String,
+    pub friendly_name: Option<String>,
 }
 
 pub(super) fn record_stopped_member(
@@ -40,6 +40,25 @@ pub(super) fn record_stopped_member(
     for identifier in identifiers {
         let key = hashed_request_key(identifier, "stopped-member", &[swarm_id.to_owned()]);
         save_json_state(STOPPED_MEMBERS_DIR, &key, &stopped, "stopped swarm member");
+    }
+
+    // Swarm-wide waits track live membership (including late joiners).
+    // Retain departures in the waiting generation, not the live registry.
+    let _guard = STATE_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    let now = now_unix_ms();
+    for mut state in scan_pending_await_members_including_expired() {
+        if state.swarm_id == swarm_id
+            && state.session_id != session_id
+            && state.requested_ids.is_empty()
+            && state.deadline_unix_ms > now
+            && !state
+                .stopped_members
+                .iter()
+                .any(|member| member.session_id == session_id)
+        {
+            state.stopped_members.push(stopped.clone());
+            save_state_unlocked(&state);
+        }
     }
 }
 
@@ -77,6 +96,8 @@ pub struct PersistedAwaitMembersState {
     pub target_status: Vec<String>,
     #[serde(default)]
     pub requested_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) stopped_members: Vec<StoppedMember>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     pub created_at_unix_ms: u64,
@@ -221,14 +242,24 @@ pub(super) fn load_state(key: &str) -> Option<PersistedAwaitMembersState> {
 
 pub(crate) fn save_state(state: &PersistedAwaitMembersState) {
     let _guard = STATE_WRITE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(current) = load_state(&state.key)
-        && (current.created_at_unix_ms > state.created_at_unix_ms
+    let current = load_state(&state.key);
+    if current.as_ref().is_some_and(|current| {
+        current.created_at_unix_ms > state.created_at_unix_ms
             || (current.created_at_unix_ms == state.created_at_unix_ms
-                && current.final_response.is_some()))
-    {
+                && current.final_response.is_some())
+    }) {
         return;
     }
-    save_state_unlocked(state);
+    if let Some(current) = current.filter(|current| {
+        current.created_at_unix_ms == state.created_at_unix_ms
+            && !current.stopped_members.is_empty()
+    }) {
+        let mut state = state.clone();
+        state.stopped_members = current.stopped_members;
+        save_state_unlocked(&state);
+    } else {
+        save_state_unlocked(state);
+    }
 }
 
 fn save_state_unlocked(state: &PersistedAwaitMembersState) {
@@ -316,6 +347,7 @@ pub(super) fn ensure_pending_state(
         swarm_id: swarm_id.to_string(),
         target_status: target_status.to_vec(),
         requested_ids: requested_ids.to_vec(),
+        stopped_members: Vec::new(),
         mode: mode.map(str::to_string),
         created_at_unix_ms: load_state(key)
             .map(|old| now_unix_ms().max(old.created_at_unix_ms.saturating_add(1)))
