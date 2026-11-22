@@ -8,6 +8,7 @@
 #[path = "backend_screen.rs"]
 mod screen;
 mod ssh_sessions;
+use ssh_sessions::subscribe_history_base;
 
 use crate::message::ToolCall;
 #[path = "backend_protocol_io.rs"]
@@ -23,14 +24,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
-
-fn subscribe_history_base(base: Option<HistoryBase>, ssh_remote: bool) -> Option<HistoryBase> {
-    if ssh_remote {
-        Some(HistoryBase::recent(128))
-    } else {
-        base
-    }
-}
 
 /// Debug events broadcast by local harnesses via debug socket.
 /// These expose the full internal state for debugging/comparison.

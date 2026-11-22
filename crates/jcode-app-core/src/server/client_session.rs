@@ -27,6 +27,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
+mod desktop_capability;
+pub(super) use desktop_capability::apply_or_defer_desktop_response_capability;
+
 use super::SessionAgents;
 
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
@@ -625,29 +628,6 @@ fn apply_or_defer_subscribe_selfdev(agent: &Arc<Mutex<Agent>>, session_id: &str)
             "Applied deferred self-dev subscribe metadata for session {}",
             session_id
         ));
-    });
-}
-
-/// Apply to the bound agent, not the connection's temporary registry. Like
-/// working-dir updates, a busy live target must not block client attachment.
-pub(super) async fn apply_or_defer_desktop_response_capability(
-    agent: &Arc<Mutex<Agent>>,
-    supports_user_response: bool,
-    supports_applets: bool,
-) {
-    if let Ok(mut guard) = agent.try_lock() {
-        guard
-            .set_desktop_response_capability(supports_user_response, supports_applets)
-            .await;
-        return;
-    }
-    let agent = Arc::clone(agent);
-    crate::runtime_activity::spawn(async move {
-        agent
-            .lock()
-            .await
-            .set_desktop_response_capability(supports_user_response, supports_applets)
-            .await;
     });
 }
 

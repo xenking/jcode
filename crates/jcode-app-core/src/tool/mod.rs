@@ -67,6 +67,7 @@ mod side_panel;
 mod skill;
 mod todo;
 mod user_response;
+mod ui_capabilities;
 mod webfetch;
 mod websearch;
 mod withheld_identity;
@@ -441,29 +442,6 @@ mod registry_touched_paths;
 mod registry_lifecycle;
 
 impl Registry {
-    #[cfg(test)]
-    pub(crate) async fn set_desktop_ui_enabled(&self, enabled: bool) {
-        self.set_ui_capabilities(enabled, enabled).await;
-    }
-
-    pub(crate) async fn set_ui_capabilities(&self, user_response: bool, applets: bool) {
-        if user_response {
-            self.register(
-                "user_response".into(),
-                Arc::new(user_response::UserResponseTool),
-            )
-            .await;
-        } else {
-            self.unregister("user_response").await;
-        }
-        if applets {
-            self.register("applet".into(), Arc::new(applet::AppletTool::new()))
-                .await;
-        } else {
-            self.unregister("applet").await;
-        }
-    }
-
     /// A view for a *tool* sub-call (`batch`, `codemode`): same tool map, same
     /// session compaction state.
     ///

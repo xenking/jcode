@@ -17,3 +17,14 @@ impl RemoteConnection {
         Ok(id)
     }
 }
+
+pub(super) fn subscribe_history_base(
+    base: Option<HistoryBase>,
+    ssh_remote: bool,
+) -> Option<HistoryBase> {
+    if ssh_remote {
+        Some(HistoryBase::recent(128))
+    } else {
+        base
+    }
+}
