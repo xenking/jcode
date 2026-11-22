@@ -386,10 +386,12 @@ fn parse_openai_response_event_inner(
         "response.completed" | "response.incomplete"
     ) && let Some(response) = event.response.as_ref()
     {
-        jcode_logging::info(&format!(
-            "OPENAI_CACHE_RESPONSE: {}",
-            cache_response_evidence(response)
-        ));
+        jcode_logging::debug_lazy(|| {
+            format!(
+                "OPENAI_CACHE_RESPONSE: {}",
+                cache_response_evidence(response)
+            )
+        });
     }
 
     match event.kind.as_str() {

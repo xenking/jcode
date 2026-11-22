@@ -6,14 +6,13 @@
 //!
 //! 1. Tens of thousands of blocking file reads land on whatever thread ran the
 //!    scan, which is felt as input lag and overlay flicker in the TUI.
-//! 2. Every load emits two INFO lines, so the burst also floods the log and
-//!    buries the very event that caused it.
+//! 2. Individual timing records, even when enabled only for slow loads or
+//!    debugging, can bury the cause of a burst.
 //!
 //! This module makes bursts self-reporting: individual loads stay quiet once a
 //! burst is recognised, and each burst emits one summary line (with a captured
 //! backtrace for the first burst in the process) naming the caller responsible.
-//! That turns "the logs are full of session_load" into an actionable pointer at
-//! the unbounded scan.
+//! That identifies the caller instead of listing every individual load.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -23,7 +22,7 @@ use std::time::{Duration, Instant};
 const BURST_THRESHOLD: usize = 32;
 
 /// Loads closer together than this continue the current burst. Anything slower
-/// is ordinary demand loading and keeps per-load logging.
+/// is ordinary demand loading and can report per-load details.
 const BURST_WINDOW: Duration = Duration::from_millis(250);
 
 /// Whether this process has already captured a backtrace for a burst. Capturing
@@ -66,7 +65,7 @@ thread_local! {
 /// Outcome of recording one session load.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LoadLogDecision {
-    /// Ordinary load: keep the detailed per-load log lines.
+    /// Ordinary load: eligible for detailed logging.
     Log,
     /// Part of a recognised burst: stay quiet, the burst summary covers it.
     Suppress,
@@ -121,8 +120,7 @@ fn flush() {
 }
 
 /// One warning at the moment a burst is recognised, carrying the caller that
-/// started it. This is the line that turns a wall of `session_load` entries
-/// into a pointer at the unbounded directory scan responsible.
+/// started it.
 fn announce_burst(state: &BurstState) {
     let mut fields = vec![
         ("phase", "load_burst_started".to_string()),

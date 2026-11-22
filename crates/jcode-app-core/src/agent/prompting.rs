@@ -156,13 +156,14 @@ impl Agent {
         split: &crate::prompt::SplitSystemPrompt,
         tools: &[ToolDefinition],
     ) {
-        let system_tokens = split.estimated_tokens();
-        let tool_tokens = ToolDefinition::aggregate_prompt_token_estimate(tools);
-        let prefix_tokens = system_tokens + tool_tokens;
-        logging::info(&format!(
-            "Prompt prefix estimate: total={} tokens (system={} tools={})",
-            prefix_tokens, system_tokens, tool_tokens
-        ));
+        logging::debug_lazy(|| {
+            let system_tokens = split.estimated_tokens();
+            let tool_tokens = ToolDefinition::aggregate_prompt_token_estimate(tools);
+            let prefix_tokens = system_tokens + tool_tokens;
+            format!(
+                "Prompt prefix estimate: total={prefix_tokens} tokens (system={system_tokens} tools={tool_tokens})"
+            )
+        });
     }
 
     pub(super) fn build_memory_prompt_nonblocking_shared(

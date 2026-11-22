@@ -304,56 +304,62 @@ impl Provider for OpenAIProvider {
         jcode_provider_core::fingerprint::note_responses_stable_item_count(
             stable_item_count.unwrap_or(input_item_count),
         );
-        let usage_diag = match self.credentials.try_read() {
-            Ok(credentials) => super::openai_stream_runtime::serving_account_diag(&credentials).0,
-            Err(_) => "account=unknown (credentials busy)".to_string(),
-        };
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             "request_start",
-            vec![
-                ("model", model_id.clone()),
-                (
-                    "transport_mode",
-                    transport_mode_snapshot.as_str().to_string(),
-                ),
-                ("websocket_preferred", use_websocket_transport.to_string()),
-                ("input_item_count", input_item_count.to_string()),
-                ("tool_count", request_tool_count.to_string()),
-                ("chatgpt_mode", is_chatgpt_mode.to_string()),
-                ("request_kind", "full".to_string()),
-                (
-                    "prompt_cache_key_present",
-                    request.get("prompt_cache_key").is_some().to_string(),
-                ),
-                (
-                    "prompt_cache_key_hash",
-                    format!("{:?}", prompt_cache_key_hash),
-                ),
-                (
-                    "prompt_cache_retention",
-                    request
-                        .get("prompt_cache_retention")
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "null".to_string()),
-                ),
-                (
-                    "service_tier",
-                    request
-                        .get("service_tier")
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "null".to_string()),
-                ),
-            ],
+            || {
+                vec![
+                    ("model", model_id.clone()),
+                    (
+                        "transport_mode",
+                        transport_mode_snapshot.as_str().to_string(),
+                    ),
+                    ("websocket_preferred", use_websocket_transport.to_string()),
+                    ("input_item_count", input_item_count.to_string()),
+                    ("tool_count", request_tool_count.to_string()),
+                    ("chatgpt_mode", is_chatgpt_mode.to_string()),
+                    ("request_kind", "full".to_string()),
+                    (
+                        "prompt_cache_key_present",
+                        request.get("prompt_cache_key").is_some().to_string(),
+                    ),
+                    (
+                        "prompt_cache_key_hash",
+                        format!("{:?}", prompt_cache_key_hash),
+                    ),
+                    (
+                        "prompt_cache_retention",
+                        request
+                            .get("prompt_cache_retention")
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "null".to_string()),
+                    ),
+                    (
+                        "service_tier",
+                        request
+                            .get("service_tier")
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "null".to_string()),
+                    ),
+                ]
+            },
         );
-        jcode_base::logging::info(&format!(
-            "OpenAI limit diag: request start model={} transport_mode={} websocket_preferred={} usage=({}) provider=({})",
-            model_id,
-            transport_mode_snapshot.as_str(),
-            use_websocket_transport,
-            usage_diag,
-            self.diagnostic_state_summary()
-        ));
+        jcode_base::logging::debug_lazy(|| {
+            let usage_diag = match self.credentials.try_read() {
+                Ok(credentials) => {
+                    super::openai_stream_runtime::serving_account_diag(&credentials).0
+                }
+                Err(_) => "account=unknown (credentials busy)".to_string(),
+            };
+            format!(
+                "OpenAI limit diag: request start model={} transport_mode={} websocket_preferred={} usage=({}) provider=({})",
+                model_id,
+                transport_mode_snapshot.as_str(),
+                use_websocket_transport,
+                usage_diag,
+                self.diagnostic_state_summary()
+            )
+        });
 
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
 
@@ -446,12 +452,14 @@ impl Provider for OpenAIProvider {
                         PersistentWsResult::TerminalError => return,
                         PersistentWsResult::Success => {
                             log_openai_stream_lifecycle(
-                                jcode_base::logging::LogLevel::Info,
+                                jcode_base::logging::LogLevel::Debug,
                                 "persistent_reuse_success",
-                                vec![
-                                    ("model", model_for_transport.clone()),
-                                    ("transport", "websocket".to_string()),
-                                ],
+                                || {
+                                    vec![
+                                        ("model", model_for_transport.clone()),
+                                        ("transport", "websocket".to_string()),
+                                    ]
+                                },
                             );
                             record_websocket_success(
                                 &websocket_cooldowns,
@@ -463,12 +471,14 @@ impl Provider for OpenAIProvider {
                         }
                         PersistentWsResult::NotAvailable => {
                             log_openai_stream_lifecycle(
-                                jcode_base::logging::LogLevel::Info,
+                                jcode_base::logging::LogLevel::Debug,
                                 "persistent_reuse_unavailable",
-                                vec![
-                                    ("model", model_for_transport.clone()),
-                                    ("transport", "websocket".to_string()),
-                                ],
+                                || {
+                                    vec![
+                                        ("model", model_for_transport.clone()),
+                                        ("transport", "websocket".to_string()),
+                                    ]
+                                },
                             );
                             jcode_base::logging::info(
                                 "No persistent WS connection available; using fresh connection",
@@ -478,11 +488,13 @@ impl Provider for OpenAIProvider {
                             log_openai_stream_lifecycle(
                                 jcode_base::logging::LogLevel::Warn,
                                 "persistent_reuse_failed",
-                                vec![
-                                    ("model", model_for_transport.clone()),
-                                    ("transport", "websocket".to_string()),
-                                    ("error", err.clone()),
-                                ],
+                                || {
+                                    vec![
+                                        ("model", model_for_transport.clone()),
+                                        ("transport", "websocket".to_string()),
+                                        ("error", err.clone()),
+                                    ]
+                                },
                             );
                             jcode_base::logging::warn(&format!(
                                 "Persistent WS continuation failed: {}; using fresh connection",
@@ -590,16 +602,18 @@ impl Provider for OpenAIProvider {
                     let transport_label = transport.as_str();
                     let attempt_started = Instant::now();
                     log_openai_stream_lifecycle(
-                        jcode_base::logging::LogLevel::Info,
+                        jcode_base::logging::LogLevel::Debug,
                         "attempt_start",
-                        vec![
-                            ("model", model_for_transport.clone()),
-                            ("attempt", (attempt + 1).to_string()),
-                            ("max_attempts", MAX_RETRIES.to_string()),
-                            ("transport", transport_label.to_string()),
-                            ("transport_mode", transport_mode.as_str().to_string()),
-                            ("forced_https", force_https_for_request.to_string()),
-                        ],
+                        || {
+                            vec![
+                                ("model", model_for_transport.clone()),
+                                ("attempt", (attempt + 1).to_string()),
+                                ("max_attempts", MAX_RETRIES.to_string()),
+                                ("transport", transport_label.to_string()),
+                                ("transport_mode", transport_mode.as_str().to_string()),
+                                ("forced_https", force_https_for_request.to_string()),
+                            ]
+                        },
                     );
                     jcode_base::logging::info(&format!(
                         "OpenAI stream attempt {}/{} using transport '{}'; model='{}'; mode='{}'",
@@ -692,17 +706,19 @@ impl Provider for OpenAIProvider {
                         }
                         Ok(()) => {
                             log_openai_stream_lifecycle(
-                                jcode_base::logging::LogLevel::Info,
+                                jcode_base::logging::LogLevel::Debug,
                                 "attempt_success",
-                                vec![
-                                    ("model", model_for_transport.clone()),
-                                    ("attempt", (attempt + 1).to_string()),
-                                    ("transport", transport_label.to_string()),
-                                    (
-                                        "elapsed_ms",
-                                        attempt_started.elapsed().as_millis().to_string(),
-                                    ),
-                                ],
+                                || {
+                                    vec![
+                                        ("model", model_for_transport.clone()),
+                                        ("attempt", (attempt + 1).to_string()),
+                                        ("transport", transport_label.to_string()),
+                                        (
+                                            "elapsed_ms",
+                                            attempt_started.elapsed().as_millis().to_string(),
+                                        ),
+                                    ]
+                                },
                             );
                             if use_websocket {
                                 record_websocket_success(
@@ -722,14 +738,16 @@ impl Provider for OpenAIProvider {
                             log_openai_stream_lifecycle(
                                 jcode_base::logging::LogLevel::Warn,
                                 "fallback_to_https",
-                                vec![
-                                    ("model", model_for_transport.clone()),
-                                    ("attempt", (attempt + 1).to_string()),
-                                    ("transport", transport_label.to_string()),
-                                    ("reason", reason.to_string()),
-                                    ("fallback_reason", fallback_reason.summary().to_string()),
-                                    ("elapsed_ms", elapsed_ms.to_string()),
-                                ],
+                                || {
+                                    vec![
+                                        ("model", model_for_transport.clone()),
+                                        ("attempt", (attempt + 1).to_string()),
+                                        ("transport", transport_label.to_string()),
+                                        ("reason", reason.to_string()),
+                                        ("fallback_reason", fallback_reason.summary().to_string()),
+                                        ("elapsed_ms", elapsed_ms.to_string()),
+                                    ]
+                                },
                             );
                             jcode_base::logging::warn(&format!(
                                 "WebSocket fallback after {}ms: {}",
@@ -800,14 +818,16 @@ impl Provider for OpenAIProvider {
                                 log_openai_stream_lifecycle(
                                     jcode_base::logging::LogLevel::Warn,
                                     "retry_scheduled",
-                                    vec![
-                                        ("model", model_for_transport.clone()),
-                                        ("attempt", (attempt + 1).to_string()),
-                                        ("next_attempt", (attempt + 2).to_string()),
-                                        ("transport", transport_label.to_string()),
-                                        ("error", error.to_string()),
-                                        ("elapsed_ms", elapsed_ms.to_string()),
-                                    ],
+                                    || {
+                                        vec![
+                                            ("model", model_for_transport.clone()),
+                                            ("attempt", (attempt + 1).to_string()),
+                                            ("next_attempt", (attempt + 2).to_string()),
+                                            ("transport", transport_label.to_string()),
+                                            ("error", error.to_string()),
+                                            ("elapsed_ms", elapsed_ms.to_string()),
+                                        ]
+                                    },
                                 );
                                 // A durable UI notice is a transcript fence. It
                                 // must follow rollback of this failed attempt.
@@ -828,14 +848,16 @@ impl Provider for OpenAIProvider {
                             log_openai_stream_lifecycle(
                                 jcode_base::logging::LogLevel::Error,
                                 "attempt_failed",
-                                vec![
-                                    ("model", model_for_transport.clone()),
-                                    ("attempt", (attempt + 1).to_string()),
-                                    ("transport", transport_label.to_string()),
-                                    ("will_retry", "false".to_string()),
-                                    ("error", error.to_string()),
-                                    ("elapsed_ms", elapsed_ms.to_string()),
-                                ],
+                                || {
+                                    vec![
+                                        ("model", model_for_transport.clone()),
+                                        ("attempt", (attempt + 1).to_string()),
+                                        ("transport", transport_label.to_string()),
+                                        ("will_retry", "false".to_string()),
+                                        ("error", error.to_string()),
+                                        ("elapsed_ms", elapsed_ms.to_string()),
+                                    ]
+                                },
                             );
                             if let Some(notice) = overload_notice {
                                 emit_status_detail(&tx, notice).await;
@@ -872,11 +894,13 @@ impl Provider for OpenAIProvider {
                     log_openai_stream_lifecycle(
                         jcode_base::logging::LogLevel::Error,
                         "retries_exhausted",
-                        vec![
-                            ("model", model_for_transport.clone()),
-                            ("max_attempts", MAX_RETRIES.to_string()),
-                            ("error", e.to_string()),
-                        ],
+                        || {
+                            vec![
+                                ("model", model_for_transport.clone()),
+                                ("max_attempts", MAX_RETRIES.to_string()),
+                                ("error", e.to_string()),
+                            ]
+                        },
                     );
                     let _ = tx
                         .send(Err(retry_diagnostics.annotate(

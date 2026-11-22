@@ -56,7 +56,14 @@ impl SyncTiming {
 
 impl Drop for SyncTiming {
     fn drop(&mut self) {
-        crate::logging::info(&self.record());
+        match self.outcome {
+            "success"
+            | "acquired"
+            | "skipped_unchanged"
+            | "skipped_disabled"
+            | "skipped_empty_or_debug" => crate::logging::debug_lazy(|| self.record()),
+            _ => crate::logging::info(&self.record()),
+        }
     }
 }
 
@@ -1126,10 +1133,12 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
     } else {
         "success"
     };
-    crate::logging::info(&format!(
-        "mobile_sync candidates={candidate_count} unchanged={unchanged_count} progress_updates={}",
-        updates.len()
-    ));
+    crate::logging::debug_lazy(|| {
+        format!(
+            "mobile_sync candidates={candidate_count} unchanged={unchanged_count} progress_updates={}",
+            updates.len()
+        )
+    });
     timing.outcome = if report.errors == 0 {
         "success"
     } else {

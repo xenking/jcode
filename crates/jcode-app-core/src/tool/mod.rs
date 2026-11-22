@@ -1033,10 +1033,13 @@ impl Registry {
             }
         }
 
-        crate::logging::event_info(
-            "TOOL_LIFECYCLE",
-            Self::tool_lifecycle_fields("start", name, resolved_name, &input, &ctx),
-        );
+        let tool_trace = crate::logging::LogLevel::Debug.is_enabled();
+        if tool_trace {
+            crate::logging::event_debug(
+                "TOOL_LIFECYCLE",
+                Self::tool_lifecycle_fields("start", name, resolved_name, &input, &ctx),
+            );
+        }
 
         let started_at = std::time::Instant::now();
         // Hooks, policy, telemetry and the context guard stay in the runtime.
@@ -1090,15 +1093,26 @@ impl Registry {
             remember_withheld_call(&ctx.session_id, call_key, invocation);
         }
 
-        let mut fields = Self::tool_lifecycle_fields("done", name, resolved_name, &input, &ctx);
-        fields.push(("elapsed_ms".to_string(), latency_ms.to_string()));
-        fields.push(("output_bytes".to_string(), output.output.len().to_string()));
-        fields.push((
-            "output_chars".to_string(),
-            output.output.chars().count().to_string(),
-        ));
-        fields.push(("image_count".to_string(), output.images.len().to_string()));
-        crate::logging::event_info("TOOL_LIFECYCLE", fields);
+        crate::logging::event_info(
+            "TOOL_LIFECYCLE",
+            [
+                ("phase", "done".to_owned()),
+                ("tool", resolved_name.to_owned()),
+                ("session_id", ctx.session_id.clone()),
+                ("elapsed_ms", latency_ms.to_string()),
+                ("output_bytes", output.output.len().to_string()),
+                ("image_count", output.images.len().to_string()),
+            ],
+        );
+        if tool_trace {
+            let mut fields =
+                Self::tool_lifecycle_fields("done_detail", name, resolved_name, &input, &ctx);
+            fields.push((
+                "output_chars".to_string(),
+                output.output.chars().count().to_string(),
+            ));
+            crate::logging::event_debug("TOOL_LIFECYCLE", fields);
+        }
 
         Ok(output)
     }

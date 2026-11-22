@@ -209,13 +209,15 @@ impl PrewarmSlot {
             match result {
                 Ok(Ok(state)) => {
                     log_openai_stream_lifecycle(
-                        jcode_base::logging::LogLevel::Info,
+                        jcode_base::logging::LogLevel::Debug,
                         "ws_prewarm_ready",
-                        vec![
-                            ("model", model),
-                            ("elapsed_ms", started_at.elapsed().as_millis().to_string()),
-                            ("protocol", WEBSOCKET_V2_BETA.to_string()),
-                        ],
+                        || {
+                            vec![
+                                ("model", model),
+                                ("elapsed_ms", started_at.elapsed().as_millis().to_string()),
+                                ("protocol", WEBSOCKET_V2_BETA.to_string()),
+                            ]
+                        },
                     );
                     let _ = tx.send(state);
                 }
@@ -224,9 +226,9 @@ impl PrewarmSlot {
                     // poison the foreground request's transport cooldown.
                     drop(tx);
                     log_openai_stream_lifecycle(
-                        jcode_base::logging::LogLevel::Info,
+                        jcode_base::logging::LogLevel::Debug,
                         "ws_prewarm_unavailable",
-                        vec![("model", model)],
+                        || vec![("model", model)],
                     );
                 }
             }
@@ -270,17 +272,19 @@ impl PrewarmSlot {
                     )
             });
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             if state.is_some() {
                 "ws_prewarm_hit"
             } else {
                 "ws_prewarm_miss"
             },
-            vec![
-                ("model", openai_request_model(request)),
-                ("compatible", compatible.to_string()),
-                ("age_ms", job.started_at.elapsed().as_millis().to_string()),
-            ],
+            || {
+                vec![
+                    ("model", openai_request_model(request)),
+                    ("compatible", compatible.to_string()),
+                    ("age_ms", job.started_at.elapsed().as_millis().to_string()),
+                ]
+            },
         );
         state
     }

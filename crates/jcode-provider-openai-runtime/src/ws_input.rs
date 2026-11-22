@@ -292,19 +292,21 @@ pub(super) fn observe_ws_response_output_event(event: &Value, output: &mut Vec<V
         Some("response.completed") => {
             let completed_output = event.pointer("/response/output").and_then(Value::as_array);
             if completed_output.is_none_or(|items| items.is_empty()) && !output.is_empty() {
-                jcode_base::logging::info(&format!(
-                    "WS_RESPONSE_OUTPUT: preserving streamed output; completed_output_present={} completed_output_items={} streamed_output_items={} streamed_tool_calls={}",
-                    completed_output.is_some(),
-                    completed_output.map_or(0, Vec::len),
-                    output.len(),
-                    output
-                        .iter()
-                        .filter(|item| matches!(
-                            item.get("type").and_then(Value::as_str),
-                            Some("function_call" | "custom_tool_call")
-                        ))
-                        .count(),
-                ));
+                jcode_base::logging::debug_lazy(|| {
+                    format!(
+                        "WS_RESPONSE_OUTPUT: preserving streamed output; completed_output_present={} completed_output_items={} streamed_output_items={} streamed_tool_calls={}",
+                        completed_output.is_some(),
+                        completed_output.map_or(0, Vec::len),
+                        output.len(),
+                        output
+                            .iter()
+                            .filter(|item| matches!(
+                                item.get("type").and_then(Value::as_str),
+                                Some("function_call" | "custom_tool_call")
+                            ))
+                            .count(),
+                    )
+                });
             }
             if let Some(items) = completed_output.filter(|items| !items.is_empty()) {
                 *output = items.clone();

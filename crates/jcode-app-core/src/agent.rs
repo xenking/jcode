@@ -280,37 +280,36 @@ fn log_agent_provider_stream_lifecycle(
     agent: &Agent,
     phase: &str,
     api_start: Instant,
-    fields: Vec<(&str, String)>,
+    fields: impl FnOnce() -> Vec<(&'static str, String)>,
 ) {
+    if !level.is_enabled() {
+        return;
+    }
     let mut owned = vec![
-        ("phase".to_string(), phase.to_string()),
-        ("provider".to_string(), agent.provider.name().to_string()),
-        ("model".to_string(), agent.provider.model()),
-        ("session_id".to_string(), agent.session.id.clone()),
+        ("phase", phase.to_string()),
+        ("provider", agent.provider.name().to_string()),
+        ("model", agent.provider.model()),
+        ("session_id", agent.session.id.clone()),
         (
-            "provider_session_id".to_string(),
-            agent
-                .provider_session_id
-                .clone()
-                .unwrap_or_else(|| "none".to_string()),
-        ),
-        (
-            "connection_type".to_string(),
+            "connection_type",
             agent
                 .last_connection_type
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string()),
         ),
-        (
-            "elapsed_ms".to_string(),
-            api_start.elapsed().as_millis().to_string(),
-        ),
+        ("elapsed_ms", api_start.elapsed().as_millis().to_string()),
     ];
-    owned.extend(
-        fields
-            .into_iter()
-            .map(|(key, value)| (key.to_string(), value)),
-    );
+    if phase != "stream_complete" || logging::LogLevel::Debug.is_enabled() {
+        owned.push((
+            "provider_session_id",
+            agent
+                .provider_session_id
+                .as_deref()
+                .unwrap_or("none")
+                .to_owned(),
+        ));
+    }
+    owned.extend(fields());
     logging::event(level, "AGENT_PROVIDER_STREAM_LIFECYCLE", owned);
 }
 
@@ -1634,35 +1633,26 @@ impl Agent {
                             .messages;
                     }
                 }
-                let user_count = messages
-                    .iter()
-                    .filter(|message| matches!(message.role, Role::User))
-                    .count();
-                let assistant_count = messages.len().saturating_sub(user_count);
-                logging::info(&format!(
-                    "messages_for_provider (compaction): returning {} messages (user={}, assistant={})",
-                    messages.len(),
-                    user_count,
-                    assistant_count,
-                ));
+                Self::log_provider_message_count("compaction", &messages);
                 return Ok((Self::bounded_outbound_images(messages), event));
             }
         }
 
         let all_messages = self.session.provider_messages();
         let messages = Self::bounded_outbound_images(all_messages.to_vec());
-        let user_count = messages
-            .iter()
-            .filter(|message| matches!(message.role, Role::User))
-            .count();
-        let assistant_count = messages.len().saturating_sub(user_count);
-        logging::info(&format!(
-            "messages_for_provider (session): returning {} messages (user={}, assistant={})",
-            messages.len(),
-            user_count,
-            assistant_count,
-        ));
+        Self::log_provider_message_count("session", &messages);
         Ok((messages, None))
+    }
+
+    fn log_provider_message_count(source: &str, messages: &[Message]) {
+        logging::debug_lazy(|| {
+            let users = messages.iter().filter(|msg| msg.role == Role::User).count();
+            format!(
+                "messages_for_provider ({source}): returning {} messages (user={users}, other={})",
+                messages.len(),
+                messages.len() - users,
+            )
+        });
     }
 
     /// Bound the inline screenshot payload of one outbound request.

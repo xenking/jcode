@@ -160,6 +160,7 @@ impl ServerRuntime {
     pub(super) fn spawn_main_accept_loop(&self, listener: Listener) -> tokio::task::JoinHandle<()> {
         let runtime = self.clone();
         let cancellation = self.tasks.cancellation.child_token();
+        let trace_accepts = crate::logging::LogLevel::Debug.is_enabled();
         tokio::spawn(async move {
             #[cfg(windows)]
             let mut listener = listener;
@@ -171,7 +172,9 @@ impl ServerRuntime {
                 };
                 match accepted {
                     Ok((stream, _)) => {
-                        crate::logging::info("[TIMING] main accept: connection accepted");
+                        if trace_accepts {
+                            crate::logging::debug("[TIMING] main accept: connection accepted");
+                        }
                         runtime.increment_client_count().await;
                         if !runtime
                             .spawn_client_task(stream, "Client error", true)

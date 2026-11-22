@@ -380,6 +380,9 @@ pub fn log_provider_canonical_input(
     tool_count: Option<usize>,
     extra_fields: &[(&str, String)],
 ) {
+    if !jcode_logging::LogLevel::Debug.is_enabled() && REQUEST_INPUT.try_with(|_| ()).is_err() {
+        return;
+    }
     let fingerprints = canonical_fingerprints(payload, items, system, tools);
     capture_request_input(provider, model, format, &fingerprints, items);
     log_canonical_fingerprints(
@@ -403,6 +406,9 @@ fn log_canonical_fingerprints(
     tool_count: Option<usize>,
     extra_fields: &[(&str, String)],
 ) {
+    if !jcode_logging::LogLevel::Debug.is_enabled() {
+        return;
+    }
     let (request_hash, request_json_chars) = fingerprints.request;
     let (item_hashes, input_hash) = &fingerprints.items;
     let item_hashes_hash = stable_hash_json(item_hashes);
@@ -472,7 +478,7 @@ fn log_canonical_fingerprints(
         }
     }
 
-    jcode_logging::info(&format!(
+    jcode_logging::debug(&format!(
         "PROVIDER_CANONICAL_INPUT: provider={} model={} format={} request_hash={} request_json_chars={} \
          input_hash={} item_count={} previous_item_count={:?} item_hashes_hash={} first_item_hash={:?} last_item_hash={:?} \
          previous_age_secs={:?} prefix_matches={:?} common_prefix_items={:?} first_changed_item_index={:?} \

@@ -259,18 +259,17 @@ impl OpenAITransport {
 fn log_openai_stream_lifecycle(
     level: jcode_base::logging::LogLevel,
     phase: &str,
-    fields: Vec<(&str, String)>,
+    fields: impl FnOnce() -> Vec<(&'static str, String)>,
 ) {
-    let mut owned = vec![
-        ("phase".to_string(), phase.to_string()),
-        ("provider".to_string(), "openai".to_string()),
-    ];
-    owned.extend(
-        fields
-            .into_iter()
-            .map(|(key, value)| (key.to_string(), value)),
-    );
-    jcode_base::logging::event(level, "PROVIDER_STREAM_LIFECYCLE", owned);
+    if level.is_enabled() {
+        let owned = [
+            ("phase", phase.to_owned()),
+            ("provider", "openai".to_owned()),
+        ]
+        .into_iter()
+        .chain(fields());
+        jcode_base::logging::event(level, "PROVIDER_STREAM_LIFECYCLE", owned);
+    }
 }
 
 fn openai_request_model(request: &Value) -> String {
@@ -674,11 +673,13 @@ fn spawn_persistent_ws_keepalive_with_interval(
                 log_openai_stream_lifecycle(
                     jcode_base::logging::LogLevel::Info,
                     "persistent_state_reset",
-                    vec![
-                        ("model", model.clone()),
-                        ("reason", "max_age".to_string()),
-                        ("source", "background_keepalive".to_string()),
-                    ],
+                    || {
+                        vec![
+                            ("model", model.clone()),
+                            ("reason", "max_age".to_string()),
+                            ("source", "background_keepalive".to_string()),
+                        ]
+                    },
                 );
                 *guard = None;
                 return;
@@ -693,11 +694,13 @@ fn spawn_persistent_ws_keepalive_with_interval(
                 log_openai_stream_lifecycle(
                     jcode_base::logging::LogLevel::Info,
                     "persistent_state_reset",
-                    vec![
-                        ("model", model.clone()),
-                        ("reason", "idle_reconnect".to_string()),
-                        ("source", "background_keepalive".to_string()),
-                    ],
+                    || {
+                        vec![
+                            ("model", model.clone()),
+                            ("reason", "idle_reconnect".to_string()),
+                            ("source", "background_keepalive".to_string()),
+                        ]
+                    },
                 );
                 *guard = None;
                 return;
@@ -723,12 +726,14 @@ fn spawn_persistent_ws_keepalive_with_interval(
                     log_openai_stream_lifecycle(
                         jcode_base::logging::LogLevel::Info,
                         "persistent_state_reset",
-                        vec![
-                            ("model", model.clone()),
-                            ("reason", reset_reason.to_string()),
-                            ("source", "background_keepalive".to_string()),
-                            ("detail", detail),
-                        ],
+                        || {
+                            vec![
+                                ("model", model.clone()),
+                                ("reason", reset_reason.to_string()),
+                                ("source", "background_keepalive".to_string()),
+                                ("detail", detail),
+                            ]
+                        },
                     );
                     *guard = None;
                     return;
@@ -741,12 +746,14 @@ fn spawn_persistent_ws_keepalive_with_interval(
                     log_openai_stream_lifecycle(
                         jcode_base::logging::LogLevel::Warn,
                         "persistent_state_reset",
-                        vec![
-                            ("model", model.clone()),
-                            ("reason", "healthcheck_failed".to_string()),
-                            ("source", "background_keepalive".to_string()),
-                            ("error", error),
-                        ],
+                        || {
+                            vec![
+                                ("model", model.clone()),
+                                ("reason", "healthcheck_failed".to_string()),
+                                ("source", "background_keepalive".to_string()),
+                                ("error", error),
+                            ]
+                        },
                     );
                     *guard = None;
                     return;

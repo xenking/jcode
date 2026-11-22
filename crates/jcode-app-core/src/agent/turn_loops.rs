@@ -179,11 +179,13 @@ impl Agent {
                 messages_with_memory.push(nudge.into_request_only());
             }
 
-            logging::info(&format!(
-                "API call starting: {} messages, {} tools",
-                messages_with_memory.len(),
-                tools.len()
-            ));
+            logging::debug_lazy(|| {
+                format!(
+                    "API call starting: {} messages, {} tools",
+                    messages_with_memory.len(),
+                    tools.len()
+                )
+            });
             let api_start = Instant::now();
 
             // Publish status for TUI to show during Task execution
@@ -246,16 +248,18 @@ impl Agent {
             // Successful API call - reset retry counter
             context_limit_retries = 0;
 
-            logging::info(&format!(
-                "API stream opened in {:.2}s",
-                api_start.elapsed().as_secs_f64()
-            ));
+            logging::debug_lazy(|| {
+                format!(
+                    "API stream opened in {:.2}s",
+                    api_start.elapsed().as_secs_f64()
+                )
+            });
             log_agent_provider_stream_lifecycle(
-                logging::LogLevel::Info,
+                logging::LogLevel::Debug,
                 self,
                 "stream_opened",
                 api_start,
-                vec![("mode", "blocking".to_string())],
+                || vec![("mode", "blocking".to_string())],
             );
 
             Bus::global().publish(BusEvent::SubagentStatus(SubagentStatus {
@@ -306,14 +310,16 @@ impl Agent {
                                 self,
                                 "stream_error_retry_after_compaction",
                                 api_start,
-                                vec![
-                                    ("mode", "blocking".to_string()),
-                                    ("error", err_str.clone()),
-                                    (
-                                        "context_limit_retries",
-                                        (context_limit_retries + 1).to_string(),
-                                    ),
-                                ],
+                                || {
+                                    vec![
+                                        ("mode", "blocking".to_string()),
+                                        ("error", err_str.clone()),
+                                        (
+                                            "context_limit_retries",
+                                            (context_limit_retries + 1).to_string(),
+                                        ),
+                                    ]
+                                },
                             );
                             context_limit_retries += 1;
                             if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
@@ -333,7 +339,7 @@ impl Agent {
                             self,
                             "stream_error",
                             api_start,
-                            vec![("mode", "blocking".to_string()), ("error", err_str)],
+                            || vec![("mode", "blocking".to_string()), ("error", err_str)],
                         );
                         return Err(e);
                     }
@@ -797,14 +803,16 @@ impl Agent {
                                 self,
                                 "stream_event_retry_after_compaction",
                                 api_start,
-                                vec![
-                                    ("mode", "blocking".to_string()),
-                                    ("error", message.clone()),
-                                    (
-                                        "context_limit_retries",
-                                        (context_limit_retries + 1).to_string(),
-                                    ),
-                                ],
+                                || {
+                                    vec![
+                                        ("mode", "blocking".to_string()),
+                                        ("error", message.clone()),
+                                        (
+                                            "context_limit_retries",
+                                            (context_limit_retries + 1).to_string(),
+                                        ),
+                                    ]
+                                },
                             );
                             context_limit_retries += 1;
                             if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
@@ -824,16 +832,18 @@ impl Agent {
                             self,
                             "stream_event_error",
                             api_start,
-                            vec![
-                                ("mode", "blocking".to_string()),
-                                ("error", message.clone()),
-                                (
-                                    "retry_after_secs",
-                                    retry_after_secs
-                                        .map(|seconds| seconds.to_string())
-                                        .unwrap_or_else(|| "none".to_string()),
-                                ),
-                            ],
+                            || {
+                                vec![
+                                    ("mode", "blocking".to_string()),
+                                    ("error", message.clone()),
+                                    (
+                                        "retry_after_secs",
+                                        retry_after_secs
+                                            .map(|seconds| seconds.to_string())
+                                            .unwrap_or_else(|| "none".to_string()),
+                                    ),
+                                ]
+                            },
                         );
                         return Err(StreamError::new(message, retry_after_secs).into());
                     }
@@ -843,37 +853,30 @@ impl Agent {
             usage_recorder.finish();
             if retry_after_compaction {
                 log_agent_provider_stream_lifecycle(
-                    logging::LogLevel::Info,
+                    logging::LogLevel::Debug,
                     self,
                     "retry_after_compaction",
                     api_start,
-                    vec![("mode", "blocking".to_string())],
+                    || vec![("mode", "blocking".to_string())],
                 );
                 continue;
             }
 
-            let api_elapsed = api_start.elapsed();
-            logging::info(&format!(
-                "API call complete in {:.2}s (input={} output={} cache_read={} cache_write={})",
-                api_elapsed.as_secs_f64(),
-                usage_input.unwrap_or(0),
-                usage_output.unwrap_or(0),
-                usage_cache_read.unwrap_or(0),
-                usage_cache_creation.unwrap_or(0),
-            ));
             log_agent_provider_stream_lifecycle(
                 logging::LogLevel::Info,
                 self,
                 "stream_complete",
                 api_start,
-                vec![
-                    ("mode", "blocking".to_string()),
-                    ("saw_message_end", saw_message_end.to_string()),
-                    ("input_tokens", usage_input.unwrap_or(0).to_string()),
-                    ("output_tokens", usage_output.unwrap_or(0).to_string()),
-                    ("cache_read", usage_cache_read.unwrap_or(0).to_string()),
-                    ("cache_write", usage_cache_creation.unwrap_or(0).to_string()),
-                ],
+                || {
+                    vec![
+                        ("mode", "blocking".to_string()),
+                        ("saw_message_end", saw_message_end.to_string()),
+                        ("input", usage_input.unwrap_or(0).to_string()),
+                        ("output", usage_output.unwrap_or(0).to_string()),
+                        ("cache_read", usage_cache_read.unwrap_or(0).to_string()),
+                        ("cache_write", usage_cache_creation.unwrap_or(0).to_string()),
+                    ]
+                },
             );
 
             if usage_input.is_some()
@@ -1064,10 +1067,7 @@ impl Agent {
                 break;
             }
 
-            logging::info(&format!(
-                "Turn has {} tool calls to execute",
-                tool_calls.len()
-            ));
+            logging::debug_lazy(|| format!("Turn has {} tool calls to execute", tool_calls.len()));
 
             // If provider handles tools internally (like Claude Code CLI), only run native tools locally
             if self.provider.handles_tools_internally() {
@@ -1243,7 +1243,7 @@ impl Agent {
                     title: None,
                 }));
 
-                logging::info(&format!("Tool starting: {}", tc.name));
+                logging::debug_lazy(|| format!("Tool starting: {}", tc.name));
                 let tool_start = Instant::now();
 
                 // Publish status for TUI to show during Task execution
@@ -1274,11 +1274,13 @@ impl Agent {
                 crate::telemetry::record_tool_call();
                 self.unlock_tools_if_needed(&tc.name);
                 let tool_elapsed = tool_start.elapsed();
-                logging::info(&format!(
-                    "Tool finished: {} in {:.2}s",
-                    tc.name,
-                    tool_elapsed.as_secs_f64()
-                ));
+                logging::debug_lazy(|| {
+                    format!(
+                        "Tool finished: {} in {:.2}s",
+                        tc.name,
+                        tool_elapsed.as_secs_f64()
+                    )
+                });
 
                 match result {
                     Ok(output) => {

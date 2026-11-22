@@ -160,11 +160,13 @@ impl Agent {
                 messages_with_memory.push(nudge.into_request_only());
             }
 
-            logging::info(&format!(
-                "API call starting: {} messages, {} tools",
-                messages_with_memory.len(),
-                tools.len()
-            ));
+            logging::debug_lazy(|| {
+                format!(
+                    "API call starting: {} messages, {} tools",
+                    messages_with_memory.len(),
+                    tools.len()
+                )
+            });
             let api_start = Instant::now();
 
             let stamped = crate::config::config()
@@ -295,16 +297,18 @@ impl Agent {
             // Successful API call - reset retry counter
             context_limit_retries = 0;
 
-            logging::info(&format!(
-                "API stream opened in {:.2}s",
-                api_start.elapsed().as_secs_f64()
-            ));
+            logging::debug_lazy(|| {
+                format!(
+                    "API stream opened in {:.2}s",
+                    api_start.elapsed().as_secs_f64()
+                )
+            });
             log_agent_provider_stream_lifecycle(
-                logging::LogLevel::Info,
+                logging::LogLevel::Debug,
                 self,
                 "stream_opened",
                 api_start,
-                vec![("mode", "mpsc".to_string())],
+                || vec![("mode", "mpsc".to_string())],
             );
 
             let mut text_content = String::new();
@@ -384,7 +388,7 @@ impl Agent {
                             self,
                             "stream_cancelled",
                             api_start,
-                            vec![
+                            || vec![
                                 ("mode", "mpsc".to_string()),
                                 ("reason", "graceful_shutdown".to_string()),
                             ],
@@ -404,17 +408,19 @@ impl Agent {
                 let Some(event) = event else {
                     log_agent_provider_stream_lifecycle(
                         if saw_message_end {
-                            logging::LogLevel::Info
+                            logging::LogLevel::Debug
                         } else {
                             logging::LogLevel::Warn
                         },
                         self,
                         "stream_eof",
                         api_start,
-                        vec![
-                            ("mode", "mpsc".to_string()),
-                            ("saw_message_end", saw_message_end.to_string()),
-                        ],
+                        || {
+                            vec![
+                                ("mode", "mpsc".to_string()),
+                                ("saw_message_end", saw_message_end.to_string()),
+                            ]
+                        },
                     );
                     break;
                 };
@@ -430,14 +436,16 @@ impl Agent {
                                 self,
                                 "stream_error_retry_after_compaction",
                                 api_start,
-                                vec![
-                                    ("mode", "mpsc".to_string()),
-                                    ("error", err_str.clone()),
-                                    (
-                                        "context_limit_retries",
-                                        (context_limit_retries + 1).to_string(),
-                                    ),
-                                ],
+                                || {
+                                    vec![
+                                        ("mode", "mpsc".to_string()),
+                                        ("error", err_str.clone()),
+                                        (
+                                            "context_limit_retries",
+                                            (context_limit_retries + 1).to_string(),
+                                        ),
+                                    ]
+                                },
                             );
                             context_limit_retries += 1;
                             if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
@@ -466,7 +474,7 @@ impl Agent {
                             self,
                             "stream_error",
                             api_start,
-                            vec![("mode", "mpsc".to_string()), ("error", err_str)],
+                            || vec![("mode", "mpsc".to_string()), ("error", err_str)],
                         );
                         return Err(e);
                     }
@@ -911,13 +919,15 @@ impl Agent {
                             self,
                             "retry_rollback",
                             api_start,
-                            vec![
-                                ("mode", "mpsc".to_string()),
-                                ("attempt", attempt.to_string()),
-                                ("max", max.to_string()),
-                                ("text_chars", text_content.len().to_string()),
-                                ("tool_calls", tool_calls.len().to_string()),
-                            ],
+                            || {
+                                vec![
+                                    ("mode", "mpsc".to_string()),
+                                    ("attempt", attempt.to_string()),
+                                    ("max", max.to_string()),
+                                    ("text_chars", text_content.len().to_string()),
+                                    ("tool_calls", tool_calls.len().to_string()),
+                                ]
+                            },
                         );
                         text_content.clear();
                         if inline_output_tap {
@@ -1067,14 +1077,16 @@ impl Agent {
                                 self,
                                 "stream_event_retry_after_compaction",
                                 api_start,
-                                vec![
-                                    ("mode", "mpsc".to_string()),
-                                    ("error", message.clone()),
-                                    (
-                                        "context_limit_retries",
-                                        (context_limit_retries + 1).to_string(),
-                                    ),
-                                ],
+                                || {
+                                    vec![
+                                        ("mode", "mpsc".to_string()),
+                                        ("error", message.clone()),
+                                        (
+                                            "context_limit_retries",
+                                            (context_limit_retries + 1).to_string(),
+                                        ),
+                                    ]
+                                },
                             );
                             context_limit_retries += 1;
                             if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
@@ -1103,16 +1115,18 @@ impl Agent {
                             self,
                             "stream_event_error",
                             api_start,
-                            vec![
-                                ("mode", "mpsc".to_string()),
-                                ("error", message.clone()),
-                                (
-                                    "retry_after_secs",
-                                    retry_after_secs
-                                        .map(|seconds| seconds.to_string())
-                                        .unwrap_or_else(|| "none".to_string()),
-                                ),
-                            ],
+                            || {
+                                vec![
+                                    ("mode", "mpsc".to_string()),
+                                    ("error", message.clone()),
+                                    (
+                                        "retry_after_secs",
+                                        retry_after_secs
+                                            .map(|seconds| seconds.to_string())
+                                            .unwrap_or_else(|| "none".to_string()),
+                                    ),
+                                ]
+                            },
                         );
                         return Err(StreamError::new(message, retry_after_secs).into());
                     }
@@ -1124,41 +1138,34 @@ impl Agent {
             usage_recorder.finish();
             if retry_after_compaction {
                 log_agent_provider_stream_lifecycle(
-                    logging::LogLevel::Info,
+                    logging::LogLevel::Debug,
                     self,
                     "retry_after_compaction",
                     api_start,
-                    vec![("mode", "mpsc".to_string())],
+                    || vec![("mode", "mpsc".to_string())],
                 );
                 continue;
             }
 
-            let api_elapsed = api_start.elapsed();
-            logging::info(&format!(
-                "API call complete in {:.2}s (input={} output={} cache_read={} cache_write={})",
-                api_elapsed.as_secs_f64(),
-                usage_input.unwrap_or(0),
-                usage_output.unwrap_or(0),
-                usage_cache_read.unwrap_or(0),
-                usage_cache_creation.unwrap_or(0),
-            ));
             log_agent_provider_stream_lifecycle(
                 logging::LogLevel::Info,
                 self,
                 "stream_complete",
                 api_start,
-                vec![
-                    ("mode", "mpsc".to_string()),
-                    ("saw_message_end", saw_message_end.to_string()),
-                    (
-                        "stop_reason",
-                        stop_reason.clone().unwrap_or_else(|| "none".to_string()),
-                    ),
-                    ("input_tokens", usage_input.unwrap_or(0).to_string()),
-                    ("output_tokens", usage_output.unwrap_or(0).to_string()),
-                    ("cache_read", usage_cache_read.unwrap_or(0).to_string()),
-                    ("cache_write", usage_cache_creation.unwrap_or(0).to_string()),
-                ],
+                || {
+                    vec![
+                        ("mode", "mpsc".to_string()),
+                        ("saw_message_end", saw_message_end.to_string()),
+                        (
+                            "stop_reason",
+                            stop_reason.clone().unwrap_or_else(|| "none".to_string()),
+                        ),
+                        ("input", usage_input.unwrap_or(0).to_string()),
+                        ("output", usage_output.unwrap_or(0).to_string()),
+                        ("cache_read", usage_cache_read.unwrap_or(0).to_string()),
+                        ("cache_write", usage_cache_creation.unwrap_or(0).to_string()),
+                    ]
+                },
             );
 
             if saw_message_end {
@@ -1520,10 +1527,7 @@ impl Agent {
                 break;
             }
 
-            logging::info(&format!(
-                "Turn has {} tool calls to execute",
-                tool_calls.len()
-            ));
+            logging::debug_lazy(|| format!("Turn has {} tool calls to execute", tool_calls.len()));
 
             if self.provider.handles_tools_internally() {
                 tool_calls.retain(|tc| JCODE_NATIVE_TOOLS.contains(&tc.name.as_str()));
@@ -1668,7 +1672,7 @@ impl Agent {
                     eprintln!("[trace] tool_exec_start name={} id={}", tc.name, tc.id);
                 }
 
-                logging::info(&format!("Tool starting: {}", tc.name));
+                logging::debug_lazy(|| format!("Tool starting: {}", tc.name));
                 crate::session_metrics::record_activity(&self.session.id);
                 if inline_output_tap {
                     // Surface the tool execution on the coordinator's inline
@@ -1781,11 +1785,13 @@ impl Agent {
 
                 if let Some(result) = tool_result {
                     // Normal tool completion
-                    logging::info(&format!(
-                        "Tool finished: {} in {:.2}s",
-                        tc.name,
-                        tool_elapsed.as_secs_f64()
-                    ));
+                    logging::debug_lazy(|| {
+                        format!(
+                            "Tool finished: {} in {:.2}s",
+                            tc.name,
+                            tool_elapsed.as_secs_f64()
+                        )
+                    });
                     if inline_output_tap {
                         // Update the tool marker in place with duration/error.
                         self.inline_tail

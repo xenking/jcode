@@ -406,9 +406,9 @@ fn response_http_request(
     }
     if let Some(built) = builder.try_clone().and_then(|builder| builder.build().ok()) {
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             "https_request_routing_headers",
-            routing_header_log_fields(built.headers()),
+            || routing_header_log_fields(built.headers()),
         );
     }
     builder
@@ -578,10 +578,12 @@ pub(super) async fn try_persistent_ws_continuation(
         log_openai_stream_lifecycle(
             jcode_base::logging::LogLevel::Warn,
             "persistent_state_reset",
-            vec![
-                ("model", openai_request_model(request)),
-                ("reason", "persistent_reuse_failed".to_string()),
-            ],
+            || {
+                vec![
+                    ("model", openai_request_model(request)),
+                    ("reason", "persistent_reuse_failed".to_string()),
+                ]
+            },
         );
         attempt.phase = RecoveryPhase::Idle;
     } else if attempt.phase == RecoveryPhase::Idle {
@@ -612,12 +614,14 @@ async fn continue_persistent_ws_locked(
         Some(s) => s,
         None => {
             log_openai_stream_lifecycle(
-                jcode_base::logging::LogLevel::Info,
+                jcode_base::logging::LogLevel::Debug,
                 "persistent_reuse_unavailable_detail",
-                vec![
-                    ("model", request_model.clone()),
-                    ("reason", "no_state".to_string()),
-                ],
+                || {
+                    vec![
+                        ("model", request_model.clone()),
+                        ("reason", "no_state".to_string()),
+                    ]
+                },
             );
             return PersistentWsResult::NotAvailable;
         }
@@ -634,12 +638,14 @@ async fn continue_persistent_ws_locked(
     {
         *guard = None;
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             "persistent_state_reset",
-            vec![
-                ("model", request_model.clone()),
-                ("reason", "handshake_identity_changed".to_string()),
-            ],
+            || {
+                vec![
+                    ("model", request_model.clone()),
+                    ("reason", "handshake_identity_changed".to_string()),
+                ]
+            },
         );
         return PersistentWsResult::NotAvailable;
     }
@@ -647,12 +653,14 @@ async fn continue_persistent_ws_locked(
     if state.cache_key.as_deref() != request.get("prompt_cache_key").and_then(Value::as_str) {
         *guard = None;
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             "persistent_state_reset",
-            vec![
-                ("model", request_model.clone()),
-                ("reason", "cache_session_changed".to_string()),
-            ],
+            || {
+                vec![
+                    ("model", request_model.clone()),
+                    ("reason", "cache_session_changed".to_string()),
+                ]
+            },
         );
         return PersistentWsResult::NotAvailable;
     }
@@ -666,12 +674,14 @@ async fn continue_persistent_ws_locked(
     {
         *guard = None;
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             "persistent_state_reset",
-            vec![
-                ("model", request_model.clone()),
-                ("reason", "request_options_changed".to_string()),
-            ],
+            || {
+                vec![
+                    ("model", request_model.clone()),
+                    ("reason", "request_options_changed".to_string()),
+                ]
+            },
         );
         return PersistentWsResult::NotAvailable;
     }
@@ -681,16 +691,18 @@ async fn continue_persistent_ws_locked(
         jcode_base::logging::info("Persistent WS connection too old; forcing reconnect");
         *guard = None;
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             "persistent_state_reset",
-            vec![
-                ("model", request_model.clone()),
-                ("reason", "max_age".to_string()),
-                (
-                    "max_age_secs",
-                    WEBSOCKET_PERSISTENT_MAX_AGE_SECS.to_string(),
-                ),
-            ],
+            || {
+                vec![
+                    ("model", request_model.clone()),
+                    ("reason", "max_age".to_string()),
+                    (
+                        "max_age_secs",
+                        WEBSOCKET_PERSISTENT_MAX_AGE_SECS.to_string(),
+                    ),
+                ]
+            },
         );
         return PersistentWsResult::NotAvailable;
     }
@@ -711,14 +723,16 @@ async fn continue_persistent_ws_locked(
             ));
             *guard = None;
             log_openai_stream_lifecycle(
-                jcode_base::logging::LogLevel::Info,
+                jcode_base::logging::LogLevel::Debug,
                 "persistent_state_reset",
-                vec![
-                    ("model", request_model.clone()),
-                    ("reason", reset_reason.to_string()),
-                    ("source", "request_reuse".to_string()),
-                    ("detail", detail),
-                ],
+                || {
+                    vec![
+                        ("model", request_model.clone()),
+                        ("reason", reset_reason.to_string()),
+                        ("source", "request_reuse".to_string()),
+                        ("detail", detail),
+                    ]
+                },
             );
             return PersistentWsResult::NotAvailable;
         }
@@ -731,12 +745,14 @@ async fn continue_persistent_ws_locked(
             log_openai_stream_lifecycle(
                 jcode_base::logging::LogLevel::Warn,
                 "persistent_state_reset",
-                vec![
-                    ("model", request_model.clone()),
-                    ("reason", "healthcheck_failed".to_string()),
-                    ("source", "request_reuse".to_string()),
-                    ("error", err.to_string()),
-                ],
+                || {
+                    vec![
+                        ("model", request_model.clone()),
+                        ("reason", "healthcheck_failed".to_string()),
+                        ("source", "request_reuse".to_string()),
+                        ("error", err.to_string()),
+                    ]
+                },
             );
             return PersistentWsResult::NotAvailable;
         }
@@ -754,14 +770,16 @@ async fn continue_persistent_ws_locked(
             input_item_count, last_input_item_count
         ));
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             "persistent_state_reset",
-            vec![
-                ("model", request_model.clone()),
-                ("reason", "input_not_growing".to_string()),
-                ("input_item_count", input_item_count.to_string()),
-                ("last_input_item_count", last_input_item_count.to_string()),
-            ],
+            || {
+                vec![
+                    ("model", request_model.clone()),
+                    ("reason", "input_not_growing".to_string()),
+                    ("input_item_count", input_item_count.to_string()),
+                    ("last_input_item_count", last_input_item_count.to_string()),
+                ]
+            },
         );
         *guard = None;
         return PersistentWsResult::NotAvailable;
@@ -775,17 +793,19 @@ async fn continue_persistent_ws_locked(
             || !input_item_hashes.starts_with(&state.last_input_item_hashes))
     {
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             "persistent_state_reset",
-            vec![
-                ("model", request_model.clone()),
-                ("reason", "input_prefix_changed".to_string()),
-                ("input_item_count", input_item_count.to_string()),
-                (
-                    "last_input_item_count",
-                    state.last_input_item_count.to_string(),
-                ),
-            ],
+            || {
+                vec![
+                    ("model", request_model.clone()),
+                    ("reason", "input_prefix_changed".to_string()),
+                    ("input_item_count", input_item_count.to_string()),
+                    (
+                        "last_input_item_count",
+                        state.last_input_item_count.to_string(),
+                    ),
+                ]
+            },
         );
         *guard = None;
         return PersistentWsResult::NotAvailable;
@@ -805,32 +825,34 @@ async fn continue_persistent_ws_locked(
             Err(diff) => {
                 use jcode_provider_core::fingerprint::stable_hash_json;
                 log_openai_stream_lifecycle(
-                    jcode_base::logging::LogLevel::Info,
+                    jcode_base::logging::LogLevel::Debug,
                     "persistent_state_reset",
-                    vec![
-                        ("model", request_model.clone()),
-                        ("reason", "response_output_changed".to_string()),
-                        ("first_changed_input_index", diff.input_index.to_string()),
-                        ("first_changed_output_index", diff.output_index.to_string()),
-                        (
-                            "previous_output_item_type",
-                            replay_item_type(Some(diff.previous)).to_string(),
-                        ),
-                        (
-                            "replay_item_type",
-                            replay_item_type(diff.current).to_string(),
-                        ),
-                        (
-                            "previous_output_item_hash",
-                            stable_hash_json(diff.previous).to_string(),
-                        ),
-                        (
-                            "replay_item_hash",
-                            diff.current
-                                .map(stable_hash_json)
-                                .map_or_else(|| "none".to_string(), |hash| hash.to_string()),
-                        ),
-                    ],
+                    || {
+                        vec![
+                            ("model", request_model.clone()),
+                            ("reason", "response_output_changed".to_string()),
+                            ("first_changed_input_index", diff.input_index.to_string()),
+                            ("first_changed_output_index", diff.output_index.to_string()),
+                            (
+                                "previous_output_item_type",
+                                replay_item_type(Some(diff.previous)).to_string(),
+                            ),
+                            (
+                                "replay_item_type",
+                                replay_item_type(diff.current).to_string(),
+                            ),
+                            (
+                                "previous_output_item_hash",
+                                stable_hash_json(diff.previous).to_string(),
+                            ),
+                            (
+                                "replay_item_hash",
+                                diff.current
+                                    .map(stable_hash_json)
+                                    .map_or_else(|| "none".to_string(), |hash| hash.to_string()),
+                            ),
+                        ]
+                    },
                 );
                 *guard = None;
                 return PersistentWsResult::NotAvailable;
@@ -859,10 +881,12 @@ async fn continue_persistent_ws_locked(
         (std::borrow::Cow::Owned(items), skipped)
     };
     if skipped_output_items > 0 {
-        jcode_base::logging::info(&format!(
-            "Skipped {} prior response output item(s) in persistent WS continuation delta",
-            skipped_output_items
-        ));
+        jcode_base::logging::debug_lazy(|| {
+            format!(
+                "Skipped {} prior response output item(s) in persistent WS continuation delta",
+                skipped_output_items
+            )
+        });
     }
     // Codex permits an empty suffix. Require positive evidence that the
     // caller replayed the entire completed output, not just the old input.
@@ -873,12 +897,14 @@ async fn continue_persistent_ws_locked(
         jcode_base::logging::info("No incremental items to send; need fresh request");
         *guard = None;
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             "persistent_state_reset",
-            vec![
-                ("model", request_model.clone()),
-                ("reason", "empty_incremental_items".to_string()),
-            ],
+            || {
+                vec![
+                    ("model", request_model.clone()),
+                    ("reason", "empty_incremental_items".to_string()),
+                ]
+            },
         );
         return PersistentWsResult::NotAvailable;
     }
@@ -900,84 +926,90 @@ async fn continue_persistent_ws_locked(
         .get("prompt_cache_key")
         .map(jcode_provider_core::fingerprint::stable_hash_json);
     let (usage_diag, usage_exhausted) = serving_account_diag(&*credentials.read().await);
-    jcode_base::logging::info(&format!(
-        "OpenAI limit diag: attempting persistent WS reuse previous_response_id_present={} usage=({}) state=({})",
-        !previous_response_id.is_empty(),
-        usage_diag,
-        state.diag_snapshot().log_fields()
-    ));
-    jcode_base::logging::info(&format!(
-        "Persistent WS continuation: previous_response_id={} {} tool_callback={} (was {} now {})",
-        previous_response_id,
-        incremental_stats.log_fields(),
-        incremental_stats.tool_callback_count() > 0,
-        state.last_input_item_count,
-        input_item_count,
-    ));
+    jcode_base::logging::debug_lazy(|| {
+        format!(
+            "OpenAI limit diag: attempting persistent WS reuse previous_response_id_present={} usage=({}) state=({})",
+            !previous_response_id.is_empty(),
+            usage_diag,
+            state.diag_snapshot().log_fields()
+        )
+    });
+    jcode_base::logging::debug_lazy(|| {
+        format!(
+            "Persistent WS continuation: previous_response_id={} {} tool_callback={} (was {} now {})",
+            previous_response_id,
+            incremental_stats.log_fields(),
+            incremental_stats.tool_callback_count() > 0,
+            state.last_input_item_count,
+            input_item_count,
+        )
+    });
     log_openai_stream_lifecycle(
-        jcode_base::logging::LogLevel::Info,
+        jcode_base::logging::LogLevel::Debug,
         "persistent_reuse_start",
-        vec![
-            ("model", request_model.clone()),
-            ("transport", "websocket".to_string()),
-            ("input_item_count", input_item_count.to_string()),
-            (
-                "last_input_item_count",
-                state.last_input_item_count.to_string(),
-            ),
-            (
-                "incremental_item_count",
-                incremental_items.len().to_string(),
-            ),
-            (
-                "previous_response_id_present",
-                (!previous_response_id.is_empty()).to_string(),
-            ),
-            (
-                "tool_callback",
-                (incremental_stats.tool_callback_count() > 0).to_string(),
-            ),
-            (
-                "request_kind",
-                if full_replay {
-                    "ws_cancel_full_replay"
-                } else {
-                    "ws_delta"
-                }
-                .to_string(),
-            ),
-            (
-                "cache_namespace",
-                if full_replay {
-                    "full_request"
-                } else {
-                    "previous_response_delta"
-                }
-                .to_string(),
-            ),
-            (
-                "prompt_cache_key_present",
-                request.get("prompt_cache_key").is_some().to_string(),
-            ),
-            (
-                "prompt_cache_key_hash",
-                format!("{:?}", request_prompt_cache_key_hash),
-            ),
-            (
-                "prompt_cache_retention",
-                request
-                    .get("prompt_cache_retention")
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "null".to_string()),
-            ),
-            (
-                "service_tier",
-                request
-                    .get("service_tier")
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "null".to_string()),
-            ),
-        ],
+        || {
+            vec![
+                ("model", request_model.clone()),
+                ("transport", "websocket".to_string()),
+                ("input_item_count", input_item_count.to_string()),
+                (
+                    "last_input_item_count",
+                    state.last_input_item_count.to_string(),
+                ),
+                (
+                    "incremental_item_count",
+                    incremental_items.len().to_string(),
+                ),
+                (
+                    "previous_response_id_present",
+                    (!previous_response_id.is_empty()).to_string(),
+                ),
+                (
+                    "tool_callback",
+                    (incremental_stats.tool_callback_count() > 0).to_string(),
+                ),
+                (
+                    "request_kind",
+                    if full_replay {
+                        "ws_cancel_full_replay"
+                    } else {
+                        "ws_delta"
+                    }
+                    .to_string(),
+                ),
+                (
+                    "cache_namespace",
+                    if full_replay {
+                        "full_request"
+                    } else {
+                        "previous_response_delta"
+                    }
+                    .to_string(),
+                ),
+                (
+                    "prompt_cache_key_present",
+                    request.get("prompt_cache_key").is_some().to_string(),
+                ),
+                (
+                    "prompt_cache_key_hash",
+                    format!("{:?}", request_prompt_cache_key_hash),
+                ),
+                (
+                    "prompt_cache_retention",
+                    request
+                        .get("prompt_cache_retention")
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "null".to_string()),
+                ),
+                (
+                    "service_tier",
+                    request
+                        .get("service_tier")
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "null".to_string()),
+                ),
+            ]
+        },
     );
 
     let mut continuation_request = if full_replay {
@@ -1175,11 +1207,13 @@ async fn continue_persistent_ws_locked(
     *recovery_phase = RecoveryPhase::InFlight;
     emit_connection_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await;
     state.last_activity_at = Instant::now();
-    jcode_base::logging::info(&format!(
-        "Persistent WS continuation request sent in {}ms ({})",
-        send_started_at.elapsed().as_millis(),
-        incremental_stats.log_fields(),
-    ));
+    jcode_base::logging::debug_lazy(|| {
+        format!(
+            "Persistent WS continuation request sent in {}ms ({})",
+            send_started_at.elapsed().as_millis(),
+            incremental_stats.log_fields(),
+        )
+    });
 
     // Stream the response, extracting the new response_id
     let mut saw_text_delta = false;
@@ -1271,11 +1305,13 @@ async fn continue_persistent_ws_locked(
                 if !logged_first_server_event {
                     emit_connection_phase(tx, jcode_message_types::ConnectionPhase::Streaming)
                         .await;
-                    jcode_base::logging::info(&format!(
-                        "Persistent WS first server event after {}ms ({})",
-                        stream_started.elapsed().as_millis(),
-                        incremental_stats.log_fields(),
-                    ));
+                    jcode_base::logging::debug_lazy(|| {
+                        format!(
+                            "Persistent WS first server event after {}ms ({})",
+                            stream_started.elapsed().as_millis(),
+                            incremental_stats.log_fields(),
+                        )
+                    });
                     logged_first_server_event = true;
                 }
                 if classification.is_fallback_notice(&text) {
@@ -1303,12 +1339,14 @@ async fn continue_persistent_ws_locked(
                         .and_then(|id| id.as_str())
                 {
                     new_response_id = Some(id.to_string());
-                    jcode_base::logging::info(&format!(
-                        "Persistent WS got new response_id after {}ms: {} ({})",
-                        stream_started.elapsed().as_millis(),
-                        id,
-                        incremental_stats.log_fields(),
-                    ));
+                    jcode_base::logging::debug_lazy(|| {
+                        format!(
+                            "Persistent WS got new response_id after {}ms: {} ({})",
+                            stream_started.elapsed().as_millis(),
+                            id,
+                            incremental_stats.log_fields(),
+                        )
+                    });
                     if usage_exhausted {
                         jcode_base::logging::warn(&format!(
                             "OpenAI limit diag: persistent WS reuse accepted request while the serving account's usage indicates exhausted usage=({}) state=({})",
@@ -1430,16 +1468,18 @@ async fn continue_persistent_ws_locked(
             "Persistent WS consumer dropped; recovering transport without response chain",
         );
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             "persistent_state_reset",
-            vec![
-                ("model", request_model),
-                (
-                    "reason",
-                    "consumer_dropped_response_chain_discarded".to_string(),
-                ),
-                ("consumer_dropped", consumer_dropped.to_string()),
-            ],
+            || {
+                vec![
+                    ("model", request_model),
+                    (
+                        "reason",
+                        "consumer_dropped_response_chain_discarded".to_string(),
+                    ),
+                    ("consumer_dropped", consumer_dropped.to_string()),
+                ]
+            },
         );
         return PersistentWsResult::Success;
     }
@@ -1454,24 +1494,28 @@ async fn continue_persistent_ws_locked(
         state.message_count += 1;
         state.last_activity_at = Instant::now();
         state.last_response_completed_at = Instant::now();
-        jcode_base::logging::info(&format!(
-            "Persistent WS continuation success after {}ms (chain length: {}, {})",
-            stream_started.elapsed().as_millis(),
-            state.message_count,
-            incremental_stats.log_fields(),
-        ));
+        jcode_base::logging::debug_lazy(|| {
+            format!(
+                "Persistent WS continuation success after {}ms (chain length: {}, {})",
+                stream_started.elapsed().as_millis(),
+                state.message_count,
+                incremental_stats.log_fields(),
+            )
+        });
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             "persistent_reuse_stream_complete",
-            vec![
-                ("model", request_model),
-                ("transport", "websocket".to_string()),
-                ("chain_length", state.message_count.to_string()),
-                (
-                    "elapsed_ms",
-                    stream_started.elapsed().as_millis().to_string(),
-                ),
-            ],
+            || {
+                vec![
+                    ("model", request_model),
+                    ("transport", "websocket".to_string()),
+                    ("chain_length", state.message_count.to_string()),
+                    (
+                        "elapsed_ms",
+                        stream_started.elapsed().as_millis().to_string(),
+                    ),
+                ]
+            },
         );
         *recovery_phase = RecoveryPhase::Idle;
         PersistentWsResult::Success
@@ -1482,14 +1526,16 @@ async fn continue_persistent_ws_locked(
         log_openai_stream_lifecycle(
             jcode_base::logging::LogLevel::Warn,
             "persistent_state_reset",
-            vec![
-                ("model", request_model),
-                ("reason", "missing_response_id".to_string()),
-                (
-                    "elapsed_ms",
-                    stream_started.elapsed().as_millis().to_string(),
-                ),
-            ],
+            || {
+                vec![
+                    ("model", request_model),
+                    ("reason", "missing_response_id".to_string()),
+                    (
+                        "elapsed_ms",
+                        stream_started.elapsed().as_millis().to_string(),
+                    ),
+                ]
+            },
         );
         PersistentWsResult::Success
     }
@@ -1588,19 +1634,21 @@ async fn stream_response_websocket_authenticated(
         .unwrap_or_else(|| "unknown".to_string());
     let stream_started_at = Instant::now();
     log_openai_stream_lifecycle(
-        jcode_base::logging::LogLevel::Info,
+        jcode_base::logging::LogLevel::Debug,
         "fresh_ws_request_start",
-        vec![
-            ("model", request_model_label.clone()),
-            ("transport", "websocket".to_string()),
-            ("input_item_count", input_item_count.to_string()),
-        ],
+        || {
+            vec![
+                ("model", request_model_label.clone()),
+                ("transport", "websocket".to_string()),
+                ("input_item_count", input_item_count.to_string()),
+            ]
+        },
     );
 
     let (usage_diag, usage_exhausted) = serving_account_diag(&*credentials.read().await);
-    jcode_base::logging::info(&format!(
-        "OpenAI limit diag: opening fresh persistent WS request usage=({usage_diag})"
-    ));
+    jcode_base::logging::debug_lazy(|| {
+        format!("OpenAI limit diag: opening fresh persistent WS request usage=({usage_diag})")
+    });
     emit_status_detail(&tx, "opening websocket").await;
     let creds = credentials.read().await;
     OpenAIProvider::verify_speed_route(&creds, premium_route)?;
@@ -1628,9 +1676,9 @@ async fn stream_response_websocket_authenticated(
         request.get("service_tier").and_then(Value::as_str),
     );
     log_openai_stream_lifecycle(
-        jcode_base::logging::LogLevel::Info,
+        jcode_base::logging::LogLevel::Debug,
         "fresh_ws_request_routing_headers",
-        routing_header_log_fields(ws_request.headers()),
+        || routing_header_log_fields(ws_request.headers()),
     );
     identity.0 = access_token.clone();
     drop(creds);
@@ -1674,9 +1722,9 @@ async fn stream_response_websocket_authenticated(
             // Handshake correlation ids identify the socket provider-side.
             fields.extend(tungstenite_header_fields(&response));
             log_openai_stream_lifecycle(
-                jcode_base::logging::LogLevel::Info,
+                jcode_base::logging::LogLevel::Debug,
                 "fresh_ws_connected",
-                fields,
+                || fields,
             );
             (stream, response)
         }
@@ -1916,14 +1964,16 @@ async fn stream_response_websocket_authenticated(
                             log_openai_stream_lifecycle(
                                 jcode_base::logging::LogLevel::Warn,
                                 "consumer_dropped",
-                                vec![
-                                    ("model", request_model_label.clone()),
-                                    ("transport", "websocket".to_string()),
-                                    (
-                                        "elapsed_ms",
-                                        stream_started_at.elapsed().as_millis().to_string(),
-                                    ),
-                                ],
+                                || {
+                                    vec![
+                                        ("model", request_model_label.clone()),
+                                        ("transport", "websocket".to_string()),
+                                        (
+                                            "elapsed_ms",
+                                            stream_started_at.elapsed().as_millis().to_string(),
+                                        ),
+                                    ]
+                                },
                             );
                             return Ok(());
                         }
@@ -1958,14 +2008,16 @@ async fn stream_response_websocket_authenticated(
                             log_openai_stream_lifecycle(
                                 jcode_base::logging::LogLevel::Warn,
                                 "consumer_dropped",
-                                vec![
-                                    ("model", request_model_label.clone()),
-                                    ("transport", "websocket".to_string()),
-                                    (
-                                        "elapsed_ms",
-                                        stream_started_at.elapsed().as_millis().to_string(),
-                                    ),
-                                ],
+                                || {
+                                    vec![
+                                        ("model", request_model_label.clone()),
+                                        ("transport", "websocket".to_string()),
+                                        (
+                                            "elapsed_ms",
+                                            stream_started_at.elapsed().as_millis().to_string(),
+                                        ),
+                                    ]
+                                },
                             );
                             return Ok(());
                         }
@@ -2022,17 +2074,19 @@ async fn stream_response_websocket_authenticated(
             request_input_stats.log_fields(),
         ));
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             "fresh_ws_stream_complete_saved",
-            vec![
-                ("model", request_model_label.clone()),
-                ("transport", "websocket".to_string()),
-                (
-                    "elapsed_ms",
-                    stream_started_at.elapsed().as_millis().to_string(),
-                ),
-                ("response_id_present", "true".to_string()),
-            ],
+            || {
+                vec![
+                    ("model", request_model_label.clone()),
+                    ("transport", "websocket".to_string()),
+                    (
+                        "elapsed_ms",
+                        stream_started_at.elapsed().as_millis().to_string(),
+                    ),
+                    ("response_id_present", "true".to_string()),
+                ]
+            },
         );
         *guard = Some(PersistentWsState {
             cache_key,
@@ -2062,15 +2116,17 @@ async fn stream_response_websocket_authenticated(
         log_openai_stream_lifecycle(
             jcode_base::logging::LogLevel::Warn,
             "fresh_ws_stream_complete_not_saved",
-            vec![
-                ("model", request_model_label),
-                ("transport", "websocket".to_string()),
-                (
-                    "elapsed_ms",
-                    stream_started_at.elapsed().as_millis().to_string(),
-                ),
-                ("reason", "missing_response_id".to_string()),
-            ],
+            || {
+                vec![
+                    ("model", request_model_label),
+                    ("transport", "websocket".to_string()),
+                    (
+                        "elapsed_ms",
+                        stream_started_at.elapsed().as_millis().to_string(),
+                    ),
+                    ("reason", "missing_response_id".to_string()),
+                ]
+            },
         );
     }
 

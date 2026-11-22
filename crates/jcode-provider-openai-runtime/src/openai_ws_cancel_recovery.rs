@@ -80,14 +80,16 @@ impl Drop for RecoverableAttempt {
             log_openai_stream_lifecycle(
                 jcode_base::logging::LogLevel::Info,
                 "persistent_cancel_recovery",
-                vec![
-                    ("transport_retained", recovered.to_string()),
-                    ("response_chain_retained", "false".to_string()),
-                    (
-                        "drain_timeout_ms",
-                        CANCEL_DRAIN_TIMEOUT.as_millis().to_string(),
-                    ),
-                ],
+                || {
+                    vec![
+                        ("transport_retained", recovered.to_string()),
+                        ("response_chain_retained", "false".to_string()),
+                        (
+                            "drain_timeout_ms",
+                            CANCEL_DRAIN_TIMEOUT.as_millis().to_string(),
+                        ),
+                    ]
+                },
             );
         });
     }
