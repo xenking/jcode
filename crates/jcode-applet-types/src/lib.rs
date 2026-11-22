@@ -17,6 +17,7 @@
 
 pub mod agent;
 pub mod asset;
+pub mod express;
 pub mod manifest;
 pub mod message;
 pub mod patch;
@@ -26,6 +27,7 @@ pub mod view;
 
 pub use agent::{AgentApplets, JCODE_APPLET_MIME};
 pub use asset::{AssetDecl, ImageFit, ImageSource};
+pub use express::compile_express;
 pub use manifest::{Capability, Launcher, Manifest, ToolCardClaim};
 pub use message::{Document, HostMessage, Instance, ProviderMessage};
 pub use patch::{PatchError, PatchOp, apply_patch};
