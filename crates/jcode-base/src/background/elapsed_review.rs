@@ -30,48 +30,6 @@ impl BackgroundTaskManager {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test(start_paused = true)]
-    async fn elapsed_review_wakes_once_even_for_an_active_command() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let manager = BackgroundTaskManager::with_output_dir(dir.path().into());
-        let mut events = Bus::global().subscribe();
-        let info = manager
-            .spawn("bash", "elapsed-review-test", |_| std::future::pending())
-            .await;
-        tokio::time::advance(Duration::from_secs(299)).await;
-        tokio::time::resume();
-        fs::write(&info.output_file, "still compiling").await?;
-        tokio::time::pause();
-        tokio::time::advance(Duration::from_secs(1)).await;
-        tokio::time::resume();
-        let task = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if let Ok(BusEvent::BackgroundTaskStalled(task)) = events.recv().await
-                    && task.task_id == info.task_id
-                {
-                    break task;
-                }
-            }
-        })
-        .await?;
-        assert!(task.elapsed_review && task.wake);
-        assert_eq!(task.output_tail, "still compiling");
-        tokio::time::pause();
-        tokio::time::advance(REVIEW_AFTER).await;
-        while let Ok(event) = events.try_recv() {
-            assert!(
-                !matches!(event, BusEvent::BackgroundTaskStalled(e) if e.task_id == info.task_id)
-            );
-        }
-        manager.cancel(&info.task_id).await?;
-        Ok(())
-    }
-}
-
 async fn bounded_tail(path: &std::path::Path) -> String {
     let Ok(mut file) = File::open(path).await else {
         return String::new();
@@ -125,4 +83,46 @@ fn review_event(
         notify: true,
         wake: true,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn elapsed_review_wakes_once_even_for_an_active_command() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let manager = BackgroundTaskManager::with_output_dir(dir.path().into());
+        let mut events = Bus::global().subscribe();
+        let info = manager
+            .spawn("bash", "elapsed-review-test", |_| std::future::pending())
+            .await;
+        tokio::time::advance(Duration::from_secs(299)).await;
+        tokio::time::resume();
+        fs::write(&info.output_file, "still compiling").await?;
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::time::resume();
+        let task = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(BusEvent::BackgroundTaskStalled(task)) = events.recv().await
+                    && task.task_id == info.task_id
+                {
+                    break task;
+                }
+            }
+        })
+        .await?;
+        assert!(task.elapsed_review && task.wake);
+        assert_eq!(task.output_tail, "still compiling");
+        tokio::time::pause();
+        tokio::time::advance(REVIEW_AFTER).await;
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                !matches!(event, BusEvent::BackgroundTaskStalled(e) if e.task_id == info.task_id)
+            );
+        }
+        manager.cancel(&info.task_id).await?;
+        Ok(())
+    }
 }

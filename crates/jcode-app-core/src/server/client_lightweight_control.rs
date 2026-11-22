@@ -140,7 +140,9 @@ mod openrig_identity_tests {
                 loop {
                     let (mut stream, _) = listener.accept().await.unwrap();
                     let mut input = [0; 4096];
-                    stream.read(&mut input).await.unwrap();
+                    if stream.read(&mut input).await.unwrap() == 0 {
+                        continue;
+                    }
                     reads.fetch_add(1, Ordering::Relaxed);
                     stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 23\r\nConnection: close\r\n\r\n{\"selfHostId\":\"host-a\"}").await.unwrap();
                 }

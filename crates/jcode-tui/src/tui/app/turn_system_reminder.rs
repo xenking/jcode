@@ -51,25 +51,6 @@ pub(in crate::tui::app) fn late_mcp_announcement_summary(body: &str) -> Option<S
     Some(summary)
 }
 
-#[cfg(test)]
-mod late_mcp_summary_tests {
-    use super::late_mcp_announcement_summary;
-
-    #[test]
-    fn summarizes_announcement_to_one_line() {
-        let body = "New MCP tools are available. They are not in your tool list; call them with mcp action=call.\n\
-            - mcp__gh__issues: server: gh  tool: issues  (List issues)\n  input_schema: {}\n\
-            - mcp__gh__prs: server: gh  tool: prs  (List PRs)\n  input_schema: {}\n\
-            - mcp__fs__read: server: fs  tool: read  (Read)\n  input_schema: {}\n\
-            ... and 4 more; use mcp action=search to find them.";
-        assert_eq!(
-            late_mcp_announcement_summary(body).as_deref(),
-            Some("7 new MCP tools available via mcp (gh, fs)")
-        );
-        assert_eq!(late_mcp_announcement_summary("Something else"), None);
-    }
-}
-
 impl App {
     /// Append a hidden `<system-reminder>` message after the turn's prompt.
     /// Per-turn reminders must never go in the system prompt: it precedes the
@@ -92,5 +73,24 @@ impl App {
             }],
             Some(crate::session::StoredDisplayRole::System),
         );
+    }
+}
+
+#[cfg(test)]
+mod late_mcp_summary_tests {
+    use super::late_mcp_announcement_summary;
+
+    #[test]
+    fn summarizes_announcement_to_one_line() {
+        let body = "New MCP tools are available. They are not in your tool list; call them with mcp action=call.\n\
+            - mcp__gh__issues: server: gh  tool: issues  (List issues)\n  input_schema: {}\n\
+            - mcp__gh__prs: server: gh  tool: prs  (List PRs)\n  input_schema: {}\n\
+            - mcp__fs__read: server: fs  tool: read  (Read)\n  input_schema: {}\n\
+            ... and 4 more; use mcp action=search to find them.";
+        assert_eq!(
+            late_mcp_announcement_summary(body).as_deref(),
+            Some("7 new MCP tools available via mcp (gh, fs)")
+        );
+        assert_eq!(late_mcp_announcement_summary("Something else"), None);
     }
 }

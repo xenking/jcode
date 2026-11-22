@@ -383,8 +383,8 @@ fn tui_auto_api_key_masks_secret_input_and_disambiguates_ambiguous_prefix() {
     app.handle_login_input(pending, "sk-abcdef12345678901234567890".to_string());
     assert!(matches!(
         app.pending_login,
-        Some(PendingLogin::ApiKeyChooseProvider { ref candidates, .. })
-            if candidates.iter().any(|c| *c == "openai-api")
-                && candidates.iter().any(|c| *c == "deepseek")
+        Some(PendingLogin::ApiKeyChooseProvider { candidates, .. })
+            if candidates.contains(&"openai-api")
+                && candidates.contains(&"deepseek")
     ));
 }

@@ -4,6 +4,7 @@ use super::*;
 mod final_text_tests;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+#[cfg(target_os = "linux")]
 use std::hint::black_box;
 
 // Counting is per-thread and disabled during CPU measurements and other tests.

@@ -315,6 +315,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::result_large_err,
+        reason = "WebSocket handshake callback uses tungstenite’s error response type"
+    )]
     async fn streams_revisions_before_stop_and_commits_the_final_segment() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());

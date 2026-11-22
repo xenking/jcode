@@ -86,10 +86,10 @@ async fn reload_survival_background_and_promoted_bash() {
         let completion = tokio::time::timeout(Duration::from_secs(8), async {
             loop {
                 successor.sweep().await;
-                if let Ok(BusEvent::BackgroundTaskCompleted(event)) = events.try_recv() {
-                    if event.task_id == id {
-                        break event;
-                    }
+                if let Ok(BusEvent::BackgroundTaskCompleted(event)) = events.try_recv()
+                    && event.task_id == id
+                {
+                    break event;
                 }
                 tokio::time::sleep(Duration::from_millis(35)).await;
             }

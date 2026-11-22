@@ -170,6 +170,8 @@ async fn manual_compaction_bounds_large_recent_tail() {
         .collect();
     manager.seed_restored_messages(messages.len());
     manager.update_observed_input_tokens(350_000);
+    let estimated_before = manager.measure_token_estimate_with(&messages) as u64;
+    assert_ne!(estimated_before, 350_000);
     manager
         .force_compact_with(&messages, Arc::new(MockSummaryProvider))
         .unwrap();
@@ -180,7 +182,7 @@ async fn manual_compaction_bounds_large_recent_tail() {
     assert_eq!(manager.active_message_chars_with(&messages), 240_000);
     assert_eq!(manager.compacted_count(), 11);
     let event = manager.take_compaction_event().unwrap();
-    assert_eq!(event.pre_tokens, Some(350_000));
+    assert_eq!(event.pre_tokens, Some(estimated_before));
     assert_eq!(
         event.post_tokens,
         Some(manager.token_estimate_with(&messages) as u64)

@@ -598,7 +598,7 @@ fn test_reload_persisted_background_tasks_note_mentions_running_task() {
         &started_at,
         true,
         false,
-    ));
+    )).expect("register detached task fixture");
 
     let note = reload_persisted_background_tasks_note(&session_id);
 
@@ -636,7 +636,7 @@ fn test_finalize_reload_reconnect_mentions_persisted_background_task() {
         &started_at,
         true,
         false,
-    ));
+    )).expect("register detached task fixture");
 
     remote::finalize_reload_reconnect(
         &mut app,

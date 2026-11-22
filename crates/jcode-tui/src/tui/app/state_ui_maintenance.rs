@@ -128,11 +128,6 @@ impl App {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn start_background_client_update(&mut self, session_id: String) {
-        self.start_background_client_update_with_channel(session_id, None);
-    }
-
     pub(super) fn start_background_client_update_with_channel(
         &mut self,
         session_id: String,
