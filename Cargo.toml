@@ -158,6 +158,7 @@ toml = "0.8"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+jcode-sdk = { path = "crates/jcode-sdk" }
 
 # File operations
 
@@ -254,8 +255,6 @@ pdf = ["jcode-tui/pdf"]
 # bridge listens on a Unix socket.
 [target.'cfg(unix)'.dependencies]
 jcode-harness-api-server = { path = "crates/jcode-harness-api-server" }
-# `jcode rollout` verifies the bridge and resumes workers through the SDK.
-jcode-sdk = { path = "crates/jcode-sdk" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }

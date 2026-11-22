@@ -61,6 +61,16 @@ pub(crate) struct Args {
     #[arg(short = 'C', long, global = true)]
     pub(crate) cwd: Option<String>,
 
+    /// Start a new local session in a Git worktree from HEAD, without uncommitted changes.
+    /// Use --worktree=BRANCH to name the new branch. The worktree stays after exit.
+    #[arg(
+        long,
+        require_equals = true,
+        value_name = "BRANCH",
+        conflicts_with_all = ["resume", "ssh", "remote_working_dir", "socket", "auto_update"]
+    )]
+    pub(crate) worktree: Option<Option<String>>,
+
     /// Working directory to send to a remote server when using --socket
     #[arg(long, global = true)]
     pub(crate) remote_working_dir: Option<String>,

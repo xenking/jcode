@@ -39,3 +39,4 @@ pub mod terminal;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod tui_launch;
+mod worktree_launch;

@@ -8,7 +8,7 @@ use crate::{
 
 use super::{
     args::{Args, Command},
-    dispatch, hot_exec, output, terminal,
+    dispatch, hot_exec, output, terminal, worktree_launch,
 };
 
 fn sync_output_style_from_config() {
@@ -18,7 +18,8 @@ fn sync_output_style_from_config() {
 pub async fn run() -> Result<()> {
     // Parse once, before startup side effects. Invalid arguments and --help
     // must not harden credential files or create configuration/telemetry state.
-    let args = Args::parse();
+    let mut args = Args::parse();
+    worktree_launch::prepare(&mut args)?;
     // Data belongs to the executable, not to the application/TUI dependency
     // chain. Every entrypoint using this startup path gets version-matched docs.
     crate::register_bundled_docs();

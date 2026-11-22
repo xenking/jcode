@@ -751,6 +751,7 @@ async fn run_default_command(args: Args) -> Result<()> {
         || args.disabled_tools.is_some()
         || args.disable_base_tools;
     if args.resume.is_none()
+        && args.worktree.is_none()
         && !explicit_provider_or_model
         && !explicit_tool_options
         && commands::maybe_run_pending_restart_restore_on_startup().await?
