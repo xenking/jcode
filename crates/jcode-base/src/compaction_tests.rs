@@ -1405,7 +1405,7 @@ fn compacted_replay_preserves_and_refreshes_phased_todo_plan() {
         );
     }
     todo.status = "completed".into();
-    crate::todo::save_todos(&session_id, &[todo]).unwrap();
+    crate::todo::save_todos(&session_id, std::slice::from_ref(&todo)).unwrap();
     let refreshed = manager
         .messages_for_api_session(&mut session, false, false)
         .messages;
@@ -1416,6 +1416,8 @@ fn compacted_replay_preserves_and_refreshes_phased_todo_plan() {
     );
     assert!(text(refreshed.last().unwrap()).contains("[x]"));
 
+    todo.status = "in_progress".into();
+    crate::todo::save_todos(&session_id, &[todo]).unwrap();
     let native = manager
         .messages_for_api_session(&mut session, false, true)
         .messages;
@@ -1423,7 +1425,8 @@ fn compacted_replay_preserves_and_refreshes_phased_todo_plan() {
         &native[0].content[..],
         [ContentBlock::OpenAICompaction { .. }]
     ));
-    assert!(!native.iter().any(|message| text(message).contains("[x]")));
+    assert!(text(native.last().unwrap()).contains("[x]"));
+    assert!(!native.iter().any(|message| text(message).contains("[>]")));
 
     crate::todo::save_todos(&session_id, &[]).unwrap();
     let cleared = manager
@@ -1437,42 +1440,40 @@ fn compacted_todo_update_keeps_responses_wire_prefix_across_tool_rounds() {
     let _guard = crate::storage::lock_test_env();
     let mut session = crate::session::Session::create(None, None);
     let mut manager = CompactionManager::new();
-    manager.restore_persisted_state(
-        &crate::session::StoredCompactionState {
-            summary_text: "Previous history".into(),
-            plan_context: Some(String::new()),
-            openai_encrypted_content: None,
-            snapcompact: None,
-            covers_up_to_turn: 0,
-            original_turn_count: 0,
-            compacted_count: 0,
-        },
-        0,
-    );
-    crate::todo::save_todos(
-        &session.id,
-        &[crate::todo::TodoItem {
-            id: "audit".into(),
-            status: "in_progress".into(),
-            content: "Audit the ledger".into(),
-            ..Default::default()
-        }],
-    )
-    .unwrap();
-    let request = |manager: &mut CompactionManager, session: &mut crate::session::Session| {
+    let checkpoint = crate::session::StoredCompactionState {
+        summary_text: "Previous history".into(),
+        plan_context: Some(String::new()),
+        openai_encrypted_content: None,
+        snapcompact: None,
+        covers_up_to_turn: 0,
+        original_turn_count: 0,
+        compacted_count: 0,
+    };
+    session.compaction = Some(Arc::new(checkpoint.clone()));
+    manager.restore_persisted_state(&checkpoint, 0);
+    let mut todo = crate::todo::TodoItem {
+        id: "audit".into(),
+        status: "in_progress".into(),
+        content: "Audit the ledger".into(),
+        ..Default::default()
+    };
+    crate::todo::save_todos(&session.id, std::slice::from_ref(&todo)).unwrap();
+    let request = |manager: &mut CompactionManager,
+                   session: &mut crate::session::Session,
+                   nudge: bool| {
         let mut messages = manager
             .messages_for_api_session(session, false, true)
             .messages;
-        messages.push(Message::user("Request-only test nudge").into_request_only());
-        jcode_provider_openai::request::build_responses_input(&messages)
+        if nudge {
+            messages.push(Message::user("Request-only test nudge").into_request_only());
+        }
+        jcode_provider_openai::request::build_responses_input(&Message::with_timestamps(&messages))
     };
-    let first = request(&mut manager, &mut session);
-    let first_durable = &first[..first.len() - 1];
+    let first = request(&mut manager, &mut session, false);
     assert!(
-        first_durable
-            .last()
+        first.last().unwrap()["content"][0]["text"]
+            .as_str()
             .unwrap()
-            .to_string()
             .contains("Audit the ledger")
     );
 
@@ -1501,18 +1502,79 @@ fn compacted_todo_update_keeps_responses_wire_prefix_across_tool_rounds() {
             is_error: None,
         }],
     );
-    let second = request(&mut manager, &mut session);
+    let second = request(&mut manager, &mut session, false);
     assert!(
-        second.starts_with(first_durable),
+        second.starts_with(&first),
         "the sent plan was moved after the tool round"
     );
     assert_eq!(
-        second[first_durable.len()..]
+        second[first.len()..]
             .iter()
             .map(|item| item["type"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["reasoning", "function_call", "function_call_output", "message"],
+        ["reasoning", "function_call", "function_call_output"],
     );
+
+    session.save().unwrap();
+    let mut session = crate::session::Session::load(&session.id).unwrap();
+    let mut manager = CompactionManager::new();
+    manager.restore_persisted_state(
+        session.compaction.as_deref().unwrap(),
+        session.messages.len(),
+    );
+    let with_nudge = request(&mut manager, &mut session, true);
+    assert_eq!(&with_nudge[..second.len()], second);
+    assert_eq!(with_nudge.len(), second.len() + 1);
+    assert_eq!(request(&mut manager, &mut session, false), second);
+
+    todo.status = "completed".into();
+    crate::todo::save_todos(&session.id, &[todo]).unwrap();
+    let completed = request(&mut manager, &mut session, false);
+    assert!(completed.starts_with(&second));
+    assert_eq!(completed.len(), second.len() + 1);
+    assert!(
+        completed.last().unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("[x] Audit the ledger")
+    );
+
+    crate::todo::save_todos(&session.id, &[]).unwrap();
+    let cleared = request(&mut manager, &mut session, false);
+    assert!(cleared.starts_with(&completed));
+    assert_eq!(cleared.len(), completed.len() + 1);
+    assert!(
+        cleared.last().unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("The todo plan is now empty")
+    );
+    assert_eq!(request(&mut manager, &mut session, false), cleared);
+
+    crate::todo::save_todos(
+        &session.id,
+        &[crate::todo::TodoItem {
+            id: "followup".into(),
+            status: "pending".into(),
+            content: "Verify the balance".into(),
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    // Compaction can leave an older plan update in its active suffix.
+    let new_checkpoint = crate::session::StoredCompactionState {
+        plan_context: None,
+        ..checkpoint
+    };
+    manager.restore_persisted_state(&new_checkpoint, session.messages.len());
+    let after_compaction = request(&mut manager, &mut session, false);
+    assert!(
+        after_compaction.last().unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("[ ] Verify the balance")
+    );
+    assert_eq!(request(&mut manager, &mut session, false), after_compaction);
 }
 
 #[test]

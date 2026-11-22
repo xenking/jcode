@@ -1611,6 +1611,7 @@ impl Agent {
                     accepts_native,
                 );
                 let mut messages = replay.messages;
+                self.compaction_persist_pending |= replay.appended_plan_update.is_some();
                 if self.compaction_persist_pending
                     || discarded_oversized_native
                     || recovered_native
@@ -1628,13 +1629,16 @@ impl Agent {
                     self.record_compaction_divider(event);
                     self.persist_session_best_effort("compaction completion");
                     if self.session.pinned_skill.is_some() {
-                        messages = manager
-                            .messages_for_api_session(
-                                &mut self.session,
-                                supports_archive,
-                                accepts_native,
-                            )
-                            .messages;
+                        let replay = manager.messages_for_api_session(
+                            &mut self.session,
+                            supports_archive,
+                            accepts_native,
+                        );
+                        messages = replay.messages;
+                        if replay.appended_plan_update.is_some() {
+                            self.compaction_persist_pending = true;
+                            self.persist_compaction_checkpoint(&manager)?;
+                        }
                     }
                 }
                 Self::log_provider_message_count("compaction", &messages);

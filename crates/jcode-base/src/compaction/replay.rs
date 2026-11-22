@@ -84,11 +84,26 @@ pub fn format_compaction_plan(session_id: &str) -> anyhow::Result<String> {
     Ok(text)
 }
 
-pub(super) fn current_plan_message(plan: &str) -> Message {
+pub(super) fn current_plan_update(
+    plan: &str,
+    checkpoint: &str,
+    active_messages: &[Message],
+) -> Option<Message> {
+    let latest = active_messages.iter().rev().find_map(|message| {
+        match (&message.role, message.content.as_ref()) {
+            (Role::User, [ContentBlock::Text { text, .. }]) => {
+                text.strip_prefix(CURRENT_PLAN_PREFIX)
+            }
+            _ => None,
+        }
+    });
+    if latest.is_none() && checkpoint == plan {
+        return None;
+    }
     let content = plan
         .strip_prefix(PLAN_PREFIX)
         .unwrap_or("The todo plan is now empty.\n</system-reminder>");
-    checkpoint_text(&format!("{CURRENT_PLAN_PREFIX}{content}"))
+    (latest != Some(content)).then(|| checkpoint_text(&format!("{CURRENT_PLAN_PREFIX}{content}")))
 }
 
 pub(super) fn checkpoint_text(text: &str) -> Message {

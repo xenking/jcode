@@ -28,6 +28,7 @@ pub const MISSING_NATIVE_SUMMARY: &str = "This provider cannot read the OpenAI c
 pub struct CompactionReplay {
     pub messages: Vec<Message>,
     pub checkpoint_changed: bool,
+    pub appended_plan_update: Option<Message>,
     pub warn_missing_native_summary: bool,
 }
 
@@ -2463,20 +2464,23 @@ impl CompactionManager {
         accepts_native: bool,
     ) -> CompactionReplay {
         let session_id = session.id.clone();
-        let (checkpoint_changed, warn_missing_native_summary, current_plan) =
+        let (checkpoint_changed, warn_missing_native_summary, mut appended_plan_update) =
             self.prepare_checkpoint(&session_id, session.provider_messages(), accepts_native);
+        if let Some(message) = &mut appended_plan_update {
+            self.append_plan_update(session, message);
+        }
         let retained =
             replay::retained_checkpoint_messages(&session.messages, self.compacted_count);
-        let mut projection = self.project_messages(
+        let projection = self.project_messages(
             session.provider_messages(),
             supports_image_input,
             accepts_native,
             retained,
         );
-        projection.messages.extend(current_plan);
         CompactionReplay {
             messages: projection.messages,
             checkpoint_changed,
+            appended_plan_update,
             warn_missing_native_summary,
         }
     }
@@ -2484,12 +2488,12 @@ impl CompactionManager {
     /// Use the caller's materialized suffix when it owns a separate history.
     pub fn messages_for_api_session_with(
         &mut self,
-        session: &crate::session::Session,
+        session: &mut crate::session::Session,
         all_messages: &[Message],
         supports_image_input: bool,
         accepts_native: bool,
     ) -> CompactionReplay {
-        let (checkpoint_changed, warn_missing_native_summary, current_plan) =
+        let (checkpoint_changed, warn_missing_native_summary, mut appended_plan_update) =
             self.prepare_checkpoint(&session.id, all_messages, accepts_native);
         let retained = if all_messages.len() == session.messages.len() {
             replay::retained_checkpoint_messages(&session.messages, self.compacted_count)
@@ -2498,12 +2502,28 @@ impl CompactionManager {
         };
         let mut projection =
             self.project_messages(all_messages, supports_image_input, accepts_native, retained);
-        projection.messages.extend(current_plan);
+        if let Some(message) = &mut appended_plan_update {
+            self.append_plan_update(session, message);
+            projection.messages.push(message.clone());
+        }
         CompactionReplay {
             messages: projection.messages,
             checkpoint_changed,
+            appended_plan_update,
             warn_missing_native_summary,
         }
+    }
+
+    fn append_plan_update(&mut self, session: &mut crate::session::Session, message: &mut Message) {
+        // Give every emitted update a fixed position. A synthesized tail would
+        // move behind the next assistant/tool result and break Responses replay.
+        session.add_message_with_display_role(
+            Role::User,
+            message.content.clone(),
+            Some(crate::session::StoredDisplayRole::System),
+        );
+        message.timestamp = session.messages.last().and_then(|stored| stored.timestamp);
+        self.notify_message_added_with(message);
     }
 
     /// Assemble the current checkpoint without advancing compaction, reading a
@@ -2531,24 +2551,28 @@ impl CompactionManager {
         let mut checkpoint_changed = self.recover_native_text(all_messages, accepts_native);
         checkpoint_changed |= discarded || self.decisions_updated || self.last_compaction.is_some();
         let mut current_plan = None;
-        if self.active_summary.as_ref().is_some_and(|summary| {
-            self.plan_context.is_none()
-                || !accepts_native
-                || summary.openai_encrypted_content.is_none()
-        }) {
+        if let Some(refresh_plan) = self
+            .active_summary
+            .as_ref()
+            .map(|summary| !accepts_native || summary.openai_encrypted_content.is_none())
+            && (refresh_plan || self.plan_context.is_none())
+        {
             match format_compaction_plan(session_id) {
-                Ok(plan) if self.plan_context.is_none() => {
-                    self.plan_context = Some(plan);
-                    checkpoint_changed = true;
-                }
-                Ok(plan)
-                    if self.plan_context.as_deref() != Some(plan.as_str())
+                Ok(plan) => {
+                    if refresh_plan
                         && (!plan.is_empty()
-                            || crate::todo::todos_exist(session_id).unwrap_or(false)) =>
-                {
-                    // The persisted checkpoint is a stable provider cache prefix.
-                    // Send changes after the active history without rewriting it.
-                    current_plan = Some(replay::current_plan_message(&plan));
+                            || crate::todo::todos_exist(session_id).unwrap_or(false))
+                    {
+                        current_plan = replay::current_plan_update(
+                            &plan,
+                            self.plan_context.as_deref().unwrap_or(&plan),
+                            self.active_messages(all_messages),
+                        );
+                    }
+                    if self.plan_context.is_none() {
+                        self.plan_context = Some(plan);
+                        checkpoint_changed = true;
+                    }
                 }
                 Err(error) if self.plan_context.is_none() => {
                     crate::logging::warn(&format!(

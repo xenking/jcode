@@ -228,7 +228,7 @@ impl App {
                     }
                 }
                 let replay = manager.messages_for_api_session_with(
-                    &self.session,
+                    &mut self.session,
                     &base_messages,
                     crate::compaction::snapcompact_pages_usable(
                         self.provider.supports_image_input(),
@@ -236,6 +236,16 @@ impl App {
                     ),
                     accepts_native,
                 );
+                if let Some(message) = replay.appended_plan_update {
+                    if !self.messages.is_empty() {
+                        self.messages.push(message);
+                    }
+                    if let Err(err) = self.session.save() {
+                        crate::logging::error(&format!(
+                            "Failed to persist the todo plan update: {err}"
+                        ));
+                    }
+                }
                 let event = manager.take_compaction_event();
                 if event.is_some()
                     || discarded_oversized_native
