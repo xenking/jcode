@@ -562,7 +562,6 @@ async fn persistent_ws_does_not_reuse_response_cancelled_before_completion() {
             serde_json::json!({"type": "message", "role": "user", "content": "first"}),
             serde_json::json!({"type": "message", "role": "user", "content": "interrupt"}),
         ],
-        2,
         &tx,
         None,
     )
@@ -592,7 +591,6 @@ async fn persistent_ws_rejects_identity_changed_by_another_fork() {
             serde_json::json!({"role":"user", "content":"previous"}),
             serde_json::json!({"role":"user", "content":"new account"}),
         ],
-        2,
         &tx,
         None,
     )
@@ -623,7 +621,6 @@ async fn persistent_ws_rechecks_identity_after_presend_backpressure() {
                 serde_json::json!({"role":"user", "content":"previous"}),
                 serde_json::json!({"role":"user", "content":"new account"}),
             ],
-            2,
             &tx,
             None,
         )

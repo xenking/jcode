@@ -1,10 +1,14 @@
+use ring::digest::{Context, SHA256, digest};
 use serde::Serialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::Instant;
+
+#[path = "fingerprint_incremental.rs"]
+mod incremental;
+pub use incremental::ResponsesFingerprintCache;
 
 #[derive(Debug, Clone)]
 struct ProviderInputSnapshot {
@@ -182,7 +186,9 @@ pub fn stable_hash_str(value: &str) -> u64 {
 }
 
 fn stable_hash_bytes(value: &[u8]) -> u64 {
-    hash_prefix(&Sha256::digest(value))
+    #[cfg(test)]
+    hash_work::record(value.len());
+    hash_prefix(digest(&SHA256, value).as_ref())
 }
 
 fn hash_prefix(digest: &[u8]) -> u64 {
@@ -209,7 +215,7 @@ fn stable_json_fingerprint<T: Serialize + ?Sized>(value: &T) -> (u64, usize) {
 fn item_fingerprints(items: &[Value]) -> (Vec<u64>, u64) {
     let mut hashes = Vec::with_capacity(items.len());
     let mut encoded = Vec::new();
-    let mut aggregate = Sha256::new();
+    let mut aggregate = Context::new(&SHA256);
     let mut valid = true;
     aggregate.update(b"[");
     for (index, item) in items.iter().enumerate() {
@@ -228,7 +234,7 @@ fn item_fingerprints(items: &[Value]) -> (Vec<u64>, u64) {
     }
     aggregate.update(b"]");
     let input_hash = if valid {
-        hash_prefix(&aggregate.finalize())
+        hash_prefix(aggregate.finish().as_ref())
     } else {
         stable_hash_str("")
     };
@@ -380,47 +386,7 @@ pub fn log_provider_canonical_input(
         provider,
         model,
         format,
-        fingerprints,
-        items.len(),
-        tool_count,
-        extra_fields,
-    );
-}
-
-/// Log a borrowed canonical object without cloning its potentially large fields.
-///
-/// `fields` must contain unique keys in the same order as the canonical JSON
-/// object (lexicographic order for serde_json's default map). Include explicit
-/// null values for absent fields when the historical object included them.
-/// No field references or serialized payload bytes survive this call.
-#[allow(clippy::too_many_arguments)]
-pub fn log_provider_canonical_input_fields(
-    provider: &str,
-    model: &str,
-    format: &str,
-    fields: &[(&str, &Value)],
-    items: &[Value],
-    system: Option<&Value>,
-    tools: Option<&Value>,
-    tool_count: Option<usize>,
-    extra_fields: &[(&str, String)],
-) {
-    debug_assert!(fields.windows(2).all(|pair| pair[0].0 < pair[1].0));
-    let fingerprints = object_fingerprints(fields.iter().copied(), items, system, tools)
-        .unwrap_or_else(|| CanonicalFingerprints {
-            // Value-to-Vec encoding is infallible in normal use. Match the
-            // historical empty encoding fallback rather than retaining a prefix.
-            request: (stable_hash_str(""), 0),
-            items: item_fingerprints(items),
-            system: system.map(stable_json_fingerprint),
-            tools: tools.map(stable_json_fingerprint),
-        });
-    capture_request_input(provider, model, format, &fingerprints, items);
-    log_canonical_fingerprints(
-        provider,
-        model,
-        format,
-        fingerprints,
+        &fingerprints,
         items.len(),
         tool_count,
         extra_fields,
@@ -432,14 +398,14 @@ fn log_canonical_fingerprints(
     provider: &str,
     model: &str,
     format: &str,
-    fingerprints: CanonicalFingerprints,
+    fingerprints: &CanonicalFingerprints,
     item_count: usize,
     tool_count: Option<usize>,
     extra_fields: &[(&str, String)],
 ) {
     let (request_hash, request_json_chars) = fingerprints.request;
-    let (item_hashes, input_hash) = fingerprints.items;
-    let item_hashes_hash = stable_hash_json(&item_hashes);
+    let (item_hashes, input_hash) = &fingerprints.items;
+    let item_hashes_hash = stable_hash_json(item_hashes);
     let (system_hash, system_json_chars) = fingerprints.system.unzip();
     let (tools_hash, tools_json_chars) = fingerprints.tools.unzip();
     let first_item_hash = item_hashes.first().copied();
@@ -481,10 +447,10 @@ fn log_canonical_fingerprints(
         .map(|previous| previous.item_hashes_hash != item_hashes_hash);
     let prefix_matches = previous
         .as_ref()
-        .map(|previous| prefix_matches(&item_hashes, &previous.item_hashes));
+        .map(|previous| prefix_matches(item_hashes, &previous.item_hashes));
     let common_prefix_items = previous
         .as_ref()
-        .map(|previous| common_prefix_len(&item_hashes, &previous.item_hashes));
+        .map(|previous| common_prefix_len(item_hashes, &previous.item_hashes));
     let first_changed_item_index = common_prefix_items
         .zip(previous.as_ref().map(|previous| previous.item_hashes.len()))
         .and_then(|(common, previous_len)| (common < previous_len).then_some(common));
@@ -543,6 +509,10 @@ fn log_canonical_fingerprints(
 #[cfg(test)]
 #[path = "fingerprint_borrowed_tests.rs"]
 mod borrowed_tests;
+
+#[cfg(test)]
+#[path = "fingerprint_hash_work.rs"]
+mod hash_work;
 
 #[cfg(test)]
 #[path = "fingerprint_tests.rs"]

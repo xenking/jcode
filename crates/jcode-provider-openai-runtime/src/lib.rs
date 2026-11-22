@@ -780,6 +780,7 @@ pub struct OpenAIProvider {
     websocket_failure_streaks: Arc<RwLock<HashMap<String, u32>>>,
     /// Persistent WebSocket connection for incremental continuation
     persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
+    canonical_input_cache: jcode_provider_core::fingerprint::ResponsesFingerprintCache,
     prewarm: Arc<openai_websocket_prewarm::PrewarmSlot>,
     /// Browser-backed ChatGPT state for web-only models such as GPT-5.6 Pro.
     chatgpt_web: Arc<chatgpt_web::ChatGptWebState>,
@@ -940,6 +941,7 @@ impl OpenAIProvider {
             websocket_cooldowns: Arc::clone(&WEBSOCKET_COOLDOWNS),
             websocket_failure_streaks: Arc::clone(&WEBSOCKET_FAILURE_STREAKS),
             persistent_ws: Arc::new(Mutex::new(None)),
+            canonical_input_cache: Default::default(),
             prewarm: Arc::new(openai_websocket_prewarm::PrewarmSlot::default()),
             chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
             browser_only: Arc::new(AtomicBool::new(browser_only)),
@@ -1504,8 +1506,6 @@ impl OpenAIProvider {
 #[path = "openai/stream.rs"]
 mod stream;
 
-#[cfg(test)]
-use self::openai_stream_runtime::try_persistent_ws_continuation;
 use self::openai_stream_runtime::{PersistentWsResult, is_retryable_error, openai_access_token};
 
 #[cfg(test)]

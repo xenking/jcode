@@ -15,6 +15,26 @@ const BRIGHT_PEARL_WRAPPED_TOOL_CALL_FIXTURE: &str = include_str!(concat!(
     "/../../tests/fixtures/openai/bright_pearl_wrapped_tool_call.txt"
 ));
 
+async fn try_persistent_ws_continuation(
+    persistent_ws: &Arc<Mutex<Option<PersistentWsState>>>,
+    credentials: &Arc<RwLock<CodexCredentials>>,
+    request: &Value,
+    input: &[Value],
+    tx: &mpsc::Sender<Result<StreamEvent>>,
+    premium_route: Option<&str>,
+) -> PersistentWsResult {
+    openai_stream_runtime::try_persistent_ws_continuation(
+        persistent_ws,
+        credentials,
+        request,
+        input,
+        &persistent_ws_input_item_hashes(input),
+        tx,
+        premium_route,
+    )
+    .await
+}
+
 struct EnvVarGuard {
     key: &'static str,
     previous: Option<OsString>,

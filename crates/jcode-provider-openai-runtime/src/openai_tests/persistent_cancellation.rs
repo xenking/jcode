@@ -60,7 +60,6 @@ async fn persistent_cancellation_completed_unseen_tool_forces_full_replay() {
         &Arc::new(RwLock::new(prewarm_test_credentials())),
         &request,
         &input,
-        input.len(),
         &tx,
         None,
     )
@@ -507,7 +506,6 @@ async fn persistent_cancellation_aborted_future_invalidates_before_handoff() {
             &Arc::new(RwLock::new(prewarm_test_credentials())),
             &serde_json::json!({"model":"gpt-5.6-sol"}),
             &input,
-            input.len(),
             &tx,
             None,
         )

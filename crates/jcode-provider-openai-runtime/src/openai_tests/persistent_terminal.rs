@@ -163,7 +163,6 @@ async fn assert_delta_wire_excludes_saved_response_output(empty_completion: bool
                     &credentials,
                     &request,
                     &input,
-                    input.len(),
                     &tx,
                     None,
                 )
@@ -482,7 +481,6 @@ async fn persistent_terminal_failure_invalidates_before_mutex_handoff() {
                 serde_json::json!({"role":"user","content":"old"}),
                 serde_json::json!({"role":"user","content":"new"}),
             ],
-            2,
             &tx,
             None,
         )

@@ -8,29 +8,6 @@ use super::*;
 #[path = "openai_catalog_prefetch.rs"]
 mod catalog_prefetch;
 
-/// Historical canonical selection, sorted exactly like serde_json's object map.
-fn canonical_request_fields(request: &Value) -> [(&'static str, &Value); 12] {
-    [
-        "context_management",
-        "include",
-        "input",
-        "instructions",
-        "model",
-        "parallel_tool_calls",
-        "prompt_cache_key",
-        "prompt_cache_retention",
-        "reasoning",
-        "service_tier",
-        "tool_choice",
-        "tools",
-    ]
-    .map(|key| (key, request.get(key).unwrap_or(&Value::Null)))
-}
-
-#[cfg(test)]
-#[path = "openai_canonical_logging_tests.rs"]
-mod canonical_logging_tests;
-
 /// Whether a model catalog fetch error is an auth rejection (401/403) that a
 /// token force-refresh may fix, as opposed to a network/server failure.
 fn catalog_error_is_auth_rejection(err: &anyhow::Error) -> bool {
@@ -78,6 +55,7 @@ impl Provider for OpenAIProvider {
         if *current != session_id {
             *current = session_id.to_owned();
             drop(current);
+            self.canonical_input_cache.clear();
             self.prewarm.clear();
             *self.turn_id.write().unwrap_or_else(|p| p.into_inner()) = None;
             *self.turn_state.lock().unwrap_or_else(|p| p.into_inner()) = None;
@@ -101,6 +79,7 @@ impl Provider for OpenAIProvider {
             self.browser_only.store(false, AtomicOrdering::Release);
         }
         drop(credentials);
+        self.canonical_input_cache.clear();
         self.clear_persistent_ws_try("OpenAI account changed");
         self.reload_cached_reasoning_efforts();
         Ok(())
@@ -214,6 +193,7 @@ impl Provider for OpenAIProvider {
             }
         }
         let (request, premium_route) = self.response_request(input, tools, system).await?;
+        let request = Arc::new(request);
         let input = request["input"]
             .as_array()
             .context("OpenAI request input is not an array")?;
@@ -273,25 +253,19 @@ impl Provider for OpenAIProvider {
         }
         let empty_tools = serde_json::json!([]);
         let request_tools = request.get("tools").unwrap_or(&empty_tools);
-        let request_instructions = request.get("instructions");
         let request_tool_count = request_tools
             .as_array()
             .map(|tools| tools.len())
             .unwrap_or(tools.len());
-        let canonical_fields = canonical_request_fields(&request);
         let request_options_hash = cache_request_options_hash(&request);
         let prompt_cache_key_hash = request
             .get("prompt_cache_key")
             .map(jcode_provider_core::fingerprint::stable_hash_json);
-        jcode_provider_core::fingerprint::log_provider_canonical_input_fields(
-            "openai",
+        let input_item_hashes = self.canonical_input_cache.log_request(
             &model_id,
-            "openai_responses_full",
-            &canonical_fields,
-            input,
-            request_instructions,
-            Some(request_tools),
-            Some(request_tool_count),
+            &request,
+            stable_item_count.unwrap_or(input_item_count),
+            request_tool_count,
             &[
                 (
                     "transport_mode",
@@ -446,7 +420,7 @@ impl Provider for OpenAIProvider {
                             &credentials,
                             &request,
                             input,
-                            input_item_count,
+                            &input_item_hashes,
                             &attempt_tx,
                             premium_route.as_deref(),
                         ),
@@ -653,7 +627,7 @@ impl Provider for OpenAIProvider {
                             attempt_tx,
                             Arc::clone(&persistent_ws),
                             Arc::clone(&turn_state),
-                            input_item_count,
+                            &input_item_hashes,
                             premium_route.as_deref(),
                         )
                         .await
@@ -1349,6 +1323,7 @@ impl Provider for OpenAIProvider {
             websocket_cooldowns: Arc::clone(&self.websocket_cooldowns),
             websocket_failure_streaks: Arc::clone(&self.websocket_failure_streaks),
             persistent_ws: Arc::new(Mutex::new(None)),
+            canonical_input_cache: Default::default(),
             prewarm: Arc::new(openai_websocket_prewarm::PrewarmSlot::default()),
             chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
             browser_only: Arc::new(AtomicBool::new(self.is_browser_only())),

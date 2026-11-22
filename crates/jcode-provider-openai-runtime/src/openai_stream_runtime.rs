@@ -539,7 +539,7 @@ pub(super) async fn try_persistent_ws_continuation(
     credentials: &Arc<RwLock<CodexCredentials>>,
     request: &Value,
     input: &[Value],
-    input_item_count: usize,
+    input_item_hashes: &[u64],
     tx: &mpsc::Sender<Result<StreamEvent>>,
     premium_route: Option<&str>,
 ) -> PersistentWsResult {
@@ -561,7 +561,7 @@ pub(super) async fn try_persistent_ws_continuation(
         credentials,
         request,
         input,
-        input_item_count,
+        input_item_hashes,
         tx,
         &mut attempt.phase,
     )
@@ -601,10 +601,12 @@ async fn continue_persistent_ws_locked(
     credentials: &Arc<RwLock<CodexCredentials>>,
     request: &Value,
     input: &[Value],
-    input_item_count: usize,
+    input_item_hashes: &[u64],
     tx: &mpsc::Sender<Result<StreamEvent>>,
     recovery_phase: &mut RecoveryPhase,
 ) -> PersistentWsResult {
+    let input_item_count = input.len();
+    debug_assert_eq!(input_item_hashes.len(), input_item_count);
     let request_model = openai_request_model(request);
     let state = match guard.as_mut() {
         Some(s) => s,
@@ -766,7 +768,6 @@ async fn continue_persistent_ws_locked(
     // Canonicalization can move a new tool output before the old cursor, even
     // when the input grows. Slicing by count would silently omit that output.
     // Replay the full normalized history unless the prior input is unchanged.
-    let input_item_hashes = persistent_ws_input_item_hashes(input);
     if !full_replay
         && (state.last_input_item_hashes.len() != state.last_input_item_count
             || !input_item_hashes.starts_with(&state.last_input_item_hashes))
@@ -1445,7 +1446,7 @@ async fn continue_persistent_ws_locked(
     if let Some(resp_id) = new_response_id {
         state.last_response_id = resp_id;
         state.last_input_item_count = input_item_count;
-        state.last_input_item_hashes = input_item_hashes;
+        state.last_input_item_hashes = input_item_hashes.to_vec();
         state.last_request_options = Some(request_options);
         state.last_response_output = response_output;
         state.message_count += 1;
@@ -1533,7 +1534,7 @@ pub(super) async fn stream_response_websocket_persistent(
     tx: mpsc::Sender<Result<StreamEvent>>,
     persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
     turn_state: Arc<StdMutex<Option<String>>>,
-    input_item_count: usize,
+    input_item_hashes: &[u64],
     premium_route: Option<&str>,
 ) -> Result<(), OpenAIStreamFailure> {
     let request_credentials = Arc::clone(&credentials);
@@ -1547,7 +1548,7 @@ pub(super) async fn stream_response_websocket_persistent(
                 tx.clone(),
                 persistent_ws,
                 turn_state,
-                input_item_count,
+                input_item_hashes,
                 access_token,
                 account_label,
                 premium_route,
@@ -1565,12 +1566,13 @@ async fn stream_response_websocket_authenticated(
     tx: mpsc::Sender<Result<StreamEvent>>,
     persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
     turn_state: Arc<StdMutex<Option<String>>>,
-    input_item_count: usize,
+    input_item_hashes: &[u64],
     access_token: String,
     account_label: Option<String>,
     premium_route: Option<&str>,
 ) -> Result<(), OpenAIStreamFailure> {
     use jcode_message_types::ConnectionPhase;
+    let input_item_count = input_item_hashes.len();
     let requested_tier = request
         .get("service_tier")
         .and_then(Value::as_str)
@@ -1703,13 +1705,6 @@ async fn stream_response_websocket_authenticated(
         }))
         .await;
 
-    let input_item_hashes = persistent_ws_input_item_hashes(
-        request
-            .get("input")
-            .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]),
-    );
     let cache_key = request
         .get("prompt_cache_key")
         .and_then(Value::as_str)
@@ -2047,7 +2042,7 @@ async fn stream_response_websocket_authenticated(
             last_response_completed_at: Instant::now(),
             message_count: 1,
             last_input_item_count: input_item_count,
-            last_input_item_hashes: input_item_hashes,
+            last_input_item_hashes: input_item_hashes.to_vec(),
             last_request_options: Some(request_options),
             turn_state,
             last_response_output: response_output,

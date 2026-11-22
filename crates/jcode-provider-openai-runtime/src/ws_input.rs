@@ -42,6 +42,7 @@ pub(super) fn summarize_ws_input(items: &[Value]) -> WsInputStats {
     stats
 }
 
+#[cfg(test)]
 pub(super) fn persistent_ws_input_item_hashes(input: &[Value]) -> Vec<u64> {
     input
         .iter()
