@@ -204,7 +204,7 @@ fn diff(
         let status = header
             .rsplit(|&byte| byte == b' ')
             .next()
-            .unwrap_or_default();
+            .context("missing status in Git diff path record")?;
         let path_count = if status.starts_with(b"R") || status.starts_with(b"C") {
             2
         } else {

@@ -1,10 +1,148 @@
 use std::ffi::OsStr;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use super::run_git_command;
+use super::{App, DisplayMessage, active_session_id, active_working_dir};
+use crate::bus::{Bus, BusEvent, GitStatusCompleted};
 use crate::git_inspection;
+
+fn git_command_repo_dir(app: &App) -> Result<PathBuf, String> {
+    if let Some(path) = active_working_dir(app) {
+        if path.is_dir() {
+            return Ok(path);
+        }
+
+        return Err(format!(
+            "Unable to run /git: session working directory {} is not accessible from this jcode client.",
+            path.display()
+        ));
+    }
+
+    if app.is_remote {
+        return Err(
+            "Unable to run /git: the remote session does not have a working directory.".to_string(),
+        );
+    }
+
+    std::env::current_dir()
+        .map_err(|_| "Unable to determine a working directory for /git.".to_string())
+}
+
+fn run_git_command(repo_dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    let output = git_inspection::command(repo_dir)
+        .args(args)
+        .current_dir(repo_dir)
+        .output()
+        .map_err(|error| format!("Failed to run git {}: {}", args.join(" "), error))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let failure = if stderr.is_empty() {
+            format!(
+                "git {} exited with status {}",
+                args.join(" "),
+                output.status
+            )
+        } else {
+            stderr
+        };
+        return Err(failure);
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_string())
+}
+
+fn build_git_status_message_for_dir(repo_dir: PathBuf) -> Result<String, String> {
+    let repo_root =
+        run_git_command(&repo_dir, &["rev-parse", "--show-toplevel"]).map_err(|error| {
+            format!(
+                "No git repository found for {}: {}",
+                repo_dir.display(),
+                error
+            )
+        })?;
+    let status = run_git_command(&repo_dir, &["status", "--short", "--branch"])?;
+
+    let repo_root_path = std::path::Path::new(&repo_root);
+    let relative_dir = repo_dir
+        .strip_prefix(repo_root_path)
+        .ok()
+        .and_then(|path| {
+            if path.as_os_str().is_empty() {
+                None
+            } else {
+                Some(path.display().to_string())
+            }
+        })
+        .unwrap_or_else(|| ".".to_string());
+
+    let heading = if relative_dir == "." {
+        format!("/git in {}", repo_root)
+    } else {
+        format!("/git in {} ({})", repo_root, relative_dir)
+    };
+
+    let status_block = status
+        .lines()
+        .map(|line| format!("  {}", line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(format!("{heading}\n\n{status_block}"))
+}
+
+pub(in crate::tui::app) fn handle_git_command(app: &mut App, trimmed: &str) -> bool {
+    let mut words = trimmed.split_whitespace();
+    if words.next() != Some("/git") {
+        return false;
+    }
+    let (action, selector, extra) = (words.next(), words.next(), words.next());
+    let diff = match (action, selector, extra) {
+        (None | Some("status"), None, None) => Some(None),
+        (Some("diff"), selector, None) => GitDiffKind::parse(selector).map(Some),
+        _ => None,
+    };
+    let Some(diff) = diff else {
+        app.push_display_message(DisplayMessage::error(
+            "Usage: /git [status | diff [staged|unstaged|untracked]]",
+        ));
+        return true;
+    };
+    if crate::tui::is_ssh_remote() {
+        let notice = if diff.is_some() {
+            "/git diff is unavailable over SSH. Open jcode on the remote host to view its Git diff."
+        } else {
+            "/git status requires the SSH connection."
+        };
+        app.push_display_message(DisplayMessage::error(notice));
+        return true;
+    }
+
+    let session_id = active_session_id(app);
+    match git_command_repo_dir(app) {
+        Ok(repo_dir) => {
+            app.set_status_notice(if diff.is_some() {
+                "Git diff loading..."
+            } else {
+                "Git status loading..."
+            });
+            std::thread::spawn(move || {
+                let result = match diff {
+                    Some(kind) => build_diff(&repo_dir, kind),
+                    None => build_git_status_message_for_dir(repo_dir),
+                };
+                Bus::global().publish(BusEvent::GitStatusCompleted(GitStatusCompleted {
+                    session_id,
+                    result,
+                }));
+            });
+        }
+        Err(error) => app.push_display_message(DisplayMessage::error(error)),
+    }
+    true
+}
 
 pub(in crate::tui) const GIT_DIFF_HEADING: &str = "/git diff (";
 const MAX_DIFF_BYTES: usize = 64 * 1024;
@@ -184,13 +322,17 @@ fn append_git_output(
     let read = child
         .stdout
         .take()
-        .expect("piped git stdout")
+        .ok_or_else(|| format!("Missing stdout from git {operation}"))?
         .take((MAX_DIFF_BYTES.saturating_sub(output.len()) + 1) as u64)
         .read_to_end(output);
     let truncated = output.len() > MAX_DIFF_BYTES;
     if truncated || read.is_err() {
         output.truncate(MAX_DIFF_BYTES);
-        let _ = child.kill();
+        if let Err(error) = child.kill()
+            && error.kind() != std::io::ErrorKind::InvalidInput
+        {
+            return Err(format!("Unable to stop git {operation}: {error}"));
+        }
     }
     let status = child
         .wait()
