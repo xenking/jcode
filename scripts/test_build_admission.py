@@ -39,7 +39,7 @@ class BuildAdmission(unittest.TestCase):
             claim = free // 2 - margin
             floor = 3 * margin
             policy.write_text(
-                f'{{"floor":{floor},"dev":{claim},"desktop":{claim},'
+                f'{{"floor":{floor},"dev":{claim},"desktop":{claim},"release":{claim},'
                 f'"aux_floor":0,"aux":0}}'
             )
 
