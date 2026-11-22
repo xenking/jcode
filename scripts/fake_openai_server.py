@@ -73,6 +73,15 @@ class H(BaseHTTPRequestHandler):
                         "intent": "Read the isolated seat environment through real Bash",
                         "command": "echo \"$FOO_SEAT\"",
                     })}}]
+        elif CONTROL and "[e2e:file-tools]" in prompt and not has_tool_result:
+            read = {"file_path": "verify-window.txt", "limit": 1}
+            calls = [("before", "read", read), ("past_eof", "read", dict(read, start_line=1000)),
+                     ("change", "edit", {"file_path": read["file_path"],
+                        "edits": [{"old_string": "initial", "new_string": "updated"}]}),
+                     ("after", "read", read)]
+            tool_calls = [{"id": f"call_{key}", "type": "function", "function": {
+                "name": name, "arguments": json.dumps(dict(args, intent=f"Verify file contract: {key}"))}}
+                for key, name, args in calls]
         elif CONTROL and "[e2e:verify-write]" in prompt and not has_tool_result:
             tool_calls = [{"id": "call_verification_write", "type": "function", "function": {
                 "name": "write", "arguments": json.dumps({
@@ -213,7 +222,7 @@ class H(BaseHTTPRequestHandler):
 
         delta = {"role": "assistant", "content": text}
         if tool_calls:
-            delta = {"role": "assistant", "tool_calls": [dict(tool_calls[0], index=0)]}
+            delta = {"role": "assistant", "tool_calls": [dict(call, index=i) for i, call in enumerate(tool_calls)]}
         event({"id": "x", "object": "chat.completion.chunk", "model": "fake-model",
                "choices": [{"index": 0, "delta": delta}]})
         event({"id": "x", "object": "chat.completion.chunk", "model": "fake-model",

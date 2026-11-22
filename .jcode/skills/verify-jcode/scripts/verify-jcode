@@ -965,6 +965,9 @@ class Harness:
                     (self.root / "workspace/verify-tool.txt").unlink(missing_ok=True)
                     self.event(action="fixture-reset", path="verify-tool.txt")
                     prompt += " [e2e:verify-write]"
+                elif feature == "file-tools":
+                    (self.root / "workspace/verify-window.txt").write_text("initial\n")
+                    prompt += " [e2e:file-tools]"
                 elif feature == "slash":
                     self.send("/help")
                     wait_for(lambda: "Esc to close" in self.pane(), "help modal")
@@ -989,6 +992,17 @@ class Harness:
                     require("Activated skill: verify-probe" in self.pane(), "Skill activation not rendered")
                     require(any("VERIFY_PROBE_SKILL_BODY" in json.dumps(r["messages"])
                                 for r in self.records()[start:]), "Skill body not delivered to provider")
+                elif feature == "file-tools":
+                    requests = [r for r in self.records()[start:] if r.get("agent") and token in json.dumps(r["messages"])]
+                    replies = [m for m in requests[-1]["messages"] if m.get("role") == "tool"][-4:]
+                    require([m.get("tool_call_id") for m in replies] ==
+                            ["call_before", "call_past_eof", "call_change", "call_after"], "Missing or reordered results")
+                    bodies = [str(m.get("content", "")) for m in replies]
+                    require("initial" in bodies[0] and "updated" in bodies[3], "Read crossed its write barrier")
+                    require("empty file" not in bodies[1].lower() and ("end of file" in bodies[1].lower() or
+                            "eof" in bodies[1].lower()), "Past-EOF range was not distinguished from empty file")
+                    require((self.root / "workspace/verify-window.txt").read_text() == "updated\n", "Wrong on-disk contents")
+                    dump(self.evidence / f"{label}-tool-results.json", replies)
                 elif feature == "side-panel":
                     self.send("/splitview on")
                     def panel_ready():
@@ -1277,7 +1291,7 @@ def main():
         command.add_argument("--evidence", required=True)
         if name == "drive":
             command.add_argument("feature", choices=["cli", "tui", "slash", "resume", "restart", "reload-bg", "reload-bg-before-attach", "reload-bg-wait", "reload-selfdev", "cancel",
-                                                     "side-panel", "mode", "mode-set", "draft-models", "worker-reload", "premium-spawn", "input", "keys"])
+                                                     "side-panel", "file-tools", "mode", "mode-set", "draft-models", "worker-reload", "premium-spawn", "input", "keys"])
             command.add_argument("--mode", choices=["plain", "json", "ndjson"], default="json")
             command.add_argument("--text", help="Text for exploratory input drive")
             command.add_argument("--keys", nargs="+", help="tmux keys, e.g. Escape or C-u")

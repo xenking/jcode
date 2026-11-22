@@ -19,6 +19,7 @@ Preconditions: Launch and doctor passed. The workspace is disposable and writabl
 - **Send and execute:** `"$V" drive --evidence "$E" tui` types a fresh token plus `[e2e:verify-write]` using terminal events. The helper first removes only its own previous `verify-tool.txt` fixture, the existing fake provider returns a write call, the real app writes `verify-tool.txt`, then the model receives the real tool result and acknowledges it.
 - **Observe:** inspect `drive-*-tui-after.txt` and `*.frame.json` for the typed token, write tool row/result and completed assistant ack. Inspect the matching `*-session.json` for the persisted conversation.
 - **Side effect:** `drive-*-tui-verify-tool.txt` must contain exactly `verification tool side effect` followed by newline. `provider.jsonl` must contain the tool result after the user token.
+- **Read/write ordering:** `"$V" drive --evidence "$E" file-tools` issues four native calls in one assistant message. The provider must receive the original value, a distinct past-EOF result, the edit result, and the updated value in call order. The helper also checks the final file contents. This journey verifies semantics, not concurrent overlap or latency.
 - **Capture:** `"$V" frame --evidence "$E" --label tool-reviewed` retains the current terminal, real cell/layout frame and client state.
 
 ## Gotchas
