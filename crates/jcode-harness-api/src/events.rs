@@ -1020,11 +1020,14 @@ fn codemode_live_and_history_metadata_round_trip_without_touching_output() {
     assert_eq!(serde_json::to_value(&event).unwrap(), legacy);
 
     let mut live = legacy;
+    let report_body = "Привет 🧪\n\ncalls:\nпользовательский текст\n";
+    live["output"] = serde_json::json!(format!("{report_body}\ncalls:\n  #1 swarm ok\n"));
+    live["report_body_bytes"] = serde_json::json!(report_body.len());
     live["codemode_status"] = serde_json::json!("error");
     live["codemode_calls_omitted"] = serde_json::json!(2);
     live["codemode_calls"] = serde_json::json!([
-        {"tool":"swarm", "action":"message", "actor":"fox", "target":"fish", "direction":"outbound", "status":"success", "duration_ms":4},
-        {"tool":"read", "status":"error", "duration_ms":7},
+        {"tool":"swarm", "action":"message", "actor":"fox", "target":"fish", "direction":"outbound", "status":"success", "duration_ms":4, "preview":"Привет"},
+        {"tool":"read", "status":"error", "duration_ms":7, "diagnostic":"Resource not found"},
         {"tool":"grep", "status":"interrupted", "duration_ms":8}
     ]);
     let event: ApiEvent = serde_json::from_value(live.clone()).unwrap();
@@ -1045,6 +1048,16 @@ fn codemode_live_and_history_metadata_round_trip_without_touching_output() {
     };
     let history = serde_json::to_value(&history_tool).unwrap();
     assert_eq!(history["codemode_calls"], live["codemode_calls"]);
+    assert_eq!(history["report_body_bytes"], report_body.len());
+    let legacy_tool: HistoryTool = serde_json::from_value(serde_json::json!({
+        "id": "parent", "name": "codemode", "codemode_status": "success",
+        "codemode_calls": [{"tool": "read", "status": "success", "duration_ms": 4}]
+    }))
+    .unwrap();
+    let legacy_summary = legacy_tool.codemode.unwrap();
+    assert!(legacy_summary.report_body_bytes.is_none());
+    assert!(legacy_summary.calls[0].preview.is_none());
+    assert!(legacy_summary.calls[0].diagnostic.is_none());
     assert_eq!(
         serde_json::from_value::<HistoryTool>(history).unwrap(),
         history_tool

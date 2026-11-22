@@ -1428,6 +1428,12 @@ impl Session {
         }
         for msg in &mut redacted.messages {
             redaction::redact_shared_content(&mut msg.content);
+            if let Some(summary) = msg.codemode.as_mut() {
+                summary.report_body_bytes = None;
+                for call in &mut summary.calls {
+                    call.preview = None;
+                }
+            }
         }
         for event in &mut redacted.replay_events {
             match &mut event.kind {

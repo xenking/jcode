@@ -18,6 +18,10 @@ pub struct CodemodeSummary {
         skip_serializing_if = "is_zero"
     )]
     pub calls_omitted: usize,
+    /// Byte length of the displayed result body before codemode's own footer.
+    /// Missing when an outer layer rewrote the result or for legacy records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_body_bytes: Option<usize>,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -44,6 +48,12 @@ pub struct CodemodeCall {
     pub direction: Option<CodemodeDirection>,
     pub status: CodemodeCallStatus,
     pub duration_ms: u64,
+    /// Redacted, single-line excerpt of a successful swarm message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    /// Safe failure category. Never the raw tool error or its arguments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

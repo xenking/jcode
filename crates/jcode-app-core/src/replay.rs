@@ -202,14 +202,21 @@ pub fn export_timeline(session: &Session) -> Vec<TimelineEvent> {
 
                         // Use stored duration or estimate
                         let duration_ms = msg.tool_duration_ms.unwrap_or(500);
+                        let output = truncate_for_timeline(content);
+                        let mut codemode = msg.codemode.clone();
+                        if output != *content
+                            && let Some(summary) = codemode.as_mut()
+                        {
+                            summary.report_body_bytes = None;
+                        }
 
                         events.push(TimelineEvent {
                             t,
                             kind: TimelineEventKind::ToolDone {
                                 name: tool_name,
-                                output: truncate_for_timeline(content),
+                                output,
                                 is_error: is_error.unwrap_or(false),
-                                codemode: msg.codemode.clone(),
+                                codemode,
                             },
                         });
                         t += duration_ms.min(100); // Small gap after tool result

@@ -156,20 +156,30 @@ fn spill_report(text: &str, spill: Option<PathBuf>) -> Option<PathBuf> {
     })
 }
 
-fn bound_report(text: String, max: usize, spill: Option<PathBuf>) -> String {
-    if text.chars().count() <= max {
-        return text;
+struct RenderedReport {
+    text: String,
+    body_bytes: usize,
+}
+
+fn bound_report(mut report: RenderedReport, max: usize, spill: Option<PathBuf>) -> RenderedReport {
+    if report.text.chars().count() <= max {
+        return report;
     }
-    let total = text.len();
-    let saved = spill_report(&text, spill);
-    let cut: String = text.chars().take(max).collect();
-    match saved {
+    let total = report.text.len();
+    let saved = spill_report(&report.text, spill);
+    let cut: String = report.text.chars().take(max).collect();
+    report.text = match saved {
         Some(path) => format!(
             "{cut}\n...(truncated {total} bytes; full report at {}. Return a smaller value or store() the rest)",
             path.display()
         ),
         None => format!("{cut}\n...(truncated; return a smaller value or store() the rest)"),
+    };
+    if cut.len() <= report.body_bytes {
+        // No receipt/footer survived. Keep the truncation notice visible.
+        report.body_bytes = report.text.len();
     }
+    report
 }
 
 fn budget_report(
@@ -177,15 +187,15 @@ fn budget_report(
     max_tokens: usize,
     spill: Option<PathBuf>,
     store_saved: bool,
-) -> String {
+) -> RenderedReport {
     let (report, body_end) = render_report_with_body(out);
     let max_bytes = max_tokens * jcode_core::util::APPROX_CHARS_PER_TOKEN;
-    if report.len() <= max_bytes {
+    if report.text.len() <= max_bytes {
         return report;
     }
 
     let mut notice = format!("\n...(truncated to ~{max_tokens} tokens)");
-    if let Some(path) = spill_report(&report, spill) {
+    if let Some(path) = spill_report(&report.text, spill) {
         let path = path.to_string_lossy();
         if path.len() <= 512 {
             notice.push_str(&format!("\nFull report: {path}"));
@@ -231,8 +241,11 @@ fn budget_report(
     }
     footer.push_str(&call_count_footer(out, ""));
     let remaining = max_bytes.saturating_sub(diagnostics.len() + notice.len() + footer.len());
-    let body = crate::util::truncate_str(&report[..body_end], remaining);
-    format!("{diagnostics}{body}{notice}{footer}")
+    let body = crate::util::truncate_str(&report.text[..body_end], remaining);
+    RenderedReport {
+        text: format!("{diagnostics}{body}{notice}{footer}"),
+        body_bytes: diagnostics.len() + body.len() + notice.len(),
+    }
 }
 
 fn spill_path(session_id: &str, call_id: &str) -> Option<PathBuf> {
@@ -259,7 +272,7 @@ fn spill_path(session_id: &str, call_id: &str) -> Option<PathBuf> {
     )
 }
 
-fn render_report_with_body(out: &jcode_codemode::RunOutput) -> (String, usize) {
+fn render_report_with_body(out: &jcode_codemode::RunOutput) -> (RenderedReport, usize) {
     let mut report = String::new();
     if !out.logs.is_empty() || out.logs_truncated {
         report.push_str("console:\n");
@@ -275,7 +288,7 @@ fn render_report_with_body(out: &jcode_codemode::RunOutput) -> (String, usize) {
         }
         report.push('\n');
     }
-    let mut body_end = report.len();
+    let console_bytes = report.len();
     match (&out.error, &out.result) {
         (Some(err), _) => {
             report.push_str("error: ");
@@ -293,9 +306,13 @@ fn render_report_with_body(out: &jcode_codemode::RunOutput) -> (String, usize) {
         }
         (None, None) => report.push_str("result: undefined\n"),
     }
-    if out.error.is_none() {
-        body_end = report.len();
-    }
+    let body_bytes = report.len();
+    // The budgeted error path renders short diagnostics before the console.
+    let budget_body_end = if out.error.is_some() {
+        console_bytes
+    } else {
+        body_bytes
+    };
     if !out.receipts.is_empty() {
         report.push_str("\ncalls:\n");
         const SHOWN: usize = 40;
@@ -334,7 +351,13 @@ fn render_report_with_body(out: &jcode_codemode::RunOutput) -> (String, usize) {
         format!(", stored: {}", keys.join(", "))
     };
     report.push_str(&call_count_footer(out, &store_suffix));
-    (report, body_end)
+    (
+        RenderedReport {
+            text: report,
+            body_bytes,
+        },
+        budget_body_end,
+    )
 }
 
 fn call_count_footer(out: &jcode_codemode::RunOutput, suffix: &str) -> String {
@@ -346,8 +369,9 @@ fn call_count_footer(out: &jcode_codemode::RunOutput, suffix: &str) -> String {
     )
 }
 
+#[cfg(test)]
 fn render_report(out: &jcode_codemode::RunOutput) -> String {
-    render_report_with_body(out).0
+    render_report_with_body(out).0.text
 }
 
 #[async_trait]
@@ -433,9 +457,12 @@ impl Tool for CodemodeTool {
         ));
 
         let spill = spill_path(&ctx.session_id, &ctx.tool_call_id);
-        let report = match params.max_output_tokens {
+        let RenderedReport {
+            text: report,
+            body_bytes,
+        } = match params.max_output_tokens {
             Some(tokens) => budget_report(&out, tokens, spill, store_result.is_ok()),
-            None => bound_report(render_report(&out), MAX_REPORT_CHARS, spill),
+            None => bound_report(render_report_with_body(&out).0, MAX_REPORT_CHARS, spill),
         };
         let store_result = store_result.with_context(|| {
             format!("codemode executed but its store was NOT persisted:\n{report}")
@@ -456,13 +483,15 @@ impl Tool for CodemodeTool {
         } else {
             CodemodeStatus::Success
         };
+        let mut summary = ledger.summary(status);
+        summary.report_body_bytes = Some(body_bytes);
         Ok(codemode_ledger::attach(
             ToolOutput::new(report).with_title(format!(
                 "codemode: {} call{}",
                 out.tool_calls,
                 if out.tool_calls == 1 { "" } else { "s" }
             )),
-            ledger.summary(status),
+            summary,
         ))
     }
 }

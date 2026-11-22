@@ -648,10 +648,15 @@ fn typescript_sdk_names_the_flattened_codemode_fields() {
             "codemode_status?",
             "codemode_calls?",
             "codemode_calls_omitted?",
+            "report_body_bytes?",
         ] {
             assert!(row.contains(field), "missing {field} in {row}");
         }
     }
+    let (_, call) = sdk.split_once("export interface CodemodeCall {").unwrap();
+    let (call, _) = call.split_once('}').unwrap();
+    assert!(call.contains("preview?: string"));
+    assert!(call.contains("diagnostic?: string"));
 }
 
 #[test]

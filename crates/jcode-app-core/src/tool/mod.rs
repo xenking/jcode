@@ -1075,7 +1075,7 @@ impl Registry {
         };
         let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         if let Some((ledger, seq)) = codemode {
-            ledger.finished(seq, latency_ms, &result);
+            ledger.finished(seq, latency_ms, &input, &result);
         }
 
         crate::telemetry::record_tool_execution(resolved_name, &input, result.is_ok(), latency_ms);
@@ -1099,6 +1099,9 @@ impl Registry {
             }
         };
 
+        if !gate_context.is_empty() {
+            codemode_ledger::clear_report_boundary(&mut output.metadata);
+        }
         for context in &gate_context {
             if !output.output.is_empty() && !output.output.ends_with('\n') {
                 output.output.push('\n');
@@ -1160,7 +1163,7 @@ impl Registry {
     async fn guard_context_overflow(
         &self,
         tool_name: &str,
-        output: ToolOutput,
+        mut output: ToolOutput,
         accept_large_output: bool,
     ) -> ToolOutput {
         let compaction = self.compaction.read().await;
@@ -1195,6 +1198,7 @@ impl Registry {
         // so the outcome does not depend on budget arithmetic happening to land
         // under a character floor.
         if current_tokens >= threshold_tokens {
+            codemode_ledger::clear_report_boundary(&mut output.metadata);
             crate::logging::info(&format!(
                 "Context guard: refused {} output of ~{}k tokens, context exhausted \
                  ({}k/{}k)",
@@ -1228,6 +1232,8 @@ impl Registry {
         if output.output.len() <= max_chars {
             return output;
         }
+
+        codemode_ledger::clear_report_boundary(&mut output.metadata);
 
         if !accept_large_output {
             crate::logging::info(&format!(

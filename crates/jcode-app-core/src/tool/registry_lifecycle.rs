@@ -154,6 +154,7 @@ impl Registry {
         if let Some(feedback) =
             crate::hooks::run_post_tool_feedback(&event, &input.to_string()).await
         {
+            super::codemode_ledger::clear_report_boundary(&mut output.metadata);
             if !output.output.is_empty() && !output.output.ends_with('\n') {
                 output.output.push('\n');
             }

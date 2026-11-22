@@ -220,6 +220,8 @@ export interface CodemodeCall {
   direction?: "outbound";
   status: CodemodeStatus | "interrupted";
   duration_ms: number;
+  preview?: string;
+  diagnostic?: string;
 }
 
 export interface HistoryTool {
@@ -230,6 +232,7 @@ export interface HistoryTool {
   codemode_status?: CodemodeStatus;
   codemode_calls?: CodemodeCall[];
   codemode_calls_omitted?: number;
+  report_body_bytes?: number;
 }
 
 export type RenderedImageSource =
@@ -656,6 +659,7 @@ export type ApiEvent =
       /** Dispatched calls only. This does not replace the wrapper output. */
       codemode_calls?: CodemodeCall[];
       codemode_calls_omitted?: number;
+      report_body_bytes?: number;
     }
   | { ev: "side_panel_state"; session_id: string; snapshot: SidePanelSnapshot }
   | { ev: "applet_state"; session_id: string; snapshot: AgentApplets }

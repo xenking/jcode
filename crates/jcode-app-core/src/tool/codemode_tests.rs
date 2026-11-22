@@ -175,7 +175,11 @@ async fn codemode_ledger_projects_only_dispatched_calls_after_partial_wrapper_fa
                 tokio::task::yield_now().await;
                 Ok(ToolOutput::new("NESTED_RESULT_SECRET"))
             } else {
-                Err(anyhow::anyhow!("NESTED_ERROR_SECRET"))
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "NESTED_ERROR_SECRET",
+                )
+                .into())
             }
         }
     }
@@ -192,7 +196,7 @@ async fn codemode_ledger_projects_only_dispatched_calls_after_partial_wrapper_fa
         const name = ['sw', 'arm'].join('');
         if (false) await tools.swarm({action:'broadcast', message:'not dispatched'});
         await Promise.allSettled([
-            callTool(name, {action:'send', to_session:'fish', message:'NESTED_INPUT_SECRET'}),
+            callTool(name, {action:'send', to_session:'fish', message:'Проверка api_key=fixture-credential'}),
             callTool(name, {action:'message', to_session:'TARGET_SECRET', message:'NESTED_INPUT_SECRET'}),
             callTool(name, 7),
             callTool('unknown_tool', {}),
@@ -212,13 +216,69 @@ async fn codemode_ledger_projects_only_dispatched_calls_after_partial_wrapper_fa
         Some(CodemodeDirection::Outbound)
     );
     assert_eq!(summary.calls[0].status, CodemodeCallStatus::Success);
+    assert_eq!(
+        summary.calls[0].preview.as_deref(),
+        Some("Проверка api_key=[REDACTED_SECRET]")
+    );
+    assert!(summary.calls[0].diagnostic.is_none());
     assert_eq!(summary.calls[1].status, CodemodeCallStatus::Error);
     assert_eq!(summary.calls[1].target, None);
+    assert!(summary.calls[1].preview.is_none());
+    assert_eq!(
+        summary.calls[1].diagnostic.as_deref(),
+        Some("Permission denied")
+    );
     let metadata = serde_json::to_string(&summary).unwrap();
-    assert!(!metadata.contains("SECRET"));
+    for secret in [
+        "NESTED_INPUT_SECRET",
+        "NESTED_RESULT_SECRET",
+        "NESTED_ERROR_SECRET",
+        "TARGET_SECRET",
+        "fixture-credential",
+    ] {
+        assert!(!metadata.contains(secret));
+    }
     assert!(!metadata.contains("unknown_tool"));
     assert!(output.output.contains("wrapper failed"));
     assert!(!output.output.contains("NESTED_RESULT_SECRET"));
+    let (body, footer) = output.output.split_at(summary.report_body_bytes.unwrap());
+    assert!(body.contains("wrapper failed"));
+    assert!(footer.starts_with("\ncalls:\n"));
+}
+
+#[test]
+fn report_body_bytes_preserves_utf8_and_footer_like_user_text() {
+    let fake_footer = "Привет 🧪\n\ncalls:\n  #1 swarm ok 3ms 5B\n\n[1 tool call, 0.0s]";
+    let mut out = jcode_codemode::RunOutput {
+        result: Some(json!(fake_footer)),
+        tool_calls: 1,
+        ..Default::default()
+    };
+    let expected = format!("result:\n{fake_footer}\n");
+    for report in [
+        render_report_with_body(&out).0,
+        budget_report(&out, 512, None, false),
+    ] {
+        assert_eq!(
+            report.text.get(..report.body_bytes),
+            Some(expected.as_str())
+        );
+        assert_eq!(&report.text[report.body_bytes..], "\n[1 tool call, 0.0s]");
+    }
+
+    out.result = Some(json!(format!("{fake_footer}{}", " 🧪".repeat(900))));
+    let budgeted = budget_report(&out, 512, None, false);
+    let body = budgeted.text.get(..budgeted.body_bytes).unwrap();
+    assert!(body.contains(fake_footer));
+    assert!(body.ends_with("...(truncated to ~512 tokens)"));
+    assert_eq!(
+        &budgeted.text[budgeted.body_bytes..],
+        "\n[1 tool call, 0.0s]"
+    );
+
+    let bounded = bound_report(render_report_with_body(&out).0, 80, None);
+    assert_eq!(bounded.body_bytes, bounded.text.len());
+    assert!(bounded.text.contains("...(truncated;"));
 }
 
 #[tokio::test]

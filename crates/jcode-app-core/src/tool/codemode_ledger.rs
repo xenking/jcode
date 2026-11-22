@@ -50,6 +50,8 @@ impl CallLedger {
             direction: None,
             status: CodemodeCallStatus::Interrupted,
             duration_ms: 0,
+            preview: None,
+            diagnostic: None,
         };
         if builtin && name == "swarm" {
             let raw = input["action"]
@@ -91,6 +93,7 @@ impl CallLedger {
         &self,
         seq: usize,
         latency_ms: u64,
+        input: &Value,
         result: &anyhow::Result<ToolOutput>,
     ) {
         let mut ledger = self.0.lock().expect("codemode ledger lock");
@@ -98,11 +101,18 @@ impl CallLedger {
             return;
         };
         call.duration_ms = latency_ms;
-        call.status = if result.is_ok() {
-            CodemodeCallStatus::Success
-        } else {
-            CodemodeCallStatus::Error
-        };
+        match result {
+            Ok(_) => {
+                call.status = CodemodeCallStatus::Success;
+                if call.action.as_deref() == Some("message") {
+                    call.preview = input["message"].as_str().and_then(message_preview);
+                }
+            }
+            Err(error) => {
+                call.status = CodemodeCallStatus::Error;
+                call.diagnostic = Some(safe_diagnostic(error).to_string());
+            }
+        }
         if call.action.as_deref() == Some("spawn")
             && let Ok(output) = result
             && let Some(name) = output
@@ -130,8 +140,53 @@ impl CallLedger {
             status,
             calls,
             calls_omitted: ledger.omitted,
+            report_body_bytes: None,
         }
     }
+}
+
+fn message_preview(message: &str) -> Option<String> {
+    const MAX_REDACTION_BYTES: usize = 4096;
+    const MAX_PREVIEW_BYTES: usize = 160;
+    if message.len() > MAX_REDACTION_BYTES {
+        return None;
+    }
+    let visible: String = message
+        .chars()
+        .filter(|&ch| {
+            (ch.is_whitespace() || !ch.is_control())
+                && !matches!(ch, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')
+        })
+        .collect();
+    let redacted = crate::message::redact_preview_secrets(&visible);
+    let line = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.is_empty() {
+        None
+    } else if line.len() <= MAX_PREVIEW_BYTES {
+        Some(line)
+    } else {
+        let cut = crate::util::truncate_str(&line, MAX_PREVIEW_BYTES - '…'.len_utf8());
+        Some(format!("{cut}…"))
+    }
+}
+
+fn safe_diagnostic(error: &anyhow::Error) -> &'static str {
+    use std::io::ErrorKind;
+    for source in error.chain() {
+        if let Some(error) = source.downcast_ref::<std::io::Error>() {
+            return match error.kind() {
+                ErrorKind::PermissionDenied => "Permission denied",
+                ErrorKind::NotFound => "Resource not found",
+                ErrorKind::TimedOut => "Tool timed out",
+                ErrorKind::ConnectionRefused => "Connection refused",
+                _ => "Tool I/O failed",
+            };
+        }
+        if source.downcast_ref::<serde_json::Error>().is_some() {
+            return "Invalid JSON data";
+        }
+    }
+    "Tool execution failed"
 }
 
 fn safe_tool_name(name: &str) -> &str {
@@ -169,6 +224,16 @@ pub(crate) fn output_summary(name: &str, output: &ToolOutput) -> Option<Box<Code
     }
     let summary = output.metadata.as_ref()?.get(METADATA_KEY)?;
     serde::Deserialize::deserialize(summary).ok()
+}
+
+pub(crate) fn clear_report_boundary(metadata: &mut Option<Value>) {
+    if let Some(meta) = metadata
+        .as_mut()
+        .and_then(|meta| meta.get_mut(METADATA_KEY))
+        && let Some(meta) = meta.as_object_mut()
+    {
+        meta.remove("report_body_bytes");
+    }
 }
 
 #[derive(Debug)]
@@ -209,7 +274,12 @@ fn bounded_ledger_keeps_invocation_order_even_when_dispatch_is_reversed() {
             false,
         );
         if seq != 2 {
-            ledger.finished(seq, seq as u64, &Ok(ToolOutput::new("not retained")));
+            ledger.finished(
+                seq,
+                seq as u64,
+                &Value::Null,
+                &Ok(ToolOutput::new("not retained")),
+            );
         }
     }
     let summary = ledger.summary(CodemodeStatus::Error);
@@ -219,4 +289,19 @@ fn bounded_ledger_keeps_invocation_order_even_when_dispatch_is_reversed() {
     for (index, call) in summary.calls.iter().enumerate() {
         assert_eq!(call.tool, format!("tool_{}", index + 1));
     }
+}
+
+#[test]
+fn message_preview_is_bounded_utf8_single_line_and_redacted() {
+    let message = format!(
+        "Проверка\u{202e}\n password=fixture-credential {}",
+        "ёж".repeat(200)
+    );
+    let preview = message_preview(&message).unwrap();
+    assert!(preview.starts_with("Проверка password=[REDACTED_SECRET] "));
+    assert!(preview.ends_with('…'));
+    assert!(preview.len() <= 160);
+    assert!(!preview.contains("fixture-credential"));
+    assert!(!preview.contains('\n'));
+    assert!(message_preview(&"ёж".repeat(1200)).is_none());
 }
