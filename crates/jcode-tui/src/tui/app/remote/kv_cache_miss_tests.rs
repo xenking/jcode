@@ -228,6 +228,101 @@ fn remote_kv_cache_miss_deduplicates_token_usage_local_classification() {
 }
 
 #[test]
+fn remote_warm_shortfall_keeps_usage_without_a_miss_and_preserves_wire_invalidations() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    for (prior_input, prior_read, input, read, wire_change) in [
+        (115_145, 113_152, 115_190, 112_768, false),
+        (195_557, 190_720, 196_490, 190_720, true),
+    ] {
+        let mut app = create_test_app();
+        let _guard = rt.enter();
+        app.runtime_mode = app_mod::AppRuntimeMode::RemoteClient;
+        app.is_remote = true;
+        app.remote_session_id = Some("session_cache_fixture".into());
+        app.remote_provider_name = Some("openai".into());
+        app.remote_provider_model = Some("gpt-6.1-sol".into());
+        let mut remote = RemoteConnection::dummy();
+        for (input, read, message_hashes) in [
+            (prior_input, prior_read, vec![10]),
+            (input, read, vec![10, 11]),
+        ] {
+            handle_server_event(
+                &mut app,
+                ServerEvent::KvCacheRequest {
+                    system_static_hash: 1,
+                    tools_hash: 2,
+                    messages_hash: message_hashes.iter().sum(),
+                    message_count: message_hashes.len(),
+                    message_hashes,
+                    tool_count: 3,
+                    system_static_chars: 10,
+                    tools_json_chars: 10,
+                    messages_json_chars: 10,
+                    ephemeral_hash: None,
+                    ephemeral_chars: 0,
+                    ephemeral_message_count: 0,
+                },
+                &mut remote,
+            );
+            handle_server_event(
+                &mut app,
+                ServerEvent::TokenUsage {
+                    effective_budget: None,
+                    input,
+                    output: 10,
+                    cache_read_input: Some(read),
+                    cache_creation_input: Some(0),
+                },
+                &mut remote,
+            );
+        }
+        assert!(
+            app.kv_cache.kv_cache_miss_samples.is_empty(),
+            "unexpected miss for {prior_input}/{prior_read} -> {input}/{read}"
+        );
+        assert!(
+            app.display_messages
+                .iter()
+                .all(|m| !m.content.contains("KV cache miss"))
+        );
+        assert_eq!(app.token_accounting.last_cache_read_tokens, Some(read));
+        assert_eq!(
+            app.token_accounting.total_cache_read_tokens,
+            prior_read + read
+        );
+
+        if wire_change {
+            let shortfall = prior_input - read;
+            assert!(handle_server_event(
+                &mut app,
+                ServerEvent::KvCacheMiss {
+                    reason: "low_read".into(),
+                    harness_caused: false,
+                    missed_tokens: shortfall,
+                    expected_tokens: prior_input,
+                    read_tokens: read,
+                    message: "KV cache miss [low_read] [wire suffix changed]: ~4.84K tokens below prior cache baseline".into(),
+                    documented_cause: None,
+                },
+                &mut remote,
+            ));
+            assert_eq!(app.kv_cache.kv_cache_miss_samples.len(), 1);
+            assert_eq!(
+                app.kv_cache.kv_cache_miss_samples[0].missed_tokens,
+                shortfall
+            );
+            assert!(
+                app.display_messages
+                    .last()
+                    .unwrap()
+                    .content
+                    .contains("[wire suffix changed]")
+            );
+        }
+    }
+}
+
+#[test]
 fn remote_kv_cache_miss_disabled_suppresses_notice_but_retains_widget_sample() {
     let mut app = create_test_app();
     app.kv_cache.kv_cache_turn_number = Some(1);

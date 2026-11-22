@@ -33,11 +33,33 @@ pub const OPENAI_MIN_MISSED_TOKENS: u64 = 2_048;
 
 /// Noise floor for a provider identity (`openai`, `openai-api`, `OpenAI`, ...).
 pub fn min_missed_tokens_for_provider(provider: &str) -> u64 {
-    if provider.trim().to_ascii_lowercase().starts_with("openai") {
+    if is_openai_cache_provider(provider) {
         OPENAI_MIN_MISSED_TOKENS
     } else {
         MIN_MISSED_TOKENS
     }
+}
+
+fn is_openai_cache_provider(provider: &str) -> bool {
+    provider.trim().to_ascii_lowercase().starts_with("openai")
+}
+
+/// OpenAI's prior total input includes tokens we never observed in the cache.
+/// If at least 95% of the baseline was read, treat a drop smaller than the
+/// provider noise floor as a shortfall rather than a loss. Callers must rule
+/// out route changes and invalidations first.
+pub fn is_warm_openai_read_shortfall(
+    provider: &str,
+    expected: u64,
+    previous_read: u64,
+    read: u64,
+) -> bool {
+    is_openai_cache_provider(provider)
+        && read != 0
+        && expected != 0
+        && previous_read != 0
+        && expected.saturating_sub(read) <= expected / 20
+        && previous_read.saturating_sub(read) < OPENAI_MIN_MISSED_TOKENS
 }
 
 /// Whether a provider drops its conversation prompt cache when the UTC date
@@ -453,6 +475,8 @@ struct Baseline {
     signature: RequestSignature,
     canonical_input: Option<CanonicalInput>,
     reusable_cache_tokens: u64,
+    #[serde(default)]
+    read_tokens: Option<u64>,
     completed_at: SystemTime,
     /// Local invalidation events and monotonic time do not survive exec.
     #[serde(skip)]
@@ -592,6 +616,7 @@ impl KvCacheMonitor {
                 signature: pending.signature,
                 canonical_input: pending.canonical_input,
                 reusable_cache_tokens,
+                read_tokens,
                 completed_at: SystemTime::now(),
                 completed_in_process: Some(Instant::now()),
                 utc_day: pending.utc_day,
@@ -770,6 +795,33 @@ fn classify(
             "; Responses wire input changed at item {index} (zero-based) after stable history"
         ));
     }
+    let prefix_unchanged = low_read
+        && wire_suffix_change.is_none()
+        && if baseline.completed_in_process.is_some() {
+            pending
+                .signature
+                .checked_prefix_unchanged(&baseline.signature)
+        } else {
+            comparable_input && canonical_change.is_none()
+        };
+    if low_read && let Some(previous_read) = baseline.read_tokens {
+        let read_drop = previous_read.saturating_sub(read_tokens);
+        if prefix_unchanged
+            && is_warm_openai_read_shortfall(&new.provider, expected, previous_read, read_tokens)
+        {
+            let idle_ms = idle_duration(baseline, pending).map(|idle| idle.as_millis());
+            let previous_uncached = expected.saturating_sub(previous_read);
+            let uncached = prefix_tokens.map(|input| input.saturating_sub(read_tokens));
+            crate::logging::info(&format!(
+                "KV_CACHE_SHORTFALL prefix_unchanged=true provider={} model={} expected={expected} previous_read={previous_read} input={prefix_tokens:?} read={read_tokens} shortfall={missed} read_drop={read_drop} previous_uncached={previous_uncached} uncached={uncached:?} idle_ms={idle_ms:?}",
+                new.provider, new.model,
+            ));
+            return None;
+        }
+        detail.push_str(&format!(
+            "; previous cache read {previous_read}, observed read drop {read_drop} tokens"
+        ));
+    }
     if baseline.completed_in_process.is_none()
         && !comparable_input
         && matches!(reason, MissReason::LowRead | MissReason::ZeroRead)
@@ -778,15 +830,7 @@ fn classify(
     }
     Some(KvCacheMiss {
         reason,
-        prefix_unchanged: low_read
-            && wire_suffix_change.is_none()
-            && if baseline.completed_in_process.is_some() {
-                pending
-                    .signature
-                    .checked_prefix_unchanged(&baseline.signature)
-            } else {
-                comparable_input && canonical_change.is_none()
-            },
+        prefix_unchanged,
         wire_suffix_change,
         expected_tokens: expected,
         read_tokens,
@@ -916,148 +960,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn provider_switch_uses_the_new_providers_uncached_input() {
-        let mut monitor = KvCacheMonitor::new();
-        monitor.begin_request(route(), sig(&[10]));
-        assert!(monitor.finish_request(205_894, Some(203_137)).is_none());
-        monitor.begin_request(
-            RequestRoute {
-                provider: "openai-oauth".into(),
-                model: "fixture".into(),
-                ..RequestRoute::default()
-            },
-            sig(&[10, 11]),
-        );
-        let miss = monitor
-            .finish_request_with_prefix(142_275, Some(142_275), Some(4_352))
-            .unwrap();
-        assert_eq!(miss.reason, MissReason::ProviderSwitch);
-        assert_eq!(
-            (miss.expected_tokens, miss.read_tokens, miss.missed_tokens),
-            (142_275, 4_352, 137_923)
-        );
-        let message = miss.message();
-        assert!(message.contains("138K tokens uncached"), "{message}");
-        assert!(message.contains("caches are not shared"), "{message}");
-        assert!(!message.contains("resent"), "{message}");
-    }
-
-    #[tokio::test]
-    async fn low_read_reports_wire_suffix_change_without_blame_or_resend_claim() {
-        use jcode_provider_core::fingerprint::{
-            capture_canonical_input, log_provider_canonical_input, note_responses_stable_item_count,
-        };
-        use serde_json::json;
-
-        let route = RequestRoute {
-            provider: "openai-oauth".into(),
-            model: "fixture".into(),
-            ..RequestRoute::default()
-        };
-        let mut monitor = KvCacheMonitor::new();
-        for (items, stable_count, projected, total, read) in [
-            (
-                vec!["user", "request-only nudge"],
-                1,
-                vec![10],
-                142_275,
-                4_352,
-            ),
-            (
-                vec!["user", "assistant", "next user"],
-                3,
-                vec![10, 11, 12],
-                142_566,
-                19_968,
-            ),
-        ] {
-            monitor.begin_request(route.clone(), sig(&projected));
-            let (_, canonical) = capture_canonical_input(async {
-                let body = json!({"input": items});
-                log_provider_canonical_input(
-                    "openai",
-                    &route.model,
-                    "openai_responses_full",
-                    &body,
-                    body["input"].as_array().unwrap(),
-                    None,
-                    None,
-                    None,
-                    &[],
-                );
-                note_responses_stable_item_count(stable_count);
-            })
-            .await;
-            monitor.note_canonical_input(canonical.unwrap());
-            let miss = monitor.finish_request_with_prefix(total, Some(total), Some(read));
-            if read == 4_352 {
-                assert!(miss.is_none());
-            } else {
-                let miss = miss.unwrap();
-                assert_eq!(miss.reason, MissReason::LowRead);
-                assert_eq!(miss.missed_tokens, 122_307);
-                let message = miss.message();
-                assert!(message.contains("[wire suffix changed]"), "{message}");
-                assert!(message.contains("stable history"), "{message}");
-                assert!(!message.contains("[prefix unchanged]"), "{message}");
-                assert!(!message.contains("resent"), "{message}");
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn identifies_drift_in_actual_responses_input_despite_stable_agent_prefix() {
-        use jcode_provider_core::fingerprint::{
-            capture_canonical_input, log_provider_canonical_input,
-        };
-        use serde_json::json;
-
-        let route = RequestRoute {
-            provider: "openai".into(),
-            model: "gpt-6.2-sol".into(),
-            ..RequestRoute::default()
-        };
-        let mut monitor = KvCacheMonitor::new();
-        for (messages, input, read) in [
-            (vec![10], vec![json!("user"), json!("ephemeral")], 0),
-            (
-                vec![10, 11],
-                vec![json!("user"), json!("tool result")],
-                5_000,
-            ),
-        ] {
-            monitor.begin_request(route.clone(), sig(&messages));
-            let (_, canonical) = capture_canonical_input(async {
-                let body = json!({"input":input});
-                log_provider_canonical_input(
-                    "openai",
-                    &route.model,
-                    "openai_responses_full",
-                    &body,
-                    body["input"].as_array().unwrap(),
-                    None,
-                    None,
-                    None,
-                    &[],
-                );
-            })
-            .await;
-            monitor.note_canonical_input(canonical.unwrap());
-            let miss = monitor.finish_request(20_000, Some(read));
-            if read > 0 {
-                let miss = miss.unwrap();
-                assert_eq!(miss.reason, MissReason::PrefixChanged);
-                assert!(
-                    miss.detail.contains("canonical input item index 1"),
-                    "{}",
-                    miss.detail
-                );
-            } else {
-                assert!(miss.is_none());
-            }
-        }
-    }
+    include!("kv_cache_monitor_tests.rs");
 
     #[test]
     fn canonical_options_and_response_chain_distinguish_partial_read() {
