@@ -102,7 +102,6 @@ impl Agent {
 
         let reset_start = Instant::now();
         self.reset_runtime_state_for_session_change();
-        self.kv_cache_monitor.restore_checkpoint(&self.session.id);
         let restored_soft_interrupts = self.restore_persisted_soft_interrupts();
         let reset_ms = reset_start.elapsed().as_millis();
 
@@ -110,7 +109,7 @@ impl Agent {
         self.restore_session_model_from_session();
         self.restore_reasoning_effort_from_session();
         self.restore_speed_from_session();
-        self.restore_tool_surface();
+        self.restore_cache_sidecars();
         let model_ms = model_start.elapsed().as_millis();
 
         let mark_active_start = Instant::now();
