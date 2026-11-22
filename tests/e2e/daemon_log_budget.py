@@ -14,7 +14,6 @@ import socket
 import subprocess
 import sys
 import tempfile
-import time
 
 from idle_unload_daemon import wait_for
 
@@ -57,7 +56,11 @@ def main(binary, measure_only):
             "FAKE_LABEL": "log-budget",
         }
         config = jhome / "config.toml"
-        config.write_text('[server]\nmobile_push = false\n', encoding="utf-8")
+        config.write_text(
+            '[session]\nunload_idle_secs = 1\nhibernation_idle_secs = 0\n'
+            '[server]\nmobile_push = false\n',
+            encoding="utf-8",
+        )
         command = [str(binary), "--no-update", "--no-selfdev"]
         with ExitStack() as stack:
             output = stack.enter_context((root / "daemon.log").open("w+"))
@@ -97,8 +100,24 @@ def main(binary, measure_only):
                     reply = debug("message", prompt, "--session", session, "--wait")
                     assert "[log-budget] ack" in reply, reply
                 assert (root / "verify-tool.txt").is_file(), "no tool side effect"
-                # Let the post-persistence debounce complete before sampling.
-                time.sleep(0.25)
+                # Force the next subscribe through persisted history rather
+                # than reading the already-resident session transcript.
+                def evicted():
+                    stats = json.loads(debug("server:memory"))["sessions"]
+                    return stats["idle_eviction_count"] > 0 and stats["live_count"] == 0
+
+                wait_for(evicted, "idle session eviction")
+                with socket.socket(socket.AF_UNIX) as peer:
+                    peer.settimeout(5)
+                    peer.connect(str(sock))
+                    subscribe = {"type": "subscribe", "id": 201, "target_session_id": session}
+                    peer.sendall((json.dumps(subscribe) + "\n").encode())
+                    with peer.makefile("rb") as stream:
+                        history = next(
+                            event for event in map(json.loads, stream)
+                            if event.get("id") == 201 and event["type"] in ("history", "error")
+                        )
+                    assert history["type"] == "history" and history["session_id"] == session, history
                 with log.open("rb") as reader:
                     reader.seek(start)
                     sample = reader.read()
@@ -116,7 +135,7 @@ def main(binary, measure_only):
         completions = [line for line in info if keys[-1] in line and b"phase=stream_complete" in line]
         tools = [line for line in info if keys[-2] in line]
         nreq = sum(1 for row in requests.read_text().splitlines() if json.loads(row)["agent"])
-        print(f"daemon log: {len(sample)} bytes for 100 connections and {nreq} provider requests")
+        print(f"daemon log: {len(sample)} bytes for 100 pings, {nreq} provider requests and cold reattach")
         print("INFO bytes by template:", {key.decode(): value for key, value in matches.items() if value})
         if not measure_only:
             assert not any(matches[key] for key in keys[:-2]), matches
