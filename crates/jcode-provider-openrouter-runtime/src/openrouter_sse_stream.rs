@@ -21,6 +21,22 @@ fn local_endpoint_troubleshooting_hint(api_base: &str, model: &str) -> &'static 
     "Hint: check network connectivity, DNS/TLS, that the base URL includes the API version (usually /v1), and that the model exists on the provider."
 }
 
+fn is_content_filter_error(body: &str) -> bool {
+    fn names_filter(message: &str) -> bool {
+        message
+            .to_ascii_lowercase()
+            .contains("blocked by content filter")
+    }
+    match serde_json::from_str::<Value>(body) {
+        Ok(body) => {
+            let error = &body["error"];
+            error["code"].as_str() == Some("content_filter")
+                || error["message"].as_str().is_some_and(names_filter)
+        }
+        Err(_) => names_filter(body),
+    }
+}
+
 /// Hint for a request the server answered with an error status. The network
 /// is working (a response came back), so connectivity advice would mislead:
 /// point at the key, the account balance, or the model instead.
@@ -291,7 +307,12 @@ async fn stream_response(
         let status = response.status();
         let retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
         let body = jcode_base::util::http_error_body(response, "HTTP error").await;
-        let hint = if azure_responses {
+        let hint = if status == reqwest::StatusCode::FORBIDDEN && is_content_filter_error(&body) {
+            "Hint: the provider's content filter blocked this request text. Remove or rewrite the flagged text before retrying."
+        } else if matches!(status.as_u16(), 401 | 403) && matches!(&auth, ProviderAuth::None { .. })
+        {
+            "Hint: the endpoint refused the request. Check its access policy, authentication settings, and route."
+        } else if azure_responses {
             match status.as_u16() {
                 401 | 402 | 403 | 500..=599 => http_status_hint(status.as_u16(), &api_base, &model),
                 429 => {
@@ -556,6 +577,108 @@ fn is_retryable_error(error_str: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn forbidden_response_error(body: &'static str, auth: ProviderAuth) -> String {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            socket.read_exact(&mut vec![0; length]).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            );
+            socket
+                .get_mut()
+                .write_all(response.as_bytes())
+                .await
+                .unwrap();
+        });
+        let (tx, _rx) = mpsc::channel(8);
+        let error = stream_response(
+            Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(3))
+                .build()
+                .unwrap(),
+            base,
+            auth,
+            false,
+            "fixture",
+            &serde_json::json!({"model":"fixture","messages":[],"stream":true}),
+            false,
+            tx,
+            Arc::new(Mutex::new(None)),
+            "fixture".into(),
+            false,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        server.await.unwrap();
+        assert!(error.contains("status: 403"), "{error}");
+        error
+    }
+
+    fn fake_bearer_auth() -> ProviderAuth {
+        ProviderAuth::AuthorizationBearer {
+            token: "fixture".into(),
+            label: "fixture bearer".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn content_filter_403_explains_refusal_not_api_key() {
+        for body in [
+            r#"{"error":{"message":"Request blocked by content filter: [CREDIT_CARD]"}}"#,
+            r#"{"error":{"message":"Request denied","code":"content_filter"}}"#,
+        ] {
+            let error = forbidden_response_error(body, fake_bearer_auth()).await;
+            let hint = error.lines().last().unwrap();
+            assert!(
+                hint.contains("content filter") && hint.contains("request text"),
+                "{error}"
+            );
+            assert!(!hint.contains("API key"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_403_diagnosis_respects_auth_mode() {
+        let body = r#"{"error":{"message":"Forbidden"}}"#;
+        let authenticated = forbidden_response_error(body, fake_bearer_auth()).await;
+        assert!(
+            authenticated.lines().last().unwrap().contains("API key"),
+            "{authenticated}"
+        );
+
+        let local = forbidden_response_error(
+            body,
+            ProviderAuth::None {
+                label: "local endpoint (no auth)".into(),
+            },
+        )
+        .await;
+        let hint = local.lines().last().unwrap();
+        assert!(
+            hint.contains("access policy") && !hint.contains("API key"),
+            "{local}"
+        );
+    }
 
     #[test]
     fn opencode_go_exhausted_five_hour_allowance_does_not_retry() {
