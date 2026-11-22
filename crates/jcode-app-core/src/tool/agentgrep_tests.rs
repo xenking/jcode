@@ -537,7 +537,7 @@ fn build_find_args_still_rejects_unscoped_empty_query() {
     let error = build_find_args(&params, &ctx).unwrap_err();
     assert_eq!(
         error.to_string(),
-        "agentgrep find requires 'query' unless path, glob, or type narrows the search"
+        "Missing parameter `query` (unless path, glob, or type narrows the search). Example: await tools.agentgrep({mode: 'find', query: 'Cargo.toml'})"
     );
 }
 
