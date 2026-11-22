@@ -45,6 +45,28 @@ fn greeting_uses_custom_action_and_json_strings() {
 }
 
 #[test]
+fn task_table_binds_only_to_the_owning_session() {
+    let source = r#"root = TaskTable("Задачи")"#;
+    let node = compile_express(source).unwrap();
+    assert!(matches!(&node.kind, NodeKind::SessionTasks { title } if title == "Задачи"));
+    let wire = serde_json::to_value(&node).unwrap();
+    assert_eq!(wire["type"], "session_tasks");
+    assert!(wire.get("rows").is_none());
+    assert_eq!(
+        serde_json::from_value::<jcode_applet_types::View>(wire).unwrap(),
+        node
+    );
+    assert!(jcode_applet_types::express::TOOL_HINT.contains("TaskTable(title)"));
+    for bad in [
+        r#"root = TaskTable()"#,
+        r#"root = TaskTable("x","foreign-session")"#,
+        r#"root = TaskTable(fetch())"#,
+    ] {
+        assert!(compile_express(bad).is_err());
+    }
+}
+
+#[test]
 fn rejects_unsupported_or_unsafe_programs() {
     for source in [
         r#"root = GreetingButton("x", "host.open_url", "y")"#,

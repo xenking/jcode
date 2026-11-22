@@ -1,4 +1,5 @@
 Macro examples:
+root = TaskTable("Tasks") -> live, read-only table of the owning chat's tasks. Mount once inline; no wait, polling, or applet patches. Ordinary table/progress values are snapshots.
 root = ReviewChange("Review patch", "src/ui.rs", "change42")  -> review.approve or review.request_changes, args.change_id, state.note
 root = GreetingButton("Show details", "details", "item42")  -> details, args.recipient
 For a different layout, provide view rather than express. Default placement is inline, replacing the tool row.

@@ -227,7 +227,8 @@ impl Walk<'_> {
             self.text(fallback)?;
         }
         match &node.kind {
-            NodeKind::Text { text, .. }
+            NodeKind::SessionTasks { title: text }
+            | NodeKind::Text { text, .. }
             | NodeKind::Markdown { text }
             | NodeKind::Code { text, .. } => self.text(text)?,
             NodeKind::Image {

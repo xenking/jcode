@@ -10,6 +10,7 @@
 //! - `GreetingButton(label, action, recipient)`: a button whose custom action
 //!   carries `recipient`. Action names are dot-separated ASCII identifiers and
 //!   cannot start with `host.`.
+//! - `TaskTable(title)`: read-only native table bound to this session's tasks.
 //!
 //! All arguments above are JSON strings. Input state is sent by the host along
 //! with actions; the note is not copied into action arguments.
@@ -29,9 +30,12 @@ macro_rules! catalog {
             "Set wait=true for the action and state. For custom layouts use view; action=catalog gives node shapes."
         );
 
-        fn expand(name: &str, args: [String; 3]) -> Result<View, String> {
+        fn expand(name: &str, parser: &mut Parser<'_>) -> Result<View, String> {
             match name {
-                $(stringify!($name) => $expand(args),)+
+                $(stringify!($name) => {
+                    $(let $arg = parser.string()?;)+
+                    $expand([$($arg),+])
+                },)+
                 _ => Err("unknown Express macro; use action=catalog for supported calls".into()),
             }
         }
@@ -41,6 +45,13 @@ macro_rules! catalog {
 catalog! {
     ReviewChange(title, body, change_id) => review;
     GreetingButton(label, event, recipient) => greeting;
+    TaskTable(title) => tasks;
+}
+
+fn tasks([title]: [String; 1]) -> Result<View, String> {
+    let mut node = Node::new(NodeKind::SessionTasks { title }).keyed("root");
+    node.fallback = Some("Live tasks require a compatible Jcode Desktop transcript.".into());
+    Ok(node)
 }
 
 fn review([title, body, change_id]: [String; 3]) -> Result<View, String> {
@@ -65,23 +76,22 @@ pub fn compile_express(source: &str) -> Result<View, String> {
     if source.len() > MAX_SOURCE_BYTES {
         return Err("Express source exceeds 64 KiB".into());
     }
-    let mut parser = Parser { rest: source };
+    let mut parser = Parser {
+        rest: source,
+        has_arg: false,
+    };
     if parser.identifier()? != "root" {
         return Err("expected root assignment".into());
     }
     parser.symbol('=')?;
     let name = parser.identifier()?;
     parser.symbol('(')?;
-    let first = parser.string()?;
-    parser.symbol(',')?;
-    let second = parser.string()?;
-    parser.symbol(',')?;
-    let third = parser.string()?;
+    let view = expand(name, &mut parser)?;
     parser.symbol(')')?;
     if !parser.rest.trim().is_empty() {
         return Err("unexpected trailing input".into());
     }
-    expand(name, [first, second, third])
+    Ok(view)
 }
 
 fn valid_action(name: &str) -> bool {
@@ -145,6 +155,7 @@ fn review_change(title: String, body: String, change_id: String) -> Node {
 
 struct Parser<'a> {
     rest: &'a str,
+    has_arg: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -177,6 +188,10 @@ impl<'a> Parser<'a> {
     }
 
     fn string(&mut self) -> Result<String, String> {
+        if self.has_arg {
+            self.symbol(',')?;
+        }
+        self.has_arg = true;
         self.whitespace();
         if !self.rest.starts_with('"') {
             return Err("expected JSON string".into());

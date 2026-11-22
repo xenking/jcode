@@ -6,6 +6,8 @@ mode: false
 
 # Native UI in Jcode Desktop
 
+For a live table of the current chat's tasks, if `TaskTable(title)` is advertised, mount `root = TaskTable("Tasks")` inline once without `wait`. The native renderer follows the owning session's task events. Do not send patches to keep it fresh. This macro does not watch arbitrary jobs, files, URLs or other sessions. Ordinary `table` and `progress` nodes still need a producer for updates.
+
 If `applet` is unavailable, give a text equivalent. Do not enable permissions or open a browser just to render UI. For a useful visual or choice, call `applet` instead of printing JSON in prose. Use `placement: "end"` when the user asks to see a demo in the current chat.
 
 1. Prefer `express` when a supported macro fits. The current runtime advertises its signatures in the tool definition. For example `root = ReviewChange("Review patch", "src/ui.rs", "change42")` returns `review.approve` or `review.request_changes`, `args.change_id`, and `state.note`. `GreetingButton(label,event,recipient)` returns the named action. Arguments are positional JSON strings. Do not emit `<a2ui>` tags, arbitrary A2UI wire JSON, or invented macros.
