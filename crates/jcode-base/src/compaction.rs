@@ -2463,16 +2463,17 @@ impl CompactionManager {
         accepts_native: bool,
     ) -> CompactionReplay {
         let session_id = session.id.clone();
-        let (checkpoint_changed, warn_missing_native_summary) =
+        let (checkpoint_changed, warn_missing_native_summary, current_plan) =
             self.prepare_checkpoint(&session_id, session.provider_messages(), accepts_native);
         let retained =
             replay::retained_checkpoint_messages(&session.messages, self.compacted_count);
-        let projection = self.project_messages(
+        let mut projection = self.project_messages(
             session.provider_messages(),
             supports_image_input,
             accepts_native,
             retained,
         );
+        projection.messages.extend(current_plan);
         CompactionReplay {
             messages: projection.messages,
             checkpoint_changed,
@@ -2488,15 +2489,16 @@ impl CompactionManager {
         supports_image_input: bool,
         accepts_native: bool,
     ) -> CompactionReplay {
-        let (checkpoint_changed, warn_missing_native_summary) =
+        let (checkpoint_changed, warn_missing_native_summary, current_plan) =
             self.prepare_checkpoint(&session.id, all_messages, accepts_native);
         let retained = if all_messages.len() == session.messages.len() {
             replay::retained_checkpoint_messages(&session.messages, self.compacted_count)
         } else {
             Vec::new()
         };
-        let projection =
+        let mut projection =
             self.project_messages(all_messages, supports_image_input, accepts_native, retained);
+        projection.messages.extend(current_plan);
         CompactionReplay {
             messages: projection.messages,
             checkpoint_changed,
@@ -2523,30 +2525,48 @@ impl CompactionManager {
         session_id: &str,
         all_messages: &[Message],
         accepts_native: bool,
-    ) -> (bool, bool) {
+    ) -> (bool, bool, Option<Message>) {
         self.check_and_apply_compaction_with(all_messages);
         let discarded = self.discard_oversized_openai_native_compaction();
         let mut checkpoint_changed = self.recover_native_text(all_messages, accepts_native);
         checkpoint_changed |= discarded || self.decisions_updated || self.last_compaction.is_some();
-        if self.active_summary.is_some() && self.plan_context.is_none() {
+        let mut current_plan = None;
+        if self.active_summary.as_ref().is_some_and(|summary| {
+            self.plan_context.is_none()
+                || !accepts_native
+                || summary.openai_encrypted_content.is_none()
+        }) {
             match format_compaction_plan(session_id) {
-                Ok(plan) => {
+                Ok(plan) if self.plan_context.is_none() => {
                     self.plan_context = Some(plan);
                     checkpoint_changed = true;
                 }
-                Err(error) => {
+                Ok(plan)
+                    if self.plan_context.as_deref() != Some(plan.as_str())
+                        && (!plan.is_empty()
+                            || crate::todo::todos_exist(session_id).unwrap_or(false)) =>
+                {
+                    // The persisted checkpoint is a stable provider cache prefix.
+                    // Send changes after the active history without rewriting it.
+                    current_plan = Some(replay::current_plan_message(&plan));
+                }
+                Err(error) if self.plan_context.is_none() => {
                     crate::logging::warn(&format!(
                         "[compaction] Could not load plan for {session_id}: {error}"
                     ));
-                    // Avoid rewriting the same checkpoint if the store later
-                    // becomes readable. The next compaction can retry.
+                    // Keep the prefix stable if the store later becomes readable.
                     self.plan_context = Some(String::new());
                     checkpoint_changed = true;
                 }
+                _ => {}
             }
         }
         let warn_missing_native_summary = self.take_missing_native_summary_warning(accepts_native);
-        (checkpoint_changed, warn_missing_native_summary)
+        (
+            checkpoint_changed,
+            warn_missing_native_summary,
+            current_plan,
+        )
     }
 
     pub fn take_missing_native_summary_warning(&mut self, accepts_native: bool) -> bool {

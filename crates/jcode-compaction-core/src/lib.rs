@@ -122,7 +122,7 @@ Write in natural language with these sections:
 - **Context:** What we're working on and why (1-2 sentences)
 - **What we did:** Key actions taken, files changed, problems solved
 - **Current state:** What works, what's broken, what's next
-- **Approved plan:** Carry forward every original approved step verbatim with its current status. Keep unfinished steps and don't promote suggestions into approved work.
+- **Approved plan:** Carry forward every original approved step verbatim with its current status. Keep unfinished steps and don't promote suggestions into approved work. Do not shorten this section for concision.
 - **User preferences:** Specific requirements or decisions they made
 
 Be concise but preserve important details. You can search the full conversation later if you need exact error messages or code snippets."#;

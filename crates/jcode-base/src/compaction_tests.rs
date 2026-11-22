@@ -1339,6 +1339,100 @@ fn test_persisted_state_round_trip_preserves_compacted_view() {
 }
 
 #[test]
+fn compacted_replay_preserves_and_refreshes_phased_todo_plan() {
+    fn text(message: &Message) -> &str {
+        match message.content.first() {
+            Some(ContentBlock::Text { text, .. }) => text,
+            _ => "",
+        }
+    }
+    let _guard = crate::storage::lock_test_env();
+    let mut session = crate::session::Session::create(None, None);
+    let session_id = session.id.clone();
+    let mut manager = CompactionManager::new();
+    manager.restore_persisted_state(
+        &crate::session::StoredCompactionState {
+            summary_text: "Previously compacted".into(),
+            plan_context: None,
+            openai_encrypted_content: Some("opaque".into()),
+            snapcompact: None,
+            covers_up_to_turn: 0,
+            original_turn_count: 0,
+            compacted_count: 0,
+        },
+        0,
+    );
+    let mut todo = crate::todo::TodoItem {
+        id: "step".into(),
+        content: "Check receipt against ledger".into(),
+        status: "pending".into(),
+        group: Some("acceptance".into()),
+        stage: Some(2),
+        ..Default::default()
+    };
+    crate::todo::save_todos(&session_id, std::slice::from_ref(&todo)).unwrap();
+    crate::todo::save_plan(
+        &session_id,
+        &crate::todo::TodoPlan {
+            user_intention: Some("Reconcile the invoice".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    crate::todo::save_goals(
+        &session_id,
+        &[crate::todo::TodoGoal {
+            group: Some("acceptance".into()),
+            feedback_loop: Some("Verify the exported report".into()),
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    let initial = manager
+        .messages_for_api_session(&mut session, false, false)
+        .messages;
+    let snapshot = text(&initial[1]);
+    for expected in [
+        "Phase 2",
+        "acceptance",
+        "Reconcile the invoice",
+        "Verify the exported report",
+        "[ ]",
+    ] {
+        assert!(
+            snapshot.contains(expected),
+            "missing {expected}: {snapshot}"
+        );
+    }
+    todo.status = "completed".into();
+    crate::todo::save_todos(&session_id, &[todo]).unwrap();
+    let refreshed = manager
+        .messages_for_api_session(&mut session, false, false)
+        .messages;
+    assert_eq!(
+        text(&refreshed[1]),
+        snapshot,
+        "checkpoint cache prefix changed"
+    );
+    assert!(text(refreshed.last().unwrap()).contains("[x]"));
+
+    let native = manager
+        .messages_for_api_session(&mut session, false, true)
+        .messages;
+    assert!(matches!(
+        &native[0].content[..],
+        [ContentBlock::OpenAICompaction { .. }]
+    ));
+    assert!(!native.iter().any(|message| text(message).contains("[x]")));
+
+    crate::todo::save_todos(&session_id, &[]).unwrap();
+    let cleared = manager
+        .messages_for_api_session(&mut session, false, false)
+        .messages;
+    assert!(text(cleared.last().unwrap()).contains("The todo plan is now empty"));
+}
+
+#[test]
 fn persisted_state_restore_and_exports_share_encrypted_body() {
     let body: Arc<str> = "encrypted-body-".repeat(128 * 1024).into();
     let state = crate::session::StoredCompactionState {

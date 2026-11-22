@@ -5,7 +5,8 @@ use std::fmt::Write;
 
 const RECENT_USER_TEXT_BYTES: usize = 12 * 1024;
 const PLAN_BYTES: usize = 4 * 1024;
-const PLAN_PREFIX: &str = "<system-reminder>\n## Plan status at the compaction checkpoint\n\nThis is the recorded todo state when history was compacted. Later todo results supersede it.\n";
+const PLAN_PREFIX: &str = "<system-reminder>\n## Plan status at the compaction checkpoint\n\nThis is the recorded todo state when history was compacted. Later todo results supersede it. Do not redo completed items or resume cancelled items.\n";
+const CURRENT_PLAN_PREFIX: &str = "<system-reminder>\n## Current todo plan\n\nThis is the current recorded todo state and supersedes the checkpoint. Do not redo completed items or resume cancelled items.\n";
 
 pub fn format_compaction_plan(session_id: &str) -> anyhow::Result<String> {
     let todos = crate::todo::load_todos(session_id)?;
@@ -13,6 +14,14 @@ pub fn format_compaction_plan(session_id: &str) -> anyhow::Result<String> {
         return Ok(String::new());
     }
     let mut text = PLAN_PREFIX.to_string();
+    let plan = crate::todo::load_plan(session_id).unwrap_or_default();
+    if let Some(intent) = plan
+        .user_intention
+        .as_deref()
+        .filter(|intent| !intent.trim().is_empty())
+    {
+        let _ = writeln!(text, "User intent: {}", truncate_str_boundary(intent, 512));
+    }
     const OMITTED: &str = "- … (additional todo entries omitted)\n";
     const END: &str = "</system-reminder>";
     // Preserve active work first if the plan exceeds the checkpoint budget.
@@ -35,21 +44,51 @@ pub fn format_compaction_plan(session_id: &str) -> anyhow::Result<String> {
             break;
         }
         let group = truncate_str_boundary(group, 128.min(remaining / 4));
-        let limit = 768.min(remaining.saturating_sub(group.len() + 16));
+        let limit = 768.min(remaining.saturating_sub(group.len() + 36));
         let content = truncate_str_boundary(&todo.content, limit);
         let ellipsis = if content.len() < todo.content.len() {
             "…"
         } else {
             ""
         };
-        if group.is_empty() {
-            let _ = writeln!(text, "- {status} {content}{ellipsis}");
-        } else {
-            let _ = writeln!(text, "- {status} ({group}) {content}{ellipsis}");
+        let _ = write!(text, "- {status} ");
+        if let Some(phase) = todo.stage {
+            let _ = write!(text, "Phase {phase} ");
         }
+        if !group.is_empty() {
+            let _ = write!(text, "({group}) ");
+        }
+        let _ = writeln!(text, "{content}{ellipsis}");
+    }
+    for goal in crate::todo::load_goals(session_id).unwrap_or_default() {
+        let Some(check) = goal
+            .feedback_loop
+            .as_deref()
+            .filter(|check| !check.trim().is_empty())
+        else {
+            continue;
+        };
+        let remaining = PLAN_BYTES.saturating_sub(text.len() + END.len());
+        if remaining < 64 {
+            break;
+        }
+        let group = truncate_str_boundary(
+            goal.group.as_deref().unwrap_or("plan"),
+            128.min(remaining / 4),
+        );
+        let check =
+            truncate_str_boundary(check, 512.min(remaining.saturating_sub(group.len() + 16)));
+        let _ = writeln!(text, "Goal ({group}): {check}");
     }
     text.push_str(END);
     Ok(text)
+}
+
+pub(super) fn current_plan_message(plan: &str) -> Message {
+    let content = plan
+        .strip_prefix(PLAN_PREFIX)
+        .unwrap_or("The todo plan is now empty.\n</system-reminder>");
+    checkpoint_text(&format!("{CURRENT_PLAN_PREFIX}{content}"))
 }
 
 pub(super) fn checkpoint_text(text: &str) -> Message {
