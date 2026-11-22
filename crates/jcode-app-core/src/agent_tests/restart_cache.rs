@@ -238,6 +238,47 @@ async fn restart_cache_anthropic() {
 }
 
 #[tokio::test]
+async fn desktop_attach_after_restart_preserves_provider_tool_hash() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = super::cold_cache::TestHome(std::env::var_os("JCODE_HOME"), home);
+    crate::env::set_var("JCODE_HOME", _home.1.path());
+    crate::config::Config::invalidate_cache();
+
+    let dialect = Dialect::Anthropic;
+    let mut agent = Agent::new_with_initial_working_dir(
+        Arc::new(dialect),
+        Registry::new(Arc::new(dialect)).await,
+        _home.1.path().to_str(),
+    );
+    append_text(&mut agent, Role::User, "Before reload.");
+    let before = request(&mut agent, dialect).await;
+    append_text(&mut agent, Role::Assistant, "Reply before reload.");
+    agent.session.save().unwrap();
+    let id = agent.session_id().to_owned();
+    drop(agent);
+
+    let mut restored = Agent::new(Arc::new(dialect), Registry::new(Arc::new(dialect)).await);
+    restored.restore_session(&id).unwrap();
+    append_text(&mut restored, Role::User, "Before Desktop attaches.");
+    let after_reload = request(&mut restored, dialect).await;
+    let tool_hash =
+        |wire: &Value| crate::agent::cache_request::stable_hash_str(&wire["tools"].to_string());
+    assert_eq!(tool_hash(&before), tool_hash(&after_reload), "after reload");
+
+    restored.set_desktop_response_capability(true, true).await;
+    let attached = request(&mut restored, dialect).await;
+    assert_eq!(tool_hash(&before), tool_hash(&attached), "after attach");
+    assert!(
+        attached["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["name"] == "applet")
+    );
+}
+
+#[tokio::test]
 async fn restart_cache_responses() {
     for case in ["plain", "summary", "snapcompact", "native"] {
         restore_wire(Dialect::Responses, case).await;
@@ -350,5 +391,58 @@ async fn restart_cache_monitor_reports_first_changed_canonical_item() {
         matches!(&miss, Some(ServerEvent::KvCacheMiss { reason, message, .. })
         if reason == "zero_read" && message.contains("comparable canonical provider input unavailable")),
         "{miss:?}"
+    );
+}
+
+#[tokio::test]
+async fn reload_factory_reuses_the_tool_surface_and_reports_the_first_cache_loss() {
+    let _guard = crate::storage::lock_test_env();
+    let home =
+        super::cold_cache::TestHome(std::env::var_os("JCODE_HOME"), tempfile::tempdir().unwrap());
+    crate::env::set_var("JCODE_HOME", home.1.path());
+    crate::config::Config::invalidate_cache();
+
+    let dialect = Dialect::Anthropic;
+    let provider = Arc::new(dialect);
+    let model = provider.model();
+    let mut agent = Agent::new_with_initial_working_dir(
+        provider.clone(),
+        registry(false).await,
+        home.1.path().to_str(),
+    );
+    append_text(&mut agent, Role::User, "Turn interrupted by reload.");
+    let before = request(&mut agent, dialect).await;
+    let signature = super::super::cache_request::kv_cache_request_event(
+        &[Message::user("Turn interrupted by reload.")],
+        &agent.tool_definitions().await,
+        "instructions",
+        &[],
+    );
+    agent.begin_kv_cache_monitor_request(&signature, &model);
+    assert!(
+        agent
+            .finish_kv_cache_monitor_request(4, Some(330_000), Some(11_000))
+            .is_none()
+    );
+    agent.session.save().unwrap();
+    let id = agent.session_id().to_owned();
+    drop(agent);
+
+    let mut restored = Agent::new_with_session(
+        provider,
+        Registry::empty(),
+        Session::load(&id).unwrap(),
+        None,
+    );
+    restored.begin_kv_cache_monitor_request(&signature, &model);
+    let miss = restored.finish_kv_cache_monitor_request(4, Some(13_562), Some(327_521));
+    assert!(
+        matches!(miss, Some(ServerEvent::KvCacheMiss { .. })),
+        "{miss:?}"
+    );
+    let after_reload = request(&mut restored, dialect).await;
+    assert_eq!(
+        before["tools"], after_reload["tools"],
+        "after factory reload"
     );
 }
