@@ -44,6 +44,10 @@ impl App {
     ) -> String {
         let baseline = request.baseline.as_ref();
         let read = self.streaming.streaming_cache_read_tokens;
+        let previous_read = baseline.and_then(|b| b.read_tokens);
+        let read_drop = previous_read
+            .zip(read)
+            .map(|(prior, read)| prior.saturating_sub(read));
         let shortfall = baseline
             .zip(read)
             .map(|(b, r)| b.input_tokens.saturating_sub(r));
@@ -68,6 +72,7 @@ impl App {
             b.provider == request.provider
                 && b.model == request.model
                 && b.upstream_provider == request.upstream_provider
+                && b.account == request.account
         });
         let upstream_matches = baseline.and_then(|b| {
             b.upstream_provider
@@ -103,6 +108,9 @@ impl App {
             {
                 "local_prefix_changed"
             }
+            (Some(b), Some(read), _) if Self::kv_cache_warm_read_shortfall(request, b, read) => {
+                "warm_read_shortfall"
+            }
             _ if static_prefix_matches == Some(true)
                 && request.baseline_messages_prefix_matches == Some(true) =>
             {
@@ -113,7 +121,7 @@ impl App {
         format!(
             "session_id={:?} baseline_provider={:?} baseline_model={:?} baseline_upstream={:?} \
              cache_generation={} baseline_cache_generation={:?} prompt_tokens={} \
-             cache_read_reported={} cache_write_reported={} prefix_shortfall_tokens={:?} prefix_shortfall_pct={:?} \
+             cache_read_reported={} cache_write_reported={} previous_cache_read={:?} read_drop_tokens={:?} prefix_shortfall_tokens={:?} prefix_shortfall_pct={:?} \
              idle_before_request_secs={:?} request_elapsed_ms={:?} request_timing_source={} ttl_state={} requested_ttl_secs={:?} \
              route_metadata_matches={:?} upstream_matches={:?} static_prefix_matches={:?} loss_evidence={} eviction_confirmed=false",
             self.kv_cache_session_id(),
@@ -125,6 +133,8 @@ impl App {
             prompt_tokens,
             read.is_some(),
             self.streaming.streaming_cache_creation_tokens.is_some(),
+            previous_read,
+            read_drop,
             shortfall,
             shortfall_pct,
             idle_secs,

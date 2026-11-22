@@ -252,6 +252,7 @@ struct KvCacheBaseline {
     /// the cache goes cold, not the bare `input` field, which for split providers
     /// is only the uncached remainder of that one request.
     input_tokens: u64,
+    read_tokens: Option<u64>,
     completed_at: Instant,
     /// UTC day the baseline request was sent. Anthropic drops conversation
     /// caches at 00:00 UTC, so a straddling miss is attributed, not alarmed.
@@ -2322,6 +2323,7 @@ impl App {
                 session_id: baseline_session_id,
                 cache_generation: request.cache_generation,
                 input_tokens: self.streaming.streaming_input_tokens,
+                read_tokens: None,
                 completed_at: Instant::now(),
                 utc_day: request.utc_day,
                 cache_ttl_secs: request.cache_ttl_secs,
@@ -2370,6 +2372,7 @@ impl App {
             session_id: baseline_session_id,
             cache_generation: request.cache_generation,
             input_tokens: reusable_tokens,
+            read_tokens: self.streaming.streaming_cache_read_tokens,
             completed_at: Instant::now(),
             utc_day: request.utc_day,
             cache_ttl_secs: request.cache_ttl_secs,
@@ -2436,9 +2439,13 @@ impl App {
         let optimal_pct = ratio_pct(read_tokens, expected_tokens);
         let reason =
             self.classify_kv_cache_miss_reason(request, baseline, read_tokens, optimal_pct);
-        // Compare the previous reusable prefix, not the current prompt's new
-        // tail. Keep the absolute tolerance for provider block rounding, but
-        // do not hide substantial losses merely because a large cache is >85% warm.
+        if reason == KvCacheMissReason::LowRead
+            && Self::kv_cache_warm_read_shortfall(request, baseline, read_tokens)
+        {
+            // The daemon still reports any request-only suffix change that the
+            // local projection cannot see.
+            return;
+        }
 
         self.kv_cache.kv_cache_miss_samples.push(KvCacheMissSample {
             turn_number: request.turn_number,
@@ -2563,6 +2570,22 @@ impl App {
             && current.tools_hash == previous.tools_hash
             && current.tool_count == previous.tool_count
             && Self::kv_cache_signatures_prefix_match(current, previous)
+    }
+
+    fn kv_cache_warm_read_shortfall(
+        request: &PendingKvCacheRequest,
+        baseline: &KvCacheBaseline,
+        read: u64,
+    ) -> bool {
+        Self::kv_cache_checked_prefix_unchanged(request)
+            && baseline.read_tokens.is_some_and(|previous_read| {
+                crate::kv_cache_monitor::is_warm_openai_read_shortfall(
+                    &request.provider,
+                    baseline.input_tokens,
+                    previous_read,
+                    read,
+                )
+            })
     }
 
     /// Specific, human-readable cause: what changed (from -> to) and the

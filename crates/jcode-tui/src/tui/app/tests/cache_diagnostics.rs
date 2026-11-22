@@ -37,6 +37,7 @@ fn cache_diagnostic_fixture() -> (App, PendingKvCacheRequest) {
         session_id: app.kv_cache_session_id(),
         cache_generation: 0,
         input_tokens: 50_000,
+        read_tokens: None,
         completed_at: started - Duration::from_secs(30),
         utc_day: 0,
         cache_ttl_secs: Some(60),

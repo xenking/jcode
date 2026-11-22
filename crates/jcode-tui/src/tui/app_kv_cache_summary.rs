@@ -28,13 +28,10 @@ impl App {
         } else {
             None
         };
-        let miss = self
-            .kv_cache
-            .kv_cache_miss_samples
-            .last()
-            .filter(|sample| {
-                sample.turn_number == request.turn_number && sample.call_index == request.call_index
-            })
+        let miss_sample = self.kv_cache.kv_cache_miss_samples.last().filter(|sample| {
+            sample.turn_number == request.turn_number && sample.call_index == request.call_index
+        });
+        let miss = miss_sample
             .map(|sample| {
                 format!(
                     "{}:{}",
@@ -57,8 +54,7 @@ impl App {
             .baseline
             .as_ref()
             .map(|baseline| baseline.input_tokens);
-        let missed_tokens =
-            baseline_input_tokens.map(|baseline| baseline.saturating_sub(read_tokens));
+        let missed_tokens = miss_sample.map(|sample| sample.missed_tokens);
         let ttl_secs = request
             .baseline
             .as_ref()

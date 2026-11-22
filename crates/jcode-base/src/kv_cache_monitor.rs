@@ -33,11 +33,33 @@ pub const OPENAI_MIN_MISSED_TOKENS: u64 = 2_048;
 
 /// Noise floor for a provider identity (`openai`, `openai-api`, `OpenAI`, ...).
 pub fn min_missed_tokens_for_provider(provider: &str) -> u64 {
-    if provider.trim().to_ascii_lowercase().starts_with("openai") {
+    if is_openai_cache_provider(provider) {
         OPENAI_MIN_MISSED_TOKENS
     } else {
         MIN_MISSED_TOKENS
     }
+}
+
+fn is_openai_cache_provider(provider: &str) -> bool {
+    provider.trim().to_ascii_lowercase().starts_with("openai")
+}
+
+/// OpenAI's prior total input includes tokens we never observed in the cache.
+/// If at least 95% of the baseline was read, treat a drop smaller than the
+/// provider noise floor as a shortfall rather than a loss. Callers must rule
+/// out route changes and invalidations first.
+pub fn is_warm_openai_read_shortfall(
+    provider: &str,
+    expected: u64,
+    previous_read: u64,
+    read: u64,
+) -> bool {
+    is_openai_cache_provider(provider)
+        && read != 0
+        && expected != 0
+        && previous_read != 0
+        && expected.saturating_sub(read) <= expected / 20
+        && previous_read.saturating_sub(read) < OPENAI_MIN_MISSED_TOKENS
 }
 
 /// Whether a provider drops its conversation prompt cache when the UTC date
@@ -453,6 +475,8 @@ struct Baseline {
     signature: RequestSignature,
     canonical_input: Option<CanonicalInput>,
     reusable_cache_tokens: u64,
+    #[serde(default)]
+    read_tokens: Option<u64>,
     completed_at: SystemTime,
     /// Local invalidation events and monotonic time do not survive exec.
     #[serde(skip)]
@@ -592,6 +616,7 @@ impl KvCacheMonitor {
                 signature: pending.signature,
                 canonical_input: pending.canonical_input,
                 reusable_cache_tokens,
+                read_tokens,
                 completed_at: SystemTime::now(),
                 completed_in_process: Some(Instant::now()),
                 utc_day: pending.utc_day,
@@ -770,6 +795,33 @@ fn classify(
             "; Responses wire input changed at item {index} (zero-based) after stable history"
         ));
     }
+    let prefix_unchanged = low_read
+        && wire_suffix_change.is_none()
+        && if baseline.completed_in_process.is_some() {
+            pending
+                .signature
+                .checked_prefix_unchanged(&baseline.signature)
+        } else {
+            comparable_input && canonical_change.is_none()
+        };
+    if low_read && let Some(previous_read) = baseline.read_tokens {
+        let read_drop = previous_read.saturating_sub(read_tokens);
+        if prefix_unchanged
+            && is_warm_openai_read_shortfall(&new.provider, expected, previous_read, read_tokens)
+        {
+            let idle_ms = idle_duration(baseline, pending).map(|idle| idle.as_millis());
+            let previous_uncached = expected.saturating_sub(previous_read);
+            let uncached = prefix_tokens.map(|input| input.saturating_sub(read_tokens));
+            crate::logging::info(&format!(
+                "KV_CACHE_SHORTFALL prefix_unchanged=true provider={} model={} expected={expected} previous_read={previous_read} input={prefix_tokens:?} read={read_tokens} shortfall={missed} read_drop={read_drop} previous_uncached={previous_uncached} uncached={uncached:?} idle_ms={idle_ms:?}",
+                new.provider, new.model,
+            ));
+            return None;
+        }
+        detail.push_str(&format!(
+            "; previous cache read {previous_read}, observed read drop {read_drop} tokens"
+        ));
+    }
     if baseline.completed_in_process.is_none()
         && !comparable_input
         && matches!(reason, MissReason::LowRead | MissReason::ZeroRead)
@@ -778,15 +830,7 @@ fn classify(
     }
     Some(KvCacheMiss {
         reason,
-        prefix_unchanged: low_read
-            && wire_suffix_change.is_none()
-            && if baseline.completed_in_process.is_some() {
-                pending
-                    .signature
-                    .checked_prefix_unchanged(&baseline.signature)
-            } else {
-                comparable_input && canonical_change.is_none()
-            },
+        prefix_unchanged,
         wire_suffix_change,
         expected_tokens: expected,
         read_tokens,
@@ -970,6 +1014,39 @@ mod tests {
         assert!(message.contains("138K tokens uncached"), "{message}");
         assert!(message.contains("caches are not shared"), "{message}");
         assert!(!message.contains("resent"), "{message}");
+    }
+
+    #[test]
+    fn unchanged_read_does_not_hide_an_observed_responses_suffix_change() {
+        let route = RequestRoute {
+            provider: "openai".into(),
+            model: "fixture".into(),
+            ..RequestRoute::default()
+        };
+        let snapshot = |item_hashes, suffix| CanonicalInput {
+            provider: route.provider.clone(),
+            format: "openai_responses_full".into(),
+            model: route.model.clone(),
+            item_hashes,
+            responses_request_only_suffix: Some(suffix),
+            system_hash: Some(1),
+            tools_hash: Some(2),
+            request_options_hash: Some(3),
+        };
+        let stable: Vec<u64> = (1..=396).collect();
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request(route.clone(), sig(&[10]));
+        monitor.note_canonical_input(snapshot(stable.clone(), vec![500]));
+        assert!(monitor.finish_request(195_557, Some(190_720)).is_none());
+        monitor.begin_request(route.clone(), sig(&[10, 11]));
+        monitor.note_canonical_input(snapshot([stable, vec![501, 502]].concat(), vec![503]));
+        let notice = monitor
+            .finish_request_with_prefix(196_490, Some(196_490), Some(190_720))
+            .unwrap();
+        assert_eq!(notice.wire_suffix_change, Some(396));
+        assert_eq!(notice.missed_tokens, 4_837);
+        assert!(notice.message().contains("[wire suffix changed]"));
+        assert!(notice.message().contains("observed read drop 0 tokens"));
     }
 
     #[tokio::test]
