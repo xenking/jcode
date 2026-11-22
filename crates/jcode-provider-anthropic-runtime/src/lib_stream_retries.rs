@@ -110,6 +110,17 @@ pub(super) async fn run_stream_with_retries(
                 if let Some(fast) = &fast {
                     if let Some(served) = served {
                         fast.confirm(served);
+                        use jcode_provider_core::SpeedMode;
+                        let actual = match served {
+                            fast_mode::ServedSpeed::Fast => SpeedMode::Fast,
+                            fast_mode::ServedSpeed::Standard => SpeedMode::Standard,
+                        };
+                        let _ = tx
+                            .send(Ok(StreamEvent::SpeedReported {
+                                requested: Some(SpeedMode::Fast),
+                                actual,
+                            }))
+                            .await;
                     }
                     let status = match (fast.block(), served) {
                         (Some(_), _) => None,

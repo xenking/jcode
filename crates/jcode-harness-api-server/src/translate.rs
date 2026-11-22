@@ -2011,6 +2011,8 @@ impl BridgeState {
             | "tool_done"
             | "connection_phase"
             | "status_detail"
+            | "service_tier_reported"
+            | "speed_reported"
                 if self.turn_fence.scoped() =>
             {
                 vec![]

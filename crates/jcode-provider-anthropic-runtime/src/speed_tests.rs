@@ -174,6 +174,11 @@ fn oauth_fast_sends_speed_and_beta_only_after_opt_in() {
         provider.set_speed_mode(SpeedMode::Fast).unwrap();
         let events = complete(provider.fork().as_ref(), Some("offline-resume")).await;
         assert!(detail_mentions(&events, "did not confirm Fast"));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::SpeedReported { .. }))
+        );
     });
 
     let [standard, fast] = server.join().unwrap();
@@ -223,6 +228,13 @@ fn api_fast_is_opt_in_for_first_party_only_and_does_not_follow_model_switches() 
             events.push(event.unwrap());
         }
         assert!(detail_mentions(&events, "confirmed Fast speed"));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::SpeedReported {
+                requested: Some(SpeedMode::Fast),
+                actual: SpeedMode::Fast,
+            }
+        )));
         assert_eq!(
             api.speed_options(&api.model())[1].availability,
             SpeedAvailability::Available
