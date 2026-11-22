@@ -147,6 +147,7 @@ impl PrewarmSlot {
         credentials: Arc<RwLock<CodexCredentials>>,
         request: &Value,
         turn_state: Arc<StdMutex<Option<String>>>,
+        premium_route: Option<String>,
     ) {
         let request = prewarm_request(request);
         let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -164,6 +165,12 @@ impl PrewarmSlot {
             let model = openai_request_model(&payload);
             let result = tokio::time::timeout(PREWARM_TIMEOUT, async {
                 let creds = credentials.read().await;
+                if let Some(route) = premium_route.as_deref() {
+                    anyhow::ensure!(
+                        OpenAIProvider::speed_route_for(&creds).as_deref() == Some(route),
+                        "OpenAI speed route changed before prewarm"
+                    );
+                }
                 // Speculation is cancellable at any instant. Never rotate an
                 // OAuth refresh token here: cancellation after server-side
                 // rotation could lose the replacement credentials. Leave
@@ -507,6 +514,7 @@ mod tests {
             Arc::clone(&credentials),
             &request,
             Arc::new(StdMutex::new(None)),
+            None,
         );
         tokio::task::yield_now().await;
         let (backing, abort) = {
@@ -528,6 +536,7 @@ mod tests {
             Arc::clone(&credentials),
             &request,
             Arc::new(StdMutex::new(None)),
+            None,
         );
         assert!(
             Arc::ptr_eq(&slot.0.lock().unwrap().as_ref().unwrap().request, &backing),
@@ -546,6 +555,7 @@ mod tests {
             Arc::clone(&credentials),
             &request,
             Arc::new(StdMutex::new(None)),
+            None,
         );
         assert!(
             !Arc::ptr_eq(&slot.0.lock().unwrap().as_ref().unwrap().request, &backing),
@@ -568,6 +578,7 @@ mod tests {
             Arc::clone(&credentials),
             &serde_json::json!({"model":"gpt-5.6-sol"}),
             Arc::new(StdMutex::new(None)),
+            None,
         );
         tokio::task::yield_now().await;
         let mut job = slot.0.lock().unwrap().take().unwrap();

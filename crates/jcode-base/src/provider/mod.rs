@@ -564,6 +564,7 @@ impl MultiProvider {
             let provider = self
                 .speed_provider()
                 .context("The configured speed route is no longer available")?;
+            self.bind_provider_session(provider.as_ref());
             return match mode {
                 CompletionMode::Unified { system } => {
                     provider

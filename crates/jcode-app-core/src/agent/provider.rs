@@ -1,5 +1,24 @@
 use super::*;
 
+pub(crate) fn legacy_speed_mode(
+    provider: &dyn crate::provider::Provider,
+    tier: &str,
+) -> Option<jcode_provider_core::SpeedMode> {
+    use jcode_provider_core::SpeedMode;
+    if !["openai", "claude", "anthropic"]
+        .iter()
+        .any(|name| provider.name().eq_ignore_ascii_case(name))
+    {
+        return None;
+    }
+    match tier.trim().to_ascii_lowercase().as_str() {
+        "off" | "none" | "default" | "standard" | "auto" => Some(SpeedMode::Standard),
+        "on" | "fast" | "priority" => Some(SpeedMode::Fast),
+        "ultra" | "ultrafast" | "ultra-fast" => Some(SpeedMode::Ultrafast),
+        _ => None,
+    }
+}
+
 fn worker_effort_cap<'a>(
     agents: &'a crate::config::AgentsConfig,
     provider_key: Option<&str>,
@@ -764,6 +783,15 @@ impl Agent {
             return Err(error);
         }
         Ok(self.provider.speed_mode())
+    }
+
+    pub(crate) fn set_legacy_session_speed(&mut self, tier: &str) -> Result<()> {
+        if let Some(mode) = legacy_speed_mode(self.provider.as_ref(), tier) {
+            self.set_speed_mode(mode)?;
+        } else {
+            self.provider.set_service_tier(tier)?;
+        }
+        Ok(())
     }
 
     pub fn restore_reasoning_effort_from_session(&mut self) {

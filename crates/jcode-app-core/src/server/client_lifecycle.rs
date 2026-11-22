@@ -2602,6 +2602,12 @@ pub(super) async fn handle_client(
                     Ok((mode, options)) => (mode, options, None),
                     Err(error) => (Default::default(), Vec::new(), Some(error.to_string())),
                 };
+                if error.is_none() {
+                    super::state::fanout_peer_client_event(
+                        &swarm_members, &client_session_id, &client_connection_id,
+                        ServerEvent::SpeedModeChanged { id: 0, speed_mode, speed_options: speed_options.clone(), error: None },
+                    ).await;
+                }
                 send_client_event_best_effort(&client_event_tx, ServerEvent::SpeedModeChanged {
                     id, speed_mode, speed_options, error,
                 }, "client_lifecycle: SpeedModeChanged");

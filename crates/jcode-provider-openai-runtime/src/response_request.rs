@@ -8,17 +8,19 @@ impl OpenAIProvider {
         input: impl Into<std::borrow::Cow<'a, [Value]>>,
         tools: &[ToolDefinition],
         system: &str,
-    ) -> Result<Value> {
+    ) -> Result<(Value, Option<String>)> {
         let model_id = self.model_id().await;
         let credentials = self.credentials.read().await;
-        Ok(self.response_request_with_tier(
+        let (tier, route) = self.request_speed_tier(&model_id, &credentials)?;
+        let request = self.response_request_with_tier(
             &model_id,
             input,
             tools,
             system,
             Self::is_chatgpt_mode(&credentials),
-            self.request_speed_tier(&model_id, &credentials)?.as_deref(),
-        ))
+            tier.as_deref(),
+        );
+        Ok((request, route))
     }
 
     #[cfg(test)]

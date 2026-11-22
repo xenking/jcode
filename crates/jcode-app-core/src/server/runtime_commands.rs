@@ -367,9 +367,9 @@ pub(super) async fn execute(
                 _ => bail!("Usage: /fast [on|ultra|off|priority|flex|auto|status]"),
             };
             if let Some(tier) = action {
-                provider.set_service_tier(tier)?;
+                agent.set_legacy_session_speed(tier)?;
             }
-            json!({"service_tier": provider.service_tier(), "provider": provider.display_name()})
+            json!({"service_tier": provider.service_tier(), "speed_mode": provider.speed_mode(), "provider": provider.display_name()})
         }
         RuntimeCommand::Telemetry => {
             json!({"enabled": false, "message": "Telemetry is disabled in this build. Nothing is collected or sent."})
@@ -503,6 +503,8 @@ mod tests {
     #[derive(Default)]
     struct NoInferenceProvider {
         tier: std::sync::Mutex<Option<String>>,
+        speed: std::sync::Mutex<jcode_provider_core::SpeedMode>,
+        speed_route: &'static str,
     }
     #[async_trait::async_trait]
     impl crate::provider::Provider for NoInferenceProvider {
@@ -532,6 +534,67 @@ mod tests {
             };
             Ok(())
         }
+
+        fn speed_mode(&self) -> jcode_provider_core::SpeedMode {
+            *self.speed.lock().unwrap()
+        }
+
+        fn speed_route_identity(&self) -> Option<String> {
+            Some(self.speed_route.into())
+        }
+
+        fn set_speed_mode(&self, mode: jcode_provider_core::SpeedMode) -> Result<()> {
+            anyhow::ensure!(
+                mode != jcode_provider_core::SpeedMode::Ultrafast,
+                "fixture route does not support Ultrafast"
+            );
+            *self.speed.lock().unwrap() = mode;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn session_speed_is_persisted_before_ack_and_restored_only_on_the_same_route() {
+        use jcode_provider_core::SpeedMode;
+        let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let provider = |speed_route| {
+            Arc::new(NoInferenceProvider {
+                speed_route,
+                ..Default::default()
+            })
+        };
+        let mut agent = Agent::new(provider("account-a"), crate::tool::Registry::empty());
+        assert_eq!(
+            agent.set_speed_mode(SpeedMode::Fast).unwrap(),
+            SpeedMode::Fast
+        );
+        assert!(agent.set_speed_mode(SpeedMode::Ultrafast).is_err());
+        let session_id = agent.session_id().to_owned();
+        let load = || crate::session::Session::load_for_resume(&session_id).unwrap();
+        assert_eq!(load().speed_selection.unwrap().mode, SpeedMode::Fast);
+        drop(agent);
+
+        let same_route = provider("account-a");
+        let mut restored = Agent::new_with_session(
+            same_route.clone(),
+            crate::tool::Registry::empty(),
+            load(),
+            None,
+        );
+        assert_eq!(restored.provider_handle().speed_mode(), SpeedMode::Fast);
+        let other = Agent::new_with_session(
+            provider("account-b"),
+            crate::tool::Registry::empty(),
+            load(),
+            None,
+        );
+        assert_eq!(other.provider_handle().speed_mode(), SpeedMode::Standard);
+        drop(other);
+        assert_eq!(
+            restored.set_speed_mode(SpeedMode::Standard).unwrap(),
+            SpeedMode::Standard
+        );
+        assert!(load().speed_selection.is_none());
     }
 
     #[tokio::test]

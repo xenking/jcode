@@ -736,6 +736,23 @@ pub(super) async fn handle_set_service_tier(
     provider: Option<Arc<dyn Provider>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
+    if let Some(provider) = provider.as_ref()
+        && crate::agent::provider::legacy_speed_mode(provider.as_ref(), &service_tier).is_some()
+    {
+        let result = match agent.try_lock() {
+            Ok(mut agent) => agent.set_legacy_session_speed(&service_tier),
+            Err(_) => Err(anyhow::anyhow!(
+                "Cannot change speed during an active turn; try again when the session is idle"
+            )),
+        };
+        let _ = client_event_tx.send(ServerEvent::ServiceTierChanged {
+            id,
+            pending: false,
+            service_tier: provider.service_tier(),
+            error: result.err().map(|error| error.to_string()),
+        });
+        return;
+    }
     let apply = move |provider: Arc<dyn Provider>,
                       client_event_tx: &mpsc::UnboundedSender<ServerEvent>| {
         match provider.set_service_tier(&service_tier) {

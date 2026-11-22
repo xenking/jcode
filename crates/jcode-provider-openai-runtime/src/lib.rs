@@ -1345,21 +1345,6 @@ impl OpenAIProvider {
         }
     }
 
-    #[cfg(test)]
-    fn load_service_tier(raw: Option<&str>) -> Option<String> {
-        let raw = raw?;
-        match Self::normalize_service_tier(raw) {
-            Ok(value) => value,
-            Err(err) => {
-                jcode_base::logging::warn(&format!(
-                    "{}; ignoring configured service tier override",
-                    err
-                ));
-                None
-            }
-        }
-    }
-
     fn load_max_output_tokens() -> Option<u32> {
         let raw = std::env::var("JCODE_OPENAI_MAX_OUTPUT_TOKENS").ok();
         let parsed = Self::parse_max_output_tokens(raw.as_deref());

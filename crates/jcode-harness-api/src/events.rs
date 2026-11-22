@@ -685,6 +685,13 @@ pub enum ApiEvent {
         speed_options: Vec<crate::SpeedOption>,
     },
 
+    /// Upstream observation, not an acknowledgement of a preference change.
+    SpeedModeReported {
+        session_id: String,
+        requested: Option<crate::SpeedMode>,
+        actual: crate::SpeedMode,
+    },
+
     /// An API-key credential was persisted or removed.
     CredentialUpdated {
         provider: String,

@@ -2194,6 +2194,7 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | ModelInfo { session_id, .. }
         | RuntimeInfo { session_id, .. }
         | SpeedModeChanged { session_id, .. }
+        | SpeedModeReported { session_id, .. }
         | ConnectionPhase { session_id, .. }
         | Models { session_id, .. }
         | Compacted { session_id, .. }

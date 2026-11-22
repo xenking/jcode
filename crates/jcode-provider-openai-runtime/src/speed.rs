@@ -124,15 +124,16 @@ impl OpenAIProvider {
         &self,
         model: &str,
         credentials: &CodexCredentials,
-    ) -> Result<Option<String>> {
+    ) -> Result<(Option<String>, Option<String>)> {
         let Some(choice) = self.requested_premium_speed() else {
             // Codex represents Standard by omitting the tier. The platform API
             // would instead inherit a project's potentially premium default.
-            return Ok(self.effective_service_tier(model).or_else(|| {
+            let tier = self.effective_service_tier(model).or_else(|| {
                 (!Self::is_chatgpt_mode(credentials)
                     && Self::speed_route_for(credentials).is_some())
                 .then(|| "default".into())
-            }));
+            });
+            return Ok((tier, None));
         };
         anyhow::ensure!(
             wire_speed_model(model) == choice.model
@@ -140,8 +141,9 @@ impl OpenAIProvider {
             "OpenAI model or credential route changed; select a speed before retrying"
         );
         self.ensure_speed_option(model, choice.mode, credentials)?;
-        Ok(Some(
-            speed_wire_tier(choice.mode, Self::is_chatgpt_mode(credentials)).into(),
+        Ok((
+            Some(speed_wire_tier(choice.mode, Self::is_chatgpt_mode(credentials)).into()),
+            Some(choice.route),
         ))
     }
 }

@@ -3024,9 +3024,10 @@ impl BridgeState {
                 if let Some(model) = event["model"].as_str() {
                     self.current_model = Some(model.to_string());
                 }
-                self.current_speed_mode = Default::default();
-                self.current_speed_options.clear();
-                self.model_catalog_loaded = false;
+                if !self.current_speed_options.is_empty() {
+                    self.current_speed_options.clear();
+                    self.model_catalog_loaded = false;
+                }
                 if let Some(provider) = event["provider_name"].as_str() {
                     self.note_provider(provider);
                 }
@@ -3055,6 +3056,27 @@ impl BridgeState {
                     ],
                     None => vec![ServerFrame::event(info)],
                 }
+            }
+            "service_tier_reported" => {
+                use jcode_harness_api::SpeedMode;
+                let mode = |tier: &str| match tier {
+                    "standard" | "default" => Some(SpeedMode::Standard),
+                    "fast" | "priority" => Some(SpeedMode::Fast),
+                    "ultrafast" => Some(SpeedMode::Ultrafast),
+                    _ => None,
+                };
+                event["tier"]
+                    .as_str()
+                    .and_then(mode)
+                    .map(|actual| {
+                        ServerFrame::event(ApiEvent::SpeedModeReported {
+                            session_id: session(self),
+                            requested: event["requested"].as_str().and_then(mode),
+                            actual,
+                        })
+                    })
+                    .into_iter()
+                    .collect()
             }
             "speed_mode_changed" => {
                 let id = event["id"].as_u64().unwrap_or_default();

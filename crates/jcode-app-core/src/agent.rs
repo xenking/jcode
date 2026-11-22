@@ -14,7 +14,7 @@ mod messages;
 #[cfg(test)]
 mod model_usage_tests;
 mod prompting;
-mod provider;
+pub(crate) mod provider;
 mod reload_resume;
 #[cfg(test)]
 mod reload_resume_tests;

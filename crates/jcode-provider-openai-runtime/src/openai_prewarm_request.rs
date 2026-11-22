@@ -40,7 +40,7 @@ impl OpenAIProvider {
         let Ok(credentials) = self.credentials.try_read() else {
             return;
         };
-        let Ok(tier) = self.request_speed_tier(model, &credentials) else {
+        let Ok((tier, premium_route)) = self.request_speed_tier(model, &credentials) else {
             return;
         };
         let request = self.response_request_with_tier(
@@ -66,6 +66,7 @@ impl OpenAIProvider {
             Arc::clone(&self.credentials),
             &request,
             Arc::clone(&self.turn_state),
+            premium_route,
         );
     }
 }

@@ -213,8 +213,7 @@ impl Provider for OpenAIProvider {
                 native_web_search::downgrade_web_search_calls(&mut input);
             }
         }
-        let request = self.response_request(input, tools, system).await?;
-        let premium_route = self.requested_premium_speed().map(|choice| choice.route);
+        let (request, premium_route) = self.response_request(input, tools, system).await?;
         let input = request["input"]
             .as_array()
             .context("OpenAI request input is not an array")?;
@@ -1130,10 +1129,7 @@ impl Provider for OpenAIProvider {
 
     fn service_tier(&self) -> Option<String> {
         if let Some(choice) = self.requested_premium_speed() {
-            let credentials = self.credentials.try_read().ok()?;
-            return Some(
-                speed::speed_wire_tier(choice.mode, Self::is_chatgpt_mode(&credentials)).into(),
-            );
+            return Some(speed::speed_wire_tier(choice.mode, true).into());
         }
         self.effective_service_tier(&self.model())
     }
