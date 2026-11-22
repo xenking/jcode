@@ -301,6 +301,9 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             )
             .await?;
         }
+        Some(Command::Review(review)) => {
+            super::review::run(review, &args.provider, args.model.as_deref()).await?;
+        }
         Some(Command::Login {
             provider: login_provider,
             account,

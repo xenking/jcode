@@ -256,6 +256,9 @@ pub(crate) enum Command {
         message: Option<String>,
     },
 
+    /// Review a local Git snapshot and print JSON findings
+    Review(super::review::ReviewArgs),
+
     /// Login to a provider via OAuth, API key, or local credentials
     Login {
         /// Provider to log in to. Equivalent to --provider for this command, e.g. `jcode login google`.
