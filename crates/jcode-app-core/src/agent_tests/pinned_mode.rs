@@ -10,7 +10,7 @@ fn mode_agent() -> (tempfile::TempDir, Agent) {
     )
     .unwrap();
     let agent = Agent::new_with_initial_working_dir(
-        Arc::new(ArchiveVisionProvider),
+        Arc::new(ArchiveReplayProvider { images: true }),
         Registry::empty(),
         project.path().to_str(),
     );
@@ -41,7 +41,7 @@ async fn pinned_mode_restores_without_duplicate_announcements_or_prompt_changes(
     );
     let loaded = Session::load(&id).unwrap();
     let mut attached = Agent::new_with_session(
-        Arc::new(ArchiveVisionProvider),
+        Arc::new(ArchiveReplayProvider { images: true }),
         Registry::empty(),
         loaded,
         None,
@@ -92,7 +92,7 @@ async fn pinned_mode_reappears_once_in_compacted_provider_transcript() {
         let child_project = tempfile::tempdir().unwrap();
         let mut agent = if inherited {
             let mut child = Agent::new_with_initial_working_dir(
-                Arc::new(ArchiveVisionProvider),
+                Arc::new(ArchiveReplayProvider { images: true }),
                 Registry::empty(),
                 child_project.path().to_str(),
             );

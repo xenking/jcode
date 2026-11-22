@@ -659,6 +659,7 @@ fn typescript_context_breakdown_matches_flattened_wire_payload() {
                 DynamicTools,
                 Agents,
                 Conversation,
+                Snapcompact,
                 Unattributed,
             ]
             .into_iter()

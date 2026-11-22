@@ -1,6 +1,6 @@
 use super::turn_execution::{LATE_MCP_ANNOUNCEMENT_MARKER, LATE_SKILL_ANNOUNCEMENT_MARKER};
 use super::*;
-use crate::compaction::{self, CompactionManager};
+use crate::compaction::{self, CompactionManager, CompactionProjection};
 use crate::prompt::{self, SplitSystemPrompt};
 use crate::provider::models::{
     context_limit_for_model_with_provider, provider_for_model_with_hint,
@@ -26,18 +26,18 @@ impl Agent {
         }
         let source = self.session.messages_for_provider_uncached();
         let action_forecast = (!summary_only).then(|| self.forecast_context_actions(&source));
-        let messages = inspect_messages(
+        let projection = inspect_messages(
             &self.session,
             source,
             compaction::snapcompact_pages_usable(self.provider.supports_image_input(), &model),
             compaction::openai_native_replay_route(provider, &model),
         );
-        let tools = self.inspect_tool_definitions(&messages).await;
+        let tools = self.inspect_tool_definitions(&projection.messages).await;
         let (prompt, skills_chars) = self.system_prompt_with_accounting(None, true);
         let mut counts = Counts::default();
         counts.prompt(&prompt, skills_chars);
-        counts.messages(&self.session, &messages);
-        counts.tools(&tools, &messages, |name| {
+        counts.messages(&self.session, &projection, true);
+        counts.tools(&tools, &projection.messages, |name| {
             crate::tool::sdk::custom(self.session_id(), name)
         });
         counts.action_forecast = action_forecast;
@@ -202,17 +202,19 @@ pub(crate) fn inspect_saved(session: &Session, summary_only: bool) -> ContextBre
     let native = provider
         .zip(model)
         .is_some_and(|(provider, model)| compaction::openai_native_replay_route(provider, model));
-    // The saved route may not have a restored image capability. The index-only
-    // projection is an estimate, without inventing a number of image pages.
-    let messages = inspect_messages(
+    // Saved sessions do not carry the provider's image capability. Only a
+    // model policy that explicitly rules pages out makes this projection known.
+    let snapcompact_known =
+        model.is_some_and(|model| !compaction::snapcompact_pages_usable(true, model));
+    let projection = inspect_messages(
         session,
         session.messages_for_provider_uncached(),
         false,
         native,
     );
-    counts.messages(session, &messages);
+    counts.messages(session, &projection, snapcompact_known);
     if let Some(tools) = super::tool_replay::saved_context_tools(session) {
-        counts.tools(&tools, &messages, |_| false);
+        counts.tools(&tools, &projection.messages, |_| false);
     }
     counts.finish(Some(session.id.clone()), session.model.clone(), meter)
 }
@@ -259,6 +261,7 @@ pub(crate) async fn inspect_draft(
     }
     let mut counts = Counts {
         conversation_chars: Some(0),
+        snapcompact_chars: Some(0),
         ..Counts::default()
     };
     counts.prompt(&prompt, Some(skills_chars));
@@ -402,16 +405,22 @@ fn apply_occupancy(
 
 fn inspect_messages(
     session: &Session,
-    mut messages: Vec<Message>,
+    messages: Vec<Message>,
     archive: bool,
     native: bool,
-) -> Vec<Message> {
-    if let Some(state) = session.compaction.as_deref() {
+) -> CompactionProjection {
+    let mut projection = if let Some(state) = session.compaction.as_deref() {
         let mut manager = CompactionManager::new();
         manager.restore_persisted_state(state, messages.len());
-        messages = manager.inspect_provider_messages(session, &messages, archive, native);
-    }
-    Agent::bounded_outbound_images(messages)
+        manager.inspect_provider_messages(session, &messages, archive, native)
+    } else {
+        CompactionProjection {
+            messages,
+            snapcompact_message_index: None,
+        }
+    };
+    projection.messages = Agent::bounded_outbound_images(projection.messages);
+    projection
 }
 
 #[derive(Default)]
@@ -423,6 +432,7 @@ struct Counts {
     dynamic_tokens: Option<usize>,
     agent_tokens: Option<usize>,
     conversation_chars: Option<usize>,
+    snapcompact_chars: Option<usize>,
     dynamic_reminder_chars: usize,
     unattributed_chars: usize,
     action_forecast: Option<ContextActionForecast>,
@@ -440,7 +450,12 @@ impl Counts {
         }
     }
 
-    fn messages(&mut self, session: &Session, messages: &[Message]) {
+    fn messages(
+        &mut self,
+        session: &Session,
+        projection: &CompactionProjection,
+        snapcompact_known: bool,
+    ) {
         let reminders: HashSet<_> = session
             .messages
             .iter()
@@ -455,7 +470,13 @@ impl Counts {
             })
             .collect();
         let mut chars = 0;
-        for message in messages {
+        self.snapcompact_chars = projection.snapcompact_message_index.is_none().then_some(0);
+        for (index, message) in projection.messages.iter().enumerate() {
+            if projection.snapcompact_message_index == Some(index) {
+                self.snapcompact_chars =
+                    snapcompact_known.then(|| compaction::message_char_count(message));
+                continue;
+            }
             let size = compaction::message_char_count(message);
             let kind = match (&message.role, message.content.as_ref()) {
                 (Role::User, [ContentBlock::Text { text, .. }]) => {
@@ -540,6 +561,7 @@ impl Counts {
             ),
             (Kind::Agents, self.agent_tokens.map(|tokens| tokens as u64)),
             (Kind::Conversation, self.conversation_chars.map(estimate)),
+            (Kind::Snapcompact, self.snapcompact_chars.map(estimate)),
         ];
         let not_attributed = estimate(
             self.unattributed_chars
@@ -563,6 +585,7 @@ impl Counts {
             .sum::<u64>();
         let local_total = (self.prompt_present
             && self.conversation_chars.is_some()
+            && self.snapcompact_chars.is_some()
             && self.builtin_tokens.is_some())
         .then_some(estimated_total);
         if meter.occupied_tokens.is_none()

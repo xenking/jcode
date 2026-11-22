@@ -60,10 +60,12 @@ struct DelayedProvider {
 
 struct NativeAutoCompactionProvider;
 
-struct ArchiveVisionProvider;
+struct ArchiveReplayProvider {
+    images: bool,
+}
 
 #[async_trait]
-impl Provider for ArchiveVisionProvider {
+impl Provider for ArchiveReplayProvider {
     async fn complete(
         &self,
         _: &[Message],
@@ -74,7 +76,7 @@ impl Provider for ArchiveVisionProvider {
         panic!("this offline request preparation test must not call a provider")
     }
     fn name(&self) -> &str {
-        "archive-vision-test"
+        "archive-replay-test"
     }
     fn model(&self) -> String {
         "claude-opus-5-5".into()
@@ -83,10 +85,12 @@ impl Provider for ArchiveVisionProvider {
         true
     }
     fn supports_image_input(&self) -> bool {
-        true
+        self.images
     }
     fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(Self)
+        Arc::new(Self {
+            images: self.images,
+        })
     }
 }
 
@@ -1296,8 +1300,15 @@ async fn run_turn_streaming_mpsc_emits_account_only_change_without_email() {
 }
 
 #[tokio::test]
-async fn messages_for_provider_caps_restored_snapcompact_pages() {
-    let provider: Arc<dyn Provider> = Arc::new(ArchiveVisionProvider);
+async fn context_breakdown_counts_only_outbound_snapcompact_checkpoint() {
+    assert_snapcompact_breakdown(true).await;
+    assert_snapcompact_breakdown(false).await;
+}
+
+async fn assert_snapcompact_breakdown(supports_images: bool) {
+    let provider: Arc<dyn Provider> = Arc::new(ArchiveReplayProvider {
+        images: supports_images,
+    });
     let mut agent = Agent::new(provider, Registry::empty());
     agent.add_message(
         Role::User,
@@ -1314,8 +1325,8 @@ async fn messages_for_provider_caps_restored_snapcompact_pages() {
             source: "history".into(),
             pages: (0..74).map(|i| format!("page{i}")).collect(),
             index: "[message 0, page 1 | user] old fact\n".into(),
-            decisions: String::new(),
-            deferred_decisions: String::new(),
+            decisions: "projected decision".into(),
+            deferred_decisions: "not sent".repeat(1_024),
             page_ranges: Vec::new(),
             render_key: String::new(),
         }),
@@ -1334,7 +1345,36 @@ async fn messages_for_provider_caps_restored_snapcompact_pages() {
             _ => None,
         })
         .collect();
-    assert_eq!(images, ["page70", "page71", "page72", "page73"]);
+    if supports_images {
+        assert_eq!(images, ["page70", "page71", "page72", "page73"]);
+    } else {
+        assert!(images.is_empty());
+    }
+    let inspection = serde_json::to_value(agent.inspect_context_breakdown(false).await).unwrap();
+    let categories = inspection["categories"].as_array().unwrap();
+    let tokens = |kind| {
+        categories
+            .iter()
+            .find(|category| category["kind"] == kind)
+            .unwrap()["tokens"]
+            .as_u64()
+            .unwrap()
+    };
+    let estimate = |messages: &[Message]| {
+        (messages
+            .iter()
+            .map(crate::compaction::message_char_count)
+            .sum::<usize>()
+            / crate::util::APPROX_CHARS_PER_TOKEN)
+            .max(1) as u64
+    };
+    assert_eq!(tokens("snapcompact"), estimate(&request[..1]));
+    assert_eq!(tokens("conversation"), estimate(&request[1..]));
+    let saved = super::context_breakdown::inspect_saved(&agent.session, false);
+    assert_eq!(
+        saved.categories.iter().find(|category| category.kind == jcode_session_types::ContextBreakdownKind::Snapcompact).unwrap().tokens,
+        None,
+    );
     assert!(
         request
             .iter()

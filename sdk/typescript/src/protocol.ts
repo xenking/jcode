@@ -487,6 +487,8 @@ export type ContextBreakdownKind =
   | "dynamic_tools"
   | "agents"
   | "conversation"
+  /** The snapcompact checkpoint projected for the serving route, not the stored archive. */
+  | "snapcompact"
   | "unattributed";
 
 export interface ContextBreakdownCategory {
@@ -574,6 +576,7 @@ export type ApiEvent =
       categories: ContextBreakdownCategory[];
       action_forecast?: ContextActionForecast;
       meter?: ContextMeter;
+      /** Occupancy minus estimated categories. A signed discrepancy, not a category. */
       residual_tokens?: number;
     }
   | { ev: "shake_tools"; session_id: string; result: ShakeToolsResult }

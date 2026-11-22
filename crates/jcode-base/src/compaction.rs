@@ -31,6 +31,11 @@ pub struct CompactionReplay {
     pub warn_missing_native_summary: bool,
 }
 
+pub struct CompactionProjection {
+    pub messages: Vec<Message>,
+    pub snapcompact_message_index: Option<usize>,
+}
+
 pub fn openai_native_replay_route(provider: &str, model: &str) -> bool {
     provider.eq_ignore_ascii_case("openai")
         && model.trim() != jcode_provider_core::CHATGPT_WEB_MODEL
@@ -2338,6 +2343,7 @@ impl CompactionManager {
             accepts_native,
             Vec::new(),
         )
+        .messages
     }
 
     /// Restore text from legacy checkpoints before another provider starts a
@@ -2371,14 +2377,14 @@ impl CompactionManager {
             self.prepare_checkpoint(&session_id, session.provider_messages(), accepts_native);
         let retained =
             replay::retained_checkpoint_messages(&session.messages, self.compacted_count);
-        let messages = self.project_messages(
+        let projection = self.project_messages(
             session.provider_messages(),
             supports_image_input,
             accepts_native,
             retained,
         );
         CompactionReplay {
-            messages,
+            messages: projection.messages,
             checkpoint_changed,
             warn_missing_native_summary,
         }
@@ -2399,10 +2405,10 @@ impl CompactionManager {
         } else {
             Vec::new()
         };
-        let messages =
+        let projection =
             self.project_messages(all_messages, supports_image_input, accepts_native, retained);
         CompactionReplay {
-            messages,
+            messages: projection.messages,
             checkpoint_changed,
             warn_missing_native_summary,
         }
@@ -2416,7 +2422,7 @@ impl CompactionManager {
         all_messages: &[Message],
         supports_image_input: bool,
         accepts_native: bool,
-    ) -> Vec<Message> {
+    ) -> CompactionProjection {
         let retained =
             replay::retained_checkpoint_messages(&session.messages, self.compacted_count);
         self.project_messages(all_messages, supports_image_input, accepts_native, retained)
@@ -2467,7 +2473,7 @@ impl CompactionManager {
         supports_image_input: bool,
         accepts_native: bool,
         retained: Vec<Message>,
-    ) -> Vec<Message> {
+    ) -> CompactionProjection {
         let active = self.active_messages(all_messages);
 
         match &self.active_summary {
@@ -2585,9 +2591,15 @@ impl CompactionManager {
                 }
                 result.extend(active.iter().cloned());
 
-                result
+                CompactionProjection {
+                    messages: result,
+                    snapcompact_message_index: summary.snapcompact.as_ref().map(|_| 0),
+                }
             }
-            None => active.to_vec(),
+            None => CompactionProjection {
+                messages: active.to_vec(),
+                snapcompact_message_index: None,
+            },
         }
     }
 

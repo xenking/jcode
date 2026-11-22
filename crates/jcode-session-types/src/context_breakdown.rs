@@ -134,5 +134,8 @@ pub enum ContextBreakdownKind {
     DynamicTools,
     Agents,
     Conversation,
+    /// The outbound snapcompact checkpoint, excluding unused archive contents.
+    Snapcompact,
+    /// Estimated input whose category is not known. Not a usage discrepancy.
     Unattributed,
 }
