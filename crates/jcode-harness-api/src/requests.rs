@@ -321,6 +321,9 @@ pub enum ApiRequest {
         /// Return only the meter, omitting categories and the residual.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         summary_only: bool,
+        /// Report snapcompact separately instead of counting it in Conversation.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        include_snapcompact: bool,
     },
 
     /// Preview or confirm local elision of old tool outputs in one open session.

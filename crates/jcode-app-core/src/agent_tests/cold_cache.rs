@@ -194,7 +194,7 @@ async fn manual_shake_requires_a_current_preview_and_records_only_one_reduction(
         panic!("expected a warm preview, got {preview:?}");
     };
     assert!(event.is_none() && stats.estimated_tokens_saved > 0);
-    let breakdown = agent.inspect_context_breakdown(false).await;
+    let breakdown = agent.inspect_context_breakdown(false, false).await;
     let forecast = breakdown.action_forecast.unwrap();
     assert_eq!(
         forecast.shake,
@@ -262,7 +262,7 @@ async fn manual_compact_forecast_is_unknown_until_real_compaction_runs() {
 
     let _guard = crate::storage::lock_test_env();
     let (_home, mut agent, _) = fixture(300, 250_000, 9_000).await;
-    let before = agent.inspect_context_breakdown(false).await;
+    let before = agent.inspect_context_breakdown(false, false).await;
     let forecast = before.action_forecast.unwrap();
     assert_eq!(
         forecast.compact_status,
@@ -274,7 +274,7 @@ async fn manual_compact_forecast_is_unknown_until_real_compaction_runs() {
     let (message, started) = agent.request_manual_compaction();
     assert!(started, "{message}");
     let busy = agent
-        .inspect_context_breakdown(false)
+        .inspect_context_breakdown(false, false)
         .await
         .action_forecast
         .unwrap();

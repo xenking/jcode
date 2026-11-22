@@ -358,7 +358,7 @@ export type ApiRequest =
   | { req: "get_history_image_chunk"; session_id: string; key: string; offset: number }
   | { req: "list_session_images"; session_id: string }
   | { req: "get_session_image"; session_id: string; image_id: string; offset: number }
-  | { req: "session_context_breakdown"; session_id?: string | null; model?: string | null; cwd?: string | null; summary_only?: boolean }
+  | { req: "session_context_breakdown"; session_id?: string | null; model?: string | null; cwd?: string | null; summary_only?: boolean; include_snapcompact?: boolean }
   | { req: "session_shake_tools"; session_id: string; action: ShakeToolsAction }
   | { req: "peek_session"; session_id: string; limit?: number }
   | { req: "clear"; session_id: string }

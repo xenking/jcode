@@ -8,6 +8,7 @@ pub(super) async fn reply(
     session_id: Option<String>,
     (model, cwd): (Option<&str>, Option<&str>),
     summary_only: bool,
+    include_snapcompact: bool,
     sessions: &SessionAgents,
     provider_template: &Arc<dyn Provider>,
 ) -> ServerEvent {
@@ -18,13 +19,15 @@ pub(super) async fn reply(
         }
         let live = sessions.read().await.get(&session_id).cloned();
         if let Some(agent) = live.as_ref().and_then(|agent| agent.try_lock().ok()) {
-            agent.inspect_context_breakdown(summary_only).await
+            agent
+                .inspect_context_breakdown(summary_only, include_snapcompact)
+                .await
         } else {
             let saved_id = session_id.clone();
             let mut saved = match tokio::task::spawn_blocking(move || {
                 crate::session::Session::load_for_remote_startup(&saved_id)
                     .ok()
-                    .map(|session| inspect_saved(&session, summary_only))
+                    .map(|session| inspect_saved(&session, summary_only, include_snapcompact))
             })
             .await
             {
@@ -47,7 +50,7 @@ pub(super) async fn reply(
         if cwd.is_some_and(|cwd| !cwd.is_absolute() || !cwd.is_dir()) {
             return error(id, "draft context working directory is unavailable");
         }
-        inspect_draft(provider_template, model, cwd).await
+        inspect_draft(provider_template, model, cwd, include_snapcompact).await
     };
     if summary_only {
         breakdown.categories.clear();

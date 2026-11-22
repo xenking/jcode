@@ -421,6 +421,8 @@ pub enum Request {
         cwd: Option<String>,
         #[serde(default)]
         summary_only: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        include_snapcompact: bool,
     },
 
     #[serde(rename = "session_shake_tools")]

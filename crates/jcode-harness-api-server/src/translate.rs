@@ -964,11 +964,14 @@ impl BridgeState {
                         "session_id, model, and cwd must be strings or null",
                     );
                 }
-                if !request["summary_only"].is_null() && !request["summary_only"].is_boolean() {
+                if ["summary_only", "include_snapcompact"]
+                    .into_iter()
+                    .any(|key| !request[key].is_null() && !request[key].is_boolean())
+                {
                     return Self::error_reply(
                         api_id,
                         ErrorCode::InvalidRequest,
-                        "summary_only must be a boolean",
+                        "summary_only and include_snapcompact must be booleans",
                     );
                 }
                 let id = self.legacy_id();
@@ -978,6 +981,7 @@ impl BridgeState {
                     "type": "session_context_breakdown", "id": id,
                     "session_id": request["session_id"], "model": request["model"], "cwd": request["cwd"],
                     "summary_only": request["summary_only"].as_bool().unwrap_or(false),
+                    "include_snapcompact": request["include_snapcompact"].as_bool().unwrap_or(false),
                 }))]
             }
             "session_shake_tools" => {

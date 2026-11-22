@@ -1350,7 +1350,8 @@ async fn assert_snapcompact_breakdown(supports_images: bool) {
     } else {
         assert!(images.is_empty());
     }
-    let inspection = serde_json::to_value(agent.inspect_context_breakdown(false).await).unwrap();
+    let inspection =
+        serde_json::to_value(agent.inspect_context_breakdown(false, true).await).unwrap();
     let categories = inspection["categories"].as_array().unwrap();
     let tokens = |kind| {
         categories
@@ -1370,10 +1371,23 @@ async fn assert_snapcompact_breakdown(supports_images: bool) {
     };
     assert_eq!(tokens("snapcompact"), estimate(&request[..1]));
     assert_eq!(tokens("conversation"), estimate(&request[1..]));
-    let saved = super::context_breakdown::inspect_saved(&agent.session, false);
+    let saved = super::context_breakdown::inspect_saved(&agent.session, false, true);
     assert_eq!(
         saved.categories.iter().find(|category| category.kind == jcode_session_types::ContextBreakdownKind::Snapcompact).unwrap().tokens,
         None,
+    );
+    let legacy = agent.inspect_context_breakdown(false, false).await;
+    assert!(legacy.categories.iter().all(|category| category.kind != jcode_session_types::ContextBreakdownKind::Snapcompact));
+    assert_eq!(
+        legacy
+            .categories
+            .iter()
+            .find(
+                |category| category.kind == jcode_session_types::ContextBreakdownKind::Conversation
+            )
+            .unwrap()
+            .tokens,
+        Some(estimate(&request)),
     );
     assert!(
         request

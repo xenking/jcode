@@ -351,6 +351,7 @@ pub(super) async fn handle_lightweight_control_request(
         model,
         cwd,
         summary_only,
+        include_snapcompact,
     } = request
     {
         let event = super::context_breakdown::reply(
@@ -358,6 +359,7 @@ pub(super) async fn handle_lightweight_control_request(
             session_id,
             (model.as_deref(), cwd.as_deref()),
             summary_only,
+            include_snapcompact,
             sessions,
             provider_template,
         )

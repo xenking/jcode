@@ -2014,12 +2014,14 @@ fn browsing_requests_work_without_attaching() {
 fn context_breakdown_round_trip_without_attaching() {
     let mut bridge = BridgeState::default();
     let out = bridge.api_request_to_legacy(&json!({
-        "req": "session_context_breakdown", "id": 27, "session_id": "session_saved"
+        "req": "session_context_breakdown", "id": 27, "session_id": "session_saved",
+        "include_snapcompact": true
     }));
     let Outbound::Legacy(request) = &out[0] else {
         panic!("context inspection must reach the daemon without attaching");
     };
     assert_eq!(request["type"], "session_context_breakdown");
+    assert_eq!(request["include_snapcompact"], true);
     assert_eq!(request["session_id"], "session_saved");
     let replies = bridge.legacy_event_to_api(&json!({
         "type": "context_breakdown", "id": request["id"],

@@ -19,6 +19,7 @@ impl RemoteEventState for RemoteConnection {
                 model: None,
                 cwd: None,
                 summary_only: true,
+                include_snapcompact: false,
             },
             "context meter",
         );

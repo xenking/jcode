@@ -15,7 +15,11 @@ use jcode_session_types::{
 use std::path::Path;
 
 impl Agent {
-    pub(crate) async fn inspect_context_breakdown(&self, summary_only: bool) -> ContextBreakdown {
+    pub(crate) async fn inspect_context_breakdown(
+        &self,
+        summary_only: bool,
+        include_snapcompact: bool,
+    ) -> ContextBreakdown {
         let model = self.provider_model();
         let provider = self.provider.name();
         let telemetry = session_telemetry::read_context(&self.session.id);
@@ -34,7 +38,10 @@ impl Agent {
         );
         let tools = self.inspect_tool_definitions(&projection.messages).await;
         let (prompt, skills_chars) = self.system_prompt_with_accounting(None, true);
-        let mut counts = Counts::default();
+        let mut counts = Counts {
+            include_snapcompact,
+            ..Counts::default()
+        };
         counts.prompt(&prompt, skills_chars);
         counts.messages(&self.session, &projection, true);
         counts.tools(&tools, &projection.messages, |name| {
@@ -139,7 +146,11 @@ impl Agent {
 }
 
 /// No Agent or provider route is constructed to inspect an unloaded session.
-pub(crate) fn inspect_saved(session: &Session, summary_only: bool) -> ContextBreakdown {
+pub(crate) fn inspect_saved(
+    session: &Session,
+    summary_only: bool,
+    include_snapcompact: bool,
+) -> ContextBreakdown {
     let model = session.model.as_deref();
     let telemetry = session_telemetry::read_context(&session.id);
     let matching = telemetry
@@ -179,7 +190,10 @@ pub(crate) fn inspect_saved(session: &Session, summary_only: bool) -> ContextBre
             .messages
             .iter()
             .any(|message| message.role == Role::Assistant);
-    let mut counts = Counts::default();
+    let mut counts = Counts {
+        include_snapcompact,
+        ..Counts::default()
+    };
     let recorded = crate::session::load_prompt_inputs(&session.id)
         .filter(|inputs| inputs.working_dir == session.working_dir);
     if let Some((inputs, snapshot)) = recorded
@@ -223,6 +237,7 @@ pub(crate) async fn inspect_draft(
     provider_template: &Arc<dyn Provider>,
     model: Option<&str>,
     cwd: Option<&Path>,
+    include_snapcompact: bool,
 ) -> ContextBreakdown {
     let default_model = provider_template.model();
     let model = model.unwrap_or(&default_model);
@@ -262,6 +277,7 @@ pub(crate) async fn inspect_draft(
     let mut counts = Counts {
         conversation_chars: Some(0),
         snapcompact_chars: Some(0),
+        include_snapcompact,
         ..Counts::default()
     };
     counts.prompt(&prompt, Some(skills_chars));
@@ -425,6 +441,7 @@ fn inspect_messages(
 
 #[derive(Default)]
 struct Counts {
+    include_snapcompact: bool,
     prompt_present: bool,
     system_chars: Option<usize>,
     skill_chars: Option<usize>,
@@ -472,7 +489,7 @@ impl Counts {
         let mut chars = 0;
         self.snapcompact_chars = projection.snapcompact_message_index.is_none().then_some(0);
         for (index, message) in projection.messages.iter().enumerate() {
-            if projection.snapcompact_message_index == Some(index) {
+            if self.include_snapcompact && projection.snapcompact_message_index == Some(index) {
                 self.snapcompact_chars =
                     snapcompact_known.then(|| compaction::message_char_count(message));
                 continue;
@@ -561,7 +578,6 @@ impl Counts {
             ),
             (Kind::Agents, self.agent_tokens.map(|tokens| tokens as u64)),
             (Kind::Conversation, self.conversation_chars.map(estimate)),
-            (Kind::Snapcompact, self.snapcompact_chars.map(estimate)),
         ];
         let not_attributed = estimate(
             self.unattributed_chars
@@ -573,6 +589,10 @@ impl Counts {
         );
         let categories: Vec<_> = counts
             .into_iter()
+            .chain(
+                self.include_snapcompact
+                    .then_some((Kind::Snapcompact, self.snapcompact_chars.map(estimate))),
+            )
             .chain([(
                 Kind::Unattributed,
                 (not_attributed > 0).then_some(not_attributed),
@@ -585,7 +605,7 @@ impl Counts {
             .sum::<u64>();
         let local_total = (self.prompt_present
             && self.conversation_chars.is_some()
-            && self.snapcompact_chars.is_some()
+            && (!self.include_snapcompact || self.snapcompact_chars.is_some())
             && self.builtin_tokens.is_some())
         .then_some(estimated_total);
         if meter.occupied_tokens.is_none()
