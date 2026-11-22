@@ -853,13 +853,7 @@ impl SessionControlHandle {
         urgent: bool,
         source: SoftInterruptSource,
     ) -> bool {
-        if !self.queue_available {
-            return false;
-        }
-        let queued =
-            enqueue_soft_interrupt(&self.soft_interrupt_queue, content, images, urgent, source);
-        self.wake_blocking_waits(queued, source);
-        queued
+        self.queue_soft_interrupt_with_id(content, images, urgent, source, None)
     }
 
     pub fn queue_soft_interrupt_with_id(
@@ -873,6 +867,10 @@ impl SessionControlHandle {
         if !self.queue_available {
             return false;
         }
+        let Ok(_delivery) = crate::turn_activity::global().admit_queue_delivery(&self.session_id)
+        else {
+            return false;
+        };
         let queued = enqueue_soft_interrupt_with_id(
             &self.soft_interrupt_queue,
             content,
@@ -945,6 +943,7 @@ impl SessionControlHandle {
             "session queue unavailable while reconnecting"
         );
         anyhow::ensure!(!client_id.trim().is_empty(), "client_id must not be empty");
+        let _delivery = crate::turn_activity::global().admit_queue_delivery(&self.session_id)?;
         if content.trim().is_empty()
             && images.is_empty()
             && attachments.is_empty()
@@ -1372,6 +1371,7 @@ impl SessionControlHandle {
             self.queue_available,
             "session queue unavailable while reconnecting"
         );
+        let _delivery = crate::turn_activity::global().admit_queue_delivery(&self.session_id)?;
         let mut queue = self
             .soft_interrupt_queue
             .lock()
@@ -1685,9 +1685,9 @@ pub(super) async fn queue_soft_interrupt_with_images_for_session(
     queues: &SessionInterruptQueues,
     sessions: &super::SessionAgents,
 ) -> bool {
-    if crate::turn_activity::session_is_stopped(session_id) {
+    let Ok(_delivery) = crate::turn_activity::global().admit_queue_delivery(session_id) else {
         return false;
-    }
+    };
     if let Some(queue) = queues.read().await.get(session_id).cloned() {
         let queued = enqueue_soft_interrupt(&queue, content, images, urgent, source);
         if queued {

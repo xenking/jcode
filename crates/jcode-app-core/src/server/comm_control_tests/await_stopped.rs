@@ -3,8 +3,11 @@
 async fn swarm_stop_seals_the_spawn_tree_before_acknowledging() {
     let (_env, _dir) = RuntimeEnvGuard::new();
     let owner = "stop-tree-owner";
-    let worker = "stop-tree-worker";
-    let child = "stop-tree-child";
+    let agent = test_agent().await;
+    let worker_id = agent.lock().await.session_id().to_owned();
+    let worker = worker_id.as_str();
+    let worker_queue = agent.lock().await.soft_interrupt_queue();
+    let child = "session_stop-tree-child";
     let other = "stop-tree-unrelated";
     let swarm = "stop-tree";
     let child_swarm = "stop-tree-nested";
@@ -25,8 +28,33 @@ async fn swarm_stop_seals_the_spawn_tree_before_acknowledging() {
         (child_swarm.into(), HashSet::from([child.into()])),
     ])));
     let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
-        HashMap::new(),
+        HashMap::from([(worker.into(), agent)]),
     ));
+    let mut detached = crate::session::Session::create_with_id(child.into(), None, None);
+    detached.add_message(
+        crate::message::Role::User,
+        vec![crate::message::ContentBlock::Text {
+            text: "Earlier work".into(),
+            cache_control: None,
+        }],
+    );
+    detached.save().unwrap();
+    let queues = Arc::new(RwLock::new(HashMap::new()));
+    crate::server::register_session_interrupt_queue(&queues, worker, worker_queue.clone()).await;
+    let enqueue = |session| {
+        crate::server::queue_soft_interrupt_for_session(
+            session,
+            "queued before stop".into(),
+            false,
+            crate::agent::SoftInterruptSource::System,
+            &queues,
+            &sessions,
+        )
+    };
+    assert!(enqueue(worker).await);
+    assert!(enqueue(child).await);
+    assert_eq!(worker_queue.lock().unwrap().len(), 1);
+    assert_eq!(crate::soft_interrupt_store::load(child).unwrap().len(), 1);
     let (events, _) = broadcast::channel(32);
     let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
     let activity = crate::turn_activity::global();
@@ -49,7 +77,7 @@ async fn swarm_stop_seals_the_spawn_tree_before_acknowledging() {
             &Arc::new(RwLock::new(VecDeque::new())),
             &Arc::new(AtomicU64::new(0)),
             &events,
-            &Arc::new(RwLock::new(HashMap::new())),
+            &queues,
             &AwaitMembersRuntime::default(),
         )
         .await;
@@ -73,6 +101,25 @@ async fn swarm_stop_seals_the_spawn_tree_before_acknowledging() {
             stop_rx.recv().await,
             Some(ServerEvent::Done { id: 17 })
         ));
+        assert!(!enqueue(worker).await, "stopped worker accepted delivery");
+        assert!(
+            !enqueue(child).await,
+            "stopped descendant accepted delivery"
+        );
+        assert!(
+            worker_queue.lock().unwrap().is_empty(),
+            "live work survived stop"
+        );
+        assert!(
+            crate::soft_interrupt_store::load(worker)
+                .unwrap()
+                .is_empty(),
+            "closing the worker saved cancelled work for replay"
+        );
+        assert!(
+            crate::soft_interrupt_store::load(child).unwrap().is_empty(),
+            "detached descendant will replay cancelled work"
+        );
         assert!(
             activity.admit(worker).is_err(),
             "stopped worker accepted a new turn"

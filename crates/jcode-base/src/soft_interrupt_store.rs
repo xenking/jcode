@@ -126,14 +126,11 @@ pub fn take(session_id: &str) -> Result<Vec<SoftInterruptMessage>> {
 }
 
 pub fn overwrite(session_id: &str, interrupts: &[SoftInterruptMessage]) -> Result<()> {
-    let path = path_for_session(session_id)?;
     if interrupts.is_empty() {
-        if path.exists() {
-            let _ = std::fs::remove_file(path);
-        }
-        return Ok(());
+        return clear(session_id);
     }
 
+    let path = path_for_session(session_id)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -150,7 +147,14 @@ pub fn append(session_id: &str, interrupt: SoftInterruptMessage) -> Result<()> {
 }
 
 pub fn clear(session_id: &str) -> Result<()> {
-    overwrite(session_id, &[])
+    let path = path_for_session(session_id)?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(anyhow::Error::new(error).context(format!(
+            "Cannot clear persisted soft interrupts for {session_id}"
+        ))),
+    }
 }
 
 /// Drop persisted interrupts whose caller id is in `client_ids`, returning the

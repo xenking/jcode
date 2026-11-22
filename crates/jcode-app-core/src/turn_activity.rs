@@ -286,6 +286,14 @@ impl ActivityRegistry {
         Ok(self.insert(&mut state, session_id, Participant::Admission))
     }
 
+    /// Keep queue writes in stop's quiescence boundary. Unlike a new turn,
+    /// writing deferred input is allowed during a runtime replacement fence.
+    pub(crate) fn admit_queue_delivery(&self, session_id: &str) -> Result<AdmissionGuard> {
+        let mut state = self.lock();
+        ensure!(!stop_path(session_id)?.try_exists()?, "Session is stopped");
+        Ok(self.insert(&mut state, session_id, Participant::Admission))
+    }
+
     pub(crate) fn stop(&self, session_id: &str) -> Result<SessionStopGuard> {
         let path = stop_path(session_id)?;
         let mut state = self.lock();

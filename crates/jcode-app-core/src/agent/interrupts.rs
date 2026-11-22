@@ -77,6 +77,10 @@ pub(super) enum PostToolInterruptOutcome {
 
 impl Agent {
     pub fn restore_persisted_soft_interrupts(&self) -> usize {
+        let Ok(_delivery) = crate::turn_activity::global().admit_queue_delivery(self.session_id())
+        else {
+            return 0;
+        };
         let Ok(mut queue) = self.soft_interrupt_queue.lock() else {
             logging::warn(&format!(
                 "Failed to restore soft interrupts for {} because queue lock was poisoned",
@@ -202,6 +206,10 @@ impl Agent {
         source: SoftInterruptSource,
         client_id: Option<String>,
     ) {
+        let Ok(_delivery) = crate::turn_activity::global().admit_queue_delivery(self.session_id())
+        else {
+            return;
+        };
         let content_bytes = content.len();
         let content_chars = content.chars().count();
         let image_count = images.len();

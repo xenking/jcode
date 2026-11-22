@@ -1179,6 +1179,35 @@ pub(super) async fn handle_comm_stop(
         };
         let mut affected_swarms = HashSet::new();
         for session in tree.keys() {
+            let agent = { sessions.read().await.get(session).cloned() };
+            let mut agent = match agent {
+                Some(agent) => Some(
+                    tokio::time::timeout(std::time::Duration::from_secs(2), agent.lock_owned())
+                        .await
+                        .map_err(|_| {
+                            anyhow::anyhow!("Timed out closing stopped session '{session}'")
+                        })?,
+                ),
+                None => None,
+            };
+            let registered_queue = soft_interrupt_queues.read().await.get(session).cloned();
+            let agent_queue = agent.as_ref().map(|agent| agent.soft_interrupt_queue());
+            for queue in registered_queue.into_iter().chain(agent_queue) {
+                queue.lock().map_err(|_| anyhow::anyhow!(
+                    "Cannot clear queued work for stopped session '{session}': queue lock poisoned"
+                ))?.clear();
+            }
+            // mark_closed snapshots the live queue. Empty both sources first,
+            // even for an unloaded worker that has only a persisted queue.
+            crate::soft_interrupt_store::clear(session)?;
+            if let Some(agent) = agent.as_mut() {
+                agent.mark_closed();
+            }
+            drop(agent);
+            let _ = super::remove_session_entry(sessions, session).await;
+            remove_session_interrupt_queue(soft_interrupt_queues, session).await;
+            remove_background_tool_signal(session);
+
             super::ask_escalation::withdraw_worker(session);
             super::comm_await::stop_session_awaits(await_members_runtime, session).await;
             {
@@ -1220,14 +1249,6 @@ pub(super) async fn handle_comm_stop(
                 },
             )
             .await;
-            if let Some(agent) = super::remove_session_entry(sessions, session).await {
-                tokio::time::timeout(std::time::Duration::from_secs(2), agent.lock())
-                    .await
-                    .map_err(|_| anyhow::anyhow!("Timed out closing stopped session '{session}'"))?
-                    .mark_closed();
-            }
-            remove_session_interrupt_queue(soft_interrupt_queues, session).await;
-            remove_background_tool_signal(session);
             remove_session_channel_subscriptions(
                 session,
                 channel_subscriptions,

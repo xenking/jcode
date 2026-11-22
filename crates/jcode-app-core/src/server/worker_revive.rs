@@ -29,9 +29,7 @@ pub(super) async fn live_or_revived_agent(
     session_id: &str,
     sessions: &SessionAgents,
 ) -> Option<Arc<Mutex<Agent>>> {
-    if crate::turn_activity::session_is_stopped(session_id) {
-        return None;
-    }
+    let _admission = crate::turn_activity::global().admit(session_id).ok()?;
     if let Some(context) = sessions.revive.get()
         && context
             .members
