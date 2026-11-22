@@ -196,6 +196,12 @@ export type RenderedImageAnchor =
   | { kind: "tool_call"; id: string }
   | { kind: "user_prompt"; ordinal: number };
 
+export interface SessionImageRef {
+  image_id: string;
+  /** One-based image number in the complete session. */
+  ordinal: number;
+}
+
 export interface RenderedImage {
   media_type: string;
   data: string;
@@ -204,6 +210,7 @@ export interface RenderedImage {
   anchor?: RenderedImageAnchor;
   /** Insert before this History.messages index (including hidden rows). Length means append. */
   history_message_index?: number;
+  session_image?: SessionImageRef;
 }
 
 /** Base64 image attachment: [mediaType, base64Data]. */
@@ -580,7 +587,7 @@ export type ApiEvent =
       residual_tokens?: number;
     }
   | { ev: "shake_tools"; session_id: string; result: ShakeToolsResult }
-  | { ev: "user_image_ids"; session_id: string; original_content: string; content: string; image_ids: string[] }
+  | { ev: "user_image_ids"; session_id: string; original_content: string; content: string; image_ids: string[]; image_ordinals?: number[] }
   | { ev: "usage_limit"; session_id: string; provider: string; model: string; account: string | null; window: string; reset: string; action: string; target: string | null; message: string }
   | { ev: "tools"; session_id: string; tools: SessionToolDefinition[] }
   | { ev: "tool_call"; session_id: string; call_id: string; name: string; input: unknown }
