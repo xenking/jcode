@@ -40,7 +40,6 @@ use crate::bus::{Bus, BusEvent, GitStatusCompleted, ManualToolCompleted, ToolEve
 use crate::id;
 use crate::message::{ContentBlock, Message, Role};
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::Instant;
 
 pub(super) const REVIEW_PREFERRED_MODEL: &str = "gpt-5.5";
