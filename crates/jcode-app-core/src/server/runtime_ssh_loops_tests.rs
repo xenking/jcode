@@ -438,13 +438,18 @@ async fn ordinary_session_respects_host_default_off_and_explicit_on() {
     )
     .unwrap();
     crate::config::Config::invalidate_cache();
-    let provider = RecordingProvider::default();
+    // Two productive continuations, then a tool-less reply with no progress.
+    let provider = RecordingProvider {
+        progress_turns: 2,
+        ..Default::default()
+    };
     let mut agent = Agent::new_with_initial_working_dir(
         Arc::new(provider.clone()),
         crate::tool::Registry::empty(),
         home.path().to_str(),
     );
     let session_id = agent.session_id().to_string();
+    *provider.progress_session.lock().unwrap() = Some(session_id.clone());
     todo::save_todos(&session_id, &open_snapshot().todos).unwrap();
     let (tx, mut rx) = mpsc::unbounded_channel();
     run_followups(&mut agent, tx.clone()).await.unwrap();
@@ -459,6 +464,7 @@ async fn ordinary_session_respects_host_default_off_and_explicit_on() {
     control(&session_id, "poke", &["on".into()])
         .unwrap()
         .unwrap();
+    run_followups(&mut agent, tx.clone()).await.unwrap();
     run_followups(&mut agent, tx).await.unwrap();
     assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
     let mut notices = 0;
