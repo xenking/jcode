@@ -44,6 +44,8 @@ import {
   type SideQuestionTopic,
   type SessionSearchHit,
   type SessionToolDefinition,
+  type SpeedMode,
+  type SpeedOption,
   type TextMatch,
   type TodoEffects,
   type TodoSnapshot,
@@ -60,6 +62,8 @@ export interface RuntimeInfo {
   model?: string;
   providers: string[];
   routes: ModelRouteInfo[];
+  speedMode?: SpeedMode;
+  speedOptions?: SpeedOption[];
 }
 
 export interface FileContent {
@@ -1057,6 +1061,8 @@ export class JcodeClient extends EventEmitter {
         ),
       ],
       routes,
+      speedMode: frame.speed_mode,
+      speedOptions: frame.speed_options,
     };
   }
 
@@ -1205,6 +1211,15 @@ export class JcodeClient extends EventEmitter {
    */
   async setReasoningEffort(sessionId: string, effort: string): Promise<void> {
     await this.requestOk({ req: "set_reasoning_effort", session_id: sessionId, effort });
+  }
+
+  /** Persist this session's requested speed. This does not confirm upstream usage. */
+  async setSpeedMode(sessionId: string, speedMode: SpeedMode): Promise<{ speedMode: SpeedMode; speedOptions: SpeedOption[] }> {
+    const frame = await this.expectReply(
+      { req: "set_speed_mode", session_id: sessionId, speed_mode: speedMode },
+      "speed_mode_changed",
+    );
+    return { speedMode: frame.speed_mode, speedOptions: frame.speed_options };
   }
 
   /**

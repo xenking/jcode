@@ -113,6 +113,15 @@ export function compareModelUsage(a?: ModelUsage | null, b?: ModelUsage | null):
     || (b.last_selected_unix_secs ?? -1) - (a.last_selected_unix_secs ?? -1);
 }
 
+export type SpeedMode = "standard" | "fast" | "ultrafast";
+export type SpeedAvailability = "available" | "unknown" | "unavailable";
+
+export interface SpeedOption {
+  mode: SpeedMode;
+  availability: SpeedAvailability;
+  reason?: string;
+}
+
 export interface ModelRouteInfo {
   model: string;
   provider: string;
@@ -120,6 +129,7 @@ export interface ModelRouteInfo {
   available: boolean;
   detail: string;
   usage?: ModelUsage;
+  speed_options?: SpeedOption[];
 }
 
 export interface TextMatch {
@@ -328,7 +338,7 @@ export type ApiRequest =
   | { req: "list_draft_models" }
   | { req: "watch_background_tasks"; session_id: string; task_id?: string }
   | { req: "cancel_background_task"; session_id: string; task_id: string }
-  | { req: "hello"; min_version: number; max_version: number; client: string; supports_user_response?: boolean }
+  | { req: "hello"; min_version: number; max_version: number; client: string; supports_user_response?: boolean; supports_applets?: boolean }
   | { req: "list_sessions"; include_archived?: boolean; limit?: number }
   | { req: "archive_session"; session_id: string }
   | { req: "restore_session"; session_id: string }
@@ -416,6 +426,7 @@ export type ApiRequest =
   | { req: "set_model"; session_id: string; model: string }
   | { req: "set_context_cap"; session_id: string; max_context_tokens: number | null }
   | { req: "set_reasoning_effort"; session_id: string; effort: string }
+  | { req: "set_speed_mode"; session_id: string; speed_mode: SpeedMode }
   | { req: "compact"; session_id: string }
   | { req: "rename_session"; session_id: string; title?: string }
   | { req: "set_session_env"; session_id: string; env: Record<string, string> }
@@ -569,7 +580,7 @@ export type ApiEvent =
   | { ev: "error"; code: ErrorCode; message: string }
   | { ev: "sessions"; sessions: SessionInfo[]; workers?: Record<string, WorkerMeta> }
   | { ev: "swarm_status"; session_id: string; updated_at_unix_ms: number; members: SwarmMemberInfo[] }
-  | { ev: "attached"; session: SessionInfo }
+  | { ev: "attached"; session: SessionInfo; pending_ask_ids?: string[] }
   | { ev: "session_forked"; session: SessionInfo }
   | { ev: "side_question_forked"; topic: SideQuestionTopic }
   | { ev: "side_questions"; topics: SideQuestionTopic[] }
@@ -740,7 +751,12 @@ export type ApiEvent =
       /** OAuth account the daemon's account router selected. */
       account_label?: string;
       routes: ModelRouteInfo[];
+      speed_mode?: SpeedMode;
+      speed_options?: SpeedOption[];
     }
+  | { ev: "speed_mode_changed"; session_id: string; speed_mode: SpeedMode; speed_options: SpeedOption[] }
+  | { ev: "speed_mode_reported"; session_id: string; requested: SpeedMode | null; actual: SpeedMode }
+  | { ev: "provider_status_detail"; session_id: string; detail: string }
   | { ev: "credential_updated"; provider: string; configured: boolean }
   | {
       ev: "file_content";
@@ -891,6 +907,9 @@ export const KNOWN_EVENT_KINDS = [
   "model_info",
   "models",
   "runtime_info",
+  "speed_mode_changed",
+  "speed_mode_reported",
+  "provider_status_detail",
   "credential_updated",
   "file_content",
   "files",
@@ -969,6 +988,7 @@ export const KNOWN_REQUEST_KINDS = [
   "set_model",
   "set_context_cap",
   "set_reasoning_effort",
+  "set_speed_mode",
   "compact",
   "rename_session",
   "set_session_env",
