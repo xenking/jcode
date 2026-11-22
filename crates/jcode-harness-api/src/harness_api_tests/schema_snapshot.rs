@@ -468,6 +468,7 @@ fn request_roundtrip() {
             max_version: 1,
             client: "test/0".into(),
             supports_user_response: false,
+            supports_applets: None,
         },
         ApiRequest::ListSessions {
             include_archived: false,

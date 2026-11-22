@@ -633,10 +633,11 @@ fn apply_or_defer_subscribe_selfdev(agent: &Arc<Mutex<Agent>>, session_id: &str)
 pub(super) async fn apply_or_defer_desktop_response_capability(
     agent: &Arc<Mutex<Agent>>,
     supports_user_response: bool,
+    supports_applets: bool,
 ) {
     if let Ok(mut guard) = agent.try_lock() {
         guard
-            .set_desktop_response_capability(supports_user_response)
+            .set_desktop_response_capability(supports_user_response, supports_applets)
             .await;
         return;
     }
@@ -645,7 +646,7 @@ pub(super) async fn apply_or_defer_desktop_response_capability(
         agent
             .lock()
             .await
-            .set_desktop_response_capability(supports_user_response)
+            .set_desktop_response_capability(supports_user_response, supports_applets)
             .await;
     });
 }

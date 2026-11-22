@@ -441,21 +441,25 @@ mod registry_touched_paths;
 mod registry_lifecycle;
 
 impl Registry {
-    /// Desktop opts in through its inline response renderer capability.
-    /// Keep Desktop-only UI tools out of the base map so terminal/headless
-    /// registries never advertise or execute them, including through batch
-    /// and codemode.
+    #[cfg(test)]
     pub(crate) async fn set_desktop_ui_enabled(&self, enabled: bool) {
-        if enabled {
+        self.set_ui_capabilities(enabled, enabled).await;
+    }
+
+    pub(crate) async fn set_ui_capabilities(&self, user_response: bool, applets: bool) {
+        if user_response {
             self.register(
                 "user_response".into(),
                 Arc::new(user_response::UserResponseTool),
             )
             .await;
+        } else {
+            self.unregister("user_response").await;
+        }
+        if applets {
             self.register("applet".into(), Arc::new(applet::AppletTool::new()))
                 .await;
         } else {
-            self.unregister("user_response").await;
             self.unregister("applet").await;
         }
     }

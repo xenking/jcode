@@ -140,6 +140,7 @@ async fn stdio_stream_handshake_ping_and_eof_release_daemon_connection() {
                 max_version: API_VERSION_MAJOR,
                 client: "stdio-test".into(),
                 supports_user_response: false,
+                supports_applets: None,
             },
         ),
     )
@@ -215,7 +216,11 @@ async fn session_tool_capabilities_are_negotiated_before_forwarding() {
         let task = tokio::spawn(run_bridge_stream(bridge_read, bridge_write, socket));
         let (read, mut write) = tokio::io::split(client);
         let mut read = BufReader::new(read);
-        write_json_line(&mut write, &json!({"v":1,"id":1,"req":"hello","min_version":1,"max_version":1,"client":"tool-test"})).await.unwrap();
+        let mut hello = json!({"v":1,"id":1,"req":"hello","min_version":1,"max_version":1,"client":"tool-test","supports_user_response":false});
+        if supported {
+            hello["supports_applets"] = json!(true);
+        }
+        write_json_line(&mut write, &hello).await.unwrap();
         // Session transport is untouched by the disposable capability probe.
         let (daemon, _) = listener.accept().await.unwrap();
         let (probe, _) = listener.accept().await.unwrap();
@@ -281,6 +286,13 @@ async fn session_tool_capabilities_are_negotiated_before_forwarding() {
             read_frame(&mut daemon_read, &mut line).await.unwrap();
             let request: Value = serde_json::from_str(&line).unwrap();
             assert_eq!(request["type"], expected);
+            if expected == "subscribe" {
+                assert_eq!(request["supports_user_response"], false);
+                assert_eq!(
+                    request["supports_applets"],
+                    if supported { json!(true) } else { Value::Null }
+                );
+            }
             if expected == "state" {
                 state_id = request["id"].clone();
             }

@@ -230,6 +230,7 @@ async fn run_scenario(assign_todo_to_worker: bool, await_worker: bool) -> Result
                 system_prompt: None,
                 supports_pdf_panels: false,
                 supports_user_response: false,
+                supports_applets: None,
                 supports_server_failover: false,
                 supports_turn_identity: false,
                 working_dir: Some(runtime.path().to_string_lossy().into_owned()),

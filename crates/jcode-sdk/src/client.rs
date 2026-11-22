@@ -42,6 +42,8 @@ pub struct ConnectOptions {
     pub ensure_runtime: bool,
     /// Desktop inline Markdown response renderer. Other clients leave false.
     pub supports_user_response: bool,
+    /// Whether this client renders applets.
+    pub supports_applets: bool,
 }
 
 impl Default for ConnectOptions {
@@ -52,6 +54,7 @@ impl Default for ConnectOptions {
             request_timeout: Some(Duration::from_secs(30)),
             ensure_runtime: true,
             supports_user_response: false,
+            supports_applets: false,
         }
     }
 }
@@ -436,6 +439,7 @@ impl JcodeClient {
             socket_path: None,
             client_name: options.client_name.clone(),
             supports_user_response: options.supports_user_response,
+            supports_applets: options.supports_applets,
             request_timeout: options.request_timeout,
             ensure_runtime: false,
         };
@@ -485,6 +489,7 @@ impl JcodeClient {
         let connect = ConnectOptions {
             socket_path: Some(instance.socket_path.clone()),
             supports_user_response: false,
+            supports_applets: false,
             client_name: options.client_name.clone(),
             request_timeout: options.request_timeout,
             ensure_runtime: false,
@@ -569,6 +574,7 @@ impl JcodeClient {
                 max_version: API_VERSION_MAJOR,
                 client: options.client_name.clone(),
                 supports_user_response: options.supports_user_response,
+                supports_applets: Some(options.supports_applets),
             },
             hello_timeout,
         )?;

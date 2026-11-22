@@ -89,6 +89,7 @@ pub(super) fn start_global_child(
     } else {
         JcodeClient::connect(ConnectOptions {
             supports_user_response: false,
+            supports_applets: false,
             socket_path: Some(parent.inner.socket_path.clone()),
             client_name: format!("{}/global-events", parent.inner.client_name),
             request_timeout: parent.inner.request_timeout,

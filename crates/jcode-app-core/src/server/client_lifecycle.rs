@@ -407,6 +407,7 @@ pub(super) async fn handle_client(
     // Keep only the window preference, never a session-specific prefix fingerprint.
     let mut recent_history_messages = None;
     let mut supports_user_response = false;
+    let mut supports_applets = false;
     let mut supports_server_failover = false;
     // Client selfdev status is determined by Subscribe request, not server's env
     let mut client_selfdev = false;
@@ -2022,6 +2023,7 @@ pub(super) async fn handle_client(
                 system_prompt,
                 supports_pdf_panels: requested_pdf_panels,
                 supports_user_response: requested_user_response,
+                supports_applets: requested_applets,
                 supports_server_failover: requested_server_failover,
                 supports_turn_identity: _,
                 working_dir: subscribe_working_dir,
@@ -2064,6 +2066,7 @@ pub(super) async fn handle_client(
                 supports_pdf_panels = requested_pdf_panels;
                 recent_history_messages = history_base.and_then(|base| base.recent_messages);
                 supports_user_response = requested_user_response;
+                supports_applets = requested_applets.unwrap_or(requested_user_response);
                 supports_server_failover = requested_server_failover;
                 active_terminal_env = terminal_env;
                 current_client_instance_id = client_instance_id.clone();
@@ -2248,6 +2251,7 @@ pub(super) async fn handle_client(
                 super::client_session::apply_or_defer_desktop_response_capability(
                     &agent,
                     supports_user_response,
+                    supports_applets,
                 )
                 .await;
                 if requested_continuation {
@@ -2435,6 +2439,7 @@ pub(super) async fn handle_client(
                 super::client_session::apply_or_defer_desktop_response_capability(
                     &agent,
                     supports_user_response,
+                    supports_applets,
                 )
                 .await;
                 session_control = refresh_session_control_handle(

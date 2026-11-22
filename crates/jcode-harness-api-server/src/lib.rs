@@ -727,6 +727,7 @@ where
     state.session_tools_supported = session_tools_supported;
     state.force_stop_turn_supported = force_stop_turn_supported;
     state.supports_user_response = hello["supports_user_response"].as_bool().unwrap_or(false);
+    state.supports_applets = hello["supports_applets"].as_bool();
     state.client_name = Some(client_name.to_string()).filter(|n| !n.is_empty());
     state.runtime_commands_supported = runtime_commands_supported;
     state.soft_interrupt_ids_supported = soft_interrupt_ids_supported;

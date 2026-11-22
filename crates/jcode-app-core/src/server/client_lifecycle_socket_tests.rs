@@ -2583,19 +2583,28 @@ async fn sdk_socket_cancel_workflow(
     if response_only {
         // Exercise actual Desktop/TUI Subscribe snapshots, including disabling
         // the tool again on a repeated subscription rather than retaining it.
-        for (index, capability) in [false, true, false].into_iter().enumerate() {
+        for (index, (capability, applets)) in [
+            (false, None),
+            (true, None),
+            (false, Some(true)),
+            (true, Some(false)),
+            (false, None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let id = 100 + index as u64 * 2;
-            send(
-                &mut client_writer,
-                json!({
-                    "type": "subscribe",
-                    "id": id,
-                    "working_dir": home._home.path(),
-                    "supports_pdf_panels": true,
-                    "supports_user_response": capability,
-                }),
-            )
-            .await;
+            let mut request = json!({
+                "type": "subscribe",
+                "id": id,
+                "working_dir": home._home.path(),
+                "supports_pdf_panels": true,
+                "supports_user_response": capability,
+            });
+            if let Some(enabled) = applets {
+                request["supports_applets"] = json!(enabled);
+            }
+            send(&mut client_writer, request).await;
             until(
                 &mut client_reader,
                 |e| matches!(e, ServerEvent::Done { id: done } if *done == id),
@@ -2611,6 +2620,10 @@ async fn sdk_socket_cancel_workflow(
                 panic!("expected tool list")
             };
             assert_eq!(tools.iter().any(|t| t.name == "user_response"), capability);
+            assert_eq!(
+                tools.iter().any(|t| t.name == "applet"),
+                applets.unwrap_or(capability)
+            );
         }
         // This test exercises catalog gating, not the 30-second retention of
         // idle unsaved sessions. Remove the isolated fixture before detaching.

@@ -163,6 +163,7 @@ pub struct BridgeState {
     pub crash_on_disconnect: bool,
     /// Client-side inline response renderer, negotiated in Hello.
     pub supports_user_response: bool,
+    pub supports_applets: Option<bool>,
     /// Client name from Hello, forwarded on subscribe (e.g. `jcode-ios/0.3.0`).
     pub client_name: Option<String>,
     /// Session id assigned by the daemon for this connection.
@@ -620,6 +621,7 @@ impl BridgeState {
                     "id": id,
                     "supports_pdf_panels": true,
                     "supports_user_response": self.supports_user_response,
+                    "supports_applets": self.supports_applets,
                     // API clients have no account-router countdown of their
                     // own, so the daemon switches pool accounts and retries
                     // usage-limited turns for them, like the TUI does.

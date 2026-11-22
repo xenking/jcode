@@ -85,6 +85,9 @@ pub enum ApiRequest {
         /// Opt in only when this client renders user_response tool calls.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         supports_user_response: bool,
+        /// Explicit applet renderer capability. Absent retains legacy behavior.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supports_applets: Option<bool>,
     },
 
     /// List sessions visible to this client.

@@ -410,6 +410,7 @@ impl JcodeClient {
                 request_timeout: options.request_timeout.or(Some(options.connect_timeout)),
                 ensure_runtime: false,
                 supports_user_response: false,
+                supports_applets: false,
             },
         )
     }

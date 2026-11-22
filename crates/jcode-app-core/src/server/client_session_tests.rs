@@ -40,7 +40,7 @@ async fn user_response_capability_does_not_block_busy_attachment() {
     let registry = busy.registry();
     tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        super::apply_or_defer_desktop_response_capability(&agent, true),
+        super::apply_or_defer_desktop_response_capability(&agent, true, true),
     )
     .await
     .expect("busy attachment must not wait for the running turn");
@@ -67,7 +67,7 @@ async fn user_response_capability_does_not_block_busy_attachment() {
     })
     .await
     .expect("capability applied after the turn releases the lock");
-    super::apply_or_defer_desktop_response_capability(&agent, false).await;
+    super::apply_or_defer_desktop_response_capability(&agent, false, false).await;
     assert!(
         !registry
             .tool_names()

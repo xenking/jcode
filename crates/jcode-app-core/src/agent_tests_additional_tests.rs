@@ -43,7 +43,7 @@ async fn user_response_capability_updates_locked_tool_surface() {
     );
     assert!(agent.locked_tools.is_some());
     assert!(!agent.tool_names().await.iter().any(|n| n == "applet"));
-    agent.set_desktop_response_capability(true).await;
+    agent.set_desktop_response_capability(true, true).await;
     assert!(agent.locked_tools.is_none());
     assert!(agent.tool_names().await.iter().any(|n| n == "applet"));
     assert!(
@@ -53,12 +53,12 @@ async fn user_response_capability_updates_locked_tool_surface() {
             .iter()
             .any(|d| d.name == "user_response")
     );
-    agent.set_desktop_response_capability(true).await;
+    agent.set_desktop_response_capability(true, true).await;
     assert!(
         agent.locked_tools.is_some(),
         "unchanged capability preserves the cache"
     );
-    agent.set_desktop_response_capability(false).await;
+    agent.set_desktop_response_capability(false, false).await;
     assert!(agent.locked_tools.is_none());
     assert!(!agent.tool_names().await.iter().any(|n| n == "applet"));
     assert!(

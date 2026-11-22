@@ -284,6 +284,7 @@ async fn idle_waiting_session_precompacts_and_persists_a_divider() -> Result<()>
                 system_prompt: None,
                 supports_pdf_panels: false,
                 supports_user_response: false,
+                supports_applets: None,
                 supports_server_failover: false,
                 supports_turn_identity: false,
                 working_dir: Some(runtime.path().to_string_lossy().into_owned()),

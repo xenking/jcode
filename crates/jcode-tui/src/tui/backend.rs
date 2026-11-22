@@ -534,6 +534,7 @@ impl RemoteConnection {
             system_prompt: None,
             supports_pdf_panels: false,
             supports_user_response: false,
+            supports_applets: None,
             supports_server_failover: false,
             supports_turn_identity: true,
             id: conn.next_request_id,
