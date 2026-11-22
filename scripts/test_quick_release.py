@@ -36,7 +36,7 @@ with open(os.environ["TEST_GH_LOG"], "a") as log:
 if args[:2] == ["repo", "view"]:
     if scenario == "repo_error":
         sys.exit(1)
-    print("owner/repo")
+    print(config["repository"])
     sys.exit(0)
 if args[0] == "release":
     if args[1] == "view" and "--json" in args:
@@ -50,6 +50,14 @@ endpoint = args[1]
 run = dict(id=100, run_number=10, run_attempt=1, head_sha=config["sha"],
            event="push", head_branch="master", path=".github/workflows/ci.yml",
            status="completed", conclusion="success")
+manual = ("event=workflow_dispatch" in endpoint or "/runs/101" in endpoint)
+if manual:
+    run.update(id=101, run_number=11, event="workflow_dispatch", head_branch="candidate",
+               path=".github/workflows/ci.yml@candidate")
+    if scenario == "manual_wrong_sha":
+        run["head_sha"] = "b" * 40
+    elif scenario == "manual_wrong_event":
+        run["event"] = "pull_request"
 if scenario == "failure":
     run["conclusion"] = "failure"
 elif scenario == "pending":
@@ -59,14 +67,21 @@ elif scenario == "other_sha":
 elif scenario == "pull_request":
     run["event"] = "pull_request"
 if "/workflows/ci.yml/runs?" in endpoint:
-    print(json.dumps([{"workflow_runs": [] if scenario == "missing" else [run]}]))
+    missing = scenario == "missing" or (manual and scenario == "manual_missing")
+    print(json.dumps([{"workflow_runs": [] if missing else [run]}]))
 elif "/jobs?" in endpoint:
-    jobs = [dict(name=name, status="completed", conclusion="success")
-            for name in config["jobs"]]
+    names = config["jobs"]
+    if config["repository"] == "xenking/jcode":
+        names = (names if manual else names[:2]) + ["TypeScript SDK"]
+    jobs = [dict(name=name, status="completed", conclusion="success") for name in names]
     if scenario == "missing_job":
         jobs.pop()
     elif scenario == "failed_job":
         jobs[-1]["conclusion"] = "failure"
+    elif manual and scenario == "manual_skipped_native":
+        jobs[2]["conclusion"] = "skipped"
+    elif manual and scenario == "manual_missing_native":
+        jobs.pop(2)
     print(json.dumps([{"jobs": jobs}]))
 else:
     marker = Path(os.environ["TEST_CONFIRMATION_MARKER"])
@@ -128,9 +143,9 @@ class QuickReleaseTests(unittest.TestCase):
         return subprocess.run(["git", *args], cwd=self.repo, check=check,
                               capture_output=True, text=True)
 
-    def release(self, scenario="success", *options, mode="--remote"):
+    def release(self, scenario="success", *options, mode="--remote", repository="owner/repo"):
         Path(self.env["TEST_CONFIRMATION_MARKER"]).unlink(missing_ok=True)
-        self.config.write_text(json.dumps(dict(scenario=scenario, sha=self.sha,
+        self.config.write_text(json.dumps(dict(scenario=scenario, sha=self.sha, repository=repository,
                                                jobs=MANDATORY_JOBS)))
         return subprocess.run(["bash", "scripts/quick-release.sh", *([mode] if mode else []), *options, TAG],
                               cwd=self.repo, env=self.env, capture_output=True,
@@ -184,6 +199,18 @@ class QuickReleaseTests(unittest.TestCase):
                 result = self.release(scenario)
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assert_no_tag()
+
+    def test_fork_requires_green_push_and_exact_green_manual_native_ci(self):
+        for scenario in ("missing", "failure", "manual_missing", "manual_wrong_sha",
+                         "manual_wrong_event", "manual_skipped_native", "manual_missing_native"):
+            with self.subTest(scenario=scenario):
+                result = self.release(scenario, repository="xenking/jcode")
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assert_no_tag()
+
+        result = self.release(repository="xenking/jcode")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git("rev-parse", f"{TAG}^{{commit}}").stdout.strip(), self.sha)
 
     def test_failed_ci_does_not_push_existing_local_tag(self):
         self.git("tag", "-a", TAG, "-m", TAG)

@@ -9,6 +9,13 @@ import sys
 
 
 WORKFLOWS = ".github/workflows/"
+JCODE_WORKFLOWS = {"ci.yml", "release.yml", "selfdev-linux.yml"}
+PUSH_JOBS = {"quality", "build", "typescript-sdk"}
+PLATFORM_JOBS = {
+    "windows-build-test", "windows-arm64-check", "windows-cross-check",
+    "powershell-syntax", "setup-friction",
+}
+PLATFORM_CONDITION = "github.repository != 'xenking/jcode' || github.event_name != 'push'"
 # Evidence commits supply the exact deleted paths, including renames out of an
 # old owner. Exceptions are present at the audit baseline, not blanket waivers.
 DELETIONS = {
@@ -51,6 +58,32 @@ def deleted_paths(checkout, repo):
             yield rule, path
 
 
+def check_fork_ci(workflow):
+    header, _, jobs_text = workflow.partition("\njobs:\n")
+    sections = re.split(r"(?m)^  ([a-z0-9-]+):[ \t]*$", jobs_text)
+    jobs = dict(zip(sections[1::2], sections[2::2]))
+    problems = []
+    if set(jobs) != PUSH_JOBS | PLATFORM_JOBS:
+        problems.append("ci-prune: CI job set changed; reconcile the fork push policy")
+    for job in sorted(PUSH_JOBS & jobs.keys()):
+        if re.search(r"(?m)^    if:", jobs[job]):
+            problems.append(f"ci-prune: CI push job {job} must run unconditionally")
+    for job in sorted(PLATFORM_JOBS & jobs.keys()):
+        if f"\n    if: {PLATFORM_CONDITION}\n" not in jobs[job]:
+            problems.append(f"ci-prune: CI job {job} must stay off fork pushes")
+    matrix = jobs.get("build", "")
+    if ("fromJSON(github.repository == 'xenking/jcode' && github.event_name == 'push'" not in matrix
+            or "&& '[{\"os\":\"ubuntu-latest\",\"target\":\"x86_64-unknown-linux-gnu\"}]'" not in matrix
+            or '"os":"macos-latest"' not in matrix):
+        problems.append("ci-prune: native macOS CI must remain on PR/manual only in the fork")
+    for trigger in ("push", "pull_request", "workflow_dispatch"):
+        if not re.search(rf"(?m)^  {trigger}:\s*$", header):
+            problems.append(f"ci-prune: fork CI lost its {trigger} trigger")
+    if not re.search(r"(?m)^permissions:\n  contents: read\n\n", header):
+        problems.append("ci-prune: CI needs explicit read-only permissions")
+    return problems
+
+
 def inspect(checkout, repo, tree, retired):
     paths = set(git(checkout, "ls-tree", "-rz", "--name-only", tree).split("\0"))
     problems = [f"{rule}: retired path returned: {path}" for rule, path in retired if path in paths]
@@ -72,7 +105,15 @@ def inspect(checkout, repo, tree, retired):
             reject("ci-prune", path, r'''^  ["']?schedule["']?\s*:''')
 
     if repo == "jcode":
-        reject("ci-prune", WORKFLOWS + "ci.yml", r"^  release-automation:")
+        ci = WORKFLOWS + "ci.yml"
+        unexpected = sorted(path for path in paths if path.startswith(WORKFLOWS)
+                            and path.endswith((".yml", ".yaml"))
+                            and path.removeprefix(WORKFLOWS) not in JCODE_WORKFLOWS)
+        problems.extend(f"ci-prune: unexpected fork workflow: {path}" for path in unexpected)
+        if ci in paths:
+            problems.extend(check_fork_ci(read(ci)))
+        else:
+            problems.append("ci-prune: live CI workflow is missing")
         reject("ci-prune", WORKFLOWS + "release.yml", r"^  (?:recovery-preflight|build-freebsd):")
         reject("sponsored-discovery", "crates/jcode-app-core/src/tool/mod.rs", r'"integration_tools"')
         reject("sponsored-discovery", "crates/jcode-config-types/src/lib.rs", r"\bstruct SponsorsConfig\b")

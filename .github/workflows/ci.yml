@@ -1,19 +1,20 @@
 name: CI
 
 on:
-  # Allows exact-source validation after bot-authored commits, whose pushes
-  # do not trigger workflows when made with GITHUB_TOKEN.
+  # Runs the full native matrix. For fork releases, run it before tagging.
   workflow_dispatch:
   push:
     branches: [main, master]
   pull_request:
     branches: [main, master]
 
-# Release authorization needs completed exact-SHA main-push CI. Keep those
-# runs alive when master advances, while still cancelling obsolete PR checks.
+# Release authorization needs exact-SHA CI. Cancel only superseded PR checks.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') && github.sha || 'latest' }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name }}-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'latest' || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
 
 env:
   JCODE_CI: "1"
@@ -32,6 +33,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -54,10 +56,6 @@ jobs:
         # No continue-on-error: any failed check still fails the quality job.
         if: ${{ !cancelled() }}
         run: cargo fmt --all -- --check
-
-      - name: Check all targets and all features
-        if: ${{ !cancelled() }}
-        run: cargo check --locked --all-targets --all-features
 
       - name: Run clippy with warnings denied
         if: ${{ !cancelled() }}
@@ -162,6 +160,10 @@ jobs:
           python3 scripts/test_check_catalog_fanout.py
           python3 scripts/check_catalog_fanout.py
 
+      - name: Test fork CI routing policy
+        if: ${{ !cancelled() && github.repository == 'xenking/jcode' }}
+        run: python3 scripts/test_fork_ci.py
+
   build:
     name: Build & Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -186,17 +188,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: macos-latest
-            target: aarch64-apple-darwin
+        # Fork pushes keep Linux. PRs and manual CI also run macOS.
+        include: >-
+          ${{ fromJSON(github.repository == 'xenking/jcode' && github.event_name == 'push'
+          && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"}]'
+          || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"}]') }}
 
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -221,28 +223,21 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq mold
 
-      - name: Build
+      - name: Configure Linux linker
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           mkdir -p .cargo
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            cat > .cargo/config.toml << 'EOF'
+          cat > .cargo/config.toml << 'EOF'
           [target.x86_64-unknown-linux-gnu]
           linker = "clang"
           rustflags = ["-C", "link-arg=-fuse-ld=mold"]
           EOF
-          fi
-          # NOTE: intentionally NOT exporting RUSTC_WRAPPER=sccache here. Only this
-          # step used sccache while the later `cargo test --no-run` steps did not,
-          # so sccache emitted rlibs/rmetas stamped `<unknown rustc version>` that
-          # the non-sccache test compile then rejected with E0514
-          # ("compiled by an incompatible version of rustc"). rust-cache already
-          # caches target/ across runs, so a clean, wrapper-consistent build is
-          # both correct and fast enough.
-          RUSTC="$(rustup which rustc)"
-          export RUSTC
-          CARGO_BIN="$(rustup which cargo)"
-          "$CARGO_BIN" build --locked --release --target ${{ matrix.target }}
+
+      - name: Build release configuration
+        if: github.repository != 'xenking/jcode' || github.event_name != 'push'
+        shell: bash
+        run: cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Compile library and binary tests
         shell: bash
@@ -428,16 +423,9 @@ jobs:
           python3 .github/scripts/run_with_timeout.py 600 \
             "$(rustup which cargo)" test --locked --target ${{ matrix.target }} --test e2e
 
-      - name: Check PowerShell script syntax (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          ./scripts/check_powershell_syntax.ps1
-
-      # Linux and macOS. Windows still has its own cfg-gated surface and is
-      # not yet warning-clean, so it stays out of the gate (#1177).
-      - name: Enforce warning budget (Linux, macOS)
-        if: runner.os == 'Linux' || runner.os == 'macOS'
+      # Quality Guardrails already checks the Linux warning budget.
+      - name: Enforce warning budget (macOS)
+        if: runner.os == 'macOS'
         shell: bash
         run: |
           scripts/check_warning_budget.sh
@@ -451,12 +439,14 @@ jobs:
 
   windows-build-test:
     name: Build & Test (windows-latest)
+    if: github.repository != 'xenking/jcode' || github.event_name != 'push'
     runs-on: windows-latest
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -641,32 +631,14 @@ jobs:
             -ArtifactExePath 'target/x86_64-pc-windows-msvc/release/jcode.exe' `
             -Version $version
 
-  fmt:
-    name: Format
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-
-      - name: Check module declarations resolve
-        # A `mod x;` with no file makes rustfmt fail with "Error writing files:
-        # failed to resolve mod", which reads like a formatting problem and hides
-        # every gate behind it. Naming the real cause first (221159294).
-        run: python3 scripts/check_module_files.py
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
   typescript-sdk:
     name: TypeScript SDK
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -698,10 +670,13 @@ jobs:
 
   setup-friction:
     name: Setup Friction Eval (Linux installer)
+    if: github.repository != 'xenking/jcode' || github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install probe shells
         run: sudo apt-get update && sudo apt-get install -y fish zsh
@@ -711,10 +686,13 @@ jobs:
 
   powershell-syntax:
     name: PowerShell Syntax
+    if: github.repository != 'xenking/jcode' || github.event_name != 'push'
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Check PowerShell script syntax (Windows PowerShell 5.1)
         shell: powershell
@@ -728,6 +706,7 @@ jobs:
 
   windows-arm64-check:
     name: Windows ARM64 Release Configuration
+    if: github.repository != 'xenking/jcode' || github.event_name != 'push'
     runs-on: windows-latest
     timeout-minutes: 35
     env:
@@ -741,6 +720,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -769,12 +749,14 @@ jobs:
 
   windows-cross-check:
     name: Windows Cross-Target Check (Linux)
+    if: github.repository != 'xenking/jcode' || github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:

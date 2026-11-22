@@ -41,6 +41,14 @@
 | jcode | Строгие границы и диагностика: ошибки tool/SDK, provider и side question не теряются; risk guard понимает локальные переменные и только read-only `find -exec`; subcalls учитывают контекст вызывающего. | `22774c334`, `f90393edf`, `dbab45972`, `5cd755229`, `57019ca9e`, `021772a44`, `649f3ec8a`, `c4d4a35d3`, `d16ce6137`, `26e0d87bd` | `jcode-command-risk`, `jcode-tool-core`, `jcode-app-core`, `jcode-harness-api-server`, provider runtimes | `justrust test -p jcode-command-risk`; `justrust test -p jcode-tool-core`. | origin |
 | jcode | Проверки качества: изолированные CLI/TUI journeys, формальная проверка ownership, test home/hook separation, swarm lock order, CI на Windows/macOS/Linux, security dependency updates. | `938b9e43a`, `023a85578`, `87bd1d185`, `483d7848f`, `7f10ab755`, `1e14f0c70`, `13233e584`, `685bd3909`, `5ca14f335`, `7e22838f5` | `.jcode/skills`, `scripts/check_*`, `.github/workflows`, `Cargo.lock` | `python3 scripts/check_test_isolation.py`; `python3 scripts/check_lock_order.py`; `justrust clippy --workspace --all-targets -- -D warnings`. | origin |
 
+### CI форка
+
+Обычный push в `master` запускает Quality Guardrails, Linux Build & Test и TypeScript SDK. PR и ручной запуск того же `CI` дополнительно проверяют macOS, Windows, ARM64, PowerShell и установщик. Сборка release-профиля остаётся в полном CI. Отдельный tag/manual `release.yml` не меняется.
+
+Перед `quick-release` нужен зелёный push и зелёный ручной `CI` на одном SHA. Выберите ветку, указывающую на этот коммит, и запустите `gh workflow run ci.yml --repo xenking/jcode --ref <ветка>`. Этот запуск делает проверки и не публикует релиз. Новые push/PR не отменяют его.
+
+`scripts/check_fork_removals.py` блокирует sync, если upstream возвращает дополнительные workflows или расширяет матрицу push. `python3 scripts/test_fork_ci.py` проверяет маршрутизацию, `python3 scripts/test_quick_release.py` проверяет запрет тега без обоих прогонов. Бюджеты размера, паник и проглоченных ошибок фиксируют накопленный долг форка на `52016d2ef` с учётом форматирования. Правила не менялись и отклоняют дальнейший рост.
+
 ## Desktop
 
 | Репозиторий | Изменение | Коммиты | Основные места | Проверка | Статус |

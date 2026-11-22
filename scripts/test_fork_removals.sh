@@ -39,7 +39,8 @@ make_fork() {
   # The production sync script takes its guard from the published CLI fork.
   if [ "$name" = jcode ]; then
     cp "$here/check_fork_removals.py" "$checkout/scripts/check_fork_removals.py"
-    git -C "$checkout" add scripts/check_fork_removals.py
+    cp "$jcode/.github/workflows/ci.yml" "$checkout/.github/workflows/ci.yml"
+    git -C "$checkout" add scripts/check_fork_removals.py .github/workflows/ci.yml
   fi
   git -C "$checkout" commit -qm 'Fixture fork advances independently' --allow-empty
   git -C "$checkout" push -q origin "HEAD:$branch"

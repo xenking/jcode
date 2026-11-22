@@ -234,7 +234,10 @@ tag_and_push() {
     origin_url="$(git remote get-url origin)"
     repository="$(gh repo view "$origin_url" --json nameWithOwner --jq .nameWithOwner)"
     if ! python3 scripts/check_release_ci.py "$head_commit" --repo "$repository" --timeout 0; then
-        echo "Error: release blocked. Push this commit to main/master and wait for all CI checks to succeed, then retry." >&2
+        echo "Error: release blocked. Push this commit to main/master and wait for CI to succeed." >&2
+        if [[ "$repository" == xenking/jcode ]]; then
+            echo "For the fork, also dispatch CI (ci.yml) on a branch at $head_commit and wait for the platform matrix." >&2
+        fi
         exit 1
     fi
     [[ -n "$PINNED_COMMIT" || "$(git rev-parse HEAD)" == "$head_commit" ]] || {
