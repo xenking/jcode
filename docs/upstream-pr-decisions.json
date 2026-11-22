@@ -71,6 +71,7 @@
     "jcode#1734": {"decision": "skipped", "head": "a8acdd1b5da2f8b7c51ebf572b0c3130ecd09743", "reason": "open-and-relevant: Windows-only, clean fork patch"},
     "jcode#1735": {"decision": "skipped", "head": "5788b81c618e5ab31ebb0afe9165ce60531eb286", "reason": "stale/conflicting: More reliable disconnected-terminal handling"},
     "jcode#1744": {"decision": "skipped", "head": "13dbcb01db4d0b71afdfe22253b666b8a60c2176", "reason": "stale/conflicting: Windows test-only"},
+    "jcode#1754": {"decision": "already-in-fork", "head": "2e2ecedf8899f1c1d92b9f5e6a014835d31dd8cf", "reason": "The production spinner skips mismatched buffer areas and uses checked retained-cell writes. The existing out-of-bounds test passes, and an isolated macOS TUI held turn survives a live shrink to 24x8 and restore to 60x30.", "covering": ["8ef29552aecb1db337aed4dc5b16ae0abbd8b7ea"]},
     "jcode#1764": {"decision": "skipped", "head": "13375d186fbf7789420dd2ed0e9d1ab661974c92", "reason": "stale/conflicting: Guards code quality and command risk"},
     "jcode#1767": {"decision": "skipped", "head": "87c6876ee9da72780c3c05794503cd86a4a55a24", "reason": "stale/conflicting: Copilot not stated as used"},
     "jcode#1771": {"decision": "skipped", "head": "55af759b57645579d30b89a6473bbd3249ff99ad", "reason": "stale/conflicting: Mixed correctness fixes, inspect individually"},
