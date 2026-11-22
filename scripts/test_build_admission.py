@@ -164,6 +164,23 @@ fn main() {
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertTrue((out / "Jcode.app/Contents/MacOS/jcode-desktop").is_file())
                     self.assertTrue((out / "SHA256SUMS").is_file())
+
+                    # The rollout binary embeds Python so it can build a CLI source
+                    # revision that predates the standalone admission script.
+                    helper = (ROOT / "scripts/build-admission.py").read_text()
+                    (cli / "scripts/build-admission.py").unlink()
+                    rollout_out, rollout_target = temp / "rollout-out", temp / "rollout-target"
+                    rollout_env = dict(pack_env, OUT_DIR=str(rollout_out), CARGO_TARGET_DIR=str(rollout_target),
+                                       JCODE_BUILD_ADMISSION_PYTHON=helper)
+                    rollout_package = [sys.executable, "-c", helper, "--owner", "rollout-desktop",
+                                       "--kind", "desktop", "--path", str(rollout_out),
+                                       "--path", str(rollout_out / "sparkle"), "--workspace",
+                                       str(desktop / "Cargo.toml"), "--workspace", str(cli / "Cargo.toml"),
+                                       "--", str(package)]
+                    result = run(rollout_package, desktop, rollout_env)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertTrue((rollout_out / "Jcode.app/Contents/MacOS/jcode").is_file())
+
                     policy.write_text("{")
                     invalid_target = temp / "invalid-target"
                     failed = run(dev[:-1] + [str(invalid_target)], ROOT, env)
