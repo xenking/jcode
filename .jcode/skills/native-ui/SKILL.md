@@ -1,7 +1,7 @@
 ---
 name: native-ui
 description: Use when showing interactive cards, embedded images, live progress, forms, or updating a prior card in Jcode Desktop. Prefer text when controls or a visual add no value.
-mode: false
+mode: true
 ---
 
 # Native UI in Jcode Desktop
