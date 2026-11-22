@@ -16,7 +16,6 @@ const TEMP_SERVER_EXIT_CODE: i32 = super::EXIT_IDLE_TIMEOUT;
 /// Exiting between a checkpoint's snapshot write and journal delete used to
 /// duplicate history on the next load (#1632).
 pub(crate) async fn drain_session_saves_before_exit() {
-    crate::logging::info("Server received SIGTERM, shutting down gracefully");
     let drained = tokio::task::spawn_blocking(|| {
         crate::session::drain_saves_for_shutdown(Duration::from_secs(5))
     })
@@ -55,6 +54,28 @@ pub fn configure_temporary_server(owner_pid: Option<u32>, idle_timeout_secs: Opt
     }
     if let Some(idle_timeout_secs) = idle_timeout_secs {
         crate::env::set_var(TEMP_IDLE_SECS_ENV, idle_timeout_secs.to_string());
+    }
+}
+
+pub fn configure_persistent_server() {
+    crate::env::remove_var(TEMP_SERVER_ENV);
+    crate::env::set_var(SERVER_SCOPE_ENV, "persistent");
+}
+
+pub(crate) fn persistent_server_enabled() -> bool {
+    std::env::var(SERVER_SCOPE_ENV).as_deref() == Ok("persistent")
+}
+
+/// An implicit private daemon keeps the usual idle budget, even with debug
+/// enabled. Preserve explicit policies inherited during a reload.
+pub fn configure_private_server(owner_pid: Option<u32>, idle_timeout_secs: Option<u64>) {
+    if !persistent_server_enabled() && !temporary_server_enabled() {
+        let timeout = idle_timeout_secs.or_else(|| {
+            std::env::var_os(TEMP_IDLE_SECS_ENV)
+                .is_none()
+                .then_some(super::IDLE_TIMEOUT_SECS)
+        });
+        configure_temporary_server(owner_pid, timeout);
     }
 }
 
@@ -227,7 +248,7 @@ async fn wait_for_owner_exit(owner_pid: Option<u32>) -> u32 {
         }
     }
     while process_alive(pid) {
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
     }
     pid
 }
@@ -254,9 +275,15 @@ async fn shutdown_temporary_server(
     socket_path: &Path,
     debug_socket_path: &Path,
 ) -> ! {
-    let _ = crate::registry::unregister_server(server_name).await;
+    let _admission = crate::turn_activity::global().close_admission();
     crate::transport::remove_socket(socket_path);
     crate::transport::remove_socket(debug_socket_path);
+    drain_session_saves_before_exit().await;
+    let _ = tokio::time::timeout(
+        Duration::from_secs(2),
+        crate::registry::unregister_server(server_name),
+    )
+    .await;
     cleanup_temporary_metadata(socket_path);
     // `std::process::exit` skips `DaemonLockGuard::drop`, so clear the lock
     // this process holds. Per-run sockets would otherwise leave one stale lock

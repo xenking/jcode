@@ -579,7 +579,9 @@ pub use self::reload_state::{
 };
 use self::reload_state::{clear_reload_marker_if_stale_for_pid, publish_reload_socket_ready};
 
-pub use self::lifecycle::configure_temporary_server;
+pub use self::lifecycle::{
+    configure_persistent_server, configure_private_server, configure_temporary_server,
+};
 #[cfg(unix)]
 use self::socket::{acquire_daemon_lock_for, mark_close_on_exec};
 pub use self::socket::{
@@ -1025,6 +1027,7 @@ impl Server {
                 use tokio::signal::unix::{SignalKind, signal};
                 if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
                     sigterm.recv().await;
+                    crate::logging::info("Server received SIGTERM, shutting down gracefully");
                     // Recovery writes wake the current owner. Only its
                     // replacement can admit work captured for this shutdown.
                     let _admission = crate::turn_activity::global().close_admission();
@@ -1554,6 +1557,8 @@ impl Server {
                 self.identity.name.clone(),
                 policy,
             );
+        } else if lifecycle::persistent_server_enabled() {
+            crate::logging::info("Persistent server requested; idle timeout monitor disabled.");
         } else if debug_control_allowed() {
             crate::logging::info("Debug control enabled; idle timeout monitor disabled.");
         } else {

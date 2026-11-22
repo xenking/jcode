@@ -113,12 +113,16 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         }) => {
             let serve_start = Instant::now();
             crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
-            if temporary_server
-                || (!persistent_server
-                    && (server::socket_path_is_custom()
-                        || std::env::var("JCODE_TEST_SESSION").as_deref() == Ok("1")))
-            {
+            if persistent_server {
+                server::configure_persistent_server();
+            } else if temporary_server {
                 server::configure_temporary_server(owner_pid, temp_idle_timeout_secs);
+            } else if server::socket_path_is_custom()
+                || (std::env::var("JCODE_TEST_SESSION").as_deref() == Ok("1")
+                    && std::env::var_os("JCODE_RUNTIME_DIR").is_some()
+                    && crate::storage::running_with_sandboxed_home())
+            {
+                server::configure_private_server(owner_pid, temp_idle_timeout_secs);
             }
             let provider_start = Instant::now();
             let provider =
