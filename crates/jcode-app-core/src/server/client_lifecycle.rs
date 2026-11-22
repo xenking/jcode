@@ -3918,6 +3918,7 @@ pub(super) async fn handle_client(
                 stdin_req_tx.clone(),
                 local_jcode_peer && connection_client_name.as_deref() == Some("jcode-tui"),
             ));
+            super::reload_recovery::ask_owner_available(&client_session_id);
         }
         if let Some(name) = connection_client_name.as_deref() {
             crate::mobile_push::note_client_attached(&client_session_id, name);

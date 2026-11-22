@@ -314,12 +314,26 @@ fn collect_garbage_at(now: SystemTime) -> Result<GarbageCollectionStats> {
 
 fn write_record(path: PathBuf, record: &ReloadRecoveryRecord) -> Result<()> {
     crate::storage::write_json(&path, record)?;
+    notify_record_ready(path);
+    Ok(())
+}
+
+fn notify_record_ready(path: PathBuf) {
     CHANGED_PATHS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(path);
     RECORD_CHANGED.notify_one();
-    Ok(())
+}
+
+/// Reconsider an orphaned ask after a client or escalation route is installed.
+/// No durable state changes here: a still-unanswered ask must survive restart.
+pub(super) fn ask_owner_available(session_id: &str) {
+    if let Ok(path) = path_for_session(session_id)
+        && path.is_file()
+    {
+        notify_record_ready(path);
+    }
 }
 
 fn take_changed_paths() -> HashSet<PathBuf> {
@@ -840,6 +854,18 @@ pub(super) struct RecoveryPass {
     retry_startup_scan: bool,
 }
 
+type PreparedRecovery = (
+    Arc<tokio::sync::Mutex<crate::agent::Agent>>,
+    crate::agent::TurnLease,
+    ReloadRecoveryRecord,
+);
+
+enum RecoveryAdmission {
+    Claimed(Box<PreparedRecovery>),
+    Deferred,
+    WaitingForAskOwner,
+}
+
 impl RecoveryOwner {
     pub(super) fn new(server: &super::Server) -> Self {
         Self {
@@ -975,8 +1001,8 @@ impl RecoveryOwner {
                 work.pending.remove(&path);
                 match read_record_at(&path) {
                     Ok(Some(record)) if record.status.needs_admission() => {
-                        work.pending.insert(path);
-                        records.push(record);
+                        work.pending.insert(path.clone());
+                        records.push((path, record));
                     }
                     Ok(_) => {}
                     Err(error) => {
@@ -992,9 +1018,10 @@ impl RecoveryOwner {
             }
             records
         };
-        for record in records {
+        for (path, record) in records {
             match self.prepare(&record).await {
-                Ok(Some((agent, lease, claimed))) => {
+                Ok(RecoveryAdmission::Claimed(prepared)) => {
+                    let (agent, lease, claimed) = *prepared;
                     let owner = self.clone();
                     let stop = tokio_util::sync::CancellationToken::new();
                     let (retired_tx, retired) = tokio::sync::watch::channel(false);
@@ -1038,7 +1065,10 @@ impl RecoveryOwner {
                         }
                     }));
                 }
-                Ok(None) => {}
+                Ok(RecoveryAdmission::WaitingForAskOwner) => {
+                    work.pending.remove(&path);
+                }
+                Ok(RecoveryAdmission::Deferred) => {}
                 Err(error) => crate::logging::warn(&format!(
                     "Recovery admission deferred for {}: {error}",
                     record.session_id
@@ -1047,16 +1077,7 @@ impl RecoveryOwner {
         }
     }
 
-    async fn prepare(
-        &self,
-        record: &ReloadRecoveryRecord,
-    ) -> Result<
-        Option<(
-            Arc<tokio::sync::Mutex<crate::agent::Agent>>,
-            crate::agent::TurnLease,
-            ReloadRecoveryRecord,
-        )>,
-    > {
+    async fn prepare(&self, record: &ReloadRecoveryRecord) -> Result<RecoveryAdmission> {
         if record.directive.continuation_message.trim().is_empty() {
             finish_pending(
                 &record.session_id,
@@ -1069,12 +1090,12 @@ impl RecoveryOwner {
                 Some("Empty recovery directive".into()),
             )
             .await;
-            return Ok(None);
+            return Ok(RecoveryAdmission::Deferred);
         }
         let session_id = &record.session_id;
         if crate::turn_activity::session_is_stopped(session_id) {
             cancel(session_id)?;
-            return Ok(None);
+            return Ok(RecoveryAdmission::Deferred);
         }
         if !crate::session::session_exists(session_id)
             && !self.sessions.read().await.contains_key(session_id)
@@ -1092,7 +1113,7 @@ impl RecoveryOwner {
                 Some("Worker transcript missing".into()),
             )
             .await;
-            return Ok(None);
+            return Ok(RecoveryAdmission::Deferred);
         }
         if self
             .swarm
@@ -1111,9 +1132,9 @@ impl RecoveryOwner {
             )?)
             .is_some()
         {
-            // Keep the durable obligation, but do not start a model turn or
-            // repeatedly execute an unanswered ask without an interactive owner.
-            return Ok(None);
+            // Keep the durable obligation, but wait for an answer route rather
+            // than loading the same transcript on every admission retry.
+            return Ok(RecoveryAdmission::WaitingForAskOwner);
         }
         let agent = self
             .sessions
@@ -1166,14 +1187,17 @@ impl RecoveryOwner {
             })
             .await?;
         let Ok(guard) = agent.try_lock() else {
-            return Ok(None);
+            return Ok(RecoveryAdmission::Deferred);
         };
         let Ok(lease) = guard.claim_server_turn() else {
-            return Ok(None);
+            return Ok(RecoveryAdmission::Deferred);
         };
         let claimed = claim(record, lease.identity())?;
         drop(guard);
-        Ok(claimed.map(|record| (agent, lease, record)))
+        Ok(match claimed {
+            Some(record) => RecoveryAdmission::Claimed(Box::new((agent, lease, record))),
+            None => RecoveryAdmission::Deferred,
+        })
     }
 
     async fn run(
@@ -1613,6 +1637,60 @@ mod tests {
             ReloadRecoveryStatus::Pending
         );
         assert_eq!(recovery_summary("reload")?.started, 0);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::await_holding_lock)]
+    async fn interrupted_ask_without_an_owner_does_not_arm_retry() -> Result<()> {
+        use crate::message::{ContentBlock, Role};
+
+        let _lock = crate::storage::lock_test_env();
+        let home = IsolatedHome::new();
+        let id = "session_parked_interrupted_ask";
+        let mut session = crate::session::Session::create_with_id(id.into(), None, None);
+        session.add_message(Role::Assistant, vec![ContentBlock::ToolUse {
+            id: "parked-ask".into(), name: "ask".into(),
+            input: serde_json::json!({"questions":[{"question":"Which?","options":[{"label":"A (Recommended)"},{"label":"B"}]}]}),
+            thought_signature: None,
+        }]);
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "parked-ask".into(),
+                content: "[Tool 'ask' interrupted by server reload after 0.2s]".into(),
+                is_error: Some(true),
+            }],
+        );
+        session.save()?;
+        intent(id, "parked-ask-reload")?;
+        let server = super::super::Server::new_with_paths(
+            Arc::new(super::super::tests::StreamingMockProvider::default()),
+            home._temp.path().join("server.sock"),
+            home._temp.path().join("debug.sock"),
+        );
+        let owner = RecoveryOwner::new(&server);
+        let work = owner.reconcile_once().await;
+        assert!(work.tasks.is_empty());
+        assert!(
+            has_pending_for_session(id),
+            "recoverable obligation remains durable"
+        );
+        assert!(
+            work.pending.is_empty(),
+            "an unanswered ask is not a timer retry"
+        );
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        owner.spawn(stop.clone(), work);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let _route = crate::tool::interactive::attach(id, tx);
+        ask_owner_available(id);
+        let prompt = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await?
+            .expect("an owner should receive the interrupted ask without a timer retry");
+        assert_eq!(prompt.request_id, "ask-parked-ask");
+        stop.cancel();
         Ok(())
     }
 

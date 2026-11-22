@@ -127,6 +127,7 @@ pub(crate) fn install_bridge(session_id: &str, members: SwarmMembers) {
         }
     }
     let worker_session_id = session_id.to_string();
+    super::reload_recovery::ask_owner_available(session_id);
     tokio::spawn(async move {
         loop {
             tokio::select! {
