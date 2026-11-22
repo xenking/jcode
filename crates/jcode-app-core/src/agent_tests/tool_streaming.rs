@@ -290,12 +290,18 @@ async fn native_citation_corrections_preserve_earlier_text_and_native_replay() {
             .rev()
             .find(|message| message.role == Role::Assistant)
             .unwrap();
-        assert!(matches!(&assistant.content[..], [
-            ContentBlock::Text { text: a, .. },
-            ContentBlock::ProviderNative { provider, item },
-            ContentBlock::Text { text: bc, .. },
-        ] if a == "Earlier commentary." && provider == "openai" && item["id"] == "ws_citation"
-            && bc == "B. [B](<https://source.example/B>)C. [C](<https://source.example/C>)"));
+        assert!(
+            matches!(&assistant.content[..], [
+                ContentBlock::Text { text: a, .. },
+                ContentBlock::ProviderNative { provider, item },
+                ContentBlock::Text { text: b, .. },
+                ContentBlock::Text { text: c, .. },
+            ] if a == "Earlier commentary." && provider == "openai" && item["id"] == "ws_citation"
+                && b == "B. [B](<https://source.example/B>)"
+                && c == "C. [C](<https://source.example/C>)"),
+            "streaming={streaming}: {:?}",
+            assistant.content,
+        );
         if streaming {
             let mut corrections = 0;
             let mut correction_pending = false;
