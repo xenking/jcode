@@ -160,15 +160,31 @@ async fn openrig_probe_is_read_only_and_keeps_daemon_connection_usable() {
     tokio::time::timeout(Duration::from_secs(4), async {
         let stream = crate::transport::Stream::connect(&socket).await.unwrap();
         let mut stream = BufReader::new(stream);
-        stream.get_mut().write_all(b"{\"type\":\"openrig_host_identity\",\"id\":7}\n").await.unwrap();
+        stream
+            .get_mut()
+            .write_all(b"{\"type\":\"openrig_host_identity\",\"id\":7}\n")
+            .await
+            .unwrap();
         let mut line = String::new();
         stream.read_line(&mut line).await.unwrap();
-        assert!(matches!(serde_json::from_str::<crate::protocol::ServerEvent>(&line).unwrap(), crate::protocol::ServerEvent::Pong { id: 7, .. }));
-        stream.get_mut().write_all(b"{\"type\":\"ping\",\"id\":8}\n").await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<crate::protocol::ServerEvent>(&line).unwrap(),
+            crate::protocol::ServerEvent::Pong { id: 7, .. }
+        ));
+        stream
+            .get_mut()
+            .write_all(b"{\"type\":\"ping\",\"id\":8}\n")
+            .await
+            .unwrap();
         line.clear();
         stream.read_line(&mut line).await.unwrap();
-        assert!(matches!(serde_json::from_str::<crate::protocol::ServerEvent>(&line).unwrap(), crate::protocol::ServerEvent::Pong { id: 8, .. }));
-    }).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<crate::protocol::ServerEvent>(&line).unwrap(),
+            crate::protocol::ServerEvent::Pong { id: 8, .. }
+        ));
+    })
+    .await
+    .unwrap();
     runtime.shutdown().await;
     accept.await.unwrap();
     assert!(server.sessions.read().await.is_empty());

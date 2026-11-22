@@ -17,9 +17,13 @@ fn the_handshake_reports_the_server_and_its_capabilities() {
 fn openrig_identity_requires_one_valid_daemon_claim() {
     let mut client = fake_harness(|_, _| {});
     assert_eq!(client.openrig_self_host_id(), None);
-    client.capabilities.push("openrig_self_host_id=host-a".into());
+    client
+        .capabilities
+        .push("openrig_self_host_id=host-a".into());
     assert_eq!(client.openrig_self_host_id(), Some("host-a"));
-    client.capabilities.push("openrig_self_host_id=host-b".into());
+    client
+        .capabilities
+        .push("openrig_self_host_id=host-b".into());
     assert_eq!(client.openrig_self_host_id(), None);
 }
 

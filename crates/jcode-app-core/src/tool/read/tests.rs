@@ -47,7 +47,10 @@ async fn reads_session_image_by_stable_id_and_ordinal() {
     ctx.session_id = session.id.clone();
     for selector in [id.as_str(), "1"] {
         let output = ReadTool::new()
-            .execute(json!({"file_path": format!("session-image://{selector}")}), ctx.clone())
+            .execute(
+                json!({"file_path": format!("session-image://{selector}")}),
+                ctx.clone(),
+            )
             .await
             .unwrap();
         assert!(output.output.starts_with(&format!("Session image [#{id}]")));

@@ -675,8 +675,11 @@ fn configured_swarm_root_effort_reads_real_config() {
 fn grok_build_subscription_request_spoofs_grok_cli_and_uses_oidc_bearer() {
     let _lock = ENV_LOCK.lock();
     let grok_home = TempDir::new().expect("grok home");
+    let jcode_home = TempDir::new().expect("jcode home");
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", jcode_home.path());
+    let auth_path = grok_home.path().join("auth.json");
     std::fs::write(
-        grok_home.path().join("auth.json"),
+        &auth_path,
         format!(
             r#"{{"https://auth.x.ai::{}": {{"key":"oidc-access","auth_mode":"oidc","expires_at":"2999-01-01T00:00:00Z"}}}}"#,
             jcode_base::auth::grok_build::OAUTH_CLIENT_ID
@@ -684,6 +687,9 @@ fn grok_build_subscription_request_spoofs_grok_cli_and_uses_oidc_bearer() {
     )
     .expect("auth.json");
     let _home = EnvVarGuard::set("GROK_HOME", grok_home.path());
+    jcode_base::platform::set_permissions_owner_only(&auth_path).expect("private fixture");
+    jcode_base::auth::grok_build::trust_cli_auth_for_future_use()
+        .expect("trust fixture credentials");
     let _deploy = EnvVarGuard::remove("GROK_DEPLOYMENT_KEY");
     let _version = EnvVarGuard::set("JCODE_GROK_CLI_VERSION", "9.8.7");
     let (addr, rx) = spawn_header_capturing_server();
@@ -709,7 +715,9 @@ fn grok_build_subscription_request_spoofs_grok_cli_and_uses_oidc_bearer() {
             .complete(&[Message::user("hello")], &tools, "sys", None)
             .await
             .expect("stream");
-        while stream.next().await.is_some() {}
+        while let Some(event) = stream.next().await {
+            event.expect("Grok chat event");
+        }
         rx.recv_timeout(Duration::from_secs(5))
             .expect("server captured request")
     });

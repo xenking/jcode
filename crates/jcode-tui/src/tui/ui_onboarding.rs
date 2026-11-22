@@ -148,10 +148,7 @@ fn import_summary_pills_line(
         focused == Pill::ImportLess,
     ));
     spans.push(Span::raw("   "));
-    spans.extend(lozenge_pill_spans(
-        "Telemetry",
-        focused == Pill::Telemetry,
-    ));
+    spans.extend(lozenge_pill_spans("Telemetry", focused == Pill::Telemetry));
     Line::from(spans).alignment(align)
 }
 

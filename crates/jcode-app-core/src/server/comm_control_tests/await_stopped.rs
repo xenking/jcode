@@ -141,7 +141,7 @@ async fn assert_await_settles_after_both_workers_are_stopped(requested: Vec<Stri
     let (tx, mut rx) = mpsc::unbounded_channel();
     let runtime = AwaitMembersRuntime::default();
     let (background_tx, mut background_rx) = mpsc::unbounded_channel();
-    let targets = crate::protocol::default_comm_await_target_statuses();
+    let targets = crate::comm_format::default_comm_await_target_statuses();
     for (id, sender, background) in [(1, &tx, false), (2, &background_tx, true)] {
         handle_comm_await_members(
             id,

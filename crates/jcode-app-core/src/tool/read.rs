@@ -159,10 +159,12 @@ impl Tool for ReadTool {
                 .ok_or_else(|| anyhow::anyhow!("Session image not found: {id}"))?;
             let id = image.info.image_id;
             let ordinal = image.info.ordinal;
-            return Ok(ToolOutput::new(format!("Session image [#{id}]
+            return Ok(ToolOutput::new(format!(
+                "Session image [#{id}]
 
-Image #{ordinal}"))
-                .with_labeled_image(image.info.media_type, image.data, format!("[#{id}]")));
+Image #{ordinal}"
+            ))
+            .with_labeled_image(image.info.media_type, image.data, format!("[#{id}]")));
         }
         let range = normalize_read_range(&params)?;
 

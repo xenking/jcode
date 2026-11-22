@@ -742,7 +742,7 @@ pub fn run_setup_hotkey(
                             );
                         }
                     }
-                        return Ok(());
+                    return Ok(());
                 }
                 Err(e) => {
                     eprintln!("  \x1b[31m✗\x1b[0m Failed: {}", e);

@@ -658,7 +658,10 @@ fn render_messages_and_images_internal(
                         let id = super::images::image_id(&session.id, &msg.id, image_ordinal);
                         image_ordinal += 1;
                         let session_image = image_index.reference(&id);
-                        if session_image.as_ref().is_some_and(|image| image.image_id != id) {
+                        if session_image
+                            .as_ref()
+                            .is_some_and(|image| image.image_id != id)
+                        {
                             last_image_idx = None;
                             continue;
                         }
@@ -791,7 +794,10 @@ fn render_messages_and_images_internal(
                     let id = super::images::image_id(&session.id, &msg.id, image_ordinal);
                     image_ordinal += 1;
                     let session_image = image_index.reference(&id);
-                    if session_image.as_ref().is_some_and(|image| image.image_id != id) {
+                    if session_image
+                        .as_ref()
+                        .is_some_and(|image| image.image_id != id)
+                    {
                         last_image_idx = None;
                         continue;
                     }

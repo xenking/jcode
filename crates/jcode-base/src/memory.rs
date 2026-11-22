@@ -43,7 +43,6 @@ pub use activity::{
     get_activity, pipeline_start, pipeline_update, record_injected_prompt, set_state,
 };
 use cache::{cache_graph, cached_graph};
-pub(crate) use pending::{discard_pending_memory, set_pending_memory_for_project_with_selection};
 pub use pending::{
     PendingMemory, clear_all_injected_memories, clear_all_pending_memory, clear_injected_memories,
     clear_pending_memory, has_any_pending_memory, has_pending_memory, is_memory_injected,
@@ -55,6 +54,7 @@ pub use pending::{
 #[cfg(test)]
 use pending::{backdate_injected_memory_for_test, insert_pending_memory_for_test};
 use pending::{begin_memory_check, finish_memory_check};
+pub(crate) use pending::{discard_pending_memory, set_pending_memory_for_project_with_selection};
 pub(crate) use prompt_support::format_context_for_extraction;
 pub use prompt_support::{
     focus_query_text, format_context_for_relevance, format_focused_query_for_relevance,

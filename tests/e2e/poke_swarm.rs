@@ -128,6 +128,15 @@ impl Provider for GatedProvider {
         "gated-poke-swarm"
     }
 
+    fn model(&self) -> String {
+        "scripted-poke-swarm".to_owned()
+    }
+
+    fn set_model(&self, model: &str) -> Result<()> {
+        anyhow::ensure!(model == self.model(), "unexpected scripted route: {model}");
+        Ok(())
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(self.clone())
     }
@@ -263,14 +272,15 @@ async fn run_scenario(assign_todo_to_worker: bool, await_worker: bool) -> Result
             .await?;
         let worker = client
             .wait_for("spawn response", Duration::from_secs(30), |e| {
-                if e["type"] == "error" {
-                    eprintln!("SPAWN ERROR EVENT: {e}");
+                if e["type"] == "error" && e["id"] == 2 {
+                    Some(Err(anyhow::anyhow!("spawn failed: {e}")))
+                } else if e["type"] == "comm_spawn_response" {
+                    e["new_session_id"].as_str().map(|id| Ok(id.to_owned()))
+                } else {
+                    None
                 }
-                (e["type"] == "comm_spawn_response")
-                    .then(|| e["new_session_id"].as_str().map(str::to_owned))
-                    .flatten()
             })
-            .await?;
+            .await??;
 
         // The worker's turn is now blocked inside the provider.
         let started = Instant::now();

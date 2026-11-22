@@ -573,9 +573,16 @@ where
         .await
         .unwrap_or_default();
     let mut openrig_host_cap = None;
-    if daemon_caps.iter().any(|cap| cap == "openrig_host_identity_v1") {
+    if daemon_caps
+        .iter()
+        .any(|cap| cap == "openrig_host_identity_v1")
+    {
         let probe = async {
-            write_json_line(&mut legacy, &serde_json::json!({"type":"openrig_host_identity", "id":0})).await?;
+            write_json_line(
+                &mut legacy,
+                &serde_json::json!({"type":"openrig_host_identity", "id":0}),
+            )
+            .await?;
             let mut reader = BufReader::new(legacy);
             let mut line = String::new();
             read_frame(&mut reader, &mut line).await?;
@@ -584,13 +591,17 @@ where
                 anyhow::bail!("invalid OpenRig identity reply");
             }
             let host = reply["capabilities"].as_array().and_then(|caps| {
-                let mut claims = caps.iter().filter_map(Value::as_str).filter(|cap| cap.starts_with("openrig_self_host_id="));
+                let mut claims = caps
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|cap| cap.starts_with("openrig_self_host_id="));
                 let claim = claims.next()?;
                 claims.next().is_none().then(|| claim.to_owned())
             });
             Ok::<_, anyhow::Error>((reader.into_inner(), host))
         };
-        let (stream, host) = tokio::time::timeout(std::time::Duration::from_secs(2), probe).await??;
+        let (stream, host) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), probe).await??;
         legacy = stream;
         openrig_host_cap = host;
     }

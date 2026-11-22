@@ -89,7 +89,7 @@ pub struct Operation(OperationKind);
 
 enum OperationKind {
     Native(native::Request),
-    Legacy(ComputerInput),
+    Legacy(Box<ComputerInput>),
 }
 
 pub enum Request {
@@ -108,7 +108,7 @@ impl Request {
         }
         let kind = match native::Request::parse(&parsed.action, input)? {
             Some(native) => OperationKind::Native(native),
-            None => OperationKind::Legacy(parsed),
+            None => OperationKind::Legacy(Box::new(parsed)),
         };
         Ok(Self::Desktop(Operation(kind)))
     }
@@ -127,7 +127,7 @@ impl Engine {
                 let mut slots = self.snapshots.lock().unwrap_or_else(|e| e.into_inner());
                 Ok(request.execute(&mut slots))
             }
-            OperationKind::Legacy(request) => run(request),
+            OperationKind::Legacy(request) => run(*request),
         }
     }
 

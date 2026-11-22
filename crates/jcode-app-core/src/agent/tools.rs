@@ -86,7 +86,8 @@ pub(super) fn label_session_images(
         return;
     }
     let mut refs = session.session_image_references_for_message(
-        message_id, first_ordinal..first_ordinal + images.len(),
+        message_id,
+        first_ordinal..first_ordinal + images.len(),
     );
     images.retain_mut(|image| {
         let (id, reference) = refs.next().expect("one reference per image");

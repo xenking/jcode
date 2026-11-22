@@ -384,10 +384,14 @@ impl Agent {
 
     pub(super) fn user_image_ids_event(&self, index: usize, original: &str) -> Option<ServerEvent> {
         if let Some(message) = self.session.messages.get(index) {
-            let count = message.content.iter()
-                .filter(|block| matches!(block, ContentBlock::Image { .. })).count();
+            let count = message
+                .content
+                .iter()
+                .filter(|block| matches!(block, ContentBlock::Image { .. }))
+                .count();
             if count > 0 {
-                let (image_ids, image_ordinals): (Vec<_>, Vec<_>) = self.session
+                let (image_ids, image_ordinals): (Vec<_>, Vec<_>) = self
+                    .session
                     .session_image_references_for_message(&message.id, 0..count)
                     .map(|(id, reference)| (id, reference.map_or(0, |image| image.ordinal)))
                     .unzip();

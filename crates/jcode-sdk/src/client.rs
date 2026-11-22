@@ -1403,7 +1403,11 @@ impl JcodeClient {
         .map(drop)
     }
 
-    pub fn rewind_transcript(&self, session_id: &str, target: crate::api::RewindAnchor) -> Result<()> {
+    pub fn rewind_transcript(
+        &self,
+        session_id: &str,
+        target: crate::api::RewindAnchor,
+    ) -> Result<()> {
         self.request_ok(ApiRequest::RewindTranscript {
             session_id: session_id.to_string(),
             target,

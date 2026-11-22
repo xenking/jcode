@@ -331,6 +331,49 @@ test("sendMessage transmits file and pasted text attachments", async () => {
   }
 });
 
+test("setQueuedPromptEditing transmits the hold and release for the same prompt", async () => {
+  const holds: Array<[string, string, string, boolean]> = [];
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      if (request.req === "set_queued_prompt_editing") {
+        holds.push([request.session_id, request.client_id, request.prompt_id, request.editing]);
+        send({ v: 1, reply_to: request.id, ev: "ok" });
+      }
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  try {
+    await client.setQueuedPromptEditing("s1", "c1", "p1", true);
+    await client.setQueuedPromptEditing("s1", "c1", "p1", false);
+    assert.deepEqual(holds, [["s1", "c1", "p1", true], ["s1", "c1", "p1", false]]);
+  } finally {
+    client.close();
+    await server.close();
+  }
+});
+
+test("listDraftModels requests a catalog without a session", async () => {
+  let calls = 0;
+  const server = await startMockHarness({
+    capabilities: ["draft_model_catalog"],
+    onRequest(request, send) {
+      if (request.req === "list_draft_models") {
+        calls += 1;
+        assert.equal("session_id" in request, false);
+        send({ v: 1, reply_to: request.id, ev: "draft_models", current: "current", routes: [] });
+      }
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  try {
+    assert.deepEqual(await client.listDraftModels(), { current: "current", routes: [] });
+    assert.equal(calls, 1);
+  } finally {
+    client.close();
+    await server.close();
+  }
+});
+
 test("editQueuedPrompt transmits attachments", async () => {
   let received: unknown;
   const server = await startMockHarness({

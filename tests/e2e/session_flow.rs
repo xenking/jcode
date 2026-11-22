@@ -115,7 +115,8 @@ async fn resume_session_restores_persisted_compaction_for_provider_context() -> 
             .join("\n---\n");
         assert!(joined.contains("recent preserved turn"));
         assert!(joined.contains("continue from the restored session"));
-        assert!(!joined.contains("older user turn"));
+        // Text-summary recovery keeps bounded user excerpts, not stale assistant turns.
+        assert_eq!(joined.matches("older user turn").count(), 1);
         assert!(!joined.contains("older assistant turn"));
 
         Ok::<_, anyhow::Error>(())

@@ -801,6 +801,12 @@ export class JcodeClient extends EventEmitter {
     });
   }
 
+  /** Hold a queued prompt for editing, or release the hold. */
+  async setQueuedPromptEditing(sessionId: string, clientId: string, promptId: string, editing: boolean): Promise<void> {
+    await this.requestOk({ req: "set_queued_prompt_editing", session_id: sessionId,
+      client_id: clientId, prompt_id: promptId, editing });
+  }
+
   async editQueuedPrompt(sessionId: string, clientId: string, promptId: string, content: string, images: ImageAttachment[] = [], attachments: Attachment[] = []): Promise<QueuedPromptEditOutcome> {
     const frame = await this.expectReply({ req: "edit_queued_prompt", session_id: sessionId, client_id: clientId,
       prompt_id: promptId, content, images, attachments }, "queued_prompt_edited");
@@ -967,6 +973,13 @@ export class JcodeClient extends EventEmitter {
   async listModels(sessionId: string): Promise<{ models: string[]; current?: string }> {
     const frame = await this.expectReply({ req: "list_models", session_id: sessionId }, "models");
     return { models: frame.models ?? [], current: frame.current };
+  }
+
+  /** List routes for a new conversation without creating a session. */
+  async listDraftModels(): Promise<{ current: string | null; routes: ModelRouteInfo[] }> {
+    if (!this.supports("draft_model_catalog")) return { current: null, routes: [] };
+    const frame = await this.expectReply({ req: "list_draft_models" }, "draft_models");
+    return { current: frame.current, routes: frame.routes };
   }
 
   /** Runtime identity, route catalog, protocol metadata, and a live health check. */
