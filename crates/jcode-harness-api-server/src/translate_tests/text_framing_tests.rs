@@ -1,6 +1,49 @@
 use super::*;
 
 #[test]
+fn scoped_text_reconnect_does_not_publish_a_suffix_as_a_new_answer() {
+    let mut origin = state_with_session();
+    let mut attached = state_with_session();
+    let identity = json!({"runtime_generation":"test-runtime", "turn_id":12});
+    let initial = json!({"type":"turn_state", "session_id":"s1", "runtime_generation":"test-runtime", "turn_id":12, "latest_turn_id":12});
+    origin.legacy_event_to_api(&initial);
+    attached.legacy_event_to_api(&initial);
+    let scoped = |event, text_frames| json!({"type":"turn_event", "identity":identity, "event":event, "text_frames":text_frames});
+    let id = "text:test-runtime:12:0";
+    let first = "**Список вклад";
+    let suffix = "ок** в окне.";
+    let text = format!("{first}{suffix}");
+    let first_frame = scoped(
+        json!({"type":"text_delta", "text":first}),
+        json!([{"kind":"append", "message_id":id, "offset":0}]),
+    );
+    assert!(matches!(origin.legacy_event_to_api(&first_frame).as_slice(), [ServerFrame {
+        event: ApiEvent::TextDelta { message_id: Some(got), text, .. }, ..
+    }] if got == id && text == first));
+
+    let continuation = scoped(
+        json!({"type":"text_delta", "text":suffix}),
+        json!([{"kind":"append", "message_id":id, "offset":first.len()}]),
+    );
+    assert!(matches!(origin.legacy_event_to_api(&continuation).as_slice(), [ServerFrame {
+        event: ApiEvent::TextDelta { message_id: Some(got), text, .. }, ..
+    }] if got == id && text == suffix));
+    assert!(attached.legacy_event_to_api(&continuation).is_empty());
+
+    let done = scoped(
+        json!({"type":"text_done"}),
+        json!([{"kind":"complete", "message_id":id, "text":text}]),
+    );
+    assert!(matches!(origin.legacy_event_to_api(&done).as_slice(), [ServerFrame {
+        event: ApiEvent::TextDone { message_id: Some(got), .. }, ..
+    }] if got == id));
+    assert!(matches!(attached.legacy_event_to_api(&done).as_slice(), [
+        ServerFrame { event: ApiEvent::TextReplace { message_id: Some(got), text: restored, .. }, .. },
+        ServerFrame { event: ApiEvent::TextDone { message_id: Some(ended), .. }, .. },
+    ] if got == id && ended == id && restored == &text));
+}
+
+#[test]
 fn text_framing_preserves_chunks_and_reasoning_then_separates_messages() {
     let mut state = state_with_session();
     let first = state.legacy_event_to_api(&json!({"type":"text_delta","text":"The cause is "}));
