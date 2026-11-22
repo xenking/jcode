@@ -190,7 +190,7 @@ fn parse_view(view: Value) -> Result<View> {
     // serde reason goes in the message itself. Without it the agent can only
     // guess which node or field is wrong.
     serde_json::from_value(view).map_err(|error| {
-        anyhow!("invalid view: {error} (see the node list in the tool description)")
+        anyhow!("invalid view: {error} (call applet with action=catalog for node shapes)")
     })
 }
 
@@ -201,15 +201,7 @@ impl Tool for AppletTool {
     }
 
     fn description(&self) -> &str {
-        "Show interactive native UI (an applet) in Jcode Desktop. By default the card replaces this tool call in the transcript. \
-For mount/update use either view or express, not both. Express example: root = ReviewChange(\"Review patch\", \"src/ui.rs\", \"change42\"). Built-in GreetingButton(label,event,recipient). \
-View is a tree of nodes, each {\"type\":...}. Layout: stack{direction:vertical|horizontal,gap,padding,align,children}, grid{min_column_width,children}, scroll{max_height,children}, card{title,children} (don't nest), tabs{bind,tabs:[{id,label,children}]}, spacer, divider. \
-Content: text{text,style:body|title|heading|caption|mono,tone,max_lines}, markdown{text}, code{text,language}, image{source:{url|data|asset},alt,aspect_ratio}, icon{name}, key_value{rows:[{key,value}]}, table{columns:[string],rows:[[string]]}, progress{value 0-1,label}, empty{title,detail}, error{message,retry}. \
-Controls (always pills): button{label,variant:primary|secondary|compact|danger,on_press}, chip{label,on_press}, toggle{label,bind}, input{bind,placeholder,multiline,on_submit}, select{bind,options:[{value,label}]}, list{children:[list_item{title,subtitle,meta,badges,on_press}]}. Escape hatch: html{source,height}. \
-Spacing tokens none|xs|sm|md|lg|xl; tones default|dim|accent|success|warning|danger. Inputs/toggles/selects/tabs bind to keys in `state`. \
-Actions are {action,args}. Custom names come back to you as an `[applet action]` message with the current state (or as this tool's output with wait=true). \
-Host actions run locally: host.open_url{url}, host.copy{text}, host.send_prompt{prompt}, host.start_chat{prompt}, host.close, host.set_state{key,value}. \
-Use update to replace the document, patch for small changes (ops on /view, /state, /title), move to change placement, close to remove."
+        jcode_applet_types::express::TOOL_HINT
     }
 
     fn parameters_schema(&self) -> Value {
@@ -217,11 +209,11 @@ Use update to replace the document, patch for small changes (ops on /view, /stat
             "type": "object",
             "properties": {
                 "intent": super::intent_schema_property(),
-                "action": {"type":"string","enum":["mount","update","patch","move","close","list"],"default":"mount"},
-                "instance": {"type":"string","description":"Instance id. Optional for mount (generated). Required otherwise."},
+                "action": {"type":"string","enum":["mount","update","patch","move","close","list","catalog"],"default":"mount"},
+                "instance": {"type":"string","description":"Target instance for update/patch/move/close. Optional on mount."},
                 "title": {"type":"string"},
                 "view": {"type":"object","description":"Root view node, e.g. {\"type\":\"stack\",\"gap\":\"sm\",\"children\":[...]}."},
-                "express": {"type":"string","description":"Express source for mount/update instead of view, e.g. root = ReviewChange(\"Review patch\", \"src/ui.rs\", \"change42\"). Built-in GreetingButton(label,event,recipient)."},
+                "express": {"type":"string","description":"One root macro call with positional JSON strings; use instead of view."},
                 "state": {"type":"object","description":"Initial values for bound controls."},
                 "assets": {"type":"array","items":{"type":"object"},"description":"Images: [{id,mime,data(base64)}], referenced as {\"asset\":id}."},
                 "placement": {"description":"Default: inline in place of this tool call. Shorthand: inline, end, panel, sidebar, overlay, composer. Or an object like {\"kind\":\"panel\"}.","anyOf":[{"type":"string"},{"type":"object"}]},
@@ -242,6 +234,14 @@ Use update to replace the document, patch for small changes (ops on /view, /stat
         }
         if params.express.is_some() && params.view.is_some() {
             bail!("provide either view or express, not both");
+        }
+        if action == "catalog" {
+            return Ok(ToolOutput::new(format!(
+                "{}\n{}",
+                self.description(),
+                include_str!("applet_catalog.txt")
+            ))
+            .with_title("Native applet catalog"));
         }
         let sid = ctx.session_id.clone();
         let require_id = || {

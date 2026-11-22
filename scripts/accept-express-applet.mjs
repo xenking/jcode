@@ -44,6 +44,13 @@ try {
   daemon.exited.then(()=>client.destroy());
   await until('Desktop applet capability', async () => (await command('tools',session)).includes('applet'));
   const tool = args => command(`tool:applet ${JSON.stringify({intent:'Exercise Express applet in private daemon',...args})}`,session);
+  const definitions=await command('tools:full',session);
+  const applet=definitions.find(d=>d.name==='applet');
+  assert.ok(applet.description.includes('plain text'));
+  assert.ok(!applet.description.includes('host.send_prompt'));
+  const catalog=await tool({action:'catalog'});
+  for(const signature of ['ReviewChange','GreetingButton','host.send_prompt','select{bind']) assert.ok(catalog.output.includes(signature));
+  assert.match((await tool({action:'list'})).output,/No applets mounted/);
   const snapshot = async() => JSON.parse(await readFile(join(store,'agent_applets',session+'.json'),'utf8')).instances.find(i=>i.id==='review');
   const express='root = ReviewChange("Review patch", "src/ui.rs", "change42")';
   const mounted=await tool({instance:'review',placement:'end',express});

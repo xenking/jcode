@@ -19,6 +19,47 @@ use serde_json::{Value, json};
 
 const MAX_SOURCE_BYTES: usize = 64 * 1024;
 
+// The tool advertises exactly the calls this dispatcher accepts.
+macro_rules! catalog {
+    ($($name:ident($($arg:ident),+) => $expand:ident);+ $(;)?) => {
+        pub const TOOL_HINT: &str = concat!(
+            "Use plain text for explanations. Use native Desktop UI when a choice or editable input helps. ",
+            "Prefer express: root = Macro(\"...\", ...). ",
+            $(stringify!($name), "(", stringify!($($arg),+), "). ",)+
+            "Set wait=true for the action and state. For custom layouts use view; action=catalog gives node shapes."
+        );
+
+        fn expand(name: &str, args: [String; 3]) -> Result<View, String> {
+            match name {
+                $(stringify!($name) => $expand(args),)+
+                _ => Err("unknown Express macro; use action=catalog for supported calls".into()),
+            }
+        }
+    }
+}
+
+catalog! {
+    ReviewChange(title, body, change_id) => review;
+    GreetingButton(label, event, recipient) => greeting;
+}
+
+fn review([title, body, change_id]: [String; 3]) -> Result<View, String> {
+    Ok(review_change(title, body, change_id))
+}
+
+fn greeting([label, event, recipient]: [String; 3]) -> Result<View, String> {
+    if !valid_action(&event) {
+        return Err("invalid custom action name".into());
+    }
+    Ok(button(
+        "root",
+        label,
+        ButtonVariant::Primary,
+        event,
+        json!({"recipient": recipient}),
+    ))
+}
+
 /// Compile the documented, bounded Express subset into native keyed nodes.
 pub fn compile_express(source: &str) -> Result<View, String> {
     if source.len() > MAX_SOURCE_BYTES {
@@ -31,35 +72,16 @@ pub fn compile_express(source: &str) -> Result<View, String> {
     parser.symbol('=')?;
     let name = parser.identifier()?;
     parser.symbol('(')?;
-    let mut args = Vec::with_capacity(3);
-    for index in 0..3 {
-        if index != 0 {
-            parser.symbol(',')?;
-        }
-        args.push(parser.string()?);
-    }
+    let first = parser.string()?;
+    parser.symbol(',')?;
+    let second = parser.string()?;
+    parser.symbol(',')?;
+    let third = parser.string()?;
     parser.symbol(')')?;
     if !parser.rest.trim().is_empty() {
         return Err("unexpected trailing input".into());
     }
-    let [first, second, third]: [String; 3] =
-        args.try_into().map_err(|_| "expected three arguments")?;
-    match name {
-        "ReviewChange" => Ok(review_change(first, second, third)),
-        "GreetingButton" => {
-            if !valid_action(&second) {
-                return Err("invalid custom action name".into());
-            }
-            Ok(button(
-                "root",
-                first,
-                ButtonVariant::Primary,
-                second,
-                json!({"recipient": third}),
-            ))
-        }
-        _ => Err(format!("unsupported Express macro {name}")),
-    }
+    expand(name, [first, second, third])
 }
 
 fn valid_action(name: &str) -> bool {

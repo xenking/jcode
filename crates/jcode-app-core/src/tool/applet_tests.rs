@@ -289,11 +289,21 @@ fn action_message_is_compact() {
     );
 }
 
-/// The description teaches the agent field names. Documents built exactly as
-/// described must validate, or every agent-built control of that kind fails.
-#[test]
-fn documented_shapes_validate() {
-    let description = AppletTool::new().description().to_string();
+#[tokio::test]
+async fn documented_shapes_validate() {
+    let tool = AppletTool::new();
+    assert!(tool.description().contains("plain text"));
+    assert!(!tool.description().contains("host.send_prompt"));
+    let response = tool
+        .execute(
+            json!({"action":"catalog"}),
+            context("catalog-session", "help"),
+        )
+        .await
+        .unwrap();
+    let description = response.output;
+    assert!(description.contains("ReviewChange"));
+    assert!(description.contains("GreetingButton"));
     assert!(description.contains("select{bind,options:[{value,label}]}"));
     assert!(description.contains("host.send_prompt{prompt}"));
     assert!(description.contains("table{columns:[string],rows:[[string]]}"));
