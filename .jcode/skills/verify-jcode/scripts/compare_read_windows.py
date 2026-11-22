@@ -2,8 +2,10 @@
 """Compare warm first-window reads in two private daemons via the provider boundary."""
 import argparse
 import contextlib
+import datetime
 import json
 import runpy
+import re
 import statistics
 import subprocess
 from pathlib import Path
@@ -21,6 +23,7 @@ def main():
     harness = runpy.run_path(str(runner))['Harness']
     seats = {}
     times = {name: [] for name in ('before', 'after')}
+    execution = {name: [] for name in times}
     with contextlib.ExitStack() as cleanup:
         for name in times:
             folder = args.evidence / name
@@ -42,8 +45,13 @@ def main():
                 results = [m for m in requests[-1]['messages'] if m.get('tool_call_id') == 'call_window']
                 assert len(results) == 1 and 'fixture line 01' in str(results[0]['content']), results
                 if i:
+                    timing = re.search(r'tool timing: start=(\S+) finish=(\S+)', str(results[0]['content']))
+                    assert timing, results
+                    begin, end = [datetime.datetime.fromisoformat(s.replace('Z', '+00:00')) for s in timing.groups()]
+                    execution[name].append((end - begin).total_seconds() * 1000)
                     times[name].append(1000 * (requests[1]['time'] - requests[0]['time']))
     report = {'fixture_mib': args.mib, 'metric': 'ms between provider request and next request containing tool result',
+              'registry_execution_ms': execution, 'registry_median_ms': {k: statistics.median(v) for k, v in execution.items()},
               'warm_samples_ms': times, 'median_ms': {k: statistics.median(v) for k, v in times.items()}}
     (args.evidence / 'comparison.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report['median_ms']))
