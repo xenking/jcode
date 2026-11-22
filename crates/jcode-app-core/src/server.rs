@@ -581,8 +581,6 @@ use self::reload_state::{clear_reload_marker_if_stale_for_pid, publish_reload_so
 
 pub use self::lifecycle::configure_temporary_server;
 #[cfg(unix)]
-pub use self::socket::spawn_server_notify;
-#[cfg(unix)]
 use self::socket::{acquire_daemon_lock_for, mark_close_on_exec};
 pub use self::socket::{
     cleanup_socket_pair, connect_socket, debug_socket_path, default_socket_path, has_live_listener,
@@ -590,6 +588,8 @@ pub use self::socket::{
     socket_path_is_custom, wait_for_server_ready,
 };
 use self::socket::{signal_ready_fd, socket_has_live_listener};
+#[cfg(unix)]
+pub use self::socket::{spawn_owned_server_notify, spawn_server_notify};
 
 pub(crate) use self::util::server_has_newer_binary;
 pub use self::util::{MANAGED_CLOUD_LIVE_RELOAD_MARKER, ServerIdentity};
@@ -660,6 +660,7 @@ pub struct Server {
     session_id: Arc<RwLock<String>>,
     /// Number of connected clients
     client_count: Arc<RwLock<usize>>,
+    temporary_client_activity: Option<tokio::sync::watch::Sender<bool>>,
     /// Connected client mapping (client_id -> session_id)
     client_connections: Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     /// File-touch tracking service (forward path index + reverse session index)
@@ -770,6 +771,8 @@ impl Server {
             is_processing: Arc::new(RwLock::new(false)),
             session_id: Arc::new(RwLock::new(String::new())),
             client_count: Arc::new(RwLock::new(0)),
+            temporary_client_activity: lifecycle::temporary_server_enabled()
+                .then(|| tokio::sync::watch::channel(false).0),
             client_connections: Arc::new(RwLock::new(HashMap::new())),
             file_touch: FileTouchService::new(),
             swarm_state: SwarmState::new(
@@ -1540,7 +1543,10 @@ impl Server {
 
         if let Some(policy) = temporary_server_policy {
             lifecycle::spawn_temporary_lifecycle_monitor(
-                Arc::clone(&self.client_count),
+                self.temporary_client_activity
+                    .as_ref()
+                    .expect("temporary server client tracker")
+                    .subscribe(),
                 Arc::clone(&self.sessions),
                 self.swarm_state.clone(),
                 self.socket_path.clone(),

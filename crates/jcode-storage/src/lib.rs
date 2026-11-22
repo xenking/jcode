@@ -114,6 +114,11 @@ pub fn runtime_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("JCODE_RUNTIME_DIR") {
         return PathBuf::from(dir);
     }
+    user_runtime_dir()
+}
+
+/// Default runtime directory, independent of daemon-specific overrides.
+pub fn user_runtime_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
         return PathBuf::from(dir);
     }

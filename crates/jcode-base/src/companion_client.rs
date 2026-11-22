@@ -179,12 +179,22 @@ impl CompanionResponse {
 /// Clients treat it like an absent companion.
 pub const DISABLED_SUFFIX: &str = "is disabled in [companion] config";
 
-/// `$JCODE_COMPANION_SOCKET`, else `jcode-companion.sock` in the runtime dir.
+/// The per-user desktop helper is shared by builds and daemon runtime dirs.
+/// Tests and alternate homes must not reach the user's helper.
 pub fn socket_path() -> PathBuf {
     if let Some(path) = std::env::var_os("JCODE_COMPANION_SOCKET") {
         return PathBuf::from(path);
     }
-    crate::storage::runtime_dir().join("jcode-companion.sock")
+    if crate::storage::running_with_sandboxed_home()
+        && let Ok(home) = crate::storage::jcode_dir()
+    {
+        return home.join("jcode-companion.sock");
+    }
+    if std::env::var("JCODE_TEST_SESSION").as_deref() == Ok("1") {
+        return crate::storage::runtime_dir()
+            .join(format!("jcode-test-companion-{}.sock", std::process::id()));
+    }
+    crate::storage::user_runtime_dir().join("jcode-companion.sock")
 }
 
 /// Why a request did not complete.

@@ -379,8 +379,50 @@ pub fn set_socket_path(path: &str) {
 /// built without ready-fd support, or crash before bind).
 #[cfg(unix)]
 pub async fn spawn_server_notify(cmd: &mut std::process::Command) -> Result<std::process::Child> {
+    let (child, _) = spawn_server_notify_impl(cmd, false).await?;
+    Ok(child)
+}
+
+/// Start an owned daemon and reap it if it exits while its owner survives.
+/// The owner's side of the lifetime channel closes even if it is killed.
+#[cfg(unix)]
+pub async fn spawn_owned_server_notify(cmd: &mut std::process::Command) -> Result<()> {
+    let (mut child, owner) = spawn_server_notify_impl(cmd, true).await?;
+    std::thread::spawn(move || {
+        let _owner = owner;
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn spawn_server_notify_impl(
+    cmd: &mut std::process::Command,
+    owned: bool,
+) -> Result<(std::process::Child, Option<std::os::unix::net::UnixStream>)> {
+    use std::os::fd::AsRawFd;
     use std::os::unix::io::FromRawFd;
+    use std::os::unix::net::UnixStream;
     use std::os::unix::process::CommandExt;
+
+    let (owner, owned_server) = if owned {
+        let (owner, server) = UnixStream::pair()?;
+        let owner_fd = server.as_raw_fd();
+        cmd.env(super::lifecycle::OWNER_FD_ENV, owner_fd.to_string());
+        // The owner's endpoint stays CLOEXEC in every child. Inherit only
+        // the server endpoint, and only in the server's initial exec.
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::fcntl(owner_fd, libc::F_SETFD, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        (Some(owner), Some(server))
+    } else {
+        (None, None)
+    };
 
     // Create a pipe: fds[0] = read end, fds[1] = write end.
     // Use pipe2 with O_CLOEXEC on the read end (parent keeps it).
@@ -414,13 +456,14 @@ pub async fn spawn_server_notify(cmd: &mut std::process::Command) -> Result<std:
     }
     cmd.env("JCODE_READY_FD", write_fd.to_string());
 
-    let mut child = cmd.spawn()?;
-
     // Close our copy of the write end so we get EOF if the child dies.
+    let read_file = unsafe { std::fs::File::from_raw_fd(read_fd) };
+    let child = cmd.spawn();
     unsafe { libc::close(write_fd) };
+    drop(owned_server);
+    let mut child = child?;
 
     // Wait for the ready signal (or timeout / child death).
-    let read_file = unsafe { std::fs::File::from_raw_fd(read_fd) };
     let mut async_file = tokio::fs::File::from_std(read_file);
     let mut buf = [0u8; 1];
     match tokio::time::timeout(
@@ -464,7 +507,7 @@ pub async fn spawn_server_notify(cmd: &mut std::process::Command) -> Result<std:
         });
     }
 
-    Ok(child)
+    Ok((child, owner))
 }
 
 /// Wait until a server socket is connectable and responds to a ping.

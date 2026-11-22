@@ -94,6 +94,7 @@ pub(super) struct ServerRuntime {
     is_processing: Arc<RwLock<bool>>,
     session_id: Arc<RwLock<String>>,
     client_count: Arc<RwLock<usize>>,
+    temporary_client_activity: Option<tokio::sync::watch::Sender<bool>>,
     client_connections: Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     swarm_state: SwarmState,
     shared_context: Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
@@ -130,6 +131,7 @@ impl ServerRuntime {
             is_processing: Arc::clone(&server.is_processing),
             session_id: Arc::clone(&server.session_id),
             client_count: Arc::clone(&server.client_count),
+            temporary_client_activity: server.temporary_client_activity.clone(),
             client_connections: Arc::clone(&server.client_connections),
             swarm_state: server.swarm_state.clone(),
             shared_context: Arc::clone(&server.shared_context),
@@ -314,7 +316,15 @@ impl ServerRuntime {
     }
 
     async fn increment_client_count(&self) {
-        *self.client_count.write().await += 1;
+        {
+            let mut count = self.client_count.write().await;
+            *count += 1;
+            if *count == 1
+                && let Some(activity) = &self.temporary_client_activity
+            {
+                activity.send_replace(true);
+            }
+        }
         crate::runtime_memory_log::emit_event(
             crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
                 "client_connected",
@@ -324,7 +334,15 @@ impl ServerRuntime {
     }
 
     async fn decrement_client_count(&self) {
-        *self.client_count.write().await -= 1;
+        {
+            let mut count = self.client_count.write().await;
+            *count -= 1;
+            if *count == 0
+                && let Some(activity) = &self.temporary_client_activity
+            {
+                activity.send_replace(false);
+            }
+        }
         crate::runtime_memory_log::emit_event(
             crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
                 "client_disconnected",

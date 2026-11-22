@@ -106,13 +106,18 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Mcp { action }) => super::mcp::run(action).await?,
         Some(Command::Serve {
             temporary_server,
+            persistent_server,
             owner_pid,
             temp_idle_timeout_secs,
             server_name,
         }) => {
             let serve_start = Instant::now();
             crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
-            if temporary_server {
+            if temporary_server
+                || (!persistent_server
+                    && (server::socket_path_is_custom()
+                        || std::env::var("JCODE_TEST_SESSION").as_deref() == Ok("1")))
+            {
                 server::configure_temporary_server(owner_pid, temp_idle_timeout_secs);
             }
             let provider_start = Instant::now();
@@ -1300,7 +1305,7 @@ async fn spawn_server_with_lifetime(
     match lifetime {
         ServerLifetime::Shared => output::stderr_info("Starting server..."),
         ServerLifetime::OwnedByThisProcess => output::stderr_info(format!(
-            "Starting a temporary server on {} for this run...",
+            "Starting an owned temporary server on {}...",
             socket_path.display()
         )),
     }
@@ -1336,7 +1341,11 @@ async fn spawn_server_with_lifetime(
 
     #[cfg(unix)]
     {
-        let _child = server::spawn_server_notify(&mut cmd).await?;
+        if lifetime == ServerLifetime::OwnedByThisProcess {
+            server::spawn_owned_server_notify(&mut cmd).await?;
+        } else {
+            let _child = server::spawn_server_notify(&mut cmd).await?;
+        }
         startup_profile::mark("server_ready");
     }
     #[cfg(not(unix))]

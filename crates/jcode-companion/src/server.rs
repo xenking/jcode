@@ -337,6 +337,7 @@ pub async fn run(options: CompanionOptions) -> Result<()> {
     // loop back into the companion socket.
     jcode_base::env::set_var("JCODE_COMPANION", "1");
 
+    let _instance = lock_instance(&options.socket)?;
     let listener = bind(&options.socket)?;
     // Windows named-pipe acceptance replaces the listening pipe instance.
     #[cfg(windows)]
@@ -399,7 +400,7 @@ pub async fn run(options: CompanionOptions) -> Result<()> {
     result
 }
 
-fn bind(path: &Path) -> Result<jcode_transport::Listener> {
+fn lock_instance(path: &Path) -> Result<std::fs::File> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| {
             format!(
@@ -408,29 +409,37 @@ fn bind(path: &Path) -> Result<jcode_transport::Listener> {
             )
         })?;
     }
-    if jcode_transport::is_socket_path(path) {
-        // A live companion answers. Only a stale socket file may be replaced.
-        if jcode_base::companion_client::request_at(
-            path,
-            &CompanionRequest::Status,
-            Duration::from_millis(500),
-        )
-        .is_ok()
-        {
-            anyhow::bail!("jcode companion is already running ({})", path.display());
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_extension("sock.lock"))
+        .with_context(|| format!("failed to open companion lock for {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            anyhow::bail!("jcode companion is already running ({})", path.display())
         }
-        jcode_transport::remove_socket(path);
+        Err(std::fs::TryLockError::Error(err)) => Err(err).context("lock companion instance"),
     }
+}
+
+fn bind(path: &Path) -> Result<jcode_transport::Listener> {
     #[cfg(unix)]
-    {
-        jcode_transport::Listener::bind(path)
-            .with_context(|| format!("failed to bind {}", path.display()))
+    if jcode_transport::is_socket_path(path) {
+        // Older builds don't take the lock. A connection is enough to prove
+        // one owns the socket, even when its request handlers are stalled.
+        match jcode_transport::SyncStream::connect(path) {
+            Ok(_) => anyhow::bail!("jcode companion is already running ({})", path.display()),
+            Err(err) if err.kind() == std::io::ErrorKind::ConnectionRefused => {
+                jcode_transport::remove_socket(path);
+            }
+            Err(err) => return Err(err).context("probe existing companion socket"),
+        }
     }
-    #[cfg(windows)]
-    {
-        jcode_transport::Listener::bind(path)
-            .with_context(|| format!("failed to bind {}", path.display()))
-    }
+    jcode_transport::Listener::bind(path)
+        .with_context(|| format!("failed to bind {}", path.display()))
 }
 
 async fn serve(stream: jcode_transport::Stream, companion: &Companion) -> Result<()> {

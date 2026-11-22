@@ -184,6 +184,10 @@ pub(crate) enum Command {
         #[arg(long, hide = true)]
         temporary_server: bool,
 
+        /// Keep a custom-socket server running even when it has no clients.
+        #[arg(long, conflicts_with = "temporary_server")]
+        persistent_server: bool,
+
         /// Internal: owning process pid for a temporary server.
         #[arg(long, hide = true)]
         owner_pid: Option<u32>,

@@ -997,15 +997,13 @@ impl AcpRuntime {
     }
 
     async fn ensure_daemon(&self) -> Result<()> {
-        if dispatch::server_is_running().await {
-            return Ok(());
+        let model = self.model.as_deref();
+        let profile = self.provider_profile.as_deref();
+        if crate::server::is_shared_socket(&self.socket_path) {
+            dispatch::spawn_server(&self.provider_choice, model, profile).await
+        } else {
+            dispatch::spawn_owned_server(&self.provider_choice, model, profile).await
         }
-        dispatch::spawn_server(
-            &self.provider_choice,
-            self.model.as_deref(),
-            self.provider_profile.as_deref(),
-        )
-        .await
     }
 
     async fn connect_daemon(&self) -> Result<(ReadHalf, WriteHalf)> {
