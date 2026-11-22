@@ -30,9 +30,16 @@ impl Session {
     /// Promotion only changes visibility. A live turn may still own the transcript.
     pub fn promote_side_question(session_id: &str) -> Result<()> {
         let path = visibility_path(session_id)?;
+        ensure!(
+            super::session_path(session_id)?.is_file(),
+            "Unknown side-question session"
+        );
         if !path.is_file() {
             let session = Self::load_startup_stub(session_id)?;
-            ensure!(session.side_question_topic().is_some(), "Not a side-question session");
+            ensure!(
+                session.side_question_topic().is_some(),
+                "Not a side-question session"
+            );
         }
         crate::storage::write_json(&path, &false)
     }
@@ -42,6 +49,10 @@ impl Session {
             .ok()
             .and_then(|path| fs::read(path).ok())
             .is_some_and(|bytes| bytes == b"false")
+    }
+
+    pub fn is_hidden_side_question(&self) -> bool {
+        self.hidden && self.parent_id.is_some() && !Self::side_question_was_promoted(&self.id)
     }
 
     pub fn side_question_topic(&self) -> Option<SideQuestionTopic> {
@@ -86,7 +97,9 @@ impl Session {
             }
         }
         topics.sort_unstable_by(|a, b| {
-            b.created_at_ms.cmp(&a.created_at_ms).then_with(|| a.session_id.cmp(&b.session_id))
+            b.created_at_ms
+                .cmp(&a.created_at_ms)
+                .then_with(|| a.session_id.cmp(&b.session_id))
         });
         Ok(topics)
     }
@@ -97,7 +110,10 @@ impl Session {
         let start = self.side_question_message_start.ok_or_else(|| {
             anyhow!("This session has no recorded side-question history boundary")
         })?;
-        ensure!(start <= self.messages.len(), "Side-question history boundary is out of range");
+        ensure!(
+            start <= self.messages.len(),
+            "Side-question history boundary is out of range"
+        );
         self.messages.drain(..start);
         self.compaction = None;
         Ok(super::render::render_messages(&self)
@@ -109,13 +125,18 @@ impl Session {
 
 fn visibility_path(id: &str) -> Result<std::path::PathBuf> {
     validate_side_question_session_id(id)?;
-    Ok(crate::storage::jcode_dir()?.join("state").join(SIDE_QUESTION_VISIBILITY_DIR).join(format!("{id}.json")))
+    Ok(crate::storage::jcode_dir()?
+        .join("state")
+        .join(SIDE_QUESTION_VISIBILITY_DIR)
+        .join(format!("{id}.json")))
 }
 
 pub(super) fn validate_side_question_session_id(id: &str) -> Result<()> {
     ensure!(
         !id.is_empty()
-            && id.bytes().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'_' | b'-' | b'.'))
+            && id
+                .bytes()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'_' | b'-' | b'.'))
             && !matches!(id, "." | ".."),
         "Invalid side-question session ID",
     );
@@ -148,7 +169,8 @@ fn is_snapshot_child(path: &std::path::Path, parent_session_id: &str) -> bool {
         fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<(), M::Error> {
             while let Some(key) = map.next_key::<String>()? {
                 if key == "parent_id" {
-                    *self.matched = map.next_value::<Option<String>>()?.as_deref() == Some(self.parent);
+                    *self.matched =
+                        map.next_value::<Option<String>>()?.as_deref() == Some(self.parent);
                     break;
                 }
                 if key == "messages" {
@@ -163,7 +185,12 @@ fn is_snapshot_child(path: &std::path::Path, parent_session_id: &str) -> bool {
         return false;
     };
     let mut matched = false;
-    let _ = ParentMatch { parent: parent_session_id, matched: &mut matched }
-        .deserialize(&mut serde_json::Deserializer::from_reader(BufReader::new(file)));
+    let _ = ParentMatch {
+        parent: parent_session_id,
+        matched: &mut matched,
+    }
+    .deserialize(&mut serde_json::Deserializer::from_reader(BufReader::new(
+        file,
+    )));
     matched
 }

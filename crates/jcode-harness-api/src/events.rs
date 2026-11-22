@@ -64,9 +64,13 @@ pub enum ApiEvent {
     /// Reply to `ForkSession`.
     SessionForked { session: SessionInfo },
 
-    SideQuestionForked { topic: crate::SideQuestionTopic },
+    SideQuestionForked {
+        topic: crate::SideQuestionTopic,
+    },
 
-    SideQuestions { topics: Vec<crate::SideQuestionTopic> },
+    SideQuestions {
+        topics: Vec<crate::SideQuestionTopic>,
+    },
 
     /// Reply to `GetHistory`.
     History {

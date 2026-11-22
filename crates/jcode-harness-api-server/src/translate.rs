@@ -204,6 +204,7 @@ pub struct BridgeState {
     pending_recovery_history: Option<(u64, Option<String>)>,
     /// Legacy and API ids for an in-flight session fork.
     pending_fork_id: Option<(u64, u64)>,
+    pending_side_question_forks: BTreeMap<u64, (u64, String)>,
     pub(crate) side_questions_supported: bool,
     /// Legacy id of the unsolicited model-catalog probe sent after attach. Its
     /// reply becomes a `model_info` event rather than a request reply, so it is
@@ -401,7 +402,11 @@ impl BridgeState {
         let req = request["req"].as_str().unwrap_or("");
 
         if req == "fork_side_question" && !self.side_questions_supported {
-            return Self::error_reply(api_id, ErrorCode::UnknownRequest, "This runtime does not support side questions.");
+            return Self::error_reply(
+                api_id,
+                ErrorCode::UnknownRequest,
+                "This runtime does not support side questions.",
+            );
         }
 
         // Stateful requests only mean something once this connection is
@@ -751,12 +756,27 @@ impl BridgeState {
                 vec![Outbound::Legacy(json!({"type": "split", "id": id}))]
             }
             "fork_side_question" => {
-                if request["session_id"].as_str().is_none_or(str::is_empty) {
-                    return Self::error_reply(api_id, ErrorCode::InvalidRequest, "Missing parent session ID");
+                let Some(parent) = request["session_id"].as_str().filter(|id| !id.is_empty())
+                else {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "Missing parent session ID",
+                    );
+                };
+                if self.session_id.as_deref() != Some(parent) {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::UnknownSession,
+                        "Attach to the parent session before asking a side question.",
+                    );
                 }
                 let id = self.legacy_id();
-                self.pending_fork_id = Some((id, api_id));
-                vec![Outbound::Legacy(json!({"type": "split_side_question", "id": id}))]
+                self.pending_side_question_forks
+                    .insert(id, (api_id, parent.to_string()));
+                vec![Outbound::Legacy(
+                    json!({"type": "split_side_question", "id": id}),
+                )]
             }
             "transfer_session" => {
                 let id = self.legacy_id();
@@ -1098,7 +1118,12 @@ impl BridgeState {
                 }
                 // Connected user clients must remain discoverable even when
                 // their idle session is older than the persisted recency page.
-                ids.extend(self.user_connected_sessions.iter().filter(|id| !hidden.contains(*id)).cloned());
+                ids.extend(
+                    self.user_connected_sessions
+                        .iter()
+                        .filter(|id| !hidden.contains(*id))
+                        .cloned(),
+                );
                 // Titles are deliberately not cached. A rename is persisted
                 // before `SessionRenamed` is broadcast, and every list call
                 // should reflect that newest canonical value even on another
@@ -2650,12 +2675,20 @@ impl BridgeState {
             }
             "side_question_forked" => {
                 let id = event["id"].as_u64().unwrap_or(0);
-                let Some((_, api_id)) = self.pending_fork_id.filter(|(pending, _)| *pending == id) else {
+                let Some((api_id, parent)) = self.pending_side_question_forks.remove(&id) else {
                     return vec![];
                 };
-                self.pending_fork_id = None;
-                match serde_json::from_value(event["topic"].clone()) {
-                    Ok(topic) => vec![ServerFrame::reply(api_id, ApiEvent::SideQuestionForked { topic })],
+                match serde_json::from_value::<jcode_harness_api::SideQuestionTopic>(
+                    event["topic"].clone(),
+                ) {
+                    Ok(topic) if topic.parent_session_id == parent => vec![ServerFrame::reply(
+                        api_id,
+                        ApiEvent::SideQuestionForked { topic },
+                    )],
+                    Ok(_) => Self::invalid_daemon_event(
+                        Some(api_id),
+                        "Side-question fork returned a different parent".into(),
+                    ),
                     Err(error) => Self::invalid_daemon_event(Some(api_id), error.to_string()),
                 }
             }
@@ -3429,12 +3462,19 @@ impl BridgeState {
                     self.pending_fork_id = None;
                 }
                 // Route to a pending request when possible, else stream it.
-                let reply_to = no_reply_api_id.or(fork_api_id).or_else(|| {
-                    self.pending_simple
-                        .iter()
-                        .position(|(legacy_id, _, _)| *legacy_id == id)
-                        .map(|index| self.pending_simple.remove(index).1)
-                });
+                let reply_to = no_reply_api_id
+                    .or(fork_api_id)
+                    .or_else(|| {
+                        self.pending_side_question_forks
+                            .remove(&id)
+                            .map(|(api_id, _)| api_id)
+                    })
+                    .or_else(|| {
+                        self.pending_simple
+                            .iter()
+                            .position(|(legacy_id, _, _)| *legacy_id == id)
+                            .map(|index| self.pending_simple.remove(index).1)
+                    });
                 let frame_event = ApiEvent::Error {
                     code: ErrorCode::Internal,
                     message,
@@ -4217,15 +4257,23 @@ impl BridgeState {
         let Some(home) = Self::jcode_home() else {
             return BTreeSet::new();
         };
-        let path = home.join("state").join(jcode_session_types::SIDE_QUESTION_VISIBILITY_DIR);
-        std::fs::read_dir(path).into_iter().flatten().flatten().filter_map(|entry| {
-            let path = entry.path();
-            if path.extension()?.to_str()? != "json"
-                || !std::fs::read(&path).is_ok_and(|bytes| bytes == b"true") {
-                return None;
-            }
-            Some(path.file_stem()?.to_str()?.to_owned())
-        }).collect()
+        let path = home
+            .join("state")
+            .join(jcode_session_types::SIDE_QUESTION_VISIBILITY_DIR);
+        std::fs::read_dir(path)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                if path.extension()?.to_str()? != "json"
+                    || !std::fs::read(&path).is_ok_and(|bytes| bytes == b"true")
+                {
+                    return None;
+                }
+                Some(path.file_stem()?.to_str()?.to_owned())
+            })
+            .collect()
     }
 
     fn stored_session_ids(limit: Option<usize>) -> Vec<String> {

@@ -351,7 +351,8 @@ pub(super) async fn cleanup_client_connection(
                         }
                     }
 
-                    let memory_enabled = agent.memory_enabled();
+                    let memory_enabled = agent.memory_enabled()
+                        && !agent.session_for_split().is_hidden_side_question();
                     let transcript = if memory_enabled {
                         Some(agent.build_transcript_for_extraction())
                     } else {

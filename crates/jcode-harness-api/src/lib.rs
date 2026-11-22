@@ -45,7 +45,6 @@ pub use events::*;
 pub use jcode_applet_types;
 pub use jcode_selfdev_types::ServingIdentity;
 pub use jcode_session_types::SessionImageRef;
-pub use jcode_session_types::{SIDE_QUESTIONS_CAPABILITY, SideQuestionTopic};
 pub use jcode_session_types::{
     AskAnswer, AskOption, AskQuestion, AskResponse, CONTEXT_BREAKDOWN_CAPABILITY,
     ContextActionForecast, ContextActionMeasurement, ContextActionSavings, ContextActionStatus,
@@ -57,6 +56,7 @@ pub use jcode_session_types::{
     Attachment, FILE_ATTACHMENTS_CAPABILITY, RewindAnchor, RewindMessageKey, StoredAttachment,
     TurnStopReason,
 };
+pub use jcode_session_types::{SIDE_QUESTIONS_CAPABILITY, SideQuestionTopic};
 pub use jcode_side_panel_types::{
     SidePanelPage, SidePanelPageFormat, SidePanelPageSource, SidePanelSnapshot,
 };

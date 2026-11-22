@@ -137,11 +137,17 @@ async fn daemon_side_questions(socket: &std::path::Path, request: &Value) -> Api
     use jcode_harness_api::{ApiRequest, ClientFrame};
     use serde_json::json;
 
-    let (message, reply_kind) = match serde_json::from_value::<ClientFrame>(request.clone()).map(|frame| frame.request) {
-        Ok(ApiRequest::ListSideQuestions { parent_session_id }) if !parent_session_id.trim().is_empty() => (
-            json!({"type":"list_side_questions", "id":1, "parent_session_id":parent_session_id}),
-            "side_questions",
-        ),
+    let (message, reply_kind) = match serde_json::from_value::<ClientFrame>(request.clone())
+        .map(|frame| frame.request)
+    {
+        Ok(ApiRequest::ListSideQuestions { parent_session_id })
+            if !parent_session_id.trim().is_empty() =>
+        {
+            (
+                json!({"type":"list_side_questions", "id":1, "parent_session_id":parent_session_id}),
+                "side_questions",
+            )
+        }
         Ok(ApiRequest::GetSideQuestionHistory { session_id }) if !session_id.trim().is_empty() => (
             json!({"type":"get_side_question_history", "id":1, "session_id":session_id}),
             "side_question_history",
@@ -150,7 +156,12 @@ async fn daemon_side_questions(socket: &std::path::Path, request: &Value) -> Api
             json!({"type":"promote_side_question", "id":1, "session_id":session_id}),
             "done",
         ),
-        _ => return ApiEvent::Error { code: ErrorCode::InvalidRequest, message: "Missing side-question session ID".into() },
+        _ => {
+            return ApiEvent::Error {
+                code: ErrorCode::InvalidRequest,
+                message: "Missing side-question session ID".into(),
+            };
+        }
     };
     let response = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let mut stream = Stream::connect(socket).await?;
@@ -163,23 +174,39 @@ async fn daemon_side_questions(socket: &std::path::Path, request: &Value) -> Api
         }
         match reply["type"].as_str() {
             Some(kind) if kind == reply_kind => match kind {
-                "side_questions" => Ok(ApiEvent::SideQuestions { topics: serde_json::from_value(reply["topics"].clone())? }),
-                "side_question_history" if reply["session_id"] == message["session_id"] => Ok(ApiEvent::History {
-                    session_id: serde_json::from_value(reply["session_id"].clone())?,
-                    messages: serde_json::from_value(reply["messages"].clone())?,
-                    images: Vec::new(),
+                "side_questions" => Ok(ApiEvent::SideQuestions {
+                    topics: serde_json::from_value(reply["topics"].clone())?,
                 }),
+                "side_question_history" if reply["session_id"] == message["session_id"] => {
+                    Ok(ApiEvent::History {
+                        session_id: serde_json::from_value(reply["session_id"].clone())?,
+                        messages: serde_json::from_value(reply["messages"].clone())?,
+                        images: Vec::new(),
+                    })
+                }
                 "done" => Ok(ApiEvent::Ok),
                 _ => anyhow::bail!("Unexpected side-question reply session"),
             },
-            Some("error") => anyhow::bail!("{}", reply["message"].as_str().unwrap_or("Side-question request failed")),
+            Some("error") => anyhow::bail!(
+                "{}",
+                reply["message"]
+                    .as_str()
+                    .unwrap_or("Side-question request failed")
+            ),
             _ => anyhow::bail!("Unexpected side-question reply"),
         }
-    }).await;
+    })
+    .await;
     match response {
         Ok(Ok(event)) => event,
-        Ok(Err(error)) => ApiEvent::Error { code: ErrorCode::Internal, message: error.to_string() },
-        Err(error) => ApiEvent::Error { code: ErrorCode::Internal, message: error.to_string() },
+        Ok(Err(error)) => ApiEvent::Error {
+            code: ErrorCode::Internal,
+            message: error.to_string(),
+        },
+        Err(error) => ApiEvent::Error {
+            code: ErrorCode::Internal,
+            message: error.to_string(),
+        },
     }
 }
 
@@ -692,7 +719,9 @@ where
     let background_tasks_supported = daemon_caps
         .iter()
         .any(|cap| cap == BACKGROUND_TASKS_CAPABILITY);
-    let side_questions_supported = daemon_caps.iter().any(|cap| cap == jcode_harness_api::SIDE_QUESTIONS_CAPABILITY);
+    let side_questions_supported = daemon_caps
+        .iter()
+        .any(|cap| cap == jcode_harness_api::SIDE_QUESTIONS_CAPABILITY);
     let hello_ok = ServerFrame::reply(
         reply_to,
         ApiEvent::HelloOk {
@@ -758,7 +787,10 @@ where
             .chain(bounded_history_supported.then(|| "bounded_history_v1".to_string()))
             .chain(ask_response_images_supported.then(|| "ask_response_images".to_string()))
             .chain(background_tasks_supported.then(|| BACKGROUND_TASKS_CAPABILITY.to_string()))
-            .chain(side_questions_supported.then(|| jcode_harness_api::SIDE_QUESTIONS_CAPABILITY.to_string()))
+            .chain(
+                side_questions_supported
+                    .then(|| jcode_harness_api::SIDE_QUESTIONS_CAPABILITY.to_string()),
+            )
             .chain(
                 ["soft_interrupt_ids", "background_tool_result"]
                     .into_iter()

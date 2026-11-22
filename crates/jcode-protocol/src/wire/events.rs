@@ -1265,10 +1265,16 @@ pub enum ServerEvent {
     },
 
     #[serde(rename = "side_question_forked")]
-    SideQuestionForked { id: u64, topic: jcode_session_types::SideQuestionTopic },
+    SideQuestionForked {
+        id: u64,
+        topic: jcode_session_types::SideQuestionTopic,
+    },
 
     #[serde(rename = "side_questions")]
-    SideQuestions { id: u64, topics: Vec<jcode_session_types::SideQuestionTopic> },
+    SideQuestions {
+        id: u64,
+        topics: Vec<jcode_session_types::SideQuestionTopic>,
+    },
 
     #[serde(rename = "side_question_history")]
     SideQuestionHistory {

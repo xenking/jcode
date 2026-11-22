@@ -841,7 +841,9 @@ pub(super) fn handle_split_side_question(
     ) {
         Ok(child) => ServerEvent::SideQuestionForked {
             id,
-            topic: child.side_question_topic().expect("new side-question child"),
+            topic: child
+                .side_question_topic()
+                .expect("new side-question child"),
         },
         Err(error) => ServerEvent::Error {
             id,

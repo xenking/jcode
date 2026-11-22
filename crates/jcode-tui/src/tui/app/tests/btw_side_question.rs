@@ -301,16 +301,47 @@ fn btw_promote_unhides_the_hidden_fork_instead_of_asking_again() {
         app.promote_btw();
 
         assert!(!app.btw_open());
-        let child = Session::load(&child_id).expect("child session file");
+        assert!(Session::side_question_was_promoted(&child_id));
         assert!(
-            !child.hidden,
-            "promotion turns the hidden fork into a real session"
+            crate::tui::session_picker::load_sessions()
+                .unwrap()
+                .iter()
+                .any(|session| session.id == child_id),
         );
         assert!(
             app.display_messages()
                 .iter()
                 .any(|message| message.content.contains(&child_id)),
             "the client says where the promoted side question went"
+        );
+    });
+}
+
+#[test]
+fn btw_history_reopens_without_a_turn_and_queues_follow_up_in_the_same_child() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let id = app.create_btw_child_session().unwrap();
+        let mut child = Session::load(&id).unwrap();
+        child.add_message(Role::User, Message::user("first question").content);
+        child.add_message(Role::Assistant, Message::user("the saved answer").content);
+        child.save().unwrap();
+        let submit = crate::tui::app::commands::handle_btw_command;
+
+        assert!(submit(&mut app, "/btw"));
+        let view = app.inline_view_state.as_ref().unwrap();
+        assert_eq!(view.lines, ["#1  first question"]);
+        assert!(submit(&mut app, "/btw #1"));
+        assert_eq!(app.btw_card().unwrap().answer, "the saved answer");
+        assert!(!app.pending_btw_turn);
+
+        assert!(submit(&mut app, "/btw #1 one more?"));
+        assert_eq!(app.btw_card().unwrap().child.as_deref(), Some(id.as_str()));
+        assert_eq!(app.btw_card().unwrap().question, "one more?");
+        assert!(app.pending_btw_turn);
+        assert_eq!(
+            Session::list_side_questions(&app.session.id).unwrap().len(),
+            1
         );
     });
 }

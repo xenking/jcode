@@ -1673,6 +1673,8 @@ pub struct App {
     inline_view_is_btw: bool,
     /// The open `/btw` side question: its card is live in `inline_view_state`.
     btw: Option<btw::BtwCard>,
+    btw_history_ids: Option<(String, Vec<String>)>,
+    btw_detached_turn: bool,
     /// Set by Esc while a side question streams, so the turn loop stops.
     btw_cancel: bool,
     /// The card was just opened and its ephemeral turn has not run yet.

@@ -1024,14 +1024,20 @@ fn test_test_command_queues_layered_verification_prompt() {
 }
 
 #[test]
-fn test_btw_command_requires_question() {
-    let mut app = create_test_app();
-    app.input = "/btw".to_string();
-    app.submit_input();
+fn test_btw_empty_command_lists_topics_instead_of_sending() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.input = "/btw".to_string();
+        app.submit_input();
 
-    let msg = app.display_messages().last().expect("missing btw error");
-    assert_eq!(msg.role, "error");
-    assert!(msg.content.contains("Usage: /btw <question>"));
+        let view = app
+            .inline_view_state
+            .as_ref()
+            .expect("side-question history");
+        assert_eq!(view.title, "Side-question history");
+        assert!(view.lines[0].contains("No side questions yet"));
+        assert!(!app.pending_btw_turn);
+    });
 }
 
 #[test]
