@@ -32,9 +32,9 @@ def main(binary, measure_only):
     fake = Path(__file__).resolve().parents[2] / "scripts/fake_openai_server.py"
     with tempfile.TemporaryDirectory(prefix="jlog-", dir=os.environ.get("JCODE_SCRATCH_DIR")) as tmp:
         root = Path(tmp)
-        home, jhome = root / "h", root / "j"
-        home.mkdir(mode=0o700)
-        jhome.mkdir(mode=0o700)
+        home, jhome, client_home = root / "h", root / "j", root / "c"
+        for directory in (home, jhome, client_home):
+            directory.mkdir(mode=0o700)
         sock, port = root / "d.sock", root / "port"
         requests = root / "requests.jsonl"
         env = {
@@ -77,7 +77,8 @@ def main(binary, measure_only):
             def debug(*args):
                 return subprocess.run(
                     [*command, "debug", *args, "--socket", str(sock)],
-                    env=env, cwd=root, capture_output=True, text=True, timeout=30,
+                    env=dict(env, JCODE_HOME=str(client_home)),
+                    cwd=root, capture_output=True, text=True, timeout=30,
                 ).stdout
 
             try:
