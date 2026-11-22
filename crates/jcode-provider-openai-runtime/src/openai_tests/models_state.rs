@@ -752,10 +752,78 @@ fn oauth_creds() -> CodexCredentials {
 }
 
 #[test]
+fn oauth_astra_uses_the_configured_compaction_policy_in_responses() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[provider]\nopenai_native_compaction_mode = 'auto'\n\
+         openai_native_compaction_threshold_tokens = 200000\n\
+         [compaction]\nreactive_threshold_tokens = 400000\n",
+    )
+    .unwrap();
+    jcode_base::config::invalidate_config_cache();
+    let provider = OpenAIProvider::new(oauth_creds());
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec!["gpt-6.2-astra".into()],
+    );
+    provider.set_model("gpt-6.2-astra").unwrap();
+
+    let request =
+        provider.response_request_for_model("gpt-6.2-astra", &[][..], &[], "fixture only", true);
+    assert!(!provider.uses_jcode_compaction());
+    assert_eq!(
+        request["context_management"][0]["compact_threshold"],
+        400_000
+    );
+    assert_eq!(provider.native_compaction_threshold_tokens(), Some(400_000));
+}
+
+#[test]
+fn native_responses_uses_the_request_model_and_its_compaction_overrides() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[provider]\nopenai_native_compaction_mode = 'auto'\n\
+         [compaction]\nreactive_threshold_tokens = 400000\n\
+         [compaction.providers.openai]\nreactive_threshold_tokens = 325000\n\
+         [compaction.models.'gpt-6.2-astra']\nreactive_threshold_tokens = 0\n\
+         reactive_threshold = 0.5\nmax_context_tokens = 500000\n",
+    )
+    .unwrap();
+    jcode_base::config::invalidate_config_cache();
+    let mut provider = OpenAIProvider::new(oauth_creds());
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec!["gpt-6.1-sol".into(), "gpt-6.2-astra".into()],
+    );
+    provider.set_model("gpt-6.1-sol").unwrap();
+    assert_eq!(provider.native_compaction_threshold_tokens(), Some(325_000));
+    let request =
+        provider.response_request_for_model("gpt-6.2-astra", &[][..], &[], "fixture only", true);
+    assert_eq!(
+        request["context_management"][0]["compact_threshold"],
+        250_000
+    );
+    provider.set_model("gpt-6.2-astra").unwrap();
+    assert_eq!(provider.native_compaction_threshold_tokens(), Some(250_000));
+    provider.native_compaction_mode = OpenAINativeCompactionMode::Explicit;
+    let request =
+        provider.response_request_for_model("gpt-6.2-astra", &[][..], &[], "fixture only", true);
+    assert!(request.get("context_management").is_none());
+    assert_eq!(provider.native_compaction_threshold_tokens(), None);
+}
+
+#[test]
 fn oauth_astra_context_meter_threshold_matches_responses_request() {
     let _guard = jcode_base::storage::lock_test_env();
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    jcode_base::config::invalidate_config_cache();
     let mut provider = OpenAIProvider::new(oauth_creds());
     jcode_base::provider::populate_account_models_for_scope(
         &provider.catalog_scope(),

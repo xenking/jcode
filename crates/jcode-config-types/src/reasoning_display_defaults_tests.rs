@@ -27,14 +27,14 @@ fn anthropic_effort_defaults_to_low() {
 fn proactive_floor_defaults_and_legacy_config() {
     let config = CompactionConfig::default();
     assert_eq!(config.reactive_threshold, 0.80);
-    assert_eq!(config.reactive_threshold_tokens, 400_000);
+    assert_eq!(config.jcode_reactive_threshold_tokens(), 400_000);
     assert_eq!(config.proactive_floor, 0.40);
     assert_eq!(config.proactive_floor_tokens, 150_000);
     let parsed: CompactionConfig = serde_json::from_str(r#"{"proactive_floor":0.15}"#).unwrap();
     assert_eq!(parsed.proactive_floor, 0.15);
     assert_eq!(parsed.proactive_floor_tokens, 150_000);
     assert_eq!(parsed.reactive_threshold, 0.80);
-    assert_eq!(parsed.reactive_threshold_tokens, 400_000);
+    assert_eq!(parsed.jcode_reactive_threshold_tokens(), 400_000);
 }
 
 #[test]

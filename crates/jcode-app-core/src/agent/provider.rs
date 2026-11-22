@@ -563,7 +563,7 @@ impl Agent {
                     model,
                     cfg.mode.as_str(),
                     cfg.reactive_threshold,
-                    cfg.reactive_threshold_tokens,
+                    cfg.jcode_reactive_threshold_tokens(),
                     cfg.max_context_tokens,
                     manager.token_budget()
                 ));

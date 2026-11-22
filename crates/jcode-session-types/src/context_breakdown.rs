@@ -37,6 +37,8 @@ pub struct ContextMeter {
     pub effective_budget_tokens: Option<u64>,
     pub session_cap_tokens: Option<u64>,
     pub compaction_mode: Option<String>,
+    /// Automatic trigger, not a context budget. In `saved` state this is the
+    /// recorded policy, not a recomputation against current daemon settings.
     pub compaction_threshold_tokens: Option<u64>,
     pub idle_precompaction_tokens: Option<u64>,
     /// Published pricing boundary for one request's total input, never occupancy.

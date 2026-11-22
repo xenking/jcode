@@ -105,7 +105,7 @@ fn the_clamped_report_drives_the_compaction_ratio() {
     manager.set_budget(1_000_000);
     manager.mode = crate::config::CompactionMode::Reactive;
     manager.compaction_config.reactive_threshold = 0.8;
-    manager.compaction_config.reactive_threshold_tokens = 0;
+    manager.compaction_config.reactive_threshold_tokens = Some(0);
     manager.update_observed_input_tokens_with_estimate(433_676, 280_000);
     let accepted = manager.update_observed_input_tokens_with_estimate(883_966, 281_628);
     let usage = accepted as f32 / 1_000_000.0;

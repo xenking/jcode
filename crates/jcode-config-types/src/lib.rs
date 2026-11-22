@@ -301,8 +301,10 @@ pub struct CompactionConfig {
     pub reactive_threshold: f32,
 
     /// [reactive] Alternative token threshold, whichever is reached first.
-    /// Zero disables the token alternative.
-    pub reactive_threshold_tokens: usize,
+    /// Zero disables the token alternative. If unset, Jcode uses 400,000 and
+    /// OpenAI native auto compaction retains its provider-specific default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reactive_threshold_tokens: Option<usize>,
 
     /// [proactive] Number of turns to look ahead when projecting token growth
     pub lookahead_turns: usize,
@@ -452,7 +454,6 @@ impl CompactionOverride {
         merge!(
             mode,
             reactive_threshold,
-            reactive_threshold_tokens,
             lookahead_turns,
             ewma_alpha,
             proactive_floor,
@@ -479,6 +480,9 @@ impl CompactionOverride {
             idle_precompact,
             idle_precompact_ratio
         );
+        if let Some(tokens) = self.reactive_threshold_tokens {
+            cfg.reactive_threshold_tokens = Some(tokens);
+        }
     }
 }
 
@@ -518,6 +522,10 @@ fn compaction_key_matches(key: &str, value: &str) -> bool {
 }
 
 impl CompactionConfig {
+    pub fn jcode_reactive_threshold_tokens(&self) -> usize {
+        self.reactive_threshold_tokens.unwrap_or(400_000)
+    }
+
     /// Effective settings for a session: model beats provider beats global.
     /// The returned config carries no nested overrides.
     pub fn resolve(&self, provider: Option<&str>, model: Option<&str>) -> CompactionConfig {
@@ -545,7 +553,7 @@ impl Default for CompactionConfig {
         Self {
             mode: CompactionMode::Reactive,
             reactive_threshold: 0.80,
-            reactive_threshold_tokens: 400_000,
+            reactive_threshold_tokens: None,
             lookahead_turns: 15,
             ewma_alpha: 0.3,
             proactive_floor: 0.40,
@@ -1369,7 +1377,8 @@ pub struct ProviderConfig {
     pub openai_service_tier: Option<String>,
     /// OpenAI native compaction mode: "auto", "explicit", or "off".
     pub openai_native_compaction_mode: String,
-    /// Token threshold at which OpenAI auto native compaction should trigger.
+    /// OpenAI native auto trigger when the resolved compaction policy has no
+    /// explicit `reactive_threshold_tokens`.
     pub openai_native_compaction_threshold_tokens: usize,
     /// Preserve provider-native reasoning/thinking items for future-turn context when supported.
     pub preserve_reasoning_context: bool,
@@ -1860,13 +1869,13 @@ reactive_threshold_tokens = 500000
         assert_eq!(resolved.shake_min_region_tokens, 400);
         assert_eq!(resolved.shake_min_savings_tokens, 4_000);
         assert!(resolved.shake_code_blocks);
-        assert_eq!(resolved.reactive_threshold_tokens, 280_000);
+        assert_eq!(resolved.reactive_threshold_tokens, Some(280_000));
         assert_eq!(
             parsed
                 .compaction
                 .resolve(Some("claude"), Some("claude-opus-5-5"))
                 .reactive_threshold_tokens,
-            500_000
+            Some(500_000)
         );
         // A forced shape name is preserved verbatim for the snapcompact pass.
         let forced: CompactionConfig =
@@ -1896,7 +1905,7 @@ reactive_threshold_tokens = 500000
                 config
                     .resolve(Some("Claude"), Some(id))
                     .reactive_threshold_tokens,
-                500_000,
+                Some(500_000),
                 "{id}"
             );
         }
@@ -1904,7 +1913,7 @@ reactive_threshold_tokens = 500000
             config
                 .resolve(Some("Claude"), Some("claude-opus-5-5-fast"))
                 .reactive_threshold_tokens,
-            400_000
+            None
         );
     }
 
@@ -1942,7 +1951,7 @@ reactive_threshold_tokens = 500000
         let r = c.resolve(Some("openai"), Some("gpt-6.1-terra"));
         assert_eq!(r.reactive_threshold, 0.80);
         assert_eq!(r.max_context_tokens, 0);
-        assert_eq!(r.reactive_threshold_tokens, 400_000);
+        assert_eq!(r.jcode_reactive_threshold_tokens(), 400_000);
     }
 
     #[test]
@@ -1951,14 +1960,14 @@ reactive_threshold_tokens = 500000
         let r = c.resolve(Some("openai"), Some("gpt-6.1-terra"));
         assert_eq!(r.reactive_threshold, 0.7);
         assert_eq!(r.max_context_tokens, 200_000);
-        assert_eq!(r.reactive_threshold_tokens, 400_000);
+        assert_eq!(r.jcode_reactive_threshold_tokens(), 400_000);
         assert!(r.models.is_empty() && r.providers.is_empty());
         let r = c.resolve(Some("OpenAI"), Some("gpt-6.1-luna"));
         assert_eq!(r.max_context_tokens, 272_000);
         let r = c.resolve(Some("claude"), Some("claude-opus-5-5"));
         assert_eq!(r.reactive_threshold, 0.80);
         assert_eq!(r.max_context_tokens, 700_000);
-        assert_eq!(r.reactive_threshold_tokens, 600_000);
+        assert_eq!(r.reactive_threshold_tokens, Some(600_000));
     }
 
     #[test]

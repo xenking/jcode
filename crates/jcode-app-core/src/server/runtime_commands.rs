@@ -212,7 +212,7 @@ pub(super) async fn execute(
             let compaction_budget = agent.effective_context_budget().await;
             json!({"compaction": {"mode": compaction.mode.as_str(),
                     "reactive_threshold": compaction.reactive_threshold,
-                    "reactive_threshold_tokens": compaction.reactive_threshold_tokens,
+                    "reactive_threshold_tokens": compaction.jcode_reactive_threshold_tokens(),
                     "proactive_floor": compaction.proactive_floor,
                     "max_context_tokens": compaction.max_context_tokens,
                     "budget": compaction_budget},"session_id": agent.session_id(), "working_dir": agent.working_dir(),

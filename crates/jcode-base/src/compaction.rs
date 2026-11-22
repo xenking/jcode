@@ -377,24 +377,34 @@ fn threshold_tokens_after_overrides(
     cfg: &crate::config::CompactionConfig,
     context_window: usize,
 ) -> Option<usize> {
+    absolute_threshold_for_window(cfg, context_window, cfg.jcode_reactive_threshold_tokens())
+}
+
+/// Compute the earlier configured trigger, independent of the compaction engine.
+pub fn absolute_threshold_for_window(
+    cfg: &crate::config::CompactionConfig,
+    context_window: usize,
+    threshold_tokens: usize,
+) -> Option<usize> {
     let budget = if cfg.max_context_tokens > 0 {
         context_window.min(cfg.max_context_tokens)
     } else {
         context_window
     };
-    threshold_tokens_for_budget(cfg, budget)
+    threshold_tokens_for_budget(cfg.reactive_threshold, budget, threshold_tokens)
 }
 
 fn threshold_tokens_for_budget(
-    cfg: &crate::config::CompactionConfig,
+    threshold_fraction: f32,
     budget: usize,
+    threshold_tokens: usize,
 ) -> Option<usize> {
     if budget == 0 {
         return None;
     }
-    let by_ratio = (budget as f64 * f64::from(cfg.reactive_threshold.clamp(0.0, 1.0))) as usize;
-    let threshold = if cfg.reactive_threshold_tokens > 0 {
-        by_ratio.min(cfg.reactive_threshold_tokens)
+    let by_ratio = (budget as f64 * f64::from(threshold_fraction.clamp(0.0, 1.0))) as usize;
+    let threshold = if threshold_tokens > 0 {
+        by_ratio.min(threshold_tokens)
     } else {
         by_ratio
     };
@@ -406,7 +416,7 @@ fn threshold_tokens_for_budget(
 fn threshold_tokens_takes_the_earlier_trigger() {
     let mut cfg = crate::config::CompactionConfig {
         reactive_threshold: 1.0,
-        reactive_threshold_tokens: 500_000,
+        reactive_threshold_tokens: Some(500_000),
         max_context_tokens: 1_000_000,
         ..Default::default()
     };
@@ -1612,7 +1622,11 @@ impl CompactionManager {
     /// Resolved reactive trigger in tokens for the active model, regardless of
     /// the configured compaction mode.
     pub fn resolved_compaction_threshold_tokens(&self) -> Option<usize> {
-        threshold_tokens_for_budget(&self.compaction_config, self.token_budget)
+        threshold_tokens_for_budget(
+            self.compaction_config.reactive_threshold,
+            self.token_budget,
+            self.compaction_config.jcode_reactive_threshold_tokens(),
+        )
     }
 
     pub fn reactive_compaction_threshold_tokens(&self) -> Option<usize> {

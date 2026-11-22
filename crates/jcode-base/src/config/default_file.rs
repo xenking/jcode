@@ -524,6 +524,7 @@ codemode = true
 mode = "reactive"
 # Reactive starts at either threshold, whichever is reached first.
 # Zero disables the absolute token threshold.
+# An explicit token threshold also selects this policy for OpenAI native auto.
 reactive_threshold = 0.80
 reactive_threshold_tokens = 400000
 # Proactive/semantic checks become eligible at either floor, whichever is
@@ -1082,7 +1083,7 @@ mod tests {
             toml::from_str::<Config>(&template).expect("the shipped config template must parse");
         assert!(config.tools.codemode);
         assert_eq!(config.compaction.reactive_threshold, 0.80);
-        assert_eq!(config.compaction.reactive_threshold_tokens, 400_000);
+        assert_eq!(config.compaction.reactive_threshold_tokens, Some(400_000));
         assert_eq!(config.compaction.proactive_floor, 0.40);
         assert_eq!(config.compaction.proactive_floor_tokens, 150_000);
         assert_eq!(

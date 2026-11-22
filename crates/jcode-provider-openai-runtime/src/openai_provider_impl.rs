@@ -1099,9 +1099,7 @@ impl Provider for OpenAIProvider {
     }
 
     fn native_compaction_threshold_tokens(&self) -> Option<usize> {
-        (!is_chatgpt_web_model(&self.model()))
-            .then(|| self.native_compaction_threshold_for_context_window(self.context_window()))
-            .flatten()
+        self.native_compaction_threshold_for_model(&self.model())
     }
 
     fn set_service_tier(&self, service_tier: &str) -> Result<()> {
@@ -1216,9 +1214,7 @@ impl Provider for OpenAIProvider {
     }
 
     fn context_window(&self) -> usize {
-        let model = self.model();
-        jcode_provider_core::context_limit_for_model_with_provider(&model, Some(self.name()))
-            .unwrap_or(jcode_provider_core::DEFAULT_CONTEXT_LIMIT)
+        self.context_window_for_model(&self.model())
     }
 
     fn fork(&self) -> Arc<dyn Provider> {

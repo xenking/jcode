@@ -150,6 +150,13 @@ ceiling, but the active provider catalog can report a different model window.
 
 Overrides re-resolve whenever the session model changes (model switch,
 session restore). `/compact mode` choices made at runtime survive re-resolve.
+In OpenAI native `auto` mode, an explicit `reactive_threshold_tokens` in the
+resolved policy also sets the Responses API compaction trigger. The earlier
+of the token and fraction thresholds applies, and `0` uses only the fraction.
+If the token setting is absent at all three layers, native `auto` keeps
+`[provider].openai_native_compaction_threshold_tokens` as its fallback. Jcode's
+own reactive compaction still defaults to 400,000 tokens when unset.
+
 The effective values are logged on every switch:
 `compaction effective: provider=... model=... reactive_threshold=... max_context_tokens=... budget=...`.
 There is no env override for `[compaction]` keys. Per-session ceiling:

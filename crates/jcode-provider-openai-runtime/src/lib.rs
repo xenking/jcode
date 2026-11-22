@@ -1286,18 +1286,27 @@ impl OpenAIProvider {
             .map(|effort| (*effort).to_string())
     }
 
-    fn native_compaction_threshold_for_context_window(
-        &self,
-        context_window: usize,
-    ) -> Option<usize> {
-        if self.native_compaction_mode != OpenAINativeCompactionMode::Auto {
+    fn context_window_for_model(&self, model: &str) -> usize {
+        jcode_provider_core::context_limit_for_model_with_provider(model, Some(self.name()))
+            .unwrap_or(jcode_provider_core::DEFAULT_CONTEXT_LIMIT)
+    }
+
+    fn native_compaction_threshold_for_model(&self, model: &str) -> Option<usize> {
+        if self.native_compaction_mode != OpenAINativeCompactionMode::Auto
+            || is_chatgpt_web_model(model)
+        {
             return None;
         }
-        Some(
-            self.native_compaction_threshold_tokens
-                .max(1000)
-                .min(context_window.max(1000)),
-        )
+        let window = self.context_window_for_model(model);
+        let config = jcode_base::config::config();
+        let policy = config.compaction.resolve(Some(self.name()), Some(model));
+        let threshold = match policy.reactive_threshold_tokens {
+            Some(tokens) => {
+                jcode_base::compaction::absolute_threshold_for_window(&policy, window, tokens)?
+            }
+            None => self.native_compaction_threshold_tokens,
+        };
+        Some(threshold.max(1000).min(window.max(1000)))
     }
 
     fn parse_max_output_tokens(raw: Option<&str>) -> Option<u32> {
