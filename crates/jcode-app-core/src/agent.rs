@@ -206,7 +206,8 @@ impl Agent {
         let miss =
             self.kv_cache_monitor
                 .finish_request_with_prefix(reusable, Some(prefix), cache_read);
-        if reusable > 0
+        if !self.session.is_ephemeral()
+            && reusable > 0
             && let Err(error) = self.kv_cache_monitor.save_checkpoint(&self.session.id)
         {
             logging::warn(&format!(

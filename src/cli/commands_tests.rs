@@ -1566,6 +1566,14 @@ async fn one_shot_output_modes_close_sessions_and_clear_active_pid_markers() {
         );
         let persisted = crate::session::Session::load(&session_id)
             .unwrap_or_else(|error| panic!("load {mode} session: {error:#}"));
+        if format == RunFormat::Ndjson {
+            assert!(
+                crate::session::session_path(&session_id)
+                    .unwrap()
+                    .with_extension("kv-cache")
+                    .exists()
+            );
+        }
         assert!(
             matches!(persisted.status, crate::session::SessionStatus::Closed),
             "{mode} run persisted status {:?}",
@@ -1742,12 +1750,9 @@ async fn run_ci_artifact_and_ephemeral_session() {
                 "{mode} left a transcript"
             );
             assert!(!crate::session::session_journal_path(&id).unwrap().exists());
-            assert!(
-                !crate::session::session_path(&id)
-                    .unwrap()
-                    .with_extension("tool-surface")
-                    .exists()
-            );
+            let path = crate::session::session_path(&id).unwrap();
+            assert!(!path.with_extension("tool-surface").exists());
+            assert!(!path.with_extension("kv-cache").exists());
             assert!(crate::session::load_prompt_inputs(&id).is_none());
         }
     }
@@ -1827,6 +1832,14 @@ impl Provider for TestProvider {
         tokio::spawn(async move {
             let _ = tx
                 .send(Ok(StreamEvent::TextDelta(RUN_TEST_RESPONSE.to_string())))
+                .await;
+            let _ = tx
+                .send(Ok(StreamEvent::TokenUsage {
+                    input_tokens: Some(3),
+                    output_tokens: Some(5),
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                }))
                 .await;
             let _ = tx
                 .send(Ok(StreamEvent::MessageEnd {
