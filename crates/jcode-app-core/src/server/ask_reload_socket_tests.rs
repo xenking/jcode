@@ -273,6 +273,7 @@ async fn socket_reload_ask_workflow(mode: &str) {
         Arc::new(RwLock::new(HashMap::new())),
         AwaitMembersRuntime::default(),
         SwarmMutationRuntime::default(),
+        None,
     ));
     let (reader, mut writer) = client_stream.into_split();
     let mut reader = BufReader::new(reader);

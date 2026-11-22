@@ -100,6 +100,93 @@ impl Drop for ResetConfigCache {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn ambient_nudge_burst_is_consumed_by_one_wake() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
+    let handle = runner.clone();
+    let waiting = tokio::spawn(async move { handle.wait_for_wake(Duration::from_secs(30)).await });
+    runner.nudge();
+    tokio::task::yield_now().await;
+    assert!(
+        !waiting.is_finished(),
+        "the first nudge opens a debounce window"
+    );
+    for _ in 0..100 {
+        runner.nudge();
+    }
+    waiting.await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), runner.wait_for_nudge())
+            .await
+            .is_err()
+    );
+    runner.nudge();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), runner.wait_for_nudge())
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn ambient_runner_observes_external_state_and_queue_replacements_after_nudge() {
+    use crate::ambient::{AmbientManager, AmbientState, ScheduleRequest};
+
+    let _guard = crate::storage::lock_test_env();
+    let _cache = ResetConfigCache;
+    let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _enabled = EnvVarGuard::unset("JCODE_AMBIENT_ENABLED");
+    std::fs::write(Config::path().unwrap(), "[ambient]\nenabled = false\n").unwrap();
+    Config::invalidate_cache();
+    let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
+    let task = tokio::spawn(runner.clone().run_loop(Arc::new(TestProvider)));
+    tokio::task::yield_now().await;
+    assert!(matches!(runner.state().await.status, AmbientStatus::Idle));
+    assert_eq!(runner.queue_json().await, "[]");
+
+    AmbientState {
+        status: AmbientStatus::Disabled,
+        ..AmbientState::default()
+    }
+    .save()
+    .unwrap();
+    let id = AmbientManager::new()
+        .unwrap()
+        .schedule(ScheduleRequest {
+            wake_in_minutes: Some(10),
+            wake_at: None,
+            context: "scheduled by another handle".into(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Ambient,
+            created_by_session: "test".into(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: vec![],
+            git_branch: None,
+            additional_context: None,
+        })
+        .unwrap();
+    runner.nudge();
+    let refreshed = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if matches!(runner.state().await.status, AmbientStatus::Disabled)
+                && runner.queue_json().await.contains(&id)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    task.abort();
+    let _ = task.await;
+    refreshed.expect("both on-disk replacements must be visible after a relevant wake");
+}
+
 #[test]
 fn ambient_gate_tracks_config_toggles_and_preserves_disabled_override() {
     let _guard = crate::storage::lock_test_env();

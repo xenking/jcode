@@ -83,7 +83,7 @@ pub enum AmbientStatus {
 }
 
 /// Priority for scheduled items
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Priority {
     Low,
     Normal,

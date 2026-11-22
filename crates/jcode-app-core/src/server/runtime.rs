@@ -358,6 +358,7 @@ impl ServerRuntime {
         nudge_ambient: bool,
         cancellation: CancellationToken,
     ) {
+        let mut session_bound = false;
         let result = {
             let client = async {
                 let mcp_pool = get_shared_mcp_pool(&self.mcp_pool).await;
@@ -390,6 +391,7 @@ impl ServerRuntime {
                     Arc::clone(&self.soft_interrupt_queues),
                     self.await_members_runtime.clone(),
                     self.swarm_mutation_runtime.clone(),
+                    nudge_ambient.then_some(&mut session_bound),
                 )
                 .await
             };
@@ -402,8 +404,11 @@ impl ServerRuntime {
 
         self.decrement_client_count().await;
 
-        if nudge_ambient && let Some(ref runner) = self.ambient_runner {
-            runner.nudge();
+        if session_bound
+            && result.is_some()
+            && let Some(ref runner) = self.ambient_runner
+        {
+            runner.session_disconnected();
         }
 
         if let Some(Err(e)) = result {
@@ -515,6 +520,65 @@ mod tests {
     #[tokio::test]
     async fn pipelined_first_subscribe_has_bounded_target_reservation_wait() {
         stalled_first_subscribe(true).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn main_socket_nudges_only_after_a_session_connection() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let _env = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let (_home, _runtime, runtime) = isolated_runtime(home.path());
+        let runner = runtime.ambient_runner.as_ref().unwrap();
+        for session_bound in [false, true] {
+            let (peer, stream) = tokio::net::UnixStream::pair().unwrap();
+            runtime.increment_client_count().await;
+            let handler = tokio::spawn(runtime.clone().run_client_stream(
+                stream,
+                "test client error",
+                true,
+                super::CancellationToken::new(),
+            ));
+            let mut peer = BufReader::new(peer);
+            let request = if session_bound {
+                let mut session = crate::session::Session::create(None, None);
+                session.working_dir = Some(home.path().to_string_lossy().into_owned());
+                session.save_prepared().unwrap();
+                serde_json::json!({
+                    "type": "subscribe", "id": 1, "working_dir": session.working_dir,
+                    "target_session_id": session.id,
+                })
+            } else {
+                serde_json::json!({"type": "ping", "id": 1})
+            };
+            peer.write_all(format!("{request}\n").as_bytes())
+                .await
+                .unwrap();
+            let mut line = String::new();
+            tokio::time::timeout(Duration::from_secs(5), peer.read_line(&mut line))
+                .await
+                .unwrap()
+                .unwrap();
+            let reply = serde_json::from_str::<serde_json::Value>(&line).unwrap();
+            assert_ne!(reply["type"], "error", "{reply}");
+            assert_eq!(
+                !runtime.client_connections.read().await.is_empty(),
+                session_bound
+            );
+            drop(peer);
+            tokio::time::timeout(Duration::from_secs(5), handler)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_millis(25), runner.wait_for_nudge())
+                    .await
+                    .is_ok(),
+                session_bound,
+            );
+        }
     }
 
     #[cfg(unix)]

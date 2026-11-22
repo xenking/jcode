@@ -199,6 +199,11 @@ Can also be called mid-cycle to queue future work:
 }
 ```
 
+Ambient-only work expires seven days after it becomes due. When multiple
+overdue entries have the same work and priority, the queue keeps the newest
+one. These rules do not remove future entries or reminders addressed to a
+specific session or a new child session.
+
 ### `todos`
 
 The agent should use a todos tool to plan its cycle. This provides:

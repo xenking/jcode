@@ -1666,6 +1666,7 @@ async fn sdk_socket_cancel_workflow(
             soft_interrupt_queues.clone(),
             AwaitMembersRuntime::default(),
             SwarmMutationRuntime::default(),
+            None,
         ));
         (server_task, client_stream)
     };

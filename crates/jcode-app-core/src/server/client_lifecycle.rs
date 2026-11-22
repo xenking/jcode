@@ -224,6 +224,7 @@ pub(super) async fn handle_client(
     soft_interrupt_queues: SessionInterruptQueues,
     await_members_runtime: AwaitMembersRuntime,
     swarm_mutation_runtime: SwarmMutationRuntime,
+    session_bound: Option<&mut bool>,
 ) -> Result<()> {
     let handler_start = Instant::now();
     let local_jcode_peer = is_local_jcode_peer(&stream);
@@ -503,6 +504,9 @@ pub(super) async fn handle_client(
                 disconnect_tx: disconnect_tx.clone(),
             },
         );
+    }
+    if let Some(session_bound) = session_bound {
+        *session_bound = true;
     }
 
     {

@@ -2,9 +2,8 @@
 
 //! Background ambient mode runner.
 //!
-//! Spawned by the server when ambient mode is enabled. Manages the lifecycle of
-//! ambient cycles: scheduling, spawning agent sessions, handling results, and
-//! providing status for the TUI widget and debug socket.
+//! Spawned by the server to deliver scheduled work. When ambient mode is
+//! enabled, also manages ambient cycles and their status.
 
 use crate::agent::Agent;
 use crate::ambient::{
@@ -23,10 +22,15 @@ use crate::tool;
 use crate::tool::ambient as ambient_tools;
 use chrono::Utc;
 use jcode_agent_runtime::{SoftInterruptMessage, SoftInterruptQueue, SoftInterruptSource};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{Notify, RwLock};
+use tokio::time::Instant;
 
 const MAX_IDLE_POLL_SECS: u64 = 30;
+const NUDGE_DEBOUNCE: Duration = Duration::from_millis(100);
+const SAFETY_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 
 fn cycle_should_notify(result: &AmbientCycleResult, pending_permissions: usize) -> bool {
     !matches!(result.status, CycleStatus::Complete)
@@ -113,12 +117,9 @@ pub struct AmbientRunnerHandle {
 }
 
 struct AmbientRunnerInner {
-    /// Current snapshot of ambient state (for queries)
-    state: RwLock<AmbientState>,
-    /// Queue item count for widget
-    queue_count: RwLock<usize>,
-    /// Next queue item context preview
-    next_queue_preview: RwLock<Option<String>>,
+    manager: Mutex<Option<AmbientManager>>,
+    paused_for_user: AtomicBool,
+    session_disconnected: AtomicBool,
     /// Wake notify (nudge the loop to re-check sooner)
     wake_notify: Notify,
     /// Whether the runner loop is active
@@ -136,12 +137,11 @@ struct AmbientRunnerInner {
 
 impl AmbientRunnerHandle {
     pub fn new(safety: Arc<SafetySystem>) -> Self {
-        let state = AmbientState::load().unwrap_or_default();
         Self {
             inner: Arc::new(AmbientRunnerInner {
-                state: RwLock::new(state),
-                queue_count: RwLock::new(0),
-                next_queue_preview: RwLock::new(None),
+                manager: Mutex::new(None),
+                paused_for_user: AtomicBool::new(false),
+                session_disconnected: AtomicBool::new(false),
                 wake_notify: Notify::new(),
                 running: RwLock::new(false),
                 safety,
@@ -152,9 +152,49 @@ impl AmbientRunnerHandle {
         }
     }
 
-    /// Nudge the ambient loop to check sooner (e.g., after session close/crash).
+    fn with_manager<T>(
+        &self,
+        f: impl FnOnce(&mut AmbientManager) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let mut cache = self.inner.manager.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.is_none() {
+            *cache = Some(AmbientManager::new()?);
+        }
+        f(cache.as_mut().expect("ambient manager initialized"))
+    }
+
+    /// Notify the loop that a schedule or other ambient input changed.
     pub fn nudge(&self) {
         self.inner.wake_notify.notify_one();
+    }
+
+    pub(crate) fn session_disconnected(&self) {
+        self.inner
+            .session_disconnected
+            .store(true, Ordering::Relaxed);
+        self.nudge();
+    }
+
+    async fn wait_for_wake(&self, delay: Duration) {
+        tokio::select! {
+            _ = self.inner.wake_notify.notified() => {
+                // A fixed window collapses bursts without starving work during
+                // continuous activity. At most one permit can accumulate.
+                tokio::time::sleep(NUDGE_DEBOUNCE).await;
+                tokio::select! {
+                    biased;
+                    _ = self.inner.wake_notify.notified() => {},
+                    _ = std::future::ready(()) => {},
+                }
+                logging::debug("Ambient runner: nudged awake");
+            },
+            _ = tokio::time::sleep(delay) => {},
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_nudge(&self) {
+        self.inner.wake_notify.notified().await;
     }
 
     /// Check if the runner loop is active.
@@ -164,7 +204,17 @@ impl AmbientRunnerHandle {
 
     /// Get current ambient state snapshot.
     pub async fn state(&self) -> AmbientState {
-        self.inner.state.read().await.clone()
+        let mut state = self
+            .with_manager(|mgr| Ok(mgr.state().clone()))
+            .unwrap_or_default();
+        if !matches!(state.status, AmbientStatus::Disabled)
+            && self.inner.paused_for_user.load(Ordering::Relaxed)
+        {
+            state.status = AmbientStatus::Paused {
+                reason: "user session active".into(),
+            };
+        }
+        state
     }
 
     /// Get a reference to the safety system (for debug socket permission commands).
@@ -214,25 +264,22 @@ impl AmbientRunnerHandle {
 
     /// Manually trigger an ambient cycle (returns immediately, cycle runs async).
     pub async fn trigger(&self) {
-        // Set status to idle so should_run returns true
-        let mut state = self.inner.state.write().await;
-        if matches!(
-            state.status,
-            AmbientStatus::Scheduled { .. } | AmbientStatus::Idle
-        ) {
-            state.status = AmbientStatus::Idle;
+        if let Err(e) = self.with_manager(|mgr| {
+            mgr.refresh_state()?;
+            if matches!(mgr.state().status, AmbientStatus::Scheduled { .. }) {
+                mgr.set_status(AmbientStatus::Idle)?;
+            }
+            Ok(())
+        }) {
+            logging::warn(&format!("Ambient runner: failed to trigger cycle: {e:#}"));
         }
-        drop(state);
-        self.inner.wake_notify.notify_one();
+        self.nudge();
     }
 
     /// Stop the ambient loop.
     pub async fn stop(&self) {
-        let mut state = self.inner.state.write().await;
-        state.status = AmbientStatus::Disabled;
-        let _ = state.save();
-        drop(state);
-        self.inner.wake_notify.notify_one();
+        self.set_status(AmbientStatus::Disabled);
+        self.nudge();
     }
 
     /// Start (or restart) the ambient loop. If the loop exited due to Disabled
@@ -242,11 +289,7 @@ impl AmbientRunnerHandle {
         if already_running {
             return false;
         }
-        {
-            let mut state = self.inner.state.write().await;
-            state.status = AmbientStatus::Idle;
-            let _ = state.save();
-        }
+        self.set_status(AmbientStatus::Idle);
         let handle = self.clone();
         tokio::spawn(async move {
             handle.run_loop(provider).await;
@@ -269,8 +312,8 @@ impl AmbientRunnerHandle {
             next_reminder_preview,
             next_reminder_due,
             overdue_reminder_count,
-        ) = match AmbientManager::new() {
-            Ok(mgr) => {
+        ) = self
+            .with_manager(|mgr| {
                 let now = Utc::now();
                 let items = mgr.queue().items();
                 let queue_count = items.len();
@@ -293,7 +336,7 @@ impl AmbientRunnerHandle {
                     .filter(|item| item.scheduled_for <= now)
                     .count();
 
-                (
+                Ok((
                     queue_count,
                     next_item.map(|item| {
                         item.task_description
@@ -312,10 +355,9 @@ impl AmbientRunnerHandle {
                     }),
                     next_reminder.map(|item| item.scheduled_for.to_rfc3339()),
                     overdue_reminder_count,
-                )
-            }
-            Err(_) => (0, None, None, 0, 0, None, None, 0),
-        };
+                ))
+            })
+            .unwrap_or((0, None, None, 0, 0, None, None, 0));
 
         let status_str = match &state.status {
             AmbientStatus::Idle => "idle".to_string(),
@@ -360,45 +402,44 @@ impl AmbientRunnerHandle {
 
     /// Get queue items JSON for debug socket.
     pub async fn queue_json(&self) -> String {
-        match AmbientManager::new() {
-            Ok(mgr) => {
-                let items: Vec<serde_json::Value> = mgr
-                    .queue()
-                    .items()
-                    .iter()
-                    .map(|item| {
-                        let (target_kind, target_session_id, target_parent_session_id) =
-                            match &item.target {
-                                ScheduleTarget::Ambient => ("ambient", None, None),
-                                ScheduleTarget::Session { session_id } => {
-                                    ("session", Some(session_id.clone()), None)
-                                }
-                                ScheduleTarget::Spawn { parent_session_id } => {
-                                    ("spawn", None, Some(parent_session_id.clone()))
-                                }
-                            };
-                        let overdue_seconds =
-                            (Utc::now() - item.scheduled_for).num_seconds().max(0);
-                        serde_json::json!({
-                            "id": item.id,
-                            "scheduled_for": item.scheduled_for.to_rfc3339(),
-                            "context": item.context,
-                            "task_description": item.task_description,
-                            "priority": format!("{:?}", item.priority),
-                            "created_at": item.created_at.to_rfc3339(),
-                            "target_kind": target_kind,
-                            "target_session_id": target_session_id,
-                            "target_parent_session_id": target_parent_session_id,
-                            "working_dir": item.working_dir,
-                            "relevant_files": item.relevant_files,
-                            "git_branch": item.git_branch,
-                            "overdue": item.scheduled_for <= Utc::now(),
-                            "overdue_seconds": overdue_seconds,
-                        })
+        match self.with_manager(|mgr| {
+            let items: Vec<serde_json::Value> = mgr
+                .queue()
+                .items()
+                .iter()
+                .map(|item| {
+                    let (target_kind, target_session_id, target_parent_session_id) =
+                        match &item.target {
+                            ScheduleTarget::Ambient => ("ambient", None, None),
+                            ScheduleTarget::Session { session_id } => {
+                                ("session", Some(session_id.clone()), None)
+                            }
+                            ScheduleTarget::Spawn { parent_session_id } => {
+                                ("spawn", None, Some(parent_session_id.clone()))
+                            }
+                        };
+                    let overdue_seconds = (Utc::now() - item.scheduled_for).num_seconds().max(0);
+                    serde_json::json!({
+                        "id": item.id,
+                        "scheduled_for": item.scheduled_for.to_rfc3339(),
+                        "context": item.context,
+                        "task_description": item.task_description,
+                        "priority": format!("{:?}", item.priority),
+                        "created_at": item.created_at.to_rfc3339(),
+                        "target_kind": target_kind,
+                        "target_session_id": target_session_id,
+                        "target_parent_session_id": target_parent_session_id,
+                        "working_dir": item.working_dir,
+                        "relevant_files": item.relevant_files,
+                        "git_branch": item.git_branch,
+                        "overdue": item.scheduled_for <= Utc::now(),
+                        "overdue_seconds": overdue_seconds,
                     })
-                    .collect();
-                serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".to_string())
-            }
+                })
+                .collect();
+            Ok(serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".to_string()))
+        }) {
+            Ok(json) => json,
             Err(e) => format!("{{\"error\": \"{}\"}}", e),
         }
     }
@@ -670,34 +711,42 @@ impl AmbientRunnerHandle {
         // Initialize safety system for ambient tools
         ambient_tools::init_safety_system(Arc::clone(&self.inner.safety));
 
+        let mut next_safety_sweep = Instant::now();
         loop {
-            // Check state
-            let state = { self.inner.state.read().await.clone() };
-
-            let ambient_allowed = ambient_allowed(&state.status);
-
-            if ambient_allowed {
-                // Update scheduler's user-active state
-                let active_sessions = *self.inner.active_user_sessions.read().await;
-                scheduler.set_user_active(active_sessions > 0);
-
-                // Check if we should pause
-                if scheduler.should_pause() {
-                    let mut s = self.inner.state.write().await;
-                    s.status = AmbientStatus::Paused {
-                        reason: "user session active".to_string(),
-                    };
-                    drop(s);
-
-                    // Sleep until nudged or 60s
-                    tokio::select! {
-                        _ = self.inner.wake_notify.notified() => {},
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {},
+            let now = Utc::now();
+            let (status, ready_direct_items, next_queue_check) = match self.with_manager(|mgr| {
+                if let Err(e) = mgr.refresh_state() {
+                    logging::warn(&format!("Ambient runner: failed to refresh state: {e:#}"));
+                }
+                let (ready, next_check) = match mgr.maintain_schedule(now) {
+                    Ok(ready) => (ready, mgr.queue().next_maintenance()),
+                    Err(e) => {
+                        logging::warn(&format!("Ambient runner: failed to maintain queue: {e:#}"));
+                        (Vec::new(), None)
                     }
+                };
+                Ok((mgr.state().status.clone(), ready, next_check))
+            }) {
+                Ok(snapshot) => snapshot,
+                Err(e) => {
+                    logging::warn(&format!("Ambient runner: failed to load manager: {e:#}"));
+                    self.wait_for_wake(Duration::from_secs(MAX_IDLE_POLL_SECS))
+                        .await;
                     continue;
                 }
+            };
+            let ambient_allowed = ambient_allowed(&status);
+            scheduler.set_user_active(*self.inner.active_user_sessions.read().await > 0);
+            let paused = ambient_allowed && scheduler.should_pause();
+            self.inner.paused_for_user.store(paused, Ordering::Relaxed);
 
-                // Drop stale permission requests whose originating session is no longer active.
+            let disconnected = self
+                .inner
+                .session_disconnected
+                .swap(false, Ordering::Relaxed);
+            if ambient_allowed && (disconnected || Instant::now() >= next_safety_sweep) {
+                next_safety_sweep = Instant::now() + SAFETY_SWEEP_INTERVAL;
+                // The timer also covers sessions without a client transport.
                 match self
                     .inner
                     .safety
@@ -719,72 +768,48 @@ impl AmbientRunnerHandle {
                 }
             }
 
-            // Load manager to check should_run and update queue info
-            let (should_run, ready_direct_items, next_direct_due) = match AmbientManager::new() {
-                Ok(mut mgr) => {
-                    let ready_direct_items = mgr.take_ready_direct_items();
-                    let next_direct_due = mgr
-                        .queue()
-                        .items()
-                        .iter()
-                        .filter(|item| item.target.is_direct_delivery())
-                        .map(|item| item.scheduled_for)
-                        .min();
-                    // Update queue info for widget
-                    {
-                        let mut qc = self.inner.queue_count.write().await;
-                        *qc = mgr.queue().len();
-                    }
-                    {
-                        let mut qp = self.inner.next_queue_preview.write().await;
-                        *qp = mgr.queue().peek_next().map(|i| i.context.clone());
-                    }
-                    // Also run if there are pending email reply directives
-                    (
-                        ambient_allowed && (mgr.should_run() || ambient::has_pending_directives()),
-                        ready_direct_items,
-                        next_direct_due,
-                    )
-                }
-                Err(e) => {
-                    logging::error(&format!("Ambient runner: failed to load manager: {}", e));
-                    (false, Vec::new(), None)
-                }
-            };
-
             if !ready_direct_items.is_empty() {
                 self.deliver_ready_direct_items(&provider, ready_direct_items)
                     .await;
             }
 
-            if !should_run {
-                let sleep_secs = if ambient_allowed {
-                    let interval = scheduler
-                        .calculate_interval(None)
-                        .as_secs()
-                        .max(MAX_IDLE_POLL_SECS);
-                    let next_direct_secs = next_direct_due
-                        .map(|next| (next - Utc::now()).num_seconds().max(0) as u64)
-                        .unwrap_or(interval);
-                    interval.min(next_direct_secs.max(1))
-                } else {
-                    next_direct_due
-                        .map(|next| (next - Utc::now()).num_seconds().max(0) as u64)
-                        .map(|secs| secs.clamp(1, MAX_IDLE_POLL_SECS))
-                        .unwrap_or(MAX_IDLE_POLL_SECS)
-                };
-
-                logging::info(&format!(
-                    "Ambient runner: not time to run, sleeping {}s",
-                    sleep_secs
-                ));
-
-                tokio::select! {
-                    _ = self.inner.wake_notify.notified() => {
-                        logging::info("Ambient runner: nudged awake");
-                    },
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)) => {},
+            let next_cycle = if ambient_allowed && !paused {
+                match status {
+                    AmbientStatus::Idle => Some(now),
+                    AmbientStatus::Scheduled { next_wake } => Some(next_wake),
+                    _ => None,
                 }
+            } else {
+                None
+            };
+            let should_run = ambient_allowed
+                && !paused
+                && (next_cycle.is_some_and(|due| due <= now)
+                    || self
+                        .with_manager(AmbientManager::has_pending_directives)
+                        .unwrap_or_else(|e| {
+                            logging::warn(&format!(
+                                "Ambient runner: failed to refresh directives: {e:#}"
+                            ));
+                            false
+                        }));
+            if !should_run {
+                // The fallback poll is only for out-of-process file/config edits.
+                let sleep = next_cycle
+                    .into_iter()
+                    .chain(next_queue_check)
+                    .map(|due| {
+                        (due - Utc::now())
+                            .to_std()
+                            .unwrap_or_default()
+                            .max(Duration::from_millis(100))
+                    })
+                    .fold(Duration::from_secs(MAX_IDLE_POLL_SECS), Duration::min);
+                logging::debug(&format!(
+                    "Ambient runner: not time to run, sleeping {}s",
+                    sleep.as_secs()
+                ));
+                self.wait_for_wake(sleep).await;
                 continue;
             }
 
@@ -827,12 +852,10 @@ impl AmbientRunnerHandle {
                     ));
 
                     // Update state
-                    if let Ok(mut mgr) = AmbientManager::new() {
-                        let _ = mgr.record_cycle_result(result.clone());
+                    if let Err(e) = self.with_manager(|mgr| mgr.record_cycle_result(result.clone()))
+                    {
+                        logging::warn(&format!("Ambient runner: failed to record cycle: {e:#}"));
                     }
-                    let mut s = self.inner.state.write().await;
-                    s.record_cycle(&result);
-                    let _ = s.save();
 
                     scheduler.on_successful_cycle();
 
@@ -880,10 +903,6 @@ impl AmbientRunnerHandle {
                         .notifier
                         .dispatch_cycle_failure(cycle_error_reason(&e));
                     scheduler.on_rate_limit_hit();
-
-                    let mut s = self.inner.state.write().await;
-                    s.status = AmbientStatus::Idle;
-                    let _ = s.save();
                 }
             }
 
@@ -895,37 +914,49 @@ impl AmbientRunnerHandle {
             let sleep_secs = interval.as_secs().max(30);
 
             // Update state with scheduled wake
-            {
-                let mut s = self.inner.state.write().await;
+            if let Err(e) = self.with_manager(|mgr| {
                 if matches!(
-                    s.status,
+                    mgr.state().status,
                     AmbientStatus::Running { .. } | AmbientStatus::Idle
                 ) {
-                    s.status = AmbientStatus::Scheduled {
+                    mgr.set_status(AmbientStatus::Scheduled {
                         next_wake: Utc::now() + chrono::Duration::seconds(sleep_secs as i64),
-                    };
-                    let _ = s.save();
+                    })?;
                 }
+                Ok(())
+            }) {
+                logging::warn(&format!(
+                    "Ambient runner: failed to schedule next cycle: {e:#}"
+                ));
+                self.wait_for_wake(Duration::from_secs(sleep_secs)).await;
             }
+        }
+    }
 
-            logging::info(&format!("Ambient runner: next cycle in {}s", sleep_secs));
-
-            tokio::select! {
-                _ = self.inner.wake_notify.notified() => {
-                    logging::info("Ambient runner: nudged awake after cycle");
-                },
-                _ = tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)) => {},
-            }
+    fn set_status(&self, status: AmbientStatus) {
+        if let Err(e) = self.with_manager(|mgr| {
+            mgr.refresh_state()?;
+            mgr.set_status(status)
+        }) {
+            logging::warn(&format!("Ambient runner: failed to set status: {e:#}"));
         }
     }
 
     /// Update the running status detail and persist to disk for waybar.
     async fn set_running_detail(&self, detail: &str) {
-        let mut s = self.inner.state.write().await;
-        s.status = AmbientStatus::Running {
-            detail: detail.to_string(),
-        };
-        let _ = s.save();
+        if let Err(e) = self.with_manager(|mgr| {
+            mgr.refresh_state()?;
+            if !matches!(mgr.state().status, AmbientStatus::Disabled) {
+                mgr.set_status(AmbientStatus::Running {
+                    detail: detail.into(),
+                })?;
+            }
+            Ok(())
+        }) {
+            logging::warn(&format!(
+                "Ambient runner: failed to set running detail: {e:#}"
+            ));
+        }
     }
 
     /// Build the ambient system prompt and initial message for a cycle.
@@ -933,10 +964,8 @@ impl AmbientRunnerHandle {
         &self,
         provider: &Arc<dyn Provider>,
     ) -> anyhow::Result<(String, String)> {
-        let state = self.inner.state.read().await.clone();
-
-        let mgr = AmbientManager::new()?;
-        let queue_items: Vec<_> = mgr.queue().items().to_vec();
+        let (state, queue_items) =
+            self.with_manager(|mgr| Ok((mgr.state().clone(), mgr.queue().items().to_vec())))?;
 
         let memory_manager = MemoryManager::new();
         let graph_health = ambient::gather_memory_graph_health(&memory_manager);

@@ -24,9 +24,3 @@ pub(super) fn queue_path() -> Result<PathBuf> {
 pub(super) fn lock_path() -> Result<PathBuf> {
     Ok(ambient_dir()?.join("ambient.lock"))
 }
-
-pub(super) fn transcripts_dir() -> Result<PathBuf> {
-    let dir = ambient_dir()?.join("transcripts");
-    storage::ensure_dir(&dir)?;
-    Ok(dir)
-}

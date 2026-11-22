@@ -1,7 +1,9 @@
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use std::path::PathBuf;
 
-use super::paths::{ambient_dir, queue_path, transcripts_dir};
+use super::paths::{queue_path, state_path};
+use super::persistence::FileRevision;
 use super::{
     AmbientCycleResult, AmbientState, AmbientStatus, ScheduleRequest, ScheduledItem, ScheduledQueue,
 };
@@ -13,19 +15,70 @@ use crate::config::config;
 
 pub struct AmbientManager {
     state: AmbientState,
+    state_path: PathBuf,
+    state_revision: Option<FileRevision>,
     queue: ScheduledQueue,
+    directives_path: PathBuf,
+    directives_revision: Option<FileRevision>,
+    pending_directives: bool,
 }
 
 impl AmbientManager {
     pub fn new() -> Result<Self> {
-        // Ensure storage layout exists
-        let _ = ambient_dir()?;
-        let _ = transcripts_dir()?;
-
-        let state = AmbientState::load()?;
+        let state_path = state_path()?;
+        let state_revision = FileRevision::read(&state_path)?;
+        let state = AmbientState::load_from(&state_path)?;
         let queue = ScheduledQueue::load(queue_path()?);
+        let directives_path = state_path.with_file_name("directives.json");
 
-        Ok(Self { state, queue })
+        Ok(Self {
+            state,
+            state_path,
+            state_revision,
+            queue,
+            directives_path,
+            directives_revision: None,
+            pending_directives: false,
+        })
+    }
+
+    pub(super) fn refresh_state(&mut self) -> Result<()> {
+        let revision = FileRevision::read(&self.state_path)?;
+        if revision != self.state_revision {
+            self.state_revision = revision;
+            self.state = AmbientState::load_from(&self.state_path)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn has_pending_directives(&mut self) -> Result<bool> {
+        let revision = FileRevision::read(&self.directives_path)?;
+        if revision != self.directives_revision {
+            self.directives_revision = revision;
+            self.pending_directives = false;
+            if self.directives_revision.is_some() {
+                let directives: Vec<super::UserDirective> =
+                    crate::storage::read_json(&self.directives_path)?;
+                self.pending_directives = directives.iter().any(|directive| !directive.consumed);
+            }
+        }
+        Ok(self.pending_directives)
+    }
+
+    pub(super) fn set_status(&mut self, status: AmbientStatus) -> Result<()> {
+        if self.state.status == status {
+            return Ok(());
+        }
+        let mut updated = self.state.clone();
+        updated.status = status;
+        self.save_state(updated)
+    }
+
+    fn save_state(&mut self, state: AmbientState) -> Result<()> {
+        crate::storage::write_json(&self.state_path, &state)?;
+        self.state = state;
+        self.state_revision = FileRevision::read(&self.state_path).ok().flatten();
+        Ok(())
     }
 
     pub fn is_enabled() -> bool {
@@ -47,8 +100,9 @@ impl AmbientManager {
     }
 
     pub fn record_cycle_result(&mut self, result: AmbientCycleResult) -> Result<()> {
-        self.state.record_cycle(&result);
-        self.state.save()?;
+        let mut updated = self.state.clone();
+        updated.record_cycle(&result);
+        self.save_state(updated)?;
 
         // If the cycle produced a schedule request, enqueue it
         if let Some(ref req) = result.next_schedule {
@@ -67,6 +121,10 @@ impl AmbientManager {
     /// specific resumed or spawned session.
     pub fn take_ready_direct_items(&mut self) -> Vec<ScheduledItem> {
         self.queue.take_ready_direct_items()
+    }
+
+    pub(super) fn maintain_schedule(&mut self, now: DateTime<Utc>) -> Result<Vec<ScheduledItem>> {
+        self.queue.maintain_and_take_direct(now)
     }
 
     /// Add a schedule request to the queue. Returns the item ID.
