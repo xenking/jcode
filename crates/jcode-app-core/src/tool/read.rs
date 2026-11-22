@@ -11,6 +11,7 @@ use std::path::Path;
 const DEFAULT_LIMIT: usize = 5000;
 const MAX_LINE_LEN: usize = 2000;
 const MAX_TEXT_OUTPUT: usize = 256 * 1024;
+const EXACT_LINE_COUNT_MAX_BYTES: u64 = 1024 * 1024;
 
 pub struct ReadTool;
 
@@ -53,6 +54,7 @@ impl NormalizedReadRange {
 }
 
 struct TextWindow {
+    more_unscanned: bool,
     output: String,
     total_lines: usize,
     truncated_lines: usize,
@@ -62,6 +64,7 @@ struct TextWindow {
 fn read_text_window(
     mut reader: impl std::io::Read,
     range: NormalizedReadRange,
+    stop_at_window_end: bool,
 ) -> Result<TextWindow> {
     use std::fmt::Write;
     let mut output = String::new();
@@ -73,6 +76,8 @@ fn read_text_window(
     let mut last = 0u8;
     let mut buffer = [0u8; 8196];
     let mut pending = 0usize;
+    let mut more_unscanned = false;
+    let mut remaining = range.next_offset();
     let mut finish_line = |terminated: bool, prefix: &mut Vec<u8>, line_len: usize, last: u8| {
         let index = total_lines;
         total_lines += 1;
@@ -108,24 +113,45 @@ fn read_text_window(
             }
             break;
         }
-        let available = pending + n;
+        let mut available = pending + n;
+        let mut at_window_end = false;
+        if stop_at_window_end && remaining != 0 {
+            for (i, &b) in buffer[..available].iter().enumerate() {
+                if b == b'\n' {
+                    remaining -= 1;
+                    if remaining == 0 {
+                        let end = i + 1;
+                        more_unscanned = end < available || reader.read(&mut [0u8; 1])? != 0;
+                        available = end;
+                        at_window_end = true;
+                        break;
+                    }
+                }
+            }
+        }
         let valid = match std::str::from_utf8(&buffer[..available]) {
             Ok(_) => available,
             Err(err) if err.error_len().is_none() => err.valid_up_to(),
             Err(_) => anyhow::bail!("stream did not contain valid UTF-8"),
         };
-        for &byte in &buffer[..valid] {
-            if byte == b'\n' {
+        for segment in buffer[..valid].split_inclusive(|b| *b == b'\n') {
+            let data = segment.strip_suffix(b"\n").unwrap_or(segment);
+            let keep = data
+                .len()
+                .min((MAX_LINE_LEN + 4).saturating_sub(prefix.len()));
+            prefix.extend_from_slice(&data[..keep]);
+            line_len = line_len.saturating_add(data.len());
+            if let Some(b) = data.last() {
+                last = *b;
+            }
+            if segment.len() != data.len() {
                 finish_line(true, &mut prefix, line_len, last);
                 line_len = 0;
                 last = 0;
-            } else {
-                if prefix.len() < MAX_LINE_LEN + 4 {
-                    prefix.push(byte);
-                }
-                line_len = line_len.saturating_add(1);
-                last = byte;
             }
+        }
+        if at_window_end {
+            break;
         }
         pending = available - valid;
         buffer.copy_within(valid..available, 0);
@@ -134,6 +160,7 @@ fn read_text_window(
         finish_line(false, &mut prefix, line_len, last);
     }
     Ok(TextWindow {
+        more_unscanned,
         output,
         total_lines,
         truncated_lines,
@@ -291,10 +318,13 @@ Image #{ordinal}"
 
         let read_path = path.clone();
         let window = tokio::task::spawn_blocking(move || {
-            read_text_window(std::fs::File::open(read_path)?, range)
+            let file = std::fs::File::open(read_path)?;
+            let large = file.metadata()?.len() > EXACT_LINE_COUNT_MAX_BYTES;
+            read_text_window(file, range, large)
         })
         .await??;
         let TextWindow {
+            more_unscanned,
             mut output,
             total_lines,
             truncated_lines: truncated_line_count,
@@ -310,12 +340,16 @@ Image #{ordinal}"
             intent: None,
             added: 0,
             removed: 0,
-            summary: Some(format!(
-                "read lines {}-{} of {}",
-                range.offset.saturating_add(1),
-                end,
-                total_lines
-            )),
+            summary: Some(if more_unscanned {
+                format!("read lines {}-{end}", range.offset.saturating_add(1))
+            } else {
+                format!(
+                    "read lines {}-{} of {}",
+                    range.offset.saturating_add(1),
+                    end,
+                    total_lines
+                )
+            }),
             detail: None,
         }));
 
@@ -333,16 +367,21 @@ Image #{ordinal}"
         }
 
         // Add metadata
-        if end < total_lines {
+        if end < total_lines || more_unscanned {
             let continuation_hint = match range.style {
                 ReadRangeStyle::OffsetLimit => format!("offset={end}"),
                 ReadRangeStyle::StartEnd => format!("start_line={}", end.saturating_add(1)),
             };
-            output.push_str(&format!(
-                "\n... {} more lines (use {} to continue)\n",
-                total_lines - end,
-                continuation_hint
-            ));
+            if more_unscanned {
+                output.push_str(&format!(
+                    "\n... more lines (use {continuation_hint} to continue)\n"
+                ));
+            } else {
+                output.push_str(&format!(
+                    "\n... {} more lines (use {continuation_hint} to continue)\n",
+                    total_lines - end
+                ));
+            }
         }
 
         if total_lines == 0 {
@@ -351,7 +390,7 @@ Image #{ordinal}"
             output.push_str("(requested range is beyond EOF)");
         } else if truncated_line_count > 0 {
             output.push_str(&format!("\n({truncated_line_count} line(s) truncated)\n"));
-        } else if range.offset == 0 && end == total_lines {
+        } else if !more_unscanned && range.offset == 0 && end == total_lines {
             output.push_str("\n(Complete file)\n");
         }
         Ok(ToolOutput::new(output))

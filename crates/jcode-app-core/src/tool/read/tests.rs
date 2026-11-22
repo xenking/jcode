@@ -114,6 +114,21 @@ async fn read_text_limits_output_and_resumes_at_first_omitted_line() {
 }
 
 #[test]
+fn large_window_does_not_consume_the_remaining_file() {
+    let bytes = b"short row\n".repeat(200_000);
+    let mut source = std::io::Cursor::new(&bytes);
+    let range = NormalizedReadRange {
+        offset: 0,
+        limit: 1,
+        style: ReadRangeStyle::StartEnd,
+    };
+    let result = read_text_window(&mut source, range, true).unwrap();
+    assert!(result.more_unscanned);
+    assert!(result.output.contains("1\tshort row"));
+    assert!(source.position() < 16 * 1024);
+}
+
+#[test]
 fn read_text_stream_handles_utf8_split_and_huge_lines() {
     struct TinyReads<'a>(&'a [u8]);
     impl std::io::Read for TinyReads<'_> {
@@ -130,7 +145,7 @@ fn read_text_stream_handles_utf8_split_and_huge_lines() {
         limit: 2,
         style: ReadRangeStyle::OffsetLimit,
     };
-    let result = read_text_window(TinyReads(text.as_bytes()), range).unwrap();
+    let result = read_text_window(TinyReads(text.as_bytes()), range, false).unwrap();
     assert_eq!(result.total_lines, 2);
     assert_eq!(result.truncated_lines, 1);
     assert!(result.output.contains("2\tlast"));
