@@ -700,6 +700,7 @@ impl Agent {
         agent.session.model = Some(agent.provider_model());
         agent.session.provider_key = agent.provider_key_for_new_session();
         agent.reconcile_explicit_provider_pin_route();
+        agent.restore_speed_from_session();
         mark("provider", &mut lap);
         // A provisional Agent is usually replaced by a resumed session (every
         // reconnect after a reload), so do not fork the git/hardware probes

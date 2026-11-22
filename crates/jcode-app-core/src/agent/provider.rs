@@ -716,6 +716,11 @@ impl Agent {
 
     pub(crate) fn restore_speed_from_session(&mut self) {
         let Some(choice) = self.session.speed_selection.clone() else {
+            if self.provider.speed_mode() != jcode_provider_core::SpeedMode::Standard {
+                let _ = self
+                    .provider
+                    .set_speed_mode(jcode_provider_core::SpeedMode::Standard);
+            }
             return;
         };
         if !self.speed_selection_matches(&choice) {
@@ -723,7 +728,9 @@ impl Agent {
             let _ = self
                 .provider
                 .set_speed_mode(jcode_provider_core::SpeedMode::Standard);
-        } else if let Err(error) = self.provider.set_speed_mode(choice.mode) {
+        } else if let Err(error) =
+            Self::apply_speed_to_provider(self.provider.as_ref(), choice.mode)
+        {
             crate::logging::warn(&format!("Could not restore session speed: {error}"));
         }
     }
@@ -758,24 +765,42 @@ impl Agent {
         Ok(())
     }
 
-    pub(crate) fn set_speed_mode(
-        &mut self,
+    pub(crate) fn apply_speed_to_provider(
+        provider: &dyn crate::provider::Provider,
         mode: jcode_provider_core::SpeedMode,
-    ) -> Result<jcode_provider_core::SpeedMode> {
+    ) -> Result<Option<crate::session::StoredSpeedSelection>> {
         use jcode_provider_core::SpeedMode;
         let next = if mode == SpeedMode::Standard {
             None
         } else {
             Some(crate::session::StoredSpeedSelection {
                 mode,
-                model: self.provider.model(),
-                route: self.provider.speed_route_identity().ok_or_else(|| {
+                model: provider.model(),
+                route: provider.speed_route_identity().ok_or_else(|| {
                     anyhow::anyhow!("The active credential route could not be identified")
                 })?,
             })
         };
+        let previous_mode = provider.speed_mode();
+        provider.set_speed_mode(mode)?;
+        if provider.speed_mode() != mode
+            || next.as_ref().is_some_and(|choice| {
+                provider.model() != choice.model
+                    || provider.speed_route_identity().as_deref() != Some(choice.route.as_str())
+            })
+        {
+            let _ = provider.set_speed_mode(previous_mode);
+            anyhow::bail!("The provider did not apply {mode:?} speed to the selected route");
+        }
+        Ok(next)
+    }
+
+    pub(crate) fn set_speed_mode(
+        &mut self,
+        mode: jcode_provider_core::SpeedMode,
+    ) -> Result<jcode_provider_core::SpeedMode> {
         let previous_mode = self.provider.speed_mode();
-        self.provider.set_speed_mode(mode)?;
+        let next = Self::apply_speed_to_provider(self.provider.as_ref(), mode)?;
         let previous = std::mem::replace(&mut self.session.speed_selection, next);
         if let Err(error) = self.session.save_prepared() {
             self.session.speed_selection = previous;
