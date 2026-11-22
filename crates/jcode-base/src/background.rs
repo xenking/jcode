@@ -576,15 +576,6 @@ impl BackgroundTaskManager {
             event_history: Vec::new(),
             stall_wake_seconds: None,
         };
-        self.write_status_file(&status_path, &initial_status).await;
-        Self::publish_task_started_activity(
-            &task_id,
-            tool_name,
-            display_name.as_deref(),
-            session_id,
-            notify,
-        );
-
         let output_path_clone = output_path.clone();
         let status_path_clone = status_path.clone();
         let task_id_clone = task_id.clone();
@@ -596,10 +587,16 @@ impl BackgroundTaskManager {
         let (delivery_flags_tx, delivery_flags_rx) = watch::channel((notify, wake));
         let manager = self.clone();
         let tasks_for_prune = Arc::clone(&self.tasks);
-        let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
+        let (published_tx, published_rx) = tokio::sync::oneshot::channel::<()>();
 
-        // Spawn the background task
+        // Register before awaiting publication. The worker owns publication
+        // and execution even if the caller is dropped.
+        let mut tasks = self.tasks.write().await;
         let handle = tokio::spawn(runtime_activity.scope(async move {
+            manager
+                .publish_started(&status_path_clone, &initial_status)
+                .await;
+            let _ = published_tx.send(());
             let result = execute_fn(output_path_clone.clone()).await;
 
             let duration_secs = started_at.elapsed().as_secs_f64();
@@ -663,15 +660,9 @@ impl BackgroundTaskManager {
             // write keeps "in the live map while the status file says Running"
             // equivalent to "a task future is actually executing", which the
             // run_plan duplicate-driver guard and self-dev build reconciliation
-            // rely on. Awaiting registration first means a task that finishes
-            // instantly cannot race the insert below and leave a permanent
-            // phantom entry in the map.
+            // rely on. Registration holds the map lock until its entry has
+            // been inserted, so even instant completion can remove it.
             drop(status_guard);
-            if let Err(error) = registered_rx.await {
-                crate::logging::debug(&format!(
-                    "Background task registration ended before completion: {error}"
-                ));
-            }
             tasks_for_prune.write().await.remove(&task_id_clone);
 
             // Read output preview for notification
@@ -717,12 +708,9 @@ impl BackgroundTaskManager {
             handle,
         };
 
-        self.tasks
-            .write()
-            .await
-            .insert(task_id.clone(), running_task);
-        let _ = registered_tx.send(());
-        self.arm_elapsed_review(tool_name, &task_id);
+        tasks.insert(task_id.clone(), running_task);
+        drop(tasks);
+        Self::await_initial_publication(published_rx).await;
 
         BackgroundTaskInfo {
             task_id,
@@ -796,15 +784,6 @@ impl BackgroundTaskManager {
             event_history: Vec::new(),
             stall_wake_seconds: None,
         };
-        self.write_status_file(&status_path, &initial_status).await;
-        Self::publish_task_started_activity(
-            &task_id,
-            tool_name,
-            display_name.as_deref(),
-            session_id,
-            notify,
-        );
-
         let output_path_clone = output_path.clone();
         let status_path_clone = status_path.clone();
         let task_id_clone = task_id.clone();
@@ -812,12 +791,18 @@ impl BackgroundTaskManager {
         let session_id_owned = session_id.to_string();
         let started_at = Instant::now();
         let started_at_rfc3339 = initial_status.started_at.clone();
+        let started_at_rfc3339_for_task = started_at_rfc3339.clone();
         let display_name_owned = initial_status.display_name.clone();
         let (delivery_flags_tx, delivery_flags_rx) = watch::channel((notify, wake));
         let manager = self.clone();
         let tasks_for_prune = Arc::clone(&self.tasks);
-        let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
+        let (published_tx, published_rx) = tokio::sync::oneshot::channel::<()>();
+        let mut tasks = self.tasks.write().await;
         let wrapper_handle = tokio::spawn(runtime_activity.scope(async move {
+            manager
+                .publish_started(&status_path_clone, &initial_status)
+                .await;
+            let _ = published_tx.send(());
             let tool_result = (&mut handle.0).await;
             let duration_secs = started_at.elapsed().as_secs_f64();
 
@@ -864,7 +849,7 @@ impl BackgroundTaskManager {
                 status: status.clone(),
                 exit_code,
                 error: error.clone(),
-                started_at: started_at_rfc3339,
+                started_at: started_at_rfc3339_for_task,
                 completed_at: Some(chrono::Utc::now().to_rfc3339()),
                 duration_secs: Some(duration_secs),
                 pid: None,
@@ -890,11 +875,6 @@ impl BackgroundTaskManager {
             // persisted (and after registration below, so instant completions
             // cannot race the insert and leave a phantom entry).
             drop(status_guard);
-            if let Err(error) = registered_rx.await {
-                crate::logging::debug(&format!(
-                    "Background task registration ended before completion: {error}"
-                ));
-            }
             tasks_for_prune.write().await.remove(&task_id_clone);
 
             let output_preview = if output_text.len() > 500 {
@@ -931,22 +911,39 @@ impl BackgroundTaskManager {
             session_id: session_id.to_string(),
             status_path: status_path.clone(),
             started_at,
-            started_at_rfc3339: initial_status.started_at.clone(),
+            started_at_rfc3339,
             delivery_flags: delivery_flags_tx,
             handle: wrapper_handle,
         };
 
-        self.tasks
-            .write()
-            .await
-            .insert(task_id.clone(), running_task);
-        let _ = registered_tx.send(());
-        self.arm_elapsed_review(tool_name, &task_id);
+        tasks.insert(task_id.clone(), running_task);
+        drop(tasks);
+        Self::await_initial_publication(published_rx).await;
 
         BackgroundTaskInfo {
             task_id,
             output_file: output_path,
             status_file: status_path,
+        }
+    }
+
+    async fn publish_started(&self, path: &std::path::Path, status: &TaskStatusFile) {
+        self.write_status_file(path, status).await;
+        Self::publish_task_started_activity(
+            &status.task_id,
+            &status.tool_name,
+            status.display_name.as_deref(),
+            &status.session_id,
+            status.notify,
+        );
+        self.arm_elapsed_review(&status.tool_name, &status.task_id);
+    }
+
+    async fn await_initial_publication(published: tokio::sync::oneshot::Receiver<()>) {
+        if let Err(error) = published.await {
+            crate::logging::debug(&format!(
+                "Background task ended before initial status publication: {error}"
+            ));
         }
     }
 
