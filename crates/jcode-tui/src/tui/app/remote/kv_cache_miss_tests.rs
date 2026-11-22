@@ -230,18 +230,40 @@ fn remote_kv_cache_miss_deduplicates_token_usage_local_classification() {
 #[test]
 fn remote_warm_shortfall_keeps_usage_without_a_miss_and_preserves_wire_invalidations() {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
     for (prior_input, prior_read, input, read, wire_change) in [
         (115_145, 113_152, 115_190, 112_768, false),
         (195_557, 190_720, 196_490, 190_720, true),
     ] {
         let mut app = create_test_app();
+        let _guard = rt.enter();
+        app.runtime_mode = app_mod::AppRuntimeMode::RemoteClient;
         app.is_remote = true;
+        app.remote_session_id = Some("session_cache_fixture".into());
         app.remote_provider_name = Some("openai".into());
+        app.remote_provider_model = Some("gpt-6.1-sol".into());
         let mut remote = RemoteConnection::dummy();
-        let mut messages = vec![crate::message::Message::user("fixture")];
-        for (input, read) in [(prior_input, prior_read), (input, read)] {
-            app.begin_kv_cache_request(&messages, &[], "system", "");
+        for (input, read, message_hashes) in [
+            (prior_input, prior_read, vec![10]),
+            (input, read, vec![10, 11]),
+        ] {
+            handle_server_event(
+                &mut app,
+                ServerEvent::KvCacheRequest {
+                    system_static_hash: 1,
+                    tools_hash: 2,
+                    messages_hash: message_hashes.iter().sum(),
+                    message_count: message_hashes.len(),
+                    message_hashes,
+                    tool_count: 3,
+                    system_static_chars: 10,
+                    tools_json_chars: 10,
+                    messages_json_chars: 10,
+                    ephemeral_hash: None,
+                    ephemeral_chars: 0,
+                    ephemeral_message_count: 0,
+                },
+                &mut remote,
+            );
             handle_server_event(
                 &mut app,
                 ServerEvent::TokenUsage {
@@ -253,9 +275,11 @@ fn remote_warm_shortfall_keeps_usage_without_a_miss_and_preserves_wire_invalidat
                 },
                 &mut remote,
             );
-            messages.push(crate::message::Message::user("continuation"));
         }
-        assert!(app.kv_cache.kv_cache_miss_samples.is_empty());
+        assert!(
+            app.kv_cache.kv_cache_miss_samples.is_empty(),
+            "unexpected miss for {prior_input}/{prior_read} -> {input}/{read}"
+        );
         assert!(
             app.display_messages
                 .iter()
