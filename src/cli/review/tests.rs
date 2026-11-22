@@ -37,20 +37,11 @@ fn write(repo: &Path, file: &str, contents: &str) {
 }
 
 #[test]
-fn review_cli_requires_one_target_and_does_not_resume_or_use_ssh() {
+fn review_cli_requires_one_target() {
     for args in [
         vec!["jcode", "review"],
         vec!["jcode", "review", "--uncommitted", "--commit", "HEAD"],
         vec!["jcode", "review", "--base", "main", "--commit", "HEAD"],
-        vec!["jcode", "--resume", "old", "review", "--uncommitted"],
-        vec![
-            "jcode",
-            "review",
-            "--commit",
-            "HEAD",
-            "--ssh",
-            "example.invalid",
-        ],
     ] {
         assert!(
             crate::cli::args::Args::try_parse_from(&args).is_err(),

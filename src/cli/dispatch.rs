@@ -27,6 +27,11 @@ use debug_parent::*;
 pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     adopt_runtime_handoff_env(args.command.as_ref());
     arm_debug_client_parent_death_signal();
+    if matches!(args.command, Some(Command::Review(_)))
+        && (args.resume.is_some() || args.ssh.is_some())
+    {
+        anyhow::bail!("Git review does not support --resume or --ssh");
+    }
     if args.ssh.is_some() {
         // A remote session ID and working directory belong to the remote host.
         // Do not run local resume lookup, provider bootstrap, or self-dev setup.

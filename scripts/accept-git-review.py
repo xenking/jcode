@@ -58,7 +58,8 @@ def exercise(binary, evidence, server, root):
     private_home.mkdir()
     env = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT", "PATHEXT") if key in os.environ}
     env.update(HOME=str(private_home), USERPROFILE=str(private_home), JCODE_HOME=str(root / "jcode"),
-               JCODE_RUNTIME_DIR=str(root / "runtime"), JCODE_TEST_SESSION="1", JCODE_NO_MENUBAR="1",
+               JCODE_RUNTIME_DIR=str(root / "runtime"), JCODE_SOCKET=str(root / "r.sock"),
+               JCODE_TEST_SESSION="1", JCODE_NO_MENUBAR="1",
                JCODE_NO_TELEMETRY="1", JCODE_TELEMETRY="off", JCODE_NO_AUTO_UPDATE="1", NO_COLOR="1",
                GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=str(root / "empty-gitconfig"),
                GIT_OPTIONAL_LOCKS="0", OPENAI_COMPAT_API_KEY="fixture-only",
@@ -77,9 +78,10 @@ def exercise(binary, evidence, server, root):
     git("commit", "-qm", "fixture")
     head = git("rev-parse", "HEAD")
 
-    def cli(case, *target):
-        invocation = [str(binary), "--no-update", "--no-selfdev", "--socket", str(root / "r.sock"),
-                      "--provider", "openai-compatible", "--model", "fake-model", "review", *target]
+    def cli(case, *target, prefix=()):
+        socket_args = [] if "--ssh" in target else ["--socket", env["JCODE_SOCKET"]]
+        invocation = [str(binary), "--no-update", "--no-selfdev", *socket_args,
+                      "--provider", "openai-compatible", "--model", "fake-model", *prefix, "review", *target]
         result = subprocess.run(invocation, cwd=repo, timeout=45, capture_output=True, env=dict(env,
             OPENAI_COMPAT_API_BASE=f"http://127.0.0.1:{server.server_port}/{case}/v1"))
         (evidence / f"{case}.stdout").write_bytes(result.stdout)
@@ -96,6 +98,11 @@ def exercise(binary, evidence, server, root):
     assert json.loads(clean.stdout) == {"target": {"kind": "uncommitted", "head": head}, "findings": []}
     unknown = cli("unknown", "--commit", "missing-ref")
     assert unknown.returncode == 1 and not unknown.stdout and b"missing-ref" in unknown.stderr, unknown
+    resume = cli("resume", "--uncommitted", prefix=("--resume", "old"))
+    ssh = cli("ssh", "--uncommitted", "--ssh", "example.invalid")
+    for invalid in (resume, ssh):
+        assert invalid.returncode == 1 and not invalid.stdout
+        assert b"Git review does not support --resume or --ssh" in invalid.stderr
     assert not provider_calls()
 
     tracked.write_text("staged-probe\n")

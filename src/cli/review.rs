@@ -17,8 +17,7 @@ If there are no findings, return {"findings":[]}."#;
 #[group(skip)]
 #[command(group(ArgGroup::new("review_target")
     .args(["uncommitted", "base", "commit"])
-    .required(true)
-    .conflicts_with_all(["resume", "ssh"])))]
+    .required(true)))]
 pub(super) struct ReviewArgs {
     /// Review staged, unstaged, and non-ignored untracked files
     #[arg(long)]
