@@ -953,8 +953,9 @@ async fn resume_all_continues_interrupted_idle_live_session() {
     let accept = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
     // Resume-all records durable intent. The same daemon owner used at startup
     // admits it, not the requesting client or a second continuation path.
-    crate::server::reload_recovery::RecoveryOwner::new(&server)
-        .spawn(runtime.cancellation_token(), Vec::new());
+    let recovery = crate::server::reload_recovery::RecoveryOwner::new(&server);
+    let startup = recovery.reconcile_once().await;
+    recovery.spawn(runtime.cancellation_token(), startup);
     let mut client = crate::server::Client::connect_with_path(socket)
         .await
         .unwrap();

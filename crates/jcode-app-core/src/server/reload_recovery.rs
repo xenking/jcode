@@ -1,19 +1,53 @@
+//! The journal tracks admission, not turn completion. `Started` is a durable
+//! receipt and the normal terminal outcome. `Delivered` is its legacy spelling.
+//! Keep terminal receipts and tombstones discoverable by session, even after
+//! removing them from the owner's active directory.
+
 use crate::tool::selfdev::ReloadRecoveryDirective;
 use anyhow::Result;
+use futures::{StreamExt, stream::FuturesUnordered};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 use std::time::{Duration, SystemTime};
+use tokio::sync::Notify;
 
 static STORE_LOCK: LazyLock<StdMutex<()>> = LazyLock::new(|| StdMutex::new(()));
+static CHANGED_PATHS: LazyLock<StdMutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| StdMutex::new(HashSet::new()));
+static RECORD_CHANGED: Notify = Notify::const_new();
 
-fn lock_store() -> std::sync::MutexGuard<'static, ()> {
-    STORE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+struct StoreGuard {
+    _file: File,
+    _local: std::sync::MutexGuard<'static, ()>,
 }
 
-const PENDING_RECORD_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+fn lock_store() -> Result<StoreGuard> {
+    let local = STORE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = recovery_dir()?;
+    crate::storage::ensure_dir(&dir)?;
+    // Different sockets may share a journal. A sweep must not remove a newer
+    // intent written by another process between reading and unlinking a receipt.
+    let file = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(".lock"))?;
+    file.lock()?;
+    Ok(StoreGuard {
+        _file: file,
+        _local: local,
+    })
+}
+
+const JOURNAL_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const GARBAGE_COLLECTION_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const ADMISSION_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 #[test]
 fn unknown_recovery_status_is_not_admitted() {
@@ -116,6 +150,7 @@ impl ReloadRecoveryRecord {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct GarbageCollectionStats {
     pub removed: usize,
+    pub archived: usize,
     pub retained: usize,
     pub errors: usize,
 }
@@ -141,49 +176,80 @@ pub(super) fn path_for_session(session_id: &str) -> Result<PathBuf> {
     Ok(recovery_dir()?.join(format!("{}.json", sanitize_session_id(session_id))))
 }
 
-fn remove_record_files(path: &std::path::Path) -> Result<()> {
-    for candidate in [path.to_path_buf(), path.with_extension("bak")] {
-        match std::fs::remove_file(&candidate) {
+fn archive_dir(dir: &Path) -> PathBuf {
+    dir.join("archive")
+}
+
+fn archive_path(path: &Path) -> PathBuf {
+    path.with_file_name("archive")
+        .join(path.file_name().unwrap())
+}
+
+fn remove_record_files(path: &Path) -> Result<()> {
+    // Remove the backup first, so only the authoritative record can remain if
+    // the process dies between these two unlinks.
+    for candidate in [path.with_extension("bak"), path.to_path_buf()] {
+        match fs::remove_file(&candidate) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
     }
 
-    #[cfg(unix)]
     if let Some(parent) = path.parent() {
-        std::fs::File::open(parent)?.sync_all()?;
+        sync_directory(parent)?;
     }
     Ok(())
 }
 
-fn file_is_expired(path: &std::path::Path, now: SystemTime) -> bool {
-    std::fs::metadata(path)
+fn sync_directory(_dir: &Path) -> Result<()> {
+    #[cfg(unix)]
+    File::open(_dir)?.sync_all()?;
+    Ok(())
+}
+
+fn archive_record(dir: &Path, path: &Path, record: &ReloadRecoveryRecord) -> Result<()> {
+    let archive = archive_path(path);
+    crate::storage::write_json(&archive, record)?;
+    // Publish the archived receipt durably before dropping either active file.
+    sync_directory(&archive_dir(dir))?;
+    sync_directory(dir)?;
+    remove_record_files(path)
+}
+
+fn file_is_expired(path: &Path, now: SystemTime) -> bool {
+    fs::metadata(path)
         .and_then(|metadata| metadata.modified())
         .ok()
         .and_then(|modified| now.duration_since(modified).ok())
-        .map(|age| age >= PENDING_RECORD_MAX_AGE)
+        .map(|age| age >= JOURNAL_RETENTION)
         .unwrap_or(false)
 }
 
-/// Collect malformed orphan records, never expire authoritative recovery outcomes.
-/// Expiring a cancellation would let legacy reload markers resurrect it.
-///
-/// This is run synchronously before the server starts accepting clients, so it
-/// cannot race in-process recovery writes. A record path is unique per session,
-/// which also bounds repeated reloads for active sessions between sweeps.
-pub(super) fn collect_garbage() -> Result<GarbageCollectionStats> {
-    collect_garbage_at(SystemTime::now())
+pub(super) fn collect_garbage() {
+    match collect_garbage_at(SystemTime::now()) {
+        Ok(stats) if stats.removed + stats.archived + stats.errors > 0 => {
+            crate::logging::info(&format!(
+                "Reload recovery GC: archived={}, removed={}, retained={}, errors={}",
+                stats.archived, stats.removed, stats.retained, stats.errors
+            ));
+        }
+        Ok(_) => {}
+        Err(error) => crate::logging::warn(&format!("Reload recovery GC failed: {error}")),
+    }
 }
 
+/// Collect malformed orphans, archive known terminal records, and never drop
+/// authoritative outcomes. Removing a tombstone could revive a cancelled turn.
 fn collect_garbage_at(now: SystemTime) -> Result<GarbageCollectionStats> {
     let dir = recovery_dir()?;
     if !dir.exists() {
         return Ok(GarbageCollectionStats::default());
     }
+    let _guard = lock_store()?;
 
     let mut stats = GarbageCollectionStats::default();
-    for entry in std::fs::read_dir(&dir)? {
+    for entry in fs::read_dir(&dir)? {
         let entry = match entry {
             Ok(entry) => entry,
             Err(_) => {
@@ -196,7 +262,7 @@ fn collect_garbage_at(now: SystemTime) -> Result<GarbageCollectionStats> {
         if extension == Some("bak") {
             let primary = path.with_extension("json");
             if !primary.exists() && file_is_expired(&path, now) {
-                match std::fs::remove_file(&path) {
+                match fs::remove_file(&path) {
                     Ok(()) => stats.removed += 1,
                     Err(error) => {
                         stats.errors += 1;
@@ -214,28 +280,54 @@ fn collect_garbage_at(now: SystemTime) -> Result<GarbageCollectionStats> {
             continue;
         }
 
-        let should_remove = match crate::storage::read_json::<ReloadRecoveryRecord>(&path) {
-            Ok(_) => false,
-            Err(_) => file_is_expired(&path, now),
-        };
-        if !should_remove {
+        if !file_is_expired(&path, now) {
             stats.retained += 1;
             continue;
         }
 
-        match remove_record_files(&path) {
-            Ok(()) => stats.removed += 1,
-            Err(error) => {
-                stats.errors += 1;
-                crate::logging::warn(&format!(
-                    "reload recovery store: failed to collect {}: {}",
-                    path.display(),
-                    error
-                ));
+        let result = match crate::storage::read_json::<ReloadRecoveryRecord>(&path) {
+            Ok(record)
+                if !record.status.needs_admission()
+                    && record.status != ReloadRecoveryStatus::Unknown =>
+            {
+                archive_record(&dir, &path, &record).map(|()| stats.archived += 1)
             }
+            Ok(_) => {
+                stats.retained += 1;
+                continue;
+            }
+            // An I/O failure is not proof that a record is malformed.
+            Err(error) if error.downcast_ref::<std::io::Error>().is_some() => Err(error),
+            Err(_) => remove_record_files(&path).map(|()| stats.removed += 1),
+        };
+        if let Err(error) = result {
+            stats.errors += 1;
+            crate::logging::warn(&format!(
+                "reload recovery store: failed to collect {}: {}",
+                path.display(),
+                error
+            ));
         }
     }
     Ok(stats)
+}
+
+fn write_record(path: PathBuf, record: &ReloadRecoveryRecord) -> Result<()> {
+    crate::storage::write_json(&path, record)?;
+    CHANGED_PATHS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(path);
+    RECORD_CHANGED.notify_one();
+    Ok(())
+}
+
+fn take_changed_paths() -> HashSet<PathBuf> {
+    std::mem::take(
+        &mut *CHANGED_PATHS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
 }
 
 pub(super) fn persist_intent(
@@ -269,12 +361,12 @@ fn persist_intent_with_mode(
     reason: impl Into<String>,
     wake: bool,
 ) -> Result<()> {
-    let _guard = lock_store();
+    let _guard = lock_store()?;
     if crate::turn_activity::session_is_stopped(session_id) {
         return Ok(());
     }
     let role_label = role.as_str();
-    if peek_for_session(session_id)?.is_some_and(|record| record.reload_id == reload_id) {
+    if peek_locked(session_id)?.is_some_and(|record| record.reload_id == reload_id) {
         return Ok(());
     }
     let record = ReloadRecoveryRecord {
@@ -294,7 +386,7 @@ fn persist_intent_with_mode(
         ask_tool_id: None,
     };
     let path = path_for_session(session_id)?;
-    crate::storage::write_json(&path, &record)?;
+    write_record(path.clone(), &record)?;
     crate::logging::info(&format!(
         "reload recovery store: persisted intent reload_id={} session={} role={} path={}",
         reload_id,
@@ -307,10 +399,37 @@ fn persist_intent_with_mode(
 
 pub(super) fn peek_for_session(session_id: &str) -> Result<Option<ReloadRecoveryRecord>> {
     let path = path_for_session(session_id)?;
-    if !path.exists() {
+    if !record_path_exists(&path)? {
         return Ok(None);
     }
-    crate::storage::read_json(&path).map(Some)
+    let _guard = lock_store()?;
+    peek_locked(session_id)
+}
+
+fn record_path_exists(path: &Path) -> Result<bool> {
+    Ok(path.try_exists()? || archive_path(path).try_exists()?)
+}
+
+fn peek_locked(session_id: &str) -> Result<Option<ReloadRecoveryRecord>> {
+    let path = path_for_session(session_id)?;
+    match read_record_at(&path)? {
+        Some(record) => Ok(Some(record)),
+        None => read_record_at(&archive_path(&path)),
+    }
+}
+
+fn read_record_at(path: &Path) -> Result<Option<ReloadRecoveryRecord>> {
+    match crate::storage::read_json(path) {
+        Ok(record) => Ok(Some(record)),
+        Err(error) if is_missing(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn is_missing(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
 pub(super) fn has_pending_for_session(session_id: &str) -> bool {
@@ -334,12 +453,9 @@ pub(super) fn has_pending_for_session(session_id: &str) -> bool {
 pub(super) fn pending_directive_for_session(
     session_id: &str,
 ) -> Result<Option<ReloadRecoveryDirective>> {
-    let path = path_for_session(session_id)?;
-    if !path.exists() {
+    let Some(record) = peek_for_session(session_id)? else {
         return Ok(None);
-    }
-
-    let record: ReloadRecoveryRecord = crate::storage::read_json(&path)?;
+    };
     if !record.status.needs_admission() {
         super::reload_trace::record_value(
             &record.reload_id,
@@ -363,7 +479,7 @@ pub(super) fn pending_directive_for_session(
         serde_json::json!({
             "session_id": session_id,
             "role": record.role.as_str(),
-            "path": path,
+            "path": path_for_session(session_id)?,
         }),
     );
     crate::logging::info(&format!(
@@ -382,28 +498,23 @@ pub(super) fn is_delivered_continuation(session_id: &str, reminder: &str) -> Res
         .is_some_and(|record| record.directive.continuation_message == reminder))
 }
 
-fn records() -> Result<Vec<ReloadRecoveryRecord>> {
-    let dir = recovery_dir()?;
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut records = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
+fn record_paths(dir: &Path) -> Result<HashSet<PathBuf>> {
+    let mut paths = HashSet::new();
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(paths),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
         let path = entry?.path();
         if path
             .extension()
             .is_some_and(|extension| extension == "json")
         {
-            match crate::storage::read_json(&path) {
-                Ok(record) => records.push(record),
-                Err(error) => crate::logging::warn(&format!(
-                    "Unreadable recovery intent {}: {error}",
-                    path.display()
-                )),
-            }
+            paths.insert(path);
         }
     }
-    Ok(records)
+    Ok(paths)
 }
 
 #[derive(Debug, Default, Clone, Serialize, PartialEq, Eq)]
@@ -416,11 +527,27 @@ pub struct ReloadRecoverySummary {
 }
 
 pub fn recovery_summary(reload_id: &str) -> Result<ReloadRecoverySummary> {
+    let _guard = lock_store()?;
+    let dir = recovery_dir()?;
+    let active = record_paths(&dir)?;
+    let archive = record_paths(&archive_dir(&dir))?;
     let mut summary = ReloadRecoverySummary::default();
-    for record in records()?
-        .into_iter()
-        .filter(|record| record.reload_id == reload_id)
-    {
+    for path in active.iter().chain(
+        archive
+            .iter()
+            .filter(|path| !active.contains(&dir.join(path.file_name().unwrap()))),
+    ) {
+        let record = match read_record_at(path) {
+            Ok(Some(record)) if record.reload_id == reload_id => record,
+            Ok(_) => continue,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "Unreadable recovery intent {}: {error}",
+                    path.display()
+                ));
+                continue;
+            }
+        };
         match record.status {
             ReloadRecoveryStatus::Pending | ReloadRecoveryStatus::Claimed => summary.pending += 1,
             ReloadRecoveryStatus::Started | ReloadRecoveryStatus::Delivered => summary.started += 1,
@@ -441,7 +568,7 @@ fn write_outcome(
     record.status = status;
     record.outcome_reason = Some(reason.to_owned());
     record.delivered_at = Some(chrono::Utc::now().to_rfc3339());
-    crate::storage::write_json(&path_for_session(&record.session_id)?, record)?;
+    write_record(path_for_session(&record.session_id)?, record)?;
     super::reload_trace::record_value(
         &record.reload_id,
         "recovery_outcome",
@@ -502,8 +629,8 @@ pub(super) async fn wait_for_retired_attempt(session_id: &str) -> bool {
 }
 
 fn finish_pending(session_id: &str, status: ReloadRecoveryStatus, reason: &str) -> Result<()> {
-    let _guard = lock_store();
-    if let Some(mut record) = peek_for_session(session_id)?
+    let _guard = lock_store()?;
+    if let Some(mut record) = peek_locked(session_id)?
         && record.status.needs_admission()
     {
         write_outcome(&mut record, status, reason)?;
@@ -535,8 +662,8 @@ fn claim(
     record: &ReloadRecoveryRecord,
     identity: &crate::protocol::TurnIdentity,
 ) -> Result<Option<ReloadRecoveryRecord>> {
-    let _guard = lock_store();
-    let Some(mut current) = peek_for_session(&record.session_id)? else {
+    let _guard = lock_store()?;
+    let Some(mut current) = peek_locked(&record.session_id)? else {
         return Ok(None);
     };
     if current.input_id() != record.input_id() || !current.status.needs_admission() {
@@ -559,7 +686,7 @@ fn claim(
     current.status = ReloadRecoveryStatus::Claimed;
     current.attempt = Some(identity.clone());
     current.attempts = current.attempts.saturating_add(1);
-    crate::storage::write_json(&path_for_session(&record.session_id)?, &current)?;
+    write_record(path_for_session(&record.session_id)?, &current)?;
     super::reload_trace::record_value(
         &current.reload_id,
         "continuation_claimed",
@@ -585,8 +712,8 @@ pub(crate) fn admit_input(
         persist_input()?;
         return Ok(true);
     };
-    let _guard = lock_store();
-    let Some(mut record) = peek_for_session(session_id)? else {
+    let _guard = lock_store()?;
+    let Some(mut record) = peek_locked(session_id)? else {
         return Ok(false);
     };
     if !input_ids.contains(&record.input_id())
@@ -617,8 +744,8 @@ pub(crate) fn admit_resume(
     session_id: &str,
     identity: &crate::protocol::TurnIdentity,
 ) -> Result<bool> {
-    let _guard = lock_store();
-    let Some(mut record) = peek_for_session(session_id)? else {
+    let _guard = lock_store()?;
+    let Some(mut record) = peek_locked(session_id)? else {
         return Ok(false);
     };
     if record.status != ReloadRecoveryStatus::Claimed || record.attempt.as_ref() != Some(identity) {
@@ -642,8 +769,8 @@ pub(crate) fn admit_ask_answer(
     identity: &crate::protocol::TurnIdentity,
     tool_id: &str,
 ) -> Result<bool> {
-    let _guard = lock_store();
-    let Some(mut record) = peek_for_session(&session.id)? else {
+    let _guard = lock_store()?;
+    let Some(mut record) = peek_locked(&session.id)? else {
         return Ok(true);
     };
     if record.ask_tool_id.as_deref() != Some(tool_id) {
@@ -671,8 +798,8 @@ pub(super) fn mark_delivered_if_matching_continuation(
     message: &str,
     _source: &str,
 ) -> Result<bool> {
-    let _guard = lock_store();
-    let Some(mut record) = peek_for_session(session_id)? else {
+    let _guard = lock_store()?;
+    let Some(mut record) = peek_locked(session_id)? else {
         return Ok(false);
     };
     if !record.status.needs_admission() || record.directive.continuation_message != message {
@@ -704,6 +831,13 @@ pub(super) struct RecoveryOwner {
     history: Arc<tokio::sync::RwLock<std::collections::VecDeque<super::SwarmEvent>>>,
     counter: Arc<std::sync::atomic::AtomicU64>,
     events: tokio::sync::broadcast::Sender<super::SwarmEvent>,
+}
+
+#[derive(Default)]
+pub(super) struct RecoveryPass {
+    pub(super) tasks: Vec<tokio::task::JoinHandle<()>>,
+    pending: HashSet<PathBuf>,
+    retry_startup_scan: bool,
 }
 
 impl RecoveryOwner {
@@ -753,37 +887,112 @@ impl RecoveryOwner {
     pub(super) fn spawn(
         self,
         cancellation: tokio_util::sync::CancellationToken,
-        mut tasks: Vec<tokio::task::JoinHandle<()>>,
+        mut work: RecoveryPass,
     ) {
         tokio::spawn(async move {
+            let mut running: FuturesUnordered<_> = work.tasks.drain(..).collect();
+            let mut retry_at = tokio::time::Instant::now() + ADMISSION_RETRY_INTERVAL;
+            let mut gc_at = tokio::time::Instant::now() + GARBAGE_COLLECTION_INTERVAL;
             loop {
+                let retry_armed = work.retry_startup_scan || !work.pending.is_empty();
                 tokio::select! {
                     biased;
                     _ = cancellation.cancelled() => break,
-                    _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+                    _ = running.next(), if !running.is_empty() => {},
+                    _ = tokio::time::sleep_until(retry_at), if retry_armed => {
+                        let mut paths = std::mem::take(&mut work.pending);
+                        if work.retry_startup_scan {
+                            paths.extend(Self::scan_startup(&mut work));
+                        }
+                        self.reconcile_paths(&mut work, paths).await;
+                        retry_at = tokio::time::Instant::now() + ADMISSION_RETRY_INTERVAL;
+                    }
+                    _ = RECORD_CHANGED.notified() => {
+                        let paths = take_changed_paths();
+                        if paths.is_empty() {
+                            continue;
+                        }
+                        // A busy daemon also retires old records without an
+                        // independent directory timer on an idle daemon.
+                        if tokio::time::Instant::now() >= gc_at {
+                            collect_garbage();
+                            gc_at = tokio::time::Instant::now() + GARBAGE_COLLECTION_INTERVAL;
+                        }
+                        self.reconcile_paths(&mut work, paths).await;
+                        if !retry_armed {
+                            retry_at = tokio::time::Instant::now() + ADMISSION_RETRY_INTERVAL;
+                        }
+                    }
                 }
-                tasks.retain(|task: &tokio::task::JoinHandle<()>| !task.is_finished());
-                tasks.extend(self.reconcile_once().await);
+                running.extend(work.tasks.drain(..));
             }
-            for task in tasks {
+            for task in running.iter() {
                 task.abort();
             }
         });
     }
 
-    pub(super) async fn reconcile_once(&self) -> Vec<tokio::task::JoinHandle<()>> {
-        let mut tasks = Vec::new();
-        let records = match records() {
-            Ok(records) => records,
+    fn scan_startup(work: &mut RecoveryPass) -> HashSet<PathBuf> {
+        match recovery_dir().and_then(|dir| record_paths(&dir)) {
+            Ok(paths) => {
+                work.retry_startup_scan = false;
+                paths
+            }
             Err(error) => {
                 crate::logging::warn(&format!("Recovery scan failed, will retry: {error}"));
-                return tasks;
+                work.retry_startup_scan = true;
+                HashSet::new()
             }
+        }
+    }
+
+    pub(super) async fn reconcile_once(&self) -> RecoveryPass {
+        let mut work = RecoveryPass::default();
+        // Writes published before this point are already covered by discovery.
+        take_changed_paths();
+        let paths = Self::scan_startup(&mut work);
+        self.reconcile_paths(&mut work, paths).await;
+        work
+    }
+
+    async fn reconcile_paths(&self, work: &mut RecoveryPass, paths: HashSet<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        let records = {
+            let _guard = match lock_store() {
+                Ok(guard) => guard,
+                Err(error) => {
+                    crate::logging::warn(&format!(
+                        "Recovery store unavailable, will retry: {error}"
+                    ));
+                    work.pending.extend(paths);
+                    return;
+                }
+            };
+            let mut records = Vec::new();
+            for path in paths {
+                work.pending.remove(&path);
+                match read_record_at(&path) {
+                    Ok(Some(record)) if record.status.needs_admission() => {
+                        work.pending.insert(path);
+                        records.push(record);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        crate::logging::warn(&format!(
+                            "Unreadable recovery intent {}: {error}",
+                            path.display()
+                        ));
+                        if error.downcast_ref::<std::io::Error>().is_some() {
+                            work.pending.insert(path);
+                        }
+                    }
+                }
+            }
+            records
         };
-        for record in records
-            .into_iter()
-            .filter(|record| record.status.needs_admission())
-        {
+        for record in records {
             match self.prepare(&record).await {
                 Ok(Some((agent, lease, claimed))) => {
                     let owner = self.clone();
@@ -814,7 +1023,7 @@ impl RecoveryOwner {
                     if !pending {
                         stop.cancel();
                     }
-                    tasks.push(tokio::spawn(async move {
+                    work.tasks.push(tokio::spawn(async move {
                         owner.run(agent, lease, claimed, stop).await;
                         // run has released its lease and drained publication.
                         retired_tx.send_replace(true);
@@ -836,7 +1045,6 @@ impl RecoveryOwner {
                 )),
             }
         }
-        tasks
     }
 
     async fn prepare(
@@ -1356,19 +1564,115 @@ mod tests {
         crate::storage::write_json(&path_for_session("pending")?, &pending)?;
         intent("terminal", "reload")?;
         cancel("terminal")?;
-        let stats = collect_garbage()?;
+        let stats = collect_garbage_at(SystemTime::now())?;
         assert_eq!(stats.retained, 2);
         assert!(peek_for_session("pending")?.is_some());
         assert!(peek_for_session("terminal")?.is_some());
-        let stats = collect_garbage_at(
-            SystemTime::now() + PENDING_RECORD_MAX_AGE + Duration::from_secs(1),
-        )?;
+        let stats =
+            collect_garbage_at(SystemTime::now() + JOURNAL_RETENTION + Duration::from_secs(1))?;
         assert_eq!(stats.removed, 0);
         assert!(has_pending_for_session("pending"));
         assert_eq!(
             peek_for_session("terminal")?.unwrap().status,
             ReloadRecoveryStatus::Cancelled
         );
+        Ok(())
+    }
+
+    #[test]
+    fn old_terminal_intents_leave_the_active_journal_without_losing_authority() -> Result<()> {
+        let _lock = crate::storage::lock_test_env();
+        let _home = IsolatedHome::new();
+        intent("stopped", "reload")?;
+        cancel("stopped")?;
+        let receipt = intent("started", "reload")?;
+        let turn = identity("runtime", 1);
+        claim(&receipt, &turn)?.unwrap();
+        assert!(admit_resume("started", &turn)?);
+        intent("pending", "reload")?;
+
+        collect_garbage_at(SystemTime::now() + JOURNAL_RETENTION + Duration::from_secs(1))?;
+        for (session, status) in [
+            ("stopped", ReloadRecoveryStatus::Cancelled),
+            ("started", ReloadRecoveryStatus::Started),
+        ] {
+            let path = path_for_session(session)?;
+            assert!(
+                !path.exists(),
+                "old terminal record is still in the active journal"
+            );
+            assert!(!path.with_extension("bak").exists());
+            assert_eq!(intent(session, "reload")?.status, status);
+            assert!(pending_directive_for_session(session)?.is_none());
+        }
+        assert!(has_pending_for_session("pending"));
+        assert_eq!(recovery_summary("reload")?.started, 1);
+        assert_eq!(recovery_summary("reload")?.cancelled, 1);
+        assert_eq!(
+            intent("started", "later")?.status,
+            ReloadRecoveryStatus::Pending
+        );
+        assert_eq!(recovery_summary("reload")?.started, 0);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::await_holding_lock)]
+    async fn idle_owner_ignores_out_of_band_records_and_wakes_for_its_own_writes() -> Result<()> {
+        let _lock = crate::storage::lock_test_env();
+        let home = IsolatedHome::new();
+        let mut external = intent("external", "external-reload")?;
+        let path = path_for_session("external")?;
+        std::fs::remove_file(&path)?;
+        external.directive.continuation_message.clear();
+        let server = super::super::Server::new_with_paths(
+            Arc::new(super::super::tests::StreamingMockProvider::default()),
+            home._temp.path().join("server.sock"),
+            home._temp.path().join("debug.sock"),
+        );
+        let stop = tokio_util::sync::CancellationToken::new();
+        let owner = RecoveryOwner::new(&server);
+        let work = owner.reconcile_once().await;
+        owner.spawn(stop.clone(), work);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        crate::storage::write_json(&path, &external)?;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        assert_eq!(peek_for_session("external")?, Some(external.clone()));
+
+        persist_intent(
+            "local-reload",
+            "local",
+            ReloadRecoveryRole::InterruptedPeer,
+            external.directive,
+            "written by this owner",
+        )?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            peek_for_session("local")?.unwrap().status,
+            ReloadRecoveryStatus::Blocked
+        );
+        assert_eq!(
+            peek_for_session("external")?.unwrap().status,
+            ReloadRecoveryStatus::Pending
+        );
+
+        let admission = crate::turn_activity::global().close_admission()?;
+        intent("deferred", "deferred-reload")?;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        drop(admission);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(has_pending_for_session("deferred"));
+        tokio::time::sleep(ADMISSION_RETRY_INTERVAL).await;
+        assert_eq!(
+            peek_for_session("deferred")?.unwrap().status,
+            ReloadRecoveryStatus::Started,
+            "an earlier write remains retryable without a second notification"
+        );
+        assert_eq!(
+            peek_for_session("external")?.unwrap().status,
+            ReloadRecoveryStatus::Pending
+        );
+        stop.cancel();
         Ok(())
     }
 

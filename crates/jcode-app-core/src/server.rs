@@ -922,9 +922,9 @@ impl Server {
 
         // Startup recovery can be expensive in multi-session reloads. Run it
         // only after the replacement daemon is already accepting reconnects.
-        let recovery_tasks = self.recover_headless_sessions_on_startup().await;
+        let recovery = self.recover_headless_sessions_on_startup().await;
         reload_recovery::RecoveryOwner::new(self)
-            .spawn(runtime.cancellation_token(), recovery_tasks);
+            .spawn(runtime.cancellation_token(), recovery);
 
         // Keep interrupted workers busy while recovery admits their turns.
         // Reconcile the roster before evaluating persisted awaits.
@@ -1022,6 +1022,9 @@ impl Server {
                 use tokio::signal::unix::{SignalKind, signal};
                 if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
                     sigterm.recv().await;
+                    // Recovery writes wake the current owner. Only its
+                    // replacement can admit work captured for this shutdown.
+                    let _admission = crate::turn_activity::global().close_admission();
                     // Bounded: a wedged registry must not keep a terminated
                     // daemon alive. Restore still recovers what this misses.
                     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -2225,18 +2228,7 @@ impl Server {
                     std::thread::sleep(std::time::Duration::from_secs(6 * 60 * 60));
                 }
             });
-        match reload_recovery::collect_garbage() {
-            Ok(stats) if stats.removed > 0 || stats.errors > 0 => {
-                crate::logging::info(&format!(
-                    "Reload recovery GC: removed={}, retained={}, errors={}",
-                    stats.removed, stats.retained, stats.errors
-                ));
-            }
-            Ok(_) => {}
-            Err(error) => crate::logging::warn(&format!(
-                "Reload recovery GC failed during startup: {error}"
-            )),
-        }
+        reload_recovery::collect_garbage();
 
         // Sessions the previous process image owned are about to reconnect.
         // Parse the large ones in the background before their markers are

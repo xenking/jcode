@@ -101,7 +101,7 @@ async fn socket_recovery_reissues_headless_ask_to_reattached_root() {
         .reconcile_once()
         .await;
     assert_eq!(
-        recovery.len(),
+        recovery.tasks.len(),
         1,
         "the daemon must admit the headless worker"
     );
@@ -168,7 +168,7 @@ async fn socket_recovery_reissues_headless_ask_to_reattached_root() {
         acknowledged.get() && closed.get()
     })
     .await;
-    for task in recovery {
+    for task in recovery.tasks {
         tokio::time::timeout(Duration::from_secs(5), task)
             .await
             .unwrap()

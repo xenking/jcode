@@ -1224,7 +1224,7 @@ async fn restored_pinned_skill_does_not_start_a_turn_but_pending_work_recovers()
             should_resume,
             "a skill announcement must neither start work nor hide an unfinished turn"
         );
-        let tasks = recovery.reconcile_once().await;
+        let tasks = recovery.reconcile_once().await.tasks;
         assert_eq!(tasks.len(), usize::from(should_resume));
         for task in tasks {
             tokio::time::timeout(Duration::from_secs(10), task)

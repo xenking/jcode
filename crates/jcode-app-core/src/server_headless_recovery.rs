@@ -5,7 +5,7 @@ use super::*;
 impl Server {
     pub(super) async fn recover_headless_sessions_on_startup(
         &self,
-    ) -> Vec<tokio::task::JoinHandle<()>> {
+    ) -> reload_recovery::RecoveryPass {
         let recovery = reload_recovery::RecoveryOwner::new(self);
         // Migrate legacy snapshots into the same durable owner. An existing
         // record, including Stop/superseded tombstones, is authoritative.

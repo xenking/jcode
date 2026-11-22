@@ -651,7 +651,7 @@ async fn startup_recovery_cannot_admit_an_explicitly_stopped_worker() -> Result<
         "stopped"
     );
     assert!(!server.running_before_restart.contains(&worker.id));
-    for task in server.recover_headless_sessions_on_startup().await {
+    for task in server.recover_headless_sessions_on_startup().await.tasks {
         task.await?;
     }
     assert!(!server.sessions.read().await.contains_key(&worker.id));
