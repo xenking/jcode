@@ -238,6 +238,23 @@ fn canonical_byte_ranges_match_with_borrowed_components() {
 
 #[test]
 fn canonical_logger_preserves_legacy_baseline_snapshot() {
+    if !jcode_logging::LogLevel::Debug.is_enabled() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "fingerprint::optimization_tests::canonical_logger_preserves_legacy_baseline_snapshot",
+            ])
+            .env("JCODE_TRACE", "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "canonical trace subprocess failed: {stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr),
+        );
+        return;
+    }
     let (payload, items, system, tools) = provider_fixture(2);
     let context = jcode_logging::current_context_snapshot();
     let key = format!(
@@ -261,7 +278,7 @@ fn canonical_logger_preserves_legacy_baseline_snapshot() {
             .lock()
             .unwrap()
             .remove(&key)
-            .expect("production logger must install its session baseline");
+            .expect("trace logger must install its session baseline");
         assert_eq!(snapshot.request_hash, expected.request.0);
         assert_eq!(snapshot.item_hashes, expected.items);
         assert_eq!(snapshot.item_hashes_hash, expected.items_hash);

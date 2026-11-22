@@ -11,6 +11,7 @@ use super::*;
 use serde_json::json;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+#[cfg(target_os = "linux")]
 use std::hint::black_box;
 
 thread_local! { static ALLOCATIONS: Cell<Option<(usize, usize)>> = const { Cell::new(None) }; }
