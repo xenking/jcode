@@ -89,6 +89,10 @@ class H(BaseHTTPRequestHandler):
                                       edits=[{"old_string": "selected", "new_string": "unexpected"}])
                 elif "call_reread" not in replies:
                     tool_calls = call("call_reread", "read", file_path="verify-anchor.txt")
+        elif CONTROL and "[e2e:read-overlap]" in prompt and not has_tool_result:
+            tool_calls = [{"id": "call_" + name, "type": "function", "function": {"name": "read",
+                "arguments": json.dumps({"file_path": name + ".txt", "start_line": 220001, "limit": 1,
+                                         "intent": "Check overlapping native reads"})}} for name in ("left", "right")]
         elif CONTROL and "[e2e:read-window]" in prompt and not has_tool_result:
             tool_calls = [{"id": "call_window", "type": "function", "function": {
                 "name": "read", "arguments": json.dumps({"file_path": "verify-large.txt", "start_line": 1,
