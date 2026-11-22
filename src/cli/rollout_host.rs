@@ -2,6 +2,7 @@
 //! `~/.jcode/builds`, the daemon socket and `/Applications/Jcode.app`.
 
 use super::rollout::{Deployed, Host, Layout, Pair, Repo, version_label_of};
+use super::rollout_owner::{Admission, Lease, Request};
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -13,10 +14,7 @@ const DEVELOPER_DIR: &str = "/Applications/Xcode.app/Contents/Developer";
 /// Prepare a selected pair, submit its durable intent, or inspect its journal.
 pub(crate) fn run_cli(args: super::args::RolloutArgs) -> Result<()> {
     if args.status {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&crate::server::rollout::status()?)?
-        );
+        println!("{}", serde_json::to_string_pretty(&rollout_status()?)?);
         return Ok(());
     }
     let options = super::rollout::RolloutOptions {
@@ -29,10 +27,34 @@ pub(crate) fn run_cli(args: super::args::RolloutArgs) -> Result<()> {
     };
     let mut host = MacHost::new()?;
     tokio::task::block_in_place(|| {
-        host.ensure_rollout_daemon()?;
+        if options.dry_run {
+            host.ensure_rollout_daemon()?;
+        } else {
+            host.terminal_at_start = crate::server::rollout::read_journal()?
+                .filter(|journal| journal.phase.terminal())
+                .map(|journal| journal.id);
+        }
         super::rollout::run(&mut host, &options, &mut std::io::stdout())
     })?;
     Ok(())
+}
+
+fn rollout_status() -> Result<serde_json::Value> {
+    use crate::server::rollout;
+    let gate = rollout::try_handoff_gate()?;
+    let journal = rollout::status()?;
+    if journal
+        .as_ref()
+        .is_none_or(|journal| journal.phase.terminal())
+        && gate.is_some()
+        && rollout::try_preparation_lock()?.is_none()
+        && let Some(preparation) = rollout::read_preparation()?
+    {
+        let mut value = serde_json::to_value(preparation)?;
+        value["phase"] = serde_json::json!("preparing");
+        return Ok(value);
+    }
+    Ok(serde_json::to_value(journal)?)
 }
 
 pub struct MacHost {
@@ -41,6 +63,8 @@ pub struct MacHost {
     /// The initiating session, used for durable reload recovery attribution.
     own_session: Option<String>,
     daemon_socket: PathBuf,
+    terminal_at_start: Option<String>,
+    preparation: Option<Lease>,
 }
 
 impl MacHost {
@@ -82,6 +106,8 @@ impl MacHost {
                 })
                 .transpose()?,
             daemon_socket,
+            terminal_at_start: None,
+            preparation: None,
         })
     }
 
@@ -113,23 +139,64 @@ impl MacHost {
         let worktree = self.worktree(repo);
         if !worktree.exists() {
             std::fs::create_dir_all(worktree.parent().unwrap_or(worktree))?;
-            run(git(self.repo(repo))
-                .args(["worktree", "add", "--detach"])
-                .arg(worktree)
-                .arg(sha))?;
+            self.run_preparing(
+                git(self.repo(repo))
+                    .args(["worktree", "add", "--detach"])
+                    .arg(worktree)
+                    .arg(sha),
+            )?;
             return Ok(());
         }
         let dirty =
             output(git(worktree).args(["status", "--porcelain", "-z", "--untracked-files=all"]))?;
         if dirty == " M Cargo.lock\0" {
-            run(git(worktree).args(["checkout", "--", "Cargo.lock"]))?;
+            self.run_preparing(git(worktree).args(["checkout", "--", "Cargo.lock"]))?;
         } else if !dirty.is_empty() {
             bail!(
                 "{} has uncommitted changes; refusing to build it",
                 worktree.display()
             );
         }
-        run(git(worktree).args(["checkout", "--detach", "--quiet", sha]))
+        self.run_preparing(git(worktree).args(["checkout", "--detach", "--quiet", sha]))
+    }
+
+    fn run_preparing(&self, command: &mut Command) -> Result<()> {
+        if let Some(preparation) = &self.preparation {
+            preparation.inherit(command);
+        }
+        run(command)
+    }
+
+    fn commit(&self, repo: Repo, revision: &str) -> Result<String> {
+        let dir = self.repo(repo);
+        let sha = output(git(dir).args([
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{revision}^{{commit}}"),
+        ]))
+        .with_context(|| format!("cannot resolve {revision} in {}", dir.display()))?;
+        Ok(sha.trim().to_string())
+    }
+
+    fn is_ancestor(&self, repo: Repo, ancestor: &str, descendant: &str) -> bool {
+        ancestor == descendant
+            || git(self.repo(repo))
+                .args(["merge-base", "--is-ancestor", ancestor, descendant])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+    }
+
+    fn matches_commit(&self, repo: Repo, reported: &str, expected: &str) -> bool {
+        reported.len() >= 7
+            && reported.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && expected.starts_with(reported)
+            && self
+                .commit(repo, reported)
+                .is_ok_and(|actual| actual == expected)
     }
 
     fn cargo(&self, dir: &Path) -> Command {
@@ -224,15 +291,16 @@ impl Host for MacHost {
     }
 
     fn free_gb(&self) -> Result<u64> {
-        let df = output(Command::new("df").arg("-Pk").arg(&self.jcode_home))?;
-        let free_kb: u64 = df
-            .lines()
-            .nth(1)
-            .and_then(|line| line.split_whitespace().nth(3))
-            .context("could not read free space from df")?
-            .parse()
-            .context("invalid free space from df")?;
-        Ok(free_kb / 1024 / 1024)
+        let target = self
+            .layout
+            .target_dir
+            .ancestors()
+            .find(|path| path.exists());
+        let home_free = free_gb(&self.jcode_home)?;
+        Ok(match target {
+            Some(target) if target != self.jcode_home => home_free.min(free_gb(target)?),
+            _ => home_free,
+        })
     }
 
     fn resolve(&mut self, repo: Repo, refname: &str, fetch: bool) -> Result<String> {
@@ -240,10 +308,48 @@ impl Host for MacHost {
         if fetch {
             run(git(&dir).args(["fetch", "--quiet", "origin"]))?;
         }
-        let sha =
-            output(git(&dir).args(["rev-parse", "--verify", &format!("{refname}^{{commit}}")]))
-                .with_context(|| format!("cannot resolve {refname} in {}", dir.display()))?;
-        Ok(sha.trim().to_string())
+        self.commit(repo, refname)
+    }
+
+    fn admit(
+        &mut self,
+        pair: &Pair,
+        options: &super::rollout::RolloutOptions,
+    ) -> Result<Option<String>> {
+        let request = Request {
+            pair,
+            include_desktop: options.desktop,
+            session: self.own_session.as_deref(),
+            app: &self.layout.app,
+            socket: &self.daemon_socket,
+            terminal_at_start: self.terminal_at_start.as_deref(),
+            timeout: options.drain_timeout,
+        };
+        match request.admit(
+            |repo, from, to| self.is_ancestor(repo, from, to),
+            |owner, message| {
+                if let (Some(from), Some(to)) =
+                    (self.own_session.as_deref(), owner.session.as_deref())
+                    && from != to
+                    && owner.socket == self.daemon_socket
+                    && let Err(error) = notify_session(&self.daemon_socket, from, to, message)
+                {
+                    eprintln!("Could not notify rollout owner {to}: {error:#}");
+                }
+            },
+        )? {
+            Admission::Join(id) => Ok(Some(id)),
+            Admission::Prepare(lease) => {
+                self.ensure_rollout_daemon()?;
+                if daemon_control(&self.control_socket()?, "server:rollout_preparation_v1")
+                    .context("daemon lacks rollout preparation ownership; update it before running rollout")? != true
+                {
+                    bail!("daemon lacks rollout preparation ownership; update it before running rollout");
+                }
+                self.preparation = Some(lease);
+                Ok(None)
+            }
+        }
     }
 
     fn commits_between(&self, repo: Repo, from: &str, to: &str) -> Option<usize> {
@@ -312,12 +418,13 @@ impl Host for MacHost {
         let hash = serde_json::from_str::<serde_json::Value>(&json).ok()?["git_hash"]
             .as_str()?
             .to_string();
-        super::rollout::same_commit(&hash, &pair.cli).then_some(binary)
+        self.matches_commit(Repo::Jcode, &hash, &pair.cli)
+            .then_some(binary)
     }
 
     fn build_cli(&mut self, pair: &Pair) -> Result<PathBuf> {
         self.checkout(Repo::Jcode, &pair.cli)?;
-        run(&mut self.cli_build_command(pair))?;
+        self.run_preparing(&mut self.cli_build_command(pair))?;
         self.built_cli(pair).with_context(|| {
             format!(
                 "{} does not report {}",
@@ -341,8 +448,8 @@ impl Host for MacHost {
                 .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())?["git_hash"]
                 .as_str()?
                 .to_string();
-        (super::rollout::same_commit(&desktop.1, &pair.desktop)
-            && super::rollout::same_commit(&cli, &pair.cli))
+        (self.matches_commit(Repo::Desktop, &desktop.1, &pair.desktop)
+            && self.matches_commit(Repo::Jcode, &cli, &pair.cli))
         .then_some(app)
     }
 
@@ -352,18 +459,20 @@ impl Host for MacHost {
         self.checkout(Repo::Jcode, &pair.cli)?;
         self.checkout(Repo::Desktop, &pair.desktop)?;
         let worktree = self.layout.desktop_worktree.clone();
-        let packaged = run(Command::new(worktree.join("scripts/package-macos.sh"))
-            .current_dir(&worktree)
-            .env("JCODE_REPO", &self.layout.jcode_worktree)
-            .env("PACKAGE_TARGETS", TARGET)
-            .env("CARGO_TARGET_DIR", &self.layout.target_dir)
-            .env("DEVELOPER_DIR", DEVELOPER_DIR));
+        let packaged = self.run_preparing(
+            Command::new(worktree.join("scripts/package-macos.sh"))
+                .current_dir(&worktree)
+                .env("JCODE_REPO", &self.layout.jcode_worktree)
+                .env("PACKAGE_TARGETS", TARGET)
+                .env("CARGO_TARGET_DIR", &self.layout.target_dir)
+                .env("DEVELOPER_DIR", DEVELOPER_DIR),
+        );
         // Cargo may rewrite the tracked lockfile even when packaging fails.
         // Restore only an unstaged lockfile change, never other modifications.
         let status =
             output(git(&worktree).args(["status", "--porcelain", "-z", "--", "Cargo.lock"]))?;
         if status == " M Cargo.lock\0" {
-            run(git(&worktree).args(["checkout", "--", "Cargo.lock"]))?;
+            self.run_preparing(git(&worktree).args(["checkout", "--", "Cargo.lock"]))?;
         } else if !status.is_empty() {
             bail!(
                 "{} has unexpected Cargo.lock changes after packaging",
@@ -388,8 +497,24 @@ impl Host for MacHost {
         bundle: Option<&Path>,
         options: &super::rollout::RolloutOptions,
     ) -> Result<String> {
+        let preparation = self
+            .preparation
+            .as_ref()
+            .context("rollout has no preparation lease")?;
+        if self.built_cli(pair).as_deref() != Some(binary)
+            || (options.desktop && self.packaged_app(pair).as_deref() != bundle)
+            || options.desktop != bundle.is_some()
+        {
+            bail!(
+                "refusing to stage: artifacts do not match pinned CLI {} and Desktop {}",
+                pair.cli,
+                pair.desktop
+            );
+        }
         let intent = crate::server::rollout::Intent {
             cli: pair.label().to_string(),
+            cli_sha: Some(pair.cli.clone()),
+            preparation_id: Some(preparation.id.clone()),
             desktop: pair.desktop.clone(),
             binary: binary.to_path_buf(),
             bundle: bundle.map(Path::to_path_buf),
@@ -398,7 +523,21 @@ impl Host for MacHost {
             drain_timeout_secs: options.drain_timeout.as_secs(),
             triggering_session: self.own_session.clone(),
         };
-        submit_intent(&self.control_socket()?, &intent)
+        let socket = self.control_socket()?;
+        for attempt in 0..5 {
+            match submit_intent(&socket, &intent) {
+                Err(error)
+                    if attempt < 4
+                        && error
+                            .to_string()
+                            .contains("another rollout admission is active") =>
+                {
+                    std::thread::sleep(Duration::from_millis(35));
+                }
+                result => return result,
+            }
+        }
+        unreachable!()
     }
 }
 
@@ -548,6 +687,33 @@ fn daemon_members(socket: &Path, command: &str, session: &str) -> Result<Vec<ser
     }
 }
 
+fn notify_session(socket: &Path, from: &str, to: &str, message: &str) -> Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket)?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    let request = serde_json::json!({
+        "type": "comm_message", "id": 1, "from_session": from, "to_session": to,
+        "delivery": "notify", "wake": false, "require_target": true,
+        "tldr": "Rollout coordination", "message": message,
+    });
+    writeln!(stream, "{request}")?;
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line)?;
+    let event: serde_json::Value = serde_json::from_str(&line)?;
+    if event["type"] != "ack" {
+        bail!(
+            "{}",
+            event["message"]
+                .as_str()
+                .unwrap_or("notification was not acknowledged")
+        );
+    }
+    Ok(())
+}
+
 #[cfg(not(unix))]
 fn daemon_members(
     _socket: &Path,
@@ -596,6 +762,18 @@ fn git(dir: &Path) -> Command {
     let mut command = Command::new("git");
     command.arg("-C").arg(dir);
     command
+}
+
+fn free_gb(path: &Path) -> Result<u64> {
+    let df = output(Command::new("df").arg("-Pk").arg(path))?;
+    let free_kb: u64 = df
+        .lines()
+        .nth(1)
+        .and_then(|line| line.split_whitespace().nth(3))
+        .with_context(|| format!("could not read free space at {}", path.display()))?
+        .parse()
+        .context("invalid free space from df")?;
+    Ok(free_kb / 1024 / 1024)
 }
 
 /// Run to completion with output streamed to the terminal.
@@ -701,6 +879,8 @@ mod tests {
             jcode_home: root.to_owned(),
             own_session: None,
             daemon_socket: root.join("daemon"),
+            terminal_at_start: None,
+            preparation: None,
         };
         (dir, host, sha)
     }

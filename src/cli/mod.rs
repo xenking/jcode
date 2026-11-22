@@ -27,6 +27,8 @@ pub mod provider_init;
 pub mod rollout;
 #[cfg(unix)]
 pub mod rollout_host;
+#[cfg(unix)]
+mod rollout_owner;
 pub mod selfdev;
 pub mod ssh;
 #[cfg(unix)]

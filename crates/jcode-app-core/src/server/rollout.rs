@@ -13,6 +13,11 @@ use super::rollout_fs;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Intent {
     pub cli: String,
+    /// Full commit selected by the caller. `cli` remains the installed label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation_id: Option<String>,
     pub desktop: String,
     pub binary: PathBuf,
     pub bundle: Option<PathBuf>,
@@ -20,6 +25,18 @@ pub struct Intent {
     pub now: bool,
     pub drain_timeout_secs: u64,
     pub triggering_session: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Preparation {
+    pub id: String,
+    pub owner_pid: u32,
+    pub session: Option<String>,
+    pub cli: String,
+    pub desktop: String,
+    pub include_desktop: bool,
+    pub app: PathBuf,
+    pub socket: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -87,11 +104,35 @@ pub fn journal_path() -> Result<PathBuf> {
 }
 
 pub fn status() -> Result<Option<Journal>> {
-    let mut journal = load_at(&journal_path()?)?;
+    let mut journal = read_journal()?;
     if let Some(journal) = journal.as_mut() {
         refresh_recovery(journal)?;
     }
     Ok(journal)
+}
+
+pub fn read_journal() -> Result<Option<Journal>> {
+    load_at(&journal_path()?)
+}
+
+fn preparation_path() -> Result<PathBuf> {
+    Ok(journal_path()?.with_file_name("preparation.json"))
+}
+
+pub fn read_preparation() -> Result<Option<Preparation>> {
+    load_json(&preparation_path()?)
+}
+
+pub fn record_preparation(preparation: &Preparation) -> Result<()> {
+    save_at(&preparation_path()?, preparation)
+}
+
+pub fn try_handoff_gate() -> Result<Option<File>> {
+    try_lock(&journal_path()?.with_file_name("handoff.lock"))
+}
+
+pub fn try_preparation_lock() -> Result<Option<File>> {
+    try_lock(&journal_path()?.with_file_name("preparation.lock"))
 }
 
 fn refresh_recovery(journal: &mut Journal) -> Result<()> {
@@ -102,13 +143,63 @@ fn refresh_recovery(journal: &mut Journal) -> Result<()> {
 }
 
 fn load_at(path: &Path) -> Result<Option<Journal>> {
+    load_json(path)
+}
+
+fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(Some(
-            serde_json::from_slice(&bytes).context("invalid rollout journal")?,
+            serde_json::from_slice(&bytes)
+                .with_context(|| format!("invalid {}", path.display()))?,
         )),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+fn try_lock(path: &Path) -> Result<Option<File>> {
+    let dir = path.parent().context("rollout lock has no parent")?;
+    std::fs::create_dir_all(dir)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                return Ok(None);
+            }
+            return Err(error.into());
+        }
+        Ok(Some(file))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        bail!("daemon rollout locking requires Unix")
+    }
+}
+
+fn save_at(path: &Path, value: &impl Serialize) -> Result<()> {
+    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary)?;
+    file.write_all(&serde_json::to_vec_pretty(value)?)?;
+    file.sync_all()?;
+    std::fs::rename(&temporary, path)?;
+    rollout_fs::sync_parent(path)?;
+    Ok(())
 }
 
 struct Store {
@@ -118,47 +209,11 @@ struct Store {
 
 impl Store {
     fn acquire(path: PathBuf) -> Result<Option<Self>> {
-        let dir = path.parent().context("rollout journal has no parent")?;
-        std::fs::create_dir_all(dir)?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(dir.join("executor.lock"))?;
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-                let error = std::io::Error::last_os_error();
-                if error.kind() == std::io::ErrorKind::WouldBlock {
-                    return Ok(None);
-                }
-                return Err(error.into());
-            }
-        }
-        #[cfg(not(unix))]
-        bail!("daemon rollout locking requires Unix");
-        Ok(Some(Self { path, _lock: lock }))
+        Ok(try_lock(&path.with_file_name("executor.lock"))?.map(|lock| Self { path, _lock: lock }))
     }
 
     fn save(&self, journal: &Journal) -> Result<()> {
-        let temporary = self
-            .path
-            .with_extension(format!("{}.tmp", std::process::id()));
-        let mut options = OpenOptions::new();
-        options.create(true).truncate(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temporary)?;
-        file.write_all(&serde_json::to_vec_pretty(journal)?)?;
-        file.sync_all()?;
-        std::fs::rename(&temporary, &self.path)?;
-        rollout_fs::sync_parent(&self.path)?;
-        Ok(())
+        save_at(&self.path, journal)
     }
 
     fn phase(&self, journal: &mut Journal, phase: Phase) -> Result<()> {
@@ -210,12 +265,16 @@ impl Store {
 }
 
 pub(super) fn is_control_command(command: &str) -> bool {
-    command == "rollout_status" || command.starts_with("rollout_submit:")
+    matches!(command, "rollout_status" | "rollout_preparation_v1")
+        || command.starts_with("rollout_submit:")
 }
 
 pub(super) fn control(command: &str) -> Result<String> {
     if command == "rollout_status" {
         return Ok(serde_json::to_string(&status()?)?);
+    }
+    if command == "rollout_preparation_v1" {
+        return Ok("true".into());
     }
     let raw = command
         .strip_prefix("rollout_submit:")
@@ -231,7 +290,15 @@ pub(super) fn submit(intent: Intent) -> Result<Journal> {
         bail!("rollout app path differs from daemon JCODE_ROLLOUT_APP");
     }
     validate_label(&intent.cli)?;
+    if let Some(sha) = &intent.cli_sha
+        && (!(sha.len() == 40 || sha.len() == 64)
+            || !sha.bytes().all(|c| c.is_ascii_hexdigit())
+            || !sha.starts_with(&intent.cli))
+    {
+        bail!("rollout CLI SHA {sha} does not match label {}", intent.cli);
+    }
     let path = journal_path()?;
+    let _handoff = try_handoff_gate()?.context("another rollout admission is active")?;
     let store = Store::acquire(path.clone())?.context("another rollout executor is active")?;
     if let Some(previous) = load_at(&path)?
         && !previous.phase.terminal()
@@ -240,6 +307,21 @@ pub(super) fn submit(intent: Intent) -> Result<Journal> {
             "unfinished rollout {}; inspect jcode rollout --status",
             previous.id
         );
+    }
+    if let Some(id) = &intent.preparation_id {
+        let prep = read_preparation()?.context("rollout preparation no longer exists")?;
+        if &prep.id != id
+            || intent.cli_sha.as_ref() != Some(&prep.cli)
+            || intent.desktop != prep.desktop
+            || intent.bundle.is_some() != prep.include_desktop
+            || intent.triggering_session != prep.session
+            || intent.app != prep.app
+            || prep.socket != super::socket_path()
+        {
+            bail!("rollout preparation {id} was superseded or does not match the intent");
+        }
+    } else if try_preparation_lock()?.is_none() {
+        bail!("a rollout preparation is already active; use a matching rollout client");
     }
     let serving =
         jcode_build_support::runtime_generation::serving_identity(jcode_build_meta::git_hash())?;

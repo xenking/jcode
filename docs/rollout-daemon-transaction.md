@@ -2,15 +2,53 @@
 
 `jcode rollout` prepares a matched CLI/Desktop pair and submits a durable intent
 through the daemon's owner-only debug socket. It returns the transaction ID, not
-a claim that deployment already finished. `jcode rollout --status` reads the
-journal even when no daemon is reachable. The production protocol command
-`server:rollout_status` exposes the same JSON to future Desktop consumers.
+a claim that deployment already finished. `jcode rollout --status` reads local
+ownership and journal state even when no daemon is reachable. The production
+protocol command `server:rollout_status` exposes the daemon journal.
 
 ## Ownership boundary
 
 Build and package remain CLI-side, intentionally. They do not change installed
 channels or the application, can be expensive, and can be restarted by rerunning
 the command. Existing artifact version probes prevent rebuilding a valid pair.
+The CLI resolves both Git refs once and records their full SHAs, the session ID
+if available, the PID, and the deployment destination. From admission through
+submission, only that owner can change `JCODE_HOME/wt/rollout` or build and
+package through `jcode rollout`. The mutating child processes inherit the lock.
+SIGKILL of the CLI does not let a second owner change their checkout or kill
+the remaining build. The next caller may reuse its verified artifacts once
+the children exit.
+
+Send pinned `--jcode-ref` and `--desktop-ref` values when coordinating rollout:
+
+- Identical requests, and requests covered by descendants in both repositories,
+  join the owning transaction at durable submission. A join returns its ID and
+  status, not a new build or a claim that rollout completed. A CLI-only owner
+  cannot cover a request that needs Desktop.
+- A terminal caller with a newer compatible pair waits for the existing rollout
+  to complete before starting preparation. A session caller receives the pending
+  pair and owner instead of blocking the daemon's drain with its active turn.
+- A divergent pair or different destination is refused. The output includes the
+  owner, status and both full pairs. Jcode attempts a direct `notify` with
+  `wake=false` when both session IDs are available. The operator or coordinators
+  decide the next reviewed pair. Rollout never merges, rebases, force-checks out
+  user changes or replaces the in-flight intent to reconcile a conflict.
+
+The submitting CLI re-probes artifact versions against the pinned commits.
+`handoff.lock` serializes a change of preparation record with submission. If
+the caller dies during submission, the next caller either finds the daemon
+journal or replaces the reservation so a late submit is rejected. A nonterminal
+journal prevents another preparation even while the daemon restarts. CLI
+admission never acquires `executor.lock`, so it cannot block startup recovery.
+
+The lock covers cooperating `jcode rollout` clients that share one `JCODE_HOME`.
+It does not serialize unrelated Cargo commands, old rollout clients, or separate
+homes that point at the same target or Applications directory. The owner checks
+available space on `JCODE_HOME` and the target filesystem before checkout or
+build. It does not reserve that space against other processes. Upgrade the daemon
+to one that supports `rollout_preparation_v1` before running the new CLI against
+its live installation. The legacy bootstrap procedure is separate.
+
 The daemon owns every installed mutation starting at stage. Killing the CLI,
 its agent tool, or its process group after submission does not cancel execution.
 Normal tool kill-on-drop and reload cleanup are unchanged.
@@ -75,6 +113,13 @@ No acceptance step may restart the user's daemon or write the real application.
 Use a private HOME, JCODE_HOME, JCODE_RUNTIME_DIR, JCODE_SOCKET, and
 JCODE_ROLLOUT_APP. Do not set JCODE_TEST_SESSION for real exec tests because it
 intentionally disables exec.
+
+Run `scripts/accept-rollout-multi-owner.py /path/to/jcode` on macOS to check
+concurrent preparation. It runs real rollout clients with private Git worktrees,
+fixture build/package commands, and a private submission socket. It covers
+identical and newer requests, divergent requests, owner death with a surviving
+build, and an artifact whose version changes before submission. It does not
+compile a release or install a bundle.
 
 `scripts/accept-rollout-daemon.py --old <binary> --new <binary>` uses two actual
 CLI generations with different compiled labels and a small fixture Desktop that

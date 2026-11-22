@@ -18,6 +18,8 @@ fn fixture() -> (tempfile::TempDir, Store, Journal) {
         schema: 1,
         id: "rollout_fixture".into(),
         intent: Intent {
+            cli_sha: None,
+            preparation_id: None,
             cli: "abcdef123".into(),
             desktop: "7654321".into(),
             binary: root.join("new-jcode"),

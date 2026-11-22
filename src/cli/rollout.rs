@@ -109,6 +109,9 @@ pub trait Host {
     fn arch(&self) -> String;
     fn free_gb(&self) -> Result<u64>;
     fn resolve(&mut self, repo: Repo, refname: &str, fetch: bool) -> Result<String>;
+    fn admit(&mut self, _pair: &Pair, _opts: &RolloutOptions) -> Result<Option<String>> {
+        Ok(None)
+    }
     fn commits_between(&self, repo: Repo, from: &str, to: &str) -> Option<usize>;
     fn deployed(&self) -> Deployed;
     fn busy_sessions(&self) -> Result<Vec<String>>;
@@ -130,6 +133,7 @@ pub trait Host {
 pub enum Outcome {
     Planned,
     Submitted(String),
+    Joined(String),
 }
 
 /// One phase, one line: `[3/8] stage            ok    detail`.
@@ -209,6 +213,20 @@ pub fn run<H: Host, W: Write>(host: &mut H, opts: &RolloutOptions, out: &mut W) 
         bail!("rollout refused: unsupported arch {arch}");
     }
     let free = run.host.free_gb()?;
+    // Low disk still permits a read-only resolution and join, not a fetch or
+    // any build. A successor must check again after waiting for its turn.
+    let fetch = !opts.dry_run && free >= MIN_FREE_GB;
+    let pair = Pair {
+        cli: run.host.resolve(Repo::Jcode, &opts.jcode_ref, fetch)?,
+        desktop: run.host.resolve(Repo::Desktop, &opts.desktop_ref, fetch)?,
+    };
+    if !opts.dry_run
+        && let Some(id) = run.host.admit(&pair, opts)?
+    {
+        run.say("stage", "join", &id)?;
+        return Ok(Outcome::Joined(id));
+    }
+    let free = if fetch { run.host.free_gb()? } else { free };
     let low_disk = (free < MIN_FREE_GB)
         .then(|| format!("refusing: {free}G free, need {MIN_FREE_GB}G for a release build"));
     if let Some(reason) = &low_disk
@@ -217,11 +235,6 @@ pub fn run<H: Host, W: Write>(host: &mut H, opts: &RolloutOptions, out: &mut W) 
         run.say("plan", "FAIL", reason)?;
         bail!("rollout refused: {free}G free disk, need {MIN_FREE_GB}G");
     }
-    let fetch = !opts.dry_run;
-    let pair = Pair {
-        cli: run.host.resolve(Repo::Jcode, &opts.jcode_ref, fetch)?,
-        desktop: run.host.resolve(Repo::Desktop, &opts.desktop_ref, fetch)?,
-    };
     let deployed = run.host.deployed();
     let cli_delta = deployed
         .cli_current
