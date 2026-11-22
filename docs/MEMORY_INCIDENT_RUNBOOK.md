@@ -169,6 +169,8 @@ Use `jeprof` from jemalloc with the exact daemon executable (not a newer
 client or launcher). On macOS the dump includes the main executable's ASLR
 mapping. The estimate covers live sampled Rust allocations, not C allocations,
 all mapped bytes, or RSS. Do not infer heap ownership from RSS alone.
+If a separate test daemon needs startup overrides such as a smaller sampling
+interval, set `_RJEM_MALLOC_CONF` for the prefixed allocator, not `MALLOC_CONF`.
 
 ### 5. `non_heap_or_mapping_growth`
 
