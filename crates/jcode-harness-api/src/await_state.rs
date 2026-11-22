@@ -87,6 +87,7 @@ pub fn pending_awaits_for_session(session_id: &str) -> Vec<PendingAwait> {
 /// Like [`pending_awaits_for_session`], but reads one explicit directory and
 /// uses `now_unix_ms` as the clock so tests are deterministic.
 pub fn pending_awaits_in(dir: &Path, session_id: &str, now_unix_ms: u64) -> Vec<PendingAwait> {
+    crate::blocking_io::assert_allowed();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };

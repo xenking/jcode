@@ -177,8 +177,9 @@ pub use jcode_applet_types as applet;
 pub use jcode_harness_api::{
     AskAnswer, AskOption, AskQuestion, AskResponse, PendingAwait, SessionEditStats,
     enrich_sessions_from_edit_stats, enrich_sessions_from_local_edit_stats,
-    enrich_sessions_from_local_swarm_state, enrich_sessions_from_swarm_state, local_worker_meta,
-    pending_awaits_for_session, pending_awaits_in, worker_ids, worker_meta, worker_meta_for,
+    enrich_sessions_from_local_swarm_state, enrich_sessions_from_swarm_state,
+    forbid_blocking_local_io, local_worker_meta, pending_awaits_for_session, pending_awaits_in,
+    worker_ids, worker_meta, worker_meta_for,
 };
 /// Auto-poke and todo quality-gate policy, identical to the TUI's. Fetch a
 /// snapshot with [`JcodeClient::todo_state`], run

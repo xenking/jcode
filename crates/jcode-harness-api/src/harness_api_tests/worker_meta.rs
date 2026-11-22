@@ -152,6 +152,29 @@ fn partial_unreadable_worker_records_do_not_claim_complete_usage() {
 }
 
 #[test]
+fn a_corrupt_journal_is_negative_cached_until_its_stamp_changes() {
+    let home = home("corrupt-journal-cache");
+    let id = "session_fox_1_a";
+    write(&home, id, SILENT, "{bad json}\n");
+    assert!(worker_meta(&home, id).is_none());
+    assert!(matches!(
+        super::CACHE
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .get(&home.join(id)),
+        Some((_, None))
+    ));
+    write(&home, id, SILENT, "{\"meta\":{\"model\":\"repaired\"}}\n");
+    assert_eq!(
+        worker_meta(&home, id).unwrap().model.as_deref(),
+        Some("repaired")
+    );
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
 fn missing_or_unreadable_records_are_absent() {
     let home = home("missing");
     assert!(worker_meta(&home, "session_nobody_5_e").is_none());

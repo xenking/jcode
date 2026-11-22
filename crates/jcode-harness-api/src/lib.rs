@@ -35,11 +35,13 @@ mod search;
 pub use search::{
     SessionSearchHighlight, SessionSearchHit, SessionSearchResults, SessionSearchRole,
 };
+mod blocking_io;
 mod sockets;
 mod swarm_metadata;
 mod worker_meta;
 
 pub use await_state::{PendingAwait, pending_awaits_for_session, pending_awaits_in};
+pub use blocking_io::forbid_blocking_local_io;
 pub use client::{FrameError, HarnessClient, read_frame, write_frame};
 pub use events::*;
 pub use jcode_applet_types;

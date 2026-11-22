@@ -13,6 +13,7 @@
 use crate::{SessionInfo, WorkerMeta, WorkerPhase};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -84,6 +85,7 @@ fn is_plain_session_id(id: &str) -> bool {
 /// What `home/sessions/<id>.json` plus its journal say about the session.
 /// `None` when neither file exists.
 pub fn worker_meta(home: &Path, session_id: &str) -> Option<WorkerMeta> {
+    crate::blocking_io::assert_allowed();
     if !is_plain_session_id(session_id) {
         return None;
     }
@@ -95,18 +97,34 @@ pub fn worker_meta(home: &Path, session_id: &str) -> Option<WorkerMeta> {
         && let Some((seen, meta)) = cache.get(&key)
         && *seen == stamp
     {
-        return Some(meta.clone());
+        return meta.clone();
     }
-    let meta = read(home, session_id);
-    if let (Some(stamp), Some(meta)) = (stamp, &meta) {
-        cache.insert(key, (stamp, meta.clone()));
+    match read_checked(home, session_id) {
+        Ok(meta) => {
+            if let (Some(stamp), Some(meta)) = (stamp, &meta) {
+                cache.insert(key, (stamp, Some(meta.clone())));
+            }
+            meta
+        }
+        Err(error) => {
+            if error.kind() == ErrorKind::UnexpectedEof {
+                return None;
+            }
+            if error.kind() == ErrorKind::InvalidData
+                && let Some(stamp) = stamp
+            {
+                cache.insert(key, (stamp, None));
+            }
+            eprintln!("harness worker metadata unavailable for {session_id}: {error}");
+            None
+        }
     }
-    meta
 }
 
 type Stamp = (u64, Option<SystemTime>, u64, Option<SystemTime>);
 
-static CACHE: Mutex<Option<HashMap<PathBuf, (Stamp, WorkerMeta)>>> = Mutex::new(None);
+type MetadataCache = HashMap<PathBuf, (Stamp, Option<WorkerMeta>)>;
+static CACHE: Mutex<Option<MetadataCache>> = Mutex::new(None);
 
 fn stamp(home: &Path, session_id: &str) -> Option<Stamp> {
     let meta = |name: String| match std::fs::metadata(home.join("sessions").join(name)) {
@@ -281,20 +299,13 @@ fn message_phase(message: &Message) -> Option<Phase> {
     None
 }
 
-fn read(home: &Path, session_id: &str) -> Option<WorkerMeta> {
-    match read_checked(home, session_id) {
-        Ok(meta) => meta,
-        Err(error) => {
-            eprintln!("harness worker metadata unavailable for {session_id}: {error}");
-            None
-        }
-    }
-}
-
 fn read_checked(home: &Path, session_id: &str) -> std::io::Result<Option<WorkerMeta>> {
     let dir = home.join("sessions");
     let snapshot: Option<Snapshot> = match std::fs::read(dir.join(format!("{session_id}.json"))) {
-        Ok(bytes) => Some(serde_json::from_slice(&bytes).map_err(std::io::Error::other)?),
+        Ok(bytes) => Some(
+            serde_json::from_slice(&bytes)
+                .map_err(|error| Error::new(ErrorKind::InvalidData, error))?,
+        ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error),
     };
@@ -310,10 +321,15 @@ fn read_checked(home: &Path, session_id: &str) -> std::io::Result<Option<WorkerM
             // A writer may be appending the final line. Do not cache or publish
             // partial usage totals until the record is complete.
             Err(error) => {
-                return Err(std::io::Error::other(format!(
-                    "journal line {}: {error}",
-                    index + 1
-                )));
+                let kind = if error.is_eof() && !line.ends_with('\n') {
+                    ErrorKind::UnexpectedEof
+                } else {
+                    ErrorKind::InvalidData
+                };
+                return Err(Error::new(
+                    kind,
+                    format!("journal line {}: {error}", index + 1),
+                ));
             }
         }
     }
