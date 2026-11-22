@@ -2280,7 +2280,7 @@ async fn sdk_socket_cancel_workflow(
                     ServerEvent::TurnStarted { identity } => {
                         assert!(active.replace(identity).is_none());
                     }
-                    ServerEvent::TurnEvent { identity, event } => {
+                    ServerEvent::TurnEvent { identity, event, .. } => {
                         if (idle_soft_interrupt || queued_test == Some("effort"))
                             && active.is_none()
                         {
@@ -2330,7 +2330,7 @@ async fn sdk_socket_cancel_workflow(
             )
             .await;
             until(&mut client_reader, |event| match event {
-                ServerEvent::TurnEvent { identity, event } => {
+                ServerEvent::TurnEvent { identity, event, .. } => {
                     assert_ne!(Some(identity), active.as_ref());
                     assert!(!matches!(event.as_ref(), ServerEvent::Error { .. }));
                     matches!(event.as_ref(), ServerEvent::Done { id: 4 })

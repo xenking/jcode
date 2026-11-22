@@ -460,6 +460,7 @@ fn btw_server_turn_events_are_unwrapped_into_the_card() {
     };
     let wrapped = |event: crate::protocol::ServerEvent| crate::protocol::ServerEvent::TurnEvent {
         identity: identity.clone(),
+        text_frames: None,
         event: Box::new(event),
     };
 

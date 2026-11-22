@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 mod ask;
+pub mod assistant_text;
 mod context_breakdown;
 pub use context_breakdown::{
     CONTEXT_BREAKDOWN_CAPABILITY, ContextActionForecast, ContextActionMeasurement,

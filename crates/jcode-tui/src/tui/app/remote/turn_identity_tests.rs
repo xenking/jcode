@@ -20,6 +20,7 @@ fn start(app: &mut App, remote: &mut RemoteConnection, generation: &str, turn_id
 fn scoped(generation: &str, turn_id: u64, event: ServerEvent) -> ServerEvent {
     ServerEvent::TurnEvent {
         identity: identity(generation, turn_id),
+        text_frames: None,
         event: Box::new(event),
     }
 }

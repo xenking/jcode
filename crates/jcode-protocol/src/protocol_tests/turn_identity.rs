@@ -7,11 +7,12 @@ fn scoped_terminal_roundtrips_without_changing_legacy_done_shape() {
             runtime_generation: "runtime-uuid".into(),
             turn_id: 7,
         },
+        text_frames: None,
         event: Box::new(ServerEvent::Done { id: 42 }),
     };
     let wire = encode_event(&event);
     let decoded: ServerEvent = serde_json::from_str(&wire).unwrap();
-    let ServerEvent::TurnEvent { identity, event } = decoded else {
+    let ServerEvent::TurnEvent { identity, event, .. } = decoded else {
         panic!("missing scope");
     };
     assert_eq!(identity.runtime_generation, "runtime-uuid");

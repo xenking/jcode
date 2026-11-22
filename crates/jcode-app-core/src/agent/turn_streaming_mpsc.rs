@@ -526,6 +526,7 @@ impl Agent {
                         }
                     }
                     StreamEvent::TextDone => {
+                        provider_native_items.finish_text(text_content.len());
                         let _ = event_tx.send(ServerEvent::TextDone);
                     }
                     StreamEvent::TextSuffixReplace { old_text, new_text } => {

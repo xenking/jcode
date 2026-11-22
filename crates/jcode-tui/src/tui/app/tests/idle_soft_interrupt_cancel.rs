@@ -13,6 +13,7 @@ fn idle_soft_interrupt_cancel_settles_pre_stream_turn_without_replaying_prompt()
             };
             let scoped = |event| ServerEvent::TurnEvent {
                 identity: identity.clone(),
+                text_frames: None,
                 event: Box::new(event),
             };
             app.pending_soft_interrupt_requests = vec![(42, "correction".into())];

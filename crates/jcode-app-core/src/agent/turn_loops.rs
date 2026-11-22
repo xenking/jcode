@@ -678,7 +678,7 @@ impl Agent {
                         }
                         provider_native_items.push(text_content.len(), provider, item);
                     }
-                    StreamEvent::TextDone => {}
+                    StreamEvent::TextDone => provider_native_items.finish_text(text_content.len()),
                     StreamEvent::MessageEnd {
                         stop_reason: reason,
                     } => {

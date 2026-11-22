@@ -274,6 +274,7 @@ fn identity_transport_negotiation_preserves_legacy_payload_shape() {
     };
     let wrapped = ServerEvent::TurnEvent {
         identity: identity.clone(),
+        text_frames: None,
         event: Box::new(ServerEvent::Done { id: 99 }),
     };
     assert!(matches!(
@@ -948,7 +949,7 @@ impl Provider for CompleteImmediatelyProvider {
 }
 
 #[derive(Clone, Default)]
-struct FanoutStreamProvider;
+struct FanoutStreamProvider(Arc<tokio::sync::Notify>);
 
 #[async_trait]
 impl Provider for FanoutStreamProvider {
@@ -959,21 +960,19 @@ impl Provider for FanoutStreamProvider {
         _system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        Ok(Box::pin(stream::unfold(0_u8, |step| async move {
-            match step {
-                0 => Some((Ok(StreamEvent::TextDelta("before attach".to_string())), 1)),
-                1 => {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    Some((Ok(StreamEvent::TextDelta("after attach".to_string())), 2))
-                }
-                2 => Some((
-                    Ok(StreamEvent::MessageEnd {
-                        stop_reason: Some("end_turn".to_string()),
-                    }),
-                    3,
-                )),
-                _ => None,
+        const EVENTS: [fn() -> StreamEvent; 5] = [
+            || StreamEvent::TextDelta("**Список вклад".into()),
+            || StreamEvent::TextDelta("ок** в окне.".into()),
+            || StreamEvent::TextDone,
+            || StreamEvent::TextDelta("Переключатель готов.".into()),
+            || StreamEvent::MessageEnd { stop_reason: Some("end_turn".into()) },
+        ];
+        let resume = Arc::clone(&self.0);
+        Ok(Box::pin(stream::unfold((0, resume), |(step, resume)| async move {
+            if step == 1 {
+                resume.notified().await;
             }
+            EVENTS.get(step).map(|event| (Ok(event()), (step + 1, resume)))
         })))
     }
 
@@ -982,7 +981,7 @@ impl Provider for FanoutStreamProvider {
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(Self)
+        Arc::new(self.clone())
     }
 }
 
@@ -1226,12 +1225,14 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
 }
 
 #[tokio::test]
-async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attachments() {
+async fn text_framing_keeps_order_across_active_attachments_and_journal_replay() {
+    use jcode_session_types::assistant_text::AssistantTextFrame as Frame;
     let _guard = crate::storage::lock_test_env();
-    let _runtime = IsolatedRuntimeDir::new();
+    let _runtime = IsolatedReloadRecoveryEnv::new();
     let session_id = "session_live_attachment_fanout";
 
-    let provider: Arc<dyn Provider> = Arc::new(FanoutStreamProvider);
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let provider: Arc<dyn Provider> = Arc::new(FanoutStreamProvider(Arc::clone(&resume)));
     let registry = Registry::new(Arc::clone(&provider)).await;
     let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
     session.model = Some("fanout-stream".to_string());
@@ -1308,15 +1309,20 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
     )
     .await;
 
-    loop {
-        let event = tokio::time::timeout(Duration::from_secs(2), recv_turn_payload(&mut origin_rx))
+    let first_id = loop {
+        let event = tokio::time::timeout(Duration::from_secs(2), origin_rx.recv())
             .await
             .expect("origin should receive the initial stream event promptly")
             .expect("origin event channel should remain open");
-        if matches!(event, ServerEvent::TextDelta { ref text } if text == "before attach") {
-            break;
+        if let ServerEvent::TurnEvent { event, text_frames, .. } = event
+            && matches!(*event, ServerEvent::TextDelta { ref text } if text == "**Список вклад")
+        {
+            let Some([Frame::Append { message_id, offset: 0 }]) = text_frames.as_deref() else {
+                panic!("first text delta has no turn-scoped block: {text_frames:?}");
+            };
+            break message_id.clone();
         }
-    }
+    };
 
     crate::server::register_session_event_sender(
         &swarm_members,
@@ -1326,25 +1332,60 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
     )
     .await;
 
+    for event in [
+        ServerEvent::Notification {
+            from_session: "worker".into(),
+            from_name: None,
+            notification_type: crate::protocol::NotificationType::Message {
+                scope: Some("dm".into()), channel: None, tldr: None,
+            },
+            message: "Incoming DM".into(),
+        },
+        ServerEvent::MemoryInjected {
+            count: 1, prompt: "One recalled memory".into(), display_prompt: None,
+            prompt_chars: 19, computed_age_ms: 0,
+        },
+    ] {
+        assert_eq!(super::super::state::fanout_session_event(&swarm_members, session_id, event).await, 2);
+    }
+    resume.notify_one();
+
     for rx in [&mut origin_rx, &mut attached_rx] {
-        let mut saw_post_attach_delta = false;
-        let mut saw_message_end = false;
-        let mut saw_done = false;
-        while !saw_post_attach_delta || !saw_message_end || !saw_done {
-            let event = tokio::time::timeout(Duration::from_secs(2), recv_turn_payload(rx))
+        let mut observed = Vec::new();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(8), rx.recv())
                 .await
-                .expect("attachment should receive streamed event promptly")
+                .unwrap_or_else(|_| panic!("attachment stopped after events {observed:?}"))
                 .expect("attachment event channel should remain open");
-            saw_post_attach_delta |= matches!(
-                event,
-                ServerEvent::TextDelta { ref text } if text == "after attach"
-            );
-            if matches!(event, ServerEvent::MessageEnd { .. }) {
-                assert!(!saw_done, "MessageEnd must precede the terminal Done event");
-                saw_message_end = true;
+            match event {
+                ServerEvent::Notification { .. } => observed.push("dm"),
+                ServerEvent::MemoryInjected { .. } => observed.push("memory"),
+                ServerEvent::TurnEvent { event, text_frames, .. } => match *event {
+                    ServerEvent::TextDelta { text } if text == "ок** в окне." => {
+                        assert!(matches!(text_frames.as_deref(), Some([Frame::Append { message_id, offset }])
+                            if message_id == &first_id && *offset == "**Список вклад".len()));
+                        observed.push("continuation");
+                    }
+                    ServerEvent::TextDone => {
+                        assert!(matches!(text_frames.as_deref(), Some([Frame::Complete { message_id, text }])
+                            if message_id == &first_id && text == "**Список вкладок** в окне."));
+                        observed.push("first block complete");
+                    }
+                    ServerEvent::TextDelta { text } if text == "Переключатель готов." => {
+                        assert!(matches!(text_frames.as_deref(), Some([Frame::Append { message_id, offset: 0 }])
+                            if message_id != &first_id));
+                        observed.push("new block");
+                    }
+                    ServerEvent::MessageEnd { .. } => observed.push("message end"),
+                    ServerEvent::Done { id: 479 } => break,
+                    ServerEvent::Error { message, .. } => panic!("turn failed: {message}"),
+                    _ => {}
+                },
+                ServerEvent::Error { message, .. } => panic!("attachment failed: {message}"),
+                _ => {}
             }
-            saw_done |= matches!(event, ServerEvent::Done { id: 479 });
         }
+        assert_eq!(observed, ["dm", "memory", "continuation", "first block complete", "new block", "message end"]);
     }
 
     let (done_id, result, _, _, _) =
@@ -1354,6 +1395,14 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
             .expect("processing completion channel should remain open");
     assert_eq!(done_id, 479);
     result.expect("turn should complete successfully");
+
+    let persisted = crate::session::Session::load(session_id).unwrap();
+    let answers: Vec<_> = crate::session::render_messages(&persisted)
+        .into_iter()
+        .filter(|row| row.role == "assistant")
+        .map(|row| row.content)
+        .collect();
+    assert_eq!(answers, ["**Список вкладок** в окне.", "Переключатель готов."]);
 
     if let Some(handle) = processing_task.take() {
         handle.await.expect("processing task join");

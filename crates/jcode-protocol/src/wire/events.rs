@@ -78,6 +78,8 @@ pub enum ServerEvent {
     TurnEvent {
         identity: TurnIdentity,
         event: Box<ServerEvent>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_frames: Option<Vec<jcode_session_types::assistant_text::AssistantTextFrame>>,
     },
     /// Serialized todo card snapshot containing todos, plan, and goals.
     #[serde(rename = "todos")]

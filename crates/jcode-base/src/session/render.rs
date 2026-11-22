@@ -634,6 +634,7 @@ fn render_messages_and_images_internal(
         }
         let message_role = msg.role.clone();
         let mut text = String::new();
+        let mut text_boundaries = Vec::new();
         // Reasoning is accumulated separately so it can be rendered *before* the
         // answer text, matching the live streaming order. Providers persist the
         // assistant turn as `[Text, ReasoningTrace, ToolUse]`, so appending
@@ -710,7 +711,11 @@ fn render_messages_and_images_internal(
                         }
                         continue;
                     }
-                    text.push_str(super::strip_reload_interruption_marker(t));
+                    let body = super::strip_reload_interruption_marker(t);
+                    if role == "assistant" && !text.is_empty() && !body.is_empty() {
+                        text_boundaries.push(text.len());
+                    }
+                    text.push_str(body);
                 }
                 ContentBlock::ToolUse {
                     id,
@@ -735,12 +740,13 @@ fn render_messages_and_images_internal(
                 } => {
                     let combined = format!("{}{}", reasoning, text);
                     if !combined.is_empty() {
+                        let reasoning_len = reasoning.len();
                         if role == "user" && !is_attached_image_label_text(&text) {
                             user_prompt_count += 1;
                         }
                         text.clear();
                         reasoning.clear();
-                        rendered.push(RenderedMessage {
+                        push_text_rows(&mut rendered, &mut text_boundaries, reasoning_len, RenderedMessage {
                             attachments: Vec::new(),
                             response_stats: None,
                             tool_duration_ms: None,
@@ -843,9 +849,10 @@ fn render_messages_and_images_internal(
                     // Flush text streamed before the search so order matches live.
                     let combined = format!("{}{}", reasoning, text);
                     if !combined.is_empty() {
+                        let reasoning_len = reasoning.len();
                         text.clear();
                         reasoning.clear();
-                        rendered.push(RenderedMessage {
+                        push_text_rows(&mut rendered, &mut text_boundaries, reasoning_len, RenderedMessage {
                             attachments: Vec::new(),
                             response_stats: None,
                             tool_duration_ms: None,
@@ -891,7 +898,9 @@ fn render_messages_and_images_internal(
             }
             // At EOF the buffers are no longer reused. Move the sole nonempty
             // buffer rather than copying it into a new allocation.
+            let reasoning_len = reasoning.len();
             let combined = if let Some(metadata) = &msg.attachment_data {
+                text_boundaries.clear();
                 metadata.display_content.clone()
             } else if reasoning.is_empty() {
                 text
@@ -900,7 +909,7 @@ fn render_messages_and_images_internal(
             } else {
                 format!("{}{}", reasoning, text)
             };
-            rendered.push(RenderedMessage {
+            push_text_rows(&mut rendered, &mut text_boundaries, reasoning_len, RenderedMessage {
                 attachments: msg
                     .attachment_data
                     .as_ref()
@@ -936,6 +945,28 @@ fn render_messages_and_images_internal(
     insert_compaction_rows(session, &mut rendered, render_start_idx);
     response_stats::attach(&session.messages, &mut rendered);
     (rendered, images, compacted_info, image_ids)
+}
+
+fn push_text_rows(
+    rendered: &mut Vec<RenderedMessage>,
+    boundaries: &mut Vec<usize>,
+    reasoning_len: usize,
+    mut row: RenderedMessage,
+) {
+    if !boundaries.is_empty() {
+        let content = std::mem::take(&mut row.content);
+        let mut start = 0;
+        for end in boundaries.drain(..).map(|offset| reasoning_len + offset) {
+            rendered.push(RenderedMessage {
+                content: content[start..end].to_owned(),
+                tool_calls: Vec::new(),
+                ..row.clone()
+            });
+            start = end;
+        }
+        row.content = content[start..].to_owned();
+    }
+    rendered.push(row);
 }
 
 /// One stored memory injection as a transcript row.

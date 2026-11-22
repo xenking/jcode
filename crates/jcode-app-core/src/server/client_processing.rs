@@ -758,6 +758,7 @@ pub(super) async fn cancel_processing_message(
     let scoped = |event| match &identity {
         Some(identity) => ServerEvent::TurnEvent {
             identity: identity.clone(),
+            text_frames: None,
             event: Box::new(event),
         },
         None => event,

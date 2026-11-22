@@ -8,6 +8,7 @@ fn identity_transport_negotiation_preserves_legacy_payload_shape() {
     };
     let wrapped = ServerEvent::TurnEvent {
         identity: identity.clone(),
+        text_frames: None,
         event: Box::new(ServerEvent::Done { id: 99 }),
     };
     assert!(matches!(

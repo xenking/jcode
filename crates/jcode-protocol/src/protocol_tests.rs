@@ -15,6 +15,7 @@ fn multi_client_shared_encoding_cost_probe() {
                     runtime_generation: "generation".into(),
                     turn_id: 1,
                 },
+                text_frames: None,
                 event: Box::new(ServerEvent::TextDelta {
                     text: "x".repeat(bytes),
                 }),

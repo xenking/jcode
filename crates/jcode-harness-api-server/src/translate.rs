@@ -1,6 +1,7 @@
 //! Pure JSON-to-JSON translation between the harness API and the legacy
 //! internal protocol. Kept side-effect free so it is trivially unit-testable.
 
+mod assistant_text;
 mod control_replies;
 mod credentials;
 mod search_hooks;
@@ -179,6 +180,7 @@ pub struct BridgeState {
     // Tuple fields: correlation id, text, whether TextDone was emitted.
     text_attempt: Vec<(String, String, bool)>,
     text_response_ended: bool,
+    scoped_text: assistant_text::AssistantTextProjection,
     /// A turn can belong to another attachment or a server-initiated wake.
     observed_turn_active: bool,
     /// Deduplicate specific limit/cancel notices from the subsequent failure.
@@ -1914,6 +1916,7 @@ impl BridgeState {
             }
             "turn_started" => {
                 if self.turn_fence.start(&event["identity"]) {
+                    self.scoped_text.reset();
                     self.observed_turn_active = true;
                     self.activity_version += 1;
                     if let Some(session_id) = self.session_id.clone() {
@@ -1940,8 +1943,20 @@ impl BridgeState {
                 ) {
                     return vec![];
                 }
-                let frames = self.legacy_event_to_api_inner(payload);
+                let text_frames = event.get("text_frames").and_then(|frames| {
+                    Vec::<jcode_session_types::assistant_text::AssistantTextFrame>::deserialize(frames).ok()
+                });
+                let framed = text_frames.is_some();
+                let mut frames = text_frames.map_or_else(Vec::new, |text_frames| {
+                    self.scoped_text.project(
+                        self.session_id.as_deref().unwrap_or_default(),
+                        payload["text"].as_str(),
+                        text_frames,
+                    )
+                });
+                frames.extend(self.translate_event(payload, !framed));
                 if matches!(payload["type"].as_str(), Some("done" | "error")) {
+                    self.scoped_text.reset();
                     self.turn_fence.complete();
                     // The turn's messages are on disk now; index them while the
                     // filesystem is already hot rather than on the next query.
@@ -2027,6 +2042,10 @@ impl BridgeState {
     }
 
     fn legacy_event_to_api_inner(&mut self, event: &Value) -> Vec<ServerFrame> {
+        self.translate_event(event, true)
+    }
+
+    fn translate_event(&mut self, event: &Value, legacy_text: bool) -> Vec<ServerFrame> {
         let history_activity = if self.turn_fence.scoped() {
             Some(self.turn_fence.active())
         } else {
@@ -2096,6 +2115,12 @@ impl BridgeState {
         {
             self.observed_turn_active = true;
             self.activity_version += 1;
+        }
+        if !legacy_text
+            && (matches!(kind, "text_done" | "text_replace" | "text_suffix_replace" | "retry_rollback")
+                || kind == "text_delta" && event["text"].as_str().is_some_and(|text| !text.is_empty()))
+        {
+            return vec![];
         }
         let mut frames = match kind {
             "peer_user_message" => event["content"]

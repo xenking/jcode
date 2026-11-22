@@ -133,13 +133,14 @@ fn wrapped(text: String) -> ServerEvent {
             runtime_generation: "turn-delivery-runtime".into(),
             turn_id: 42,
         },
+        text_frames: None,
         event: Box::new(ServerEvent::TextDelta { text }),
     }
 }
 
 fn payload(event: &ServerEvent) -> &str {
     match event {
-        ServerEvent::TurnEvent { identity, event } => {
+        ServerEvent::TurnEvent { identity, event, .. } => {
             assert_eq!(identity.turn_id, 42);
             assert_eq!(identity.runtime_generation, "turn-delivery-runtime");
             match event.as_ref() {
@@ -424,6 +425,7 @@ async fn turn_channel_fallback_and_attached_delivery_move_live_and_drained_paylo
             ServerEvent::TurnEvent {
                 identity: actual,
                 event,
+                ..
             } => {
                 assert_eq!(actual, identity);
                 assert!(
@@ -460,6 +462,7 @@ async fn turn_channel_fallback_and_attached_delivery_move_live_and_drained_paylo
                 ServerEvent::TurnEvent {
                     identity: actual,
                     event,
+                    ..
                 } => {
                     assert_eq!(actual, identity);
                     match *event {

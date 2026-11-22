@@ -283,6 +283,7 @@ impl ProviderNativeTracker {
 pub struct ProviderNativeItems {
     /// (byte offset into the response text at arrival, provider, item)
     items: Vec<(usize, String, Value)>,
+    text_boundaries: Vec<usize>,
 }
 
 impl ProviderNativeItems {
@@ -303,11 +304,18 @@ impl ProviderNativeItems {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
+        self.items.is_empty() && self.text_boundaries.is_empty()
+    }
+
+    pub fn finish_text(&mut self, text_len: usize) {
+        if text_len > self.text_boundaries.last().copied().unwrap_or_default() {
+            self.text_boundaries.push(text_len);
+        }
     }
 
     pub fn clear(&mut self) {
         self.items.clear();
+        self.text_boundaries.clear();
     }
 
     /// Correct trailing text without moving native items to stale byte offsets.
@@ -322,6 +330,7 @@ impl ProviderNativeItems {
             .items
             .iter()
             .any(|(offset, _, _)| *offset > start && *offset < end)
+            || self.text_boundaries.iter().any(|offset| *offset > start && *offset < end)
         {
             return false;
         }
@@ -329,6 +338,11 @@ impl ProviderNativeItems {
             return false;
         }
         for (offset, _, _) in &mut self.items {
+            if *offset >= end {
+                *offset = text.len();
+            }
+        }
+        for offset in &mut self.text_boundaries {
             if *offset >= end {
                 *offset = text.len();
             }
@@ -398,6 +412,17 @@ impl ProviderNativeItems {
                 });
             }
         };
+        let mut boundaries = self.text_boundaries.iter().copied().peekable();
+        let mut push_until = |blocks: &mut Vec<crate::ContentBlock>, start: usize, end: usize| {
+            let mut start = start;
+            while let Some(boundary) = boundaries.next_if(|boundary| *boundary <= end) {
+                if boundary > start && text.is_char_boundary(boundary) {
+                    push_text(blocks, &text[start..boundary]);
+                    start = boundary;
+                }
+            }
+            push_text(blocks, &text[start..end]);
+        };
         for (offset, provider, item) in &self.items {
             if is_hidden_control_item(item) {
                 continue;
@@ -406,14 +431,14 @@ impl ProviderNativeItems {
             while !text.is_char_boundary(at) {
                 at += 1;
             }
-            push_text(&mut blocks, &text[cursor..at]);
+            push_until(&mut blocks, cursor, at);
             cursor = at;
             blocks.push(crate::ContentBlock::ProviderNative {
                 provider: provider.clone(),
                 item: item.clone(),
             });
         }
-        push_text(&mut blocks, &text[cursor..]);
+        push_until(&mut blocks, cursor, text.len());
         blocks
     }
 }
