@@ -1,4 +1,4 @@
-//! OpenAI model selection and associated runtime state reset.
+//! OpenAI model selection.
 
 use super::*;
 
@@ -66,7 +66,6 @@ impl OpenAIProvider {
             jcode_base::provider::clear_model_unavailable_for_scope(&self.catalog_scope(), model);
             drop(current);
             if changed {
-                self.clear_persistent_ws_try("manual OpenAI model change reset the response chain");
                 self.revalidate_reasoning_effort();
             }
             Ok(())

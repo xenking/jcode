@@ -114,7 +114,6 @@ impl OpenAIProvider {
             .write()
             .unwrap_or_else(|p| p.into_inner()) = choice;
         *self.service_tier.write().unwrap_or_else(|p| p.into_inner()) = None;
-        self.clear_persistent_ws_try("OpenAI speed changed");
         Ok(())
     }
 

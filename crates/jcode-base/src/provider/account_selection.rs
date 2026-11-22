@@ -99,8 +99,8 @@ impl MultiProvider {
     }
 
     /// Select a saved login without rewriting the process-wide account preference.
-    /// Build the replacement off to the side so validation errors leave the old
-    /// runtime, model and account untouched.
+    /// Keep the runtime when selecting a model on its current login. Validate
+    /// a different login on a fork before replacing the runtime.
     pub(super) fn set_model_on_saved_account(
         &self,
         method: &str,
@@ -134,16 +134,23 @@ impl MultiProvider {
             _ => unreachable!(),
         }
         .ok_or_else(|| anyhow!("{} runtime is not configured", Self::provider_label(target)))?;
-        let replacement = runtime.fork();
-        replacement.set_oauth_account(Some(label))?;
-        replacement.set_credential_mode(CredentialMode::OAuth)?;
-        replacement.set_model(&model_name_for_provider(target, model.trim()))?;
-        let slot = match target {
-            ActiveProvider::Claude => &self.anthropic,
-            ActiveProvider::OpenAI => &self.openai,
-            _ => unreachable!(),
-        };
-        *slot.write().unwrap_or_else(|p| p.into_inner()) = Some(replacement);
+        let model = model_name_for_provider(target, model.trim());
+        if runtime.credential_mode() == CredentialMode::OAuth
+            && runtime.oauth_account_label().as_deref() == Some(label)
+        {
+            runtime.set_model(&model)?;
+        } else {
+            let replacement = runtime.fork();
+            replacement.set_oauth_account(Some(label))?;
+            replacement.set_credential_mode(CredentialMode::OAuth)?;
+            replacement.set_model(&model)?;
+            let slot = match target {
+                ActiveProvider::Claude => &self.anthropic,
+                ActiveProvider::OpenAI => &self.openai,
+                _ => unreachable!(),
+            };
+            *slot.write().unwrap_or_else(|p| p.into_inner()) = Some(replacement);
+        }
         self.set_active_provider(target);
         self.invalidate_routes_memo();
         Ok(())

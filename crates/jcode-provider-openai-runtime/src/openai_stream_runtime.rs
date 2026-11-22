@@ -623,6 +623,8 @@ async fn continue_persistent_ws_locked(
         }
     };
 
+    // Settings can change without a request. Compare the actual handshake,
+    // cache key and request options with the last response before reusing it.
     if state.identity
         != openai_websocket_prewarm::prewarm_identity(
             &*credentials.read().await,

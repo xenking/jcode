@@ -79,8 +79,6 @@ impl Provider for OpenAIProvider {
             self.browser_only.store(false, AtomicOrdering::Release);
         }
         drop(credentials);
-        self.canonical_input_cache.clear();
-        self.clear_persistent_ws_try("OpenAI account changed");
         self.reload_cached_reasoning_efforts();
         Ok(())
     }
