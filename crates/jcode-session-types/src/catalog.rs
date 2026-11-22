@@ -13,6 +13,9 @@ pub struct SideQuestionTopic {
     /// Absent on legacy hidden forks that never recorded the boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_start: Option<usize>,
+    /// Last persisted selection in this child, without attaching to its agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<SessionCatalogContext>,
 }
 
 /// Last persisted model settings for a session catalog row, without its transcript.

@@ -1,7 +1,9 @@
 use std::{fs, io::BufReader};
 
 use anyhow::{Result, anyhow, ensure};
-use jcode_session_types::{RenderedMessage, SIDE_QUESTION_VISIBILITY_DIR, SideQuestionTopic};
+use jcode_session_types::{
+    RenderedMessage, SIDE_QUESTION_VISIBILITY_DIR, SessionCatalogContext, SideQuestionTopic,
+};
 use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
 
 use super::Session;
@@ -93,6 +95,13 @@ request in this new forked session, using the inherited conversation only as con
             parent_session_id: self.parent_id.clone()?,
             created_at_ms: self.created_at.timestamp_millis(),
             message_start: self.side_question_message_start,
+            context: (self.model.is_some() || self.reasoning_effort.is_some()).then(|| {
+                SessionCatalogContext {
+                    model: self.model.clone(),
+                    reasoning_effort: self.reasoning_effort.clone(),
+                    ..SessionCatalogContext::default()
+                }
+            }),
         })
     }
 

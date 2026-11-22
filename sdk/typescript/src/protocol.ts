@@ -66,6 +66,8 @@ export interface SideQuestionTopic {
   created_at_ms: number;
   /** Raw transcript offset. Not an index into rendered getHistory results. */
   message_start?: number;
+  /** The child's last persisted model selection. Reading it does not attach a runtime. */
+  context?: SessionCatalogContext;
 }
 
 /** Live lifecycle fact from one daemon publication. */

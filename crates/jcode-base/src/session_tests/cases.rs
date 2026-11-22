@@ -400,6 +400,29 @@ fn placeholder_model_keeps_an_observed_account_route() -> Result<()> {
 }
 
 #[test]
+fn side_question_list_uses_the_childs_persisted_model_and_effort() -> Result<()> {
+    let _env_lock = lock_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path().as_os_str());
+    let mut child = Session::create_with_id(
+        "session_btw_child".into(),
+        Some("session_btw_parent".into()),
+        None,
+    );
+    child.model = Some("gpt-5-btw-child".into());
+    child.reasoning_effort = Some("high".into());
+    child.save_new_side_question()?;
+
+    let topics = Session::list_side_questions("session_btw_parent")?;
+    assert_eq!(topics.len(), 1);
+    assert_eq!(topics[0].session_id, "session_btw_child");
+    let context = topics[0].context.as_ref().unwrap();
+    assert_eq!(context.model.as_deref(), Some("gpt-5-btw-child"));
+    assert_eq!(context.reasoning_effort.as_deref(), Some("high"));
+    Ok(())
+}
+
+#[test]
 fn load_startup_stub_preserves_metadata_but_skips_heavy_vectors() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
