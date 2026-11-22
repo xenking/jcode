@@ -264,7 +264,7 @@ fn claim_update_fetch_slot() -> bool {
         return false;
     }
     // Touch before fetching so a spawn burst collapses to ~one fetch.
-    std::fs::write(&marker, b"").is_ok()
+    crate::storage::touch_stamp(&marker).is_ok()
 }
 
 /// `None` means this local checkout has no tracking branch, not a failed check.

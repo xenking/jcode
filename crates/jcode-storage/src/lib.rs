@@ -593,6 +593,12 @@ pub fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     write_bytes_inner(path, bytes, true, false)
 }
 
+/// Refresh a throttle marker's mtime. A non-empty payload forces a write even
+/// on filesystems where reopening an already empty file does not update mtime.
+pub fn touch_stamp(path: &Path) -> std::io::Result<()> {
+    std::fs::write(path, b"1")
+}
+
 fn write_json_inner<T: Serialize + ?Sized>(
     path: &Path,
     value: &T,
