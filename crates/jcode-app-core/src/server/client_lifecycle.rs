@@ -2590,6 +2590,23 @@ pub(super) async fn handle_client(
                 handle_set_service_tier(id, service_tier, &agent, session_control.provider_handle(), &client_event_tx).await;
             }
 
+            Request::SetSpeedMode { id, speed_mode } => {
+                let result = match agent.try_lock() {
+                    Ok(mut agent) => agent.set_speed_mode(speed_mode).map(|mode| {
+                        let provider = agent.provider_handle();
+                        (mode, provider.speed_options(&provider.model()))
+                    }),
+                    Err(_) => Err(anyhow::anyhow!("Cannot change speed during an active turn; try again when the session is idle")),
+                };
+                let (speed_mode, speed_options, error) = match result {
+                    Ok((mode, options)) => (mode, options, None),
+                    Err(error) => (Default::default(), Vec::new(), Some(error.to_string())),
+                };
+                send_client_event_best_effort(&client_event_tx, ServerEvent::SpeedModeChanged {
+                    id, speed_mode, speed_options, error,
+                }, "client_lifecycle: SpeedModeChanged");
+            }
+
             Request::SetTransport { id, transport } => {
                 handle_set_transport(id, transport, &agent, &client_event_tx).await;
             }

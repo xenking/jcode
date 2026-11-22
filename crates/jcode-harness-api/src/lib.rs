@@ -43,6 +43,7 @@ pub use await_state::{PendingAwait, pending_awaits_for_session, pending_awaits_i
 pub use client::{FrameError, HarnessClient, read_frame, write_frame};
 pub use events::*;
 pub use jcode_applet_types;
+pub use jcode_message_types::{SpeedAvailability, SpeedMode, SpeedOption};
 pub use jcode_selfdev_types::ServingIdentity;
 pub use jcode_session_types::SessionImageRef;
 pub use jcode_session_types::{

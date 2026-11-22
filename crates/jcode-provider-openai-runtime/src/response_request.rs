@@ -8,12 +8,20 @@ impl OpenAIProvider {
         input: impl Into<std::borrow::Cow<'a, [Value]>>,
         tools: &[ToolDefinition],
         system: &str,
-    ) -> Value {
+    ) -> Result<Value> {
         let model_id = self.model_id().await;
-        let is_chatgpt_mode = Self::is_chatgpt_mode(&*self.credentials.read().await);
-        self.response_request_for_model(&model_id, input, tools, system, is_chatgpt_mode)
+        let credentials = self.credentials.read().await;
+        Ok(self.response_request_with_tier(
+            &model_id,
+            input,
+            tools,
+            system,
+            Self::is_chatgpt_mode(&credentials),
+            self.request_speed_tier(&model_id, &credentials)?.as_deref(),
+        ))
     }
 
+    #[cfg(test)]
     pub(super) fn response_request_for_model<'a>(
         &self,
         model_id: &str,
@@ -21,6 +29,26 @@ impl OpenAIProvider {
         tools: &[ToolDefinition],
         system: &str,
         is_chatgpt_mode: bool,
+    ) -> Value {
+        let tier = self.effective_service_tier(model_id);
+        self.response_request_with_tier(
+            model_id,
+            input,
+            tools,
+            system,
+            is_chatgpt_mode,
+            tier.as_deref(),
+        )
+    }
+
+    pub(super) fn response_request_with_tier<'a>(
+        &self,
+        model_id: &str,
+        input: impl Into<std::borrow::Cow<'a, [Value]>>,
+        tools: &[ToolDefinition],
+        system: &str,
+        is_chatgpt_mode: bool,
+        service_tier: Option<&str>,
     ) -> Value {
         let hosted_tools =
             native_web_search::hosted_tools_for_request(model_id, is_chatgpt_mode, tools);
@@ -38,7 +66,6 @@ impl OpenAIProvider {
         // Map the `swarm` sentinel (and any future aliases) to the real effort
         // value the API understands.
         let api_reasoning_effort = self.api_reasoning_effort(reasoning_effort.as_deref());
-        let service_tier = self.effective_service_tier(model_id);
         let native_compaction_threshold = self.native_compaction_threshold_for_model(model_id);
         Self::build_response_request(
             model_id,
@@ -48,7 +75,7 @@ impl OpenAIProvider {
             is_chatgpt_mode,
             self.max_output_tokens,
             api_reasoning_effort.as_deref(),
-            service_tier.as_deref(),
+            service_tier,
             Some(&self.cache_routing_key()),
             self.prompt_cache_retention.as_deref(),
             native_compaction_threshold,

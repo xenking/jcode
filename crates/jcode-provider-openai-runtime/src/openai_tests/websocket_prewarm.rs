@@ -97,6 +97,7 @@ async fn websocket_v2_prewarm_is_adopted_by_complete_without_losing_request_stat
                 .is_some_and(|key| !key.is_empty())
         );
         assert_eq!(warm["reasoning"]["effort"], "high");
+        assert_eq!(warm["service_tier"], "fast");
         assert_eq!(warm["tools"][0]["name"], "lookup");
         socket
             .send(WsMessage::Text(
@@ -125,6 +126,7 @@ async fn websocket_v2_prewarm_is_adopted_by_complete_without_losing_request_stat
         assert_eq!(generated["model"], "gpt-5.6-sol");
         assert_eq!(generated["instructions"], "preserve this system prompt");
         assert_eq!(generated["reasoning"]["effort"], "high");
+        assert_eq!(generated["service_tier"], "fast");
         assert_eq!(generated["tools"][0]["name"], "lookup");
         assert!(
             generated.get("generate").is_none(),
@@ -170,6 +172,7 @@ async fn websocket_v2_prewarm_is_adopted_by_complete_without_losing_request_stat
         .set_transport("websocket")
         .expect("force local websocket transport");
     provider.set_model("gpt-5.6-sol").expect("set test model");
+    provider.set_speed_mode(jcode_provider_core::SpeedMode::Fast).unwrap();
     provider
         .set_reasoning_effort("high")
         .expect("set reasoning effort");

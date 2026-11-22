@@ -213,7 +213,8 @@ impl Provider for OpenAIProvider {
                 native_web_search::downgrade_web_search_calls(&mut input);
             }
         }
-        let request = self.response_request(input, tools, system).await;
+        let request = self.response_request(input, tools, system).await?;
+        let premium_route = self.requested_premium_speed().map(|choice| choice.route);
         let input = request["input"]
             .as_array()
             .context("OpenAI request input is not an array")?;
@@ -404,6 +405,16 @@ impl Provider for OpenAIProvider {
             }
             jcode_base::logging::set_provider_info("OpenAI", &model_for_transport);
             let stream_task = async move {
+                let verify_credential = async || -> Result<()> {
+                    if let Some(route) = premium_route.as_deref() {
+                        anyhow::ensure!(
+                            Self::speed_route_for(&*credentials.read().await).as_deref()
+                                == Some(route),
+                            "The OpenAI credential route changed after speed was selected; select a speed before retrying"
+                        );
+                    }
+                    Ok(())
+                };
                 let Some(input) = request["input"].as_array() else {
                     if tx
                         .send(Err(anyhow::anyhow!("OpenAI request input is not an array")))
@@ -418,6 +429,10 @@ impl Provider for OpenAIProvider {
                 };
                 let mut retry_diagnostics =
                     super::openai_retry_diagnostics::OpenAIRetryDiagnostics::default();
+                if let Err(error) = verify_credential().await {
+                    let _ = tx.send(Err(error)).await;
+                    return;
+                }
                 // Attempt persistent WebSocket continuation first
                 if use_websocket_transport {
                     // Track output: a continuation that streams partial output
@@ -558,6 +573,10 @@ impl Provider for OpenAIProvider {
                         ));
                     }
                     skip_backoff_once = false;
+                    if let Err(error) = verify_credential().await {
+                        let _ = tx.send(Err(error)).await;
+                        return;
+                    }
 
                     let transport = if force_https_for_request {
                         OpenAITransport::HTTPS
@@ -884,11 +903,9 @@ impl Provider for OpenAIProvider {
                         ],
                     );
                     let _ = tx
-                        .send(Err(retry_diagnostics.annotate(anyhow::anyhow!(
-                            "Failed after {} retries: {}",
-                            MAX_RETRIES,
-                            e
-                        ))))
+                        .send(Err(retry_diagnostics.annotate(
+                            e.context(format!("Failed after {MAX_RETRIES} retries")),
+                        )))
                         .await;
                 }
             };
@@ -1090,7 +1107,34 @@ impl Provider for OpenAIProvider {
         jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec()
     }
 
+    fn speed_options(&self, model: &str) -> Vec<jcode_provider_core::SpeedOption> {
+        self.credentials
+            .try_read()
+            .map(|credentials| self.scope_speed_options(model, &credentials))
+            .unwrap_or_else(|_| vec![jcode_provider_core::SpeedOption::standard()])
+    }
+
+    fn speed_mode(&self) -> jcode_provider_core::SpeedMode {
+        self.requested_premium_speed()
+            .map(|choice| choice.mode)
+            .unwrap_or_default()
+    }
+
+    fn set_speed_mode(&self, mode: jcode_provider_core::SpeedMode) -> Result<()> {
+        self.apply_speed(mode)
+    }
+
+    fn speed_route_identity(&self) -> Option<String> {
+        Self::speed_route_for(&*self.credentials.try_read().ok()?)
+    }
+
     fn service_tier(&self) -> Option<String> {
+        if let Some(choice) = self.requested_premium_speed() {
+            let credentials = self.credentials.try_read().ok()?;
+            return Some(
+                speed::speed_wire_tier(choice.mode, Self::is_chatgpt_mode(&credentials)).into(),
+            );
+        }
         self.effective_service_tier(&self.model())
     }
 
@@ -1104,6 +1148,14 @@ impl Provider for OpenAIProvider {
 
     fn set_service_tier(&self, service_tier: &str) -> Result<()> {
         let normalized = Self::normalize_service_tier(service_tier)?;
+        match normalized.as_deref() {
+            None => return self.apply_speed(jcode_provider_core::SpeedMode::Standard),
+            Some("priority") => return self.apply_speed(jcode_provider_core::SpeedMode::Fast),
+            Some("ultrafast") => {
+                return self.apply_speed(jcode_provider_core::SpeedMode::Ultrafast);
+            }
+            _ => {}
+        }
         if normalized
             .as_deref()
             .is_some_and(|tier| !self.supports_service_tier(&self.model(), tier))
@@ -1115,6 +1167,7 @@ impl Provider for OpenAIProvider {
                 self.available_service_tiers().join(", ")
             );
         }
+        self.apply_speed(jcode_provider_core::SpeedMode::Standard)?;
         let mut guard = self
             .service_tier
             .write()
@@ -1282,6 +1335,7 @@ impl Provider for OpenAIProvider {
                     .unwrap_or_else(|p| p.into_inner())
                     .clone(),
             )),
+            premium_speed: StdRwLock::new(None),
             service_tier: Arc::new(StdRwLock::new(
                 self.service_tier
                     .read()

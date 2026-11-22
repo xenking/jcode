@@ -716,6 +716,7 @@ fn configure_test_remote_models_with_cursor(app: &mut App) {
         .iter()
         .cloned()
         .map(|model| crate::provider::ModelRoute {
+            speed_options: Vec::new(),
             model,
             provider: "Cursor".to_string(),
             api_method: "cursor".to_string(),
@@ -788,6 +789,7 @@ fn test_available_models_updated_event_surfaces_authed_provider_in_remote_model_
             ],
             available_model_routes: vec![
                 crate::provider::ModelRoute {
+                    speed_options: Vec::new(),
                     model: "claude-opus-4.6".to_string(),
                     provider: "Copilot".to_string(),
                     api_method: "copilot".to_string(),
@@ -797,6 +799,7 @@ fn test_available_models_updated_event_surfaces_authed_provider_in_remote_model_
                     cheapness: None,
                 },
                 crate::provider::ModelRoute {
+                    speed_options: Vec::new(),
                     model: "grok-code-fast-1".to_string(),
                     provider: "Copilot".to_string(),
                     api_method: "copilot".to_string(),
@@ -879,6 +882,7 @@ fn test_duplicate_available_models_updated_event_is_a_no_op() {
             provider_model: Some("claude-opus-4.6".to_string()),
             available_models: vec!["claude-opus-4.6".to_string()],
             available_model_routes: vec![crate::provider::ModelRoute {
+                speed_options: Vec::new(),
                 model: "claude-opus-4.6".to_string(),
                 provider: "Copilot".to_string(),
                 api_method: "copilot".to_string(),
@@ -920,6 +924,7 @@ fn test_remote_final_catalog_replaces_post_login_loading_state_in_place() {
     app.remote_provider_model = Some("gpt-5.4".to_string());
     app.remote_available_entries = vec!["gpt-5.4".to_string()];
     app.remote_model_options = vec![crate::provider::ModelRoute {
+        speed_options: Vec::new(),
         model: "gpt-5.4".to_string(),
         provider: "OpenAI".to_string(),
         api_method: "openai-oauth".to_string(),
@@ -944,6 +949,7 @@ fn test_remote_final_catalog_replaces_post_login_loading_state_in_place() {
             provider_model: Some("claude-opus-4.6".to_string()),
             available_models: vec!["claude-opus-4.6".to_string()],
             available_model_routes: vec![crate::provider::ModelRoute {
+                speed_options: Vec::new(),
                 model: "claude-opus-4.6".to_string(),
                 provider: "Anthropic".to_string(),
                 api_method: "anthropic-oauth".to_string(),

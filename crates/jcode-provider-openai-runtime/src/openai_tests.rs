@@ -385,4 +385,5 @@ include!("openai_tests/cache_affinity.rs");
 include!("openai_tests/persistent_cancellation.rs");
 
 include!("openai_tests/http_idle.rs");
+include!("openai_tests/speed.rs");
 include!("openai_tests/overload_retry.rs");

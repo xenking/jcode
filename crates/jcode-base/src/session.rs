@@ -96,6 +96,13 @@ pub use {jcode_session_types::prompt_title, persistence::drain_saves_for_shutdow
 mod message_helpers;
 pub(crate) use message_helpers::is_visible_conversation_message;
 pub use message_helpers::{derive_session_provider_key, is_scheduled_task_message};
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredSpeedSelection {
+    pub mode: jcode_provider_core::SpeedMode,
+    pub model: String,
+    pub route: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -143,6 +150,8 @@ pub struct Session {
     /// Provider reasoning/thinking effort for this session (e.g., OpenAI low|medium|high|xhigh).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed_selection: Option<StoredSpeedSelection>,
     /// This session was spawned as a swarm worker, not a user-started session.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_swarm_worker: bool,
@@ -281,6 +290,8 @@ struct SessionStartupStub {
     #[serde(default)]
     reasoning_effort: Option<String>,
     #[serde(default)]
+    speed_selection: Option<StoredSpeedSelection>,
+    #[serde(default)]
     is_swarm_worker: bool,
     #[serde(default)]
     worker_model_approval: Option<AuthorizedWorkerModel>,
@@ -390,6 +401,7 @@ impl Session {
         session.model = stub.model;
         session.route_api_method = stub.route_api_method;
         session.reasoning_effort = stub.reasoning_effort;
+        session.speed_selection = stub.speed_selection;
         session.is_swarm_worker = stub.is_swarm_worker;
         session.worker_model_approval = stub.worker_model_approval;
         session.context_cap = stub.context_cap;
@@ -437,6 +449,7 @@ impl Session {
         session.model = snapshot.model;
         session.route_api_method = snapshot.route_api_method;
         session.reasoning_effort = snapshot.reasoning_effort;
+        session.speed_selection = snapshot.speed_selection;
         session.is_swarm_worker = snapshot.is_swarm_worker;
         session.worker_model_approval = snapshot.worker_model_approval;
         session.context_cap = snapshot.context_cap;
@@ -685,6 +698,7 @@ impl Session {
             route_api_method_present: true,
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
+            speed_selection: self.speed_selection.clone(),
             is_swarm_worker: self.is_swarm_worker,
             worker_model_approval: self.worker_model_approval.clone(),
             context_cap: self.context_cap,
@@ -901,6 +915,7 @@ impl Session {
         self.model = meta.model;
         self.normalize_placeholder_model();
         self.reasoning_effort = meta.reasoning_effort;
+        self.speed_selection = meta.speed_selection;
         self.is_swarm_worker = meta.is_swarm_worker;
         self.worker_model_approval = meta.worker_model_approval;
         self.context_cap = meta.context_cap;
@@ -958,6 +973,7 @@ impl Session {
             model: None,
             route_api_method: None,
             reasoning_effort: None,
+            speed_selection: None,
             is_swarm_worker: false,
             worker_model_approval: None,
             context_cap: None,
@@ -1026,6 +1042,7 @@ impl Session {
             model: None,
             route_api_method: None,
             reasoning_effort: None,
+            speed_selection: None,
             is_swarm_worker: false,
             worker_model_approval: None,
             context_cap: None,
@@ -2061,6 +2078,8 @@ struct RemoteStartupSessionSnapshot {
     route_api_method: Option<String>,
     #[serde(default)]
     reasoning_effort: Option<String>,
+    #[serde(default)]
+    speed_selection: Option<StoredSpeedSelection>,
     #[serde(default)]
     is_swarm_worker: bool,
     #[serde(default)]

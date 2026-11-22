@@ -191,6 +191,7 @@ mod tests {
 
     fn route(model: &str, provider: &str, api_method: &str, available: bool) -> ModelRoute {
         ModelRoute {
+            speed_options: Vec::new(),
             model: model.to_string(),
             provider: provider.to_string(),
             api_method: api_method.to_string(),
@@ -395,6 +396,7 @@ mod generation_tests {
 
     fn route(model: &str, provider: &str, api_method: &str) -> ModelRoute {
         ModelRoute {
+            speed_options: Vec::new(),
             model: model.to_string(),
             provider: provider.to_string(),
             api_method: api_method.to_string(),
@@ -513,6 +515,7 @@ mod unified_rank_tests {
             "OpenAI"
         };
         ModelRoute {
+            speed_options: Vec::new(),
             model: model.into(),
             provider: provider.into(),
             api_method: api_method.into(),
@@ -553,6 +556,7 @@ mod unified_rank_account_tests {
     #[test]
     fn spent_account_does_not_exclude_sibling_account() {
         let routes = vec![ModelRoute {
+            speed_options: Vec::new(),
             model: "claude-opus-5-5".into(),
             provider: "Anthropic".into(),
             api_method: "claude-oauth@claude-otter".into(),

@@ -43,7 +43,7 @@ use account_failover::{
     account_usage_probe, active_account_label_for_provider, maybe_annotate_limit_summary,
     same_provider_account_failover_enabled,
 };
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 #[cfg(test)]
 use jcode_provider_core::FailoverDecision;
@@ -526,7 +526,10 @@ impl MultiProvider {
         mode: CompletionMode<'_>,
         resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        self.bind_auto_account_for_request(self.active_provider())?;
+        let premium = self.speed_mode() != jcode_provider_core::SpeedMode::Standard;
+        if !premium {
+            self.bind_auto_account_for_request(self.active_provider())?;
+        }
         self.spawn_anthropic_catalog_refresh_if_needed();
         self.spawn_openai_catalog_refresh_if_needed();
 
@@ -557,6 +560,32 @@ impl MultiProvider {
             };
 
         let active = self.active_provider();
+        if premium {
+            let provider = self
+                .speed_provider()
+                .context("The configured speed route is no longer available")?;
+            return match mode {
+                CompletionMode::Unified { system } => {
+                    provider
+                        .complete(messages, tools, system, resume_session_id)
+                        .await
+                }
+                CompletionMode::Split {
+                    system_static,
+                    system_dynamic,
+                } => {
+                    provider
+                        .complete_split(
+                            messages,
+                            tools,
+                            system_static,
+                            system_dynamic,
+                            resume_session_id,
+                        )
+                        .await
+                }
+            };
+        }
         // Saved account requests remain session-local. Only configured pool
         // members may propose another exact account after a startup failure.
         if let Some(bound_label) = self.selected_account_for_provider(active) {
@@ -2525,6 +2554,38 @@ impl Provider for MultiProvider {
         }
     }
 
+    fn speed_options(&self, model: &str) -> Vec<jcode_provider_core::SpeedOption> {
+        self.speed_provider()
+            .map(|provider| provider.speed_options(model))
+            .unwrap_or_else(|| vec![jcode_provider_core::SpeedOption::standard()])
+    }
+
+    fn speed_mode(&self) -> jcode_provider_core::SpeedMode {
+        self.speed_provider()
+            .map(|provider| provider.speed_mode())
+            .unwrap_or_default()
+    }
+
+    fn speed_route_identity(&self) -> Option<String> {
+        self.speed_provider()?.speed_route_identity()
+    }
+
+    fn set_speed_mode(&self, mode: jcode_provider_core::SpeedMode) -> Result<()> {
+        use jcode_provider_core::SpeedMode;
+        if mode == SpeedMode::Standard {
+            for provider in [self.openai_provider(), self.anthropic_provider()]
+                .into_iter()
+                .flatten()
+            {
+                provider.set_speed_mode(mode)?;
+            }
+            return Ok(());
+        }
+        self.speed_provider()
+            .context("The active route does not support premium speed")?
+            .set_speed_mode(mode)
+    }
+
     fn service_tier(&self) -> Option<String> {
         match self.active_provider() {
             ActiveProvider::Claude => self.anthropic_provider().and_then(|a| a.service_tier()),
@@ -3126,6 +3187,7 @@ mod bedrock_placeholder_default_tests {
 
     fn route(model: &str, available: bool) -> ModelRoute {
         ModelRoute {
+            speed_options: Vec::new(),
             model: model.to_string(),
             provider: "AWS Bedrock".to_string(),
             api_method: "bedrock".to_string(),

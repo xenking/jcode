@@ -603,6 +603,7 @@ fn test_guardrail_reroute_prefers_native_anthropic_route() {
     app.remote_model_options = vec![
         openai_oauth_route("gpt-5.5"),
         crate::provider::ModelRoute {
+            speed_options: Vec::new(),
             model: "claude-opus-4-8".to_string(),
             provider: "OpenRouter".to_string(),
             api_method: "openrouter".to_string(),
@@ -2749,6 +2750,8 @@ fn resumed_history_restores_last_provider_reported_context_usage() {
             reasoning_effort: None,
             service_tier: None,
             available_service_tiers: None,
+            speed_mode: Default::default(),
+            speed_options: Vec::new(),
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),

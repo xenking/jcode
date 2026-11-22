@@ -287,6 +287,7 @@ pub fn ranked_flagship_for_provider(provider_id: &str, models: &[&str]) -> Optio
     let routes: Vec<ModelRoute> = models
         .iter()
         .map(|model| ModelRoute {
+            speed_options: Vec::new(),
             model: (*model).to_string(),
             provider: String::new(),
             api_method: provider_id.clone(),
@@ -339,6 +340,7 @@ pub fn onboarding_default_selection(provider_ids: &[&str]) -> Option<(String, St
         .iter()
         .filter_map(|id| {
             default_model_for_provider(id).map(|model| ModelRoute {
+                speed_options: Vec::new(),
                 model: model.to_string(),
                 provider: id.trim().to_string(),
                 api_method: String::new(),
@@ -1155,6 +1157,7 @@ mod tests {
 
     fn route(model: &str, provider: &str, api_method: &str, available: bool) -> ModelRoute {
         ModelRoute {
+            speed_options: Vec::new(),
             model: model.to_string(),
             provider: provider.to_string(),
             api_method: api_method.to_string(),

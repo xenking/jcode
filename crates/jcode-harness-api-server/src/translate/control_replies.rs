@@ -34,6 +34,7 @@ pub(super) enum SimpleKind {
     ContextCap,
     /// Awaiting `reasoning_effort_changed`.
     ReasoningEffort,
+    SpeedMode,
     /// Awaiting `compacted_history`.
     Compact,
     /// Awaiting the catalog reply that answers `list_models`.

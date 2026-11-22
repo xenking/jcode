@@ -750,6 +750,10 @@ pub enum ServerEvent {
         /// Authoritative service tiers from the live provider, including an empty unsupported list.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         available_service_tiers: Option<Vec<String>>,
+        #[serde(default)]
+        speed_mode: jcode_message_types::SpeedMode,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        speed_options: Vec<jcode_message_types::SpeedOption>,
         /// Connected MCP server names
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mcp_servers: Vec<String>,
@@ -1019,6 +1023,15 @@ pub enum ServerEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         service_tier: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+
+    #[serde(rename = "speed_mode_changed")]
+    SpeedModeChanged {
+        id: u64,
+        speed_mode: jcode_message_types::SpeedMode,
+        speed_options: Vec<jcode_message_types::SpeedOption>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
 

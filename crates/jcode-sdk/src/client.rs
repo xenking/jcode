@@ -1518,6 +1518,8 @@ impl JcodeClient {
                 auth_method,
                 account_label,
                 routes,
+                speed_mode,
+                speed_options,
             } => {
                 let mut providers = Vec::new();
                 if let Some(provider) = provider.as_ref() {
@@ -1541,9 +1543,25 @@ impl JcodeClient {
                     account_label,
                     providers,
                     routes,
+                    speed_mode,
+                    speed_options,
                 })
             }
             other => Err(unexpected("runtime_info", &other)),
+        }
+    }
+
+    /// Return the speed acknowledged by the attached session after persistence.
+    pub fn set_speed_mode(
+        &self,
+        speed_mode: jcode_harness_api::SpeedMode,
+    ) -> Result<jcode_harness_api::SpeedMode> {
+        match self
+            .request_ok(ApiRequest::SetSpeedMode { speed_mode })?
+            .event
+        {
+            ApiEvent::SpeedModeChanged { speed_mode, .. } => Ok(speed_mode),
+            other => Err(unexpected("speed_mode_changed", &other)),
         }
     }
 
@@ -2175,6 +2193,7 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | SessionRecovery { session_id, .. }
         | ModelInfo { session_id, .. }
         | RuntimeInfo { session_id, .. }
+        | SpeedModeChanged { session_id, .. }
         | ConnectionPhase { session_id, .. }
         | Models { session_id, .. }
         | Compacted { session_id, .. }

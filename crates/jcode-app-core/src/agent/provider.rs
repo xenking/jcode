@@ -626,6 +626,7 @@ impl Agent {
     ) -> Result<()> {
         let previous_effort = self.provider.reasoning_effort();
         self.provider.set_route_selection(selection)?;
+        self.reset_speed_after_route_change()?;
         let resolved_model = self.provider.model();
         self.session.provider_key = Some(selection.runtime_key.stable_id());
         self.session.route_api_method = Some(selection.api_method.clone());
@@ -653,6 +654,7 @@ impl Agent {
     ) -> Result<()> {
         let previous_effort = self.provider.reasoning_effort();
         crate::provider::set_model_with_auth_refresh(self.provider.as_ref(), model)?;
+        self.reset_speed_after_route_change()?;
         let resolved_model = self.provider.model();
         self.session.provider_key =
             crate::provider::MultiProvider::session_provider_key_after_model_switch(
@@ -691,6 +693,77 @@ impl Agent {
 
     pub(crate) fn user_selected_provider_model_after(&self, generation: u64) -> bool {
         self.provider_runtime_state.user_selected_after(generation)
+    }
+
+    pub(crate) fn restore_speed_from_session(&mut self) {
+        let Some(choice) = self.session.speed_selection.clone() else {
+            return;
+        };
+        if !self.speed_selection_matches(&choice) {
+            self.session.speed_selection = None;
+            let _ = self
+                .provider
+                .set_speed_mode(jcode_provider_core::SpeedMode::Standard);
+        } else if let Err(error) = self.provider.set_speed_mode(choice.mode) {
+            crate::logging::warn(&format!("Could not restore session speed: {error}"));
+        }
+    }
+
+    pub(super) fn ensure_session_speed(&self) -> Result<()> {
+        if let Some(choice) = &self.session.speed_selection {
+            anyhow::ensure!(
+                self.speed_selection_matches(choice) && self.provider.speed_mode() == choice.mode,
+                "The saved {:?} speed is unavailable on this route. Select Standard or choose a supported speed before retrying.",
+                choice.mode,
+            );
+        }
+        Ok(())
+    }
+
+    fn speed_selection_matches(&self, choice: &crate::session::StoredSpeedSelection) -> bool {
+        choice.model == self.provider.model()
+            && self.provider.speed_route_identity().as_deref() == Some(choice.route.as_str())
+    }
+
+    fn reset_speed_after_route_change(&mut self) -> Result<()> {
+        if self
+            .session
+            .speed_selection
+            .as_ref()
+            .is_some_and(|choice| !self.speed_selection_matches(choice))
+        {
+            self.provider
+                .set_speed_mode(jcode_provider_core::SpeedMode::Standard)?;
+            self.session.speed_selection = None;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn set_speed_mode(
+        &mut self,
+        mode: jcode_provider_core::SpeedMode,
+    ) -> Result<jcode_provider_core::SpeedMode> {
+        use jcode_provider_core::SpeedMode;
+        let next = if mode == SpeedMode::Standard {
+            None
+        } else {
+            Some(crate::session::StoredSpeedSelection {
+                mode,
+                model: self.provider.model(),
+                route: self.provider.speed_route_identity().ok_or_else(|| {
+                    anyhow::anyhow!("The active credential route could not be identified")
+                })?,
+            })
+        };
+        let previous_mode = self.provider.speed_mode();
+        self.provider.set_speed_mode(mode)?;
+        let previous = std::mem::replace(&mut self.session.speed_selection, next);
+        if let Err(error) = self.session.save_prepared() {
+            self.session.speed_selection = previous;
+            let _ = self.provider.set_speed_mode(previous_mode);
+            return Err(error);
+        }
+        Ok(self.provider.speed_mode())
     }
 
     pub fn restore_reasoning_effort_from_session(&mut self) {

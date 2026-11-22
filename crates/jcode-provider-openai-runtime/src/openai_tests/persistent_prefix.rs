@@ -63,6 +63,7 @@ async fn assert_codex_parity_verified_empty_delta(stale: bool) {
         let first = prefix_test_request(&mut original).await;
         assert_eq!(first["input"], json!(&full_input[..1]));
         assert_eq!(first["prompt_cache_key"], "parity-fixture-key");
+        assert_eq!(first["service_tier"], "fast");
         let mut output = full_input[1].clone();
         output["id"] = json!("msg_fixture");
         output["status"] = json!("completed");
@@ -124,6 +125,7 @@ async fn assert_codex_parity_verified_empty_delta(stale: bool) {
         }
     });
     let provider = prefix_test_provider().await;
+    provider.set_speed_mode(jcode_provider_core::SpeedMode::Fast).unwrap();
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         prefix_test_complete(&provider, &[user], "resp_fixture").await;
         if stale {

@@ -36,7 +36,10 @@ pub enum ApiEvent {
     },
 
     /// Request failed.
-    Error { code: ErrorCode, message: String },
+    Error {
+        code: ErrorCode,
+        message: String,
+    },
 
     /// Reply to `ListSessions`.
     Sessions {
@@ -67,7 +70,9 @@ pub enum ApiEvent {
     },
 
     /// Reply to `ForkSession`.
-    SessionForked { session: SessionInfo },
+    SessionForked {
+        session: SessionInfo,
+    },
 
     SideQuestionForked {
         topic: crate::SideQuestionTopic,
@@ -184,7 +189,10 @@ pub enum ApiEvent {
     },
 
     /// Model reasoning delta (render dim/italic; safe to ignore).
-    ReasoningDelta { session_id: String, text: String },
+    ReasoningDelta {
+        session_id: String,
+        text: String,
+    },
 
     /// Reasoning finished for the current step.
     ReasoningDone {
@@ -509,7 +517,10 @@ pub enum ApiEvent {
     },
 
     /// A prompt submitted by another client attached to this session.
-    PeerUserMessage { session_id: String, content: String },
+    PeerUserMessage {
+        session_id: String,
+        content: String,
+    },
     /// A signed swarm DM addressed to this session. Not a user prompt.
     AgentMessage {
         session_id: String,
@@ -526,7 +537,9 @@ pub enum ApiEvent {
     /// that shows "sent" versus "acknowledged" needs the second fact, and
     /// without it the only proof a message landed is the reply, which can be
     /// minutes away.
-    MessageAccepted { session_id: String },
+    MessageAccepted {
+        session_id: String,
+    },
 
     /// Durable IDs for the image attachments in a submitted user message.
     UserImageIds {
@@ -584,7 +597,10 @@ pub enum ApiEvent {
     /// This is separate from `SessionStatus`: a session can be `generating`
     /// throughout all of these phases, while clients need the finer progress to
     /// avoid looking stuck before the model emits its first token.
-    ConnectionPhase { session_id: String, phase: String },
+    ConnectionPhase {
+        session_id: String,
+        phase: String,
+    },
 
     /// Structured provider quota outcome for a turn.
     UsageLimit {
@@ -656,10 +672,24 @@ pub enum ApiEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         account_label: Option<String>,
         routes: Vec<ModelRouteInfo>,
+        #[serde(default)]
+        speed_mode: crate::SpeedMode,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        speed_options: Vec<crate::SpeedOption>,
+    },
+
+    /// A durable session speed choice acknowledged by the runtime.
+    SpeedModeChanged {
+        session_id: String,
+        speed_mode: crate::SpeedMode,
+        speed_options: Vec<crate::SpeedOption>,
     },
 
     /// An API-key credential was persisted or removed.
-    CredentialUpdated { provider: String, configured: bool },
+    CredentialUpdated {
+        provider: String,
+        configured: bool,
+    },
 
     /// Reply to `ReadFile`.
     FileContent {
@@ -887,6 +917,8 @@ pub struct ModelRouteInfo {
     pub api_method: String,
     pub available: bool,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub speed_options: Vec<crate::SpeedOption>,
     /// Tracked turns and prior picker selections, when supplied by the runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::ModelUsage>,

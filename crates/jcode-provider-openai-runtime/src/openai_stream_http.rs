@@ -173,7 +173,12 @@ pub(crate) async fn stream_response(
             ],
         );
 
-        if let Some(reason) = classify_unavailable_model_error(status, &body)
+        let speed_denial = requested_tier.as_deref().is_some_and(|tier| {
+            matches!(tier, "fast" | "priority" | "ultrafast")
+                && (status == StatusCode::FORBIDDEN || status == StatusCode::BAD_REQUEST)
+        });
+        if !speed_denial
+            && let Some(reason) = classify_unavailable_model_error(status, &body)
             && let Some(model_name) = request.get("model").and_then(|m| m.as_str())
         {
             jcode_base::provider::record_model_unavailable_for_scope(
@@ -188,7 +193,7 @@ pub(crate) async fn stream_response(
         }
 
         // Check if we need to refresh token
-        if should_refresh_token(status, &body) {
+        if !speed_denial && should_refresh_token(status, &body) {
             if tx.is_closed() {
                 return Ok(());
             }

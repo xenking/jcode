@@ -357,3 +357,14 @@ mod cache_tests {
         }
     }
 }
+/// Delivery of paid speed is documented only on the native OpenAI endpoints.
+pub fn native_speed_api_endpoint(base: &str) -> bool {
+    let Ok(url) = url::Url::parse(base) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && matches!(
+            url.host_str(),
+            Some("api.openai.com" | "us.api.openai.com" | "eu.api.openai.com")
+        )
+}

@@ -502,6 +502,7 @@ fn test_model_picker_preview_enter_selects_model() {
         .iter()
         .cloned()
         .map(|model| crate::provider::ModelRoute {
+            speed_options: Vec::new(),
             model,
             provider: "OpenAI".to_string(),
             api_method: "openai-oauth".to_string(),

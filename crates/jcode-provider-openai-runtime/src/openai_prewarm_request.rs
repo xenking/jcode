@@ -40,12 +40,16 @@ impl OpenAIProvider {
         let Ok(credentials) = self.credentials.try_read() else {
             return;
         };
-        let request = self.response_request_for_model(
+        let Ok(tier) = self.request_speed_tier(model, &credentials) else {
+            return;
+        };
+        let request = self.response_request_with_tier(
             model,
             &[],
             tools,
             system,
             Self::is_chatgpt_mode(&credentials),
+            tier.as_deref(),
         );
         drop(credentials);
         if matches!(mode, OpenAITransportMode::Auto)

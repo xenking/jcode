@@ -2976,6 +2976,7 @@ fn handle_server_event_inner(
             }
             false
         }
+        ServerEvent::SpeedModeChanged { .. } => false,
         ServerEvent::ServiceTierChanged {
             service_tier,
             error,

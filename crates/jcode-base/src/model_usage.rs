@@ -531,6 +531,7 @@ mod tests {
 
     fn route(method: &str) -> ModelRoute {
         ModelRoute {
+            speed_options: Vec::new(),
             model: "test-model".into(),
             provider: "OpenAI".into(),
             api_method: method.into(),

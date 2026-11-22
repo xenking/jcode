@@ -63,6 +63,7 @@ impl Agent {
                 ));
             }
             self.apply_pending_reasoning_effort();
+            self.ensure_session_speed()?;
             // Start provider transport setup before deriving and potentially
             // compacting the request history. This is the first point where the
             // stable request settings are available.

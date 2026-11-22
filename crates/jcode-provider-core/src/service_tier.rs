@@ -293,3 +293,87 @@ mod tests {
         );
     }
 }
+use crate::{SpeedAvailability, SpeedMode, SpeedOption};
+
+/// OAuth support comes from the specific account's Codex catalog, never from
+/// the platform API model list. A catalog advertises models, not rate limits.
+pub fn openai_speed_options(
+    model: &str,
+    oauth: bool,
+    advertised: Option<&[String]>,
+) -> Vec<SpeedOption> {
+    let model = crate::model_id::canonical(model);
+    let model = model.strip_suffix("[1m]").unwrap_or(&model);
+    let model = crate::model_id::slash_base(model);
+    let public_fast_models = [
+        "gpt-6.2-astra",
+        "gpt-6.2-sol",
+        "gpt-6.1-terra",
+        "gpt-6.1-sol",
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.3-codex",
+    ];
+    let matches_model = |family: &str| {
+        model == family
+            || model.strip_prefix(family).is_some_and(|suffix| {
+                suffix.len() == 11 && suffix.bytes().all(|c| c == b'-' || c.is_ascii_digit())
+            })
+    };
+    let public_ultrafast = ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.1-sol"];
+    let mut options = vec![SpeedOption::standard()];
+    for (mode, ids, api_support) in [
+        (
+            SpeedMode::Fast,
+            &["priority", "fast"][..],
+            public_fast_models.into_iter().any(matches_model),
+        ),
+        (
+            SpeedMode::Ultrafast,
+            &["ultrafast"][..],
+            public_ultrafast.into_iter().any(matches_model),
+        ),
+    ] {
+        let supported = if oauth {
+            advertised.is_some_and(|tiers| tiers.iter().any(|tier| ids.contains(&tier.as_str())))
+        } else {
+            api_support
+        };
+        let (availability, reason) = if !supported {
+            (
+                SpeedAvailability::Unavailable,
+                Some(if oauth {
+                    "The Codex catalog for this account does not advertise this speed for the model"
+                } else {
+                    "The OpenAI API does not document this speed for the model"
+                }),
+            )
+        } else if !oauth
+            && mode == SpeedMode::Ultrafast
+            && ["gpt-6-astra", "gpt-6.1-sol"]
+                .into_iter()
+                .any(matches_model)
+        {
+            (SpeedAvailability::Available, None)
+        } else {
+            (
+                SpeedAvailability::Unknown,
+                Some(
+                    "The model supports this speed, but account entitlement and quota are not verified",
+                ),
+            )
+        };
+        options.push(SpeedOption {
+            mode,
+            availability,
+            reason: reason.map(str::to_owned),
+        });
+    }
+    options
+}

@@ -1837,6 +1837,7 @@ mod effort;
 
 fn route(model: &str, available: bool) -> crate::provider::ModelRoute {
     crate::provider::ModelRoute {
+        speed_options: Vec::new(),
         model: model.to_string(),
         provider: "p".to_string(),
         api_method: "m".to_string(),

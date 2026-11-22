@@ -368,6 +368,7 @@ fn agent_failover_context_limits_follow_exact_saved_account() {
             ["openai-fox", "openai-otter"]
                 .into_iter()
                 .map(|account| ModelRoute {
+                    speed_options: Vec::new(),
                     api_method: format!("openai-oauth@{account}"),
                     ..build_openai_oauth_route("gpt-6.1-sol", true, "")
                 })
@@ -579,6 +580,7 @@ fn agent_failover_pool_order_beats_global_model_quality_and_configured_identity(
             vec![
                 build_openai_api_key_route("gpt-6-astra", true, ""),
                 ModelRoute {
+                    speed_options: Vec::new(),
                     model: "claude-sonnet-4-6".into(),
                     provider: "Anthropic".into(),
                     api_method: "anthropic-api-key".into(),
@@ -667,6 +669,7 @@ fn agent_failover_configured_account_pin_matches_only_exact_target_login() {
                 ["gpt-6-astra", "gpt-5.5"]
                     .into_iter()
                     .map(|model| ModelRoute {
+                        speed_options: Vec::new(),
                         api_method: "openai-oauth@openai-fox".into(),
                         ..build_openai_oauth_route(model, true, "")
                     })

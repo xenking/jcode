@@ -109,6 +109,7 @@ impl Agent {
         let model_start = Instant::now();
         self.restore_session_model_from_session();
         self.restore_reasoning_effort_from_session();
+        self.restore_speed_from_session();
         self.restore_tool_surface();
         let model_ms = model_start.elapsed().as_millis();
 

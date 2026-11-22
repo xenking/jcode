@@ -767,6 +767,7 @@ impl Agent {
         }
         agent.restore_session_model_from_session();
         agent.restore_reasoning_effort_from_session();
+        agent.restore_speed_from_session();
         agent.session.ensure_initial_session_context_message();
         agent.sync_memory_dedup_state_from_session();
         agent.seed_compaction_from_session();

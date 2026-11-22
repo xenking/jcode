@@ -936,6 +936,7 @@ impl Request {
             Request::RunSubagent { id, .. } => *id,
             Request::SetReasoningEffort { id, .. } => *id,
             Request::SetServiceTier { id, .. } => *id,
+            Request::SetSpeedMode { id, .. } => *id,
             Request::SetTransport { id, .. } => *id,
             Request::SetPremiumMode { id, .. } => *id,
             Request::SetFeature { id, .. } => *id,

@@ -75,6 +75,7 @@ const REQUIRES_ATTACH: &[&str] = &[
     "set_model",
     "set_context_cap",
     "set_reasoning_effort",
+    "set_speed_mode",
     "compact",
     "rename_session",
     "set_session_env",
@@ -246,6 +247,8 @@ pub struct BridgeState {
     /// Reasoning effort last reported by the daemon, so identity events can
     /// carry it without a round trip.
     current_effort: Option<String>,
+    current_speed_mode: jcode_harness_api::SpeedMode,
+    current_speed_options: Vec<jcode_harness_api::SpeedOption>,
     available_routes: Vec<ModelRouteInfo>,
     /// Deltas can precede the first catalog or a delayed snapshot reply.
     model_usage_updates: BTreeMap<(String, String, String), jcode_harness_api::ModelUsage>,
@@ -752,7 +755,9 @@ impl BridgeState {
                 }
                 vec![Outbound::Legacy(message)]
             }
-            "fork_session" | "fork_side_question" | "transfer_session" => self.translate_fork_request(req, api_id, request),
+            "fork_session" | "fork_side_question" | "transfer_session" => {
+                self.translate_fork_request(req, api_id, request)
+            }
             "cancel" => {
                 let id = self.legacy_id();
                 self.pending_simple.push((id, api_id, SimpleKind::Ok));
@@ -1506,6 +1511,26 @@ impl BridgeState {
                     "id": id,
                     "model": model,
                 }))]
+            }
+            "set_speed_mode" => {
+                let speed_mode = match serde_json::from_value::<jcode_harness_api::SpeedMode>(
+                    request["speed_mode"].clone(),
+                ) {
+                    Ok(mode) => mode,
+                    Err(_) => {
+                        return Self::error_reply(
+                            api_id,
+                            ErrorCode::InvalidRequest,
+                            "speed_mode must be standard, fast, or ultrafast",
+                        );
+                    }
+                };
+                let id = self.legacy_id();
+                self.pending_simple
+                    .push((id, api_id, SimpleKind::SpeedMode));
+                vec![Outbound::Legacy(
+                    json!({"type": "set_speed_mode", "id": id, "speed_mode": speed_mode}),
+                )]
             }
             "set_reasoning_effort" => {
                 let effort = request["effort"].as_str().unwrap_or("");
@@ -2999,6 +3024,9 @@ impl BridgeState {
                 if let Some(model) = event["model"].as_str() {
                     self.current_model = Some(model.to_string());
                 }
+                self.current_speed_mode = Default::default();
+                self.current_speed_options.clear();
+                self.model_catalog_loaded = false;
                 if let Some(provider) = event["provider_name"].as_str() {
                     self.note_provider(provider);
                 }
@@ -3027,6 +3055,34 @@ impl BridgeState {
                     ],
                     None => vec![ServerFrame::event(info)],
                 }
+            }
+            "speed_mode_changed" => {
+                let id = event["id"].as_u64().unwrap_or_default();
+                let reply_to = self.take_simple(id, SimpleKind::SpeedMode);
+                if let Some(message) = event["error"].as_str() {
+                    return reply_to
+                        .map(|api_id| {
+                            ServerFrame::reply(
+                                api_id,
+                                ApiEvent::Error {
+                                    code: ErrorCode::InvalidRequest,
+                                    message: message.into(),
+                                },
+                            )
+                        })
+                        .into_iter()
+                        .collect();
+                }
+                self.note_speed(event);
+                let changed = ApiEvent::SpeedModeChanged {
+                    session_id: session(self),
+                    speed_mode: self.current_speed_mode,
+                    speed_options: self.current_speed_options.clone(),
+                };
+                return match reply_to {
+                    Some(api_id) => vec![ServerFrame::reply(api_id, changed)],
+                    None => vec![ServerFrame::event(changed)],
+                };
             }
             "reasoning_effort_changed" => {
                 let id = event["id"].as_u64().unwrap_or(0);
@@ -3616,6 +3672,7 @@ impl BridgeState {
     /// The daemon reports models on attach and on every change; caching here
     /// is what lets `list_models` answer without a round trip.
     fn note_models(&mut self, event: &Value) {
+        self.note_speed(event);
         self.model_catalog_loaded = true;
         if let Some(models) = event["available_models"].as_array() {
             let names: Vec<String> = models
@@ -3655,6 +3712,8 @@ impl BridgeState {
                         api_method: route["api_method"].as_str()?.to_string(),
                         available: route["available"].as_bool().unwrap_or(false),
                         detail: route["detail"].as_str().unwrap_or("").to_string(),
+                        speed_options: serde_json::from_value(route["speed_options"].clone())
+                            .unwrap_or_default(),
                         usage: serde_json::from_value(route["usage"].clone()).unwrap_or(None),
                     })
                 })
@@ -3707,6 +3766,16 @@ impl BridgeState {
             auth_method: self.current_credential.clone(),
             account_label: self.current_account.clone(),
             routes: self.available_routes.clone(),
+            speed_mode: self.current_speed_mode,
+            speed_options: self.current_speed_options.clone(),
+        }
+    }
+
+    fn note_speed(&mut self, event: &Value) {
+        if let Ok(mode) = serde_json::from_value(event["speed_mode"].clone()) {
+            self.current_speed_mode = mode;
+            self.current_speed_options =
+                serde_json::from_value(event["speed_options"].clone()).unwrap_or_default();
         }
     }
 

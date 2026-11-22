@@ -123,6 +123,7 @@ pub fn build_anthropic_oauth_route(
     detail: impl Into<String>,
 ) -> ModelRoute {
     ModelRoute {
+        speed_options: Vec::new(),
         model: model.to_string(),
         provider: "Anthropic".to_string(),
         api_method: "claude-oauth".to_string(),
@@ -151,6 +152,7 @@ pub fn build_openai_api_key_route(
 
 pub fn build_chatgpt_web_route() -> ModelRoute {
     ModelRoute {
+        speed_options: Vec::new(),
         model: super::CHATGPT_WEB_MODEL.to_string(),
         provider: "OpenAI".to_string(),
         api_method: "chatgpt-web".to_string(),
@@ -168,6 +170,7 @@ fn build_openai_route(
     detail: impl Into<String>,
 ) -> ModelRoute {
     ModelRoute {
+        speed_options: Vec::new(),
         model: model.to_string(),
         provider: "OpenAI".to_string(),
         api_method: api_method.to_string(),
@@ -180,6 +183,7 @@ fn build_openai_route(
 
 pub fn build_copilot_route(model: &str, available: bool, detail: impl Into<String>) -> ModelRoute {
     ModelRoute {
+        speed_options: Vec::new(),
         model: model.to_string(),
         provider: "Copilot".to_string(),
         api_method: "copilot".to_string(),
@@ -196,6 +200,7 @@ pub fn build_openrouter_auto_route(
     auto_detail: impl Into<String>,
 ) -> ModelRoute {
     ModelRoute {
+        speed_options: Vec::new(),
         model: model.to_string(),
         provider: "auto".to_string(),
         api_method: "openrouter".to_string(),
@@ -222,6 +227,7 @@ pub fn build_openrouter_endpoint_route(
     }
 
     ModelRoute {
+        speed_options: Vec::new(),
         model: model.to_string(),
         provider: endpoint.provider_name.clone(),
         api_method: "openrouter".to_string(),
@@ -246,6 +252,7 @@ pub fn build_openrouter_fallback_provider_route(
     provider: &str,
 ) -> ModelRoute {
     ModelRoute {
+        speed_options: Vec::new(),
         model: display_model.to_string(),
         provider: provider.to_string(),
         api_method: "openrouter".to_string(),

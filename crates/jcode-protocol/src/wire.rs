@@ -650,6 +650,11 @@ pub enum Request {
     /// Set service tier for OpenAI models (priority|fast|flex|off)
     #[serde(rename = "set_service_tier")]
     SetServiceTier { id: u64, service_tier: String },
+    #[serde(rename = "set_speed_mode")]
+    SetSpeedMode {
+        id: u64,
+        speed_mode: jcode_message_types::SpeedMode,
+    },
 
     /// Set connection transport for OpenAI models (auto|https|websocket)
     #[serde(rename = "set_transport")]

@@ -689,6 +689,8 @@ fn startup_history(session_id: &str) -> ServerEvent {
         reasoning_effort: None,
         service_tier: None,
         available_service_tiers: None,
+        speed_mode: Default::default(),
+        speed_options: Vec::new(),
         compaction_mode: crate::config::CompactionMode::Reactive,
         activity: None,
         side_panel: crate::side_panel::SidePanelSnapshot::default(),

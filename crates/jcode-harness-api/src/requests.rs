@@ -530,6 +530,11 @@ pub enum ApiRequest {
         effort: String,
     },
 
+    /// Select the session's execution speed without changing reasoning effort.
+    SetSpeedMode {
+        speed_mode: crate::SpeedMode,
+    },
+
     /// Summarize the transcript so far, freeing context.
     ///
     /// Without this a long-lived client eventually hits the context limit and

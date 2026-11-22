@@ -18,10 +18,10 @@ mod protocol_disconnect;
 mod protocol_partial_disconnect;
 #[path = "client_behavior/search_sessions.rs"]
 mod search_sessions;
-#[path = "client_behavior/swarm_status.rs"]
-mod swarm_status;
 #[path = "client_behavior/side_questions.rs"]
 mod side_questions;
+#[path = "client_behavior/swarm_status.rs"]
+mod swarm_status;
 
 /// A socket-pair transport, so the test drives the client over the same code
 /// path a real connection uses.
@@ -495,6 +495,8 @@ fn model_switch_preserves_identity_and_catalog_events_around_the_reply() {
         reply(frame, ApiEvent::Ok, writer);
         push(
             ApiEvent::RuntimeInfo {
+                speed_mode: Default::default(),
+                speed_options: Vec::new(),
                 session_id: session_id.clone(),
                 provider: Some("openai-api".into()),
                 model: Some("new-model".into()),
@@ -502,6 +504,7 @@ fn model_switch_preserves_identity_and_catalog_events_around_the_reply() {
                 auth_method: None,
                 account_label: None,
                 routes: vec![ModelRouteInfo {
+                    speed_options: Vec::new(),
                     usage: None,
                     model: "new-model".into(),
                     provider: "openai-api".into(),

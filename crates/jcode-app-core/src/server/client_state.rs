@@ -334,6 +334,8 @@ async fn build_model_catalog(
         available_model_routes,
         available_service_tiers,
         mcp_servers: Vec::new(),
+        speed_mode: provider.speed_mode(),
+        speed_options: provider.speed_options(&provider.model()),
         skills: Vec::new(),
         total_tokens: None,
         token_usage_totals: None,
@@ -855,6 +857,8 @@ async fn send_history_from_persisted_session(
                 .map(str::to_string)
                 .collect(),
         ),
+        speed_mode: provider.speed_mode(),
+        speed_options: provider.speed_options(&provider.model()),
         mcp_servers: Vec::new(),
         skills: Vec::new(),
         total_tokens: optional_total_tokens(token_usage_totals),
@@ -980,6 +984,7 @@ async fn send_history_with_guard(
 ) -> Result<()> {
     let mut timing = Timing::new("live_history", Some(id), session_id);
     let history_start = Instant::now();
+    let speed_provider = agent_guard.provider_handle();
     let catalog_provider = include_model_catalog.then(|| agent_guard.provider_handle());
     let (
         messages,
@@ -1211,6 +1216,8 @@ async fn send_history_with_guard(
         available_model_routes,
         available_service_tiers,
         mcp_servers,
+        speed_mode: speed_provider.speed_mode(),
+        speed_options: speed_provider.speed_options(&speed_provider.model()),
         skills,
         total_tokens: optional_total_tokens(token_usage_totals),
         token_usage_totals: optional_token_usage_totals(token_usage_totals),

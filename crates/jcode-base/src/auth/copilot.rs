@@ -998,6 +998,7 @@ pub fn choose_default_model(available_models: &[CopilotModelInfo]) -> String {
         .iter()
         .filter(|id| id.starts_with("claude-") || id.starts_with("gpt-"))
         .map(|id| crate::provider::ModelRoute {
+            speed_options: Vec::new(),
             model: canonical_of(id),
             provider: "Copilot".to_string(),
             api_method: "copilot".to_string(),

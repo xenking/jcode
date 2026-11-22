@@ -75,6 +75,7 @@ mod tests {
 
     fn route(model: &str, provider: &str, api_method: &str) -> ModelRoute {
         ModelRoute {
+            speed_options: Vec::new(),
             model: model.into(),
             provider: provider.into(),
             api_method: api_method.into(),

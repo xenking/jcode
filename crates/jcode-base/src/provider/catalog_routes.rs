@@ -38,6 +38,7 @@ pub fn simplified_model_routes_for_picker(
             // Platform-API-only GPT Pro models: never advertise an OAuth route.
             if jcode_provider_core::is_openai_api_only_pro_model(&model) {
                 routes.push(ModelRoute {
+                    speed_options: Vec::new(),
                     model: model.clone(),
                     provider: "OpenAI".to_string(),
                     api_method: "openai-api-key".to_string(),
@@ -54,6 +55,7 @@ pub fn simplified_model_routes_for_picker(
             }
             if auth.openai_has_oauth {
                 routes.push(ModelRoute {
+                    speed_options: Vec::new(),
                     model: model.clone(),
                     provider: "OpenAI".to_string(),
                     api_method: "openai-oauth".to_string(),
@@ -65,6 +67,7 @@ pub fn simplified_model_routes_for_picker(
             }
             if auth.openai_has_api_key {
                 routes.push(ModelRoute {
+                    speed_options: Vec::new(),
                     model: model.clone(),
                     provider: "OpenAI".to_string(),
                     api_method: "openai-api-key".to_string(),
@@ -76,6 +79,7 @@ pub fn simplified_model_routes_for_picker(
             }
             if auth.openai == AuthState::NotConfigured {
                 routes.push(ModelRoute {
+                    speed_options: Vec::new(),
                     model,
                     provider: "OpenAI".to_string(),
                     api_method: "openai-oauth".to_string(),
@@ -143,6 +147,7 @@ pub fn simplified_model_routes_for_picker(
             };
 
         routes.push(ModelRoute {
+            speed_options: Vec::new(),
             model,
             provider,
             api_method,
@@ -155,6 +160,7 @@ pub fn simplified_model_routes_for_picker(
 
     if routes.is_empty() && !current_model.is_empty() && current_model != "unknown" {
         routes.push(ModelRoute {
+            speed_options: Vec::new(),
             model: current_model.to_string(),
             provider: current_provider_name.to_string(),
             api_method: "current".to_string(),
@@ -271,6 +277,37 @@ fn expand_saved_account_routes(mut routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
             }
         }
     }
+    let mut oauth_tiers = std::collections::HashMap::new();
+    let native_api = super::openai::native_speed_api_endpoint(&super::openai::resolve_api_base());
+    for route in &mut routes {
+        use jcode_provider_core::RuntimeKey;
+        if !route.available {
+            continue;
+        }
+        match RuntimeKey::from_api_method(&route.api_method_kind(), &route.provider) {
+            RuntimeKey::OpenAIApiKey if native_api => {
+                route.speed_options = jcode_provider_core::service_tier::openai_speed_options(
+                    &route.model,
+                    false,
+                    None,
+                );
+            }
+            RuntimeKey::OpenAIOAuth if route.model != CHATGPT_WEB_MODEL => {
+                let scope = jcode_provider_core::oauth_account_label(&route.api_method)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| super::openai_catalog_scope_for_credential(true, ""));
+                let catalog = oauth_tiers.entry(scope).or_insert_with_key(|scope| {
+                    super::cached_openai_service_tiers_for_scope(scope).unwrap_or_default()
+                });
+                route.speed_options = jcode_provider_core::service_tier::openai_speed_options(
+                    &route.model,
+                    true,
+                    catalog.get(&route.model).map(Vec::as_slice),
+                );
+            }
+            _ => {}
+        }
+    }
     dedupe_model_routes(routes)
 }
 
@@ -344,6 +381,7 @@ pub fn append_simplified_anthropic_model_routes(
             anthropic_api_key_route_availability(&model)
         };
         routes.push(ModelRoute {
+            speed_options: Vec::new(),
             model: model.clone(),
             provider: "Anthropic".to_string(),
             api_method: if oauth { "claude-oauth" } else { "claude-api" }.to_string(),
@@ -402,6 +440,7 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
     if !has_openrouter_transport && !added_direct_openai_compatible_routes {
         // OpenRouter not configured - show a placeholder as unavailable.
         routes.push(ModelRoute {
+            speed_options: Vec::new(),
             model: "openrouter models".to_string(),
             provider: "—".to_string(),
             api_method: "openrouter".to_string(),
@@ -504,6 +543,7 @@ pub(super) fn append_anthropic_routes(
                 routes.push(build_anthropic_oauth_route(&model, available, detail));
             } else {
                 routes.push(ModelRoute {
+                    speed_options: Vec::new(),
                     model: model.clone(),
                     provider: "Anthropic".to_string(),
                     api_method: "claude-api".to_string(),
@@ -714,6 +754,7 @@ fn named_provider_profile_routes(
             continue;
         }
         routes.push(ModelRoute {
+            speed_options: Vec::new(),
             model,
             provider: profile_name.to_string(),
             api_method: api_method.clone(),
@@ -752,6 +793,7 @@ fn append_gemini_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>) 
     if let Some(gemini) = provider.gemini_provider() {
         for model in gemini.available_models_display() {
             routes.push(ModelRoute {
+                speed_options: Vec::new(),
                 model,
                 provider: "Gemini".to_string(),
                 api_method: "code-assist-oauth".to_string(),
@@ -774,6 +816,7 @@ fn append_cursor_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>) 
     if let Some(cursor) = provider.cursor_provider() {
         for model in cursor.available_models_display() {
             routes.push(ModelRoute {
+                speed_options: Vec::new(),
                 model,
                 provider: "Cursor".to_string(),
                 api_method: "cursor".to_string(),
@@ -876,6 +919,7 @@ fn append_openrouter_routes(
                     )
                 });
             routes.push(ModelRoute {
+                speed_options: Vec::new(),
                 model: model.clone(),
                 provider,
                 api_method,

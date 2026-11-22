@@ -102,6 +102,7 @@ fn old(provider: &dyn Provider, selected_method: Option<&str>) -> Option<ModelRo
 }
 fn row(model: &str, provider: &str, method: &str) -> ModelRoute {
     ModelRoute {
+        speed_options: Vec::new(),
         model: model.into(),
         provider: provider.into(),
         api_method: method.into(),

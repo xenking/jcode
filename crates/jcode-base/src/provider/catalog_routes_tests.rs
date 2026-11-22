@@ -51,6 +51,7 @@ fn saved_account_catalogs_keep_work_personal_and_named_accounts_separate() {
     let routes = expand_saved_account_routes(vec![
         build_anthropic_oauth_route("claude-sonnet-4-6", true, ""),
         ModelRoute {
+            speed_options: Vec::new(),
             model: "claude-sonnet-4-6".into(),
             provider: "Anthropic".into(),
             api_method: "claude-api".into(),

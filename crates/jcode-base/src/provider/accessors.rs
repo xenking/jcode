@@ -1,6 +1,14 @@
 use super::*;
 
 impl MultiProvider {
+    pub(super) fn speed_provider(&self) -> Option<Arc<dyn Provider>> {
+        match self.active_provider() {
+            ActiveProvider::OpenAI => self.openai_provider(),
+            ActiveProvider::Claude => self.anthropic_provider(),
+            _ => None,
+        }
+    }
+
     pub(super) fn anthropic_provider(&self) -> Option<Arc<dyn Provider>> {
         self.anthropic
             .read()

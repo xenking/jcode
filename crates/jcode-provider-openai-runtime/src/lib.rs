@@ -42,6 +42,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 mod model_selection;
 mod openai_ws_connect;
 mod response_request;
+mod speed;
 use openai_ws_connect::connect_ws;
 mod native_compaction;
 mod openai_retry_diagnostics;
@@ -771,6 +772,7 @@ pub struct OpenAIProvider {
     model_reasoning_efforts: Arc<StdRwLock<HashMap<String, Vec<String>>>>,
     model_service_tiers: Arc<StdRwLock<HashMap<String, Vec<String>>>>,
     service_tier: Arc<StdRwLock<Option<String>>>,
+    premium_speed: StdRwLock<Option<speed::PremiumSpeed>>,
     native_compaction_mode: OpenAINativeCompactionMode,
     native_compaction_threshold_tokens: usize,
     transport_mode: Arc<RwLock<OpenAITransportMode>>,
@@ -893,12 +895,6 @@ impl OpenAIProvider {
             .openai_reasoning_effort
             .as_deref()
             .and_then(Self::normalize_reasoning_effort);
-        let service_tier = Self::load_service_tier(
-            jcode_base::config::config()
-                .provider
-                .openai_service_tier
-                .as_deref(),
-        );
         let transport_mode = OpenAITransportMode::from_config(
             jcode_base::config::config()
                 .provider
@@ -936,7 +932,8 @@ impl OpenAIProvider {
                 jcode_base::provider::cached_openai_service_tiers_for_scope(&catalog_scope)
                     .unwrap_or_default(),
             )),
-            service_tier: Arc::new(StdRwLock::new(service_tier)),
+            service_tier: Arc::new(StdRwLock::new(None)),
+            premium_speed: StdRwLock::new(None),
             native_compaction_mode,
             native_compaction_threshold_tokens,
             transport_mode: Arc::new(RwLock::new(transport_mode)),
@@ -1348,6 +1345,7 @@ impl OpenAIProvider {
         }
     }
 
+    #[cfg(test)]
     fn load_service_tier(raw: Option<&str>) -> Option<String> {
         let raw = raw?;
         match Self::normalize_service_tier(raw) {
@@ -1380,6 +1378,13 @@ impl OpenAIProvider {
     }
 
     fn responses_url(credentials: &CodexCredentials) -> String {
+        #[cfg(test)]
+        if Self::is_chatgpt_mode(credentials)
+            && let Ok(base) = std::env::var("JCODE_TEST_OPENAI_OAUTH_BASE")
+            && base.starts_with("http://127.0.0.1:")
+        {
+            return format!("{}/{RESPONSES_PATH}", base.trim_end_matches('/'));
+        }
         let base = if Self::is_chatgpt_mode(credentials) {
             // ChatGPT/Codex OAuth backend is fixed; a custom base only applies
             // to API-key usage of the native Responses API.
@@ -1417,7 +1422,9 @@ impl OpenAIProvider {
 
     async fn model_id(&self) -> String {
         let current = self.model.read().await.clone();
-        if jcode_provider_core::worker_request_is_pinned() {
+        if jcode_provider_core::worker_request_is_pinned()
+            || self.requested_premium_speed().is_some()
+        {
             return current.strip_suffix("[1m]").unwrap_or(&current).to_string();
         }
         let scope = self.catalog_scope_async().await;

@@ -2302,6 +2302,48 @@ fn an_empty_model_is_refused_locally() {
 }
 
 #[test]
+fn speed_mode_ack_and_attach_snapshot_are_independent_of_effort() {
+    use jcode_harness_api::{SpeedAvailability, SpeedMode};
+    let mut state = state_with_session();
+    let options = json!([{"mode":"standard","availability":"available"}, {"mode":"fast","availability":"unknown"}]);
+    state.note_models(
+        &json!({"reasoning_effort":"high", "speed_mode":"standard", "speed_options":options}),
+    );
+    for (api_id, mode, error) in [(5, "ultrafast", Some("not entitled")), (6, "fast", None)] {
+        let out = state.api_request_to_legacy(
+            &json!({"id":api_id, "req":"set_speed_mode", "speed_mode":mode}),
+        );
+        let Outbound::Legacy(request) = &out[0] else {
+            panic!("expected live request")
+        };
+        assert_eq!(request["type"], "set_speed_mode");
+        assert_eq!(request["speed_mode"], mode);
+        assert!(request.get("effort").is_none());
+        let frames = state.legacy_event_to_api(&json!({"type":"speed_mode_changed", "id":request["id"], "speed_mode":mode, "speed_options":options, "error":error}));
+        assert_eq!(frames[0].reply_to, Some(api_id));
+        match error {
+            Some(_) => assert!(matches!(frames[0].event, ApiEvent::Error { .. })),
+            None => assert!(matches!(
+                frames[0].event,
+                ApiEvent::SpeedModeChanged {
+                    speed_mode: SpeedMode::Fast,
+                    ..
+                }
+            )),
+        }
+    }
+    assert!(
+        matches!(state.runtime_info(), ApiEvent::RuntimeInfo { speed_mode: SpeedMode::Fast, reasoning_effort: Some(effort), speed_options, .. } if effort == "high" && speed_options[1].availability == SpeedAvailability::Unknown)
+    );
+    state.note_models(
+        &json!({"reasoning_effort":"high", "speed_mode":"standard", "speed_options":options}),
+    );
+    assert!(
+        matches!(state.runtime_info(), ApiEvent::RuntimeInfo { speed_mode: SpeedMode::Standard, reasoning_effort: Some(effort), .. } if effort == "high")
+    );
+}
+
+#[test]
 fn reasoning_effort_reports_provider_refusal() {
     let mut state = state_with_session();
     let out = state.api_request_to_legacy(&json!({

@@ -777,6 +777,8 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         available_models: vec!["gpt-5.4".to_string()],
         available_model_routes: Vec::new(),
         available_service_tiers: None,
+        speed_mode: Default::default(),
+        speed_options: Vec::new(),
         mcp_servers: Vec::new(),
         skills: Vec::new(),
         total_tokens: Some((123, 45)),

@@ -427,6 +427,17 @@ pub trait Provider: Send + Sync {
         SpeedMode::Standard
     }
 
+    /// Opaque, non-secret identifier used to bind a saved premium selection
+    /// to the same credential route when restoring a session.
+    fn speed_route_identity(&self) -> Option<String> {
+        Some(format!(
+            "{}:{:?}:{:?}",
+            self.name(),
+            self.active_resolved_credential(),
+            self.serving_oauth_account_label()
+        ))
+    }
+
     fn set_speed_mode(&self, mode: SpeedMode) -> Result<()> {
         match mode {
             SpeedMode::Standard => Ok(()),
@@ -973,6 +984,8 @@ pub struct NativeCompactionResult {
 /// A single route to access a model: model + provider + API method
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelRoute {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub speed_options: Vec<SpeedOption>,
     pub model: String,
     pub provider: String,
     pub api_method: String,

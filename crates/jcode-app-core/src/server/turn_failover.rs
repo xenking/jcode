@@ -77,6 +77,9 @@ fn describe_route(route: &crate::provider::ModelRoute) -> String {
 /// Pick the next pool-approved route for `agent` after `error`, or `None`
 /// when automatic switching is disabled or nothing eligible remains.
 pub(super) fn pick_failover_target(agent: &Agent, error: &str) -> Option<FailoverTarget> {
+    if agent.provider_handle().speed_mode() != jcode_provider_core::SpeedMode::Standard {
+        return None;
+    }
     let config = crate::config::Config::load().provider;
     if config.cross_provider_failover != crate::config::CrossProviderFailoverMode::Countdown {
         return None;
@@ -888,6 +891,7 @@ mod tests {
         }
         fn model_routes(&self) -> Vec<ModelRoute> {
             vec![ModelRoute {
+                speed_options: Vec::new(),
                 model: "claude-opus-5-5".into(),
                 provider: "Claude".into(),
                 api_method: "anthropic-api".into(),
@@ -1024,6 +1028,7 @@ mod tests {
         }
         fn model_routes(&self) -> Vec<ModelRoute> {
             vec![ModelRoute {
+                speed_options: Vec::new(),
                 model: "gpt-6.1-sol".into(),
                 provider: "OpenAI".into(),
                 api_method: "openai-api".into(),

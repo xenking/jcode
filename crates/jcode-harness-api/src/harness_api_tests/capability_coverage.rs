@@ -102,6 +102,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("SetQueuedPromptEditing", Covered),
     ("SetQueuedPromptMode", Covered),
     ("SetReasoningEffort", Covered),
+    ("SetSpeedMode", Covered),
     ("SetRoute", ClientInternal),
     ("SetServiceTier", ClientInternal),
     ("SetSessionSaved", Covered),
