@@ -7,6 +7,18 @@ pub struct SkillInvocation<'a> {
     pub prompt: Option<&'a str>,
 }
 
+impl SkillInvocation<'_> {
+    /// Preserve quoting for consumers that parse words rather than prompt prose.
+    pub fn raw_arguments<'a>(&self, input: &'a str) -> &'a str {
+        input
+            .trim()
+            .strip_prefix('/')
+            .and_then(|input| input.strip_prefix(self.name))
+            .unwrap_or_default()
+            .trim()
+    }
+}
+
 impl SkillRegistry {
     /// Resolve a slash invocation against registered names, including names
     /// containing spaces. The longest registered name wins; unknown names fall
@@ -62,6 +74,7 @@ mod tests {
                     mode: None,
                     allowed_tools: None,
                     disable_model_invocation: false,
+                    command: None,
                     content: "content".to_string(),
                     path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
                     search_text: std::sync::OnceLock::from(build_skill_search_text(

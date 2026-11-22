@@ -421,7 +421,26 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
         return Ok(());
     };
 
-    if snapshot.get(invocation.name).is_some() {
+    let mut skill_snapshot = snapshot;
+    if skill_snapshot.get(invocation.name).is_none() {
+        app.refresh_skills_snapshot();
+        skill_snapshot = app.current_skills_snapshot();
+    }
+    if let Some(skill) = skill_snapshot.get(invocation.name) {
+        if !app_mod::registered_command_names()
+            .any(|name| trimmed.split_whitespace().next() == Some(name))
+        {
+            match skill.command_line(invocation.raw_arguments(&prepared.expanded)) {
+                Ok(Some(command)) => {
+                    return submit_remote_input_shell(app, remote, raw_input, command).await;
+                }
+                Err(error) => {
+                    app.push_display_message(DisplayMessage::error(error.to_string()));
+                    return Ok(());
+                }
+                Ok(None) => {}
+            }
+        }
         remote
             .runtime_command("mode", vec![invocation.name.to_string()])
             .await?;
@@ -435,12 +454,7 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     };
 
     let skill_name = invocation.name.to_string();
-    let mut skill = snapshot.get(&skill_name).cloned();
-    if skill.is_none() {
-        app.refresh_skills_snapshot();
-        skill = app.current_skills_snapshot().get(&skill_name).cloned();
-    }
-    if skill.is_none() {
+    if skill_snapshot.get(&skill_name).is_none() {
         // Preserve the existing unknown-skill and built-in slash-command
         // handling, including the helpful endorsed-skill installation hint.
         app.input = raw_input;

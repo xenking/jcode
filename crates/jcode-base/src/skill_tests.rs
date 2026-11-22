@@ -74,6 +74,7 @@ fn test_skill(name: &str, description: &str, content: &str) -> Skill {
         mode: None,
         allowed_tools: None,
         disable_model_invocation: false,
+        command: None,
         content: content.to_string(),
         path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
         search_text: std::sync::OnceLock::from(build_skill_search_text(name, description, content)),

@@ -1098,6 +1098,41 @@ fn skills_command_refreshes_registry_from_disk_before_listing() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn command_skill_runs_a_literal_argument_without_a_model_turn() {
+    let mut app = create_test_app();
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join(".jcode/skills/shell-fixture");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        "---\nname: shell-fixture\ndescription: Command skill fixture\ncommand: \"printf '%s' > output\"\n---\nDo not send this to the model.\n",
+    )
+    .unwrap();
+    app.session.working_dir = Some(temp.path().to_string_lossy().into_owned());
+    app.input = "/shell-fixture 'two words; touch injected'".into();
+    app.submit_input();
+    assert!(
+        !app.is_processing,
+        "a command skill must not start a model turn"
+    );
+    assert!(app.active_skill.is_none());
+    let output = temp.path().join("output");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        if std::fs::read_to_string(&output).as_deref().ok() == Some("two words; touch injected") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "shell output missing or incorrect"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(!temp.path().join("injected").exists());
+}
+
 #[test]
 fn skill_invocation_with_prompt_activates_and_submits_in_one_turn() {
     let mut app = create_test_app();

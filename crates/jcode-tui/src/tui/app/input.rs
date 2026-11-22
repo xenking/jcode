@@ -3873,6 +3873,36 @@ impl App {
         self.append_turn_system_reminder(reminder);
     }
 
+    fn run_input_shell_line(&mut self, raw_input: String, command: &str) {
+        self.push_display_message(DisplayMessage::user(raw_input));
+
+        if command.is_empty() {
+            self.push_display_message(DisplayMessage::system(
+                "Shell command cannot be empty after !.",
+            ));
+            self.set_status_notice("Shell command is empty");
+            return;
+        }
+
+        if self.is_remote {
+            self.push_display_message(DisplayMessage::system(
+                "Input-line ! shell commands are only available in a local jcode TUI session.",
+            ));
+            self.set_status_notice("Local shell unavailable in remote mode");
+            return;
+        }
+
+        self.set_status_notice(format!(
+            "Running local shell: {}",
+            crate::util::truncate_str(command, 48)
+        ));
+        spawn_input_shell_command(
+            self.session.id.clone(),
+            command.to_string(),
+            self.session.working_dir.clone(),
+        );
+    }
+
     /// Submit input - just sets up message and flags, processing happens in next loop iteration
     pub(super) fn submit_input(&mut self) {
         let command = expand_paste_placeholders(self, &self.input)
@@ -3958,33 +3988,7 @@ impl App {
         }
 
         if let Some(command) = extract_input_shell_command(&input) {
-            self.push_display_message(DisplayMessage::user(raw_input));
-
-            if command.is_empty() {
-                self.push_display_message(DisplayMessage::system(
-                    "Shell command cannot be empty after !.",
-                ));
-                self.set_status_notice("Shell command is empty");
-                return;
-            }
-
-            if self.is_remote {
-                self.push_display_message(DisplayMessage::system(
-                    "Input-line ! shell commands are only available in a local jcode TUI session.",
-                ));
-                self.set_status_notice("Local shell unavailable in remote mode");
-                return;
-            }
-
-            self.set_status_notice(format!(
-                "Running local shell: {}",
-                crate::util::truncate_str(command, 48)
-            ));
-            spawn_input_shell_command(
-                self.session.id.clone(),
-                command.to_string(),
-                self.session.working_dir.clone(),
-            );
+            self.run_input_shell_line(raw_input, command);
             return;
         }
 
@@ -4013,6 +4017,17 @@ impl App {
             }
 
             if let Some(skill) = skill {
+                match skill.command_line(invocation.raw_arguments(&input)) {
+                    Ok(Some(command)) => {
+                        self.run_input_shell_line(raw_input, &command);
+                        return;
+                    }
+                    Err(error) => {
+                        self.push_display_message(DisplayMessage::error(error.to_string()));
+                        return;
+                    }
+                    Ok(None) => {}
+                }
                 self.activate_pinned_skill(&skill_name, skill.get_prompt());
                 self.push_display_message(DisplayMessage {
                     role: "system".to_string(),

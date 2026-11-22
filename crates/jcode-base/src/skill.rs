@@ -38,6 +38,7 @@ pub struct Skill {
     pub mode: Option<bool>,
     pub allowed_tools: Option<Vec<String>>,
     disable_model_invocation: bool,
+    command: Option<String>,
     pub content: String,
     pub path: PathBuf,
     /// Normalized search text, built on first use. Normalizing every skill
@@ -56,6 +57,7 @@ struct SkillFrontmatter {
     allowed_tools: Option<AllowedTools>,
     #[serde(rename = "disable-model-invocation")]
     disable_model_invocation: Option<serde_yaml::Value>,
+    command: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -587,6 +589,7 @@ impl SkillRegistry {
             mode,
             allowed_tools,
             disable_model_invocation,
+            command,
         } = frontmatter;
 
         let allowed_tools = allowed_tools.map(|tools| match tools {
@@ -604,6 +607,9 @@ impl SkillRegistry {
             allowed_tools,
             disable_model_invocation: disable_model_invocation
                 == Some(serde_yaml::Value::Bool(true)),
+            command: command
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
             content: body,
             path: path.to_path_buf(),
             search_text: std::sync::OnceLock::new(),
@@ -729,6 +735,7 @@ impl SkillRegistry {
             icon,
             mode,
             allowed_tools,
+            command: scalar("command"),
             disable_model_invocation: entries
                 .iter()
                 .find(|(key, _)| *key == "disable-model-invocation")
@@ -1117,6 +1124,24 @@ pub fn endorsed_skills() -> &'static [EndorsedSkill] {
 impl Skill {
     pub fn is_model_invocable(&self) -> bool {
         !self.disable_model_invocation
+    }
+
+    /// Shell line for an explicit user slash invocation, never for model loads.
+    pub fn command_line(&self, raw_args: &str) -> Result<Option<String>> {
+        let Some(command) = &self.command else {
+            return Ok(None);
+        };
+        anyhow::ensure!(cfg!(unix), "Command skills require a POSIX shell");
+        let args = shlex::split(raw_args)
+            .unwrap_or_else(|| raw_args.split_whitespace().map(str::to_owned).collect());
+        // Pass user words as positional parameters to the trusted script, not as source text.
+        let script = format!("{command} \"$@\"");
+        let line = shlex::try_join(
+            ["bash", "-c", &script, "--"]
+                .into_iter()
+                .chain(args.iter().map(String::as_str)),
+        )?;
+        Ok(Some(line))
     }
 
     /// Get the full prompt content for this skill
