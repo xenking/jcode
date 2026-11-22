@@ -6,7 +6,7 @@
 //! before *any* picker, shortcut, or composer sees them. The async reader and
 //! synchronous burst drains share this filter, just like crossterm's reader.
 
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::Stream;
 use jcode_tui_style::ThemeMode;
 use std::collections::VecDeque;
@@ -400,7 +400,57 @@ fn take_event(state: &mut RuntimeTheme) -> Option<Event> {
     }
     let event = state.reports.ready.pop_front()?;
     state.note_input(&event, Instant::now());
-    Some(event)
+    Some(match event {
+        Event::Key(key) => Event::Key(normalize_ctrl_layout(key)),
+        other => other,
+    })
+}
+
+/// Crossterm resolves Windows keys using the active layout and discards the
+/// Kitty base-layout codepoint on Unix. Recover Ctrl letter bindings for
+/// standard ЙЦУКЕН without translating text input or AltGr chords.
+pub(super) fn normalize_ctrl_layout(mut key: KeyEvent) -> KeyEvent {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) {
+        return key;
+    }
+    let KeyCode::Char(ch) = key.code else {
+        return key;
+    };
+    let latin: char = match ch.to_lowercase().next() {
+        Some('й') => 'q',
+        Some('ц') => 'w',
+        Some('у') => 'e',
+        Some('к') => 'r',
+        Some('е') => 't',
+        Some('н') => 'y',
+        Some('г') => 'u',
+        Some('ш') => 'i',
+        Some('щ') => 'o',
+        Some('з') => 'p',
+        Some('ф') => 'a',
+        Some('ы' | 'і') => 's',
+        Some('в') => 'd',
+        Some('а') => 'f',
+        Some('п') => 'g',
+        Some('р') => 'h',
+        Some('о') => 'j',
+        Some('л') => 'k',
+        Some('д') => 'l',
+        Some('я') => 'z',
+        Some('ч') => 'x',
+        Some('с') => 'c',
+        Some('м') => 'v',
+        Some('и') => 'b',
+        Some('т') => 'n',
+        Some('ь') => 'm',
+        _ => return key,
+    };
+    key.code = KeyCode::Char(if ch.is_uppercase() {
+        latin.to_ascii_uppercase()
+    } else {
+        latin
+    });
+    key
 }
 
 /// Nonblocking burst drain with the same report filter as [`EventStream`].
@@ -528,8 +578,6 @@ mod tests {
         );
     }
     use super::*;
-    use crossterm::event::KeyEvent;
-
     #[test]
     fn idle_timer_sleeps_until_the_next_query_instead_of_polling() {
         let now = Instant::now();
@@ -585,6 +633,28 @@ mod tests {
 
     fn key(ch: char, modifiers: KeyModifiers) -> Event {
         Event::Key(KeyEvent::new(KeyCode::Char(ch), modifiers))
+    }
+
+    #[test]
+    fn cyrillic_ctrl_chords_reach_the_same_bindings_as_latin() {
+        let mut state = RuntimeTheme::default();
+        let ctrl = KeyModifiers::CONTROL;
+        let shifted = ctrl | KeyModifiers::SHIFT;
+        let alt_gr = ctrl | KeyModifiers::ALT;
+        for (input, expected) in [
+            (key('с', ctrl), key('c', ctrl)),
+            (key('в', ctrl), key('d', ctrl)),
+            (key('д', ctrl), key('l', ctrl)),
+            (key('і', ctrl), key('s', ctrl)),
+            (key('С', shifted), key('C', shifted)),
+            (key('С', ctrl), key('C', ctrl)),
+            (key('с', KeyModifiers::NONE), key('с', KeyModifiers::NONE)),
+            (key('с', alt_gr), key('с', alt_gr)),
+            (key('ё', ctrl), key('ё', ctrl)),
+        ] {
+            state.reports.push(input.clone(), Instant::now());
+            assert_eq!(take_event(&mut state), Some(expected), "{input:?}");
+        }
     }
 
     fn report(filter: &mut ColorReports, body: &str, bel: bool, now: Instant) {

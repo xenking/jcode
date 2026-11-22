@@ -1483,6 +1483,7 @@ impl SessionPicker {
             return Ok(OverlayAction::Continue);
         }
         let key = jcode_tui_core::korean_input::normalize_key_event(key);
+        let key = super::terminal_events::normalize_ctrl_layout(key);
         self.handle_overlay_key(key.code, key.modifiers)
     }
 

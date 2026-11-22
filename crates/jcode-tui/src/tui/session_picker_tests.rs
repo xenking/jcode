@@ -2213,6 +2213,27 @@ fn test_reseed_grouped_keeps_selection_when_list_changes() {
 }
 
 #[test]
+fn cyrillic_ctrl_c_closes_standalone_picker_on_press_only() {
+    use crossterm::event::KeyEvent;
+
+    let mut picker = SessionPicker::new(vec![make_session(
+        "session_picker",
+        "picker",
+        false,
+        SessionStatus::Closed,
+    )]);
+    let key = |kind| KeyEvent::new_with_kind(KeyCode::Char('с'), KeyModifiers::CONTROL, kind);
+    assert!(matches!(
+        picker.handle_key_event(key(KeyEventKind::Release)).unwrap(),
+        OverlayAction::Continue
+    ));
+    assert!(matches!(
+        picker.handle_key_event(key(KeyEventKind::Press)).unwrap(),
+        OverlayAction::Close
+    ));
+}
+
+#[test]
 fn test_search_mode_held_ctrl_j_k_navigate_session_list() {
     use crossterm::event::{KeyEvent, KeyEventKind};
 
