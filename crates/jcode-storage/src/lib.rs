@@ -137,8 +137,22 @@ pub fn user_runtime_dir() -> PathBuf {
     dir
 }
 
+/// The Darwin per-user temp dir is fixed for the life of the process, while
+/// `runtime_dir()` is called for every durable-state path. Resolve it once:
+/// a reconnect storm otherwise spends most daemon CPU on `confstr` + `stat`.
 #[cfg(target_os = "macos")]
 fn darwin_user_temp_dir() -> Option<PathBuf> {
+    static RESOLVED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    if let Some(dir) = RESOLVED.get() {
+        return Some(dir.clone());
+    }
+    // A missing dir is not cached: it may be created later.
+    let dir = resolve_darwin_user_temp_dir()?;
+    Some(RESOLVED.get_or_init(|| dir).clone())
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_darwin_user_temp_dir() -> Option<PathBuf> {
     use std::ffi::CStr;
     use std::os::unix::ffi::OsStrExt;
     let mut buf = vec![0 as libc::c_char; libc::PATH_MAX as usize];
