@@ -367,7 +367,7 @@ impl Tool for CodemodeTool {
                     "type": "integer",
                     "minimum": MIN_OUTPUT_TOKENS,
                     "maximum": MAX_OUTPUT_TOKENS,
-                    "description": "Optional approximate report budget. Use 4000 for a compact preview. Save full script data with store(key, value), then page it with load(key). Intermediate tool output is unaffected."
+                    "description": "Report budget, not tool output. Use 4000 for previews and store/load for full data."
                 }
             }
         })
