@@ -17,6 +17,15 @@ LOADER.exec_module(HELPER)
 
 
 class VerificationSafetyTests(unittest.TestCase):
+    def test_terminal_journey_rejects_missing_duplicate_and_late_output(self):
+        good = "STAGEA_fresh STAGEB_fresh"
+        HELPER.check_journey_capture(good, "fresh", True)
+        HELPER.check_journey_capture("STAGEA_fresh", "fresh", False)
+        for text, completed in [("STAGEA_fresh", True), (good + " STAGEB_fresh", True),
+                                (good, False), ("STAGEA_fresh STAGEA_fresh", False)]:
+            with self.subTest(text=text, completed=completed), self.assertRaises(RuntimeError):
+                HELPER.check_journey_capture(text, "fresh", completed)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.base = Path(self.temp.name)

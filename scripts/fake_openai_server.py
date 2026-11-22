@@ -244,6 +244,27 @@ class H(BaseHTTPRequestHandler):
             self.wfile.write(b"data: " + json.dumps(obj).encode() + b"\n\n")
             self.wfile.flush()
 
+        staged = re.search(r"\[e2e:stream:([a-z0-9_]+)\]", prompt) if CONTROL else None
+        if staged and not tool_calls:
+            token = staged.group(1)
+            def chunk(content):
+                event({"id": "x", "object": "chat.completion.chunk", "model": "fake-model",
+                       "choices": [{"index": 0, "delta": {"content": content}}]})
+            chunk("STAGEA_" + token + " ")
+            if not self.hold(token):
+                return
+            try:
+                chunk("STAGEB_" + token)
+                event({"id": "x", "object": "chat.completion.chunk", "model": "fake-model",
+                       "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": usage})
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                (CONTROL / (token + ".finished")).write_text("provider attempted remaining stream\n")
+            return
+
         delta = {"role": "assistant", "content": text}
         if tool_calls:
             delta = {"role": "assistant", "tool_calls": [dict(call, index=i) for i, call in enumerate(tool_calls)]}

@@ -29,6 +29,7 @@ Record the feature ID, exact user entry point, action, resulting frame/response,
 | --- | --- | --- |
 | [One-shot CLI](cli-run.md) | `drive cli --mode plain`, `json`, `ndjson` | stdin/shell integration is not a separate supported argument here |
 | [Interactive turn and tools](tui-tool.md) | `drive tui`: type, Enter, stream, real write | paste, queued/interrupt turns, tool expansion/collapse |
+| Terminal streaming journey | `drive terminal-journey`: staged SSE, resize, Escape cancellation, subsequent turn | real provider authentication, tool cancellation |
 | [Slash commands and skills](slash-skill.md) | `drive slash`: /help, /verify-probe prompt | /?, /commands, /skills listing, bare activation, completion picker |
 | [Session resume](resume.md) | `drive resume`: quit UI, --resume exact ID, continue | --resume picker, /resume picker, CLI --resume run, full daemon restart |
 | [Session mode](session-mode.md) | `drive mode`: pin, compact, spawn, clear. `drive mode-set`: toggle, restart, continued provider request, unpin one | auto-compaction, resume after compaction |

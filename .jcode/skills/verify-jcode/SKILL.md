@@ -39,6 +39,7 @@ Require `status: ready`. This is read-only against the app: verify the runtime o
 ```bash
 "$V" drive --evidence "$E" cli --mode json
 "$V" drive --evidence "$E" tui
+"$V" drive --evidence "$E" terminal-journey
 "$V" drive --evidence "$E" slash
 "$V" drive --evidence "$E" resume
 "$V" drive --evidence "$E" cancel
