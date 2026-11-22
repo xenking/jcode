@@ -193,8 +193,15 @@ impl Client {
             }
             let event: ServerEvent = serde_json::from_str(&line)?;
             match event {
-                ServerEvent::Ack { .. } => continue,
-                _ => return Ok(event),
+                ServerEvent::History {
+                    id: response_id, ..
+                }
+                | ServerEvent::Error {
+                    id: response_id, ..
+                } if response_id == id => {
+                    return Ok(event);
+                }
+                _ => {}
             }
         }
 
@@ -352,5 +359,58 @@ impl Client {
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;
         Ok(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn history_request_ignores_unrelated_socket_events() -> Result<()> {
+        let (client, server) = crate::transport::stream_pair()?;
+        let (reader, writer) = client.into_split();
+        let mut client = Client {
+            reader: BufReader::new(reader),
+            writer,
+            next_id: 1,
+        };
+        let (reader, mut writer) = server.into_split();
+        let mut reader = BufReader::new(reader);
+        let transcript = [
+            concat!(
+                "{\"type\":\"swarm_status\",\"members\":[]}\n",
+                "{\"type\":\"history\",\"id\":99,\"session_id\":\"stale\",\"messages\":[]}\n",
+                "{\"type\":\"history\",\"id\":1,\"session_id\":\"current\",\"messages\":[]}\n",
+            ),
+            concat!(
+                "{\"type\":\"error\",\"id\":99,\"message\":\"stale error\"}\n",
+                "{\"type\":\"error\",\"id\":2,\"message\":\"history unavailable\"}\n",
+            ),
+        ];
+        let server = tokio::spawn(async move {
+            for (index, response) in transcript.into_iter().enumerate() {
+                let mut request = String::new();
+                reader.read_line(&mut request).await?;
+                assert!(
+                    matches!(serde_json::from_str(&request)?, Request::GetHistory { id } if id == index as u64 + 1)
+                );
+                writer.write_all(response.as_bytes()).await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        });
+
+        let history = client.get_history_event().await?;
+        assert!(
+            matches!(&history, ServerEvent::History { id: 1, session_id, .. } if session_id == "current"),
+            "unexpected history response: {history:?}"
+        );
+        let error = client.get_history_event().await?;
+        assert!(
+            matches!(error, ServerEvent::Error { id: 2, .. }),
+            "unexpected history response: {error:?}"
+        );
+        server.await??;
+        Ok(())
     }
 }
