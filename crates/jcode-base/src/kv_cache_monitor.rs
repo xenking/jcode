@@ -917,6 +917,35 @@ mod tests {
     }
 
     #[test]
+    fn warm_openai_shortfall_is_not_a_miss_but_real_losses_are() {
+        let route = RequestRoute {
+            provider: "openai".into(),
+            model: "fixture".into(),
+            ..RequestRoute::default()
+        };
+        // Same provider/account, complete matching history. Prior uncached input
+        // was already 1,993 tokens, so the 2,377-token shortfall includes only
+        // 384 fewer observed reads, not a 2,377-token loss.
+        for (read, history, expected_reason) in [
+            (112_768, vec![10, 11], None),
+            (110_080, vec![10, 11], Some(MissReason::LowRead)),
+            (70_016, vec![10, 11], Some(MissReason::LowRead)),
+            (112_768, vec![99, 11], Some(MissReason::PrefixChanged)),
+        ] {
+            let mut monitor = KvCacheMonitor::new();
+            monitor.begin_request(route.clone(), sig(&[10]));
+            assert!(monitor.finish_request(115_145, Some(113_152)).is_none());
+            monitor.begin_request(route.clone(), sig(&history));
+            let result = monitor.finish_request_with_prefix(115_190, Some(115_190), Some(read));
+            assert_eq!(result.as_ref().map(|notice| notice.reason), expected_reason);
+            if let Some(notice) = result {
+                assert_eq!(notice.missed_tokens, 115_145 - read);
+                assert!(notice.message().contains("KV cache miss"));
+            }
+        }
+    }
+
+    #[test]
     fn provider_switch_uses_the_new_providers_uncached_input() {
         let mut monitor = KvCacheMonitor::new();
         monitor.begin_request(route(), sig(&[10]));
