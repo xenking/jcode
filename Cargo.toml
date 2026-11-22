@@ -140,9 +140,6 @@ path = "src/bin/tui_bench.rs"
 required-features = ["dev-bins"]
 
 [dependencies]
-# Memory allocator (reduces fragmentation for long-running server)
-tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"], optional = true }
-
 # Async runtime
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 futures = "0.3"
@@ -226,7 +223,7 @@ tempfile = "3"
 [features]
 # Memory recall uses Jev Decisions and needs no local inference stack.
 # Keep embeddings opt-in for historical benchmarks/debugging only.
-default = ["pdf", "bedrock"]
+default = ["pdf", "bedrock", "jemalloc-prof"]
 dev-bins = ["jcode-tui/dev-bins"]
 jemalloc = [
     "dep:tikv-jemallocator",
@@ -262,6 +259,11 @@ jcode-sdk = { path = "crates/jcode-sdk" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+# Keep jemalloc prefixed so only jcode's Rust global allocator uses it, not C
+# dependencies or other binaries (including allocation-counting test probes).
+tikv-jemallocator = { version = "0.6", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "0.7"

@@ -1,4 +1,8 @@
-#[cfg(feature = "jemalloc")]
+#[cfg(all(
+    not(test),
+    feature = "jemalloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
@@ -11,18 +15,25 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 // narenas:4            — limit arena count (17 threads don't need 64 arenas)
 // prof:true            — enable profiling support in jemalloc-prof builds
 // prof_active:false    — keep sampling disabled until explicitly enabled at runtime
-#[cfg(all(feature = "jemalloc", not(feature = "jemalloc-prof")))]
-// jemalloc reads this exact exported symbol name at startup.
-#[allow(non_upper_case_globals)]
-#[unsafe(no_mangle)]
-pub static malloc_conf: Option<&'static [u8; 50]> =
+#[cfg(all(
+    not(test),
+    feature = "jemalloc",
+    not(feature = "jemalloc-prof"),
+    any(target_os = "macos", target_os = "linux")
+))]
+// Prefixed tikv-jemalloc reads this symbol before main.
+#[unsafe(export_name = "_rjem_malloc_conf")]
+pub static MALLOC_CONF: Option<&'static [u8; 50]> =
     Some(b"dirty_decay_ms:1000,muzzy_decay_ms:1000,narenas:4\0");
 
-#[cfg(feature = "jemalloc-prof")]
-// jemalloc reads this exact exported symbol name at startup.
-#[allow(non_upper_case_globals)]
-#[unsafe(no_mangle)]
-pub static malloc_conf: Option<&'static [u8; 78]> =
+#[cfg(all(
+    not(test),
+    feature = "jemalloc-prof",
+    any(target_os = "macos", target_os = "linux")
+))]
+// Prefixed tikv-jemalloc reads this symbol before main.
+#[unsafe(export_name = "_rjem_malloc_conf")]
+pub static MALLOC_CONF: Option<&'static [u8; 78]> =
     Some(b"dirty_decay_ms:1000,muzzy_decay_ms:1000,narenas:4,prof:true,prof_active:false\0");
 
 use anyhow::Result;

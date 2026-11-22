@@ -158,6 +158,74 @@ pub(super) async fn run_debug_message_with_timeout(
     }
 }
 
+pub(super) fn maybe_handle_allocator_command(command: &str) -> Option<Result<String>> {
+    let command = command.trim();
+    if command != "allocator" && !command.starts_with("allocator:") {
+        return None;
+    }
+    Some(execute_allocator_command(command))
+}
+
+fn execute_allocator_command(command: &str) -> Result<String> {
+    use crate::process_memory;
+    use serde_json::{json, to_string_pretty};
+
+    let mut payload = match command {
+        "allocator" | "allocator:info" => {
+            return Ok(to_string_pretty(&process_memory::allocator_info())?);
+        }
+        "allocator:purge" => json!({
+            "action": "purge",
+            "tuning": process_memory::purge_allocator()?,
+        }),
+        "allocator:profile:on" | "allocator:profile:off" => {
+            let active = command == "allocator:profile:on";
+            process_memory::set_allocator_profiling_active(active)?;
+            json!({"profiling_active": active})
+        }
+        "allocator:profile:dump" => {
+            json!({"path": process_memory::dump_allocator_profile(None)?})
+        }
+        _ => {
+            if let Some(ms) = command.strip_prefix("allocator:decay:") {
+                let ms = ms.trim();
+                if ms.is_empty() {
+                    anyhow::bail!("allocator:decay:<ms> requires a decay value in milliseconds");
+                }
+                let ms: isize = ms.parse().map_err(|_| {
+                    anyhow::anyhow!("allocator:decay:<ms> requires an integer millisecond value")
+                })?;
+                json!({
+                    "action": "set_decay",
+                    "dirty_decay_ms": ms,
+                    "muzzy_decay_ms": ms,
+                    "tuning": process_memory::set_allocator_decay_ms(ms, ms)?,
+                })
+            } else if let Some(prefix) = command.strip_prefix("allocator:profile:prefix:") {
+                let prefix = prefix.trim();
+                if prefix.is_empty() {
+                    anyhow::bail!("allocator:profile:prefix: requires a prefix");
+                }
+                process_memory::set_allocator_profile_prefix(prefix)?;
+                json!({"prefix": prefix})
+            } else if let Some(path) = command.strip_prefix("allocator:profile:dump ") {
+                let path = path.trim();
+                if path.is_empty() {
+                    anyhow::bail!("allocator:profile:dump requires a path");
+                }
+                let path =
+                    process_memory::dump_allocator_profile(Some(std::path::Path::new(path)))?;
+                json!({"path": path})
+            } else {
+                anyhow::bail!("unknown allocator debug command: {command}");
+            }
+        }
+    };
+    payload["status"] = json!("ok");
+    payload["allocator"] = json!(process_memory::allocator_info());
+    Ok(to_string_pretty(&payload)?)
+}
+
 pub(super) async fn execute_debug_command(
     agent: Arc<Mutex<Agent>>,
     command: &str,
@@ -438,105 +506,6 @@ pub(super) async fn execute_debug_command(
         let agent = agent.lock().await;
         let info = agent.debug_memory_profile();
         return Ok(serde_json::to_string_pretty(&info).unwrap_or_else(|_| "{}".to_string()));
-    }
-
-    if trimmed == "allocator" || trimmed == "allocator:info" {
-        let info = crate::process_memory::allocator_info();
-        return Ok(serde_json::to_string_pretty(&info).unwrap_or_else(|_| "{}".to_string()));
-    }
-
-    if trimmed == "allocator:purge" {
-        let tuning = crate::process_memory::purge_allocator()?;
-        let payload = serde_json::json!({
-            "status": "ok",
-            "action": "purge",
-            "tuning": tuning,
-            "allocator": crate::process_memory::allocator_info(),
-        });
-        return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
-    }
-
-    if let Some(ms) = trimmed.strip_prefix("allocator:decay:") {
-        let ms = ms.trim();
-        if ms.is_empty() {
-            return Err(anyhow::anyhow!(
-                "allocator:decay:<ms> requires a decay value in milliseconds"
-            ));
-        }
-        let decay_ms: isize = ms.parse().map_err(|_| {
-            anyhow::anyhow!("allocator:decay:<ms> requires an integer millisecond value")
-        })?;
-        let tuning = crate::process_memory::set_allocator_decay_ms(decay_ms, decay_ms)?;
-        let payload = serde_json::json!({
-            "status": "ok",
-            "action": "set_decay",
-            "dirty_decay_ms": decay_ms,
-            "muzzy_decay_ms": decay_ms,
-            "tuning": tuning,
-            "allocator": crate::process_memory::allocator_info(),
-        });
-        return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
-    }
-
-    if trimmed == "allocator:profile:on" {
-        crate::process_memory::set_allocator_profiling_active(true)?;
-        let payload = serde_json::json!({
-            "status": "ok",
-            "profiling_active": true,
-            "allocator": crate::process_memory::allocator_info(),
-        });
-        return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
-    }
-
-    if trimmed == "allocator:profile:off" {
-        crate::process_memory::set_allocator_profiling_active(false)?;
-        let payload = serde_json::json!({
-            "status": "ok",
-            "profiling_active": false,
-            "allocator": crate::process_memory::allocator_info(),
-        });
-        return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
-    }
-
-    if let Some(prefix) = trimmed.strip_prefix("allocator:profile:prefix:") {
-        let prefix = prefix.trim();
-        if prefix.is_empty() {
-            return Err(anyhow::anyhow!(
-                "allocator:profile:prefix: requires a prefix"
-            ));
-        }
-        crate::process_memory::set_allocator_profile_prefix(prefix)?;
-        let payload = serde_json::json!({
-            "status": "ok",
-            "prefix": prefix,
-            "allocator": crate::process_memory::allocator_info(),
-        });
-        return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
-    }
-
-    if trimmed == "allocator:profile:dump" {
-        let path = crate::process_memory::dump_allocator_profile(None)?;
-        let payload = serde_json::json!({
-            "status": "ok",
-            "path": path,
-            "allocator": crate::process_memory::allocator_info(),
-        });
-        return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
-    }
-
-    if let Some(path) = trimmed.strip_prefix("allocator:profile:dump ") {
-        let path = path.trim();
-        if path.is_empty() {
-            return Err(anyhow::anyhow!("allocator:profile:dump requires a path"));
-        }
-        let output_path =
-            crate::process_memory::dump_allocator_profile(Some(std::path::Path::new(path)))?;
-        let payload = serde_json::json!({
-            "status": "ok",
-            "path": output_path,
-            "allocator": crate::process_memory::allocator_info(),
-        });
-        return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
     }
 
     if trimmed == "last_response" {

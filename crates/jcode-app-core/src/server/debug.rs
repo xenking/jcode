@@ -5,7 +5,8 @@
 
 use super::debug_ambient::maybe_handle_ambient_command;
 use super::debug_command_exec::{
-    DebugInterruptContext, execute_debug_command, resolve_debug_session,
+    DebugInterruptContext, execute_debug_command, maybe_handle_allocator_command,
+    resolve_debug_session,
 };
 use super::debug_events::{
     maybe_handle_event_query_command, maybe_handle_event_subscription_command,
@@ -697,6 +698,8 @@ pub(super) async fn handle_debug_client(
                                     maybe_handle_event_query_command(cmd, &event_history).await
                                 {
                                     Ok(output)
+                                } else if let Some(result) = maybe_handle_allocator_command(cmd) {
+                                    result
                                 } else if cmd == "swarm:help" {
                                     Ok(swarm_debug_help_text())
                                 } else if cmd == "help" {

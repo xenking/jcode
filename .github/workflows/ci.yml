@@ -239,6 +239,10 @@ jobs:
         shell: bash
         run: cargo build --locked --release --target ${{ matrix.target }}
 
+      - name: Smoke-test release daemon allocator
+        if: github.repository != 'xenking/jcode' || github.event_name != 'push'
+        run: python3 scripts/check_daemon_allocator.py target/${{ matrix.target }}/release/jcode
+
       - name: Compile library and binary tests
         shell: bash
         run: |

@@ -16,10 +16,6 @@ name = "jcode_base"
 path = "src/lib.rs"
 
 [dependencies]
-# Memory allocator (reduces fragmentation for long-running server)
-tikv-jemalloc-ctl = { version = "0.6", optional = true }
-tikv-jemalloc-sys = { version = "0.6", optional = true }
-
 # Async runtime
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 futures = "0.3"
@@ -157,6 +153,10 @@ bedrock = ["jcode-provider-bedrock/aws-sdk"]
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Power", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_SystemServices", "Win32_System_Threading"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+tikv-jemalloc-ctl = { version = "0.6", optional = true }
+tikv-jemalloc-sys = { version = "0.6", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "0.7"

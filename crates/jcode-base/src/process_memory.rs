@@ -1,10 +1,10 @@
 use crate::logging;
 use anyhow::{Result, anyhow};
-#[cfg(feature = "jemalloc")]
+#[cfg(all(feature = "jemalloc", any(target_os = "macos", target_os = "linux")))]
 use libc::c_char;
 use serde::Serialize;
 use std::collections::VecDeque;
-#[cfg(feature = "jemalloc")]
+#[cfg(all(feature = "jemalloc", any(target_os = "macos", target_os = "linux")))]
 use std::ffi::CString;
 use std::path::Path;
 use std::path::PathBuf;
@@ -12,7 +12,7 @@ use std::sync::{Mutex, OnceLock};
 
 const MAX_HISTORY_SAMPLES: usize = 512;
 
-#[cfg(feature = "jemalloc")]
+#[cfg(all(feature = "jemalloc", any(target_os = "macos", target_os = "linux")))]
 struct JemallocStatsMibs {
     epoch: tikv_jemalloc_ctl::epoch_mib,
     allocated: tikv_jemalloc_ctl::stats::allocated_mib,
@@ -23,7 +23,10 @@ struct JemallocStatsMibs {
     retained: tikv_jemalloc_ctl::stats::retained_mib,
 }
 
-#[cfg(feature = "jemalloc-prof")]
+#[cfg(all(
+    feature = "jemalloc-prof",
+    any(target_os = "macos", target_os = "linux")
+))]
 struct JemallocProfilingMibs {
     enabled: tikv_jemalloc_ctl::profiling::prof_mib,
 }
@@ -111,7 +114,11 @@ pub struct AllocatorStats {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct AllocatorProfilingInfo {
     pub available: bool,
+    /// Whether profiling was enabled at startup (opt.prof).
     pub enabled: Option<bool>,
+    /// Whether allocation sampling is currently active (prof.active).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -323,7 +330,7 @@ pub fn history(limit: usize) -> Vec<ProcessMemoryHistoryEntry> {
 }
 
 pub fn allocator_info() -> AllocatorInfo {
-    #[cfg(feature = "jemalloc")]
+    #[cfg(all(feature = "jemalloc", any(target_os = "macos", target_os = "linux")))]
     {
         let stats = jemalloc_stats();
         let profiling = jemalloc_profiling_info();
@@ -336,7 +343,7 @@ pub fn allocator_info() -> AllocatorInfo {
         }
     }
 
-    #[cfg(not(feature = "jemalloc"))]
+    #[cfg(not(all(feature = "jemalloc", any(target_os = "macos", target_os = "linux"))))]
     {
         let stats = glibc_malloc_stats();
         AllocatorInfo {
@@ -411,14 +418,14 @@ fn glibc_malloc_stats() -> Option<AllocatorStats> {
 
 #[cfg(all(
     not(all(target_os = "linux", target_env = "gnu")),
-    not(feature = "jemalloc")
+    not(all(feature = "jemalloc", any(target_os = "macos", target_os = "linux")))
 ))]
 fn glibc_malloc_stats() -> Option<AllocatorStats> {
     None
 }
 
 pub fn purge_allocator() -> Result<AllocatorTuningInfo> {
-    #[cfg(feature = "jemalloc")]
+    #[cfg(all(feature = "jemalloc", any(target_os = "macos", target_os = "linux")))]
     {
         logging::info("purging jemalloc allocator arenas");
         let _ = jemalloc_void_ctl("thread.idle");
@@ -456,7 +463,7 @@ pub fn purge_allocator() -> Result<AllocatorTuningInfo> {
 
     #[cfg(all(
         not(all(target_os = "linux", target_env = "gnu")),
-        not(feature = "jemalloc")
+        not(all(feature = "jemalloc", any(target_os = "macos", target_os = "linux")))
     ))]
     {
         logging::warn("allocator purge requested but no purge mechanism is available");
@@ -470,7 +477,7 @@ pub fn set_allocator_decay_ms(dirty_ms: isize, muzzy_ms: isize) -> Result<Alloca
     logging::info(&format!(
         "setting allocator decay dirty_ms={dirty_ms} muzzy_ms={muzzy_ms}"
     ));
-    #[cfg(feature = "jemalloc")]
+    #[cfg(all(feature = "jemalloc", any(target_os = "macos", target_os = "linux")))]
     {
         unsafe {
             tikv_jemalloc_ctl::raw::write(b"arenas.dirty_decay_ms\0", dirty_ms)
@@ -498,7 +505,7 @@ pub fn set_allocator_decay_ms(dirty_ms: isize, muzzy_ms: isize) -> Result<Alloca
         }))
     }
 
-    #[cfg(not(feature = "jemalloc"))]
+    #[cfg(not(all(feature = "jemalloc", any(target_os = "macos", target_os = "linux"))))]
     {
         let _ = (dirty_ms, muzzy_ms);
         logging::warn("allocator decay update requested but jemalloc feature is disabled");
@@ -509,7 +516,10 @@ pub fn set_allocator_decay_ms(dirty_ms: isize, muzzy_ms: isize) -> Result<Alloca
 }
 
 pub fn set_allocator_profiling_active(active: bool) -> Result<()> {
-    #[cfg(feature = "jemalloc-prof")]
+    #[cfg(all(
+        feature = "jemalloc-prof",
+        any(target_os = "macos", target_os = "linux")
+    ))]
     {
         unsafe {
             tikv_jemalloc_ctl::raw::write(b"prof.active\0", active)
@@ -517,7 +527,10 @@ pub fn set_allocator_profiling_active(active: bool) -> Result<()> {
         }
     }
 
-    #[cfg(not(feature = "jemalloc-prof"))]
+    #[cfg(not(all(
+        feature = "jemalloc-prof",
+        any(target_os = "macos", target_os = "linux")
+    )))]
     {
         let _ = active;
         Err(anyhow!(
@@ -527,7 +540,10 @@ pub fn set_allocator_profiling_active(active: bool) -> Result<()> {
 }
 
 pub fn dump_allocator_profile(path: Option<&Path>) -> Result<PathBuf> {
-    #[cfg(feature = "jemalloc-prof")]
+    #[cfg(all(
+        feature = "jemalloc-prof",
+        any(target_os = "macos", target_os = "linux")
+    ))]
     {
         let output_path = match path {
             Some(path) => path.to_path_buf(),
@@ -546,10 +562,16 @@ pub fn dump_allocator_profile(path: Option<&Path>) -> Result<PathBuf> {
                 .map_err(|e| anyhow!("failed to dump jemalloc heap profile: {}", e))?;
         }
 
+        #[cfg(target_os = "macos")]
+        append_macos_heap_mapping(&output_path)?;
+
         Ok(output_path)
     }
 
-    #[cfg(not(feature = "jemalloc-prof"))]
+    #[cfg(not(all(
+        feature = "jemalloc-prof",
+        any(target_os = "macos", target_os = "linux")
+    )))]
     {
         let _ = path;
         Err(anyhow!(
@@ -558,8 +580,49 @@ pub fn dump_allocator_profile(path: Option<&Path>) -> Result<PathBuf> {
     }
 }
 
+#[cfg(all(feature = "jemalloc-prof", target_os = "macos"))]
+#[allow(deprecated)] // libc supplies the dyld ABI without adding a mach2 dependency.
+fn append_macos_heap_mapping(path: &Path) -> Result<()> {
+    use std::io::Write;
+
+    unsafe extern "C" {
+        fn getsegmentdata(
+            header: *const libc::mach_header_64,
+            segment: *const libc::c_char,
+            size: *mut libc::c_ulong,
+        ) -> *mut u8;
+    }
+
+    // This version of jemalloc reads /proc maps, which macOS lacks. jeprof
+    // needs the main executable's loaded __TEXT range to undo ASLR.
+    let mut size = 0;
+    // SAFETY: dyld image 0 is the loaded main executable and remains mapped
+    // for the lifetime of the process. Both supported macOS targets are 64-bit.
+    let header = unsafe { libc::_dyld_get_image_header(0) }.cast::<libc::mach_header_64>();
+    if header.is_null()
+        || unsafe { getsegmentdata(header, c"__TEXT".as_ptr(), &mut size) }.is_null()
+        || size == 0
+    {
+        return Err(anyhow!(
+            "cannot locate the executable's Mach-O __TEXT segment"
+        ));
+    }
+    let start = header.addr();
+    let end = start + size as usize;
+    let exe = std::env::current_exe()?.canonicalize()?;
+    writeln!(
+        std::fs::OpenOptions::new().append(true).open(path)?,
+        "\nMAPPED_LIBRARIES:\n{start:x}-{end:x} r-xp 00000000 00:00 0 {}",
+        exe.display()
+    )?;
+    Ok(())
+}
+
 pub fn set_allocator_profile_prefix(prefix: &str) -> Result<()> {
-    #[cfg(feature = "jemalloc-prof")]
+    #[cfg(all(
+        feature = "jemalloc-prof",
+        any(target_os = "macos", target_os = "linux")
+    ))]
     {
         let c_prefix =
             CString::new(prefix).map_err(|_| anyhow!("heap profile prefix contains NUL byte"))?;
@@ -569,7 +632,10 @@ pub fn set_allocator_profile_prefix(prefix: &str) -> Result<()> {
         }
     }
 
-    #[cfg(not(feature = "jemalloc-prof"))]
+    #[cfg(not(all(
+        feature = "jemalloc-prof",
+        any(target_os = "macos", target_os = "linux")
+    )))]
     {
         let _ = prefix;
         Err(anyhow!(
@@ -609,7 +675,7 @@ pub fn estimate_json_bytes<T: Serialize>(value: &T) -> usize {
 /// arenas; on Linux system-allocator builds it calls `malloc_trim(0)`; on
 /// other platforms it is a no-op.
 pub fn release_retained_heap(reason: &str) {
-    #[cfg(feature = "jemalloc")]
+    #[cfg(all(feature = "jemalloc", any(target_os = "macos", target_os = "linux")))]
     {
         if let Err(err) = purge_allocator() {
             logging::info(&format!("jemalloc purge ({reason}) failed: {err}"));
@@ -636,7 +702,7 @@ pub fn release_retained_heap(reason: &str) {
 
     #[cfg(all(
         not(all(target_os = "linux", target_env = "gnu")),
-        not(feature = "jemalloc")
+        not(all(feature = "jemalloc", any(target_os = "macos", target_os = "linux")))
     ))]
     {
         let _ = reason;
@@ -873,7 +939,10 @@ fn read_linux_memory_info(status: &str) -> Option<OsProcessMemoryInfo> {
     }
 }
 
-#[cfg(feature = "jemalloc-prof")]
+#[cfg(all(
+    feature = "jemalloc-prof",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn default_heap_profile_path() -> Result<PathBuf> {
     let base = crate::storage::jcode_dir()?.join("profiles").join("heap");
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
@@ -881,7 +950,7 @@ fn default_heap_profile_path() -> Result<PathBuf> {
     Ok(base.join(format!("jcode-{}-{}.heap", pid, timestamp)))
 }
 
-#[cfg(feature = "jemalloc")]
+#[cfg(all(feature = "jemalloc", any(target_os = "macos", target_os = "linux")))]
 fn jemalloc_stats() -> Option<AllocatorStats> {
     let mibs = jemalloc_stats_mibs()?;
     mibs.epoch.advance().ok()?;
@@ -896,7 +965,7 @@ fn jemalloc_stats() -> Option<AllocatorStats> {
     })
 }
 
-#[cfg(feature = "jemalloc")]
+#[cfg(all(feature = "jemalloc", any(target_os = "macos", target_os = "linux")))]
 fn jemalloc_tuning_info() -> Option<AllocatorTuningInfo> {
     let arena_count = tikv_jemalloc_ctl::arenas::narenas::read().ok()?;
     let mut initialized_arenas = 0u64;
@@ -933,7 +1002,7 @@ fn jemalloc_tuning_info() -> Option<AllocatorTuningInfo> {
     })
 }
 
-#[cfg(feature = "jemalloc")]
+#[cfg(all(feature = "jemalloc", any(target_os = "macos", target_os = "linux")))]
 fn jemalloc_read_dynamic<T: Copy>(name: &str) -> Result<T> {
     let c_name = CString::new(name).map_err(|_| anyhow!("mallctl name contains NUL byte"))?;
     unsafe {
@@ -942,7 +1011,7 @@ fn jemalloc_read_dynamic<T: Copy>(name: &str) -> Result<T> {
     }
 }
 
-#[cfg(feature = "jemalloc")]
+#[cfg(all(feature = "jemalloc", any(target_os = "macos", target_os = "linux")))]
 fn jemalloc_write_dynamic<T>(name: &str, value: T) -> Result<()> {
     let c_name = CString::new(name).map_err(|_| anyhow!("mallctl name contains NUL byte"))?;
     unsafe {
@@ -951,7 +1020,7 @@ fn jemalloc_write_dynamic<T>(name: &str, value: T) -> Result<()> {
     }
 }
 
-#[cfg(feature = "jemalloc")]
+#[cfg(all(feature = "jemalloc", any(target_os = "macos", target_os = "linux")))]
 fn jemalloc_void_ctl(name: &str) -> Result<()> {
     let c_name = CString::new(name).map_err(|_| anyhow!("mallctl name contains NUL byte"))?;
     unsafe {
@@ -973,7 +1042,7 @@ fn jemalloc_void_ctl(name: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "jemalloc")]
+#[cfg(all(feature = "jemalloc", any(target_os = "macos", target_os = "linux")))]
 fn jemalloc_stats_mibs() -> Option<&'static JemallocStatsMibs> {
     static MIBS: OnceLock<Option<JemallocStatsMibs>> = OnceLock::new();
     MIBS.get_or_init(|| {
@@ -990,24 +1059,36 @@ fn jemalloc_stats_mibs() -> Option<&'static JemallocStatsMibs> {
     .as_ref()
 }
 
-#[cfg(feature = "jemalloc-prof")]
+#[cfg(all(
+    feature = "jemalloc-prof",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn jemalloc_profiling_info() -> Option<AllocatorProfilingInfo> {
     let mibs = jemalloc_profiling_mibs()?;
     Some(AllocatorProfilingInfo {
         available: true,
         enabled: mibs.enabled.read().ok(),
+        active: unsafe { tikv_jemalloc_ctl::raw::read::<bool>(b"prof.active\0") }.ok(),
     })
 }
 
-#[cfg(all(feature = "jemalloc", not(feature = "jemalloc-prof")))]
+#[cfg(all(
+    any(target_os = "macos", target_os = "linux"),
+    feature = "jemalloc",
+    not(feature = "jemalloc-prof")
+))]
 fn jemalloc_profiling_info() -> Option<AllocatorProfilingInfo> {
     Some(AllocatorProfilingInfo {
         available: false,
         enabled: None,
+        active: None,
     })
 }
 
-#[cfg(feature = "jemalloc-prof")]
+#[cfg(all(
+    feature = "jemalloc-prof",
+    any(target_os = "macos", target_os = "linux")
+))]
 fn jemalloc_profiling_mibs() -> Option<&'static JemallocProfilingMibs> {
     static MIBS: OnceLock<Option<JemallocProfilingMibs>> = OnceLock::new();
     MIBS.get_or_init(|| {

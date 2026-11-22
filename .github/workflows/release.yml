@@ -94,6 +94,10 @@ jobs:
           echo "$version"
           grep -q "${RELEASE_TAG} " <<<"$version"
 
+      - name: Smoke-test release daemon allocator
+        if: runner.os != 'Windows'
+        run: python3 scripts/check_daemon_allocator.py target/${{ matrix.target }}/release/jcode
+
       - name: Package (unix)
         if: runner.os != 'Windows'
         shell: bash

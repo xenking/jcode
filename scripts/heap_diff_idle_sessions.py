@@ -42,32 +42,24 @@ def main() -> int:
     for name in ("auth.json", "anthropic-auth.json", "openai-auth.json", "config.toml", "models"):
         if (real / name).exists():
             (home / name).symlink_to(real / name)
-    prefix = str(prof / "h")
     env = os.environ.copy()
+    malloc_conf = "prof:true,prof_active:true,lg_prof_sample:15"
     env.update({
         "JCODE_HOME": str(home), "JCODE_RUNTIME_DIR": str(run), "JCODE_TEMP_SERVER": "1",
         "JCODE_SERVER_OWNER_PID": str(os.getpid()), "JCODE_NO_TELEMETRY": "1",
-        "JCODE_DEBUG_CONTROL": "1",
+        "JCODE_DEBUG_CONTROL": "1", "JCODE_TEST_SESSION": "1",
         # Sample every ~32KB (2^15) and accumulate nothing: live-heap dumps.
-        "MALLOC_CONF": f"prof_active:true,lg_prof_sample:15,prof_prefix:{prefix}",
+        "MALLOC_CONF": malloc_conf, "_RJEM_MALLOC_CONF": malloc_conf,
     })
     sock = str(run / "t.sock")
     server = subprocess.Popen([binary, "--no-update", "--no-selfdev", "serve", "--socket", sock],
                               cwd=work, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                               stderr=open(Path(root) / "server.log", "w"), preexec_fn=os.setsid)
-    gdb = ["gdb", "-p", str(server.pid), "-batch", "-ex"]
-
     def heap_dump(name: str) -> str:
-        before = set(prof.glob("*.heap"))
-        # NULL newp: jemalloc writes <prof_prefix>.<pid>.<seq>.m<seq>.heap.
-        cmd = 'call (int)mallctl("prof.dump", 0, 0, 0, 0)'
-        r = subprocess.run(["sudo", "-n"] + gdb + [cmd], capture_output=True, text=True)
-        new = sorted(set(prof.glob("*.heap")) - before)
-        if not new:
-            print(r.stdout[-800:], r.stderr[-800:], file=sys.stderr)
-            raise RuntimeError("heap dump failed")
         path = prof / f"{name}.heap"
-        new[-1].rename(path)
+        subprocess.run([binary, "--no-update", "--no-selfdev", "--socket", sock,
+                        "debug", f"allocator:profile:dump {path}"], cwd=work, env=env,
+                       check=True, timeout=30, stdout=subprocess.DEVNULL)
         return str(path)
 
     try:
