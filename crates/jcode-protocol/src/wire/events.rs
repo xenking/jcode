@@ -1192,6 +1192,8 @@ pub enum ServerEvent {
         id: u64,
         session_id: String,
         new_session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_speed: Option<jcode_message_types::WorkerSpeedStatus>,
     },
 
     /// Response to comm_list_models request

@@ -533,6 +533,8 @@ pub struct AgentInfo {
     /// Reasoning effort the agent's provider is running with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_speed: Option<jcode_message_types::WorkerSpeedStatus>,
     /// Number of turns the agent has run this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_count: Option<u64>,
@@ -593,6 +595,8 @@ pub struct AgentStatusSnapshot {
     pub provider_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_speed: Option<jcode_message_types::WorkerSpeedStatus>,
 }
 
 /// Lightweight swarm plan graph summary for planner-friendly reads.

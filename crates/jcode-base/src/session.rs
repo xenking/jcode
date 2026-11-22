@@ -20,7 +20,10 @@ pub use window_closures::{clear_window_closed, recent_window_closures, record_wi
 pub struct WorkerModelApproval {
     pub model: String,
     pub provider: String,
-    pub effort: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<StoredSpeedSelection>,
 }
 
 impl WorkerModelApproval {
@@ -152,6 +155,8 @@ pub struct Session {
     pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed_selection: Option<StoredSpeedSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_speed: Option<jcode_message_types::WorkerSpeedStatus>,
     /// This session was spawned as a swarm worker, not a user-started session.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_swarm_worker: bool,
@@ -291,6 +296,8 @@ struct SessionStartupStub {
     reasoning_effort: Option<String>,
     #[serde(default)]
     speed_selection: Option<StoredSpeedSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worker_speed: Option<jcode_message_types::WorkerSpeedStatus>,
     #[serde(default)]
     is_swarm_worker: bool,
     #[serde(default)]
@@ -373,6 +380,21 @@ impl Session {
         });
     }
 
+    pub fn is_worker_speed_approved(&self, speed: &StoredSpeedSelection) -> bool {
+        self.worker_model_approval.as_ref().is_some_and(|approved| {
+            approved.worker_id == self.id && approved.selection.speed.as_ref() == Some(speed)
+        })
+    }
+
+    pub fn record_worker_standard_speed(&mut self, reason: &str) {
+        if let Some(speed) = &mut self.worker_speed
+            && speed.effective != jcode_message_types::SpeedMode::Standard
+        {
+            speed.effective = jcode_message_types::SpeedMode::Standard;
+            speed.reason = Some(reason.into());
+        }
+    }
+
     pub fn is_worker_model_approved(
         &self,
         model: &str,
@@ -383,7 +405,7 @@ impl Session {
             approved.worker_id == self.id
                 && approved.selection.model == model
                 && approved.selection.provider == provider
-                && Some(approved.selection.effort.as_str()) == effort
+                && approved.selection.effort.as_deref() == effort
         })
     }
 
@@ -402,6 +424,7 @@ impl Session {
         session.route_api_method = stub.route_api_method;
         session.reasoning_effort = stub.reasoning_effort;
         session.speed_selection = stub.speed_selection;
+        session.worker_speed = stub.worker_speed;
         session.is_swarm_worker = stub.is_swarm_worker;
         session.worker_model_approval = stub.worker_model_approval;
         session.context_cap = stub.context_cap;
@@ -450,6 +473,7 @@ impl Session {
         session.route_api_method = snapshot.route_api_method;
         session.reasoning_effort = snapshot.reasoning_effort;
         session.speed_selection = snapshot.speed_selection;
+        session.worker_speed = snapshot.worker_speed;
         session.is_swarm_worker = snapshot.is_swarm_worker;
         session.worker_model_approval = snapshot.worker_model_approval;
         session.context_cap = snapshot.context_cap;
@@ -699,6 +723,7 @@ impl Session {
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
             speed_selection: self.speed_selection.clone(),
+            worker_speed: self.worker_speed.clone(),
             is_swarm_worker: self.is_swarm_worker,
             worker_model_approval: self.worker_model_approval.clone(),
             context_cap: self.context_cap,
@@ -916,6 +941,7 @@ impl Session {
         self.normalize_placeholder_model();
         self.reasoning_effort = meta.reasoning_effort;
         self.speed_selection = meta.speed_selection;
+        self.worker_speed = meta.worker_speed;
         self.is_swarm_worker = meta.is_swarm_worker;
         self.worker_model_approval = meta.worker_model_approval;
         self.context_cap = meta.context_cap;
@@ -974,6 +1000,7 @@ impl Session {
             route_api_method: None,
             reasoning_effort: None,
             speed_selection: None,
+            worker_speed: None,
             is_swarm_worker: false,
             worker_model_approval: None,
             context_cap: None,
@@ -1043,6 +1070,7 @@ impl Session {
             route_api_method: None,
             reasoning_effort: None,
             speed_selection: None,
+            worker_speed: None,
             is_swarm_worker: false,
             worker_model_approval: None,
             context_cap: None,
@@ -2080,6 +2108,8 @@ struct RemoteStartupSessionSnapshot {
     reasoning_effort: Option<String>,
     #[serde(default)]
     speed_selection: Option<StoredSpeedSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worker_speed: Option<jcode_message_types::WorkerSpeedStatus>,
     #[serde(default)]
     is_swarm_worker: bool,
     #[serde(default)]

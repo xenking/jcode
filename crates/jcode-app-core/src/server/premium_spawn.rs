@@ -1,8 +1,9 @@
 use super::comm_session::spawn_model_selection::SwarmSpawnSelection;
 use super::*;
 use crate::protocol::{AskOption, AskQuestion};
-use crate::session::WorkerModelApproval;
+use crate::session::{StoredSpeedSelection, WorkerModelApproval};
 use anyhow::Context;
+use jcode_message_types::{SpeedAvailability, SpeedMode, WorkerSpeedStatus};
 
 const ALLOW: &str = "Allow this worker";
 const DENY: &str = "Deny";
@@ -50,6 +51,8 @@ pub(super) struct PreparedSwarmWorker {
     pub provider_key: Option<String>,
     pub route_api_method: Option<String>,
     pub effort: Option<String>,
+    pub speed: WorkerSpeedStatus,
+    pub speed_selection: Option<StoredSpeedSelection>,
     pub approval: Option<WorkerModelApproval>,
 }
 
@@ -58,6 +61,7 @@ impl PreparedSwarmWorker {
         template: &dyn Provider,
         selection: SwarmSpawnSelection,
         requested_effort: &str,
+        requested_speed: SpeedMode,
     ) -> Result<Self> {
         let provider = template.fork();
         let mut provider_key = selection.provider_key;
@@ -145,12 +149,16 @@ impl PreparedSwarmWorker {
                 "Provider did not apply a permitted swarm worker effort"
             );
         }
+        let (speed, speed_selection) =
+            prepare_worker_speed(provider.as_ref(), provider_key.as_deref(), requested_speed)?;
         Ok(Self {
             provider,
             model,
             provider_key,
             route_api_method,
             effort,
+            speed,
+            speed_selection,
             approval: None,
         })
     }
@@ -161,23 +169,49 @@ impl PreparedSwarmWorker {
         members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
         lane_or_label: Option<&str>,
     ) -> Result<()> {
-        if !WorkerModelApproval::required_for(&self.model) {
+        if self.speed_selection.is_none() && !WorkerModelApproval::required_for(&self.model) {
             return Ok(());
         }
-        let effort = self
-            .effort
-            .as_deref()
-            .filter(|effort| jcode_provider_core::reasoning_effort_rank(effort).is_some())
-            .context("Cannot confirm a premium worker without an exact effort")?;
+        if WorkerModelApproval::required_for(&self.model) {
+            anyhow::ensure!(
+                self.effort.as_deref().is_some_and(|effort| {
+                    jcode_provider_core::reasoning_effort_rank(effort).is_some()
+                }),
+                "Cannot confirm a premium model without an exact effort"
+            );
+        }
+        let effort = self.effort.as_deref().unwrap_or("not reported by provider");
         let provider = self.provider.name();
+        let route = self.provider_key.as_deref().unwrap_or(provider);
         let owner = owner_session(requester, members)
             .await
             .context("No trusted owner for this premium worker")?;
         let label = lane_or_label.unwrap_or(requester);
+        let terms = self
+            .speed_selection
+            .as_ref()
+            .and_then(|speed| {
+                self.provider
+                    .speed_options(&speed.model)
+                    .into_iter()
+                    .find(|option| option.mode == speed.mode)
+            })
+            .map(|option| {
+                let notice = option
+                    .reason
+                    .map(|reason| format!(" {reason}"))
+                    .unwrap_or_default();
+                if option.availability == SpeedAvailability::Unknown {
+                    format!(" Account availability is unconfirmed.{notice}")
+                } else {
+                    notice
+                }
+            })
+            .unwrap_or_default();
         let questions = [AskQuestion {
             question: format!(
-                "Allow one premium swarm worker for {label} using {} via {provider} at effort {effort}?",
-                self.model,
+                "Allow one premium swarm worker for {label} using {} via {route} at effort {effort}? {}{terms}",
+                self.model, self.speed,
             ),
             header: Some("Premium run".into()),
             options: vec![
@@ -188,7 +222,7 @@ impl PreparedSwarmWorker {
                 AskOption {
                     label: ALLOW.into(),
                     description: Some(
-                        "Allow only this worker at the model and effort shown".into(),
+                        "Allow only this worker at the model, effort and speed shown".into(),
                     ),
                 },
             ],
@@ -210,13 +244,15 @@ impl PreparedSwarmWorker {
         });
         anyhow::ensure!(
             allowed,
-            "Premium worker {} at {effort} requires explicit owner approval",
-            self.model
+            "Premium worker {} at effort {effort} and speed {:?} requires explicit owner approval",
+            self.model,
+            self.speed.effective
         );
         self.approval = Some(WorkerModelApproval {
             model: self.model.clone(),
             provider: provider.to_string(),
-            effort: effort.to_string(),
+            effort: self.effort.clone(),
+            speed: self.speed_selection.clone(),
         });
         Ok(())
     }
@@ -228,13 +264,82 @@ impl PreparedSwarmWorker {
         let key = self.provider_key.as_deref();
         Agent::validate_worker_route(key.unwrap_or(self.provider.name()), &self.model)?;
         anyhow::ensure!(
-            Agent::worker_effort_for_provider(self.provider.as_ref(), key, &approval.effort)?
-                == approval.effort
-                && self.provider.reasoning_effort().as_deref() == Some(approval.effort.as_str()),
+            self.provider.reasoning_effort() == approval.effort,
             "Worker effort changed while waiting for approval. Request a new spawn."
         );
+        if let Some(effort) = &approval.effort {
+            anyhow::ensure!(
+                Agent::worker_effort_for_provider(self.provider.as_ref(), key, effort)? == *effort,
+                "Worker effort policy changed while waiting for approval. Request a new spawn."
+            );
+        }
+        if let Some(speed) = &approval.speed {
+            anyhow::ensure!(
+                self.provider.speed_route_identity().as_deref() == Some(speed.route.as_str())
+                    && self.provider.model() == speed.model
+                    && self.provider.speed_mode() == speed.mode
+                    && Agent::cap_worker_speed(self.provider.as_ref(), key, speed.mode)
+                        == speed.mode
+                    && self
+                        .provider
+                        .speed_options(&speed.model)
+                        .iter()
+                        .any(|option| {
+                            option.mode == speed.mode
+                                && option.availability != SpeedAvailability::Unavailable
+                        }),
+                "Worker speed or credential route changed while waiting for approval. Request a new spawn."
+            );
+        }
         Ok(())
     }
+}
+
+fn prepare_worker_speed(
+    provider: &dyn Provider,
+    provider_key: Option<&str>,
+    requested: SpeedMode,
+) -> Result<(WorkerSpeedStatus, Option<StoredSpeedSelection>)> {
+    let capped = Agent::cap_worker_speed(provider, provider_key, requested);
+    let mut status = WorkerSpeedStatus {
+        requested,
+        effective: SpeedMode::Standard,
+        reason: (capped != requested).then(|| format!("Configured swarm speed cap: {capped:?}")),
+    };
+    if capped != SpeedMode::Standard {
+        let model = provider.model();
+        let option = provider
+            .speed_options(&model)
+            .into_iter()
+            .find(|option| option.mode == capped);
+        if option
+            .as_ref()
+            .is_some_and(|option| option.availability != SpeedAvailability::Unavailable)
+        {
+            match Agent::apply_speed_to_provider(provider, capped) {
+                Ok(Some(selection)) => {
+                    status.effective = capped;
+                    return Ok((status, Some(selection)));
+                }
+                Ok(None) => {
+                    status.reason =
+                        Some(format!("{capped:?} was not applied by this provider route"))
+                }
+                Err(error) => {
+                    status.reason = Some(format!(
+                        "{capped:?} unavailable on the worker route: {error}"
+                    ))
+                }
+            }
+        } else {
+            status.reason =
+                Some(option.and_then(|option| option.reason).unwrap_or_else(|| {
+                    format!("{capped:?} is not available on this worker route")
+                }));
+        }
+    }
+    Agent::apply_speed_to_provider(provider, SpeedMode::Standard)?;
+    Ok((status, None))
 }
 
 async fn owner_session(

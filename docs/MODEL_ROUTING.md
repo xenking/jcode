@@ -14,6 +14,8 @@ the active model.
 | Agent-chosen worker model (swarm tool `model` param) | `[agents] swarm_model_selection` + `swarm_model_allowlist` (exact strings) | none | denied |
 | Worker effort | `[agents] swarm_effort` | none | `low` |
 | Worker effort ceilings by model route | `[agents] swarm_effort_caps` | none | no cap |
+| Worker speed | `[agents] swarm_speed` | Swarm `spawn` or todo lane `speed` | `standard` |
+| Worker speed ceilings | `[agents] swarm_speed_caps` | none | no cap |
 | `/review`, autoreview | `[autoreview] model` | `/agents review <model>` | inherit |
 | `/judge`, autojudge | `[autojudge] model` | `/agents judge <model>` | inherit |
 | Memory extraction | `[agents] memory_model` | `/agents memory <model>` | inherit |
@@ -34,6 +36,22 @@ Resolution for a swarm spawn (`server/spawn_model_selection.rs`):
    coordinator's route catalog shows no *available* (logged-in) route for it,
    the first available fallback is used. Unknown catalog keeps `swarm_model`.
 4. Otherwise inherit the coordinator's model, provider key and auth route.
+
+### Worker speed
+
+A spawn's `speed` overrides the todo lane's `speed`. An automatic worker uses
+its lane's speed if set, then `[agents] swarm_speed`. If none is set, the
+worker starts at Standard, regardless of the coordinator's speed.
+
+Set ceilings in `swarm_speed_caps` by model or `provider:model`. The strictest
+matching ceiling wins. The worker uses Standard when the selected route
+cannot apply the capped speed. Both the spawn result and `swarm list` show the
+requested speed, effective speed, and reason for any reduction.
+
+Fast and Ultrafast require owner approval for the individual worker at the
+shown effort and credential route. With no approval, the worker does not
+start. On resume, the approval applies only to the same worker and route.
+A fallback runs at Standard and does not re-enable a previous speed.
 
 ### `spawn_allowed_models`: the hard worker boundary
 

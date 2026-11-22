@@ -756,6 +756,10 @@ pub struct AgentsConfig {
     pub swarm_effort: Option<String>,
     /// Maximum worker effort per exact provider:model route. Empty is unrestricted.
     pub swarm_effort_caps: std::collections::BTreeMap<String, String>,
+    /// Worker speed when neither the spawn nor its todo lane sets one.
+    pub swarm_speed: jcode_message_types::SpeedMode,
+    /// Maximum worker speed per model or provider:model route.
+    pub swarm_speed_caps: std::collections::BTreeMap<String, jcode_message_types::SpeedMode>,
     /// Worker model pool, like omp's task pool: each exact `provider:model`
     /// route lists the reasoning efforts a worker may use on it. A non-empty
     /// pool is the worker allowlist (merged into `spawn_allowed_models` and

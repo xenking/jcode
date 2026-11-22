@@ -331,6 +331,25 @@ pub(crate) fn seed_spawn_lane(
     Ok(lane_brief(&seeded))
 }
 
+pub(super) fn spawn_lane_speed(
+    coordinator_session: &str,
+    lane_id: &str,
+) -> anyhow::Result<Option<jcode_message_types::SpeedMode>> {
+    let mut speed = None;
+    for item in crate::todo::load_todos(coordinator_session)? {
+        if crate::todo::stages::lane_id(&item) == lane_id
+            && let Some(next) = item.lane_speed
+        {
+            anyhow::ensure!(
+                speed.is_none_or(|speed| speed == next),
+                "Todo lane {lane_id} has conflicting speed overrides"
+            );
+            speed = Some(next);
+        }
+    }
+    Ok(speed)
+}
+
 pub(crate) fn open_spawn_lane_owner(
     coordinator_session: &str,
     lane_id: &str,

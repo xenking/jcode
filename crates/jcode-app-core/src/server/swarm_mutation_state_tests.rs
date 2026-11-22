@@ -58,6 +58,7 @@ async fn swarm_mutation_replays_persisted_spawn_response() {
         &state,
         PersistedSwarmMutationResponse::Spawn {
             new_session_id: "child-1".to_string(),
+            worker_speed: None,
         },
     )
     .await;

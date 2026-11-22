@@ -26,6 +26,8 @@ pub(crate) enum PersistedSwarmMutationResponse {
     },
     Spawn {
         new_session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_speed: Option<jcode_message_types::WorkerSpeedStatus>,
     },
 }
 
@@ -49,10 +51,14 @@ impl PersistedSwarmMutationResponse {
                 message,
                 retry_after_secs,
             },
-            Self::Spawn { new_session_id } => ServerEvent::CommSpawnResponse {
+            Self::Spawn {
+                new_session_id,
+                worker_speed,
+            } => ServerEvent::CommSpawnResponse {
                 id,
                 session_id: session_id.to_string(),
                 new_session_id,
+                worker_speed,
             },
         }
     }

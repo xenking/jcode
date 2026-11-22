@@ -32,7 +32,7 @@ mod pause_tests;
 mod lane_dependency_tests;
 
 /// A lane-wide field edit naming one member applies atomically to its entire
-/// lane (`lane_after`, `lane_owner`).
+/// lane (`lane_after`, `lane_owner`, `lane_speed`).
 fn patch_lane_field(todos: &mut [Value], id: &str, field: &str, value: Value) -> Result<()> {
     let typed: Vec<TodoItem> = serde_json::from_value(Value::Array(todos.to_vec()))?;
     let target = typed
@@ -253,6 +253,7 @@ const UPDATE_FIELDS: &[&str] = &[
     "lane_after",
     "lane_dependencies",
     "lane_owner",
+    "lane_speed",
     "confidence",
     "completion_confidence",
     "confidence_history",
@@ -413,6 +414,9 @@ fn prepare_todo_patch(
         if let Some(value) = fields.get("lane_owner") {
             patch_lane_field(&mut todos, id, "lane_owner", value.clone())?;
         }
+        if let Some(value) = fields.get("lane_speed") {
+            patch_lane_field(&mut todos, id, "lane_speed", value.clone())?;
+        }
     }
 
     for mut add in adds {
@@ -457,18 +461,18 @@ fn prepare_todo_patch(
                 fields.insert(canonical.into(), value);
             }
         }
-        if !fields.contains_key("lane_after")
-            && let Some(value) = todos
-                .iter()
-                .find(|todo| {
-                    todo.get("stage") == fields.get("stage")
-                        && todo.get("group") == fields.get("group")
-                })
-                .and_then(|todo| todo.get("lane_after"))
-        {
-            fields.insert("lane_after".into(), value.clone());
+        let lane_template = todos.iter().find(|todo| {
+            todo.get("stage") == fields.get("stage") && todo.get("group") == fields.get("group")
+        });
+        for field in ["lane_after", "lane_speed"] {
+            if !fields.contains_key(field)
+                && let Some(value) = lane_template.and_then(|todo| todo.get(field))
+            {
+                fields.insert(field.into(), value.clone());
+            }
         }
         let lane_after = fields.get("lane_after").cloned();
+        let lane_speed = fields.get("lane_speed").cloned();
         let id = fields.get("id").and_then(Value::as_str).map(str::to_string);
         if let Some(id) = &id
             && todos.iter().any(|todo| id_of(todo).as_deref() == Some(id))
@@ -483,8 +487,13 @@ fn prepare_todo_patch(
             Some(index) => todos.insert(index + 1, add),
             None => todos.push(add),
         }
-        if let (Some(id), Some(value)) = (id, lane_after) {
-            patch_lane_after(&mut todos, &id, value)?;
+        if let Some(id) = id {
+            if let Some(value) = lane_after {
+                patch_lane_after(&mut todos, &id, value)?;
+            }
+            if let Some(value) = lane_speed {
+                patch_lane_field(&mut todos, &id, "lane_speed", value)?;
+            }
         }
     }
 
@@ -632,7 +641,7 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("lane must be an object"))?;
             if lane
                 .keys()
-                .any(|key| !["lane", "items", "after", "owner"].contains(&key.as_str()))
+                .any(|key| !["lane", "items", "after", "owner", "speed"].contains(&key.as_str()))
             {
                 bail!("unexpected lane field");
             }
@@ -664,6 +673,7 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
                     "lane_after",
                     "lane_dependencies",
                     "lane_owner",
+                    "lane_speed",
                 ]
                 .iter()
                 .any(|key| item.contains_key(*key))
@@ -696,6 +706,9 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
                 }
                 if let Some(owner) = lane.get("owner").filter(|owner| !owner.is_null()) {
                     item.insert("lane_owner".into(), owner.clone());
+                }
+                if let Some(speed) = lane.get("speed") {
+                    item.insert("lane_speed".into(), speed.clone());
                 }
                 todos.push(Value::Object(item));
             }
@@ -1369,6 +1382,10 @@ impl Tool for TodoTool {
             "type": "string", "enum": ["self", "worker"],
             "description": "Who runs the lane. worker: a swarm worker auto-spawns when the lane is ready. Updates whole lane."
         });
+        schema["properties"]["todos"]["items"]["properties"]["lane_speed"] = json!({
+            "type": ["string", "null"], "enum": ["standard", "fast", "ultrafast", null],
+            "description": "Worker speed override for this lane. Null uses owner config. Accelerated speed requires owner approval."
+        });
         let mut add_properties = schema["properties"]["todos"]["items"]["properties"].clone();
         add_properties["after"] = json!({
             "type": "string",
@@ -1413,6 +1430,9 @@ impl Tool for TodoTool {
                         }, "owner": {
                             "type": "string", "enum": ["self", "worker"],
                             "description": "Default self. worker: a swarm worker auto-spawns when the lane is ready, no launch call."
+                        }, "speed": {
+                            "type": ["string", "null"], "enum": ["standard", "fast", "ultrafast", null],
+                            "description": "Requested worker speed for this lane. Accelerated speed requires owner approval."
                         }, "items": {"type": "array", "minItems": 1, "items": item}}
                     }
                 }}}

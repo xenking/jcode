@@ -4038,6 +4038,7 @@ dependencies = [
 name = "jcode-config-types"
 version = "0.1.0"
 dependencies = [
+ "jcode-message-types",
  "serde",
  "serde_json",
  "toml",
@@ -4732,6 +4733,7 @@ name = "jcode-task-types"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "jcode-message-types",
  "serde",
  "serde_json",
 ]

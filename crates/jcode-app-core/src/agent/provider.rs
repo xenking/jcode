@@ -174,7 +174,76 @@ fn capped_worker_effort_by_cap(
         })
 }
 
+fn speed_rank(mode: jcode_provider_core::SpeedMode) -> u8 {
+    use jcode_provider_core::SpeedMode::*;
+    match mode {
+        Standard => 0,
+        Fast => 1,
+        Ultrafast => 2,
+    }
+}
+
 impl Agent {
+    fn worker_speed_cap(
+        provider: &dyn Provider,
+        provider_key: Option<&str>,
+    ) -> jcode_provider_core::SpeedMode {
+        use jcode_provider_core::{AuthMode, AuthRoute, ResolvedCredential, SpeedMode};
+        let caps = &crate::config::config().agents.swarm_speed_caps;
+        if caps.is_empty() {
+            return SpeedMode::Ultrafast;
+        }
+        let model = provider.model();
+        let provider_name = provider.name().to_ascii_lowercase();
+        let credential_route = std::cell::OnceCell::new();
+        let model_suffix = format!(":{model}");
+        caps.iter()
+            .filter(|(key, _)| {
+                if key.as_str() == model {
+                    return true;
+                }
+                let Some(prefix) = key.strip_suffix(&model_suffix) else {
+                    return false;
+                };
+                if prefix == provider_name || Some(prefix) == provider_key {
+                    return true;
+                }
+                let Some(route) = AuthRoute::parse_explicit_credential_prefix(prefix) else {
+                    return false;
+                };
+                *credential_route.get_or_init(|| {
+                    let mode = match provider.active_resolved_credential()? {
+                        ResolvedCredential::Oauth => AuthMode::Oauth,
+                        ResolvedCredential::ApiKey => AuthMode::ApiKey,
+                    };
+                    match provider_name.as_str() {
+                        "openai" => Some(AuthRoute::openai(mode)),
+                        "anthropic" | "claude" => Some(AuthRoute::anthropic(mode)),
+                        _ => None,
+                    }
+                }) == Some(route)
+            })
+            .map(|(_, mode)| *mode)
+            .min_by_key(|mode| speed_rank(*mode))
+            .unwrap_or(SpeedMode::Ultrafast)
+    }
+
+    pub(crate) fn cap_worker_speed(
+        provider: &dyn Provider,
+        provider_key: Option<&str>,
+        requested: jcode_provider_core::SpeedMode,
+    ) -> jcode_provider_core::SpeedMode {
+        if requested == jcode_provider_core::SpeedMode::Standard {
+            return requested;
+        }
+        let cap = Self::worker_speed_cap(provider, provider_key);
+        if speed_rank(requested) > speed_rank(cap) {
+            cap
+        } else {
+            requested
+        }
+    }
+
     pub(crate) fn worker_effort_for_provider(
         provider: &dyn Provider,
         provider_key: Option<&str>,
@@ -208,6 +277,8 @@ impl Agent {
         provider_key: Option<String>,
         route_api_method: Option<String>,
         approval: Option<crate::session::WorkerModelApproval>,
+        speed: jcode_message_types::WorkerSpeedStatus,
+        speed_selection: Option<crate::session::StoredSpeedSelection>,
     ) -> Result<()> {
         if provider_key.is_some() {
             self.session.provider_key = provider_key;
@@ -215,11 +286,25 @@ impl Agent {
         self.session.route_api_method = route_api_method;
         self.session.reasoning_effort = self.provider.reasoning_effort();
         self.session.set_worker_model_approval(approval);
+        self.session.worker_speed = Some(speed);
+        self.session.speed_selection = speed_selection;
+        // The fresh-session constructor clears any inherited provider speed.
+        // Reinstall only the selection granted for this new worker.
+        self.session.is_swarm_worker = true;
+        if let Some(choice) = &self.session.speed_selection {
+            self.ensure_worker_speed_allowed(choice.mode)?;
+            Self::apply_speed_to_provider(self.provider.as_ref(), choice.mode)?;
+        }
+        self.ensure_session_speed()?;
         crate::session_effort::record_session_effort(
             &self.session.id,
             self.session.reasoning_effort.as_deref(),
         );
-        self.mark_swarm_worker()
+        self.session.save_prepared()
+    }
+
+    pub(crate) fn worker_speed_status(&self) -> Option<jcode_message_types::WorkerSpeedStatus> {
+        self.session.worker_speed.clone()
     }
 
     /// Whether this session was created as a swarm worker. Persisted with the
@@ -301,8 +386,12 @@ impl Agent {
         }
         self.enforce_worker_model()?;
         self.enforce_worker_effort()?;
+        let speed = self.provider.speed_mode();
+        self.ensure_worker_speed_allowed(speed)?;
         let model = self.provider_model();
-        if !crate::session::WorkerModelApproval::required_for(&model) {
+        if speed == jcode_provider_core::SpeedMode::Standard
+            && !crate::session::WorkerModelApproval::required_for(&model)
+        {
             return Ok(());
         }
         let effort = self.provider.reasoning_effort();
@@ -311,6 +400,30 @@ impl Agent {
                 .is_worker_model_approved(&model, self.provider.name(), effort.as_deref()),
             "Swarm worker refused to run {model} at {} without matching owner approval",
             effort.as_deref().unwrap_or("unknown effort")
+        );
+        Ok(())
+    }
+
+    fn ensure_worker_speed_allowed(&self, mode: jcode_provider_core::SpeedMode) -> Result<()> {
+        use jcode_provider_core::SpeedMode;
+        if !self.session.is_swarm_worker || mode == SpeedMode::Standard {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            Self::cap_worker_speed(
+                self.provider.as_ref(),
+                self.session.provider_key.as_deref(),
+                mode
+            ) == mode,
+            "Worker speed {mode:?} exceeds the configured swarm speed cap. Select Standard."
+        );
+        anyhow::ensure!(
+            self.session.speed_selection.as_ref().is_some_and(|speed| {
+                speed.mode == mode
+                    && self.speed_selection_matches(speed)
+                    && self.session.is_worker_speed_approved(speed)
+            }),
+            "Worker speed {mode:?} has no owner approval for this session and route. Select Standard or request a new worker."
         );
         Ok(())
     }
@@ -725,13 +838,25 @@ impl Agent {
         };
         if !self.speed_selection_matches(&choice) {
             self.session.speed_selection = None;
+            self.session
+                .record_worker_standard_speed("The credential route changed");
             let _ = self
                 .provider
                 .set_speed_mode(jcode_provider_core::SpeedMode::Standard);
-        } else if let Err(error) =
-            Self::apply_speed_to_provider(self.provider.as_ref(), choice.mode)
+        } else if let Err(error) = self
+            .ensure_worker_speed_allowed(choice.mode)
+            .and_then(|_| Self::apply_speed_to_provider(self.provider.as_ref(), choice.mode))
         {
             crate::logging::warn(&format!("Could not restore session speed: {error}"));
+            if self.session.is_swarm_worker {
+                let _ = self
+                    .provider
+                    .set_speed_mode(jcode_provider_core::SpeedMode::Standard);
+                self.session.speed_selection = None;
+                self.session.record_worker_standard_speed(&format!(
+                    "Saved worker speed unavailable: {error}"
+                ));
+            }
         }
     }
 
@@ -761,6 +886,11 @@ impl Agent {
             self.provider
                 .set_speed_mode(jcode_provider_core::SpeedMode::Standard)?;
             self.session.speed_selection = None;
+            self.session
+                .record_worker_standard_speed("The credential route changed");
+        } else if self.session.is_swarm_worker && self.session.speed_selection.is_none() {
+            self.provider
+                .set_speed_mode(jcode_provider_core::SpeedMode::Standard)?;
         }
         Ok(())
     }
@@ -819,11 +949,19 @@ impl Agent {
         &mut self,
         mode: jcode_provider_core::SpeedMode,
     ) -> Result<jcode_provider_core::SpeedMode> {
+        use jcode_provider_core::SpeedMode;
+        self.ensure_worker_speed_allowed(mode)?;
         let previous_mode = self.provider.speed_mode();
         let next = Self::apply_speed_to_provider(self.provider.as_ref(), mode)?;
         let previous = std::mem::replace(&mut self.session.speed_selection, next);
+        let previous_worker_speed = self.session.worker_speed.clone();
+        if mode == SpeedMode::Standard {
+            self.session
+                .record_worker_standard_speed("Standard selected for this worker");
+        }
         if let Err(error) = self.session.save_prepared() {
             self.session.speed_selection = previous;
+            self.session.worker_speed = previous_worker_speed;
             let _ = self.provider.set_speed_mode(previous_mode);
             return Err(error);
         }
@@ -834,6 +972,10 @@ impl Agent {
         if let Some(mode) = legacy_speed_mode(self.provider.as_ref(), tier) {
             self.set_speed_mode(mode)?;
         } else {
+            anyhow::ensure!(
+                !self.session.is_swarm_worker,
+                "Workers must use an approved speed mode, not a service tier override"
+            );
             self.provider.set_service_tier(tier)?;
         }
         Ok(())

@@ -42,6 +42,8 @@ pub(super) struct SessionJournalMeta {
     pub(super) reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) speed_selection: Option<super::StoredSpeedSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) worker_speed: Option<jcode_message_types::WorkerSpeedStatus>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) is_swarm_worker: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -128,6 +130,7 @@ pub(super) fn metadata_requires_snapshot(
         || prev.route_api_method != current.route_api_method
         || prev.reasoning_effort != current.reasoning_effort
         || prev.speed_selection != current.speed_selection
+        || prev.worker_speed != current.worker_speed
         || prev.is_swarm_worker != current.is_swarm_worker
         || prev.worker_model_approval != current.worker_model_approval
         || prev.context_cap != current.context_cap

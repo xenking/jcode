@@ -307,6 +307,7 @@ async fn spawn_assignment_session(ctx: &ToolContext, params: &CommunicateInput) 
         // Worker effort is not agent-controlled: the server applies
         // `agents.swarm_effort` (default "low").
         effort: None,
+        speed: None,
         label: None,
         lane_id: None,
     };
@@ -750,6 +751,8 @@ struct CommunicateInput {
     follow_up: Option<String>,
     #[serde(default)]
     spawn_mode: Option<String>,
+    #[serde(default)]
+    speed: Option<jcode_message_types::SpeedMode>,
     /// One-line summary shown collapsed in the recipient's UI for long
     /// message/report bodies. Required when the body exceeds the collapse
     /// threshold.
@@ -905,6 +908,10 @@ impl Tool for CommunicateTool {
                     "type": "string",
                     "enum": ["visible", "headless", "inline", "auto"],
                     "description": "Omit to use the user's configured mode. Set only when the user asks for one."
+                },
+                "speed": {
+                    "type": "string", "enum": ["standard", "fast", "ultrafast"],
+                    "description": "Per-worker speed for spawn. Only set when the user requests it. Accelerated speed requires owner approval."
                 },
                 "session_ids": {
                     "type": "array",
@@ -1550,19 +1557,26 @@ impl Tool for CommunicateTool {
                     // Worker effort is not agent-controlled: the server applies
                     // `agents.swarm_effort` (default "low").
                     effort: None,
+                    speed: params.speed,
                     label: Some(label),
                     lane_id: Some(lane_id.clone()),
                 };
 
                 match send_request(request).await {
-                    Ok(ServerEvent::CommSpawnResponse { new_session_id, .. })
-                        if !new_session_id.is_empty() =>
-                    {
+                    Ok(ServerEvent::CommSpawnResponse {
+                        new_session_id,
+                        worker_speed,
+                        ..
+                    }) if !new_session_id.is_empty() => {
+                        let speed = worker_speed
+                            .as_ref()
+                            .map(|speed| format!("\n{speed}"))
+                            .unwrap_or_default();
                         Ok(ToolOutput::new(format!(
-                            "Spawned new agent: {new_session_id}\nLane {lane_id}: {seeded_count} todo item(s) prepopulated before startup and synced to your lane. The worker received its lane tasks automatically."
+                            "Spawned new agent: {new_session_id}{speed}\nLane {lane_id}: {seeded_count} todo item(s) prepopulated before startup and synced to your lane. The worker received its lane tasks automatically."
                         ))
                         .with_metadata(
-                            serde_json::json!({"session_id": new_session_id, "lane": lane_id, "seeded_todo_count": seeded_count, "lane_synced": true}),
+                            serde_json::json!({"session_id": new_session_id, "lane": lane_id, "seeded_todo_count": seeded_count, "lane_synced": true, "worker_speed": worker_speed}),
                         ))
                     }
                     Ok(response) => {

@@ -285,6 +285,11 @@ fn format_members_renders_activity_progress_churn_and_turns() {
             provider_name: Some("anthropic".to_string()),
             provider_model: Some("claude-sonnet".to_string()),
             provider_effort: Some("medium".to_string()),
+            worker_speed: Some(jcode_message_types::WorkerSpeedStatus {
+                requested: jcode_message_types::SpeedMode::Fast,
+                effective: jcode_message_types::SpeedMode::Standard,
+                reason: Some("Unavailable on this route".into()),
+            }),
             turn_count: Some(7),
             recent_total_tokens: Some(12_345),
             recent_output_tokens: Some(2_000),
@@ -303,6 +308,12 @@ fn format_members_renders_activity_progress_churn_and_turns() {
     assert!(text.contains("98.8k tok total"), "got: {text}");
     assert!(
         text.contains("Model: anthropic/claude-sonnet (medium)"),
+        "got: {text}"
+    );
+    assert!(
+        text.contains(
+            "Speed requested: Fast. Effective speed: Standard. Unavailable on this route"
+        ),
         "got: {text}"
     );
     // Running agent shows current-turn duration, not an "idle" label.
@@ -459,6 +470,11 @@ fn format_status_snapshot_includes_activity_and_metadata() {
         }),
         provider_name: None,
         provider_model: None,
+        worker_speed: Some(jcode_message_types::WorkerSpeedStatus {
+            requested: jcode_message_types::SpeedMode::Ultrafast,
+            effective: jcode_message_types::SpeedMode::Fast,
+            reason: Some("Configured swarm speed cap: Fast".into()),
+        }),
     });
 
     assert!(
@@ -472,11 +488,14 @@ fn format_status_snapshot_includes_activity_and_metadata() {
             .contains("Lifecycle: running — working on observability")
     );
     assert!(output.output.contains("Activity: busy (bash)"));
+    assert!(output.output.contains(
+        "Speed requested: Ultrafast. Effective speed: Fast. Configured swarm speed cap: Fast"
+    ));
     assert!(output.output.contains("Swarm: swarm-test"));
     assert!(
-        output
-            .output
-            .contains("Meta: headless · attachments=0 · active=3s ago · status_age=7s · joined=42s")
+        output.output.contains(
+            "Meta: headless · attachments=0 · active=3s ago · status_age=7s · joined=42s"
+        )
     );
     assert!(output.output.contains("Files: src/server/comm_sync.rs"));
 }

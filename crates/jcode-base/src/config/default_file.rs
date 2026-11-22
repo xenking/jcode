@@ -703,6 +703,9 @@ spawn_allowed_models = []
 # Optional per-route worker effort ceilings. An absent entry leaves the model's
 # supported levels unrestricted. Applies on spawn, model failover, and /effort.
 swarm_effort_caps = {}
+# Worker request speed, independent of effort. Accelerated workers need owner approval.
+# swarm_speed = "standard"
+# swarm_speed_caps = { "openai:gpt-5.5" = "standard" }
 # swarm_effort_caps = { "openai:gpt-6.1-sol" = "xhigh" }
 #
 # Worker pool, like omp's task pool: the models workers may use and, per

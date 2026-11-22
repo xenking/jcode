@@ -76,6 +76,36 @@ fn incremental_edits_apply_to_whole_lane_and_new_members_inherit() {
 }
 
 #[test]
+fn swarm_speed_lane_roundtrips_and_is_preserved_by_todo_patch() {
+    use jcode_message_types::SpeedMode;
+    let plan = json!({"phases": [{"phase": 1, "lanes": [{
+        "lane": "next", "owner": "worker", "speed": "ultrafast", "items": [
+            {"id": "a", "content": "a", "status": "pending", "priority": "high"},
+            {"id": "b", "content": "b", "status": "pending", "priority": "high"}
+        ]
+    }]}]});
+    let original = parsed(plan);
+    assert!(
+        original
+            .iter()
+            .all(|todo| todo.lane_speed == Some(SpeedMode::Ultrafast))
+    );
+    let mut added = item("c", 1, "next");
+    added["after"] = json!("b");
+    let update = apply_todo_patch(json!({"add": [added]}), || json!(original)).unwrap();
+    assert!(
+        parsed(update.clone())
+            .iter()
+            .all(|todo| todo.lane_speed == Some(SpeedMode::Ultrafast))
+    );
+    let clear = apply_todo_patch(json!({"update": [{"id": "a", "lane_speed": null}]}), || {
+        update["todos"].clone()
+    })
+    .unwrap();
+    assert!(parsed(clear).iter().all(|todo| todo.lane_speed.is_none()));
+}
+
+#[test]
 fn public_schema_exposes_lane_dependencies_only_at_correct_levels() {
     let schema = TodoTool.parameters_schema();
     assert!(schema["properties"]["add"]["items"]["properties"]["lane_dependencies"].is_object());

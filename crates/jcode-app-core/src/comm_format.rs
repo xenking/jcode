@@ -246,6 +246,11 @@ pub fn format_comm_members(current_session_id: &str, members: &[AgentInfo]) -> S
                 _ => String::new(),
             };
 
+            let speed_suffix = member
+                .worker_speed
+                .as_ref()
+                .map(|speed| format!("\n    {speed}"))
+                .unwrap_or_default();
             let mut extra_meta = Vec::new();
             if member.is_headless == Some(true) {
                 extra_meta.push("headless".to_string());
@@ -287,7 +292,7 @@ pub fn format_comm_members(current_session_id: &str, members: &[AgentInfo]) -> S
                 activity_suffix,
                 progress_suffix,
                 work_suffix,
-                model_suffix,
+                format_args!("{model_suffix}{speed_suffix}"),
                 if files.is_empty() {
                     String::new()
                 } else {
@@ -414,6 +419,10 @@ pub fn format_comm_status_snapshot(snapshot: &AgentStatusSnapshot) -> String {
         let provider = snapshot.provider_name.as_deref().unwrap_or("unknown");
         let model = snapshot.provider_model.as_deref().unwrap_or("unknown");
         output.push_str(&format!("  Provider: {} / {}\n", provider, model));
+    }
+
+    if let Some(speed) = &snapshot.worker_speed {
+        output.push_str(&format!("  {speed}\n"));
     }
 
     if snapshot.files_touched.is_empty() {

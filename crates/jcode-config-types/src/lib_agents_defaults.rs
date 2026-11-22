@@ -10,6 +10,8 @@ impl Default for AgentsConfig {
             swarm_model_fallbacks: Vec::new(),
             swarm_effort: None,
             swarm_effort_caps: std::collections::BTreeMap::new(),
+            swarm_speed: Default::default(),
+            swarm_speed_caps: std::collections::BTreeMap::new(),
             swarm_pool: std::collections::BTreeMap::new(),
             swarm_root_effort: None,
             swarm_spawn_mode: SwarmSpawnMode::default(),

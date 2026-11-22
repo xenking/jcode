@@ -67,7 +67,7 @@ fn create_visible_spawn_session(
     provider_key_override: Option<&str>,
     route_api_method_override: Option<&str>,
     effort_override: Option<&str>,
-    approval: Option<crate::session::WorkerModelApproval>,
+    prepared: Option<&super::premium_spawn::PreparedSwarmWorker>,
     selfdev_requested: bool,
 ) -> anyhow::Result<(String, PathBuf)> {
     let cwd = match working_dir {
@@ -77,7 +77,11 @@ fn create_visible_spawn_session(
 
     let mut session = Session::create(None, None);
     session.is_swarm_worker = true;
-    session.set_worker_model_approval(approval);
+    if let Some(worker) = prepared {
+        session.set_worker_model_approval(worker.approval.clone());
+        session.speed_selection = worker.speed_selection.clone();
+        session.worker_speed = Some(worker.speed.clone());
+    }
     session.working_dir = Some(cwd.display().to_string());
     if let Some(model) = model_override {
         session.model = Some(model.to_string());
@@ -270,7 +274,7 @@ fn prepare_visible_spawn_session<F>(
     provider_key_override: Option<&str>,
     route_api_method_override: Option<&str>,
     effort_override: Option<&str>,
-    approval: Option<crate::session::WorkerModelApproval>,
+    prepared: Option<&super::premium_spawn::PreparedSwarmWorker>,
     selfdev_requested: bool,
     startup_message: Option<&str>,
     launch_visible: F,
@@ -285,7 +289,7 @@ where
         provider_key.as_deref(),
         route_api_method_override,
         effort_override,
-        approval,
+        prepared,
         selfdev_requested,
     )?;
 
@@ -415,6 +419,7 @@ pub(super) async fn spawn_swarm_agent(
     spawn_mode: Option<SwarmSpawnMode>,
     requested_model: Option<String>,
     requested_effort: Option<String>,
+    requested_speed: Option<jcode_message_types::SpeedMode>,
     label: Option<String>,
     spawn_key: &str,
     sessions: &SessionAgents,
@@ -468,7 +473,7 @@ pub(super) async fn spawn_swarm_agent(
     // startup env (#405).
     let client_terminal_env =
         client_terminal_env_for_session(req_session_id, client_connections).await;
-    let configured_swarm_model =
+    let preferred_swarm_model =
         session_swarm_model(req_session_id, sessions, agents_config.swarm_model.clone()).await;
     let configured_swarm_model =
         if requested_model.is_none() && !agents_config.swarm_model_fallbacks.is_empty() {
@@ -480,20 +485,21 @@ pub(super) async fn spawn_swarm_agent(
                 None => Vec::new(),
             };
             let picked = pick_available_swarm_model(
-                configured_swarm_model.clone(),
+                preferred_swarm_model.clone(),
                 &agents_config.swarm_model_fallbacks,
                 &routes,
             );
-            if picked != configured_swarm_model {
+            if picked != preferred_swarm_model {
                 crate::logging::info(&format!(
                     "Swarm spawn: configured model {:?} not available, using fallback {:?}",
-                    configured_swarm_model, picked
+                    preferred_swarm_model, picked
                 ));
             }
             picked
         } else {
-            configured_swarm_model
+            preferred_swarm_model.clone()
         };
+    let using_startup_fallback = configured_swarm_model != preferred_swarm_model;
     let resolved_spawn_mode = resolve_swarm_spawn_mode(spawn_mode, agents_config.swarm_spawn_mode);
     // Only a worker running on the configured default model gets the configured
     // fallbacks at runtime. An explicit per-spawn model choice is honoured as-is,
@@ -516,13 +522,30 @@ pub(super) async fn spawn_swarm_agent(
         requested_effort.as_deref(),
         agents_config.swarm_effort.as_deref(),
     );
+    let spawn_speed = match (requested_speed, lane_id.as_deref()) {
+        (Some(speed), _) => speed,
+        (None, Some(lane_id)) => super::swarm_todo_link::spawn_lane_speed(req_session_id, lane_id)?
+            .unwrap_or(agents_config.swarm_speed),
+        (None, None) => agents_config.swarm_speed,
+    };
     let mut prepared = super::premium_spawn::PreparedSwarmWorker::resolve(
         provider_template.as_ref(),
         selection,
         spawn_effort
             .as_deref()
             .unwrap_or(spawn_policy::DEFAULT_SWARM_WORKER_EFFORT),
+        if using_startup_fallback {
+            Default::default()
+        } else {
+            spawn_speed
+        },
     )?;
+    if using_startup_fallback && spawn_speed != prepared.speed.effective {
+        prepared.speed.requested = spawn_speed;
+        prepared.speed.reason = Some(
+            "The configured worker route was unavailable; using Standard on its fallback".into(),
+        );
+    }
 
     // Validate the explicit lane before allocating or launching a worker.
     let mut startup_message = if let Some(lane_id) = lane_id.as_deref() {
@@ -574,7 +597,7 @@ pub(super) async fn spawn_swarm_agent(
             prepared.provider_key.as_deref(),
             prepared.route_api_method.as_deref(),
             prepared.effort.as_deref(),
-            prepared.approval.clone(),
+            Some(&prepared),
             coordinator_is_canary,
             startup_message.as_deref(),
             |session_id, cwd, selfdev_requested, provider_key| {
@@ -829,6 +852,7 @@ pub(super) async fn handle_comm_spawn(
     spawn_mode: Option<SwarmSpawnMode>,
     model: Option<String>,
     effort: Option<String>,
+    speed: Option<jcode_message_types::SpeedMode>,
     label: Option<String>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     sessions: &SessionAgents,
@@ -875,23 +899,24 @@ pub(super) async fn handle_comm_spawn(
         None => return,
     };
 
-    let mutation_key = request_key(
-        &req_session_id,
-        "spawn",
-        &[
-            swarm_id.clone(),
-            lane_id.clone().unwrap_or_default(),
-            working_dir.clone().unwrap_or_default(),
-            initial_message.clone().unwrap_or_default(),
-            request_nonce.clone().unwrap_or_default(),
-            spawn_mode
-                .map(|mode| format!("{mode:?}"))
-                .unwrap_or_default(),
-            effort.clone().unwrap_or_default(),
-            model.clone().unwrap_or_default(),
-            label.clone().unwrap_or_default(),
-        ],
-    );
+    let mut key_fields = vec![
+        swarm_id.clone(),
+        lane_id.clone().unwrap_or_default(),
+        working_dir.clone().unwrap_or_default(),
+        initial_message.clone().unwrap_or_default(),
+        request_nonce.clone().unwrap_or_default(),
+        spawn_mode
+            .map(|mode| format!("{mode:?}"))
+            .unwrap_or_default(),
+        effort.clone().unwrap_or_default(),
+        model.clone().unwrap_or_default(),
+        label.clone().unwrap_or_default(),
+    ];
+    // Keep legacy replay keys for requests that did not specify a speed.
+    if let Some(speed) = speed {
+        key_fields.push(format!("speed:{speed:?}"));
+    }
+    let mutation_key = request_key(&req_session_id, "spawn", &key_fields);
     let Some(mutation_state) = begin_or_replay(
         swarm_mutation_runtime,
         &mutation_key,
@@ -914,6 +939,7 @@ pub(super) async fn handle_comm_spawn(
         spawn_mode,
         model,
         effort,
+        speed,
         label,
         &mutation_key,
         sessions,
@@ -932,7 +958,12 @@ pub(super) async fn handle_comm_spawn(
     )
     .await
     {
-        Ok(new_session_id) => PersistedSwarmMutationResponse::Spawn { new_session_id },
+        Ok(new_session_id) => PersistedSwarmMutationResponse::Spawn {
+            worker_speed: Session::load_startup_stub(&new_session_id)
+                .ok()
+                .and_then(|session| session.worker_speed),
+            new_session_id,
+        },
         Err(error) => PersistedSwarmMutationResponse::Error {
             message: format!("Failed to spawn agent: {error}"),
             retry_after_secs: None,

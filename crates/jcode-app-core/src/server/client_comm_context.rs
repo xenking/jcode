@@ -290,6 +290,7 @@ pub(super) async fn handle_comm_list(
             let extras = super::comm_sync::member_runtime_extras(
                 &m.session_id,
                 m.status == "running",
+                m.report_back_to_session_id.is_some(),
                 sessions,
                 client_connections,
             )
@@ -315,6 +316,7 @@ pub(super) async fn handle_comm_list(
                 provider_name: extras.provider_name,
                 provider_model: extras.provider_model,
                 provider_effort: extras.provider_effort,
+                worker_speed: extras.worker_speed,
                 turn_count: extras.turn_count,
                 recent_total_tokens: extras.recent_total_tokens,
                 recent_output_tokens: extras.recent_output_tokens,

@@ -103,6 +103,8 @@ pub(super) async fn create_headless_session(
             worker.provider_key,
             worker.route_api_method,
             worker.approval,
+            worker.speed,
+            worker.speed_selection,
         )?;
     } else if report_back_to_session_id.is_some() {
         new_agent.mark_swarm_worker()?;

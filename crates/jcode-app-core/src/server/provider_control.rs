@@ -613,7 +613,9 @@ pub(super) async fn handle_set_reasoning_effort(
     let result = if let Ok(mut agent_guard) = agent.try_lock() {
         apply_reasoning_effort(&mut agent_guard, &effort, is_swarm_worker)
     } else if let Some(provider) = provider.filter(|provider| {
-        !is_swarm_worker || !crate::session::WorkerModelApproval::required_for(&provider.model())
+        !is_swarm_worker
+            || (provider.speed_mode() == jcode_provider_core::SpeedMode::Standard
+                && !crate::session::WorkerModelApproval::required_for(&provider.model()))
     }) {
         let requested = if is_swarm_worker {
             let session_id = session_id.to_owned();

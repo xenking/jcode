@@ -3,7 +3,7 @@ pub mod provider_native;
 mod shared_content;
 pub use shared_content::SharedContent;
 mod speed;
-pub use speed::{SpeedAvailability, SpeedMode, SpeedOption};
+pub use speed::{SpeedAvailability, SpeedMode, SpeedOption, WorkerSpeedStatus};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolCall {

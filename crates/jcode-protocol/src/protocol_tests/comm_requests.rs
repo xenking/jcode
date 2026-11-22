@@ -457,6 +457,7 @@ fn test_comm_spawn_roundtrip_with_optional_nonce() -> Result<()> {
         spawn_mode: Some("headless".to_string()),
         model: Some("openai-api:gpt-5.5".to_string()),
         effort: Some("low".to_string()),
+        speed: Some(jcode_message_types::SpeedMode::Fast),
         label: Some("review auth flow".to_string()),
     };
     let json = serde_json::to_string(&req)?;
@@ -465,6 +466,7 @@ fn test_comm_spawn_roundtrip_with_optional_nonce() -> Result<()> {
     assert!(json.contains("\"request_nonce\":\"planner-fresh-123\""));
     assert!(json.contains("\"spawn_mode\":\"headless\""));
     assert!(json.contains("\"effort\":\"low\""));
+    assert!(json.contains("\"speed\":\"fast\""));
     assert!(json.contains("\"label\":\"review auth flow\""));
     assert!(json.contains("\"model\":\"openai-api:gpt-5.5\""));
     let decoded = parse_request_json(&json)?;
@@ -478,6 +480,7 @@ fn test_comm_spawn_roundtrip_with_optional_nonce() -> Result<()> {
         spawn_mode,
         model,
         effort,
+        speed,
         label,
         ..
     } = decoded
@@ -492,6 +495,7 @@ fn test_comm_spawn_roundtrip_with_optional_nonce() -> Result<()> {
     assert_eq!(spawn_mode.as_deref(), Some("headless"));
     assert_eq!(model.as_deref(), Some("openai-api:gpt-5.5"));
     assert_eq!(effort.as_deref(), Some("low"));
+    assert_eq!(speed, Some(jcode_message_types::SpeedMode::Fast));
     assert_eq!(label.as_deref(), Some("review auth flow"));
     Ok(())
 }

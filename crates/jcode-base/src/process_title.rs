@@ -239,6 +239,7 @@ mod tests {
                 group: Some("resume title sync".to_string()),
                 lane_after: None,
                 lane_owner: None,
+                lane_speed: None,
                 confidence: Some(crate::todo::ConfidenceState::Plausible),
                 completion_confidence: None,
                 confidence_history: Vec::new(),

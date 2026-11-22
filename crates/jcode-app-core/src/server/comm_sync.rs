@@ -73,6 +73,7 @@ pub(super) struct MemberRuntimeExtras {
     pub(super) provider_name: Option<String>,
     pub(super) provider_model: Option<String>,
     pub(super) provider_effort: Option<String>,
+    pub(super) worker_speed: Option<jcode_message_types::WorkerSpeedStatus>,
     pub(super) turn_count: Option<u64>,
     pub(super) recent_total_tokens: Option<u64>,
     pub(super) recent_output_tokens: Option<u64>,
@@ -83,6 +84,47 @@ pub(super) struct MemberRuntimeExtras {
     pub(super) todos_total: Option<usize>,
 }
 
+#[derive(Default)]
+struct MemberProviderExtras {
+    name: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+    worker_speed: Option<jcode_message_types::WorkerSpeedStatus>,
+}
+
+async fn member_provider_extras(
+    session_id: &str,
+    is_worker: bool,
+    sessions: &SessionAgents,
+) -> MemberProviderExtras {
+    {
+        let agents = sessions.read().await;
+        if let Some(agent) = agents.get(session_id)
+            && let Ok(agent) = agent.try_lock()
+        {
+            return MemberProviderExtras {
+                name: Some(agent.provider_name()),
+                model: Some(agent.provider_model()),
+                effort: agent.provider_reasoning_effort(),
+                worker_speed: agent.worker_speed_status(),
+            };
+        }
+    }
+    // A busy worker still has a saved spawn policy. Never wait on its Agent.
+    MemberProviderExtras {
+        worker_speed: if is_worker {
+            super::run_blocking_io(|| {
+                crate::session::Session::load_startup_stub(session_id)
+                    .ok()
+                    .and_then(|session| session.worker_speed)
+            })
+        } else {
+            None
+        },
+        ..Default::default()
+    }
+}
+
 /// Gather live runtime extras for a single member session.
 ///
 /// `member_is_running` is used as a fallback "processing" hint when no live
@@ -90,6 +132,7 @@ pub(super) struct MemberRuntimeExtras {
 pub(super) async fn member_runtime_extras(
     session_id: &str,
     member_is_running: bool,
+    is_worker: bool,
     sessions: &SessionAgents,
     client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
 ) -> MemberRuntimeExtras {
@@ -98,25 +141,7 @@ pub(super) async fn member_runtime_extras(
         live_activity_snapshot(&connections, session_id, member_is_running)
     };
 
-    let (provider_name, provider_model, provider_effort) = {
-        let agent_sessions = sessions.read().await;
-        if let Some(agent) = agent_sessions.get(session_id) {
-            // Never block on a busy agent: token churn and turns come from the
-            // lock-free metrics registry, so a missing provider name here just
-            // means the agent is mid-turn.
-            if let Ok(agent) = agent.try_lock() {
-                (
-                    Some(agent.provider_name()),
-                    Some(agent.provider_model()),
-                    agent.provider_reasoning_effort(),
-                )
-            } else {
-                (None, None, None)
-            }
-        } else {
-            (None, None, None)
-        }
-    };
+    let provider = member_provider_extras(session_id, is_worker, sessions).await;
 
     let metrics = crate::session_metrics::snapshot(
         session_id,
@@ -133,9 +158,10 @@ pub(super) async fn member_runtime_extras(
 
     MemberRuntimeExtras {
         activity,
-        provider_name,
-        provider_model,
-        provider_effort,
+        provider_name: provider.name,
+        provider_model: provider.model,
+        provider_effort: provider.effort,
+        worker_speed: provider.worker_speed,
         turn_count: metrics.map(|m| m.turns),
         recent_total_tokens: metrics.map(|m| m.recent_total_tokens),
         recent_output_tokens: metrics.map(|m| m.recent_output_tokens),
@@ -288,18 +314,12 @@ pub(super) async fn handle_comm_status(
             live_activity_snapshot(&connections, &target_session, member.status == "running")
         };
 
-        let (provider_name, provider_model) = {
-            let agent_sessions = sessions.read().await;
-            if let Some(agent) = agent_sessions.get(&target_session) {
-                if let Ok(agent) = agent.try_lock() {
-                    (Some(agent.provider_name()), Some(agent.provider_model()))
-                } else {
-                    (None, None)
-                }
-            } else {
-                (None, None)
-            }
-        };
+        let provider = member_provider_extras(
+            &target_session,
+            member.report_back_to_session_id.is_some(),
+            sessions,
+        )
+        .await;
 
         AgentStatusSnapshot {
             session_id: member.session_id.clone(),
@@ -316,8 +336,9 @@ pub(super) async fn handle_comm_status(
             joined_age_secs: Some(member.joined_at.elapsed().as_secs()),
             files_touched,
             activity,
-            provider_name,
-            provider_model,
+            provider_name: provider.name,
+            provider_model: provider.model,
+            worker_speed: provider.worker_speed,
         }
     };
 

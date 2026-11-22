@@ -14,6 +14,7 @@ use crate::server::{SwarmEventType, SwarmMember, VersionedPlan};
 use crate::tool::Registry;
 use anyhow::Result;
 use async_trait::async_trait;
+use jcode_message_types::{SpeedAvailability, SpeedMode, SpeedOption};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -22,19 +23,23 @@ use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 struct MockProvider;
 
-type FakeRequests = Arc<std::sync::Mutex<Vec<(String, String)>>>;
+type FakeRequests = Arc<std::sync::Mutex<Vec<(String, String, SpeedMode)>>>;
 
 struct RoutingProvider {
+    name: &'static str,
     model: std::sync::Mutex<String>,
     effort: std::sync::Mutex<String>,
+    speed: std::sync::Mutex<SpeedMode>,
     requests: Option<FakeRequests>,
 }
 
 impl RoutingProvider {
     fn new(model: &str) -> Self {
         Self {
+            name: "mock",
             model: std::sync::Mutex::new(model.into()),
             effort: std::sync::Mutex::new("medium".into()),
+            speed: std::sync::Mutex::new(SpeedMode::Fast),
             requests: None,
         }
     }
@@ -53,10 +58,11 @@ impl Provider for RoutingProvider {
             anyhow::bail!("routing regression must not make model calls");
         };
         assert!(jcode_provider_core::worker_request_is_pinned());
-        requests
-            .lock()
-            .unwrap()
-            .push((self.model(), self.reasoning_effort().unwrap()));
+        requests.lock().unwrap().push((
+            self.model(),
+            self.reasoning_effort().unwrap(),
+            self.speed_mode(),
+        ));
         use crate::message::StreamEvent;
         Ok(Box::pin(futures::stream::iter([
             Ok(StreamEvent::TextDelta("fake response".into())),
@@ -66,7 +72,10 @@ impl Provider for RoutingProvider {
         ])))
     }
     fn name(&self) -> &str {
-        "mock"
+        self.name
+    }
+    fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
+        (self.name == "openai").then_some(jcode_provider_core::ResolvedCredential::ApiKey)
     }
     fn model(&self) -> String {
         self.model.lock().unwrap().clone()
@@ -89,10 +98,41 @@ impl Provider for RoutingProvider {
     fn available_efforts(&self) -> Vec<&'static str> {
         vec!["low", "medium", "high", "xhigh"]
     }
+    fn speed_options(&self, model: &str) -> Vec<SpeedOption> {
+        let mut options = vec![SpeedOption::standard()];
+        if model != "unsupported-speed" {
+            options.extend(
+                [SpeedMode::Fast, SpeedMode::Ultrafast].map(|mode| SpeedOption {
+                    mode,
+                    availability: if model == "acceleratable-lane" {
+                        SpeedAvailability::Unknown
+                    } else {
+                        SpeedAvailability::Available
+                    },
+                    reason: None,
+                }),
+            );
+        }
+        options
+    }
+    fn speed_mode(&self) -> SpeedMode {
+        *self.speed.lock().unwrap()
+    }
+    fn set_speed_mode(&self, speed: SpeedMode) -> Result<()> {
+        anyhow::ensure!(
+            self.speed_options(&self.model())
+                .iter()
+                .any(|option| option.mode == speed)
+        );
+        *self.speed.lock().unwrap() = speed;
+        Ok(())
+    }
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self {
+            name: self.name,
             model: std::sync::Mutex::new(self.model()),
             effort: std::sync::Mutex::new(self.reasoning_effort().unwrap()),
+            speed: std::sync::Mutex::new(self.speed_mode()),
             requests: self.requests.clone(),
         })
     }
@@ -1112,25 +1152,43 @@ async fn global_agent_model_request_updates_server_config_not_session() {
 
 #[tokio::test]
 async fn premium_worker_requires_owner_before_allocation_and_only_runs_approved_pair() {
-    assert_premium_worker_approval("gpt-6.2-astra", false).await;
+    assert_premium_worker_approval("gpt-6.2-astra", false, None).await;
 }
 
 #[tokio::test]
 async fn premium_worker_requires_owner_for_an_auto_todo_lane_on_capped_fable() {
-    assert_premium_worker_approval("claude-fable-5-2", true).await;
+    assert_premium_worker_approval("claude-fable-5-2", true, None).await;
 }
 
-async fn assert_premium_worker_approval(model: &str, auto_lane: bool) {
+#[tokio::test]
+async fn swarm_speed_keeps_sibling_requests_independent_and_survives_restore() {
+    assert_premium_worker_approval("acceleratable-worker", false, Some(SpeedMode::Ultrafast)).await;
+}
+
+#[tokio::test]
+async fn swarm_speed_auto_lane_requires_owner_before_first_request() {
+    assert_premium_worker_approval("acceleratable-lane", true, Some(SpeedMode::Fast)).await;
+}
+
+async fn assert_premium_worker_approval(model: &str, auto_lane: bool, speed: Option<SpeedMode>) {
     let _env = crate::storage::lock_test_env();
     let home = tempfile::tempdir().unwrap();
     let previous = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", home.path());
     std::fs::write(
         home.path().join("config.toml"),
-        format!("[agents]\nswarm_effort_caps = {{ \"{model}\" = \"high\" }}\n"),
+        format!("[agents]\nswarm_effort_caps = {{ \"{model}\" = \"high\" }}\nswarm_speed_caps = {{ \"mock:{model}\" = \"fast\", \"openai-api:auth-cap-worker\" = \"standard\" }}\n"),
     )
     .unwrap();
     crate::config::invalidate_config_cache();
+    let auth_cap_route = RoutingProvider {
+        name: "openai",
+        ..RoutingProvider::new("auth-cap-worker")
+    };
+    assert_eq!(
+        Agent::cap_worker_speed(&auth_cap_route, Some("openai"), SpeedMode::Fast),
+        SpeedMode::Standard
+    );
     let coordinator = "session_lead_1_test";
     let lane = auto_lane.then(|| {
         let task = crate::todo::TodoItem {
@@ -1140,6 +1198,7 @@ async fn assert_premium_worker_approval(model: &str, auto_lane: bool) {
             stage: Some(1),
             group: Some("premium-lane".into()),
             lane_owner: Some("worker".into()),
+            lane_speed: speed,
             ..Default::default()
         };
         let lane = crate::todo::stages::lane_id(&task);
@@ -1170,16 +1229,17 @@ async fn assert_premium_worker_approval(model: &str, auto_lane: bool) {
     let clients = Arc::new(RwLock::new(HashMap::new()));
     let (automation, mut automation_rx) = mpsc::unbounded_channel();
     let _automation = crate::tool::interactive::attach_client(coordinator, automation, false);
-    let spawn = |key: &'static str| {
+    let spawn = |key: &'static str, lane, effort: &'static str, requested_speed| {
         super::spawn_swarm_agent(
             coordinator,
             "swarm",
-            lane.clone(),
+            lane,
             Some(home.path().to_string_lossy().into_owned()),
             Some("Execute isolated fake turn".into()),
             Some(crate::config::SwarmSpawnMode::Headless),
             None,
-            Some("xhigh".into()),
+            Some(effort.into()),
+            requested_speed,
             None,
             key,
             &sessions,
@@ -1197,7 +1257,14 @@ async fn assert_premium_worker_approval(model: &str, auto_lane: bool) {
             &clients,
         )
     };
-    let unattended = spawn("premium-fake-test").await.unwrap_err();
+    let explicit_speed = if auto_lane { None } else { speed };
+    let target = |key| spawn(key, lane.clone(), "xhigh", explicit_speed);
+    let effective = if speed.is_some() {
+        SpeedMode::Fast
+    } else {
+        SpeedMode::Standard
+    };
+    let unattended = target("premium-fake-test").await.unwrap_err();
     assert!(
         unattended.to_string().contains("explicit owner approval"),
         "{unattended:#}"
@@ -1211,8 +1278,22 @@ async fn assert_premium_worker_approval(model: &str, auto_lane: bool) {
                 .unwrap()
                 .unwrap();
             let question = ask.ask_questions.unwrap().to_string();
+            if auto_lane && speed.is_some() {
+                assert!(
+                    question.contains("Account availability is unconfirmed"),
+                    "{question}"
+                );
+            }
             assert!(question.contains(model), "{question}");
             assert!(question.contains("effort high"), "{question}");
+            assert!(
+                question.contains(&format!("Speed requested: {:?}", speed.unwrap_or_default())),
+                "{question}"
+            );
+            assert!(
+                question.contains(&format!("Effective speed: {effective:?}")),
+                "{question}"
+            );
             assert!(sessions.read().await.is_empty());
             assert_eq!(state.members.read().await.len(), 1);
             assert!(requests.lock().unwrap().is_empty());
@@ -1234,7 +1315,7 @@ async fn assert_premium_worker_approval(model: &str, auto_lane: bool) {
                 )
                 .unwrap();
         };
-        let (result, ()) = tokio::join!(spawn("premium-fake-test"), reply);
+        let (result, ()) = tokio::join!(target("premium-fake-test"), reply);
         drop(attachment);
         if choice == "Deny" {
             assert!(
@@ -1243,6 +1324,7 @@ async fn assert_premium_worker_approval(model: &str, auto_lane: bool) {
                     .to_string()
                     .contains("explicit owner approval")
             );
+            assert!(requests.lock().unwrap().is_empty());
             continue;
         }
         let sid = result.unwrap();
@@ -1255,7 +1337,7 @@ async fn assert_premium_worker_approval(model: &str, auto_lane: bool) {
         })
         .await
         .unwrap();
-        let expected = (model.into(), "high".into());
+        let expected = (model.into(), "high".into(), effective);
         let startup_count = requests.lock().unwrap().len();
         assert!(
             requests
@@ -1268,16 +1350,19 @@ async fn assert_premium_worker_approval(model: &str, auto_lane: bool) {
             assert_eq!(startup_count, 1);
         }
         let saved = crate::session::Session::load(&sid).unwrap();
+        let status = saved.worker_speed.as_ref().unwrap();
+        assert_eq!(status.requested, speed.unwrap_or_default());
+        assert_eq!(status.effective, effective);
         assert!(saved.is_worker_model_approved(model, "mock", Some("high")));
         assert!(!saved.is_worker_model_approved(model, "mock", Some("xhigh")));
         assert!(!saved.is_worker_model_approved("gpt-5.4", "mock", Some("high")));
         assert_eq!(
-            spawn("premium-fake-test").await.unwrap(),
+            target("premium-fake-test").await.unwrap(),
             sid,
             "same spawn after UI detaches"
         );
         if auto_lane {
-            assert_eq!(spawn("new-dispatch-nonce").await.unwrap(), sid);
+            assert_eq!(target("new-dispatch-nonce").await.unwrap(), sid);
         }
         assert_eq!(
             requests.lock().unwrap().len(),
@@ -1286,6 +1371,7 @@ async fn assert_premium_worker_approval(model: &str, auto_lane: bool) {
         );
         let runtime = provider.fork();
         runtime.set_reasoning_effort("medium").unwrap();
+        runtime.set_speed_mode(SpeedMode::Standard).unwrap();
         let registry = Registry::new(runtime.clone()).await;
         let mut resumed = Agent::new_with_session(runtime.clone(), registry, saved, None);
         runtime.set_reasoning_effort("medium").unwrap();
@@ -1306,6 +1392,65 @@ async fn assert_premium_worker_approval(model: &str, auto_lane: bool) {
                 .contains("fake response")
         );
         assert_eq!(requests.lock().unwrap().len(), startup_count + 1);
+        assert_eq!(requests.lock().unwrap().last(), Some(&expected));
+        let mut observed = startup_count + 1;
+        if speed.is_some() && !auto_lane {
+            let sibling = spawn("standard-sibling", None, "low", None).await.unwrap();
+            wait_for_worker_requests(&requests, observed + 1, &sessions, &sibling).await;
+            observed += 1;
+            assert_eq!(
+                requests.lock().unwrap().last(),
+                Some(&(model.into(), "low".into(), SpeedMode::Standard))
+            );
+            assert_eq!(
+                crate::session::Session::load(&sibling)
+                    .unwrap()
+                    .worker_speed
+                    .unwrap()
+                    .effective,
+                SpeedMode::Standard
+            );
+            assert_eq!(runtime.speed_mode(), SpeedMode::Fast);
+
+            // A model fallback switches through Agent::set_model, which must
+            // drop the route-scoped speed before the next provider request.
+            resumed.set_model("fallback-worker").unwrap();
+            resumed
+                .run_once_capture("Continue on fallback")
+                .await
+                .unwrap();
+            observed += 1;
+            assert_eq!(
+                requests.lock().unwrap().last().unwrap().2,
+                SpeedMode::Standard
+            );
+            resumed.set_model(model).unwrap();
+            assert_eq!(runtime.speed_mode(), SpeedMode::Standard);
+            assert!(resumed.set_speed_mode(SpeedMode::Fast).is_err());
+            assert_eq!(requests.lock().unwrap().len(), observed);
+
+            provider.set_model("unsupported-speed").unwrap();
+            let unsupported = spawn("unsupported-speed", None, "low", Some(SpeedMode::Fast))
+                .await
+                .unwrap();
+            wait_for_worker_requests(&requests, observed + 1, &sessions, &unsupported).await;
+            observed += 1;
+            let status = crate::session::Session::load(&unsupported)
+                .unwrap()
+                .worker_speed
+                .unwrap();
+            assert_eq!(status.requested, SpeedMode::Fast);
+            assert_eq!(status.effective, SpeedMode::Standard);
+            assert!(status.reason.unwrap().contains("not available"));
+            assert_eq!(
+                requests.lock().unwrap().last(),
+                Some(&(
+                    "unsupported-speed".into(),
+                    "low".into(),
+                    SpeedMode::Standard
+                ))
+            );
+        }
         std::fs::write(
             home.path().join("config.toml"),
             "[agents]\nspawn_allowed_models = [\"gpt-5.4\"]\n",
@@ -1320,7 +1465,7 @@ async fn assert_premium_worker_approval(model: &str, auto_lane: bool) {
             denied.to_string().contains("spawn_allowed_models"),
             "{denied:#}"
         );
-        assert_eq!(requests.lock().unwrap().len(), startup_count + 1);
+        assert_eq!(requests.lock().unwrap().len(), observed);
     }
     if let Some(previous) = previous {
         crate::env::set_var("JCODE_HOME", previous);
@@ -1328,6 +1473,23 @@ async fn assert_premium_worker_approval(model: &str, auto_lane: bool) {
         crate::env::remove_var("JCODE_HOME");
     }
     crate::config::invalidate_config_cache();
+}
+
+async fn wait_for_worker_requests(
+    requests: &FakeRequests,
+    count: usize,
+    sessions: &super::super::SessionAgents,
+    worker: &str,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        while requests.lock().unwrap().len() < count {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let agent = sessions.read().await.get(worker).cloned().unwrap();
+        drop(agent.lock().await);
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -1367,6 +1529,7 @@ async fn auto_lane_worker_publishes_a_task_label_without_a_spawn_prompt() {
         Some(home.path().to_string_lossy().into_owned()),
         None,
         Some(crate::config::SwarmSpawnMode::Headless),
+        None,
         None,
         None,
         None,
@@ -1465,6 +1628,7 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
             Some(temp.path().to_string_lossy().into_owned()),
             None,
             Some(crate::config::SwarmSpawnMode::Headless),
+            None,
             None,
             None,
             Some("routing test".into()),
