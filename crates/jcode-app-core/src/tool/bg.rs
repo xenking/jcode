@@ -14,6 +14,10 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+#[path = "bg_dependency_wait.rs"]
+mod dependency_wait;
+use dependency_wait::wait_on_await_dependency;
+
 fn default_watch_notify() -> bool {
     true
 }
@@ -601,7 +605,7 @@ struct WaitManyOutcome {
     unknown: Vec<String>,
 }
 
-async fn wait_many_polling(
+async fn wait_many(
     manager: &background::BackgroundTaskManager,
     session_id: &str,
     task_ids: &[String],
@@ -613,6 +617,8 @@ async fn wait_many_polling(
     let deadline = Instant::now() + max_wait;
     let mut last_progress = std::collections::HashMap::new();
     let mut wait_guard = None;
+    let mut task_changes = manager.subscribe_status_changes();
+    let mut await_completions = crate::server::await_members_state::subscribe_await_completion();
     for task_id in task_ids {
         if let Some(task) = manager.status(task_id).await {
             last_progress.insert(task_id.clone(), task.progress.clone());
@@ -722,9 +728,25 @@ async fn wait_many_polling(
             };
             crate::wait_registry::register(session_id, &reason)
         });
+        // External writers and detached process exits cannot signal our watches.
+        let reconcile_external = !unknown.is_empty()
+            || !dependencies.is_empty()
+            || tasks.iter().any(|task| {
+                !is_terminal(&task.status)
+                    && (task.detached || !manager.is_live_task(&task.task_id))
+            });
+        let wake_at = if reconcile_external {
+            deadline.min(Instant::now() + Duration::from_secs(1))
+        } else {
+            deadline
+        };
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            _ = async {
+                while matches!(task_changes.recv().await, Ok(id) if !task_ids.contains(&id)) {}
+            } => {}
+            _ = await_completions.changed(), if !dependencies.is_empty() => {}
             _ = incoming.arrived() => {}
+            _ = tokio::time::sleep_until(wake_at.into()) => {}
         }
     }
 }
@@ -1028,7 +1050,7 @@ impl Tool for BgTool {
                     } else {
                         "any"
                     };
-                    let outcome = wait_many_polling(
+                    let outcome = wait_many(
                         manager,
                         &ctx.session_id,
                         &task_ids,
@@ -1256,13 +1278,13 @@ mod tests {
             })
             .await;
         let ids = vec![task.task_id.clone()];
-        let result = wait_many_polling(&manager, sid, &ids, Duration::ZERO, false, "all")
+        let result = wait_many(&manager, sid, &ids, Duration::ZERO, false, "all")
             .await
             .unwrap();
         assert_eq!(result.reason, "timeout");
         assert_eq!(crate::wait_registry::current(sid), None);
 
-        let mut future = Box::pin(wait_many_polling(
+        let mut future = Box::pin(wait_many(
             &manager,
             sid,
             &ids,
@@ -1435,7 +1457,7 @@ mod tests {
             crate::incoming_message::notify(sid);
         });
         let started = Instant::now();
-        let reason = wait_many_polling(&manager, sid, &ids, Duration::from_secs(120), false, "all")
+        let reason = wait_many(&manager, sid, &ids, Duration::from_secs(120), false, "all")
             .await
             .unwrap()
             .reason;
@@ -1644,55 +1666,10 @@ fn await_dependency_status_text(id: &str) -> Result<String> {
     })
 }
 
-async fn wait_on_await_dependency(
-    ctx: &ToolContext,
-    id: &str,
-    wait_duration: Duration,
-) -> Result<ToolOutput> {
-    let deadline = Instant::now() + wait_duration;
-    let incoming = crate::incoming_message::watch(&ctx.session_id);
-    let _wait_guard = crate::wait_registry::register(&ctx.session_id, "Waiting for swarm members");
-    let metadata = |reason: &str| {
-        json!({
-            "task_id": id,
-            "wait_reason": reason,
-            "timed_out": reason == "timeout",
-        })
-    };
-    loop {
-        let dependency = load_await_dependency(id)?;
-        if let Some(summary) = await_dependency_summary(&dependency) {
-            return Ok(
-                ToolOutput::new(format!("Await dependency {id} resolved.\n{summary}"))
-                    .with_title(format!("bg wait {id}"))
-                    .with_metadata(metadata("completed")),
-            );
-        }
-        if !dependency.is_running() {
-            return Ok(
-                ToolOutput::new(format!("Await dependency {id} expired before resolving."))
-                    .with_title(format!("bg wait {id}"))
-                    .with_metadata(metadata("expired")),
-            );
-        }
-        if incoming.is_pending() {
-            return Ok(ToolOutput::new(format!(
-                "{USER_MESSAGE_NOTE}\n\nAwait dependency {id} is still running."
-            ))
-            .with_title(format!("bg wait {id}"))
-            .with_metadata(metadata("user_message")));
-        }
-        if Instant::now() >= deadline {
-            return Ok(ToolOutput::new(format!(
-                "Await dependency {id} is still running after the wait window."
-            ))
-            .with_title(format!("bg wait {id}"))
-            .with_metadata(metadata("timeout")));
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-}
-
 #[cfg(test)]
 #[path = "bg_await_dependency_tests.rs"]
 mod await_dependency_tests;
+
+#[cfg(test)]
+#[path = "bg_completion_signal_tests.rs"]
+mod completion_signal_tests;

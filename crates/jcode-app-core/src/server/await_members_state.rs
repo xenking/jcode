@@ -6,13 +6,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, mpsc, watch};
 
 const AWAIT_MEMBERS_DIR: &str = "jcode-await-members";
 const STOPPED_MEMBERS_DIR: &str = "jcode-await-stopped-members";
 const FINAL_STATE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const PENDING_STATE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 static STATE_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static COMPLETIONS: std::sync::LazyLock<watch::Sender<()>> =
+    std::sync::LazyLock::new(|| watch::channel(()).0);
+
+pub(crate) fn subscribe_await_completion() -> watch::Receiver<()> {
+    COMPLETIONS.subscribe()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StoppedMember {
@@ -397,6 +403,7 @@ pub(super) fn persist_final_response(
         return (next, false);
     }
     invalidate_pending_scan();
+    COMPLETIONS.send_replace(());
     (next, true)
 }
 

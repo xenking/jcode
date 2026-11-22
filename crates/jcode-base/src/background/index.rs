@@ -366,6 +366,7 @@ impl BackgroundTaskManager {
     ) -> Result<()> {
         let path = path.to_owned();
         let status = status.clone();
+        let changes = self.status_changes.clone();
         self.indexed(move |_, index| {
             use std::io::Write;
             // An atomic replacement also prevents other managers/processes from
@@ -390,7 +391,11 @@ impl BackgroundTaskManager {
             })();
             match result {
                 Ok(stamp) => {
+                    let changed_id = (changes.receiver_count() > 0).then(|| status.task_id.clone());
                     index.record(status, stamp, true);
+                    if let Some(id) = changed_id {
+                        let _ = changes.send(id);
+                    }
                     Ok(())
                 }
                 Err(error) => {
