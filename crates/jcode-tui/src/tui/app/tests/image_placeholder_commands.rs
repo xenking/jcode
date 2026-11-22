@@ -29,6 +29,7 @@ fn live_image_ids_update_echo_with_collapsed_paste() {
             original_content: "expanded paste [image 1]".into(),
             content: "expanded paste [#img_test]".into(),
             image_ids: vec!["img_test".into()],
+            image_ordinals: vec![],
         },
         &mut remote,
     );

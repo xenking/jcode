@@ -8,12 +8,12 @@ fn live_user_image_ids_are_forwarded_to_the_attached_session() {
     };
     let frames = state.legacy_event_to_api(&json!({
         "type":"user_image_ids", "original_content":"look [#image 1]",
-        "content":"look [#img_test]", "image_ids":["img_test"]
+        "content":"look [#img_test]", "image_ids":["img_test"], "image_ordinals":[7]
     }));
     assert!(matches!(&frames[..], [frame] if matches!(&frame.event,
-        ApiEvent::UserImageIds { session_id, original_content, content, image_ids }
+        ApiEvent::UserImageIds { session_id, original_content, content, image_ids, image_ordinals }
         if session_id == "s1" && original_content == "look [#image 1]"
-            && content == "look [#img_test]" && image_ids == &["img_test"]
+            && content == "look [#img_test]" && image_ids == &["img_test"] && image_ordinals == &[7]
     )));
 }
 

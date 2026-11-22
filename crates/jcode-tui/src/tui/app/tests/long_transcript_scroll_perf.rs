@@ -130,6 +130,7 @@ fn long_transcript_streaming_while_scrolled_perf() {
         label: Some("img".to_string()),
         source: crate::session::RenderedImageSource::UserInput,
         anchor: None,
+        session_image: None,
         history_message_index: None,
     }];
     app.invalidate_side_pane_images_signature();

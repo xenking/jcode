@@ -454,6 +454,7 @@ pub fn generated_image_rendered_image(
 ) -> Option<jcode_session_types::RenderedImage> {
     let (media_type, data) = generated_image_payload(path, output_format)?;
     Some(jcode_session_types::RenderedImage {
+        session_image: None,
         history_message_index: None,
         media_type,
         data,

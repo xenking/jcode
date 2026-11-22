@@ -668,6 +668,7 @@ fn check_history_panel_snapshot(authoritative: bool, session_changed: bool) {
         label: Some("restored image".to_string()),
         source: crate::session::RenderedImageSource::UserInput,
         anchor: None,
+        session_image: None,
         history_message_index: None,
     }];
     let panels_before = app.side_panel.clone();
@@ -797,6 +798,7 @@ fn test_delta_history_rebuilds_transcript_from_advertised_prefix() {
             label: None,
             source: crate::session::RenderedImageSource::UserInput,
             anchor: None,
+            session_image: None,
             history_message_index: None,
         }]),
     });

@@ -989,6 +989,7 @@ fn test_images_do_not_drive_side_panel_visibility() {
     app.side_panel = crate::side_panel::SidePanelSnapshot::default();
     app.remote_side_pane_images
         .push(crate::session::RenderedImage {
+            session_image: None,
             history_message_index: None,
             media_type: "image/png".to_string(),
             data: "image-data".to_string(),

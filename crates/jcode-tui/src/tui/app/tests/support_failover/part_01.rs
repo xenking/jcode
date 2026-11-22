@@ -294,6 +294,7 @@ fn debug_memory_profile_includes_app_owned_summary_for_large_client_state() {
     let mut app = create_test_app();
     app.remote_side_pane_images
         .push(crate::session::RenderedImage {
+            session_image: None,
             history_message_index: None,
             media_type: "image/png".to_string(),
             data: "x".repeat(32 * 1024),

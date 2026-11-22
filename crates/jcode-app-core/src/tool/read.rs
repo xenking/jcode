@@ -122,7 +122,7 @@ impl Tool for ReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read text, images or PDFs, including session-image://<image_id>."
+        "Read text, images or PDFs, including session-image://<image_id> or session-image://N for Image #N."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -133,7 +133,7 @@ impl Tool for ReadTool {
                 "intent": super::intent_schema_property(),
                 "file_path": {
                     "type": "string",
-                    "description": "Path to a file, or session-image://<image_id> for an image in this session."
+                    "description": "Path to a file, or session-image://<image_id> or session-image://N for Image #N in this session."
                 },
                 "start_line": {
                     "type": "integer",
@@ -157,13 +157,12 @@ impl Tool for ReadTool {
             let image = session
                 .session_image(id)
                 .ok_or_else(|| anyhow::anyhow!("Session image not found: {id}"))?;
-            return Ok(
-                ToolOutput::new(format!("Session image [#{id}]")).with_labeled_image(
-                    image.info.media_type,
-                    image.data,
-                    format!("[#{id}]"),
-                ),
-            );
+            let id = image.info.image_id;
+            let ordinal = image.info.ordinal;
+            return Ok(ToolOutput::new(format!("Session image [#{id}]
+
+Image #{ordinal}"))
+                .with_labeled_image(image.info.media_type, image.data, format!("[#{id}]")));
         }
         let range = normalize_read_range(&params)?;
 

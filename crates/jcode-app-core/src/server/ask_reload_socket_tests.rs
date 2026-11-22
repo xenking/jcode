@@ -558,12 +558,14 @@ async fn socket_reload_ask_workflow(mode: &str) {
         original_content,
         content,
         image_ids,
+        image_ordinals,
     } = event
     else {
         unreachable!()
     };
     assert_eq!(original_content, "look [#image 1]");
     assert_eq!(image_ids.len(), 1);
+    assert_eq!(image_ordinals, vec![4]);
     assert_eq!(content, format!("look [#{}]", image_ids[0]));
     writer.write_all(format!("{}\n", json!({"type":"get_session_image","id":92,"session_id":session_id,"image_id":image_ids[0]})).as_bytes()).await.unwrap();
     let image = until(&mut reader, |event| {

@@ -858,6 +858,7 @@ const BODY_ANCHOR_TINY_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAf
 
 fn anchored_tool_image(tool_id: &str) -> crate::session::RenderedImage {
     crate::session::RenderedImage {
+        session_image: None,
         history_message_index: None,
         media_type: "image/png".to_string(),
         data: BODY_ANCHOR_TINY_PNG_B64.to_string(),

@@ -86,6 +86,7 @@ impl App {
                 label: None,
                 source: crate::session::RenderedImageSource::UserInput,
                 anchor: anchor.clone(),
+                session_image: None,
                 history_message_index: None,
             })
             .collect();

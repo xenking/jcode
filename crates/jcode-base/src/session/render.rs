@@ -443,6 +443,7 @@ fn render_messages_and_images_internal(
 ) {
     let mut rendered: Vec<RenderedMessage> = Vec::new();
     let mut image_ids = Vec::new();
+    let image_index = session.image_index();
     let mut images: Vec<RenderedImage> = Vec::new();
     let mut tool_map: HashMap<String, ToolCall> = HashMap::new();
     // 0-based ordinal of the next rendered user prompt, used to anchor pasted
@@ -656,6 +657,11 @@ fn render_messages_and_images_internal(
                     if super::images::is_archive_marker(t) {
                         let id = super::images::image_id(&session.id, &msg.id, image_ordinal);
                         image_ordinal += 1;
+                        let session_image = image_index.reference(&id);
+                        if session_image.as_ref().is_some_and(|image| image.image_id != id) {
+                            last_image_idx = None;
+                            continue;
+                        }
                         if include_archived
                             && let Some(media_type) =
                                 super::images::archived_image_media_type(t, &id)
@@ -667,6 +673,7 @@ fn render_messages_and_images_internal(
                                 image_anchor_for_message(role, current_tool, user_prompt_count);
                             let is_pending_prompt_anchor = current_tool.is_none() && role == "user";
                             images.push(RenderedImage {
+                                session_image,
                                 history_message_index: current_tool.map(|_| rendered.len()),
                                 media_type,
                                 data: format!("jcode-lazy:{id}"),
@@ -781,13 +788,20 @@ fn render_messages_and_images_internal(
                 }
                 ContentBlock::AnthropicThinking { .. } | ContentBlock::OpenAIReasoning { .. } => {}
                 ContentBlock::Image { media_type, data } => {
-                    image_ids.push(super::images::image_id(&session.id, &msg.id, image_ordinal));
+                    let id = super::images::image_id(&session.id, &msg.id, image_ordinal);
                     image_ordinal += 1;
+                    let session_image = image_index.reference(&id);
+                    if session_image.as_ref().is_some_and(|image| image.image_id != id) {
+                        last_image_idx = None;
+                        continue;
+                    }
+                    image_ids.push(id);
                     let current_tool =
                         current_tool.and_then(|index| rendered[index].tool_data.as_ref());
                     let anchor = image_anchor_for_message(role, current_tool, user_prompt_count);
                     let is_pending_prompt_anchor = current_tool.is_none() && role == "user";
                     images.push(RenderedImage {
+                        session_image,
                         history_message_index: current_tool.map(|_| rendered.len()),
                         media_type: media_type.clone(),
                         data: data.clone(),

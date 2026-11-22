@@ -2083,6 +2083,8 @@ impl BridgeState {
                         .to_owned(),
                     content: event["content"].as_str().unwrap_or_default().to_owned(),
                     image_ids,
+                    image_ordinals: serde_json::from_value(event["image_ordinals"].clone())
+                        .unwrap_or_default(),
                 })]
             }
             "tools" => {

@@ -3677,6 +3677,7 @@ fn handle_server_event_inner(
             original_content,
             content,
             image_ids,
+            image_ordinals: _,
         } => {
             if let Some(index) = app
                 .display_messages

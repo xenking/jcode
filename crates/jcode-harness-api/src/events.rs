@@ -1,6 +1,6 @@
 //! Server-to-client events: replies and streaming.
 
-use crate::search::SessionSearchHit;
+use crate::{SessionImageRef, search::SessionSearchHit};
 use serde::{Deserialize, Serialize};
 
 /// Curated event surface. Internally-tagged on `"ev"`.
@@ -521,6 +521,9 @@ pub enum ApiEvent {
         original_content: String,
         content: String,
         image_ids: Vec<String>,
+        /// One-based session ordinals, in the same order as `image_ids`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        image_ordinals: Vec<usize>,
     },
 
     /// The `ask` tool is blocked on the user answering these questions.
@@ -971,6 +974,8 @@ pub struct RenderedImage {
     /// for multiple images at the same boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_message_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_image: Option<SessionImageRef>,
 }
 
 #[cfg(test)]

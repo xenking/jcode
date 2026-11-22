@@ -1776,7 +1776,7 @@ impl Agent {
                                 Some(tool_elapsed.as_millis() as u64),
                             );
                             label_session_images(
-                                &self.session.id,
+                                &self.session,
                                 &message_id,
                                 0,
                                 &mut side_pane_images,

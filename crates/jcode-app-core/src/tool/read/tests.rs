@@ -19,7 +19,7 @@ fn make_ctx(working_dir: std::path::PathBuf) -> ToolContext {
     clippy::await_holding_lock,
     reason = "test must serialize process environment for its entire async lifetime"
 )]
-async fn reads_session_image_by_stable_id() {
+async fn reads_session_image_by_stable_id_and_ordinal() {
     let _lock = crate::storage::lock_test_env();
     struct RestoreHome(Option<std::ffi::OsString>);
     impl Drop for RestoreHome {
@@ -45,11 +45,15 @@ async fn reads_session_image_by_stable_id() {
     session.save().unwrap();
     let mut ctx = make_ctx(std::env::temp_dir());
     ctx.session_id = session.id.clone();
-    let output = ReadTool::new()
-        .execute(json!({"file_path": format!("session-image://{id}")}), ctx)
-        .await
-        .unwrap();
-    assert_eq!(output.images[0].data, "aW1hZ2U=");
+    for selector in [id.as_str(), "1"] {
+        let output = ReadTool::new()
+            .execute(json!({"file_path": format!("session-image://{selector}")}), ctx.clone())
+            .await
+            .unwrap();
+        assert!(output.output.starts_with(&format!("Session image [#{id}]")));
+        assert!(output.output.contains("Image #1"));
+        assert_eq!(output.images[0].data, "aW1hZ2U=");
+    }
 }
 
 #[test]

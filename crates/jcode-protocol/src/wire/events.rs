@@ -693,6 +693,9 @@ pub enum ServerEvent {
         original_content: String,
         content: String,
         image_ids: Vec<String>,
+        /// One-based session ordinals, in the same order as `image_ids`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        image_ordinals: Vec<usize>,
     },
 
     /// Error occurred

@@ -77,6 +77,7 @@ fn recent_history_counts_ask_answers_but_preserves_image_ordinals() {
         label: None,
         source: crate::session::RenderedImageSource::UserInput,
         anchor: Some(crate::session::RenderedImageAnchor::UserPrompt { ordinal: 1 }),
+        session_image: None,
         history_message_index: None,
     };
     let (_, images, info) = super::super::recent_history_window(messages, vec![image], 2);
@@ -133,6 +134,7 @@ fn history_images_base_omits_only_matching_image_sets() {
         label: None,
         source: crate::session::RenderedImageSource::UserInput,
         anchor: None,
+        session_image: None,
         history_message_index: None,
     };
     let images = vec![image("a"), image("b")];
@@ -204,6 +206,7 @@ fn recent_history_preserves_archive_prompt_offset_and_rebases_images() {
         label: None,
         source: crate::session::RenderedImageSource::UserInput,
         anchor: Some(crate::session::RenderedImageAnchor::UserPrompt { ordinal }),
+        session_image: None,
         history_message_index: None,
     };
     let (window, images, info) =
@@ -285,6 +288,7 @@ fn recent_history_scopes_tool_images_and_rebases_append_boundaries() {
             tool_name: "read".to_owned(),
         },
         anchor: Some(crate::session::RenderedImageAnchor::ToolCall { id: id.to_owned() }),
+        session_image: None,
         history_message_index: Some(index),
     };
     let (window, images, _) = super::super::recent_history_window(

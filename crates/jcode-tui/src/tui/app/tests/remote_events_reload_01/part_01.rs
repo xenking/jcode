@@ -1412,6 +1412,7 @@ fn test_handle_server_event_side_pane_images_populates_pane_live() {
         crate::protocol::ServerEvent::SidePaneImages {
             session_id: "session_active".to_string(),
             images: vec![crate::session::RenderedImage {
+                session_image: None,
                 history_message_index: None,
                 media_type: "image/png".to_string(),
                 data: "image-data".to_string(),
@@ -1459,6 +1460,7 @@ fn test_native_generated_image_renders_inline_without_opening_side_panel() {
         crate::protocol::ServerEvent::SidePaneImages {
             session_id: "session_active".to_string(),
             images: vec![crate::session::RenderedImage {
+                session_image: None,
                 history_message_index: None,
                 media_type: "image/png".to_string(),
                 data: "image-data".to_string(),
@@ -1511,6 +1513,7 @@ fn test_handle_server_event_side_pane_images_ignores_inactive_session() {
         crate::protocol::ServerEvent::SidePaneImages {
             session_id: "session_other".to_string(),
             images: vec![crate::session::RenderedImage {
+                session_image: None,
                 history_message_index: None,
                 media_type: "image/png".to_string(),
                 data: "image-data".to_string(),

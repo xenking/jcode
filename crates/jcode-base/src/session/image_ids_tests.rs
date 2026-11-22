@@ -49,6 +49,8 @@ fn image_identity_survives_shake_and_snapcompact_persistence() -> anyhow::Result
     let restored = Session::load(&session.id)?;
     assert!(restored.compaction.as_ref().unwrap().snapcompact.is_some());
     assert_eq!(restored.session_images(), expected);
+    assert_eq!(expected[0].ordinal, 1);
+    assert_eq!(restored.session_image("1").unwrap().info.image_id, expected[0].image_id);
     assert_eq!(
         restored.session_image(&expected[0].image_id).unwrap().data,
         "cGljdHVyZQ=="
@@ -354,6 +356,47 @@ fn queued_message_rename_updates_its_persisted_marker() {
 }
 
 #[test]
+fn explicit_reread_keeps_the_original_number_without_creating_an_attachment() {
+    let mut session = Session::create(None, None);
+    let pixels = || ContentBlock::Image {
+        media_type: "image/png".into(),
+        data: "same-payload".into(),
+    };
+    session.add_message(Role::User, vec![pixels()]);
+    let original = session.session_images().remove(0);
+    session.add_message(Role::Assistant, vec![ContentBlock::ToolUse {
+        id: "read-1".into(),
+        name: "read".into(),
+        input: serde_json::json!({"file_path": "session-image://1"}),
+        thought_signature: None,
+    }]);
+    let reread_message = session.add_message(Role::User, vec![
+        ContentBlock::ToolResult {
+            tool_use_id: "read-1".into(),
+            content: format!("Session image [#{}]\n\nImage #1", original.image_id),
+            is_error: None,
+        },
+        pixels(),
+    ]);
+    session.add_message(Role::User, vec![pixels()]);
+    let metadata = session.session_images();
+    assert_eq!(metadata.len(), 2, "only the two deliberate user uploads are listed");
+    assert_eq!(metadata[0], original);
+    assert_eq!(metadata[1].ordinal, 2);
+    assert_ne!(metadata[0].image_id, metadata[1].image_id, "identical uploads are still distinct");
+    let legacy_id = image_id(&session.id, &reread_message, 0);
+    assert_eq!(session.session_image(&legacy_id).unwrap().info, original);
+    let (_, images, _, ids) = super::render::render_messages_and_images_with_ids(&session, usize::MAX);
+    assert_eq!(ids, vec![metadata[0].image_id.clone(), metadata[1].image_id.clone()]);
+    assert_eq!(images.len(), 2, "re-read must not add a duplicate rendered attachment");
+    assert_eq!(images[0].session_image.as_ref().unwrap().ordinal, 1);
+    assert_eq!(images[1].session_image.as_ref().unwrap().ordinal, 2);
+    let provider = session.messages_for_provider();
+    assert!(provider[2].content.iter().any(|block| matches!(block, ContentBlock::Image { .. })),
+        "the explicit read still returns image bytes to the model");
+}
+
+#[test]
 fn image_ids_are_unique_and_stable_for_legacy_sessions() {
     let mut session = Session::create(None, None);
     for _ in 0..2 {
@@ -368,6 +411,7 @@ fn image_ids_are_unique_and_stable_for_legacy_sessions() {
     let images = session.session_images();
     assert_eq!(images.len(), 2);
     assert_ne!(images[0].image_id, images[1].image_id);
+    assert_eq!(images.iter().map(|image| image.ordinal).collect::<Vec<_>>(), [1, 2]);
     // Simulate a transcript written before stable markers existed.
     for message in &mut session.messages {
         let images: Vec<_> = message

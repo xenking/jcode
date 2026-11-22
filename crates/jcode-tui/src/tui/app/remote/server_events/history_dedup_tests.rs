@@ -20,6 +20,7 @@ fn message(role: &str, content: &str) -> HistoryMessage {
 
 fn image(data: &str) -> RenderedImage {
     RenderedImage {
+        session_image: None,
         history_message_index: None,
         media_type: "image/png".to_string(),
         data: data.to_string(),

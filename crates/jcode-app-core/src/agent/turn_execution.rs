@@ -384,16 +384,13 @@ impl Agent {
 
     pub(super) fn user_image_ids_event(&self, index: usize, original: &str) -> Option<ServerEvent> {
         if let Some(message) = self.session.messages.get(index) {
-            let image_ids: Vec<_> = message
-                .content
-                .iter()
-                .filter(|block| matches!(block, ContentBlock::Image { .. }))
-                .enumerate()
-                .map(|(ordinal, _)| {
-                    crate::session::image_id(&self.session.id, &message.id, ordinal)
-                })
-                .collect();
-            if !image_ids.is_empty() {
+            let count = message.content.iter()
+                .filter(|block| matches!(block, ContentBlock::Image { .. })).count();
+            if count > 0 {
+                let (image_ids, image_ordinals): (Vec<_>, Vec<_>) = self.session
+                    .session_image_references_for_message(&message.id, 0..count)
+                    .map(|(id, reference)| (id, reference.map_or(0, |image| image.ordinal)))
+                    .unzip();
                 let mut content = original.to_string();
                 let mut missing = Vec::new();
                 for (index, id) in image_ids.iter().enumerate() {
@@ -416,6 +413,7 @@ impl Agent {
                     original_content: original.to_string(),
                     content,
                     image_ids,
+                    image_ordinals,
                 });
             }
         }

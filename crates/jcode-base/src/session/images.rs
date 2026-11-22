@@ -5,12 +5,17 @@
 //! inserted alongside them. A session namespace prevents cross-session aliases.
 use super::{ContentBlock, Session};
 use chrono::{DateTime, Utc};
+use jcode_session_types::SessionImageRef;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionImageInfo {
     pub image_id: String,
+    /// One-based order in the complete session, independent of the visible history window.
+    #[serde(default)]
+    pub ordinal: usize,
     pub message_index: usize,
     pub timestamp: Option<DateTime<Utc>>,
     pub media_type: String,
@@ -302,76 +307,156 @@ pub(super) fn provider_message(session_id: &str, stored: &super::StoredMessage) 
     message.to_message()
 }
 
+struct IndexedImage {
+    info: SessionImageInfo,
+    block_index: usize,
+}
+
+/// Derived from the durable transcript, never from a provider projection or UI page.
+/// Aliases preserve lookups for IDs recorded before re-reads shared an identity.
+#[derive(Default)]
+pub(super) struct SessionImageIndex {
+    entries: Vec<IndexedImage>,
+    by_id: HashMap<String, usize>,
+}
+
+impl SessionImageIndex {
+    fn get(&self, selector: &str) -> Option<&IndexedImage> {
+        let index = if let Some(index) = self.by_id.get(selector) {
+            *index
+        } else {
+            selector.parse::<usize>().ok()?.checked_sub(1)?
+        };
+        self.entries.get(index)
+    }
+
+    pub(super) fn reference(&self, id: &str) -> Option<SessionImageRef> {
+        let entry = self.get(id)?;
+        Some(SessionImageRef {
+            image_id: entry.info.image_id.clone(),
+            ordinal: entry.info.ordinal,
+        })
+    }
+}
+
 impl Session {
-    pub fn session_images(&self) -> Vec<SessionImageInfo> {
-        let mut result = Vec::new();
+    pub(super) fn image_index(&self) -> SessionImageIndex {
+        let mut index = SessionImageIndex::default();
+        let mut reads = HashMap::new();
         for (message_index, message) in self.messages.iter().enumerate() {
-            let mut ordinal = 0;
-            for block in &message.content {
+            let mut local_ordinal = 0;
+            let mut read = None;
+            for (block_index, block) in message.content.iter().enumerate() {
                 let media_type = match block {
-                    ContentBlock::Image { media_type, .. } => Some(media_type.clone()),
+                    ContentBlock::Image { media_type, .. } => media_type.clone(),
                     ContentBlock::Text { text, .. } => {
-                        parse_archive_marker(text).and_then(|reference| {
-                            (reference.image_id == image_id(&self.id, &message.id, ordinal))
-                                .then_some(reference.media_type)
-                        })
+                        let Some(reference) = parse_archive_marker(text) else {
+                            continue;
+                        };
+                        if reference.image_id != image_id(&self.id, &message.id, local_ordinal) {
+                            continue;
+                        }
+                        reference.media_type
                     }
-                    _ => None,
+                    ContentBlock::ToolUse {
+                        id, name, input, ..
+                    } if name == "read" => {
+                        if let Some(selector) = input
+                            .get("file_path")
+                            .and_then(|value| value.as_str())
+                            .and_then(|path| path.strip_prefix("session-image://"))
+                        {
+                            reads.insert(id.as_str(), selector);
+                        }
+                        continue;
+                    }
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => {
+                        let returned_id = content
+                            .lines()
+                            .next()
+                            .and_then(|line| line.strip_prefix("Session image [#"))
+                            .and_then(|line| line.strip_suffix(']'));
+                        read = reads
+                            .remove(tool_use_id.as_str())
+                            .filter(|_| !is_error.unwrap_or(false))
+                            .and_then(|selector| index.get(selector))
+                            .filter(|original| {
+                                returned_id.and_then(|id| index.by_id.get(id)).copied()
+                                    == Some(original.info.ordinal - 1)
+                            })
+                            .map(|original| original.info.ordinal - 1);
+                        continue;
+                    }
+                    _ => continue,
                 };
-                if let Some(media_type) = media_type {
-                    result.push(SessionImageInfo {
-                        image_id: image_id(&self.id, &message.id, ordinal),
+                let id = image_id(&self.id, &message.id, local_ordinal);
+                local_ordinal += 1;
+                if let Some(entry_index) = read.take() {
+                    index.by_id.insert(id, entry_index);
+                    continue;
+                }
+                let entry_index = index.entries.len();
+                index.by_id.insert(id.clone(), entry_index);
+                index.entries.push(IndexedImage {
+                    info: SessionImageInfo {
+                        image_id: id,
+                        ordinal: entry_index + 1,
                         message_index,
                         timestamp: message.timestamp,
                         media_type,
-                    });
-                    ordinal += 1;
-                }
+                    },
+                    block_index,
+                });
             }
         }
-        result
+        index
     }
 
-    pub fn session_image(&self, id: &str) -> Option<SessionImage> {
-        for (message_index, message) in self.messages.iter().enumerate() {
-            let mut ordinal = 0;
-            for block in &message.content {
-                let candidate = image_id(&self.id, &message.id, ordinal);
-                let found = match block {
-                    ContentBlock::Image { media_type, data } => {
-                        Some((media_type.clone(), (candidate == id).then(|| data.clone())))
-                    }
-                    ContentBlock::Text { text, .. } => {
-                        parse_archive_marker(text).and_then(|reference| {
-                            (reference.image_id == candidate).then(|| {
-                                (
-                                    reference.media_type,
-                                    (candidate == id)
-                                        .then(|| read_archived_image(&candidate))
-                                        .flatten(),
-                                )
-                            })
-                        })
-                    }
-                    _ => None,
-                };
-                if let Some((media_type, data)) = found {
-                    if candidate == id {
-                        return Some(SessionImage {
-                            info: SessionImageInfo {
-                                image_id: candidate,
-                                message_index,
-                                timestamp: message.timestamp,
-                                media_type,
-                            },
-                            data: data?,
-                        });
-                    }
-                    ordinal += 1;
-                }
-            }
-        }
-        None
+    pub fn session_images(&self) -> Vec<SessionImageInfo> {
+        self.image_index()
+            .entries
+            .into_iter()
+            .map(|entry| entry.info)
+            .collect()
+    }
+
+    pub fn session_image_references_for_message(
+        &self,
+        message_id: &str,
+        ordinals: std::ops::Range<usize>,
+    ) -> impl Iterator<Item = (String, Option<SessionImageRef>)> + use<> {
+        let index = self.image_index();
+        let session_id = self.id.clone();
+        let message_id = message_id.to_owned();
+        ordinals.map(move |ordinal| {
+            let id = image_id(&session_id, &message_id, ordinal);
+            let reference = index.reference(&id);
+            (id, reference)
+        })
+    }
+
+    /// Accept an immutable image ID or a one-based session ordinal.
+    pub fn session_image(&self, selector: &str) -> Option<SessionImage> {
+        let index = self.image_index();
+        let entry = index.get(selector)?;
+        let block = self
+            .messages
+            .get(entry.info.message_index)?
+            .content
+            .get(entry.block_index)?;
+        let data = match block {
+            ContentBlock::Image { data, .. } => data.clone(),
+            ContentBlock::Text { .. } => read_archived_image(&entry.info.image_id)?,
+            _ => return None,
+        };
+        Some(SessionImage {
+            info: entry.info.clone(),
+            data,
+        })
     }
 }
 

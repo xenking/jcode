@@ -56,6 +56,7 @@ pub(super) fn tool_output_side_pane_images(
         .images
         .iter()
         .map(|img| jcode_session_types::RenderedImage {
+            session_image: None,
             history_message_index: None,
             media_type: img.media_type.clone(),
             data: img.data.clone(),
@@ -76,19 +77,30 @@ pub(super) fn tool_output_side_pane_images(
 }
 
 pub(super) fn label_session_images(
-    session_id: &str,
+    session: &crate::session::Session,
     message_id: &str,
     first_ordinal: usize,
-    images: &mut [jcode_session_types::RenderedImage],
+    images: &mut Vec<jcode_session_types::RenderedImage>,
 ) {
-    for (offset, image) in images.iter_mut().enumerate() {
-        let id = crate::session::image_id(session_id, message_id, first_ordinal + offset);
+    if images.is_empty() {
+        return;
+    }
+    let mut refs = session.session_image_references_for_message(
+        message_id, first_ordinal..first_ordinal + images.len(),
+    );
+    images.retain_mut(|image| {
+        let (id, reference) = refs.next().expect("one reference per image");
+        if reference.as_ref().is_some_and(|image| image.image_id != id) {
+            return false;
+        }
+        image.session_image = reference;
         let label = image.label.get_or_insert_with(String::new);
         if !label.is_empty() {
             label.push(' ');
         }
         label.push_str(&format!("[#{id}]"));
-    }
+        true
+    });
 }
 
 /// Metadata key a tool sets to load deferred tool definitions into context.

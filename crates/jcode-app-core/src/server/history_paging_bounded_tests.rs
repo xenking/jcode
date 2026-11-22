@@ -363,6 +363,14 @@ fn bounded_history_images_use_stable_session_ids_even_for_duplicate_payloads() {
             .collect::<Vec<_>>()
     );
     assert_ne!(image_keys[0], image_keys[1]);
+    let tail = page_records(&records, None, 1).unwrap();
+    let first = page_records(&records, tail.before.as_deref(), 1).unwrap();
+    for (page, expected) in [(first, &ids[0]), (tail, &ids[1])] {
+        let record: serde_json::Value = serde_json::from_str(&page.fragments[0].text).unwrap();
+        assert_eq!(record["images"][0]["session_image"], serde_json::json!({
+            "image_id": expected.image_id, "ordinal": expected.ordinal,
+        }));
+    }
     assert_eq!(
         super::image_chunk(&session, &ids[0].image_id, 0).unwrap(),
         (4, "same".into())

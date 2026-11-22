@@ -171,7 +171,7 @@ impl Agent {
             }
             let stored = &self.session.messages[result_index];
             label_session_images(
-                &self.session.id,
+                &self.session,
                 &stored.id,
                 first_ordinal,
                 &mut side_pane_images,

@@ -227,6 +227,13 @@ pub enum RenderedImageAnchor {
     UserPrompt { ordinal: usize },
 }
 
+/// The user-facing number and immutable wire identity of one session image.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionImageRef {
+    pub image_id: String,
+    pub ordinal: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RenderedImage {
     pub media_type: String,
@@ -246,6 +253,8 @@ pub struct RenderedImage {
     /// for multiple images at the same boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_message_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_image: Option<SessionImageRef>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Default)]

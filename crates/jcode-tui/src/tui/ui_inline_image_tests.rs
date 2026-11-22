@@ -566,6 +566,7 @@ fn rendered_image(
     anchor: Option<crate::session::RenderedImageAnchor>,
 ) -> crate::session::RenderedImage {
     crate::session::RenderedImage {
+        session_image: None,
         history_message_index: None,
         media_type: "image/png".to_string(),
         data: TINY_PNG_B64.to_string(),
@@ -608,6 +609,7 @@ fn resolving_hidden_images_does_not_stage_payload_bytes() {
         .expect("encode fixture");
     let data = base64::engine::general_purpose::STANDARD.encode(png);
     let image = crate::session::RenderedImage {
+        session_image: None,
         history_message_index: None,
         media_type: "image/png".to_string(),
         data,
