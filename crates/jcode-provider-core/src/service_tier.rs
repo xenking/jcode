@@ -91,7 +91,7 @@ pub fn speed_tier_ladder(
         || provider.contains("anthropic")
         || (provider.is_empty() && model.starts_with("claude"));
     if is_anthropic {
-        return if model.contains("claude-opus-4-8") {
+        return if model == "claude-opus-5-5" || model.contains("claude-opus-4-8") {
             STANDARD_FAST.to_vec()
         } else {
             Vec::new()

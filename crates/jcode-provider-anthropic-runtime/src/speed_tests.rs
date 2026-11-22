@@ -304,6 +304,54 @@ fn api_fast_is_opt_in_for_first_party_only_and_does_not_follow_model_switches() 
 }
 
 #[test]
+fn opus_55_fast_controls_send_speed_not_capacity_tier() {
+    use jcode_provider_core::service_tier::{speed_tier_ladder_with_capabilities, step_speed_tier};
+
+    let _lock = jcode_base::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = crate::tests::EnvVarGuard::set("JCODE_HOME", home.path());
+    let (url, server) = capture([
+        ("200 OK", SSE, CONFIRMED_FAST),
+        ("200 OK", SSE, STOP),
+        ("200 OK", SSE, CONFIRMED_FAST),
+    ]);
+    let api = api_provider(&url, true);
+    let gateway = api_provider(&url, false);
+
+    runtime().block_on(async {
+        // The TUI's /fast on calls this legacy trait method directly in local mode.
+        api.set_service_tier("priority").unwrap();
+        assert_eq!(api.service_tier().as_deref(), Some("priority"));
+        complete(&api, None).await;
+
+        // Both TUIs step the same advertised ladder on Alt+Down and Alt+Up.
+        let ladder = speed_tier_ladder_with_capabilities(
+            Some(api.name()),
+            Some(&api.model()),
+            Some(&api.available_service_tiers()),
+        );
+        for (direction, expected) in [(-1, "off"), (1, "priority")] {
+            let (_, next, at_end) =
+                step_speed_tier(&ladder, api.service_tier().as_deref(), direction).unwrap();
+            assert_eq!(next, expected);
+            assert!(!at_end);
+            api.set_service_tier(next).unwrap();
+            complete(&api, None).await;
+        }
+        assert!(!gateway.available_service_tiers().contains(&"priority"));
+        assert!(gateway.set_service_tier("priority").is_err());
+    });
+
+    let [slash_fast, step_down, step_up] = server.join().unwrap();
+    assert_standard(&step_down);
+    for request in [slash_fast, step_up] {
+        assert_eq!(request.body["speed"], "fast");
+        assert!(request.body.get("service_tier").is_none());
+        assert_beta(&request, false);
+    }
+}
+
+#[test]
 fn oauth_usage_credit_denial_stays_standard_and_never_transfers_opt_in_to_another_account() {
     let _lock = jcode_base::storage::lock_test_env();
     let home = tempfile::tempdir().unwrap();
