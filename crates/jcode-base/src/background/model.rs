@@ -254,6 +254,7 @@ pub(super) struct RunningTask {
     pub(super) started_at: Instant,
     pub(super) started_at_rfc3339: String,
     pub(super) delivery_flags: watch::Sender<(bool, bool)>,
+    pub(super) terminal_claimed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub(super) handle: JoinHandle<Result<TaskResult>>,
 }
 

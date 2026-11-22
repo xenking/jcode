@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
@@ -261,11 +262,11 @@ impl BackgroundTaskManager {
             return self.read_status_file(status_path).await.unwrap_or(status);
         }
 
-        self.publish_detached_completion(&status, output);
+        self.publish_status_completion(&status, output);
         status
     }
 
-    fn publish_detached_completion(&self, status: &TaskStatusFile, output: String) {
+    fn publish_status_completion(&self, status: &TaskStatusFile, output: String) {
         let output_preview = if output.len() > 500 {
             format!("{}...", crate::util::truncate_str(&output, 500))
         } else {
@@ -308,7 +309,7 @@ impl BackgroundTaskManager {
     pub async fn replay_detached_completions_for(&self, session_id: &str) {
         for status in self.unacknowledged_completions(session_id).await {
             let output = self.output(&status.task_id).await.unwrap_or_default();
-            self.publish_detached_completion(&status, output);
+            self.publish_status_completion(&status, output);
         }
     }
 
@@ -590,6 +591,8 @@ impl BackgroundTaskManager {
         let (delivery_flags_tx, delivery_flags_rx) = watch::channel((notify, wake));
         let manager = self.clone();
         let tasks_for_prune = Arc::clone(&self.tasks);
+        let terminal_claimed = Arc::new(AtomicBool::new(false));
+        let claim_for_task = Arc::clone(&terminal_claimed);
         let (published_tx, published_rx) = tokio::sync::oneshot::channel::<()>();
 
         // Register before awaiting publication. The worker owns publication
@@ -601,6 +604,9 @@ impl BackgroundTaskManager {
                 .await;
             let _ = published_tx.send(());
             let result = execute_fn(output_path_clone.clone()).await;
+            if claim_for_task.swap(true, Ordering::Relaxed) {
+                return result;
+            }
 
             let duration_secs = started_at.elapsed().as_secs_f64();
             let (status, exit_code, error) = match &result {
@@ -708,6 +714,7 @@ impl BackgroundTaskManager {
             started_at,
             started_at_rfc3339,
             delivery_flags: delivery_flags_tx,
+            terminal_claimed,
             handle,
         };
 
@@ -799,6 +806,8 @@ impl BackgroundTaskManager {
         let (delivery_flags_tx, delivery_flags_rx) = watch::channel((notify, wake));
         let manager = self.clone();
         let tasks_for_prune = Arc::clone(&self.tasks);
+        let terminal_claimed = Arc::new(AtomicBool::new(false));
+        let claim_for_task = Arc::clone(&terminal_claimed);
         let (published_tx, published_rx) = tokio::sync::oneshot::channel::<()>();
         let mut tasks = self.tasks.write().await;
         let wrapper_handle = tokio::spawn(runtime_activity.scope(async move {
@@ -830,6 +839,13 @@ impl BackgroundTaskManager {
                 ),
             };
 
+            if claim_for_task.swap(true, Ordering::Relaxed) {
+                return Ok(TaskResult {
+                    exit_code,
+                    error,
+                    status: Some(status),
+                });
+            }
             if let Ok(mut file) = File::create(&output_path_clone).await {
                 let _ = file.write_all(output_text.as_bytes()).await;
             }
@@ -916,6 +932,7 @@ impl BackgroundTaskManager {
             started_at,
             started_at_rfc3339,
             delivery_flags: delivery_flags_tx,
+            terminal_claimed,
             handle: wrapper_handle,
         };
 
@@ -1155,16 +1172,24 @@ impl BackgroundTaskManager {
         task_id: &str,
         _graceful_timeout: std::time::Duration,
     ) -> Result<bool> {
-        // Never hold the map or status lock while awaiting the task: completion
-        // needs both locks before it can exit.
-        let task = self.tasks.write().await.remove(task_id);
+        let task = {
+            let mut tasks = self.tasks.write().await;
+            // Once natural completion claims the result, only that task may
+            // commit the status and emit the event, even if it has not pruned yet.
+            if tasks
+                .get(task_id)
+                .is_some_and(|task| task.terminal_claimed.swap(true, Ordering::Relaxed))
+            {
+                return Ok(false);
+            }
+            tasks.remove(task_id)
+        };
         if let Some(mut task) = task {
             task.handle.abort();
             let _ = (&mut task.handle).await;
             let _status_guard = self.progress_updates.lock().await;
 
             // Update status file
-            let (notify_flag, wake_flag) = *task.delivery_flags.borrow();
             let mut final_status = TaskStatusFile {
                 task_id: task.task_id,
                 tool_name: task.tool_name,
@@ -1181,8 +1206,8 @@ impl BackgroundTaskManager {
                 owner_instance: Some(model::process_instance_token().to_string()),
                 detached: false,
                 completion_delivered: None,
-                notify: notify_flag,
-                wake: wake_flag,
+                notify: false,
+                wake: false,
                 progress: None,
                 event_history: Vec::new(),
                 stall_wake_seconds: None,
@@ -1196,6 +1221,7 @@ impl BackgroundTaskManager {
             );
             self.write_status_file(&task.status_path, &final_status)
                 .await;
+            self.publish_status_completion(&final_status, "Cancelled by user".into());
 
             Ok(true)
         } else {
@@ -1232,6 +1258,8 @@ impl BackgroundTaskManager {
             status.status = BackgroundTaskStatus::Failed;
             status.exit_code = None;
             status.error = Some("Cancelled by user".to_string());
+            status.notify = false;
+            status.wake = false;
             status.completed_at = Some(completed_at.to_rfc3339());
             status.duration_secs = Self::status_duration_secs(&status.started_at, completed_at);
             let event_status = status.status.clone();
@@ -1242,6 +1270,7 @@ impl BackgroundTaskManager {
                 terminal_event_record(event_status, event_exit_code, event_error.as_deref()),
             );
             self.write_status_file(&status_path, &status).await;
+            self.publish_status_completion(&status, "Cancelled by user".into());
             Ok(true)
         }
     }
@@ -1266,10 +1295,16 @@ impl BackgroundTaskManager {
         let mut finalized = 0;
 
         for task in tasks {
-            task.handle.abort();
+            let interrupted = !task.terminal_claimed.swap(true, Ordering::Relaxed);
+            if interrupted {
+                task.handle.abort();
+            }
             // Wait (bounded) for the aborted future to actually drop, so
             // kill_on_drop children are killed before the upcoming exec.
             let _ = tokio::time::timeout(Duration::from_secs(2), task.handle).await;
+            if !interrupted {
+                continue;
+            }
 
             let (notify_flag, wake_flag) = *task.delivery_flags.borrow();
             let prior_status = self.read_status_file(&task.status_path).await;
