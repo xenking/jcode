@@ -15,14 +15,14 @@ const env = {PATH:process.env.PATH, HOME:home, JCODE_HOME:store, JCODE_TEST_SESS
 function request(path, message, retain=false) {
   return new Promise((ok, reject) => {
     const socket = createConnection(path), timer = setTimeout(() => socket.destroy(Error('private socket timed out')),30000);
-    let buffer='';
+    let buffer='', session;
     socket.on('connect', () => socket.write(JSON.stringify(message)+'\n'));
     socket.on('error', reject).on('close', () => { clearTimeout(timer); reject(Error('private socket closed')); });
     socket.setEncoding('utf8').on('data', chunk => {
       buffer += chunk;
       while (buffer.includes('\n')) {
         const i=buffer.indexOf('\n'), line=buffer.slice(0,i); buffer=buffer.slice(i+1);
-        try { const value=JSON.parse(line); if(value.id!==message.id) continue; if(retain){ clearTimeout(timer); ok(socket); } else { ok(value); socket.destroy(); } return; }
+        try { const value=JSON.parse(line); if(process.env.EXPRESS_SMOKE_TRACE) console.error(message.type, value.type, value.id, value.session_id); if (retain && ['session','history'].includes(value.type) && value.session_id) session=value.session_id; if(value.id!==message.id || value.type==='ack') continue; if(retain){ if(value.type==='error') throw Error(JSON.stringify(value)); if(value.type!=='done' || !session) continue; clearTimeout(timer); ok({socket,session}); } else { ok(value); socket.destroy(); } return; }
         catch(err){ socket.destroy(err); return; }
       }
     });
@@ -40,10 +40,9 @@ async function command(command,session_id){
 const daemon=Bun.spawn([bin,'--no-update','--no-selfdev','--provider','anthropic-api','serve','--socket',sock],{env,cwd:home,stdout:'ignore',stderr:'ignore'});
 try {
   await until('private daemon',async()=>(await request(sock,{type:'ping',id:2})).type==='pong');
-  const created=await command(`create_session:${home}`), session=created.session_id;
-  assert.ok(session,JSON.stringify(created));
-  const client=await request(sock,{type:'subscribe',id:10,working_dir:home,target_session_id:session,supports_applets:true,supports_user_response:false},true);
+  const {socket:client,session}=await request(sock,{type:'subscribe',id:10,working_dir:home,supports_applets:true,supports_user_response:false},true);
   daemon.exited.then(()=>client.destroy());
+  await until('Desktop applet capability', async () => (await command('tools',session)).includes('applet'));
   const tool = args => command(`tool:applet ${JSON.stringify({intent:'Exercise Express applet in private daemon',...args})}`,session);
   const snapshot = async() => JSON.parse(await readFile(join(store,'agent_applets',session+'.json'),'utf8')).instances.find(i=>i.id==='review');
   const express='root = ReviewChange("Review patch", "src/ui.rs", "change42")';
