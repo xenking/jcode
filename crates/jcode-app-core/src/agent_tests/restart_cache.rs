@@ -16,7 +16,12 @@ impl Provider for Dialect {
         _: &str,
         _: Option<&str>,
     ) -> Result<EventStream> {
-        panic!("offline wire fixture")
+        Ok(Box::pin(futures::stream::iter([
+            Ok(StreamEvent::TextDelta(
+                "Summary of the folded history.".into(),
+            )),
+            Ok(StreamEvent::MessageEnd { stop_reason: None }),
+        ])))
     }
 
     fn name(&self) -> &str {
@@ -348,6 +353,110 @@ fn restart_cache_continue_is_outside_anthropic_cached_history() {
     let nudge = &items[boundary.0]["content"][0];
     assert_eq!(nudge["text"], "Continue.");
     assert!(nudge.get("cache_control").is_none());
+}
+
+#[tokio::test]
+async fn restart_cache_monitor_attributes_idle_manual_compaction() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let home = crate::storage::jcode_dir().unwrap();
+    std::fs::write(
+        home.join("config.toml"),
+        "[compaction]\nsnapcompact = false\n",
+    )
+    .unwrap();
+    crate::config::Config::invalidate_cache();
+    let dialect = Dialect::Anthropic;
+    let mut agent =
+        Agent::new_with_initial_working_dir(Arc::new(dialect), Registry::empty(), home.to_str());
+    let model = dialect.model();
+    let event = super::super::cache_request::kv_cache_request_event(&[], &[], "", &[]);
+    let canonical = |wire: &Value| {
+        use jcode_provider_core::fingerprint::{CanonicalInput, stable_hash_json};
+        CanonicalInput {
+            provider: "anthropic".into(),
+            format: "anthropic_messages_split".into(),
+            model: model.clone(),
+            item_hashes: wire["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(stable_hash_json)
+                .collect(),
+            system_hash: Some(stable_hash_json(&wire["system"])),
+            tools_hash: Some(stable_hash_json(&wire["tools"])),
+            request_options_hash: None,
+            responses_request_only_suffix: None,
+        }
+    };
+    for _ in 0..8 {
+        append_text(&mut agent, Role::User, &"Build this feature. ".repeat(500));
+        append_text(&mut agent, Role::Assistant, "Done.");
+    }
+    append_text(&mut agent, Role::User, "Before compaction");
+    let before = canonical(&request(&mut agent, dialect).await);
+    agent.begin_kv_cache_monitor_request(&event, &model);
+    agent.kv_cache_monitor.note_canonical_input(before.clone());
+    assert!(
+        agent
+            .finish_kv_cache_monitor_request(0, Some(10_000), Some(10_000))
+            .is_none()
+    );
+    append_text(&mut agent, Role::Assistant, "Last reply before compaction");
+    agent.session.save().unwrap();
+
+    agent
+        .registry
+        .compaction()
+        .write()
+        .await
+        .update_observed_input_tokens(190_000);
+    let (detail, started) = agent.request_manual_compaction();
+    assert!(started, "{detail}");
+    let applied = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let (event, error, pending) = agent.poll_compaction_status();
+            if let Some(event) = event {
+                break event;
+            }
+            assert!(pending, "{error:?}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(applied.trigger, "manual");
+    let id = agent.session_id().to_owned();
+    drop(agent);
+
+    let mut restored = Agent::new(Arc::new(dialect), Registry::empty());
+    restored.restore_session(&id).unwrap();
+    append_text(&mut restored, Role::User, "After restart");
+    let after = canonical(&request(&mut restored, dialect).await);
+    assert_eq!(before.system_hash, after.system_hash);
+    assert_eq!(before.tools_hash, after.tools_hash);
+    assert!(!after.item_hashes.starts_with(&before.item_hashes));
+    restored.begin_kv_cache_monitor_request(&event, &model);
+    restored
+        .kv_cache_monitor
+        .note_canonical_input(after.clone());
+    let miss = restored.finish_kv_cache_monitor_request(0, Some(1_000), Some(19_000));
+    assert!(
+        matches!(&miss, Some(ServerEvent::KvCacheMiss { reason, harness_caused: false, .. }) if reason == "compaction"),
+        "{miss:?}"
+    );
+
+    drop(restored);
+    let mut restored = Agent::new(Arc::new(dialect), Registry::empty());
+    restored.restore_session(&id).unwrap();
+    restored.begin_kv_cache_monitor_request(&event, &model);
+    let mut unexpected = after;
+    unexpected.item_hashes[0] ^= 1;
+    restored.kv_cache_monitor.note_canonical_input(unexpected);
+    let miss = restored.finish_kv_cache_monitor_request(0, Some(1_000), Some(19_000));
+    assert!(
+        matches!(&miss, Some(ServerEvent::KvCacheMiss { reason, harness_caused: true, .. }) if reason == "prefix_changed"),
+        "{miss:?}"
+    );
 }
 
 #[tokio::test]
