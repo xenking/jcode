@@ -442,7 +442,14 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
             }
         }
         remote
-            .runtime_command("mode", vec![invocation.name.to_string()])
+            .runtime_command(
+                "mode",
+                vec![
+                    "--invoke-skill".into(),
+                    invocation.name.to_owned(),
+                    invocation.raw_arguments(&prepared.expanded).to_owned(),
+                ],
+            )
             .await?;
     }
 

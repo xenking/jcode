@@ -1685,7 +1685,7 @@ impl Agent {
                 if let Some(skill) = skills.get(invocation.name) {
                     println!("Activating skill: {}", skill.name);
                     println!("{}\n", skill.description);
-                    self.set_pinned_skill(Some(invocation.name))?;
+                    self.invoke_pinned_skill(invocation.name, invocation.raw_arguments(input))?;
                     if let Some(prompt) = invocation.prompt {
                         if let Err(e) = self.run_once(prompt).await {
                             eprintln!("\nError: {}\n", e);

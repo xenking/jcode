@@ -132,6 +132,8 @@ pub struct Session {
     pub pinned_skill: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pinned_skills: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pinned_skill_arguments: std::collections::BTreeMap<String, String>,
     /// Durable logical input turn identity for per-route usage deduplication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_usage_turn_id: Option<String>,
@@ -285,6 +287,8 @@ struct SessionStartupStub {
     pinned_skill: Option<String>,
     #[serde(default)]
     pinned_skills: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pinned_skill_arguments: std::collections::BTreeMap<String, String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     #[serde(default)]
@@ -458,6 +462,7 @@ impl Session {
         session.system_prompt = stub.system_prompt;
         session.pinned_skill = stub.pinned_skill;
         session.pinned_skills = stub.pinned_skills;
+        session.pinned_skill_arguments = stub.pinned_skill_arguments;
         session.created_at = stub.created_at;
         session.updated_at = stub.updated_at;
         session.compaction = stub.compaction;
@@ -507,6 +512,7 @@ impl Session {
         session.system_prompt = snapshot.system_prompt;
         session.pinned_skill = snapshot.pinned_skill;
         session.pinned_skills = snapshot.pinned_skills;
+        session.pinned_skill_arguments = snapshot.pinned_skill_arguments;
         session.created_at = snapshot.created_at;
         session.updated_at = snapshot.updated_at;
         session.messages = snapshot.messages;
@@ -757,6 +763,7 @@ impl Session {
             system_prompt: self.system_prompt.clone(),
             pinned_skill: self.pinned_skill.clone(),
             pinned_skills: self.pinned_skills.clone(),
+            pinned_skill_arguments: self.pinned_skill_arguments.clone(),
             updated_at: self.updated_at,
             compaction: self.compaction.clone(),
             compaction_unchanged: false,
@@ -972,6 +979,7 @@ impl Session {
         self.system_prompt = meta.system_prompt;
         self.pinned_skill = meta.pinned_skill;
         self.pinned_skills = meta.pinned_skills;
+        self.pinned_skill_arguments = meta.pinned_skill_arguments;
         self.updated_at = meta.updated_at;
         if !meta.compaction_unchanged {
             self.compaction = meta.compaction;
@@ -1037,6 +1045,7 @@ impl Session {
             system_prompt: None,
             pinned_skill: None,
             pinned_skills: Vec::new(),
+            pinned_skill_arguments: Default::default(),
             model_usage_turn_id: None,
             compaction: None,
             provider_session_id: None,
@@ -1108,6 +1117,7 @@ impl Session {
             system_prompt: None,
             pinned_skill: None,
             pinned_skills: Vec::new(),
+            pinned_skill_arguments: Default::default(),
             model_usage_turn_id: None,
             compaction: None,
             provider_session_id: None,
@@ -2170,6 +2180,8 @@ struct RemoteStartupSessionSnapshot {
     pinned_skill: Option<String>,
     #[serde(default)]
     pinned_skills: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pinned_skill_arguments: std::collections::BTreeMap<String, String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     #[serde(default, deserialize_with = "parallel_messages::deserialize")]

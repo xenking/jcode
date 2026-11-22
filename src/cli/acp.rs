@@ -1289,11 +1289,20 @@ impl AcpRuntime {
         // against the session's registry. Unknown or path-like slash text is
         // passed through to the model unchanged.
         let mut text = text;
+        let mut skill_arguments = None;
         let skills = session.skills();
         let selected_skill = match explicit_skill {
             Some(name) => Some(name),
             None => match resolve_acp_skill_invocation(&skills, &text) {
                 Some((name, prompt)) => {
+                    skill_arguments = Some(
+                        text.trim()
+                            .trim_start_matches(['/', '$'])
+                            .strip_prefix(&name)
+                            .unwrap_or_default()
+                            .trim()
+                            .to_owned(),
+                    );
                     text = prompt.unwrap_or_default();
                     Some(name)
                 }
@@ -1311,6 +1320,13 @@ impl AcpRuntime {
                 .await?;
                 return Ok(());
             };
+            if let Some(arguments) = skill_arguments
+                && skill.content.contains('$')
+                && let Err(error) = invoke_acp_skill(&session, &name, arguments).await
+            {
+                cleanup_prompt_state(&session).await;
+                return Err(error);
+            }
             let notice = format!("Activated skill: {} - {}", skill.name, skill.description);
             *session.active_skill.lock().await = Some(name);
             self.write_notification(
@@ -1661,6 +1677,29 @@ async fn cleanup_prompt_state(session: &DaemonSession) {
     }
     session.cancel_requested.store(false, Ordering::SeqCst);
     session.prompt_running.store(false, Ordering::SeqCst);
+}
+
+async fn invoke_acp_skill(session: &DaemonSession, name: &str, arguments: String) -> Result<()> {
+    let request_id = session.next_id();
+    session
+        .send(&Request::RuntimeCommand {
+            id: request_id,
+            command: "mode".into(),
+            args: vec!["--invoke-skill".into(), name.to_owned(), arguments],
+        })
+        .await?;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match session.read_event().await? {
+                ServerEvent::RuntimeCommandResult { id, .. } if id == request_id => return Ok(()),
+                ServerEvent::Error { id, message, .. } if id == request_id => {
+                    anyhow::bail!("Could not activate skill /{name}: {message}");
+                }
+                _ => {}
+            }
+        }
+    })
+    .await?
 }
 
 async fn wait_for_done(session: &DaemonSession, request_id: u64) -> Result<()> {

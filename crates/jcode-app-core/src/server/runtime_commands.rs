@@ -107,7 +107,14 @@ pub(super) async fn execute(
             bail!("Background output must be handled by the session runtime")
         }
         RuntimeCommand::Mode => {
-            let message = agent.mode_command(&args.join(" "))?;
+            let message = if let [flag, name, arguments] = args
+                && flag == "--invoke-skill"
+            {
+                agent.invoke_pinned_skill(name, arguments)?;
+                String::new()
+            } else {
+                agent.mode_command(&args.join(" "))?
+            };
             let session = agent.session_for_split();
             return Ok((
                 json!({"pinned_skill": session.pinned_skill, "pinned_skills": session.pinned_skill_names()}),
@@ -815,6 +822,54 @@ mod tests {
                 .is_none()
         );
     }
+    #[tokio::test]
+    async fn mode_invocation_persists_rendered_arguments_without_duplicate_reminders() {
+        let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let dir = project.path().join(".jcode/skills/mode-probe");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "---\nname: mode-probe\ndescription: Runtime mode\narguments: repo, issue\n---\nHandle $repo/$issue\n").unwrap();
+        let mut agent = Agent::new_with_initial_working_dir(
+            Arc::new(NoInferenceProvider::default()),
+            crate::tool::Registry::empty(),
+            project.path().to_str(),
+        );
+        for arguments in ["'my repo' 17", "\"my repo\" 17", "other 18"] {
+            let (data, _) = execute(
+                &mut agent,
+                RuntimeCommand::Mode,
+                &[
+                    "--invoke-skill".into(),
+                    "mode-probe".into(),
+                    arguments.into(),
+                ],
+                false,
+                Value::Null,
+            )
+            .await
+            .unwrap();
+            assert_eq!(data["pinned_skill"], "mode-probe");
+        }
+        let saved = crate::session::Session::load(agent.session_id()).unwrap();
+        let rendered: Vec<_> = saved
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                crate::message::ContentBlock::Text { text, .. }
+                    if text.contains("# Active Skill") =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rendered.len(), 2);
+        assert!(rendered[0].contains("Handle my repo/17"));
+        assert!(rendered[1].contains("Handle other/18"));
+        assert_eq!(saved.pinned_skill_arguments("mode-probe"), "other 18");
+    }
+
     #[tokio::test]
     async fn mode_toggles_roundtrip_through_session_storage() {
         let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();

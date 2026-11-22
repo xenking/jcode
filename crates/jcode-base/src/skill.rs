@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
+mod arguments;
 mod invocation;
 pub use invocation::SkillInvocation;
 
@@ -39,6 +40,7 @@ pub struct Skill {
     pub allowed_tools: Option<Vec<String>>,
     disable_model_invocation: bool,
     command: Option<String>,
+    arguments: Vec<String>,
     pub content: String,
     pub path: PathBuf,
     /// Normalized search text, built on first use. Normalizing every skill
@@ -58,6 +60,7 @@ struct SkillFrontmatter {
     #[serde(rename = "disable-model-invocation")]
     disable_model_invocation: Option<serde_yaml::Value>,
     command: Option<String>,
+    arguments: Option<AllowedTools>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -590,6 +593,7 @@ impl SkillRegistry {
             allowed_tools,
             disable_model_invocation,
             command,
+            arguments,
         } = frontmatter;
 
         let allowed_tools = allowed_tools.map(|tools| match tools {
@@ -610,6 +614,19 @@ impl SkillRegistry {
             command: command
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty()),
+            arguments: match arguments {
+                Some(AllowedTools::CommaDelimited(names)) if names.contains(',') => names
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+                Some(AllowedTools::CommaDelimited(names)) => {
+                    names.split_whitespace().map(str::to_owned).collect()
+                }
+                Some(AllowedTools::Sequence(names)) => names,
+                None => Vec::new(),
+            },
             content: body,
             path: path.to_path_buf(),
             search_text: std::sync::OnceLock::new(),
@@ -736,6 +753,7 @@ impl SkillRegistry {
             mode,
             allowed_tools,
             command: scalar("command"),
+            arguments: scalar("arguments").map(AllowedTools::CommaDelimited),
             disable_model_invocation: entries
                 .iter()
                 .find(|(key, _)| *key == "disable-model-invocation")
@@ -1132,8 +1150,7 @@ impl Skill {
             return Ok(None);
         };
         anyhow::ensure!(cfg!(unix), "Command skills require a POSIX shell");
-        let args = shlex::split(raw_args)
-            .unwrap_or_else(|| raw_args.split_whitespace().map(str::to_owned).collect());
+        let args = arguments::split(raw_args);
         // Pass user words as positional parameters to the trusted script, not as source text.
         let script = format!("{command} \"$@\"");
         let line = shlex::try_join(
@@ -1146,10 +1163,25 @@ impl Skill {
 
     /// Get the full prompt content for this skill
     pub fn get_prompt(&self) -> String {
-        format!(
-            "# Skill: {}\n\n{}\n\n{}",
-            self.name, self.description, self.content
-        )
+        self.prompt_with_body(&self.content)
+    }
+
+    /// Render once from the original template. Inserted arguments are never expanded.
+    pub fn render_prompt(&self, raw_arguments: &str, project_dir: Option<&Path>) -> String {
+        if !self.content.contains('$') {
+            return self.get_prompt();
+        }
+        self.prompt_with_body(&arguments::render(
+            &self.content,
+            raw_arguments,
+            &self.arguments,
+            self.path.parent(),
+            project_dir,
+        ))
+    }
+
+    fn prompt_with_body(&self, body: &str) -> String {
+        format!("# Skill: {}\n\n{}\n\n{}", self.name, self.description, body)
     }
 
     /// Load additional files from the skill directory

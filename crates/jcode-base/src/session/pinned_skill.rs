@@ -11,7 +11,25 @@ impl Session {
 
     pub fn set_pinned_skill_names(&mut self, names: Vec<String>) {
         self.pinned_skill = names.first().cloned();
+        self.pinned_skill_arguments
+            .retain(|name, _| names.contains(name));
         self.pinned_skills = names;
+    }
+
+    pub fn pinned_skill_arguments(&self, name: &str) -> &str {
+        self.pinned_skill_arguments
+            .get(name)
+            .map_or("", String::as_str)
+    }
+
+    pub fn set_pinned_skill_invocation(&mut self, name: &str, arguments: &str) {
+        self.set_pinned_skill_names(vec![name.to_owned()]);
+        if arguments.is_empty() {
+            self.pinned_skill_arguments.remove(name);
+        } else {
+            self.pinned_skill_arguments
+                .insert(name.to_owned(), arguments.to_owned());
+        }
     }
 
     pub fn render_pinned_skill_announcement(
@@ -71,6 +89,8 @@ impl Session {
             return;
         }
         self.set_pinned_skill_names(names.to_vec());
+        self.pinned_skill_arguments
+            .clone_from(&parent.pinned_skill_arguments);
         let global = crate::skill::SkillRegistry::shared_snapshot();
         let child_skills = crate::skill::SkillRegistry::effective_for_working_dir(
             &global,
@@ -84,7 +104,12 @@ impl Session {
             child_skills
                 .get(name)
                 .or_else(|| parent_skills.get(name))
-                .map(|skill| skill.get_prompt())
+                .map(|skill| {
+                    skill.render_prompt(
+                        self.pinned_skill_arguments(name),
+                        self.working_dir.as_deref().map(Path::new),
+                    )
+                })
         })
         .or_else(|| parent.stored_pinned_skill_announcement().map(str::to_owned))
         .or_else(|| {

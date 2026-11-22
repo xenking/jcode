@@ -956,6 +956,20 @@ impl Agent {
         self.set_pinned_skills(name.map(str::to_owned).into_iter().collect())
     }
 
+    pub(crate) fn invoke_pinned_skill(&mut self, name: &str, arguments: &str) -> Result<()> {
+        if self.current_skills_snapshot().get(name).is_none() {
+            anyhow::bail!(crate::skill::unknown_skill_message(name));
+        }
+        let previous = self.active_skill_announcement();
+        self.session.set_pinned_skill_invocation(name, arguments);
+        self.active_skill = Some(name.to_owned());
+        if self.active_skill_announcement() != previous {
+            self.announce_active_skill_inner();
+        }
+        self.session.save()?;
+        Ok(())
+    }
+
     fn set_pinned_skills(&mut self, next: Vec<String>) -> Result<()> {
         let skills = self.current_skills_snapshot();
         if let Some(missing) = next.iter().find(|name| skills.get(name).is_none()) {
@@ -1065,7 +1079,15 @@ impl Agent {
         self.active_skill.as_ref()?;
         let skills = self.current_skills_snapshot();
         Session::render_pinned_skill_announcement(self.session.pinned_skill_names(), |name| {
-            skills.get(name).map(|skill| skill.get_prompt())
+            skills.get(name).map(|skill| {
+                skill.render_prompt(
+                    self.session.pinned_skill_arguments(name),
+                    self.session
+                        .working_dir
+                        .as_deref()
+                        .map(std::path::Path::new),
+                )
+            })
         })
         .or_else(|| {
             self.session

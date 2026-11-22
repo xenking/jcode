@@ -3830,7 +3830,7 @@ impl App {
                 ));
                 return true;
             };
-            self.activate_pinned_skill(argument, skill.get_prompt());
+            self.activate_pinned_skill(skill, None);
         }
         self.push_display_message(DisplayMessage::system(format!(
             "Session mode: {}",
@@ -3843,11 +3843,24 @@ impl App {
         true
     }
 
-    fn activate_pinned_skill(&mut self, name: &str, prompt: String) {
-        let names = vec![name.to_owned()];
-        let changed = self.session.pinned_skill_names() != names;
-        self.session.set_pinned_skill_names(names);
-        self.active_skill = Some(name.into());
+    fn activate_pinned_skill(&mut self, skill: &crate::skill::Skill, arguments: Option<&str>) {
+        let name = &skill.name;
+        let names = vec![name.clone()];
+        let project = self
+            .session
+            .working_dir
+            .as_deref()
+            .map(std::path::Path::new);
+        let previous_arguments = self.session.pinned_skill_arguments(name);
+        let previous = skill.render_prompt(previous_arguments, project);
+        let prompt = skill.render_prompt(arguments.unwrap_or(previous_arguments), project);
+        let changed = self.session.pinned_skill_names() != names || prompt != previous;
+        if let Some(arguments) = arguments {
+            self.session.set_pinned_skill_invocation(name, arguments);
+        } else {
+            self.session.set_pinned_skill_names(names);
+        }
+        self.active_skill = Some(name.clone());
         if changed && !self.is_remote {
             self.append_turn_system_reminder(Some(format!("# Active Skill\n\n{}", prompt.trim())));
         }
@@ -3862,7 +3875,17 @@ impl App {
         let skills = self.current_skills_snapshot();
         let rendered = crate::session::Session::render_pinned_skill_announcement(
             self.session.pinned_skill_names(),
-            |name| skills.get(name).map(|skill| skill.get_prompt()),
+            |name| {
+                skills.get(name).map(|skill| {
+                    skill.render_prompt(
+                        self.session.pinned_skill_arguments(name),
+                        self.session
+                            .working_dir
+                            .as_deref()
+                            .map(std::path::Path::new),
+                    )
+                })
+            },
         );
         let reminder = rendered
             .as_deref()
@@ -4028,7 +4051,7 @@ impl App {
                     }
                     Ok(None) => {}
                 }
-                self.activate_pinned_skill(&skill_name, skill.get_prompt());
+                self.activate_pinned_skill(&skill, Some(invocation.raw_arguments(&input)));
                 self.push_display_message(DisplayMessage {
                     role: "system".to_string(),
                     content: format!("Activated skill: {} - {}", skill.name, skill.description),
