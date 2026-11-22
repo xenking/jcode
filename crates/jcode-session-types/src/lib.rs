@@ -37,8 +37,9 @@ pub use transcription::{
 pub const FILE_ATTACHMENTS_CAPABILITY: &str = "file_attachments_v1";
 mod catalog;
 pub use catalog::{
-    SIDE_QUESTION_VISIBILITY_DIR, SIDE_QUESTIONS_CAPABILITY, SessionCatalogContext,
-    SideQuestionTopic,
+    SIDE_QUESTION_VISIBILITY_DIR, SIDE_QUESTIONS_CAPABILITY, SessionCatalogActivity,
+    SessionCatalogContext, SessionOrigin, SideQuestionTopic, legacy_agent_session,
+    read_legacy_catalog_activity,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

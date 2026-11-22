@@ -638,6 +638,10 @@ impl Agent {
         Self::new_with_initial_working_dir(provider, registry, None)
     }
 
+    pub(crate) fn mark_agent_started(&mut self) {
+        self.session.agent_started = true;
+    }
+
     pub(crate) fn new_with_initial_working_dir(
         provider: Arc<dyn Provider>,
         registry: Registry,

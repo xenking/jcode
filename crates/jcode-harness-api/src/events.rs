@@ -839,8 +839,8 @@ pub struct SessionInfo {
     /// could not determine it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_bytes: Option<u64>,
-    /// Whether the user pinned/saved this session. Saved sessions sort before
-    /// ordinary sessions in every first-party session picker.
+    /// Whether the user pinned/saved this session. The default session-picker
+    /// order puts saved sessions first.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub saved: bool,
     /// Optional label given with `/save <label>`. Pickers display and search it
@@ -858,6 +858,23 @@ pub struct SessionInfo {
     pub archived: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at_ms: Option<u64>,
+}
+
+impl SessionInfo {
+    pub fn is_agent_started(&self) -> bool {
+        // Older daemons still distinguish swarm ownership from a fork parent.
+        self.context
+            .as_ref()
+            .and_then(|context| context.activity)
+            .map_or_else(
+                || self.parent_session_id.is_some(),
+                |activity| activity.origin == crate::SessionOrigin::Agent,
+            )
+    }
+
+    pub fn last_agent_activity_at_ms(&self) -> Option<i64> {
+        self.context.as_ref()?.activity?.last_agent_activity_at_ms
+    }
 }
 
 /// Live ownership and lifecycle facts. Transcript metadata cannot establish

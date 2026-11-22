@@ -117,6 +117,9 @@ pub struct Session {
     pub custom_title: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Set at creation for autonomous runs that are not swarm workers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub agent_started: bool,
     /// Immutable after the initial fork. Hidden is visibility, not provenance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     side_question_message_start: Option<usize>,
@@ -303,6 +306,8 @@ struct SessionStartupStub {
     #[serde(default)]
     is_swarm_worker: bool,
     #[serde(default)]
+    agent_started: bool,
+    #[serde(default)]
     worker_model_approval: Option<AuthorizedWorkerModel>,
     #[serde(default)]
     context_cap: Option<usize>,
@@ -411,6 +416,42 @@ impl Session {
         })
     }
 
+    pub(crate) fn catalog_activity(&self) -> jcode_session_types::SessionCatalogActivity {
+        use jcode_session_types::{SessionCatalogActivity, SessionOrigin, legacy_agent_session};
+        let belongs_to_session = |time: chrono::DateTime<chrono::Utc>| {
+            self.parent_id.is_none() || time >= self.created_at
+        };
+        let is_agent = self.agent_started
+            || self.is_swarm_worker
+            || self.hidden
+            || self.side_question_message_start.is_some()
+            || legacy_agent_session(
+                self.parent_id.is_some(),
+                self.title.as_deref(),
+                self.system_prompt.as_deref(),
+            )
+            || (self.parent_id.is_some()
+                && self.messages.iter().rev().any(|message| {
+                    message.timestamp.is_some_and(belongs_to_session)
+                        && is_scheduled_task_message(message)
+                }));
+        SessionCatalogActivity {
+            origin: if is_agent {
+                SessionOrigin::Agent
+            } else {
+                SessionOrigin::User
+            },
+            last_agent_activity_at_ms: self
+                .messages
+                .iter()
+                .rev()
+                .filter(|message| message.role == Role::Assistant)
+                .filter_map(|message| message.timestamp)
+                .find(|time| belongs_to_session(*time))
+                .map(|time| time.timestamp_millis()),
+        }
+    }
+
     fn session_from_startup_stub(stub: SessionStartupStub) -> Self {
         let mut session = Self::create_with_id(stub.id, stub.parent_id, stub.title);
         session.custom_title = stub.custom_title;
@@ -428,6 +469,7 @@ impl Session {
         session.speed_selection = stub.speed_selection;
         session.worker_speed = stub.worker_speed;
         session.is_swarm_worker = stub.is_swarm_worker;
+        session.agent_started = stub.agent_started;
         session.worker_model_approval = stub.worker_model_approval;
         session.context_cap = stub.context_cap;
         session.subagent_model = stub.subagent_model;
@@ -477,6 +519,7 @@ impl Session {
         session.speed_selection = snapshot.speed_selection;
         session.worker_speed = snapshot.worker_speed;
         session.is_swarm_worker = snapshot.is_swarm_worker;
+        session.agent_started = snapshot.agent_started;
         session.worker_model_approval = snapshot.worker_model_approval;
         session.context_cap = snapshot.context_cap;
         session.subagent_model = snapshot.subagent_model;
@@ -1004,6 +1047,7 @@ impl Session {
             speed_selection: None,
             worker_speed: None,
             is_swarm_worker: false,
+            agent_started: false,
             worker_model_approval: None,
             context_cap: None,
             subagent_model: None,
@@ -1074,6 +1118,7 @@ impl Session {
             speed_selection: None,
             worker_speed: None,
             is_swarm_worker: false,
+            agent_started: false,
             worker_model_approval: None,
             context_cap: None,
             subagent_model: None,
@@ -2149,6 +2194,8 @@ struct RemoteStartupSessionSnapshot {
     worker_speed: Option<jcode_message_types::WorkerSpeedStatus>,
     #[serde(default)]
     is_swarm_worker: bool,
+    #[serde(default)]
+    agent_started: bool,
     #[serde(default)]
     worker_model_approval: Option<AuthorizedWorkerModel>,
     #[serde(default)]

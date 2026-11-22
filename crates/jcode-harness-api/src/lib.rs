@@ -52,8 +52,8 @@ pub use jcode_session_types::{
     AskAnswer, AskOption, AskQuestion, AskResponse, CONTEXT_BREAKDOWN_CAPABILITY,
     ContextActionForecast, ContextActionMeasurement, ContextActionSavings, ContextActionStatus,
     ContextBreakdown, ContextBreakdownCategory, ContextBreakdownKind, ContextMeter,
-    ContextMeterState, ContextOccupancySource, SHAKE_TOOLS_CAPABILITY, SessionCatalogContext,
-    ShakeToolsAction, ShakeToolsResult, ShakeToolsStats,
+    ContextMeterState, ContextOccupancySource, SHAKE_TOOLS_CAPABILITY, SessionCatalogActivity,
+    SessionCatalogContext, SessionOrigin, ShakeToolsAction, ShakeToolsResult, ShakeToolsStats,
 };
 pub use jcode_session_types::{
     Attachment, FILE_ATTACHMENTS_CAPABILITY, RewindAnchor, RewindMessageKey, StoredAttachment,

@@ -173,6 +173,7 @@ fn create_coordinator_session(parent: &Session, mission: &Option<String>) -> Res
         None => "Overnight coordinator".to_string(),
     });
     let mut child = Session::create(Some(parent.id.clone()), title);
+    child.agent_started = true;
     child.replace_messages(parent.messages.clone());
     child.compaction = parent.compaction.clone();
     child.provider_key = parent.provider_key.clone();

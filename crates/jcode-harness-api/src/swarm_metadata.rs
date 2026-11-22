@@ -160,6 +160,15 @@ pub fn enrich_sessions_from_swarm_state(sessions: &mut [SessionInfo], dir: impl 
                 .clone()
                 .filter(|parent| !parent.trim().is_empty() && parent != &session.session_id);
         }
+        if session.parent_session_id.is_some() {
+            let context = session.context.get_or_insert_with(Default::default);
+            context.activity = Some(crate::SessionCatalogActivity {
+                origin: crate::SessionOrigin::Agent,
+                last_agent_activity_at_ms: context
+                    .activity
+                    .and_then(|activity| activity.last_agent_activity_at_ms),
+            });
+        }
         if session.agent_label.is_none() {
             session.agent_label = member
                 .task_label

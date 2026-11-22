@@ -36,6 +36,11 @@ export interface SessionCatalogContext {
   modes?: string[];
   /** Estimated prompt-cache expiry in Unix milliseconds, not a guaranteed hit. */
   cache_expires_at_ms?: number;
+  activity?: {
+    origin: "user" | "agent";
+    /** Last persisted assistant message in Unix milliseconds. */
+    last_agent_activity_at_ms?: number;
+  };
 }
 
 export interface SessionInfo {

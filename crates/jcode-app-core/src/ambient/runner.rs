@@ -585,6 +585,7 @@ impl AmbientRunnerHandle {
                 child
             }
         };
+        child.agent_started = true;
         child.status = crate::session::SessionStatus::Closed;
         child.save()?;
 
@@ -1058,6 +1059,7 @@ impl AmbientRunnerHandle {
         registry.register_ambient_tools().await;
 
         let mut agent = Agent::new(cycle_provider.clone(), registry);
+        agent.mark_agent_started();
         agent.set_debug(true);
         agent.set_system_prompt(&system_prompt);
         let ambient_session_id = agent.session_id().to_string();

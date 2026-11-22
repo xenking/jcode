@@ -3005,6 +3005,71 @@ fn list_sessions_carries_each_workers_own_record_facts() {
 }
 
 #[test]
+fn session_list_reports_agent_origin_and_latest_reply_from_legacy_records() {
+    let home = ScopedJcodeHome::new("session-catalog-activity");
+    let sessions = home.path.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    for (id, record) in [
+        (
+            "session_mine",
+            json!({"parent_id": "session_parent", "title": "Manual split", "messages": [
+                {"role": "assistant", "timestamp": "2024-01-01T00:00:01Z"},
+                {"role": "user", "timestamp": "2024-01-01T00:00:04Z"}
+            ]}),
+        ),
+        (
+            "session_worker",
+            json!({"title": "Swarm worker", "is_swarm_worker": true}),
+        ),
+        (
+            "session_child",
+            json!({"parent_id": "session_mine", "title": "Find context (@explore swarm)"}),
+        ),
+        (
+            "session_side",
+            json!({"parent_id": "session_mine", "side_question_message_start": 2}),
+        ),
+        ("session_ambient", json!({"agent_started": true})),
+    ] {
+        std::fs::write(sessions.join(format!("{id}.json")), record.to_string()).unwrap();
+    }
+    std::fs::write(sessions.join("session_worker.journal.jsonl"), concat!(
+        "{\"append_messages\":[{\"role\":\"assistant\",\"timestamp\":\"2024-01-01T00:00:03Z\"}]}\n",
+        "{\"append_messages\":[{\"role\":\"user\",\"timestamp\":\"2024-01-01T00:00:05Z\"}]}\n"
+    )).unwrap();
+
+    let mut bridge = BridgeState::default();
+    for request in [
+        json!({"req": "list_sessions", "id": 1}),
+        json!({"req": "list_sessions", "id": 2, "limit": 9}),
+    ] {
+        let event = only_reply_event(bridge.api_request_to_legacy(&request));
+        let ApiEvent::Sessions { sessions, .. } = event else {
+            panic!("expected sessions reply, got {event:?}");
+        };
+        for (id, origin, reply) in [
+            ("session_mine", "user", Some(1_704_067_201_000_i64)),
+            ("session_worker", "agent", Some(1_704_067_203_000)),
+            ("session_child", "agent", None),
+            ("session_side", "agent", None),
+            ("session_ambient", "agent", None),
+        ] {
+            let row = sessions
+                .iter()
+                .find(|session| session.session_id == id)
+                .unwrap();
+            let wire = serde_json::to_value(row).unwrap();
+            assert_eq!(wire["context"]["activity"]["origin"], origin, "{id}");
+            assert_eq!(
+                wire["context"]["activity"]["last_agent_activity_at_ms"].as_i64(),
+                reply,
+                "{id}"
+            );
+        }
+    }
+}
+
+#[test]
 fn user_connections_are_global_independent_and_fresh_in_list_metadata() {
     let home = ScopedJcodeHome::new("global-user-presence");
     for id in [
@@ -3114,6 +3179,11 @@ fn listed_session_context_comes_from_persisted_session_without_history() {
     session.pinned_skills = vec!["swarm".into(), "selfdev".into()];
     session.route_api_method = Some("openrouter".into());
     session.last_provider_request_at = Some(session.updated_at);
+    session.messages = serde_json::from_value(json!([
+        {"id":"reply", "role":"assistant", "content":[], "timestamp":"2024-01-01T00:00:01Z"},
+        {"id":"prompt", "role":"user", "content":[], "timestamp":"2024-01-01T00:00:03Z"}
+    ]))
+    .unwrap();
     jcode_base::recent_session_index::upsert_session(&session).unwrap();
 
     let event = only_reply_event(
@@ -3127,6 +3197,7 @@ fn listed_session_context_comes_from_persisted_session_without_history() {
         json!({
             "model": "example-model", "reasoning_effort": "high", "modes": ["swarm", "selfdev"],
             "cache_expires_at_ms": session.updated_at.timestamp_millis() + 300_000,
+            "activity": {"origin": "user", "last_agent_activity_at_ms": 1_704_067_201_000_i64},
         })
     );
 }
@@ -4242,6 +4313,7 @@ fn history_response_stats_cross_real_render_protocol_and_sdk_boundary() {
             response_stats: row.response_stats,
             timestamp_ms: row.timestamp_ms,
             tool_duration_ms: None,
+            codemode: row.codemode,
         })
         .collect();
     let mut state = state_with_session();

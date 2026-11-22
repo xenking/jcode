@@ -264,6 +264,7 @@ fn session_catalog_context(session: &Session) -> SessionCatalogContext {
         reasoning_effort: session.reasoning_effort.clone(),
         modes: session.pinned_skill_names().to_vec(),
         cache_expires_at_ms,
+        activity: Some(session.catalog_activity()),
     }
 }
 

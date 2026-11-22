@@ -1904,6 +1904,7 @@ pub(super) async fn run_swarm_task(
         Some(session_id),
         Some(format!("{} (@{} swarm)", description, subagent_type)),
     );
+    session.agent_started = true;
     let child_session_id = session.id.clone();
     session.model = Some(coordinator_model);
     // Inherit the coordinator's exact auth identity so the forked worker keeps
