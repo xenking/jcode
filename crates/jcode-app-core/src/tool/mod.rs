@@ -71,7 +71,6 @@ pub(crate) mod session_search_index;
 mod side_panel;
 mod skill;
 mod todo;
-mod ui_capabilities;
 mod user_response;
 mod webfetch;
 mod websearch;
@@ -560,6 +559,10 @@ impl Registry {
                 side_panel::SidePanelTool::new,
             );
             Self::insert_tool_timed(&mut m, &mut timings, "panel", panel::PanelTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "applet", applet::AppletTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "user_response", || {
+                user_response::UserResponseTool
+            });
             Self::insert_tool_timed(&mut m, &mut timings, "edit", edit::EditTool::new);
             // `multiedit` merged into `edit`, and `patch` into `apply_patch`.
             // Both old names still resolve through `resolve_tool_name`.

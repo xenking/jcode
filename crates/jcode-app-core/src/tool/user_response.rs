@@ -25,7 +25,7 @@ impl Tool for UserResponseTool {
     }
 
     fn description(&self) -> &str {
-        "Respond to the user with Markdown rendered inline in Jcode Desktop. Use this for user-visible answers, explanations, and completion summaries. Put the full response in content, with an optional title. Do not duplicate this response in a normal assistant message. This is a response, not a separate panel or an applet."
+        "Reply in Desktop Markdown. Do not duplicate as assistant text."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -41,7 +41,11 @@ impl Tool for UserResponseTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        super::interactive::require_desktop(
+            &ctx.session_id,
+            super::interactive::DesktopTool::UserResponse,
+        )?;
         let input: Input = serde_json::from_value(input)?;
         let mut output = ToolOutput::new(input.content);
         output.title = input.title;
@@ -67,6 +71,7 @@ mod tests {
 
     #[tokio::test]
     async fn user_response_preserves_markdown_and_optional_title() {
+        let _desktop = crate::tool::interactive::attach_desktop(&context().session_id);
         for title in [None, Some("Summary")] {
             let content = "# Answer\n\n**Markdown** with Unicode: 日本語\n";
             let result = UserResponseTool
@@ -94,6 +99,10 @@ mod tests {
 
     #[tokio::test]
     async fn user_response_rejects_invalid_input() {
+        // Use a distinct session so other tests cannot grant this call access.
+        let mut ctx = context();
+        ctx.session_id.push_str("-invalid");
+        let _desktop = crate::tool::interactive::attach_desktop(&ctx.session_id);
         for input in [
             json!({}),
             json!({"content": null}),
@@ -101,44 +110,17 @@ mod tests {
             json!({"content": "ok", "title": 42}),
             json!({"content": "ok", "unexpected": true}),
         ] {
-            assert!(UserResponseTool.execute(input, context()).await.is_err());
+            assert!(UserResponseTool.execute(input, ctx.clone()).await.is_err());
         }
     }
 
-    #[tokio::test]
-    async fn user_response_desktop_registration_is_reversible_and_isolated() {
-        let desktop = crate::tool::Registry::empty();
-        let tui = crate::tool::Registry::empty();
-        assert!(!crate::tool::Registry::base_tools(&tui.skills).contains_key("user_response"));
-        assert!(
-            tui.execute("user_response", json!({"content": "no"}), context())
-                .await
-                .is_err()
-        );
-        desktop.set_desktop_ui_enabled(true).await;
-        let defs = desktop.definitions(None).await;
-        let def = defs.iter().find(|d| d.name == "user_response").unwrap();
+    #[test]
+    fn user_response_builtin_schema() {
+        let registry = crate::tool::Registry::empty();
+        let mut base = crate::tool::Registry::base_tools(&registry.skills);
+        let def = base.remove("user_response").unwrap().to_definition();
         assert_eq!(def.input_schema["required"], json!(["content", "intent"]));
         assert_eq!(def.input_schema["additionalProperties"], false);
         assert!(def.description.contains("Do not duplicate"));
-        assert!(tui.definitions(None).await.is_empty());
-        let output = desktop
-            .execute(
-                "user_response",
-                json!({"content": "# Hello", "title": "Hi"}),
-                context(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(output.output, "# Hello");
-        assert_eq!(output.title.as_deref(), Some("Hi"));
-        desktop.set_desktop_ui_enabled(false).await;
-        assert!(desktop.definitions(None).await.is_empty());
-        assert!(
-            desktop
-                .execute("user_response", json!({"content": "no"}), context())
-                .await
-                .is_err()
-        );
     }
 }

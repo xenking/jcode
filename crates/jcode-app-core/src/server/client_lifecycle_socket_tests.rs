@@ -1508,7 +1508,7 @@ async fn sdk_socket_configure_list_callback_and_busy_rejection() {
 }
 
 #[tokio::test]
-async fn user_response_socket_registration_follows_explicit_capability() {
+async fn desktop_socket_capabilities_gate_execution_not_the_catalog() {
     sdk_socket_workflow(true, false, false).await;
 }
 
@@ -1605,7 +1605,7 @@ async fn sdk_socket_cancel_workflow(
     terminal_provider
         .long_tool
         .store(queued_test == Some("force_stop_tool"), Ordering::SeqCst);
-    let provider_template: Arc<dyn Provider> = if terminal_race {
+    let provider_template: Arc<dyn Provider> = if terminal_race || response_only {
         Arc::new(terminal_provider.clone())
     } else {
         Arc::new(SdkCallbackProvider::default())
@@ -2439,8 +2439,9 @@ async fn sdk_socket_cancel_workflow(
         return;
     }
     if response_only {
-        // Exercise actual Desktop/TUI Subscribe snapshots, including disabling
-        // the tool again on a repeated subscription rather than retaining it.
+        let mut previous = None;
+        let mut previous_tools_hash = None;
+        terminal_provider.finish_first.notify_one();
         for (index, (capability, applets)) in [
             (false, None),
             (true, None),
@@ -2477,13 +2478,61 @@ async fn sdk_socket_cancel_workflow(
             else {
                 panic!("expected tool list")
             };
-            assert_eq!(tools.iter().any(|t| t.name == "user_response"), capability);
-            assert_eq!(
-                tools.iter().any(|t| t.name == "applet"),
-                applets.unwrap_or(capability)
-            );
+            for name in ["applet", "user_response"] {
+                assert!(tools.iter().any(|tool| tool.name == name), "missing {name}");
+            }
+            let catalog = serde_json::to_value(tools).unwrap();
+            if let Some(previous) = previous.replace(catalog.clone()) {
+                assert_eq!(previous, catalog);
+            }
+            let agent = sessions.read().await.values().next().unwrap().clone();
+            let agent = agent.lock().await;
+            for (name, input, supported) in [
+                ("user_response", json!({"content":"# Hello"}), capability),
+                (
+                    "applet",
+                    json!({"action":"catalog"}),
+                    applets.unwrap_or(capability),
+                ),
+            ] {
+                let result = agent.execute_tool(name, input).await;
+                if supported {
+                    assert!(result.is_ok(), "{name}: {result:?}");
+                } else {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("no Desktop client attached")
+                    );
+                }
+            }
+            drop(agent);
+
+            let prompt_id = id + 20;
+            send(
+                &mut client_writer,
+                json!({"type":"message","id":prompt_id,"content":"Check the tool cache key."}),
+            )
+            .await;
+            let ServerEvent::KvCacheRequest { tools_hash, .. } =
+                until(&mut client_reader, |event| {
+                    matches!(event, ServerEvent::KvCacheRequest { .. })
+                })
+                .await
+            else {
+                unreachable!();
+            };
+            if let Some(previous_tools_hash) = previous_tools_hash.replace(tools_hash) {
+                assert_eq!(previous_tools_hash, tools_hash);
+            }
+            until(
+                &mut client_reader,
+                |event| matches!(event, ServerEvent::Done { id } if *id == prompt_id),
+            )
+            .await;
         }
-        // This test exercises catalog gating, not the 30-second retention of
+        // This test exercises tool availability, not the 30-second retention of
         // idle unsaved sessions. Remove the isolated fixture before detaching.
         sessions.clear_for_test().await;
         drop(client_writer);

@@ -1,5 +1,6 @@
 #![allow(clippy::await_holding_lock)]
 use super::*;
+use std::sync::Arc;
 
 fn context(session: &str, call: &str) -> ToolContext {
     ToolContext {
@@ -41,41 +42,43 @@ fn ids_are_slugs_with_hex() {
 }
 
 #[tokio::test]
-async fn applet_requires_desktop_capability() {
+async fn applet_requires_a_live_desktop_in_its_session() {
     let registry = crate::tool::Registry::empty();
-    for enabled in [false, true, false] {
-        registry.set_desktop_ui_enabled(enabled).await;
-        assert_eq!(
-            registry
-                .definitions(None)
-                .await
-                .iter()
-                .any(|d| d.name == "applet"),
-            enabled
-        );
-        assert_eq!(
-            registry
-                .definitions_for_session("applet-capability-test")
-                .await
-                .iter()
-                .any(|d| d.name == "applet"),
-            enabled,
-            "codemode must honor the same capability"
-        );
-        if !enabled {
-            assert!(
-                registry
-                    .execute(
-                        "functions.applet",
-                        json!({"action":"list"}),
-                        context("applet-capability-test", "applet-denied"),
-                    )
-                    .await
-                    .is_err(),
-                "terminal clients must not execute applets"
-            );
-        }
-    }
+    registry
+        .register("applet".into(), Arc::new(AppletTool::new()))
+        .await;
+    let session = "applet-capability-test";
+    let execute = |session| {
+        registry.execute(
+            "functions.applet",
+            json!({"action":"catalog"}),
+            context(session, "applet-check"),
+        )
+    };
+    let _other = crate::tool::interactive::attach_desktop("applet-other-session");
+    assert!(
+        execute(session)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("no Desktop client attached")
+    );
+    let desktop = crate::tool::interactive::attach_desktop(session);
+    assert!(
+        execute(session)
+            .await
+            .unwrap()
+            .output
+            .contains("ReviewChange")
+    );
+    drop(desktop);
+    assert!(
+        execute(session)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("no Desktop client attached")
+    );
 }
 
 #[tokio::test]
@@ -83,11 +86,7 @@ async fn mount_patch_wait_and_close() {
     let _guard = crate::storage::lock_test_env();
     let _home = temp_home();
     let tool = AppletTool::new();
-    let registry = crate::tool::Registry::empty();
-    assert!(
-        !crate::tool::Registry::base_tools(&registry.skills).contains_key("applet"),
-        "applet must not be registered for terminal/headless clients"
-    );
+    let _desktop = crate::tool::interactive::attach_desktop("s1");
 
     let out = tool
         .execute(
@@ -173,7 +172,10 @@ async fn express_mount_update_and_wait_through_registry() {
     let _guard = crate::storage::lock_test_env();
     let _home = temp_home();
     let registry = std::sync::Arc::new(crate::tool::Registry::empty());
-    registry.set_desktop_ui_enabled(true).await;
+    registry
+        .register("applet".into(), Arc::new(AppletTool::new()))
+        .await;
+    let _desktop = crate::tool::interactive::attach_desktop("express-session");
     let definition = registry
         .definitions(None)
         .await
@@ -292,6 +294,7 @@ fn action_message_is_compact() {
 #[tokio::test]
 async fn documented_shapes_validate() {
     let tool = AppletTool::new();
+    let _desktop = crate::tool::interactive::attach_desktop("catalog-session");
     assert!(tool.description().contains("plain text"));
     assert!(!tool.description().contains("host.send_prompt"));
     let response = tool
@@ -337,6 +340,7 @@ async fn documented_shapes_validate() {
 async fn invalid_view_error_names_the_cause() {
     let _guard = crate::storage::lock_test_env();
     let _home = temp_home();
+    let _desktop = crate::tool::interactive::attach_desktop("applet-invalid-view");
     let error = AppletTool::new()
         .execute(
             json!({"title":"T","view":{"type":"table",

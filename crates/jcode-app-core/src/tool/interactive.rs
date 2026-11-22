@@ -152,11 +152,42 @@ fn register_ask(
     });
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DesktopCapabilities {
+    pub applets: bool,
+    pub user_response: bool,
+}
+
+pub(super) enum DesktopTool {
+    Applet,
+    UserResponse,
+}
+
+pub(super) fn require_desktop(session_id: &str, tool: DesktopTool) -> anyhow::Result<()> {
+    let routes = ROUTES.lock().unwrap_or_else(|e| e.into_inner());
+    let supported = routes.get(session_id).is_some_and(|routes| {
+        routes.iter().any(|route| {
+            !route.target.is_closed()
+                && match tool {
+                    DesktopTool::Applet => route.desktop.applets,
+                    DesktopTool::UserResponse => route.desktop.user_response,
+                }
+        })
+    });
+    let name = match tool {
+        DesktopTool::Applet => "applet",
+        DesktopTool::UserResponse => "user_response",
+    };
+    anyhow::ensure!(supported, "no Desktop client attached with {name} support");
+    Ok(())
+}
+
 struct Route {
     id: u64,
     sender: UnboundedSender<StdinInputRequest>,
     target: UnboundedSender<StdinInputRequest>,
     owner_ui: bool,
+    desktop: DesktopCapabilities,
 }
 
 impl Route {
@@ -172,11 +203,26 @@ static NEXT: AtomicU64 = AtomicU64::new(1);
 pub(crate) struct Attachment {
     session_id: String,
     id: u64,
+    desktop: DesktopCapabilities,
 }
 
 impl Attachment {
     pub(crate) fn session_is(&self, session_id: &str) -> bool {
         self.session_id == session_id
+    }
+
+    pub(crate) fn set_desktop_capabilities(&mut self, desktop: DesktopCapabilities) {
+        if self.desktop == desktop {
+            return;
+        }
+        let mut routes = ROUTES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(route) = routes
+            .get_mut(&self.session_id)
+            .and_then(|routes| routes.iter_mut().find(|route| route.id == self.id))
+        {
+            route.desktop = desktop;
+            self.desktop = desktop;
+        }
     }
 
     pub(crate) fn pending_ask_ids(&self) -> Vec<String> {
@@ -204,6 +250,19 @@ impl Attachment {
 #[cfg(test)]
 pub(crate) fn attach(session_id: &str, sender: UnboundedSender<StdinInputRequest>) -> Attachment {
     attach_client(session_id, sender, false)
+}
+
+#[cfg(test)]
+pub(crate) fn attach_desktop(
+    session_id: &str,
+) -> (Attachment, mpsc::UnboundedReceiver<StdinInputRequest>) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut attachment = attach(session_id, tx);
+    attachment.set_desktop_capabilities(DesktopCapabilities {
+        applets: true,
+        user_response: true,
+    });
+    (attachment, rx)
 }
 
 pub(crate) fn attach_client(
@@ -245,6 +304,7 @@ pub(crate) fn attach_client(
             sender: route_tx,
             target: sender.clone(),
             owner_ui,
+            desktop: DesktopCapabilities::default(),
         });
     ROUTES_CHANGED.notify_waiters();
     if let Some(requests) = all.get(session_id) {
@@ -263,6 +323,7 @@ pub(crate) fn attach_client(
     Attachment {
         session_id: session_id.to_owned(),
         id,
+        desktop: DesktopCapabilities::default(),
     }
 }
 

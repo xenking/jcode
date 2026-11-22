@@ -32,45 +32,6 @@ async fn working_directory_moves_preserve_first_active_session_origin() {
 }
 
 #[tokio::test]
-async fn user_response_capability_updates_locked_tool_surface() {
-    let mut agent = Agent::new(Arc::new(BoundSavedAccountProvider), Registry::empty());
-    assert!(
-        !agent
-            .tool_definitions()
-            .await
-            .iter()
-            .any(|d| d.name == "user_response")
-    );
-    assert!(agent.locked_tools.is_some());
-    assert!(!agent.tool_names().await.iter().any(|n| n == "applet"));
-    agent.set_desktop_response_capability(true, true).await;
-    assert!(agent.locked_tools.is_none());
-    assert!(agent.tool_names().await.iter().any(|n| n == "applet"));
-    assert!(
-        agent
-            .tool_definitions()
-            .await
-            .iter()
-            .any(|d| d.name == "user_response")
-    );
-    agent.set_desktop_response_capability(true, true).await;
-    assert!(
-        agent.locked_tools.is_some(),
-        "unchanged capability preserves the cache"
-    );
-    agent.set_desktop_response_capability(false, false).await;
-    assert!(agent.locked_tools.is_none());
-    assert!(!agent.tool_names().await.iter().any(|n| n == "applet"));
-    assert!(
-        !agent
-            .tool_definitions()
-            .await
-            .iter()
-            .any(|d| d.name == "user_response")
-    );
-}
-
-#[tokio::test]
 async fn saved_account_observed_binding_is_persisted() {
     let _guard = crate::storage::lock_test_env();
     let home = tempfile::tempdir().unwrap();

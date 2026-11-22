@@ -258,24 +258,41 @@ async fn desktop_attach_after_restart_preserves_provider_tool_hash() {
     let id = agent.session_id().to_owned();
     drop(agent);
 
-    let mut restored = Agent::new(Arc::new(dialect), Registry::new(Arc::new(dialect)).await);
-    restored.restore_session(&id).unwrap();
+    let mut restored = Agent::new_with_session(
+        Arc::new(dialect),
+        Registry::new(Arc::new(dialect)).await,
+        Session::load(&id).unwrap(),
+        None,
+    );
     append_text(&mut restored, Role::User, "Before Desktop attaches.");
     let after_reload = request(&mut restored, dialect).await;
     let tool_hash =
         |wire: &Value| crate::agent::cache_request::stable_hash_str(&wire["tools"].to_string());
     assert_eq!(tool_hash(&before), tool_hash(&after_reload), "after reload");
 
-    restored.set_desktop_response_capability(true, true).await;
-    let attached = request(&mut restored, dialect).await;
-    assert_eq!(tool_hash(&before), tool_hash(&attached), "after attach");
-    assert!(
-        attached["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|d| d["name"] == "applet")
-    );
+    for name in ["applet", "user_response"] {
+        assert!(
+            before["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["name"] == name)
+        );
+    }
+    for _ in 0..2 {
+        let desktop = crate::tool::interactive::attach_desktop(&id);
+        assert_eq!(
+            tool_hash(&before),
+            tool_hash(&request(&mut restored, dialect).await),
+            "after attach"
+        );
+        drop(desktop);
+        assert_eq!(
+            tool_hash(&before),
+            tool_hash(&request(&mut restored, dialect).await),
+            "after detach"
+        );
+    }
 }
 
 #[tokio::test]

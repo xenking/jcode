@@ -27,9 +27,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
-mod desktop_capability;
-pub(super) use desktop_capability::apply_or_defer_desktop_response_capability;
-
 use super::SessionAgents;
 
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;

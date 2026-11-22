@@ -413,8 +413,7 @@ pub(super) async fn handle_client(
     let mut supports_pdf_panels = false;
     // Keep only the window preference, never a session-specific prefix fingerprint.
     let mut recent_history_messages = None;
-    let mut supports_user_response = false;
-    let mut supports_applets = false;
+    let mut desktop = crate::tool::interactive::DesktopCapabilities::default();
     let mut supports_server_failover = false;
     // Client selfdev status is determined by Subscribe request, not server's env
     let mut client_selfdev = false;
@@ -2089,8 +2088,6 @@ pub(super) async fn handle_client(
                 continue_on_disconnect = requested_continuation;
                 supports_pdf_panels = requested_pdf_panels;
                 recent_history_messages = history_base.and_then(|base| base.recent_messages);
-                supports_user_response = requested_user_response;
-                supports_applets = requested_applets.unwrap_or(requested_user_response);
                 supports_server_failover = requested_server_failover;
                 active_terminal_env = terminal_env;
                 current_client_instance_id = client_instance_id.clone();
@@ -2271,18 +2268,16 @@ pub(super) async fn handle_client(
                     // front of the client's GetHistory, delaying first paint.
                     last_available_models_snapshot = None;
                 }
-                super::client_session::apply_or_defer_desktop_response_capability(
-                    &agent,
-                    supports_user_response,
-                    supports_applets,
-                )
-                .await;
                 if requested_continuation {
                     super::runtime_ssh_loops::initialize_remote_session(
                         &client_session_id,
                         crate::config::config().features.auto_poke,
                     )?;
                 }
+                desktop = crate::tool::interactive::DesktopCapabilities {
+                    user_response: requested_user_response,
+                    applets: requested_applets.unwrap_or(requested_user_response),
+                };
                 client_subscribed = true;
                 provisional_session = false;
                 super::background_tasks::schedule_detached_completion_replay(&client_session_id);
@@ -2454,12 +2449,6 @@ pub(super) async fn handle_client(
                 if client_session_id != pre_resume_session_id {
                     provisional_session = false;
                 }
-                super::client_session::apply_or_defer_desktop_response_capability(
-                    &agent,
-                    supports_user_response,
-                    supports_applets,
-                )
-                .await;
                 session_control = refresh_session_control_handle(
                     &client_session_id,
                     &agent,
@@ -3921,15 +3910,21 @@ pub(super) async fn handle_client(
                 handle_client_debug_response(id, output, &client_debug_response_tx);
             }
         }
-        if client_subscribed
-            && stdin_attachment.as_ref().is_none_or(|route| !route.session_is(&client_session_id))
-        {
-            stdin_attachment = Some(crate::tool::interactive::attach_client(
-                &client_session_id,
-                stdin_req_tx.clone(),
-                local_jcode_peer && connection_client_name.as_deref() == Some("jcode-tui"),
-            ));
-            super::reload_recovery::ask_owner_available(&client_session_id);
+        if client_subscribed {
+            let newly_attached = stdin_attachment.as_ref().is_none_or(|route| !route.session_is(&client_session_id));
+            if newly_attached {
+                stdin_attachment = Some(crate::tool::interactive::attach_client(
+                    &client_session_id,
+                    stdin_req_tx.clone(),
+                    local_jcode_peer && connection_client_name.as_deref() == Some("jcode-tui"),
+                ));
+            }
+            if let Some(attachment) = stdin_attachment.as_mut() {
+                attachment.set_desktop_capabilities(desktop);
+            }
+            if newly_attached {
+                super::reload_recovery::ask_owner_available(&client_session_id);
+            }
         }
         if let Some(name) = connection_client_name.as_deref() {
             crate::mobile_push::note_client_attached(&client_session_id, name);

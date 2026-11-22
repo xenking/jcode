@@ -227,6 +227,10 @@ impl Tool for AppletTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        super::interactive::require_desktop(
+            &ctx.session_id,
+            super::interactive::DesktopTool::Applet,
+        )?;
         let params: AppletInput = serde_json::from_value(input).context("invalid applet input")?;
         let action = params.action.as_deref().unwrap_or("mount");
         if params.express.is_some() && !matches!(action, "mount" | "update") {

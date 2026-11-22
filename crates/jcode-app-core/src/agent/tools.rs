@@ -305,21 +305,3 @@ mod image_anchor_tests {
         assert_eq!(images[0].label.as_deref(), Some("first.png"));
     }
 }
-
-impl super::Agent {
-    pub(crate) async fn set_desktop_response_capability(
-        &mut self,
-        user_response: bool,
-        applets: bool,
-    ) {
-        let names = self.registry.tool_names().await;
-        let has_user_response = names.iter().any(|n| n == "user_response");
-        let has_applets = names.iter().any(|n| n == "applet");
-        if has_user_response != user_response || has_applets != applets {
-            self.registry
-                .set_ui_capabilities(user_response, applets)
-                .await;
-            self.invalidate_sdk_tools();
-        }
-    }
-}
