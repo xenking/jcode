@@ -55,10 +55,12 @@ pub struct DisplayConfig {
     pub latex_rendering: LatexRenderingMode,
     /// Pin read images to side pane (default: true)
     pub pin_images: bool,
-    /// Pin the full session todo list to the top of the chat transcript while
-    /// it scrolls, like the sticky previous-prompt preview (default: true)
+    /// Legacy switch. `false` disables the pinned todo header in every mode.
     #[serde(default = "default_true")]
     pub pin_todos: bool,
+    /// Amount of detail in the pinned todo header (default: full).
+    #[serde(deserialize_with = "crate::serde_lenient::lenient_enum")]
+    pub todo_header: TodoHeaderMode,
     /// Show idle animation before first prompt (default: false)
     pub idle_animation: bool,
     /// Briefly animate user prompt line when it enters viewport (default: true)
@@ -206,6 +208,39 @@ impl ResumeTimeMode {
         }
     }
 }
+
+/// Visibility and detail of the pinned todo header.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TodoHeaderMode {
+    #[default]
+    Full,
+    Minimal,
+    Hidden,
+}
+
+impl TodoHeaderMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Minimal => "minimal",
+            Self::Hidden => "hidden",
+        }
+    }
+
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Full => Self::Minimal,
+            Self::Minimal => Self::Hidden,
+            Self::Hidden => Self::Full,
+        }
+    }
+
+    pub fn is_visible(self) -> bool {
+        self != Self::Hidden
+    }
+}
+
 impl Default for DisplayConfig {
     fn default() -> Self {
         Self {
@@ -213,6 +248,7 @@ impl Default for DisplayConfig {
             show_diffs: None,
             pin_images: true,
             pin_todos: true,
+            todo_header: TodoHeaderMode::Full,
             queue_mode: false,
             auto_server_reload: true,
             mouse_capture: true,
@@ -253,6 +289,14 @@ impl Default for DisplayConfig {
     }
 }
 impl DisplayConfig {
+    pub fn todo_header_mode(&self) -> TodoHeaderMode {
+        if self.pin_todos {
+            self.todo_header
+        } else {
+            TodoHeaderMode::Hidden
+        }
+    }
+
     pub fn apply_legacy_compat(&mut self) {
         if let Some(show) = self.show_diffs.take() {
             self.diff_mode = if show {
@@ -411,14 +455,23 @@ mod tests {
 
     #[test]
     fn todos_are_pinned_by_default_but_can_be_disabled() {
-        assert!(DisplayConfig::default().pin_todos);
+        use super::TodoHeaderMode;
+
+        assert_eq!(
+            DisplayConfig::default().todo_header_mode(),
+            TodoHeaderMode::Full
+        );
 
         let missing: DisplayConfig = serde_json::from_str("{}").expect("display config");
-        assert!(missing.pin_todos);
+        assert_eq!(missing.todo_header_mode(), TodoHeaderMode::Full);
 
         let disabled: DisplayConfig =
             serde_json::from_str(r#"{"pin_todos":false}"#).expect("display config");
-        assert!(!disabled.pin_todos);
+        assert_eq!(disabled.todo_header_mode(), TodoHeaderMode::Hidden);
+
+        let disabled: DisplayConfig =
+            serde_json::from_str(r#"{"pin_todos":false,"todo_header":"minimal"}"#).unwrap();
+        assert_eq!(disabled.todo_header_mode(), TodoHeaderMode::Hidden);
     }
 
     #[test]

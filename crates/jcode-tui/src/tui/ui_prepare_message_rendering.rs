@@ -21,7 +21,10 @@ pub(super) fn render_message_into(
     if super::super::messages::is_swarm_await_started(msg)
         || super::super::messages::is_routine_swarm_await_result(msg)
         || (role == "tool"
-            && crate::config::config().display.pin_todos
+            && crate::config::config()
+                .display
+                .todo_header_mode()
+                .is_visible()
             && msg
                 .tool_data
                 .as_ref()

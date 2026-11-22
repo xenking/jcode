@@ -507,7 +507,12 @@ pub(super) fn prepare_messages(
         messages_version: app
             .display_messages_version()
             .wrapping_mul(2)
-            .wrapping_add(u64::from(crate::config::config().display.pin_todos))
+            .wrapping_add(u64::from(
+                crate::config::config()
+                    .display
+                    .todo_header_mode()
+                    .is_visible(),
+            ))
             .wrapping_mul(31)
             .wrapping_add(super::hash_text_for_cache(
                 app.pinned_todos_payload().unwrap_or(""),
@@ -1014,7 +1019,12 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
         messages_version: app
             .display_messages_version()
             .wrapping_mul(2)
-            .wrapping_add(u64::from(crate::config::config().display.pin_todos)),
+            .wrapping_add(u64::from(
+                crate::config::config()
+                    .display
+                    .todo_header_mode()
+                    .is_visible(),
+            )),
         diagram_mode: app.diagram_mode(),
         centered: app.centered_mode(),
         mermaid_aspect_bucket: crate::tui::mermaid::current_preferred_aspect_ratio_bucket(),

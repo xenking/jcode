@@ -321,12 +321,16 @@ impl Config {
         Ok(())
     }
 
-    /// Update the persisted pinned-todos preference.
-    pub fn set_pin_todos(pin: bool) -> anyhow::Result<()> {
+    /// Save the todo header mode and keep the legacy pin flag in sync.
+    pub fn set_todo_header_mode(mode: TodoHeaderMode) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;
-        cfg.display.pin_todos = pin;
+        cfg.display.todo_header = mode;
+        cfg.display.pin_todos = mode.is_visible();
         cfg.save()?;
-        crate::logging::info(&format!("Saved display.pin_todos to config: {}", pin));
+        crate::logging::info(&format!(
+            "Saved display.todo_header to config: {}",
+            mode.as_str()
+        ));
         Ok(())
     }
 

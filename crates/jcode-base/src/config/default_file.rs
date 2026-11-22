@@ -202,9 +202,9 @@ centered = false
 # Pin read images to a side pane (default: true)
 pin_images = true
 
-# Pin the full session todo list to the top of the chat transcript while it
-# scrolls, like the sticky previous-prompt preview (default: false)
-# pin_todos = true
+# Pinned todo header: "full" (default), "minimal" (one line), or "hidden".
+# /todos pin cycles modes. The legacy pin_todos = false overrides this setting.
+# todo_header = "full"
 
 # Queue mode: wait until assistant is done before sending next message
 queue_mode = false

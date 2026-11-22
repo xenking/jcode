@@ -39,6 +39,59 @@ fn todo_payload() -> String {
     .to_string()
 }
 
+#[test]
+fn pinned_todo_header_modes_render_full_one_or_zero_rows() {
+    with_pinned_todos_config(|| {
+        let state = TestState {
+            pinned_todos_payload: Some(todo_payload()),
+            justrust_status: Some(crate::tui::justrust_status::StatusRow {
+                text: "justrust build".into(),
+                tone: crate::tui::justrust_status::Tone::Active,
+                own_session: true,
+            }),
+            ..Default::default()
+        };
+        let config_path = crate::config::Config::path().expect("isolated config path");
+        for mode in ["full", "minimal", "hidden"] {
+            std::fs::write(
+                &config_path,
+                format!("[display]\ntodo_header = \"{mode}\"\n"),
+            )
+            .expect("write isolated mode");
+            crate::config::invalidate_config_cache();
+            let (rows, _) = viewport::pinned_todo_band_lines(&state, 40, 30);
+            match mode {
+                "full" => assert!(rows.len() > 1, "full band: {rows:?}"),
+                "minimal" => {
+                    assert_eq!(rows.len(), 1, "minimal band: {rows:?}");
+                    assert!(rows[0].width() <= 40, "summary must fit the terminal");
+                    assert!(
+                        rows[0]
+                            .to_string()
+                            .contains("Todos 0/1 · Pinned regression task")
+                    );
+
+                    let mut narrow = state.clone();
+                    narrow.pinned_todos_payload = Some(
+                        serde_json::json!({"todos": [{
+                            "id": "wide", "content": "検証 👩‍💻\nмного строк",
+                            "status": "in_progress", "priority": "high"
+                        }]})
+                        .to_string(),
+                    );
+                    let (rows, expand) = viewport::pinned_todo_band_lines(&narrow, 20, 8);
+                    assert_eq!(rows.len(), 1);
+                    assert!(rows[0].width() <= 20);
+                    assert!(rows[0].to_string().ends_with('…'));
+                    assert!(expand.is_none());
+                }
+                "hidden" => assert!(rows.is_empty(), "hidden band: {rows:?}"),
+                _ => unreachable!(),
+            }
+        }
+    });
+}
+
 /// A subprocess bounds failure even if both worker threads deadlock while
 /// holding shared test locks. A timed channel alone would leave the rest of
 /// the test binary wedged behind those locks after the assertion failed.

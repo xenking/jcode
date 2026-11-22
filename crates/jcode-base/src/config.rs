@@ -13,7 +13,7 @@ pub use jcode_config_types::{
     NamedProviderConfig, NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig,
     NotificationsConfig, PowerConfig, ProviderConfig, ReasoningDisplayMode, ResumeOpenElsewhere,
     ResumeTimeMode, SafetyConfig, SessionConfig, SessionPickerResumeAction, SwarmSpawnMode,
-    TerminalConfig, UpdateChannel, WebSearchConfig, WebSearchEngine,
+    TerminalConfig, TodoHeaderMode, UpdateChannel, WebSearchConfig, WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};

@@ -1616,7 +1616,7 @@ pub struct App {
     todo_card_rendered_hash: u64,
     /// Tracks the display-only full report for the current completed todo cycle.
     todo_completion_report: todo_completion::TodoCompletionReportState,
-    /// JSON payload for the pinned todo band (display.pin_todos). `None` when
+    /// JSON payload for the pinned todo header (display.todo_header). `None` when
     /// the feature is off or the session has no todos. Refreshed on tick.
     /// The renderer wiring for these three fields is landing separately, so
     /// they are allowed to be unread until it does.

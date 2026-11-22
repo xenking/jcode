@@ -1,6 +1,7 @@
 //! Pinned todo bands and viewport margins.
 
 use super::*;
+use crate::config::TodoHeaderMode;
 
 /// Use the exact pinned-card identity and context for both drawing and queries.
 fn project_pinned_todo_card<R>(
@@ -10,7 +11,7 @@ fn project_pinned_todo_card<R>(
     active_first: bool,
     project: impl FnOnce(&[Line<'static>]) -> R,
 ) -> R {
-    if width < 16 || !crate::config::config().display.pin_todos {
+    if width < 16 {
         return project(&[]);
     }
     let Some(payload) = payload else {
@@ -44,7 +45,17 @@ pub(super) fn pinned_todo_card_has_lines(
     diff_mode: crate::config::DiffDisplayMode,
     width: u16,
 ) -> bool {
-    project_pinned_todo_card(payload, diff_mode, width, false, |lines| !lines.is_empty())
+    match crate::config::config().display.todo_header_mode() {
+        TodoHeaderMode::Hidden => false,
+        TodoHeaderMode::Minimal => width >= 16 && minimal_payload(payload).is_some(),
+        TodoHeaderMode::Full => {
+            project_pinned_todo_card(payload, diff_mode, width, false, |lines| !lines.is_empty())
+        }
+    }
+}
+
+fn minimal_payload(payload: Option<&str>) -> Option<&str> {
+    payload.filter(|payload| !payload.trim().is_empty())
 }
 
 /// Pinned todo band for an arbitrary todo payload. Shared by the live chat
@@ -56,11 +67,35 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
     width: u16,
     viewport_height: u16,
 ) -> (Vec<Line<'static>>, Option<usize>) {
-    if width < 16 || viewport_height < 3 {
+    pinned_todo_band_lines_for_mode(
+        payload,
+        expanded,
+        diff_mode,
+        width,
+        viewport_height,
+        crate::config::config().display.todo_header_mode(),
+    )
+}
+
+pub(super) fn pinned_todo_band_lines_for_mode(
+    payload: Option<&str>,
+    expanded: bool,
+    diff_mode: crate::config::DiffDisplayMode,
+    width: u16,
+    viewport_height: u16,
+    mode: TodoHeaderMode,
+) -> (Vec<Line<'static>>, Option<usize>) {
+    PINNED_TODO_LAST_MAX.store(0, std::sync::atomic::Ordering::Relaxed);
+    if width < 16 || viewport_height < 3 || !mode.is_visible() {
         return (Vec::new(), None);
     }
-
-    PINNED_TODO_LAST_MAX.store(0, std::sync::atomic::Ordering::Relaxed);
+    if mode == TodoHeaderMode::Minimal {
+        let rows = minimal_payload(payload)
+            .map(|payload| super::super::messages::minimal_pinned_todo_row(payload, width))
+            .into_iter()
+            .collect();
+        return (rows, None);
+    }
 
     // Band budget: about a third of the viewport.
     let budget = ((viewport_height as usize) / 3).clamp(2, 12);
@@ -206,7 +241,13 @@ mod pinned_todo_projection_tests {
     fn run_isolated(test: &str, pin_todos: bool) -> bool {
         if std::env::var_os("JCODE_PINNED_PROJECTION_CHILD").is_some() {
             assert_eq!(std::env::var("JCODE_TEST_SESSION").as_deref(), Ok("1"));
-            assert_eq!(crate::config::config().display.pin_todos, pin_todos);
+            assert_eq!(
+                crate::config::config()
+                    .display
+                    .todo_header_mode()
+                    .is_visible(),
+                pin_todos
+            );
             return false;
         }
         let home = std::env::temp_dir().join(format!(
@@ -235,6 +276,7 @@ mod pinned_todo_projection_tests {
             .env("JCODE_HOME", &home)
             .env("JCODE_TEST_SESSION", "1")
             .env("JCODE_PINNED_PROJECTION_CHILD", "1")
+            .env_remove("JCODE_PIN_TODOS")
             .output()
             .unwrap();
         std::fs::remove_dir_all(home).unwrap();

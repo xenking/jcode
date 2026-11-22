@@ -1968,7 +1968,10 @@ impl SessionPicker {
             .hash(&mut h);
         is_loading.hash(&mut h);
         diff_mode.hash(&mut h);
-        crate::config::config().display.pin_todos.hash(&mut h);
+        crate::config::config()
+            .display
+            .todo_header_mode()
+            .hash(&mut h);
         crate::config::config()
             .display
             .compact_thinking

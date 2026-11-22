@@ -1,4 +1,5 @@
 use super::App;
+use crate::config::{Config, TodoHeaderMode, config};
 use crate::side_panel::{
     SidePanelPage, SidePanelPageFormat, SidePanelPageSource, SidePanelSnapshot,
 };
@@ -51,7 +52,7 @@ impl App {
         if !(crate::tui::is_ssh_remote() || self.remote_todos_payload.is_some())
             || !(self.todos_view_enabled
                 || self.latest_todo_card_index().is_some()
-                || crate::config::config().display.pin_todos)
+                || config().display.todo_header_mode().is_visible())
             || self
                 .remote_todos_requested_at
                 .is_some_and(|at| at.elapsed() < self.remote_todos_poll_interval())
@@ -188,7 +189,7 @@ impl App {
     }
 
     /// Live-refresh the payload behind the pinned todo band
-    /// (`display.pin_todos`). Returns true when the payload changed and the
+    /// (`display.todo_header`). Returns true when the payload changed and the
     /// viewport should redraw. Disk reads are throttled to once per second.
     pub(super) fn refresh_pinned_todos_if_needed(&mut self) -> bool {
         // Replay state comes exclusively from historical events or explicit
@@ -196,7 +197,7 @@ impl App {
         if self.is_replay {
             return false;
         }
-        if !crate::config::config().display.pin_todos {
+        if !config().display.todo_header_mode().is_visible() {
             if self.pinned_todos_payload.is_some() {
                 self.pinned_todos_payload = None;
                 self.pinned_todos_rendered_hash = 0;
@@ -456,18 +457,14 @@ impl App {
 
 pub(super) fn todos_view_status_message(app: &App) -> String {
     format!(
-        "Todo card: shown inline in the chat with /todos or {}.\n\nTodo side-panel screen: {}\n\nPinned todo band: {}\n\nWhen the panel screen is enabled (/todos panel), the side panel shows a transient Todos page dedicated to the current session's todo list and refreshes as the list changes. It is not persisted to session side-panel storage.\n\nWhen the pinned band is enabled (/todos pin), the full todo list stays pinned to the top of the chat transcript while it scrolls, like the previous-prompt preview.",
+        "Todo card: shown inline in the chat with /todos or {}.\n\nTodo side-panel screen: {}\n\nPinned todo header: {}\n\n/todos pin cycles full, minimal, and hidden. This does not change the inline card or side panel.",
         crate::tui::keybind::todo_card_key_label(),
         if app.todos_view_enabled() {
             "enabled"
         } else {
             "disabled"
         },
-        if crate::config::config().display.pin_todos {
-            "enabled"
-        } else {
-            "disabled"
-        }
+        config().display.todo_header_mode().as_str()
     )
 }
 
@@ -518,32 +515,17 @@ pub(super) fn handle_todos_view_command(app: &mut App, trimmed: &str) -> bool {
                 "Todo screen disabled.".to_string(),
             ));
         }
-        // Pin the full todo list to the top of the chat transcript.
-        "pin" | "pin on" | "pin off" => {
-            let enabled = match arg {
-                "pin on" => true,
-                "pin off" => false,
-                _ => !crate::config::config().display.pin_todos,
-            };
-            app.set_status_notice(if enabled {
-                "Pinned todos: ON"
-            } else {
-                "Pinned todos: OFF"
-            });
-            match crate::config::Config::set_pin_todos(enabled) {
-                Ok(()) => app.push_display_message(crate::tui::DisplayMessage::system(
-                    if enabled {
-                        "Pinned todo band enabled. The todo list stays pinned to the top of the transcript while it scrolls."
-                    } else {
-                        "Pinned todo band disabled."
-                    }
-                    .to_string(),
-                )),
-                Err(error) => app.push_display_message(crate::tui::DisplayMessage::error(
-                    format!("Failed to save display.pin_todos: {}", error),
-                )),
-            }
-            app.refresh_pinned_todos_now();
+        "pin" | "header" | "pin cycle" | "header cycle" => {
+            apply_todo_header_mode(app, config().display.todo_header_mode().cycle());
+        }
+        "pin full" | "header full" | "pin on" | "header on" => {
+            apply_todo_header_mode(app, TodoHeaderMode::Full);
+        }
+        "pin minimal" | "header minimal" => {
+            apply_todo_header_mode(app, TodoHeaderMode::Minimal);
+        }
+        "pin hidden" | "header hidden" | "pin off" | "header off" => {
+            apply_todo_header_mode(app, TodoHeaderMode::Hidden);
         }
         "status" => {
             app.push_display_message(crate::tui::DisplayMessage::system(
@@ -552,12 +534,29 @@ pub(super) fn handle_todos_view_command(app: &mut App, trimmed: &str) -> bool {
         }
         _ => {
             app.push_display_message(crate::tui::DisplayMessage::error(
-                "Usage: /todos [card|panel|pin|on|off|status]".to_string(),
+                "Usage: /todos [card|panel|pin [full|minimal|hidden]|on|off|status]".to_string(),
             ));
         }
     }
 
     true
+}
+
+fn apply_todo_header_mode(app: &mut App, mode: TodoHeaderMode) {
+    match Config::set_todo_header_mode(mode) {
+        Ok(()) => {
+            let notice = format!(
+                "Todo header: {}",
+                config().display.todo_header_mode().as_str()
+            );
+            app.set_status_notice(notice.clone());
+            app.push_display_message(crate::tui::DisplayMessage::system(notice));
+            app.refresh_pinned_todos_now();
+        }
+        Err(error) => app.push_display_message(crate::tui::DisplayMessage::error(format!(
+            "Failed to save display.todo_header: {error}"
+        ))),
+    }
 }
 
 /// Pinned-todo-band payload for any session, read from disk. Used by the

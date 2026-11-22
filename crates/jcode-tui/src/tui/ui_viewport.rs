@@ -274,8 +274,7 @@ pub(super) fn draw_messages(
 
     let total_lines = prepared.total_wrapped_lines();
     let viewport_height = render_area.height as usize;
-    // Pinned todo band (display.pin_todos): the full todo card rendered beneath
-    // the sticky previous-prompt preview, including at the top of the transcript.
+    // The todo header sits beneath the sticky previous-prompt preview.
     let (pinned_todo_band, pinned_todo_more_line) =
         pinned_todo_band_lines(app, text_render_area.width, render_area.height);
     let pinned_todo_band_rows = pinned_todo_band.len() as u16;
@@ -1298,14 +1297,17 @@ pub(crate) fn pinned_todo_band_lines(
     width: u16,
     viewport_height: u16,
 ) -> (Vec<Line<'static>>, Option<usize>) {
-    let (mut lines, more) = pinned_todo_band_lines_for_payload(
+    let mode = crate::config::config().display.todo_header_mode();
+    let (mut lines, more) = todo_margins::pinned_todo_band_lines_for_mode(
         app.pinned_todos_payload(),
         app.pinned_todos_expanded(),
         app.diff_mode(),
         width,
         viewport_height,
+        mode,
     );
-    if width > 0
+    if mode == crate::config::TodoHeaderMode::Full
+        && width > 0
         && viewport_height >= 3
         && let Some(status) = app.justrust_status()
     {

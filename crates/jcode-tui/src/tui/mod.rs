@@ -758,7 +758,7 @@ pub trait TuiState {
         ui::hash_text_for_cache(self.streaming_text())
     }
     /// JSON payload for the pinned todo band rendered at the top of the chat
-    /// viewport when `display.pin_todos` is enabled. `None` when the feature
+    /// viewport when `display.todo_header` is visible. `None` when the feature
     /// is off or the session has no todos.
     fn pinned_todos_payload(&self) -> Option<&str> {
         None
