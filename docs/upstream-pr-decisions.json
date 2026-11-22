@@ -178,6 +178,7 @@
     "jcode#2264": {"decision": "skipped", "head": "c6437048090e49d019f15bd40e67ac36ec71ec14", "reason": "open-and-relevant (not verified equivalent): platform, provider, CI or feature outside stated priorities"},
     "jcode#2274": {"decision": "skipped", "head": "01021d63c73e16b3c8f6353336c7392a4f5a56c3", "reason": "superseded / overlaps #2266; compare before choosing: equivalent or overlap exists; compare gaps before importing"},
     "jcode-desktop#10": {"decision": "skipped", "head": "b09e0e5b13250e3f69aae535ff1c738a5a90cbfc", "reason": "open-and-relevant (not verified equivalent): Linux-only or optional feature"},
-    "jcode-desktop#12": {"decision": "skipped", "head": "f6cb10ff7b19ac70668794668f84fee1cefe4835", "reason": "open-and-relevant (not verified equivalent): Linux-only or optional feature"}
+    "jcode-desktop#12": {"decision": "skipped", "head": "f6cb10ff7b19ac70668794668f84fee1cefe4835", "reason": "open-and-relevant (not verified equivalent): Linux-only or optional feature"},
+    "jcode-desktop#26": {"decision": "already-in-fork", "head": "f107bee8b11ebc2318cba2248daa54ceed1113d8", "reason": "Desktop already completes and dispatches installed slash skills from the daemon catalog. The structured SendSkill path passes the canonical skill and user arguments to the active session.", "covering": ["88d6347c53be2ebbe86a85c2ef533ad177f4f1bb"]}
   }
 }
