@@ -95,6 +95,7 @@ impl MacHost {
         let target_dir = std::env::var_os("CARGO_TARGET_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| jcode_home.join("shared-build/target"));
+        let target_dir = std::path::absolute(target_dir)?;
         let desktop_worktree = worktrees.join("jcode-desktop");
         let runtime_dir = rollout_runtime_dir()?;
         let daemon_socket = std::env::var_os("JCODE_SOCKET")
@@ -155,9 +156,8 @@ impl MacHost {
     fn checkout(&self, repo: Repo, sha: &str) -> Result<()> {
         let worktree = self.worktree(repo);
         if !worktree.exists() {
-            std::fs::create_dir_all(worktree.parent().unwrap_or(worktree))?;
-            self.run_preparing(
-                git(self.repo(repo))
+            self.run_admitted(
+                self.checkout_command(repo, self.repo(repo))
                     .args(["worktree", "add", "--detach"])
                     .arg(worktree)
                     .arg(sha),
@@ -167,21 +167,47 @@ impl MacHost {
         let dirty =
             output(git(worktree).args(["status", "--porcelain", "-z", "--untracked-files=all"]))?;
         if dirty == " M Cargo.lock\0" {
-            self.run_preparing(git(worktree).args(["checkout", "--", "Cargo.lock"]))?;
+            self.run_admitted(self.checkout_command(repo, worktree).args([
+                "checkout",
+                "--",
+                "Cargo.lock",
+            ]))?;
         } else if !dirty.is_empty() {
             bail!(
                 "{} has uncommitted changes; refusing to build it",
                 worktree.display()
             );
         }
-        self.run_preparing(git(worktree).args(["checkout", "--detach", "--quiet", sha]))
+        self.run_admitted(
+            self.checkout_command(repo, worktree)
+                .args(["checkout", "--detach", "--quiet", sha]),
+        )
     }
 
-    fn run_preparing(&self, command: &mut Command) -> Result<()> {
+    fn checkout_command(&self, repo: Repo, dir: &Path) -> Command {
+        let mut command = disk_admission_command("rollout-checkout", "checkout");
+        command
+            .arg("--path")
+            .arg(self.worktree(repo))
+            .arg("--path")
+            .arg(self.repo(repo))
+            .args(["--", "git", "-C"])
+            .arg(dir);
+        command
+    }
+
+    fn run_admitted(&self, command: &mut Command) -> Result<()> {
         if let Some(preparation) = &self.preparation {
             preparation.inherit(command);
         }
-        run(command)
+        let status = command
+            .stdin(Stdio::null())
+            .status()
+            .context("could not start rollout build admission (requires python3)")?;
+        if !status.success() {
+            bail!("rollout build admission or its child exited with {status}");
+        }
+        Ok(())
     }
 
     fn commit(&self, repo: Repo, revision: &str) -> Result<String> {
@@ -216,17 +242,13 @@ impl MacHost {
                 .is_ok_and(|actual| actual == expected)
     }
 
-    fn cargo(&self, dir: &Path) -> Command {
-        let mut command = Command::new("cargo");
+    fn cli_build_command(&self, pair: &Pair) -> Command {
+        let mut command = disk_admission_command("rollout-cli", "release");
         command
-            .current_dir(dir)
+            .args(["--cargo", "--", "cargo"])
+            .current_dir(&self.layout.jcode_worktree)
             .env("CARGO_TARGET_DIR", &self.layout.target_dir)
             .env("DEVELOPER_DIR", DEVELOPER_DIR);
-        command
-    }
-
-    fn cli_build_command(&self, pair: &Pair) -> Command {
-        let mut command = self.cargo(&self.layout.jcode_worktree);
         // build-meta watches this input. Pinning it also refreshes git date,
         // tag and changelog when the detached checkout advances.
         command.env("JCODE_BUILD_GIT_HASH", &pair.cli).args([
@@ -440,7 +462,7 @@ impl Host for MacHost {
 
     fn build_cli(&mut self, pair: &Pair) -> Result<PathBuf> {
         self.checkout(Repo::Jcode, &pair.cli)?;
-        self.run_preparing(&mut self.cli_build_command(pair))?;
+        self.run_admitted(&mut self.cli_build_command(pair))?;
         self.built_cli(pair).with_context(|| {
             format!(
                 "{} does not report {}",
@@ -475,10 +497,29 @@ impl Host for MacHost {
         self.checkout(Repo::Jcode, &pair.cli)?;
         self.checkout(Repo::Desktop, &pair.desktop)?;
         let worktree = self.layout.desktop_worktree.clone();
-        let packaged = self.run_preparing(
-            Command::new(worktree.join("scripts/package-macos.sh"))
+        let mut command = disk_admission_command("rollout-desktop", "desktop");
+        command
+            .arg("--path")
+            .arg(&self.layout.dist_dir)
+            .arg("--path")
+            .arg(
+                std::env::var_os("SPARKLE_ROOT")
+                    .filter(|path| !path.is_empty())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| self.layout.dist_dir.join("sparkle")),
+            )
+            .arg("--workspace")
+            .arg(worktree.join("Cargo.toml"))
+            .arg("--workspace")
+            .arg(self.layout.jcode_worktree.join("Cargo.toml"));
+        let packaged = self.run_admitted(
+            command
+                .arg("--")
+                .arg(worktree.join("scripts/package-macos.sh"))
                 .current_dir(&worktree)
+                .env("JCODE_BUILD_ADMISSION_PYTHON", BUILD_ADMISSION)
                 .env("JCODE_REPO", &self.layout.jcode_worktree)
+                .env("OUT_DIR", &self.layout.dist_dir)
                 .env("PACKAGE_TARGETS", TARGET)
                 .env("CARGO_TARGET_DIR", &self.layout.target_dir)
                 .env("DEVELOPER_DIR", DEVELOPER_DIR),
@@ -488,7 +529,11 @@ impl Host for MacHost {
         let status =
             output(git(&worktree).args(["status", "--porcelain", "-z", "--", "Cargo.lock"]))?;
         if status == " M Cargo.lock\0" {
-            self.run_preparing(git(&worktree).args(["checkout", "--", "Cargo.lock"]))?;
+            self.run_admitted(self.checkout_command(Repo::Desktop, &worktree).args([
+                "checkout",
+                "--",
+                "Cargo.lock",
+            ]))?;
         } else if !status.is_empty() {
             bail!(
                 "{} has unexpected Cargo.lock changes after packaging",
@@ -772,6 +817,15 @@ fn user_runtime_dir() -> Result<PathBuf> {
     {
         Ok(crate::storage::runtime_dir())
     }
+}
+
+// A rollout may intentionally build commits older than the admission helper.
+const BUILD_ADMISSION: &str = include_str!("../../scripts/build-admission.py");
+
+fn disk_admission_command(owner: &str, kind: &str) -> Command {
+    let mut command = Command::new("python3");
+    command.args(["-c", BUILD_ADMISSION, "--owner", owner, "--kind", kind]);
+    command
 }
 
 fn git(dir: &Path) -> Command {

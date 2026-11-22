@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+admission="$repo_root/scripts/build-admission.py"
 
 # `selfdev test` installs a shell-level `cargo` shim so raw `cargo test/check`
 # commands receive this wrapper's memory, linker, feature, and toolchain policy.
@@ -23,7 +24,7 @@ fi
 # physical paths so entering this checkout through a symlink still works.
 case "$(pwd -P)" in
   "$repo_root"|"$repo_root"/*) cd "$repo_root" ;;
-  *) exec cargo "$@" ;;
+  *) exec python3 "$admission" --owner dev_cargo --cargo -- cargo "$@" ;;
 esac
 
 # Self-dev builds launched by the daemon may not carry JCODE_SESSION_ID.
@@ -992,7 +993,8 @@ run_local_cargo() {
     local output_file
     output_file=$(mktemp "${TMPDIR:-/tmp}/jcode-dev-cargo.XXXXXX")
     local status=0
-    cargo "${cargo_argv[@]}" 2>&1 | tee "$output_file" || status=${PIPESTATUS[0]}
+    python3 "$admission" --owner dev_cargo --cargo -- cargo "${cargo_argv[@]}" 2>&1 \
+      | tee "$output_file" || status=${PIPESTATUS[0]}
     if [[ "$status" -eq 0 ]] \
       && grep -qE '^running 0 tests$' "$output_file" \
       && ! grep -qE '^running [1-9][0-9]* tests$' "$output_file"; then
@@ -1004,10 +1006,17 @@ run_local_cargo() {
     return "$status"
   fi
 
-  cargo "${cargo_argv[@]}"
+  python3 "$admission" --owner dev_cargo --cargo -- cargo "${cargo_argv[@]}"
 }
 
 cargo_action_needs_gate() {
+  local arg
+  for arg in "${cargo_argv[@]}"; do
+    case "$arg" in
+      --) break ;;
+      -h|--help|-V|--version) return 1 ;;
+    esac
+  done
   case "${cargo_argv[0]:-}" in
     build|check|clippy|test|bench|run|rustc|rustdoc) return 0 ;;
     *) return 1 ;;
@@ -1029,6 +1038,16 @@ acquire_cargo_gate() {
   cargo_gate_status="not-needed"
   cargo_gate_wait_ms=0
   cargo_action_needs_gate || return 0
+  local cargo_bin justrust_bin
+  cargo_bin=$(type -P cargo || true)
+  justrust_bin=$(type -P justrust || true)
+  if [[ -n "$cargo_bin" && -n "$justrust_bin" && "$cargo_bin" -ef "$justrust_bin" \
+    && "${JUSTRUST_REMOTE:-}" != off ]]; then
+    case "${JUSTRUST_CARGO_ROUTE:-}" in
+      0|off|false|no) ;;
+      *) return 0 ;;
+    esac
+  fi
 
   case "${JCODE_CARGO_GATE:-on}" in
     0|false|no|off|disabled)
@@ -1042,11 +1061,11 @@ acquire_cargo_gate() {
   fi
   if ! command -v flock >/dev/null 2>&1; then
     cargo_gate_status="unavailable"
-    log "flock is unavailable; running without the host-wide Cargo gate"
+    log "optional memory gate requires the flock CLI; disk admission is independent"
     return 0
   fi
 
-  local gate_dir gate_path wait_started_ns wait_finished_ns waited_seconds
+  local gate_dir gate_path wait_started_ns wait_finished_ns
   gate_dir="${JCODE_CARGO_GATE_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}}"
   mkdir -p "$gate_dir"
   gate_path="${JCODE_CARGO_GATE_PATH:-$gate_dir/jcode-cargo-build.lock}"
@@ -1054,13 +1073,10 @@ acquire_cargo_gate() {
   if ! flock -n "$cargo_gate_fd"; then
     log "waiting for the host-wide Cargo gate ($gate_path)"
     wait_started_ns=$(date +%s%N)
-    waited_seconds=0
-    # Avoid one silent, unbounded flock call. Periodic notes make it clear that
-    # the process is alive and blocked behind another compiler rather than hung.
-    while ! flock -w 30 "$cargo_gate_fd"; do
-      waited_seconds=$((waited_seconds + 30))
-      log "still waiting for the host-wide Cargo gate (${waited_seconds}s elapsed)"
-    done
+    if ! flock -w 30 "$cargo_gate_fd"; then
+      log "local build blocked after 30s by the host-wide memory gate ($gate_path)"
+      return 75
+    fi
     wait_finished_ns=$(date +%s%N)
     cargo_gate_wait_ms=$(( (wait_finished_ns - wait_started_ns) / 1000000 ))
   fi
