@@ -792,8 +792,8 @@ impl App {
 
         // Pre-compute context info so it shows on startup
         let available_skills: Vec<crate::prompt::SkillInfo> = skills
-            .list()
-            .iter()
+            .list_for_model()
+            .into_iter()
             .map(|s| crate::prompt::SkillInfo {
                 name: s.name.clone(),
                 description: s.description.clone(),

@@ -37,6 +37,7 @@ pub struct Skill {
     pub icon: Option<String>,
     pub mode: Option<bool>,
     pub allowed_tools: Option<Vec<String>>,
+    disable_model_invocation: bool,
     pub content: String,
     pub path: PathBuf,
     /// Normalized search text, built on first use. Normalizing every skill
@@ -53,6 +54,8 @@ struct SkillFrontmatter {
     mode: Option<bool>,
     #[serde(rename = "allowed-tools")]
     allowed_tools: Option<AllowedTools>,
+    #[serde(rename = "disable-model-invocation")]
+    disable_model_invocation: Option<serde_yaml::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -583,6 +586,7 @@ impl SkillRegistry {
             icon,
             mode,
             allowed_tools,
+            disable_model_invocation,
         } = frontmatter;
 
         let allowed_tools = allowed_tools.map(|tools| match tools {
@@ -598,6 +602,8 @@ impl SkillRegistry {
             icon,
             mode,
             allowed_tools,
+            disable_model_invocation: disable_model_invocation
+                == Some(serde_yaml::Value::Bool(true)),
             content: body,
             path: path.to_path_buf(),
             search_text: std::sync::OnceLock::new(),
@@ -644,8 +650,8 @@ impl SkillRegistry {
     }
 
     /// Fallback for frontmatter that is not valid YAML: read the top-level
-    /// `name`, `description` and `allowed-tools` keys as plain text and ignore
-    /// everything else. Returns `None` unless both required keys are present.
+    /// recognized fields from individual entries. Returns `None` unless both
+    /// required keys are present.
     fn parse_frontmatter_lenient(yaml: &str) -> Option<SkillFrontmatter> {
         fn top_level_key(line: &str) -> Option<(&str, &str)> {
             if line.starts_with([' ', '\t', '#', '-']) {
@@ -723,6 +729,10 @@ impl SkillRegistry {
             icon,
             mode,
             allowed_tools,
+            disable_model_invocation: entries
+                .iter()
+                .find(|(key, _)| *key == "disable-model-invocation")
+                .and_then(|(_, lines)| serde_yaml::from_str(lines[0].trim()).ok()),
         })
     }
 
@@ -744,6 +754,14 @@ impl SkillRegistry {
         let mut skills: Vec<&Skill> = self.skills.values().map(Arc::as_ref).collect();
         skills.sort_by(|a, b| a.name.cmp(&b.name));
         skills
+    }
+
+    /// List skills that may be advertised to the model. User-facing lists use `list`.
+    pub fn list_for_model(&self) -> Vec<&Skill> {
+        self.list()
+            .into_iter()
+            .filter(|skill| skill.is_model_invocable())
+            .collect()
     }
 
     /// Reload a specific skill by name
@@ -1097,6 +1115,10 @@ pub fn endorsed_skills() -> &'static [EndorsedSkill] {
 }
 
 impl Skill {
+    pub fn is_model_invocable(&self) -> bool {
+        !self.disable_model_invocation
+    }
+
     /// Get the full prompt content for this skill
     pub fn get_prompt(&self) -> String {
         format!(

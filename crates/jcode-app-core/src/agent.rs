@@ -498,8 +498,8 @@ impl Agent {
 
     fn prompt_skill_infos(skills: &SkillRegistry) -> Vec<crate::prompt::SkillInfo> {
         skills
-            .list()
-            .iter()
+            .list_for_model()
+            .into_iter()
             .map(|skill| crate::prompt::SkillInfo {
                 name: skill.name.clone(),
                 description: skill.description.clone(),

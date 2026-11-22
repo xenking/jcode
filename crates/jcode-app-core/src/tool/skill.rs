@@ -105,7 +105,10 @@ impl Tool for SkillTool {
                     .await
             }
             "list" => self.list_skills(ctx.working_dir.as_deref()).await,
-            "reload" => self.reload_skill(params.name).await,
+            "reload" => {
+                self.reload_skill(params.name, ctx.working_dir.as_deref())
+                    .await
+            }
             "reload_all" => self.reload_all_skills(ctx.working_dir.as_deref()).await,
             "read" => {
                 self.read_skill(params.name, ctx.working_dir.as_deref())
@@ -161,6 +164,8 @@ impl SkillTool {
             }
         })?;
 
+        ensure_model_invocable(&name, Some(skill))?;
+
         let base_dir = skill
             .path
             .parent()
@@ -178,8 +183,7 @@ impl SkillTool {
 
     async fn list_skills(&self, working_dir: Option<&std::path::Path>) -> Result<ToolOutput> {
         let registry = self.effective_registry(working_dir).await;
-        let mut skills = registry.list();
-        skills.sort_by(|a, b| a.name.cmp(&b.name));
+        let skills = registry.list_for_model();
 
         let installed: std::collections::HashSet<&str> =
             skills.iter().map(|s| s.name.as_str()).collect();
@@ -212,21 +216,29 @@ impl SkillTool {
             output
         };
 
-        append_endorsed_skills(&mut output, &installed);
+        append_endorsed_skills(&mut output, &installed, &registry);
         output.push_str(&skill_load_errors_section(&registry));
 
         Ok(ToolOutput::new(output).with_title("Skills: List"))
     }
 
-    async fn reload_skill(&self, name: Option<String>) -> Result<ToolOutput> {
+    async fn reload_skill(
+        &self,
+        name: Option<String>,
+        working_dir: Option<&std::path::Path>,
+    ) -> Result<ToolOutput> {
         let name = normalize_skill_name(name, "reload")?;
-
+        if working_dir.is_some() {
+            ensure_model_invocable(&name, self.effective_registry(working_dir).await.get(&name))?;
+        }
         let mut registry = self.registry.write().await;
+        ensure_model_invocable(&name, registry.get(&name))?;
 
         match registry.reload(&name) {
             Ok(true) => {
                 // Re-read to get updated info
                 if let Some(skill) = registry.get(&name) {
+                    ensure_model_invocable(&name, Some(skill))?;
                     Ok(ToolOutput::new(format!(
                         "Reloaded skill '{}'\n\nDescription: {}\nPath: {}",
                         name,
@@ -270,7 +282,7 @@ impl SkillTool {
         match reloaded {
             Ok(global_count) => {
                 let effective = self.effective_registry(working_dir).await;
-                let skills = effective.list();
+                let skills = effective.list_for_model();
                 let mut output = format!(
                     "Reloaded {} global skills ({} effective for this session)\n\n",
                     global_count,
@@ -308,6 +320,7 @@ impl SkillTool {
         let registry = self.effective_registry(working_dir).await;
 
         if let Some(skill) = registry.get(&name) {
+            ensure_model_invocable(&name, Some(skill))?;
             let mut output = format!("# Skill: {}\n\n", skill.name);
             output.push_str(&format!("**Description:** {}\n", skill.description));
             output.push_str(&format!("**Path:** {}\n", skill.path.display()));
@@ -331,8 +344,19 @@ impl SkillTool {
 /// Append the curated jcode-endorsed skill catalog to `output`, grouped by
 /// category and marked with installed/not-installed status. `installed` is the
 /// set of skill names currently loaded in the registry.
-fn append_endorsed_skills(output: &mut String, installed: &std::collections::HashSet<&str>) {
-    let endorsed = crate::skill::endorsed_skills();
+fn append_endorsed_skills(
+    output: &mut String,
+    installed: &std::collections::HashSet<&str>,
+    registry: &SkillRegistry,
+) {
+    let endorsed: Vec<_> = crate::skill::endorsed_skills()
+        .iter()
+        .filter(|skill| {
+            registry
+                .get(skill.name)
+                .is_none_or(crate::skill::Skill::is_model_invocable)
+        })
+        .collect();
     if endorsed.is_empty() {
         return;
     }
@@ -341,7 +365,7 @@ fn append_endorsed_skills(output: &mut String, installed: &std::collections::Has
 
     // Group by category, preserving first-seen order.
     let mut category_order: Vec<&str> = Vec::new();
-    for skill in endorsed {
+    for skill in &endorsed {
         if !category_order.contains(&skill.category) {
             category_order.push(skill.category);
         }
@@ -381,6 +405,14 @@ fn append_endorsed_skills(output: &mut String, installed: &std::collections::Has
     output.push_str(
         "NVIDIA CUDA-X skills come from the official catalog at https://github.com/NVIDIA/skills.\n",
     );
+}
+
+fn ensure_model_invocable(name: &str, skill: Option<&crate::skill::Skill>) -> Result<()> {
+    anyhow::ensure!(
+        skill.is_none_or(crate::skill::Skill::is_model_invocable),
+        "Skill '{name}' can only be invoked by the user with /{name}"
+    );
+    Ok(())
 }
 
 fn normalize_skill_name(name: Option<String>, action: &str) -> Result<String> {
@@ -481,6 +513,43 @@ mod tests {
         }
         // No skills are loaded in this tool, so they should be "not installed".
         assert!(result.output.contains("[not installed]"));
+    }
+
+    #[tokio::test]
+    async fn user_only_skill_is_invocable_but_not_discoverable_by_the_model() {
+        let (_, temp) = create_test_tool_with_skill("frontend-design");
+        std::fs::write(
+            temp.path().join(".jcode/skills/frontend-design/SKILL.md"),
+            "---\nname: frontend-design\ndescription: Private skill\ndisable-model-invocation: true\n---\nPrivate instructions",
+        )
+        .unwrap();
+        let registry = SkillRegistry::load_for_working_dir(Some(temp.path())).unwrap();
+        let invocation = registry.resolve_invocation("/frontend-design").unwrap();
+        assert!(
+            registry
+                .get(invocation.name)
+                .unwrap()
+                .get_prompt()
+                .contains("Private instructions")
+        );
+        let tool = SkillTool::new(Arc::new(RwLock::new(registry)));
+        let result = tool
+            .execute(json!({"action": "list"}), create_test_context())
+            .await
+            .unwrap();
+        assert!(!result.output.contains("/frontend-design"));
+        for action in ["load", "read", "reload"] {
+            let error = tool
+                .execute(
+                    json!({"action": action, "name": "frontend-design"}),
+                    create_test_context(),
+                )
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("/frontend-design"));
+            assert!(!error.contains("Private"));
+        }
     }
 
     #[tokio::test]

@@ -19,8 +19,8 @@ impl App {
         // system prompt, so skill changes cannot invalidate the cache.
         let skill_prompt: Option<String> = None;
         let available_skills: Vec<crate::prompt::SkillInfo> = skills
-            .list()
-            .iter()
+            .list_for_model()
+            .into_iter()
             .map(|s| crate::prompt::SkillInfo {
                 name: s.name.clone(),
                 description: s.description.clone(),

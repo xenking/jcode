@@ -61,6 +61,7 @@ mod tests {
                     icon: None,
                     mode: None,
                     allowed_tools: None,
+                    disable_model_invocation: false,
                     content: "content".to_string(),
                     path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
                     search_text: std::sync::OnceLock::from(build_skill_search_text(
