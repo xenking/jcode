@@ -666,8 +666,10 @@ fn typescript_context_breakdown_matches_flattened_wire_payload() {
             .collect(),
             action_forecast: Some(ContextActionForecast {
                 current_tokens: Some(40_000),
-                compact: Some(ContextActionSavings::UpperBound { tokens: 8_000 }),
-                shake: Some(ContextActionSavings::NoChange),
+                compact: None,
+                shake: None,
+                compact_status: Some(ContextActionStatus::SavingsUnknown),
+                shake_status: Some(ContextActionStatus::NoEligible),
             }),
         },
     };
@@ -679,10 +681,21 @@ fn typescript_context_breakdown_matches_flattened_wire_payload() {
             "missing wire field {key}"
         );
     }
-    assert_eq!(
-        wire["action_forecast"]["compact"],
-        serde_json::json!({"kind":"upper_bound","tokens":8_000})
-    );
+    assert_eq!(wire["action_forecast"]["compact_status"], "savings_unknown");
+    assert_eq!(wire["action_forecast"]["shake_status"], "no_eligible");
+    let forecast = sdk
+        .split_once("export interface ContextActionForecast {")
+        .unwrap()
+        .1
+        .split_once('}')
+        .unwrap()
+        .0;
+    for key in wire["action_forecast"].as_object().unwrap().keys() {
+        assert!(
+            forecast.contains(&format!("{key}:")) || forecast.contains(&format!("{key}?:")),
+            "missing context action forecast field {key}"
+        );
+    }
     assert!(!block.contains("breakdown:"));
     let meter = sdk.split_once("export interface ContextMeter {").unwrap().1;
     let meter = meter.split_once('}').unwrap().0;

@@ -257,6 +257,53 @@ async fn manual_shake_requires_a_current_preview_and_records_only_one_reduction(
 }
 
 #[tokio::test]
+async fn manual_compact_forecast_is_unknown_until_real_compaction_runs() {
+    use jcode_session_types::ContextActionStatus;
+
+    let _guard = crate::storage::lock_test_env();
+    let (_home, mut agent, _) = fixture(300, 250_000, 9_000).await;
+    let before = agent.inspect_context_breakdown(false).await;
+    let forecast = before.action_forecast.unwrap();
+    assert_eq!(
+        forecast.compact_status,
+        Some(ContextActionStatus::SavingsUnknown)
+    );
+    assert_eq!(forecast.compact, None);
+    assert!(agent.session.compaction.is_none());
+
+    let (message, started) = agent.request_manual_compaction();
+    assert!(started, "{message}");
+    let busy = agent
+        .inspect_context_breakdown(false)
+        .await
+        .action_forecast
+        .unwrap();
+    assert_eq!(busy.compact_status, Some(ContextActionStatus::Busy));
+    assert_eq!(busy.shake_status, Some(ContextActionStatus::Busy));
+
+    let event = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let (event, error, pending) = agent.poll_compaction_status();
+            if let Some(event) = event {
+                break event;
+            }
+            assert!(pending, "{error:?}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("manual Compact completed");
+    assert_eq!(event.trigger, "manual");
+    assert!(
+        event
+            .pre_tokens
+            .zip(event.post_tokens)
+            .is_some_and(|(pre, post)| pre > post)
+    );
+    assert_eq!(compaction_dividers(&agent), ["manual"]);
+}
+
+#[tokio::test]
 async fn idle_cache_expiry_shakes_at_ttl_before_the_next_user_turn() {
     let _guard = crate::storage::lock_test_env();
     let (_home, mut agent, before) = fixture(300, 1_000, 20_000).await;

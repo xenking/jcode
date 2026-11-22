@@ -1,5 +1,6 @@
 use super::*;
 use crate::agent::context_breakdown::{inspect_draft, inspect_saved, unavailable};
+use jcode_session_types::{ContextActionForecast, ContextActionStatus};
 use std::path::Path;
 
 pub(super) async fn reply(
@@ -20,7 +21,7 @@ pub(super) async fn reply(
             agent.inspect_context_breakdown(summary_only).await
         } else {
             let saved_id = session_id.clone();
-            match tokio::task::spawn_blocking(move || {
+            let mut saved = match tokio::task::spawn_blocking(move || {
                 crate::session::Session::load_for_remote_startup(&saved_id)
                     .ok()
                     .map(|session| inspect_saved(&session, summary_only))
@@ -30,7 +31,16 @@ pub(super) async fn reply(
                 Ok(Some(breakdown)) => breakdown,
                 _ if live.is_some() => unavailable(session_id),
                 _ => return error(id, "session context is unavailable"),
+            };
+            if !summary_only {
+                saved.action_forecast =
+                    Some(ContextActionForecast::unavailable(if live.is_some() {
+                        ContextActionStatus::Busy
+                    } else {
+                        ContextActionStatus::Unknown
+                    }));
             }
+            saved
         }
     } else {
         let cwd = cwd.map(Path::new);

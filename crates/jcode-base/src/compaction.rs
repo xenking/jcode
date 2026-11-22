@@ -2036,18 +2036,9 @@ impl CompactionManager {
         Ok(cutoff)
     }
 
-    /// Optimistic local bound: keep the protected tail and assume the new
-    /// summary takes zero space. Never run the provider during preflight.
-    pub fn manual_compaction_upper_bound(&self, all_messages: &[Message]) -> Result<usize, String> {
-        let cutoff = self.manual_compaction_cutoff(all_messages)?;
-        let tail_chars = self.active_messages(all_messages)[cutoff..]
-            .iter()
-            .map(message_char_count)
-            .sum();
-        let floor = estimate_compaction_tokens(None, tail_chars, self.token_budget);
-        Ok(self
-            .measure_token_estimate_with(all_messages)
-            .saturating_sub(floor))
+    /// Read-only admission check shared with the manual Compact command.
+    pub fn can_manually_compact(&self, all_messages: &[Message]) -> bool {
+        self.manual_compaction_cutoff(all_messages).is_ok()
     }
 
     /// Force immediate compaction (for manual /compact command).

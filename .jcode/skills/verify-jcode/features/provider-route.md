@@ -47,3 +47,8 @@ checks the outgoing `compact_threshold`, reads the saved meter after restart,
 reattaches without inference, and checks the live meter and next saved policy.
 It retains the requests, meter payloads, CLI replies, and cleanup receipt.
 It does not contact OpenAI OAuth or test server-side compaction execution.
+
+For the manual action forecast, run `python3 .jcode/skills/verify-jcode/scripts/context_action_forecast.py "$BINARY"`.
+The probe opens a private blank session, checks the read-only forecast, and then
+checks that Shake preview finds nothing and manual Compact refuses to start.
+It uses a dummy loopback endpoint and does not touch the shared daemon.

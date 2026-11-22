@@ -73,6 +73,35 @@ pub struct ContextActionForecast {
     pub current_tokens: Option<u64>,
     pub compact: Option<ContextActionSavings>,
     pub shake: Option<ContextActionSavings>,
+    // Keep new statuses separate so old clients can still read the breakdown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_status: Option<ContextActionStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shake_status: Option<ContextActionStatus>,
+}
+
+impl ContextActionForecast {
+    pub fn unavailable(status: ContextActionStatus) -> Self {
+        Self {
+            current_tokens: None,
+            compact: None,
+            shake: None,
+            compact_status: Some(status),
+            shake_status: Some(status),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextActionStatus {
+    NoEligible,
+    Unsupported,
+    Busy,
+    /// The planner can start, but the resulting artifact size is unknown.
+    SavingsUnknown,
+    /// No live planner was available to inspect.
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

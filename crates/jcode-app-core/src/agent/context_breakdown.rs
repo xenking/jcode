@@ -8,9 +8,9 @@ use crate::provider::models::{
 use crate::session_telemetry::{self, SessionTelemetry};
 use crate::util::APPROX_CHARS_PER_TOKEN;
 use jcode_session_types::{
-    ContextActionForecast, ContextActionSavings, ContextBreakdown, ContextBreakdownCategory,
-    ContextBreakdownKind as Kind, ContextMeter, ContextMeterState as State,
-    ContextOccupancySource as Source,
+    ContextActionForecast, ContextActionSavings, ContextActionStatus, ContextBreakdown,
+    ContextBreakdownCategory, ContextBreakdownKind as Kind, ContextMeter,
+    ContextMeterState as State, ContextOccupancySource as Source,
 };
 use std::path::Path;
 
@@ -25,9 +25,7 @@ impl Agent {
             return meter_only(Some(self.session.id.clone()), Some(model), meter);
         }
         let source = self.session.messages_for_provider_uncached();
-        let action_forecast = (!summary_only)
-            .then(|| self.forecast_context_actions(&source))
-            .flatten();
+        let action_forecast = (!summary_only).then(|| self.forecast_context_actions(&source));
         let messages = inspect_messages(
             &self.session,
             source,
@@ -103,36 +101,40 @@ impl Agent {
 }
 
 impl Agent {
-    fn forecast_context_actions(&self, messages: &[Message]) -> Option<ContextActionForecast> {
+    fn forecast_context_actions(&self, messages: &[Message]) -> ContextActionForecast {
         let compaction = self.registry.compaction();
-        let manager = compaction.try_read().ok()?;
+        let Ok(manager) = compaction.try_read() else {
+            return ContextActionForecast::unavailable(ContextActionStatus::Busy);
+        };
         if manager.is_compacting() {
-            return None;
+            return ContextActionForecast::unavailable(ContextActionStatus::Busy);
         }
-        let compact =
-            (!self.is_swarm_worker() && self.provider.supports_compaction()).then(|| match manager
-                .manual_compaction_upper_bound(messages)
-            {
-                Ok(tokens) if tokens > 0 => ContextActionSavings::UpperBound {
-                    tokens: tokens as u64,
-                },
-                _ => ContextActionSavings::NoChange,
-            });
+        let compact_status = if self.is_swarm_worker() || !self.provider.supports_compaction() {
+            ContextActionStatus::Unsupported
+        } else if manager.can_manually_compact(messages) {
+            ContextActionStatus::SavingsUnknown
+        } else {
+            ContextActionStatus::NoEligible
+        };
         let start = manager.active_start(messages);
         let config = manager.manual_tool_shake_config();
-        let shake = match self.session.preview_shake_stored_messages(start, &config) {
-            compaction::ShakeOutcome::Shaken { tokens_saved, .. } => {
-                ContextActionSavings::Estimate {
+        let (shake, shake_status) = match self.session.preview_shake_stored_messages(start, &config)
+        {
+            compaction::ShakeOutcome::Shaken { tokens_saved, .. } => (
+                Some(ContextActionSavings::Estimate {
                     tokens: tokens_saved as u64,
-                }
-            }
-            compaction::ShakeOutcome::NoChange => ContextActionSavings::NoChange,
+                }),
+                None,
+            ),
+            compaction::ShakeOutcome::NoChange => (None, Some(ContextActionStatus::NoEligible)),
         };
-        Some(ContextActionForecast {
+        ContextActionForecast {
             current_tokens: None,
-            compact,
-            shake: Some(shake),
-        })
+            compact: None,
+            shake,
+            compact_status: Some(compact_status),
+            shake_status,
+        }
     }
 }
 

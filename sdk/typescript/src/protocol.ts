@@ -500,10 +500,19 @@ export type ContextActionSavings =
   | { kind: "estimate"; tokens: number }
   | { kind: "upper_bound"; tokens: number };
 
+export type ContextActionStatus =
+  | "no_eligible"
+  | "unsupported"
+  | "busy"
+  | "savings_unknown"
+  | "unknown";
+
 export interface ContextActionForecast {
   current_tokens: number | null;
   compact: ContextActionSavings | null;
   shake: ContextActionSavings | null;
+  compact_status?: ContextActionStatus;
+  shake_status?: ContextActionStatus;
 }
 
 export interface ContextActionMeasurement {
