@@ -198,6 +198,13 @@ pub fn classify_target(
     recursive: bool,
     ctx: &RiskContext,
 ) -> Option<RiskFinding> {
+    if ctx.working_dir.is_none() && expanded.is_relative() {
+        return Some(RiskFinding {
+            level: RiskLevel::Confirm,
+            reason: format!("the working directory for `{raw}` could not be determined"),
+            target: Some(raw.to_string()),
+        });
+    }
     // Glob and variable expansion we did not perform: we cannot know the
     // footprint, so escalate rather than guess.
     if (raw.contains('*') || raw.contains('?'))

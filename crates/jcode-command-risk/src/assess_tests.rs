@@ -7,6 +7,54 @@
 use super::*;
 use std::path::PathBuf;
 
+#[test]
+fn directory_changes_keep_protected_fixture_paths_guarded() {
+    let ctx = RiskContext {
+        working_dir: Some("/fixture/project".into()),
+        home_dir: Some("/fixture/person".into()),
+        ..Default::default()
+    };
+    let command = "cd /fixture/person && rmdir Documents";
+    assert_eq!(assess(command, &ctx).level, RiskLevel::Catastrophic);
+    assert_eq!(
+        assess("cd $UNRESOLVED && rmdir artifact", &ctx).level,
+        RiskLevel::Confirm
+    );
+}
+
+#[test]
+fn redirects_are_not_destructive_command_operands() {
+    let ctx = RiskContext {
+        working_dir: Some("/fixture/project".into()),
+        ..Default::default()
+    };
+    for redirect in [
+        "2>/dev/null",
+        "2>>/dev/null",
+        "< /dev/null",
+        "2>&1",
+        "2>& 1",
+        "&>/dev/null",
+        "&>>/dev/null",
+    ] {
+        let assessment = assess(&format!("rm -r artifact {redirect}"), &ctx);
+        assert_eq!(assessment.level, RiskLevel::Low, "{redirect}");
+        assert_eq!(assessment.findings.len(), 1, "{redirect}: {assessment:?}");
+    }
+    for operand in ["2 ", "'2'", "\\2"] {
+        assert_eq!(
+            assess(&format!("rm -r artifact {operand}>/dev/null"), &ctx)
+                .findings
+                .len(),
+            2
+        );
+    }
+    assert_eq!(
+        assess("echo line >& /dev/fixture", &ctx).level,
+        RiskLevel::Catastrophic
+    );
+}
+
 fn ctx() -> RiskContext {
     RiskContext {
         working_dir: Some(PathBuf::from("/home/u/proj")),

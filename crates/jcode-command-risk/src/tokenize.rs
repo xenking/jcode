@@ -12,6 +12,8 @@ pub struct Token {
     /// True when this segment's stdin comes from a pipe, so its operands are
     /// partly supplied at runtime by the previous command.
     pub receives_pipe: bool,
+    /// A redirection destination, not an argument to the program.
+    pub is_redirect_target: bool,
     /// True for `>` / `>|` redirect destinations, which are truncated on open.
     pub is_truncating_redirect_target: bool,
     /// True for control operators like `&&`, which are never path targets.
@@ -23,6 +25,7 @@ impl Token {
         Self {
             text: text.into(),
             receives_pipe: false,
+            is_redirect_target: false,
             is_truncating_redirect_target: false,
             is_operator: false,
         }
@@ -54,7 +57,7 @@ impl Token {
 }
 
 /// Characters that separate one command from the next.
-const SEGMENT_SEPARATORS: &[&str] = &["&&", "||", ";", "|", "\n", "(", ")"];
+const SEGMENT_SEPARATORS: &[&str] = &["&&", "||", ";", "&", "|", "|&", "\n", "(", ")"];
 
 /// Split a command line into individual command segments, each tokenized.
 ///
@@ -73,7 +76,7 @@ pub fn split_segments(command: &str) -> Vec<Vec<Token>> {
             }
             // The command after `|` consumes the previous one's output as
             // operands, which this parser cannot see (#604 review).
-            next_receives_pipe = token.text == "|";
+            next_receives_pipe = matches!(token.text.as_str(), "|" | "|&");
             continue;
         }
         let mut token = token;
@@ -84,6 +87,12 @@ pub fn split_segments(command: &str) -> Vec<Vec<Token>> {
         segments.push(current);
     }
     segments
+}
+
+enum Redirect {
+    Truncate,
+    OutputFdOrFile,
+    Other,
 }
 
 /// Tokenize a command line, resolving quotes so `rm "$HOME"` and `rm $HOME`
@@ -98,7 +107,8 @@ pub fn tokenize(command: &str) -> Vec<Token> {
     let mut current = String::new();
     let mut has_content = false;
     let mut chars = command.chars().peekable();
-    let mut pending_redirect = false;
+    let mut pending_redirect = None;
+    let mut io_number_eligible = true;
 
     macro_rules! flush {
         () => {
@@ -106,11 +116,20 @@ pub fn tokenize(command: &str) -> Vec<Token> {
                 let mut token = Token::word(std::mem::take(&mut current));
                 #[allow(unused_assignments)]
                 {
-                    if pending_redirect {
-                        token.is_truncating_redirect_target = true;
-                        pending_redirect = false;
+                    if let Some(redirect) = pending_redirect.take() {
+                        token.is_redirect_target = true;
+                        token.is_truncating_redirect_target = match redirect {
+                            Redirect::Truncate => true,
+                            Redirect::OutputFdOrFile => {
+                                token.text != "-"
+                                    && (token.text.is_empty()
+                                        || !token.text.bytes().all(|b| b.is_ascii_digit()))
+                            }
+                            Redirect::Other => false,
+                        };
                     }
                     has_content = false;
+                    io_number_eligible = true;
                 }
                 tokens.push(token);
             }
@@ -120,6 +139,7 @@ pub fn tokenize(command: &str) -> Vec<Token> {
     while let Some(c) = chars.next() {
         match c {
             '\'' => {
+                io_number_eligible = false;
                 has_content = true;
                 for q in chars.by_ref() {
                     if q == '\'' {
@@ -129,6 +149,7 @@ pub fn tokenize(command: &str) -> Vec<Token> {
                 }
             }
             '"' => {
+                io_number_eligible = false;
                 has_content = true;
                 while let Some(q) = chars.next() {
                     if q == '"' {
@@ -147,6 +168,10 @@ pub fn tokenize(command: &str) -> Vec<Token> {
             }
             '\\' => {
                 if let Some(next) = chars.next() {
+                    if next == '\n' {
+                        continue;
+                    }
+                    io_number_eligible = false;
                     has_content = true;
                     current.push(next);
                 }
@@ -154,16 +179,27 @@ pub fn tokenize(command: &str) -> Vec<Token> {
             ' ' | '\t' => flush!(),
             '\n' | ';' => {
                 flush!();
+                pending_redirect = None;
                 let mut op = Token::word(c.to_string());
                 op.is_operator = true;
                 tokens.push(op);
             }
+            '&' if chars.peek() == Some(&'>') => {
+                flush!();
+                chars.next();
+                pending_redirect = Some(if chars.peek() == Some(&'>') {
+                    chars.next();
+                    Redirect::Other
+                } else {
+                    Redirect::Truncate
+                });
+            }
             '&' | '|' => {
                 flush!();
+                pending_redirect = None;
                 let mut text = c.to_string();
-                if chars.peek() == Some(&c) {
-                    text.push(c);
-                    chars.next();
+                if let Some(next) = chars.next_if(|next| *next == c || (c == '|' && *next == '&')) {
+                    text.push(next);
                 }
                 let mut op = Token::word(text);
                 op.is_operator = true;
@@ -171,43 +207,49 @@ pub fn tokenize(command: &str) -> Vec<Token> {
             }
             '(' | ')' => {
                 flush!();
+                pending_redirect = None;
                 let mut op = Token::word(c.to_string());
                 op.is_operator = true;
                 tokens.push(op);
             }
-            '>' => {
-                flush!();
-                // `>>` appends and does not truncate, so it is far less
-                // destructive; only a single `>` clobbers.
-                if chars.peek() == Some(&'>') {
-                    chars.next();
-                } else if chars.peek() == Some(&'&') {
-                    // `>&N` / `>&-` duplicate or close a file descriptor and
-                    // never name a file to truncate. Consume the FD word.
-                    chars.next();
-                    let mut fd = String::new();
-                    while let Some(&d) = chars.peek() {
-                        if d.is_ascii_digit() || d == '-' {
-                            fd.push(d);
-                            chars.next();
-                        } else {
-                            break;
-                        }
-                    }
-                    if fd.is_empty() {
-                        // `>& file` (bash: redirect stdout+stderr) truncates.
-                        pending_redirect = true;
-                    }
+            '>' | '<' => {
+                if has_content && io_number_eligible && pending_redirect.is_none() {
+                    current.clear();
+                    has_content = false;
                 } else {
-                    if chars.peek() == Some(&'|') {
-                        chars.next();
-                    }
-                    pending_redirect = true;
+                    flush!();
                 }
+                pending_redirect = Some(match (c, chars.peek().copied()) {
+                    ('>', Some('>')) => {
+                        chars.next();
+                        Redirect::Other
+                    }
+                    ('>', Some('&')) => {
+                        chars.next();
+                        Redirect::OutputFdOrFile
+                    }
+                    ('>', next) => {
+                        if next == Some('|') {
+                            chars.next();
+                        }
+                        Redirect::Truncate
+                    }
+                    ('<', Some('<')) => {
+                        chars.next();
+                        chars.next_if(|next| matches!(next, '-' | '<'));
+                        Redirect::Other
+                    }
+                    (_, next) => {
+                        if matches!(next, Some('&' | '>')) {
+                            chars.next();
+                        }
+                        Redirect::Other
+                    }
+                });
             }
-            '<' => flush!(),
             _ => {
                 has_content = true;
+                io_number_eligible &= c.is_ascii_digit();
                 current.push(c);
             }
         }

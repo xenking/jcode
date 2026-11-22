@@ -232,6 +232,7 @@ pub fn assess(command: &str, ctx: &RiskContext) -> RiskAssessment {
 }
 
 fn collect_findings(command: &str, ctx: &RiskContext, findings: &mut Vec<RiskFinding>) {
+    const MAX_DIRECTORY_CANDIDATES: usize = 16;
     let segments = tokenize::split_segments(command);
     // Values assigned on this command line (`R=$HOME/scratch/x`) and loop
     // variables with literal word lists (`for w in a b`) are known to the shell
@@ -240,16 +241,48 @@ fn collect_findings(command: &str, ctx: &RiskContext, findings: &mut Vec<RiskFin
     // segments are reached, so a variable used before it is assigned stays
     // unresolved just as the shell would see it unset.
     let mut env = vars::VarEnv::default();
+    let mut directories = vec![ctx.working_dir.clone()];
     for segment in &segments {
         // Assigning a variable the guard trusts is judged on the assignment
         // token itself; ordinary commands that merely print such a variable
         // (`grep JCODE_HOME=`) are untouched.
-        for finding in vars::reassignment_findings(segment) {
+        let words = command_words(segment);
+        for finding in vars::reassignment_findings(&words) {
             push_finding(findings, finding);
         }
-        env.absorb(segment);
+        env.absorb(&words);
+        let mut changes = Vec::new();
         for expanded in env.expand_segment(segment) {
-            assess_segment(&expanded, ctx, findings);
+            for directory in &directories {
+                let local = RiskContext {
+                    working_dir: directory.clone(),
+                    ..ctx.clone()
+                };
+                let mut local_findings = Vec::new();
+                assess_segment(&expanded, &local, &mut local_findings);
+                for finding in local_findings {
+                    push_finding(findings, finding);
+                }
+                if let Some(mut change) = directory_change(&expanded, &local) {
+                    if changes.len() >= MAX_DIRECTORY_CANDIDATES {
+                        change = None;
+                    }
+                    if !changes.contains(&change) {
+                        changes.push(change);
+                    }
+                }
+            }
+        }
+        // A failed, conditional, or subshell-local cd can leave any previous
+        // directory in effect. Keep it rather than assuming the last cd ran.
+        for directory in changes {
+            if !directories.contains(&directory) {
+                if directories.len() < MAX_DIRECTORY_CANDIDATES || directory.is_none() {
+                    directories.push(directory);
+                } else if !directories.contains(&None) {
+                    directories.push(None);
+                }
+            }
         }
     }
 
@@ -257,12 +290,67 @@ fn collect_findings(command: &str, ctx: &RiskContext, findings: &mut Vec<RiskFin
     // word tokenizer flattens into literals (#1753). Each body is strictly
     // shorter than its parent, so the recursion terminates.
     for source in tokenize::embedded_substitutions(command) {
-        let mut nested = Vec::new();
-        collect_findings(&source, ctx, &mut nested);
-        for finding in nested {
-            push_finding(findings, finding);
-        }
+        collect_findings(&source, ctx, findings);
     }
+}
+
+fn command_words(tokens: &[Token]) -> std::borrow::Cow<'_, [Token]> {
+    if tokens.iter().any(|token| token.is_redirect_target) {
+        tokens
+            .iter()
+            .filter(|token| !token.is_redirect_target)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into()
+    } else {
+        tokens.into()
+    }
+}
+
+fn directory_change(tokens: &[Token], ctx: &RiskContext) -> Option<Option<std::path::PathBuf>> {
+    let mut words = tokens
+        .iter()
+        .filter(|token| !token.is_redirect_target)
+        .peekable();
+    while words.peek().is_some_and(|token| {
+        SHELL_CONTROL_PREFIXES.contains(&token.text.as_str())
+            || matches!(token.text.as_str(), "{" | "!")
+            || vars::starts_with_assignment(std::slice::from_ref(*token))
+    }) {
+        words.next();
+    }
+    let mut program = words.next()?;
+    while matches!(program.text.as_str(), "builtin" | "command") {
+        program = words.next()?;
+    }
+    match program.text.as_str() {
+        "pushd" | "popd" => return Some(None),
+        "cd" => {}
+        _ => return None,
+    }
+    while words
+        .peek()
+        .is_some_and(|token| matches!(token.text.as_str(), "-L" | "-P" | "-Pe"))
+    {
+        words.next();
+    }
+    if words.peek().is_some_and(|token| token.text == "--") {
+        words.next();
+    }
+    let Some(target) = words.next() else {
+        return Some(ctx.home_dir.clone());
+    };
+    if words.next().is_some()
+        || target.text.is_empty()
+        || target.text.starts_with('-')
+        || target.text.contains(['$', '`', '*', '?', '[', '{'])
+        || (target.text.starts_with('~')
+            && (ctx.home_dir.is_none() || (target.text != "~" && !target.text.starts_with("~/"))))
+    {
+        return Some(None);
+    }
+    let path = paths::expand(&target.text, ctx);
+    Some(path.is_absolute().then_some(path))
 }
 
 fn push_finding(findings: &mut Vec<RiskFinding>, finding: RiskFinding) {
@@ -284,7 +372,8 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
     // Strip wrapper programs (`sudo`, `env`, `xargs`, ...) so the destructive
     // verb underneath is the one we classify. Without this, any common prefix
     // is a complete bypass.
-    let mut tokens = tokens;
+    let words = command_words(tokens);
+    let mut tokens = words.as_ref();
     while tokens.len() > 1
         && tokens
             .first()
@@ -436,7 +525,7 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
     let targets: Vec<&Token> = tokens
         .iter()
         .skip(1)
-        .filter(|t| !t.is_flag() && !t.is_operator && !t.is_truncating_redirect_target)
+        .filter(|t| !t.is_flag() && !t.is_operator)
         .collect();
 
     // A destructive command fed by a pipe takes its operands from the previous
