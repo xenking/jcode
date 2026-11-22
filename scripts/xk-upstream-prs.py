@@ -395,7 +395,7 @@ def patch(path, commit):
                "--no-renames", "--src-prefix=a/", "--dst-prefix=b/", parents[1], commit, "--").stdout
 
 
-def exact_upstream(path, pr, ports, upstream_tip):
+def exact_upstream(path, pr, ports, upstream_tip, fork_tip):
     if len(ports) != 1:
         return False
     port = next(iter(ports))
@@ -404,13 +404,15 @@ def exact_upstream(path, pr, ports, upstream_tip):
         return False
     names = git(path, "diff", "--name-only", "-z", "--no-renames", f"{port}^1", port, "--").stdout
     paths = [os.fsdecode(name) for name in names.split(b"\0") if name]
-    result = git(path, "--literal-pathspecs", "diff", "--quiet", "--no-ext-diff", "--no-textconv",
-                 upstream_tip, "HEAD", "--", *paths, check=False)
-    if result.returncode not in (0, 1):
+    for old, new in ((port, fork_tip), (upstream_tip, "HEAD")):
+        result = git(path, "--literal-pathspecs", "diff", "--quiet", "--no-ext-diff", "--no-textconv",
+                     old, new, "--", *paths, check=False)
+        if result.returncode == 1:
+            return False
         result.check_returncode()
-    # Every touched path must already match current upstream byte for byte.
-    # This checks the actual merge result, not just similarity of two patches.
-    return result.returncode == 0
+    # The fork must not have rewritten the port's paths, and the actual merge
+    # must match current upstream byte for byte on all those paths.
+    return True
 
 
 def reconcile(args):
@@ -439,7 +441,7 @@ def reconcile(args):
             continue
         if picked:
             outcomes.append((identity, picked[1]))
-        elif not args.check and exact_upstream(path, pr, commits, target):
+        elif not args.check and exact_upstream(path, pr, commits, target, fork_ref(repo)):
             outcomes.append((identity, "upstream"))
         else:
             pending.append((pr, commits))

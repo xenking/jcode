@@ -195,9 +195,10 @@ class Workflow(unittest.TestCase):
         self.git(self.fork, "push", "origin", "HEAD:master")
         return landed, port, self.temp / "worktrees/jcode"
 
-    def sync(self, *args, expected=0):
+    def sync(self, *args, expected=0, push=False):
+        push_args = [] if push else ["--no-push"]
         return self.run_cli(["bash", str(SCRIPTS / "xk-upstream-sync.sh"),
-                             "--repo", "jcode", "--skip-checks", "--no-push", *args], expected)
+                             "--repo", "jcode", "--skip-checks", *push_args, *args], expected)
 
     def test_sync_exact_port_reconciles_once_without_rewriting_history(self):
         landed, port, worktree = self.setup_merge(False)
@@ -224,6 +225,18 @@ class Workflow(unittest.TestCase):
         result = self.cli("status")
         self.assertIn("[jcode#1789]", result)
         self.assertIn(f"fork `{original[:12]}`", result)
+
+    def test_late_origin_port_invalidates_earlier_reconciliation_before_push(self):
+        _, _, worktree = self.setup_merge(False)
+        self.assertIn("kept upstream", self.sync())
+        (self.fork / "late-port").write_text("additional fork behavior\n")
+        late = self.port(1789)
+        self.git(self.fork, "push", "origin", "HEAD:master")
+        result = self.sync("--continue", expected=3, push=True)
+        self.assertIn("review before push", result)
+        self.assertEqual(self.git(worktree, "rev-parse", "origin/master"), late)
+        self.assertEqual(self.git(worktree, "ls-remote", "origin", "refs/heads/master").split()[0], late)
+        self.assertEqual((worktree / "late-port").read_text(), "additional fork behavior\n")
 
     def test_sync_conflict_and_variant_cannot_ship_without_review(self):
         _, _, worktree = self.setup_merge(True)

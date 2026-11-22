@@ -43,8 +43,9 @@ without a matching decision will appear in that backlog.
 `xk-upstream-sync.sh` prints the new and changed PRs before merging. It checks
 merged ports in the candidate before validation and after merging any late
 origin changes. The original port stays in history for provenance. If the
-landed patch matches one port exactly and the actual candidate matches upstream
-on every affected path, sync records `upstream` automatically.
+landed patch matches one port exactly, the fork has not changed its paths
+since the port, and the candidate matches upstream on each affected path,
+sync records `upstream` automatically.
 
 If Git reports conflicts, resolve those first and call sync with `--continue`
 to commit the merge and see any outstanding port reviews. Sync will not push
