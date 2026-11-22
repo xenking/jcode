@@ -65,23 +65,12 @@ use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 /// Anthropic Messages API endpoint
-const API_URL: &str = "https://api.anthropic.com/v1/messages";
+const API_URL: &str = jcode_base::provider::anthropic::ANTHROPIC_MESSAGES_URL;
 
 /// OAuth endpoint (with beta=true query param)
 const API_URL_OAUTH: &str = "https://api.anthropic.com/v1/messages?beta=true";
 
-fn direct_api_url() -> String {
-    let base = std::env::var("JCODE_ANTHROPIC_API_BASE")
-        .ok()
-        .or_else(|| std::env::var("ANTHROPIC_BASE_URL").ok())
-        .map(|value| value.trim().trim_end_matches('/').to_string())
-        .filter(|value| !value.is_empty());
-    match base {
-        Some(base) if base.ends_with("/messages") => base,
-        Some(base) => format!("{base}/messages"),
-        None => API_URL.to_string(),
-    }
-}
+use jcode_base::provider::anthropic::{direct_api_url, direct_auth_mode};
 
 fn configured_direct_headers() -> Result<HeaderMap> {
     let Some(raw) = std::env::var("JCODE_ANTHROPIC_HEADERS")
@@ -101,24 +90,6 @@ fn configured_direct_headers() -> Result<HeaderMap> {
         result.insert(name, value);
     }
     Ok(result)
-}
-
-fn direct_auth_mode() -> String {
-    std::env::var("JCODE_ANTHROPIC_AUTH")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| {
-            if std::env::var("ANTHROPIC_AUTH_TOKEN")
-                .ok()
-                .is_some_and(|value| !value.trim().is_empty())
-            {
-                "bearer".to_string()
-            } else {
-                "header".to_string()
-            }
-        })
-        .trim()
-        .to_ascii_lowercase()
 }
 
 #[derive(Clone)]

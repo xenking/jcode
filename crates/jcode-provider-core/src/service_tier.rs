@@ -295,6 +295,27 @@ mod tests {
 }
 use crate::{SpeedAvailability, SpeedMode, SpeedOption};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnthropicFastMode {
+    Stable,
+    Beta,
+}
+
+pub fn anthropic_fast_mode(
+    model: &str,
+    oauth: bool,
+    date: (i32, u32, u32),
+) -> Option<AnthropicFastMode> {
+    use AnthropicFastMode::{Beta, Stable};
+    match base_model(model).as_str() {
+        "claude-opus-5-5" | "claude-fable-5-2" => Some(Stable),
+        "claude-mythos-5-2" if !oauth => Some(Stable),
+        "claude-opus-5" => Some(Beta),
+        "claude-opus-4-8" if date < (2026, 11, 30) => Some(Beta),
+        _ => None,
+    }
+}
+
 /// OAuth support comes from the specific account's Codex catalog, never from
 /// the platform API model list. A catalog advertises models, not rate limits.
 pub fn openai_speed_options(

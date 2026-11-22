@@ -201,6 +201,38 @@ fn oauth_fast_sends_speed_and_beta_only_after_opt_in() {
 }
 
 #[test]
+fn changing_the_api_key_does_not_reuse_fast_authorization() {
+    let _lock = jcode_base::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = crate::tests::EnvVarGuard::set("JCODE_HOME", home.path());
+    let (url, server) = capture([("200 OK", SSE, STOP)]);
+    let mut provider = api_provider(&url, true);
+    runtime().block_on(async {
+        provider.set_speed_mode(SpeedMode::Fast).unwrap();
+        let original = provider.speed_route_identity().unwrap();
+        provider.profile_api_key = Some(Ok("another-offline-fixture-api-key".into()));
+        assert_ne!(
+            provider.speed_route_identity().as_deref(),
+            Some(original.as_str())
+        );
+        assert!(
+            provider
+                .complete(&[Message::user("fixture")], &[], "", None)
+                .await
+                .is_err()
+        );
+        provider.set_speed_mode(SpeedMode::Standard).unwrap();
+        complete(&provider, None).await;
+    });
+    let [request] = server.join().unwrap();
+    assert_standard(&request);
+    assert_eq!(
+        request.headers["x-api-key"],
+        "another-offline-fixture-api-key"
+    );
+}
+
+#[test]
 fn api_fast_is_opt_in_for_first_party_only_and_does_not_follow_model_switches() {
     let _lock = jcode_base::storage::lock_test_env();
     let home = tempfile::tempdir().unwrap();

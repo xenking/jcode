@@ -79,6 +79,48 @@ pub fn apply_oauth_attribution_headers(
 /// Available models
 pub const AVAILABLE_MODELS: &[&str] = jcode_provider_core::ALL_CLAUDE_MODELS;
 
+pub const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
+
+pub fn direct_api_url() -> String {
+    let base = std::env::var("JCODE_ANTHROPIC_API_BASE")
+        .ok()
+        .or_else(|| std::env::var("ANTHROPIC_BASE_URL").ok())
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty());
+    match base {
+        Some(base) if base.ends_with("/messages") => base,
+        Some(base) => format!("{base}/messages"),
+        None => ANTHROPIC_MESSAGES_URL.to_string(),
+    }
+}
+
+pub fn direct_auth_mode() -> String {
+    std::env::var("JCODE_ANTHROPIC_AUTH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            if std::env::var("ANTHROPIC_AUTH_TOKEN")
+                .ok()
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                "bearer".to_string()
+            } else {
+                "header".to_string()
+            }
+        })
+        .trim()
+        .to_ascii_lowercase()
+}
+
+pub fn native_fast_api_configured() -> bool {
+    direct_api_url() == ANTHROPIC_MESSAGES_URL
+        && direct_auth_mode() == "header"
+        && std::env::var("JCODE_ANTHROPIC_AUTH_HEADER")
+            .as_deref()
+            .unwrap_or("x-api-key")
+            .eq_ignore_ascii_case("x-api-key")
+}
+
 pub fn load_anthropic_api_key() -> Result<String> {
     if std::env::var("JCODE_ANTHROPIC_AUTH")
         .ok()

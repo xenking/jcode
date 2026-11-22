@@ -1,31 +1,21 @@
 use super::*;
+use chrono::Datelike;
+pub(super) use jcode_provider_core::service_tier::AnthropicFastMode as FastMode;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const BETA: &str = "fast-mode-2026-02-01";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum FastMode {
-    Stable,
-    Beta,
-}
 
 pub(super) fn capability(model: &str, oauth: bool) -> Option<FastMode> {
     capability_on(model, oauth, chrono::Utc::now().date_naive())
 }
 
 fn capability_on(model: &str, oauth: bool, today: chrono::NaiveDate) -> Option<FastMode> {
-    // Claude Platform Fast docs, checked 2026-11-22. Claude Code docs list the
-    // same subscription models except Mythos. A listed model is not account entitlement.
-    match strip_1m_suffix(model) {
-        "claude-opus-5-5" | "claude-fable-5-2" => Some(FastMode::Stable),
-        "claude-mythos-5-2" if !oauth => Some(FastMode::Stable),
-        "claude-opus-5" => Some(FastMode::Beta),
-        "claude-opus-4-8" if today < chrono::NaiveDate::from_ymd_opt(2026, 11, 30).unwrap() => {
-            Some(FastMode::Beta)
-        }
-        _ => None,
-    }
+    jcode_provider_core::service_tier::anthropic_fast_mode(
+        model,
+        oauth,
+        (today.year(), today.month(), today.day()),
+    )
 }
 
 pub(super) fn append_beta(headers: &mut String, fast: Option<FastMode>) {

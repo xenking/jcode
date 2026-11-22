@@ -1,4 +1,5 @@
 use crate::auth::{AuthState, AuthStatus};
+use chrono::Datelike;
 
 use super::pricing::cheapness_for_route;
 use super::{
@@ -279,12 +280,16 @@ fn expand_saved_account_routes(mut routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
     }
     let mut oauth_tiers = std::collections::HashMap::new();
     let native_api = super::openai::native_speed_api_endpoint(&super::openai::resolve_api_base());
+    let native_anthropic_api = super::anthropic::native_fast_api_configured();
+    let today = chrono::Utc::now().date_naive();
+    let today = (today.year(), today.month(), today.day());
     for route in &mut routes {
         use jcode_provider_core::RuntimeKey;
         if !route.available {
             continue;
         }
-        match RuntimeKey::from_api_method(&route.api_method_kind(), &route.provider) {
+        let method = route.api_method_kind();
+        match RuntimeKey::from_api_method(&method, &route.provider) {
             RuntimeKey::OpenAIApiKey if native_api => {
                 route.speed_options = jcode_provider_core::service_tier::openai_speed_options(
                     &route.model,
@@ -299,11 +304,38 @@ fn expand_saved_account_routes(mut routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
                 let catalog = oauth_tiers.entry(scope).or_insert_with_key(|scope| {
                     super::cached_openai_service_tiers_for_scope(scope).unwrap_or_default()
                 });
+                let model = jcode_provider_core::model_id::canonical(&route.model);
+                let model = model.strip_suffix("[1m]").unwrap_or(&model);
                 route.speed_options = jcode_provider_core::service_tier::openai_speed_options(
                     &route.model,
                     true,
-                    catalog.get(&route.model).map(Vec::as_slice),
+                    catalog.get(model).map(Vec::as_slice),
                 );
+            }
+            RuntimeKey::ClaudeOAuth | RuntimeKey::AnthropicApiKey => {
+                let oauth = matches!(
+                    method,
+                    jcode_provider_core::ModelRouteApiMethod::ClaudeOAuth
+                );
+                let native = oauth || native_anthropic_api;
+                if native
+                    && jcode_provider_core::service_tier::anthropic_fast_mode(
+                        &route.model,
+                        oauth,
+                        today,
+                    )
+                    .is_some()
+                {
+                    route.speed_options = vec![
+                        jcode_provider_core::SpeedOption::standard(),
+                        jcode_provider_core::SpeedOption {
+                            mode: jcode_provider_core::SpeedMode::Fast,
+                            availability: jcode_provider_core::SpeedAvailability::Unknown,
+                            reason: Some(if oauth { "Uses paid Anthropic usage credits; account eligibility is not verified" }
+                                else { "Uses premium Anthropic API rates; organization eligibility is not verified" }.into()),
+                        },
+                    ];
+                }
             }
             _ => {}
         }
