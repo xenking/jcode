@@ -115,6 +115,9 @@ pub enum Request {
     Message {
         id: u64,
         content: String,
+        /// Out-of-band client provenance for rendering. Never part of provider input.
+        #[serde(default, skip_serializing_if = "is_false")]
+        jarvis_voice: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<(String, String)>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -240,6 +243,9 @@ pub enum Request {
     SoftInterrupt {
         id: u64,
         content: String,
+        /// Out-of-band client provenance for rendering. Never part of provider input.
+        #[serde(default, skip_serializing_if = "is_false")]
+        jarvis_voice: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<(String, String)>,
         /// If true, can skip remaining tools at injection point C

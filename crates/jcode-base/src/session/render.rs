@@ -127,7 +127,7 @@ const COMPACTED_HISTORY_MIN_TURNS_TO_TRUNCATE: usize = 5;
 
 fn stored_message_is_user_turn(msg: &super::StoredMessage) -> bool {
     if !matches!(msg.role, Role::User)
-        || msg.display_role.is_some()
+        || msg.has_context_display_role()
         || is_auto_poke_user_message(msg)
         || super::is_scheduled_task_message(msg)
         || is_internal_system_reminder(msg)
@@ -296,7 +296,7 @@ fn image_anchor_for_message(
             id: tool.id.clone(),
         });
     }
-    if rendered_role == "user" {
+    if matches!(rendered_role, "user" | "jarvis_user") {
         return Some(RenderedImageAnchor::UserPrompt {
             ordinal: user_prompt_ordinal,
         });
@@ -611,6 +611,7 @@ fn render_messages_and_images_internal(
         let msg_timestamp_ms = msg.timestamp.map(|at| at.timestamp_millis());
 
         let role = match msg.display_role {
+            Some(StoredDisplayRole::JarvisUser) => "jarvis_user",
             Some(StoredDisplayRole::System) => "system",
             Some(StoredDisplayRole::BackgroundTask) => "background_task",
             Some(StoredDisplayRole::FileActivity) => "file_activity",
@@ -748,7 +749,9 @@ fn render_messages_and_images_internal(
                     let combined = format!("{}{}", reasoning, text);
                     if !combined.is_empty() {
                         let reasoning_len = reasoning.len();
-                        if role == "user" && !is_attached_image_label_text(&text) {
+                        if matches!(role, "user" | "jarvis_user")
+                            && !is_attached_image_label_text(&text)
+                        {
                             user_prompt_count += 1;
                         }
                         text.clear();
@@ -825,7 +828,8 @@ fn render_messages_and_images_internal(
                     let current_tool =
                         current_tool.and_then(|index| rendered[index].tool_data.as_ref());
                     let anchor = image_anchor_for_message(role, current_tool, user_prompt_count);
-                    let is_pending_prompt_anchor = current_tool.is_none() && role == "user";
+                    let is_pending_prompt_anchor =
+                        current_tool.is_none() && matches!(role, "user" | "jarvis_user");
                     images.push(RenderedImage {
                         session_image,
                         history_message_index: current_tool.map(|_| rendered.len()),
@@ -914,7 +918,7 @@ fn render_messages_and_images_internal(
         }
 
         if !reasoning.is_empty() || !text.is_empty() || msg.attachment_data.is_some() {
-            if role == "user" && !is_attached_image_label_text(&text) {
+            if matches!(role, "user" | "jarvis_user") && !is_attached_image_label_text(&text) {
                 user_prompt_count += 1;
             }
             // At EOF the buffers are no longer reused. Move the sole nonempty

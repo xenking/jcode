@@ -965,15 +965,22 @@ impl Provider for FanoutStreamProvider {
             || StreamEvent::TextDelta("ок** в окне.".into()),
             || StreamEvent::TextDone,
             || StreamEvent::TextDelta("Переключатель готов.".into()),
-            || StreamEvent::MessageEnd { stop_reason: Some("end_turn".into()) },
+            || StreamEvent::MessageEnd {
+                stop_reason: Some("end_turn".into()),
+            },
         ];
         let resume = Arc::clone(&self.0);
-        Ok(Box::pin(stream::unfold((0, resume), |(step, resume)| async move {
-            if step == 1 {
-                resume.notified().await;
-            }
-            EVENTS.get(step).map(|event| (Ok(event()), (step + 1, resume)))
-        })))
+        Ok(Box::pin(stream::unfold(
+            (0, resume),
+            |(step, resume)| async move {
+                if step == 1 {
+                    resume.notified().await;
+                }
+                EVENTS
+                    .get(step)
+                    .map(|event| (Ok(event()), (step + 1, resume)))
+            },
+        )))
     }
 
     fn name(&self) -> &str {
@@ -1169,6 +1176,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
             ProcessingMessage {
                 attachment_data: None,
                 queued_client_id: None,
+                jarvis_voice: false,
                 id: 42,
                 content: "do not start during reload".to_string(),
                 images: Vec::new(),
@@ -1281,6 +1289,7 @@ async fn text_framing_keeps_order_across_active_attachments_and_journal_replay()
         ProcessingMessage {
             attachment_data: None,
             queued_client_id: None,
+            jarvis_voice: false,
             id: 479,
             content: "stream to every attachment".to_string(),
             images: Vec::new(),
@@ -1314,10 +1323,20 @@ async fn text_framing_keeps_order_across_active_attachments_and_journal_replay()
             .await
             .expect("origin should receive the initial stream event promptly")
             .expect("origin event channel should remain open");
-        if let ServerEvent::TurnEvent { event, text_frames, .. } = event
+        if let ServerEvent::TurnEvent {
+            event, text_frames, ..
+        } = event
             && matches!(*event, ServerEvent::TextDelta { ref text } if text == "**Список вклад")
         {
-            let Some([Frame::Append { message_id, offset: 0 }]) = text_frames.as_deref() else {
+            let Some(
+                [
+                    Frame::Append {
+                        message_id,
+                        offset: 0,
+                    },
+                ],
+            ) = text_frames.as_deref()
+            else {
                 panic!("first text delta has no turn-scoped block: {text_frames:?}");
             };
             break message_id.clone();
@@ -1337,16 +1356,24 @@ async fn text_framing_keeps_order_across_active_attachments_and_journal_replay()
             from_session: "worker".into(),
             from_name: None,
             notification_type: crate::protocol::NotificationType::Message {
-                scope: Some("dm".into()), channel: None, tldr: None,
+                scope: Some("dm".into()),
+                channel: None,
+                tldr: None,
             },
             message: "Incoming DM".into(),
         },
         ServerEvent::MemoryInjected {
-            count: 1, prompt: "One recalled memory".into(), display_prompt: None,
-            prompt_chars: 19, computed_age_ms: 0,
+            count: 1,
+            prompt: "One recalled memory".into(),
+            display_prompt: None,
+            prompt_chars: 19,
+            computed_age_ms: 0,
         },
     ] {
-        assert_eq!(super::super::state::fanout_session_event(&swarm_members, session_id, event).await, 2);
+        assert_eq!(
+            super::super::state::fanout_session_event(&swarm_members, session_id, event).await,
+            2
+        );
     }
     resume.notify_one();
 
@@ -1360,20 +1387,29 @@ async fn text_framing_keeps_order_across_active_attachments_and_journal_replay()
             match event {
                 ServerEvent::Notification { .. } => observed.push("dm"),
                 ServerEvent::MemoryInjected { .. } => observed.push("memory"),
-                ServerEvent::TurnEvent { event, text_frames, .. } => match *event {
+                ServerEvent::TurnEvent {
+                    event, text_frames, ..
+                } => match *event {
                     ServerEvent::TextDelta { text } if text == "ок** в окне." => {
-                        assert!(matches!(text_frames.as_deref(), Some([Frame::Append { message_id, offset }])
-                            if message_id == &first_id && *offset == "**Список вклад".len()));
+                        assert!(
+                            matches!(text_frames.as_deref(), Some([Frame::Append { message_id, offset }])
+                            if message_id == &first_id && *offset == "**Список вклад".len())
+                        );
                         observed.push("continuation");
                     }
                     ServerEvent::TextDone => {
-                        assert!(matches!(text_frames.as_deref(), Some([Frame::Complete { message_id, text }])
-                            if message_id == &first_id && text == "**Список вкладок** в окне."));
+                        assert!(
+                            matches!(text_frames.as_deref(), Some([Frame::Complete { message_id, text }])
+                            if message_id == &first_id && text == "**Список вкладок** в окне.")
+                        );
                         observed.push("first block complete");
                     }
-                    ServerEvent::TextDelta { text } if text == "Переключатель готов." => {
-                        assert!(matches!(text_frames.as_deref(), Some([Frame::Append { message_id, offset: 0 }])
-                            if message_id != &first_id));
+                    ServerEvent::TextDelta { text } if text == "Переключатель готов." =>
+                    {
+                        assert!(
+                            matches!(text_frames.as_deref(), Some([Frame::Append { message_id, offset: 0 }])
+                            if message_id != &first_id)
+                        );
                         observed.push("new block");
                     }
                     ServerEvent::MessageEnd { .. } => observed.push("message end"),
@@ -1385,7 +1421,17 @@ async fn text_framing_keeps_order_across_active_attachments_and_journal_replay()
                 _ => {}
             }
         }
-        assert_eq!(observed, ["dm", "memory", "continuation", "first block complete", "new block", "message end"]);
+        assert_eq!(
+            observed,
+            [
+                "dm",
+                "memory",
+                "continuation",
+                "first block complete",
+                "new block",
+                "message end"
+            ]
+        );
     }
 
     let (done_id, result, _, _, _) =
@@ -1402,7 +1448,10 @@ async fn text_framing_keeps_order_across_active_attachments_and_journal_replay()
         .filter(|row| row.role == "assistant")
         .map(|row| row.content)
         .collect();
-    assert_eq!(answers, ["**Список вкладок** в окне.", "Переключатель готов."]);
+    assert_eq!(
+        answers,
+        ["**Список вкладок** в окне.", "Переключатель готов."]
+    );
 
     if let Some(handle) = processing_task.take() {
         handle.await.expect("processing task join");
@@ -1556,6 +1605,7 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
         ProcessingMessage {
             attachment_data: None,
             queued_client_id: None,
+            jarvis_voice: false,
             id: 1,
             content: "must not enter transcript".into(),
             images: Vec::new(),
@@ -1585,6 +1635,7 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
             .send(ProcessingMessage {
                 attachment_data: None,
                 queued_client_id: None,
+                jarvis_voice: false,
                 id,
                 content: content.into(),
                 images: Vec::new(),
@@ -1864,6 +1915,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             ProcessingMessage {
                 attachment_data: None,
                 queued_client_id: None,
+                jarvis_voice: false,
                 id: 77,
                 content: "continue after reload".to_string(),
                 images: Vec::new(),
@@ -1927,6 +1979,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             ProcessingMessage {
                 attachment_data: None,
                 queued_client_id: None,
+                jarvis_voice: false,
                 id: 78,
                 content: String::new(),
                 images: Vec::new(),
@@ -1993,6 +2046,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
                 ProcessingMessage {
                     attachment_data: None,
                     queued_client_id: None,
+                    jarvis_voice: false,
                     id,
                     content: continuation.to_string(),
                     images: Vec::new(),
@@ -2089,6 +2143,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
                 ProcessingMessage {
                     attachment_data: None,
                     queued_client_id: None,
+                    jarvis_voice: false,
                     id: message_id,
                     content: format!("do not start {session_id} during reload"),
                     images: Vec::new(),
@@ -2309,106 +2364,8 @@ mod ask_reload_socket_tests;
 #[path = "client_lifecycle_tests/system_prompt.rs"]
 mod system_prompt;
 
-/// Thirty text deltas 20ms apart, the shape of a provider stream.
-#[derive(Clone, Default)]
-struct SteadyDeltaProvider;
-
-const STEADY_DELTAS: usize = 30;
-
-#[async_trait]
-impl Provider for SteadyDeltaProvider {
-    async fn complete(
-        &self,
-        _messages: &[Message],
-        _tools: &[ToolDefinition],
-        _system: &str,
-        _resume_session_id: Option<&str>,
-    ) -> Result<EventStream> {
-        Ok(Box::pin(stream::unfold(0_usize, |step| async move {
-            if step < STEADY_DELTAS {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-                Some((Ok(StreamEvent::TextDelta(format!("w{step} "))), step + 1))
-            } else if step == STEADY_DELTAS {
-                Some((
-                    Ok(StreamEvent::MessageEnd {
-                        stop_reason: Some("end_turn".to_string()),
-                    }),
-                    step + 1,
-                ))
-            } else {
-                None
-            }
-        })))
-    }
-
-    fn name(&self) -> &str {
-        "steady-delta"
-    }
-
-    fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(Self)
-    }
-}
-
-/// A streamed turn publishes one text event per provider delta while a client
-/// is focused or has never said, and a few coalesced ones once every attached
-/// client reported that it is unfocused. The text itself must be identical.
-#[tokio::test(start_paused = true)]
-async fn streamed_text_is_coalesced_only_when_every_client_is_unfocused() {
-    let _guard = crate::storage::lock_test_env();
-    let _env = IsolatedReloadRecoveryEnv::new();
-    let expected: String = (0..STEADY_DELTAS).map(|step| format!("w{step} ")).collect();
-
-    for unfocused in [false, true] {
-        let provider: Arc<dyn Provider> = Arc::new(SteadyDeltaProvider);
-        let registry = Registry::new(Arc::clone(&provider)).await;
-        let mut agent = Agent::new(provider, registry);
-        let session_id = agent.session_id().to_string();
-        let connection = format!("steady-conn-{unfocused}");
-        if unfocused {
-            crate::stream_batching::set_connection_focus(&connection, &session_id, false, false);
-        }
-        // What the session fanout does with the attached connections.
-        crate::stream_batching::note_session_targets(&session_id, [&connection]);
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        agent
-            .run_once_streaming_mpsc("go", Vec::new(), None, tx)
-            .await
-            .expect("turn completes");
-
-        let mut text = String::new();
-        let mut text_events = 0usize;
-        let mut text_after_end = false;
-        let mut ended = false;
-        while let Ok(event) = rx.try_recv() {
-            match event {
-                ServerEvent::TextDelta { text: delta } => {
-                    text_after_end |= ended;
-                    text.push_str(&delta);
-                    text_events += 1;
-                }
-                ServerEvent::MessageEnd { .. } | ServerEvent::Done { .. } => ended = true,
-                _ => {}
-            }
-        }
-        assert_eq!(text, expected, "unfocused={unfocused}");
-        assert!(
-            !text_after_end,
-            "held text must precede the end of the turn"
-        );
-        if unfocused {
-            // 600ms of stream in 250ms batches.
-            assert!(
-                (2..=4).contains(&text_events),
-                "expected a few batches, got {text_events}"
-            );
-        } else {
-            assert_eq!(text_events, STEADY_DELTAS);
-        }
-        crate::stream_batching::forget_connection(&connection);
-    }
-}
+#[path = "client_lifecycle_tests/stream_coalescing.rs"]
+mod stream_coalescing;
 
 #[path = "client_lifecycle_tests_additional_tests.rs"]
 mod additional_identity_transport_negotiation_preserves_legacy_payload_shape;

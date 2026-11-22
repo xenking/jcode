@@ -588,6 +588,12 @@ impl CompactionManager {
         self.refresh_context_cap();
     }
 
+    /// Update the budget and resolve overrides for the provider/model together.
+    pub fn set_budget_for_model(&mut self, budget: usize, provider: &str, model: &str) {
+        self.model_token_budget = budget;
+        self.set_active_model(Some(provider), Some(model));
+    }
+
     /// Set the per-session context ceiling. `None` or zero restores the global cap.
     pub fn set_context_cap_override(&mut self, cap: Option<usize>) {
         self.context_cap_override = cap.filter(|cap| *cap > 0);
@@ -932,9 +938,11 @@ impl CompactionManager {
 
         // 2. Either the percentage or absolute token floor permits prediction.
         let usage = self.context_usage_with(all_messages);
-        let token_floor_reached = cfg.proactive_floor_tokens > 0
-            && self.effective_token_count_with(all_messages) >= cfg.proactive_floor_tokens;
-        if usage < cfg.proactive_floor && !token_floor_reached {
+        let proactive_floor = cfg.proactive_floor;
+        let proactive_floor_tokens = cfg.proactive_floor_tokens;
+        let token_floor_reached = proactive_floor_tokens > 0
+            && self.effective_token_count_with(all_messages) >= proactive_floor_tokens;
+        if usage < proactive_floor && !token_floor_reached {
             return true;
         }
 

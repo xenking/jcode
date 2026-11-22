@@ -1160,3 +1160,34 @@ fn compact_labels_fit_cells_and_status_never_contains_newlines() {
         assert!(!line.to_string().contains('\n'));
     }
 }
+
+#[test]
+fn overscroll_omits_duplicate_trailing_effort_suffix_but_keeps_swarm() {
+    let mut facts = OverscrollFacts {
+        machine: None,
+        dir: None,
+        branch: None,
+        git: None,
+        context: None,
+        account_remaining: None,
+        auth: None,
+        provider: Some("Antigravity".to_string()),
+        model: Some("Gemini 4 Neon Low".to_string()),
+        effort: Some("low".to_string()),
+    };
+    let (spans, _) = overscroll_fit_facts(&facts, 80);
+    let rendered: String = spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(
+        rendered.contains("Gemini 4 Neon Low") && !rendered.contains("Gemini 4 Neon Low low"),
+        "expected no duplicate effort suffix, got: {rendered}"
+    );
+
+    facts.effort = overscroll_short_reasoning("swarm").map(str::to_string);
+    let (swarm_spans, _) = overscroll_fit_facts(&facts, 80);
+    let swarm_rendered: String = swarm_spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(
+        swarm_rendered.contains("Gemini 4 Neon Low")
+            && swarm_rendered.contains(crate::tui::app::effort_display_label("swarm")),
+        "expected swarm effort label to remain visible, got: {swarm_rendered}"
+    );
+}

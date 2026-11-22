@@ -27,13 +27,45 @@ pub(in crate::tui::app) async fn begin_remote_send(
         system_reminder,
         auto_retry,
         retry_attempts,
+        false,
     )
     .await
 }
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "Preserve retry content independently of wire attachment payload"
+    reason = "Carry voice origin through remote retries"
+)]
+pub(in crate::tui::app) async fn begin_remote_send_with_origin(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    content: String,
+    images: Vec<(String, String)>,
+    is_system: bool,
+    system_reminder: Option<String>,
+    auto_retry: bool,
+    retry_attempts: u8,
+    jarvis_voice: bool,
+) -> Result<u64> {
+    begin_remote_send_with_attachments(
+        app,
+        remote,
+        content.clone(),
+        images,
+        Vec::new(),
+        content,
+        is_system,
+        system_reminder,
+        auto_retry,
+        retry_attempts,
+        jarvis_voice,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Carry wire and retry payloads independently"
 )]
 async fn begin_remote_send_with_attachments(
     app: &mut App,
@@ -46,6 +78,7 @@ async fn begin_remote_send_with_attachments(
     system_reminder: Option<String>,
     auto_retry: bool,
     retry_attempts: u8,
+    jarvis_voice: bool,
 ) -> Result<u64> {
     if let Err(error) = app.prepare_local_tools(remote).await {
         crate::logging::info(&format!(
@@ -87,12 +120,13 @@ async fn begin_remote_send_with_attachments(
         }
     });
     let msg_id = remote
-        .send_message_with_attachments(
+        .send_message_with_attachments_and_origin(
             content.clone(),
             images.clone(),
             attachments,
             system_reminder.clone(),
-            None,
+            app.active_skill.clone(),
+            jarvis_voice,
         )
         .await;
     let msg_id = match msg_id {
@@ -151,6 +185,7 @@ async fn begin_remote_send_with_attachments(
     app.thinking_prefix_emitted = false;
     app.thinking_buffer.clear();
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice,
         content: retry_content,
         images,
         is_system,
@@ -296,6 +331,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
         None,
         false,
         0,
+        false,
     )
     .await
     {

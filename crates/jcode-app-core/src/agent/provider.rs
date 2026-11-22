@@ -578,6 +578,12 @@ impl Agent {
         let provider = match provider.as_str() {
             "openai" => "openai",
             "claude" | "anthropic" => "claude",
+            "antigravity" => "antigravity",
+            "copilot" => "copilot",
+            "gemini" => "gemini",
+            "cursor" => "cursor",
+            "bedrock" => "bedrock",
+            "openrouter" => "openrouter",
             _ => return,
         };
         let label = self.provider.oauth_account_label();
@@ -586,16 +592,19 @@ impl Agent {
             self.provider.active_resolved_credential(),
             label.as_deref(),
         ) {
-            (_, Some(jcode_provider_core::ResolvedCredential::Oauth), Some(label)) => {
-                (provider, Some(label))
-            }
+            (
+                "openai" | "claude",
+                Some(jcode_provider_core::ResolvedCredential::Oauth),
+                Some(label),
+            ) => (provider, Some(label)),
             ("openai", Some(jcode_provider_core::ResolvedCredential::ApiKey), _) => {
                 ("openai-api", None)
             }
             ("claude", Some(jcode_provider_core::ResolvedCredential::ApiKey), _) => {
                 ("anthropic-api", None)
             }
-            _ => return,
+            ("openai" | "claude", _, _) => return,
+            (single, _, _) => (single, None),
         };
         if crate::provider::provider_unavailability_detail_for_account_label(key, label).is_none() {
             crate::provider::record_provider_unavailable_for_account_label(key, label, error);
@@ -1033,12 +1042,23 @@ impl Agent {
     }
 
     pub fn set_reasoning_effort(&mut self, effort: &str) -> Result<Option<String>> {
+        let prev_model = self.provider.model();
         let effort = self.worker_effort(effort)?;
         self.provider.set_reasoning_effort(&effort)?;
         // This choice supersedes any older one still waiting for a busy turn.
         crate::session_effort::clear_pending_effort(&self.session.id);
         let current = self.provider.reasoning_effort();
         self.session.reasoning_effort = current.clone();
+        let new_model = self.provider.model();
+        if new_model != prev_model {
+            self.session.model = Some(self.provider_model());
+            let event = crate::provider::ProviderStateEvent::selected_model(
+                crate::provider::ProviderModelSelectionSource::User,
+                new_model,
+            );
+            self.provider_runtime_state.apply(event);
+            self.refresh_compaction_budget();
+        }
         // Keep the side-table in sync (see `restore_reasoning_effort_from_session`).
         crate::session_effort::record_session_effort(&self.session.id, current.as_deref());
         self.log_env_snapshot("set_reasoning_effort");

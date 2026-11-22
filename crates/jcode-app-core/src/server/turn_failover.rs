@@ -247,6 +247,7 @@ pub(super) async fn process_message_with_server_failover(
         enabled,
         None,
         None,
+        None,
     )
     .await
 }
@@ -260,19 +261,21 @@ pub(super) async fn process_reserved_message_with_server_failover(
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
     enabled: bool,
+    display_role: Option<crate::session::StoredDisplayRole>,
     queued_client_id: Option<Vec<String>>,
     attachment_data: Option<jcode_session_types::MessageAttachments>,
 ) -> anyhow::Result<()> {
     let reminder = system_reminder.clone();
     let mut guard = agent.lock().await;
     let attempt_start = guard.message_count();
-    let result = super::client_lifecycle::process_reserved_message_streaming_mpsc(
+    let result = super::client_lifecycle::process_reserved_message_with_role(
         &mut guard,
         lease,
         content,
         images,
         system_reminder,
         event_tx.clone(),
+        display_role,
         queued_client_id,
         attachment_data,
     )

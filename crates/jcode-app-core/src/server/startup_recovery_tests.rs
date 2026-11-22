@@ -114,19 +114,7 @@ async fn formal_recovery_stop_after_owner_read_prevents_continuation() -> Result
     for _ in 0..16 {
         tokio::task::yield_now().await;
     }
-    let cancelled = crate::server::swarm::cancel_spawned_descendant_turns(
-        "formal-owner",
-        &server.swarm_state.members,
-        &server.swarm_state.swarms_by_id,
-        None,
-        None,
-        None,
-    )
-    .await;
-    assert!(
-        cancelled.is_empty(),
-        "no worker turn exists at the stop boundary"
-    );
+    assert!(!crate::turn_cancel_registry::has_active_turn(&worker.id));
     crate::server::update_member_status(
         "formal-owner",
         "stopped",

@@ -91,6 +91,7 @@ use subscribe_context::*;
 
 struct ProcessingMessage {
     attachment_data: Option<jcode_session_types::MessageAttachments>,
+    jarvis_voice: bool,
     id: u64,
     queued_client_id: Option<Vec<String>>,
     content: String,
@@ -1489,6 +1490,7 @@ pub(super) async fn handle_client(
             Request::SessionContextBreakdown { .. } | Request::SessionShakeTools { .. } => unreachable!("Context control dispatched before acknowledgment"),
             Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. } => unreachable!("SDK controls dispatched before acknowledgment"),
             Request::Message {
+                jarvis_voice,
                 id,
                 mut content,
                 mut images,
@@ -1576,6 +1578,7 @@ pub(super) async fn handle_client(
                 start_processing_message(
                     ProcessingMessage {
                         attachment_data,
+                        jarvis_voice,
                         id,
                         queued_client_id: None,
                         content,
@@ -1612,8 +1615,13 @@ pub(super) async fn handle_client(
                         &swarm_members,
                         &client_session_id,
                         &client_connection_id,
-                        ServerEvent::PeerUserMessage {
-                            content: peer_content,
+                        if jarvis_voice {
+                            ServerEvent::SoftInterruptInjected {
+                                content: peer_content, display_role: Some("jarvis_user".into()),
+                                point: "turn_start".into(), tools_skipped: None, client_ids: Vec::new(),
+                            }
+                        } else {
+                            ServerEvent::PeerUserMessage { content: peer_content }
                         },
                     )
                     .await;
@@ -1652,6 +1660,7 @@ pub(super) async fn handle_client(
             }
 
             Request::SoftInterrupt {
+                jarvis_voice,
                 id,
                 content,
                 images,
@@ -1705,6 +1714,7 @@ pub(super) async fn handle_client(
                     start_processing_message(
                         ProcessingMessage {
                             attachment_data: None,
+                            jarvis_voice,
                             id,
                             queued_client_id: None,
                             content,
@@ -1740,7 +1750,7 @@ pub(super) async fn handle_client(
                     if processing_message_id == Some(id) {
                         send_client_event_best_effort(&client_event_tx, ServerEvent::SoftInterruptInjected {
                             content: accepted_content,
-                            display_role: None,
+                            display_role: jarvis_voice.then(|| "jarvis_user".to_owned()),
                             point: "turn_start".to_string(),
                             tools_skipped: None,
                             client_ids: client_id.into_iter().collect(),
@@ -1758,6 +1768,7 @@ pub(super) async fn handle_client(
                         content,
                         images,
                         urgent,
+                        jarvis_voice,
                         client_id,
                         &session_control,
                         &client_event_tx,
@@ -2587,6 +2598,7 @@ pub(super) async fn handle_client(
                         send_client_event_best_effort(&client_event_tx, ServerEvent::ReasoningEffortChanged {
                             id,
                             effort: None,
+                            model: None,
                             error: Some(format!("target session not found: {target_session_id}")),
                         }, "client_lifecycle: ReasoningEffortChanged");
                     }
@@ -3015,6 +3027,7 @@ pub(super) async fn handle_client(
                             }
                             start_processing_message(
                                 ProcessingMessage {
+                                    jarvis_voice: false,
                                     attachment_data: None,
                                     id, queued_client_id: None, content, images: Vec::new(), system_reminder: None,
                                     active_skill: None, server_failover: true,
@@ -4140,6 +4153,7 @@ impl ModelCatalogRetry {
 }
 
 #[cfg(test)]
+#[path = "client_lifecycle_catalog_retry_tests.rs"]
 mod model_catalog_retry_tests;
 
 #[path = "client_processing.rs"]
@@ -4205,6 +4219,35 @@ pub(super) async fn process_reserved_message_streaming_mpsc(
     queued_client_id: Option<Vec<String>>,
     attachment_data: Option<jcode_session_types::MessageAttachments>,
 ) -> Result<()> {
+    process_reserved_message_with_role(
+        agent,
+        lease,
+        content,
+        images,
+        system_reminder,
+        event_tx,
+        None,
+        queued_client_id,
+        attachment_data,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Carry turn lease and input provenance through the streaming boundary"
+)]
+pub(super) async fn process_reserved_message_with_role(
+    agent: &mut Agent,
+    lease: &crate::agent::TurnLease,
+    content: &str,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+    display_role: Option<crate::session::StoredDisplayRole>,
+    queued_client_id: Option<Vec<String>>,
+    attachment_data: Option<jcode_session_types::MessageAttachments>,
+) -> Result<()> {
     agent.validate_server_turn(lease)?;
     let session_id = agent.session_id().to_string();
     let result = agent
@@ -4214,7 +4257,7 @@ pub(super) async fn process_reserved_message_streaming_mpsc(
             images,
             system_reminder,
             event_tx,
-            None,
+            display_role,
             queued_client_id,
             attachment_data,
         )

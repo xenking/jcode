@@ -330,7 +330,10 @@ impl ProviderNativeItems {
             .items
             .iter()
             .any(|(offset, _, _)| *offset > start && *offset < end)
-            || self.text_boundaries.iter().any(|offset| *offset > start && *offset < end)
+            || self
+                .text_boundaries
+                .iter()
+                .any(|offset| *offset > start && *offset < end)
         {
             return false;
         }

@@ -19,13 +19,13 @@ pub use catalog_refresh::{
 };
 
 use anyhow::Result;
-#[cfg(test)]
-pub(crate) use catalog::{parse_anthropic_model_catalog, parse_openai_model_catalog};
 pub use catalog::{
     AnthropicModelCatalog, ModelCatalogHttpStatus, OpenAIModelCatalog,
     fetch_anthropic_model_catalog, fetch_anthropic_model_catalog_oauth,
     fetch_openai_api_key_model_catalog, fetch_openai_context_limits, fetch_openai_model_catalog,
 };
+#[cfg(test)]
+pub(crate) use catalog::{parse_anthropic_model_catalog, parse_openai_model_catalog};
 use catalog_service::{ModelCatalogService, RuntimeModelUnavailability};
 use jcode_provider_core::{
     ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, ModelCapabilities,

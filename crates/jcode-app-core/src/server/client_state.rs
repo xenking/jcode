@@ -1,6 +1,4 @@
-use super::ClientConnectionInfo;
-use super::SessionAgents;
-use super::server_has_newer_binary;
+use super::{ClientConnectionInfo, SessionAgents, server_has_newer_binary};
 use crate::agent::Agent;
 use crate::bus::Bus;
 use crate::message::Role;
@@ -466,7 +464,8 @@ pub(super) fn recent_history_window(
         })
         .sum::<usize>();
     let is_prompt = |message: &&HistoryMessage| {
-        message.role == "user" && !crate::session::is_attached_image_label_text(&message.content)
+        matches!(message.role.as_str(), "user" | "jarvis_user")
+            && !crate::session::is_attached_image_label_text(&message.content)
     };
     // Image anchors use ordinals of actual user rows, not decision cards.
     let excluded_prompts = messages[..start].iter().filter(is_prompt).count();

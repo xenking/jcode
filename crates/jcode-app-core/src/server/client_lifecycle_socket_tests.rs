@@ -1852,7 +1852,7 @@ async fn sdk_socket_cancel_workflow(
         .await;
         send(
             &mut client_writer,
-            json!({"type":if idle_soft_interrupt { "soft_interrupt" } else { "message" },"id":2,"content":"one shared turn"}),
+            json!({"type":if idle_soft_interrupt { "soft_interrupt" } else { "message" },"id":2,"content":"one shared turn", "jarvis_voice":idle_soft_interrupt}),
         )
         .await;
         tokio::time::timeout(
@@ -2112,8 +2112,8 @@ async fn sdk_socket_cancel_workflow(
         }
         if idle_soft_interrupt {
             until(&mut client_reader, |event| {
-                matches!(event, ServerEvent::SoftInterruptInjected { content, point, client_ids, .. }
-                    if content == "one shared turn" && point == "turn_start" && client_ids.is_empty())
+                matches!(event, ServerEvent::SoftInterruptInjected { content, point, client_ids, display_role, .. }
+                    if display_role.as_deref() == Some("jarvis_user") && content == "one shared turn" && point == "turn_start" && client_ids.is_empty())
             })
             .await;
         }
@@ -2282,7 +2282,9 @@ async fn sdk_socket_cancel_workflow(
                     ServerEvent::TurnStarted { identity } => {
                         assert!(active.replace(identity).is_none());
                     }
-                    ServerEvent::TurnEvent { identity, event, .. } => {
+                    ServerEvent::TurnEvent {
+                        identity, event, ..
+                    } => {
                         if (idle_soft_interrupt || queued_test == Some("effort"))
                             && active.is_none()
                         {
@@ -2332,7 +2334,9 @@ async fn sdk_socket_cancel_workflow(
             )
             .await;
             until(&mut client_reader, |event| match event {
-                ServerEvent::TurnEvent { identity, event, .. } => {
+                ServerEvent::TurnEvent {
+                    identity, event, ..
+                } => {
                     assert_ne!(Some(identity), active.as_ref());
                     assert!(!matches!(event.as_ref(), ServerEvent::Error { .. }));
                     matches!(event.as_ref(), ServerEvent::Done { id: 4 })

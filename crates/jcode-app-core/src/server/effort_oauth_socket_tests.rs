@@ -178,7 +178,7 @@ fn claude_oauth_socket_effort_change_keeps_cached_prefix_and_sends_control() {
                 assert!(medium_request > 0, "first inference reached the OAuth fixture");
             }
             send(&mut writer, json!({"type":"set_reasoning_effort","id":effort_id,"effort":effort})).await;
-            until(&mut reader, |event| matches!(event, ServerEvent::ReasoningEffortChanged { id, effort: Some(value), error: None } if *id == effort_id && value == effort)).await;
+            until(&mut reader, |event| matches!(event, ServerEvent::ReasoningEffortChanged { id, effort: Some(value), error: None, .. } if *id == effort_id && value == effort)).await;
             send(&mut writer, json!({"type":"message","id":message_id,"content":"Reply done without tools."})).await;
             until(&mut reader, |event| matches!(event, ServerEvent::Done { id } if *id == message_id)).await;
         }

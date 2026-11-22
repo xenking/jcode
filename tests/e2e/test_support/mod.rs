@@ -399,6 +399,7 @@ impl WsTestClient {
         self.send_request(Request::Message {
             attachments: Vec::new(),
             id,
+            jarvis_voice: false,
             content: content.to_string(),
             images: vec![],
             system_reminder: None,

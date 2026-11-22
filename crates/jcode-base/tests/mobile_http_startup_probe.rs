@@ -2,6 +2,7 @@
 //! Run this executable directly in fresh processes with MOBILE_HTTP_MODE=two|shared.
 //! CPU and allocation passes are separate: MOBILE_HTTP_COUNT=1 enables counting.
 use std::alloc::{GlobalAlloc, Layout, System};
+#[cfg(target_os = "linux")]
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;

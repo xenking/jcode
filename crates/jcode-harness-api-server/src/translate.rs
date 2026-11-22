@@ -1943,7 +1943,10 @@ impl BridgeState {
                     return vec![];
                 }
                 let text_frames = event.get("text_frames").and_then(|frames| {
-                    Vec::<jcode_session_types::assistant_text::AssistantTextFrame>::deserialize(frames).ok()
+                    Vec::<jcode_session_types::assistant_text::AssistantTextFrame>::deserialize(
+                        frames,
+                    )
+                    .ok()
                 });
                 let framed = text_frames.is_some();
                 let mut frames = text_frames.map_or_else(Vec::new, |text_frames| {
@@ -2116,8 +2119,11 @@ impl BridgeState {
             self.activity_version += 1;
         }
         if !legacy_text
-            && (matches!(kind, "text_done" | "text_replace" | "text_suffix_replace" | "retry_rollback")
-                || kind == "text_delta" && event["text"].as_str().is_some_and(|text| !text.is_empty()))
+            && (matches!(
+                kind,
+                "text_done" | "text_replace" | "text_suffix_replace" | "retry_rollback"
+            ) || kind == "text_delta"
+                && event["text"].as_str().is_some_and(|text| !text.is_empty()))
         {
             return vec![];
         }
@@ -3166,8 +3172,15 @@ impl BridgeState {
                 // value "none" is a separate explicit setting.
                 let changed = event["error"].as_str().is_none() && {
                     let effort = event["effort"].as_str().map(str::to_string);
-                    let moved = self.current_effort != effort;
+                    let model = event["model"].as_str().map(str::to_string);
+                    let moved = self.current_effort != effort
+                        || model
+                            .as_ref()
+                            .is_some_and(|m| self.current_model.as_ref() != Some(m));
                     self.current_effort = effort;
+                    if let Some(model) = model {
+                        self.current_model = Some(model);
+                    }
                     moved
                 };
                 // A successful change is also broadcast as identity, mirroring

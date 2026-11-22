@@ -928,8 +928,7 @@ impl Server {
         // Startup recovery can be expensive in multi-session reloads. Run it
         // only after the replacement daemon is already accepting reconnects.
         let recovery = self.recover_headless_sessions_on_startup().await;
-        reload_recovery::RecoveryOwner::new(self)
-            .spawn(runtime.cancellation_token(), recovery);
+        reload_recovery::RecoveryOwner::new(self).spawn(runtime.cancellation_token(), recovery);
 
         // Keep interrupted workers busy while recovery admits their turns.
         // Reconcile the roster before evaluating persisted awaits.

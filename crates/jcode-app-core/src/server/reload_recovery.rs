@@ -1294,6 +1294,7 @@ impl RecoveryOwner {
                     Some(record.directive.continuation_message.clone()),
                     events.sender(),
                     true,
+                    None,
                     Some(vec![record.input_id()]),
                     None,
                 )

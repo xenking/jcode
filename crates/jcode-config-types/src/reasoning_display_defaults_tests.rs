@@ -38,6 +38,54 @@ fn proactive_floor_defaults_and_legacy_config() {
 }
 
 #[test]
+fn per_provider_compaction_thresholds_override_globals_case_insensitively() {
+    let parsed: CompactionConfig = serde_json::from_str(
+        r#"{
+            "reactive_threshold": 0.80,
+            "reactive_threshold_tokens": 400000,
+            "providers": {
+                "gemini": {
+                    "reactive_threshold_tokens": 300000,
+                    "max_context_tokens": 500000
+                }
+            }
+        }"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        parsed
+            .resolve(Some("Gemini"), None)
+            .jcode_reactive_threshold_tokens(),
+        300_000
+    );
+    assert_eq!(
+        parsed
+            .resolve(Some("gemini"), None)
+            .jcode_reactive_threshold_tokens(),
+        300_000
+    );
+    assert_eq!(
+        parsed.resolve(Some("Gemini"), None).reactive_threshold,
+        0.80
+    );
+    assert_eq!(
+        parsed.resolve(Some("Gemini"), None).max_context_tokens,
+        500_000
+    );
+
+    // Other providers inherit global defaults
+    assert_eq!(
+        parsed
+            .resolve(Some("Claude"), None)
+            .jcode_reactive_threshold_tokens(),
+        400_000
+    );
+    assert_eq!(parsed.resolve(Some("Claude"), None).max_context_tokens, 0);
+    assert_eq!(parsed.jcode_reactive_threshold_tokens(), 400_000);
+}
+
+#[test]
 fn explicit_reasoning_display_is_distinguishable_from_the_legacy_fallback() {
     // Front-ends (the desktop) apply their own default only when the user
     // has not chosen one, so this flag must not be true just because

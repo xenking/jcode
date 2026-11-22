@@ -25,6 +25,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
         };
         let req = Request::Message {
             id,
+            jarvis_voice: false,
             content: content.clone(),
             images: images.clone(),
             attachments: vec![],

@@ -76,9 +76,10 @@ pub use models::{
     provider_for_model_with_hint as core_provider_for_model_with_hint, provider_key_from_hint,
 };
 pub use reasoning::{
-    DEEPSEEK_SELECTABLE_EFFORTS, OPENAI_SELECTABLE_EFFORTS, OPENROUTER_SELECTABLE_EFFORTS,
-    REASONING_EFFORT_MAX_RANK, canonical_reasoning_effort, inferred_reasoning_efforts,
-    reasoning_effort_glyph, reasoning_effort_rank,
+    ANTIGRAVITY_EFFORT_SUFFIXES, DEEPSEEK_SELECTABLE_EFFORTS, OPENAI_SELECTABLE_EFFORTS,
+    OPENROUTER_SELECTABLE_EFFORTS, REASONING_EFFORT_MAX_RANK, antigravity_efforts_from_catalog,
+    canonical_reasoning_effort, inferred_reasoning_efforts, reasoning_effort_glyph,
+    reasoning_effort_rank, split_antigravity_model_effort,
 };
 pub use selection::{
     ActiveProvider, ProviderAvailability, auto_default_provider, cli_provider_arg_for_session_key,

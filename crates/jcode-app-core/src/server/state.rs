@@ -587,10 +587,10 @@ pub(super) async fn fanout_peer_client_event(
     send_event_to_targets(targets.as_slice(), event)
 }
 
-#[path = "turn_stop_log.rs"]
-pub(super) mod turn_stop_log;
 #[path = "assistant_text.rs"]
 mod assistant_text;
+#[path = "turn_stop_log.rs"]
+pub(super) mod turn_stop_log;
 
 /// Owns one turn's event queue. Closing or aborting the producer drains all
 /// accepted events before releasing the runtime's publication reservation.

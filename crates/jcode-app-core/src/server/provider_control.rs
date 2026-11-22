@@ -610,8 +610,14 @@ pub(super) async fn handle_set_reasoning_effort(
     provider: Option<Arc<dyn Provider>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
-    let result = if let Ok(mut agent_guard) = agent.try_lock() {
-        apply_reasoning_effort(&mut agent_guard, &effort, is_swarm_worker)
+    let (result, updated_model) = if let Ok(mut agent_guard) = agent.try_lock() {
+        let prev_model = agent_guard.provider_model();
+        let result = apply_reasoning_effort(&mut agent_guard, &effort, is_swarm_worker);
+        let updated_model = result
+            .is_ok()
+            .then(|| agent_guard.provider_model())
+            .filter(|model| model != &prev_model);
+        (result, updated_model)
     } else if let Some(provider) = provider.filter(|provider| {
         !is_swarm_worker
             || (provider.speed_mode() == jcode_provider_core::SpeedMode::Standard
@@ -635,6 +641,7 @@ pub(super) async fn handle_set_reasoning_effort(
         } else {
             Ok(effort)
         };
+        let prev_model = provider.model();
         let result = requested
             .and_then(|requested| provider.set_reasoning_effort(&requested))
             .map(|()| provider.reasoning_effort());
@@ -666,7 +673,11 @@ pub(super) async fn handle_set_reasoning_effort(
                 }
             });
         }
-        send_reasoning_effort_result(id, result, client_event_tx);
+        let updated_model = result
+            .is_ok()
+            .then(|| provider.model())
+            .filter(|model| model != &prev_model);
+        send_reasoning_effort_result(id, result, updated_model, client_event_tx);
         return;
     } else {
         // The running turn holds the agent lock, and the out-of-band provider
@@ -691,11 +702,11 @@ pub(super) async fn handle_set_reasoning_effort(
                 agent_guard.apply_pending_reasoning_effort();
             },
         );
-        send_reasoning_effort_result(id, Ok(current.map(str::to_owned)), client_event_tx);
+        send_reasoning_effort_result(id, Ok(current.map(str::to_owned)), None, client_event_tx);
         return;
     };
 
-    send_reasoning_effort_result(id, result, client_event_tx);
+    send_reasoning_effort_result(id, result, updated_model, client_event_tx);
 }
 
 fn apply_reasoning_effort(
@@ -712,6 +723,7 @@ fn apply_reasoning_effort(
 fn send_reasoning_effort_result(
     id: u64,
     result: anyhow::Result<Option<String>>,
+    model: Option<String>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     match result {
@@ -719,6 +731,7 @@ fn send_reasoning_effort_result(
             let _ = client_event_tx.send(ServerEvent::ReasoningEffortChanged {
                 id,
                 effort,
+                model,
                 error: None,
             });
         }
@@ -726,6 +739,7 @@ fn send_reasoning_effort_result(
             let _ = client_event_tx.send(ServerEvent::ReasoningEffortChanged {
                 id,
                 effort: None,
+                model: None,
                 error: Some(e.to_string()),
             });
         }

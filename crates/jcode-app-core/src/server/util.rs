@@ -108,11 +108,14 @@ fn strip_deleted_suffix(path: PathBuf) -> PathBuf {
 pub(crate) fn running_server_binary() -> Option<PathBuf> {
     jcode_build_support::runtime_generation::serving_identity(jcode_build_meta::git_hash())
         .map(|identity| identity.binary_path)
+        .map(|path| (!jcode_build_support::is_dynamic_loader_path(&path)).then_some(path))
         .map_err(|error| crate::logging::warn(&format!("running generation unknown: {error:#}")))
         .ok()
+        .flatten()
 }
 
 /// Follow channel symlinks in a launch path to the file it points at now.
+#[cfg(test)]
 #[cfg(test)]
 fn resolve_launch_path(exe: PathBuf) -> PathBuf {
     let exe = strip_deleted_suffix(exe);

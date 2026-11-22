@@ -140,7 +140,9 @@ fn wrapped(text: String) -> ServerEvent {
 
 fn payload(event: &ServerEvent) -> &str {
     match event {
-        ServerEvent::TurnEvent { identity, event, .. } => {
+        ServerEvent::TurnEvent {
+            identity, event, ..
+        } => {
             assert_eq!(identity.turn_id, 42);
             assert_eq!(identity.runtime_generation, "turn-delivery-runtime");
             match event.as_ref() {

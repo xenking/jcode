@@ -17,26 +17,32 @@ fn scoped_text_reconnect_does_not_publish_a_suffix_as_a_new_answer() {
         json!({"type":"text_delta", "text":first}),
         json!([{"kind":"append", "message_id":id, "offset":0}]),
     );
-    assert!(matches!(origin.legacy_event_to_api(&first_frame).as_slice(), [ServerFrame {
+    assert!(
+        matches!(origin.legacy_event_to_api(&first_frame).as_slice(), [ServerFrame {
         event: ApiEvent::TextDelta { message_id: Some(got), text, .. }, ..
-    }] if got == id && text == first));
+    }] if got == id && text == first)
+    );
 
     let continuation = scoped(
         json!({"type":"text_delta", "text":suffix}),
         json!([{"kind":"append", "message_id":id, "offset":first.len()}]),
     );
-    assert!(matches!(origin.legacy_event_to_api(&continuation).as_slice(), [ServerFrame {
+    assert!(
+        matches!(origin.legacy_event_to_api(&continuation).as_slice(), [ServerFrame {
         event: ApiEvent::TextDelta { message_id: Some(got), text, .. }, ..
-    }] if got == id && text == suffix));
+    }] if got == id && text == suffix)
+    );
     assert!(attached.legacy_event_to_api(&continuation).is_empty());
 
     let done = scoped(
         json!({"type":"text_done"}),
         json!([{"kind":"complete", "message_id":id, "text":text}]),
     );
-    assert!(matches!(origin.legacy_event_to_api(&done).as_slice(), [ServerFrame {
+    assert!(
+        matches!(origin.legacy_event_to_api(&done).as_slice(), [ServerFrame {
         event: ApiEvent::TextDone { message_id: Some(got), .. }, ..
-    }] if got == id));
+    }] if got == id)
+    );
     assert!(matches!(attached.legacy_event_to_api(&done).as_slice(), [
         ServerFrame { event: ApiEvent::TextReplace { message_id: Some(got), text: restored, .. }, .. },
         ServerFrame { event: ApiEvent::TextDone { message_id: Some(ended), .. }, .. },

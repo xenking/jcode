@@ -334,14 +334,16 @@ impl DisplayMessage {
         // Stored compaction rows carry no title; the collapse state lives in the
         // title, so rehydrated dividers start collapsed like live ones.
         let title = (item.role == "compaction").then(|| COMPACTION_COLLAPSED_TITLE.to_string());
-        Self {
+        let mut row = Self {
             role: item.role,
             content: format_attachment_chips(item.content, &item.attachments),
             tool_calls: item.tool_calls,
             duration_secs,
             title,
             tool_data: item.tool_data,
-        }
+        };
+        row.normalize_jarvis_role();
+        row
     }
 
     /// Create a tool message with title.

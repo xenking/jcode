@@ -1444,9 +1444,7 @@ impl Tool for TodoTool {
         // and point the other two routes at it.
         let phase_items = &mut schema["properties"]["phases"]["items"]["properties"]["lanes"]["items"]
             ["properties"]["items"];
-        phase_items["description"] = json!(
-            "Fields as in add except after and phase/lane fields."
-        );
+        phase_items["description"] = json!("Fields as in add except after and phase/lane fields.");
         schema
     }
 
