@@ -1284,7 +1284,6 @@ pub(super) async fn handle_resume_session(
     id: u64,
     session_id: String,
     resume_slot: Option<super::session_manager::SessionReservation<'_>>,
-    working_dir_override: Option<&str>,
     client_instance_id: Option<&str>,
     client_has_local_history: bool,
     history_base: Option<crate::protocol::HistoryBase>,
@@ -1352,7 +1351,7 @@ pub(super) async fn handle_resume_session(
     // Migration may replace the transcript on disk, but not runtime ownership.
     // Refresh the canonical idle owner in place instead of restoring a second
     // Agent into this connection's temporary placeholder.
-    resume_guard.refresh_stale(working_dir_override).await?;
+    resume_guard.refresh_stale(None).await?;
     let live_target_agent = claim_live_target_agent(
         &session_id,
         client_connection_id,
@@ -1540,23 +1539,13 @@ pub(super) async fn handle_resume_session(
         // working dir, not the server process cwd (issue #420).
         // Do not block on the agent lock here: the target agent may be busy
         // mid-turn (lock held), and awaiting it would deadlock the resume.
-        let mcp_working_dir = working_dir_override.map(PathBuf::from).or_else(|| {
-            live_target_agent
-                .try_lock()
-                .ok()
-                .and_then(|agent_guard| agent_guard.working_dir().map(PathBuf::from))
-                .or_else(|| {
-                    crate::session::Session::load_startup_stub(&session_id)
-                        .map(Some)
-                        .unwrap_or_else(|error| {
-                            crate::logging::warn(&format!(
-                                "Failed to load MCP session fallback for {session_id}: {error}"
-                            ));
-                            None
-                        })
-                        .and_then(|session| session.working_dir.map(PathBuf::from))
-                })
-        });
+        let mcp_working_dir = super::subscribe_working_dir::live_session_working_dir(
+            live_target_agent,
+            &session_id,
+            swarm_members,
+        )
+        .await
+        .map(PathBuf::from);
         registry
             .register_mcp_tools_for_dir(
                 Some(client_event_tx.clone()),
@@ -1724,7 +1713,7 @@ pub(super) async fn handle_resume_session(
         session_id, pre_lock_ms
     ));
     let restored = resume_guard
-        .restore_new(detached, working_dir_override, *client_selfdev)
+        .restore_new(detached, None, *client_selfdev)
         .await;
     let (restored_agent, result, is_canary, restore_lease) = match restored {
         Ok((restored_agent, previous, canary, lease)) => {

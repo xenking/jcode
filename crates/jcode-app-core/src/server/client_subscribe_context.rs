@@ -30,8 +30,8 @@ pub(super) fn initial_subscribe_working_dir(
 }
 
 /// A reattachment names an existing session, not a new client working directory.
-/// Resolve an omitted cwd before provisional initialization, never from the
-/// daemon/bridge process cwd. Idle empty sessions may exist only in memory.
+/// Prefer the target's cwd before provisional initialization. The client's
+/// cwd can initialize a new session or a placeholder, never an attach target.
 pub(super) async fn resolve_target_subscribe_working_dir(
     request: &mut Request,
     sessions: &SessionAgents,
@@ -45,48 +45,37 @@ pub(super) async fn resolve_target_subscribe_working_dir(
     else {
         return Ok(());
     };
-    if working_dir.is_some() {
-        return Ok(());
-    }
     let live = sessions.read().await.get(target).cloned();
     let resolved = if let Some(live) = live {
-        // Contention is expected during a turn, not a failed session lookup.
-        let idle_cwd = match live.try_lock() {
-            Ok(agent) => agent.working_dir().map(str::to_string),
-            Err(_) => None,
-        };
-        if idle_cwd.is_some() {
-            idle_cwd
-        } else {
-            // A generating Agent owns its mutex. The member records the same
-            // session root, so attaching must not wait for the model turn.
-            // A plain chat that never joined a swarm has no member root, so
-            // fall back to the persisted root: the live session is real, and
-            // reporting it as unknown makes every reattach fail until the
-            // turn ends.
-            let member_cwd = members
-                .read()
-                .await
-                .get(target)
-                .and_then(|member| member.working_dir.as_ref())
-                .map(|path| path.to_string_lossy().into_owned());
-            match member_cwd {
-                Some(cwd) => Some(cwd),
-                None => crate::session::Session::load_startup_stub(target)
-                    .ok()
-                    .and_then(|session| session.working_dir),
+        super::super::subscribe_working_dir::live_session_working_dir(&live, target, members).await
+    } else {
+        match crate::session::Session::load_startup_stub(target) {
+            Ok(session) => session.working_dir,
+            Err(error)
+                if working_dir.is_some()
+                    && error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Unknown session '{target}' or session could not be loaded for attachment: {error:#}"
+                ));
             }
         }
-    } else {
-        let session = crate::session::Session::load_startup_stub(target).map_err(|error| {
-            format!("Unknown session '{target}' or session could not be loaded for attachment: {error:#}")
-        })?;
-        session.working_dir
     };
-    *working_dir = Some(resolved.ok_or_else(|| {
-        format!("Unknown session '{target}' or session has no working directory")
-    })?);
-    Ok(())
+    if let Some(resolved) = resolved {
+        *working_dir = Some(resolved);
+    }
+    if working_dir.is_some() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Unknown session '{target}' or session has no working directory"
+        ))
+    }
 }
 
 pub(super) fn validated_subscribe_working_dir(

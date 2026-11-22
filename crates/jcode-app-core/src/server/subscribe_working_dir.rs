@@ -1,4 +1,36 @@
+use super::{Agent, SwarmMember};
+use std::collections::HashMap;
 use std::path::Path;
+use tokio::sync::{Mutex, RwLock};
+
+pub(super) async fn live_session_working_dir(
+    agent: &Mutex<Agent>,
+    session_id: &str,
+    members: &RwLock<HashMap<String, SwarmMember>>,
+) -> Option<String> {
+    if let Ok(agent) = agent.try_lock() {
+        return agent.working_dir().map(str::to_owned);
+    }
+    // Do not wait for a turn's Agent lock. A member can describe unsaved
+    // sessions, and sessions that never joined a swarm have a disk fallback.
+    let member_dir = members
+        .read()
+        .await
+        .get(session_id)
+        .and_then(|member| member.working_dir.as_ref())
+        .map(|path| path.to_string_lossy().into_owned());
+    member_dir.or_else(
+        || match crate::session::Session::load_startup_stub(session_id) {
+            Ok(session) => session.working_dir,
+            Err(error) => {
+                crate::logging::debug(&format!(
+                    "Could not read working directory for busy session {session_id}: {error:#}"
+                ));
+                None
+            }
+        },
+    )
+}
 
 /// Resolve the working directory a subscribe should actually bind to.
 ///

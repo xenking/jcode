@@ -89,14 +89,19 @@ async fn target_subscribe_uses_live_unsaved_root_without_changing_it() {
         HashMap::from([(id.into(), agent.clone())]),
     ));
     let members = Arc::new(RwLock::new(HashMap::new()));
-    let mut request = subscribe(id);
-    resolve_target_subscribe_working_dir(&mut request, &sessions, &members)
-        .await
-        .unwrap();
-    assert_eq!(
-        initial_subscribe_working_dir(&request).unwrap(),
-        "/workspace/live-original"
-    );
+    for reported in [None, Some("/workspace/other-project")] {
+        let mut request = subscribe(id);
+        if let Request::Subscribe { working_dir, .. } = &mut request {
+            *working_dir = reported.map(str::to_owned);
+        }
+        resolve_target_subscribe_working_dir(&mut request, &sessions, &members)
+            .await
+            .unwrap();
+        assert_eq!(
+            initial_subscribe_working_dir(&request).unwrap(),
+            "/workspace/live-original"
+        );
+    }
     assert_eq!(
         agent.lock().await.working_dir(),
         Some("/workspace/live-original")
@@ -123,6 +128,91 @@ async fn target_subscribe_uses_persisted_root_when_no_live_agent_exists() {
         initial_subscribe_working_dir(&request).unwrap(),
         "/workspace/persisted-original"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cross_project_target_subscribe_keeps_the_persisted_root_over_socket() {
+    cross_project_attach_over_socket(true).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cross_project_resume_keeps_the_persisted_root_over_socket() {
+    cross_project_attach_over_socket(false).await;
+}
+
+#[cfg(unix)]
+async fn cross_project_attach_over_socket(target_subscribe: bool) {
+    use serde_json::json;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let _lock = crate::storage::lock_test_env();
+    let home = Home::new();
+    let target_root = home._temp.path().join("target-project");
+    let client_root = home._temp.path().join("client-project");
+    std::fs::create_dir(&target_root).unwrap();
+    std::fs::create_dir(&client_root).unwrap();
+    let mut target = crate::session::Session::create(None, Some("Target project".into()));
+    target.working_dir = Some(target_root.to_string_lossy().into_owned());
+    target.save().unwrap();
+
+    let sockets = tempfile::tempdir_in("/tmp").unwrap();
+    let socket = sockets.path().join("attach.sock");
+    let server = crate::server::Server::new_with_paths(
+        Arc::new(NoRequests),
+        socket.clone(),
+        sockets.path().join("debug.sock"),
+    );
+    let runtime = crate::server::runtime::ServerRuntime::from_server(&server);
+    let accept = runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
+    let (reader, mut writer) = crate::transport::Stream::connect(&socket)
+        .await
+        .unwrap()
+        .into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let mut requests = vec![json!({"type":"subscribe","id":1,"working_dir":client_root})];
+    if target_subscribe {
+        requests[0]["target_session_id"] = json!(target.id);
+    } else {
+        requests.push(json!({"type":"resume_session","id":2,"session_id":target.id}));
+    }
+    for (index, request) in requests.into_iter().enumerate() {
+        let request_id = index as u64 + 1;
+        writer
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let line = lines.next_line().await.unwrap().expect("socket closed");
+                match serde_json::from_str::<ServerEvent>(&line).unwrap() {
+                    ServerEvent::Done { id } if id == request_id => break,
+                    ServerEvent::Error { id, message, .. } if id == request_id => {
+                        panic!("{message}")
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("attachment should finish");
+    }
+
+    let agent = server
+        .sessions
+        .read()
+        .await
+        .get(&target.id)
+        .cloned()
+        .unwrap();
+    let cwd = agent
+        .lock()
+        .await
+        .working_dir()
+        .map(std::path::PathBuf::from);
+    accept.abort();
+    assert_eq!(cwd.as_deref(), Some(target_root.as_path()));
 }
 
 #[tokio::test]
@@ -247,7 +337,9 @@ async fn target_subscribe_reports_corrupt_persisted_state_without_using_process_
 }
 
 #[tokio::test]
-async fn target_subscribe_preserves_explicit_directory_and_its_validation() {
+async fn unknown_target_keeps_explicit_directory_for_creation_and_validates_it() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = Home::new();
     let mut request = subscribe("session_explicit");
     if let Request::Subscribe { working_dir, .. } = &mut request {
         *working_dir = Some("/workspace/explicit".into());

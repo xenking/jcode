@@ -102,7 +102,6 @@ async fn handle_resume_session_allows_attach_without_local_history() -> Result<(
         target_session_id.to_string(),
         None,
         None,
-        None,
         false,
         None,
         true,

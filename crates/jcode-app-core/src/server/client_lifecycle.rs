@@ -1469,7 +1469,7 @@ pub(super) async fn handle_client(
             provisional_session = false;
         }
 
-        if let Err(message) = resolve_target_subscribe_working_dir(
+        if resume_slot.is_none() && let Err(message) = resolve_target_subscribe_working_dir(
             &mut request, &sessions, &swarm_members,
         ).await {
             send_client_event_best_effort(&client_event_tx, ServerEvent::Error {
@@ -2119,7 +2119,6 @@ pub(super) async fn handle_client(
                                 id,
                                 target_session_id.clone(),
                                 resume_slot,
-                                subscribe_working_dir.as_deref(),
                                 client_instance_id.as_deref(),
                                 client_has_local_history,
                                 history_base,
@@ -2166,7 +2165,7 @@ pub(super) async fn handle_client(
                         if client_session_id == target_session_id {
                             handle_subscribe(
                                 id,
-                                subscribe_working_dir,
+                                None,
                                 selfdev,
                                 false,
                                 &mut client_selfdev,
@@ -2208,7 +2207,7 @@ pub(super) async fn handle_client(
                         }
                         handle_subscribe(
                             id,
-                            subscribe_working_dir,
+                            subscribe_working_dir.filter(|_| provisional_session),
                             selfdev,
                             true,
                             &mut client_selfdev,
@@ -2240,7 +2239,7 @@ pub(super) async fn handle_client(
                     }
                     handle_subscribe(
                         id,
-                        subscribe_working_dir,
+                        subscribe_working_dir.filter(|_| provisional_session),
                         selfdev,
                         true,
                         &mut client_selfdev,
@@ -2403,10 +2402,6 @@ pub(super) async fn handle_client(
                 client_name: _,
             } => {
                 let pre_resume_session_id = client_session_id.clone();
-                let resume_working_dir = {
-                    let agent_guard = agent.lock().await;
-                    agent_guard.working_dir().map(str::to_string)
-                };
                 current_client_instance_id = client_instance_id.clone();
                 {
                     let mut connections = client_connections.write().await;
@@ -2420,7 +2415,6 @@ pub(super) async fn handle_client(
                         id,
                         session_id,
                         None,
-                        resume_working_dir.as_deref(),
                         client_instance_id.as_deref(),
                         client_has_local_history,
                         recent_history_messages.map(crate::protocol::HistoryBase::recent),
