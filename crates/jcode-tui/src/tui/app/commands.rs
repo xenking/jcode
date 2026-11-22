@@ -4,6 +4,9 @@ pub(super) use release_prompts::*;
 #[path = "commands_manual_subagent.rs"]
 mod manual_subagent;
 use manual_subagent::launch_manual_subagent;
+#[path = "commands_git_diff.rs"]
+mod git_diff;
+pub(in crate::tui) use git_diff::GIT_DIFF_HEADING;
 
 pub(super) use super::commands_improve::{
     build_improve_prompt, build_improve_resume_prompt, build_refactor_prompt,
@@ -1436,23 +1439,46 @@ fn build_git_status_message_for_dir(repo_dir: PathBuf) -> Result<String, String>
     Ok(format!("{heading}\n\n{status_block}"))
 }
 
-fn handle_git_command(app: &mut App, trimmed: &str) -> bool {
-    if trimmed != "/git" && trimmed != "/git status" {
-        if trimmed.starts_with("/git ") {
-            app.push_display_message(DisplayMessage::error(
-                "Usage: /git or /git status".to_string(),
-            ));
-            return true;
-        }
+pub(super) fn handle_git_command(app: &mut App, trimmed: &str) -> bool {
+    let mut words = trimmed.split_whitespace();
+    if words.next() != Some("/git") {
         return false;
+    }
+    let (action, selector, extra) = (words.next(), words.next(), words.next());
+    let diff = match (action, selector, extra) {
+        (None | Some("status"), None, None) => Some(None),
+        (Some("diff"), selector, None) => git_diff::GitDiffKind::parse(selector).map(Some),
+        _ => None,
+    };
+    let Some(diff) = diff else {
+        app.push_display_message(DisplayMessage::error(
+            "Usage: /git [status | diff [staged|unstaged|untracked]]",
+        ));
+        return true;
+    };
+    if crate::tui::is_ssh_remote() {
+        let notice = if diff.is_some() {
+            "/git diff is unavailable over SSH. Open jcode on the remote host to view its Git diff."
+        } else {
+            "/git status requires the SSH connection."
+        };
+        app.push_display_message(DisplayMessage::error(notice));
+        return true;
     }
 
     let session_id = active_session_id(app);
     match git_command_repo_dir(app) {
         Ok(repo_dir) => {
-            app.set_status_notice("Git status loading...");
+            app.set_status_notice(if diff.is_some() {
+                "Git diff loading..."
+            } else {
+                "Git status loading..."
+            });
             std::thread::spawn(move || {
-                let result = build_git_status_message_for_dir(repo_dir);
+                let result = match diff {
+                    Some(kind) => git_diff::build_diff(&repo_dir, kind),
+                    None => build_git_status_message_for_dir(repo_dir),
+                };
                 Bus::global().publish(BusEvent::GitStatusCompleted(GitStatusCompleted {
                     session_id,
                     result,
@@ -1527,8 +1553,12 @@ pub(super) fn handle_git_status_completed(app: &mut App, completed: GitStatusCom
 
     match completed.result {
         Ok(message) => {
+            app.set_status_notice(if message.starts_with(GIT_DIFF_HEADING) {
+                "Git diff"
+            } else {
+                "Git status"
+            });
             app.push_display_message(DisplayMessage::system(message));
-            app.set_status_notice("Git status");
         }
         Err(error) => app.push_display_message(DisplayMessage::error(error)),
     }

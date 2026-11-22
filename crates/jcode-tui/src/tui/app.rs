@@ -28,6 +28,7 @@ use crate::tool::{Registry, ToolContext};
 use crate::tui::terminal_events::EventStream;
 use anyhow::Result;
 use auth::PendingLogin;
+pub(super) use commands::GIT_DIFF_HEADING;
 use crossterm::event::{
     Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };

@@ -383,7 +383,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
         }
 
         if crate::tui::is_ssh_remote() && trimmed.split_whitespace().next() == Some("/git") {
-            if matches!(trimmed, "/git" | "/git status") {
+            if trimmed == "/git" || trimmed.split_whitespace().eq(["/git", "status"]) {
                 // The daemon resolves its own CWD. Never consult local git or
                 // interpolate the remote working directory into a shell string.
                 super::input_dispatch::submit_remote_input_shell(
@@ -394,7 +394,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 )
                 .await?;
             } else {
-                app.push_display_message(DisplayMessage::error("Usage: /git or /git status"));
+                app_mod::commands::handle_git_command(app, trimmed);
             }
             return Ok(());
         }

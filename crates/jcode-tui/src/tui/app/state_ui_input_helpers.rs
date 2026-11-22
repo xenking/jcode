@@ -60,7 +60,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/split-view", "Alias for /splitview"),
     RegisteredCommand::public("/btw", "Ask a side question in a card above the composer"),
     RegisteredCommand::public("/ssh", "Connect to a remote machine using system SSH"),
-    RegisteredCommand::public("/git", "Show git status for the session working directory"),
+    RegisteredCommand::public(
+        "/git",
+        "Show Git status or diff for the session working directory",
+    ),
     RegisteredCommand::public("/colors", "List, configure, and score every TUI color"),
     RegisteredCommand::hidden("/color", "Alias for /colors"),
     RegisteredCommand::public("/hotkeys", "List hotkeys with your personal usage"),
@@ -813,15 +816,23 @@ impl App {
             return self.rank_suggestions(input, suggestions);
         }
 
-        if prefix.starts_with("/git ") {
+        if prefix_trimmed == "/git" || prefix.starts_with("/git ") {
             return self.rank_suggestions(
                 input,
-                vec![("/git status".into(), "Show branch and working tree status")],
+                vec![
+                    ("/git status".into(), "Show branch and working tree status"),
+                    (
+                        "/git diff".into(),
+                        "Show working tree and untracked changes",
+                    ),
+                    ("/git diff staged".into(), "Show changes in the index"),
+                    (
+                        "/git diff unstaged".into(),
+                        "Show tracked changes not in the index",
+                    ),
+                    ("/git diff untracked".into(), "Show untracked files"),
+                ],
             );
-        }
-
-        if prefix_trimmed == "/git" {
-            return vec![("/git status".into(), "Show branch and working tree status")];
         }
 
         if prefix.starts_with("/transcript ") {

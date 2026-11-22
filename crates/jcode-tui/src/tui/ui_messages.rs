@@ -86,6 +86,8 @@ fn render_single_line_system_notice(
         Some("Skills" | "Context" | "Support" | "Cloud transfer" | "Todo completion" | "Rewind")
     ) || msg.content.starts_with("Shell command · ")
         || msg.content.starts_with("Authentication Status:")
+        || msg.content.starts_with(crate::tui::app::GIT_DIFF_HEADING)
+        || msg.content.starts_with("/git\n")
         || (msg.content.contains('\n') && msg.content.contains("/cancel"))
     {
         return None;
@@ -542,6 +544,13 @@ pub(crate) fn render_system_message(
 
     let centered = markdown::center_code_blocks();
     let wrap_width = centered_wrap_width(width.saturating_sub(4), centered, 96);
+    if msg.content.starts_with(crate::tui::app::GIT_DIFF_HEADING) {
+        let mut lines = render_git_diff_lines(&msg.content, wrap_width);
+        if centered {
+            left_pad_lines_for_centered_mode(&mut lines, width);
+        }
+        return lines;
+    }
     let display_content = normalize_system_content_for_display(&msg.content);
     // Authored summaries that use markdown (bold/lists/headings/links) render as
     // markdown so they read cleanly. Plain status/help text keeps the original
@@ -568,6 +577,27 @@ pub(crate) fn render_system_message(
         }
     }
     lines
+}
+
+fn render_git_diff_lines(content: &str, width: usize) -> Vec<Line<'static>> {
+    content
+        .split('\n')
+        .flat_map(|line| {
+            let color = match line.as_bytes() {
+                [b'+', ..] if !line.starts_with("+++ ") => diff_add_color(),
+                [b'-', ..] if !line.starts_with("--- ") => diff_del_color(),
+                _ => system_message_color(),
+            };
+            let chunks = if line.width() > width {
+                split_by_display_width(line, width.max(1))
+            } else {
+                vec![line.to_owned()]
+            };
+            chunks
+                .into_iter()
+                .map(move |chunk| Line::from(Span::styled(chunk, Style::default().fg(color))))
+        })
+        .collect()
 }
 
 /// Heuristic: does authored system content use markdown formatting that is

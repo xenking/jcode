@@ -65,7 +65,7 @@ impl App {
                 "/btw <question>\nAsk a side question without adding it to the current conversation. The answer streams into a card above the composer.\n\n/btw lists recent topics for this session. Use /btw #N to reopen one, or /btw #N <question> to ask a follow-up in the same topic.\n\nEsc closes the card when the composer is empty. Ctrl+p opens the side topic as its own chat.\n\nOn a local daemon, the hidden child can answer while the parent is working. Over SSH, the question opens as /fork <question> instead."
             }
             "git" => {
-                "/git\nShow git status --short --branch for the current session working directory.\n\n/git status\nAlias for /git."
+                "/git\nShow git status --short --branch for the current session working directory.\n\n/git status\nAlias for /git.\n\n/git diff\nShow the working tree against HEAD, plus untracked files.\n\n/git diff staged\nShow changes in the index.\n\n/git diff unstaged\nShow tracked changes not in the index.\n\n/git diff untracked\nShow newly created files not tracked or ignored by Git.\n\nGit diff is unavailable over SSH. /diff only changes how tool edits are displayed."
             }
             "commit" => {
                 "/commit\nAsk the agent to inspect current uncommitted changes and create interactive, logical commits.\n\nThe agent should group related files or hunks, preserve unrelated work, validate as appropriate, and report the commits created plus anything left uncommitted."
