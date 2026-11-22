@@ -1433,6 +1433,89 @@ fn compacted_replay_preserves_and_refreshes_phased_todo_plan() {
 }
 
 #[test]
+fn compacted_todo_update_keeps_responses_wire_prefix_across_tool_rounds() {
+    let _guard = crate::storage::lock_test_env();
+    let mut session = crate::session::Session::create(None, None);
+    let mut manager = CompactionManager::new();
+    manager.restore_persisted_state(
+        &crate::session::StoredCompactionState {
+            summary_text: "Previous history".into(),
+            plan_context: Some(String::new()),
+            openai_encrypted_content: None,
+            snapcompact: None,
+            covers_up_to_turn: 0,
+            original_turn_count: 0,
+            compacted_count: 0,
+        },
+        0,
+    );
+    crate::todo::save_todos(
+        &session.id,
+        &[crate::todo::TodoItem {
+            id: "audit".into(),
+            status: "in_progress".into(),
+            content: "Audit the ledger".into(),
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    let request = |manager: &mut CompactionManager, session: &mut crate::session::Session| {
+        let mut messages = manager
+            .messages_for_api_session(session, false, true)
+            .messages;
+        messages.push(Message::user("Request-only test nudge").into_request_only());
+        jcode_provider_openai::request::build_responses_input(&messages)
+    };
+    let first = request(&mut manager, &mut session);
+    let first_durable = &first[..first.len() - 1];
+    assert!(
+        first_durable
+            .last()
+            .unwrap()
+            .to_string()
+            .contains("Audit the ledger")
+    );
+
+    session.add_message(
+        Role::Assistant,
+        vec![
+            ContentBlock::OpenAIReasoning {
+                id: "rs_audit".into(),
+                summary: vec![],
+                encrypted_content: Some("opaque-reasoning".into()),
+                status: None,
+            },
+            ContentBlock::ToolUse {
+                id: "call_audit".into(),
+                name: "lookup".into(),
+                input: serde_json::json!({}),
+                thought_signature: None,
+            },
+        ],
+    );
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::ToolResult {
+            tool_use_id: "call_audit".into(),
+            content: "Ledger entry found".into(),
+            is_error: None,
+        }],
+    );
+    let second = request(&mut manager, &mut session);
+    assert!(
+        second.starts_with(first_durable),
+        "the sent plan was moved after the tool round"
+    );
+    assert_eq!(
+        second[first_durable.len()..]
+            .iter()
+            .map(|item| item["type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["reasoning", "function_call", "function_call_output", "message"],
+    );
+}
+
+#[test]
 fn persisted_state_restore_and_exports_share_encrypted_body() {
     let body: Arc<str> = "encrypted-body-".repeat(128 * 1024).into();
     let state = crate::session::StoredCompactionState {
