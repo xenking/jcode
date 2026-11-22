@@ -13,6 +13,7 @@ pub enum BackgroundTaskStatus {
 }
 
 pub const BACKGROUND_TASKS_CAPABILITY: &str = "background_tasks_v1";
+pub const PERSISTENT_BACKGROUND_TASKS_CAPABILITY: &str = "persistent_background_tasks_v1";
 
 /// User-facing task state. A stalled task is still running and can recover.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

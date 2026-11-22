@@ -40,7 +40,7 @@ async fn snapshot(reply: Value) -> std::collections::HashSet<String> {
         );
         write_json_line(reader.get_mut(), &reply).await.unwrap();
     });
-    let result = daemon_user_connections(&path).await;
+    let result = DaemonControl::default().user_connections(&path).await;
     server.await.unwrap();
     result
 }
@@ -76,7 +76,8 @@ async fn old_malformed_and_disconnected_sources_never_claim_connected_users() {
     );
     let dir = SocketDir::new();
     assert!(
-        daemon_user_connections(&dir.path().join("missing.sock"))
+        DaemonControl::default()
+            .user_connections(&dir.path().join("missing.sock"))
             .await
             .is_empty()
     );
@@ -88,7 +89,12 @@ async fn stalled_presence_probe_is_bounded() {
     let path = dir.path().join("stalled.sock");
     let listener = UnixListener::bind(&path).unwrap();
     let start = std::time::Instant::now();
-    assert!(daemon_user_connections(&path).await.is_empty());
+    assert!(
+        DaemonControl::default()
+            .user_connections(&path)
+            .await
+            .is_empty()
+    );
     assert!(start.elapsed() < std::time::Duration::from_secs(2));
     drop(listener);
 }

@@ -522,14 +522,14 @@ fn jcode_protocol_like_kv_miss() -> Value {
     })
 }
 
-pub(super) struct ScopedJcodeHome {
+pub(crate) struct ScopedJcodeHome {
     path: PathBuf,
     previous: Option<OsString>,
     _guard: MutexGuard<'static, ()>,
 }
 
 impl ScopedJcodeHome {
-    pub(super) fn new(label: &str) -> Self {
+    pub(crate) fn new(label: &str) -> Self {
         let guard = jcode_home_test_lock();
         let previous = std::env::var_os("JCODE_HOME");
         let unique = SystemTime::now()

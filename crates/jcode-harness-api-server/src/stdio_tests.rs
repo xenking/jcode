@@ -114,6 +114,90 @@ async fn background_task_watch_reopens_with_authoritative_state() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn periodic_presence_and_task_watch_reuse_the_capability_connection() {
+    use serde_json::json;
+    use std::time::Duration;
+
+    let _home = translate::ScopedJcodeHome::new("periodic-control");
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("daemon.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let (client, bridge) = tokio::io::duplex(8192);
+    let (bridge_read, bridge_write) = tokio::io::split(bridge);
+    let bridge = tokio::spawn(run_bridge_stream(bridge_read, bridge_write, socket));
+    let (read, mut write) = tokio::io::split(client);
+    let mut read = BufReader::new(read);
+    let mut line = String::new();
+    let budget = Duration::from_secs(3);
+    write_json_line(
+        &mut write,
+        &json!({"v":1,"id":1,"req":"hello","min_version":1,"max_version":1}),
+    )
+    .await
+    .unwrap();
+    let (_session, _) = listener.accept().await.unwrap();
+    let (control, _) = listener.accept().await.unwrap();
+    let mut control = BufReader::new(control);
+    read_frame(&mut control, &mut line).await.unwrap();
+    let pong = json!({"type":"pong","id":0,"capabilities":["session_connections", "background_tasks_v1", "persistent_background_tasks_v1"], "user_connected_session_ids": []});
+    write_json_line(control.get_mut(), &pong).await.unwrap();
+    line.clear();
+    read_frame(&mut read, &mut line).await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&line).unwrap()["ev"],
+        "hello_ok"
+    );
+
+    for id in 2..5 {
+        write_json_line(&mut write, &json!({"v":1,"id":id,"req":"list_sessions"}))
+            .await
+            .unwrap();
+        line.clear();
+        tokio::time::timeout(budget, read_frame(&mut read, &mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&line).unwrap()["reply_to"],
+            id
+        );
+    }
+    write_json_line(
+        &mut write,
+        &json!({"v":1,"id":5,"req":"watch_background_tasks","session_id":"session-owner"}),
+    )
+    .await
+    .unwrap();
+    for _ in 0..2 {
+        line.clear();
+        let n = tokio::time::timeout(budget, read_frame(&mut control, &mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            n, 0,
+            "the bridge must retain the negotiated control connection"
+        );
+        let request = serde_json::from_str::<Value>(&line).unwrap();
+        assert_eq!(request["type"], "background_tasks");
+        assert_eq!(request["keep_open"], true);
+        write_json_line(
+            control.get_mut(),
+            &json!({"type":"background_tasks","id":request["id"],"tasks":[]}),
+        )
+        .await
+        .unwrap();
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
+    write.shutdown().await.unwrap();
+    bridge.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn stdio_stream_handshake_ping_and_eof_release_daemon_connection() {
     let root = std::env::temp_dir().join(format!(
         "jcode-stdio-test-{}-{}",

@@ -4525,6 +4525,9 @@ impl BridgeState {
 mod tests;
 
 #[cfg(test)]
+pub(crate) use tests::ScopedJcodeHome;
+
+#[cfg(test)]
 #[path = "side_question_tests.rs"]
 mod side_question_tests;
 

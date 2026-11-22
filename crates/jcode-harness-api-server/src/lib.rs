@@ -40,6 +40,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 // Unix sockets on Unix, named pipes on Windows, one API. Without this the
 // bridge simply did not compile for Windows, so the SDK could not run there at
@@ -63,60 +64,31 @@ fn release_large_frame(buffer: &mut Vec<u8>) {
     }
 }
 
-/// Capabilities the native daemon advertises in its ping reply. `None` means
-/// the probe failed, not that the daemon advertised no capabilities.
-///
-/// Probe only an old, universally supported control request on a disposable
-/// connection. Older daemons close that connection after ping, and may close
-/// connections receiving unknown requests. Never probe on the session stream.
-async fn daemon_capabilities(socket: &std::path::Path) -> Option<Vec<String>> {
-    let probe = async {
-        let mut stream = Stream::connect(socket).await.ok()?;
-        write_json_line(&mut stream, &serde_json::json!({"type":"ping", "id":0}))
-            .await
-            .ok()?;
-        let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-        read_frame(&mut reader, &mut line).await.ok()?;
-        let reply: Value = serde_json::from_str(&line).ok()?;
-        if reply["type"] != "pong" || reply["id"] != 0 {
-            return None;
-        }
-        Some(
-            reply["capabilities"]
-                .as_array()
-                .map(|caps| {
-                    caps.iter()
-                        .filter_map(|cap| cap.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default(),
-        )
-    };
-    tokio::time::timeout(std::time::Duration::from_millis(500), probe)
-        .await
-        .ok()
-        .flatten()
-}
-
 mod session_controls;
-use session_controls::{daemon_background_tasks, daemon_side_questions};
+use session_controls::{DaemonControl, daemon_side_questions};
 
-#[derive(Default)]
+const TASK_POLL_MIN: Duration = Duration::from_secs(2);
+const TASK_POLL_QUIET_MAX: Duration = Duration::from_secs(30);
+const TASK_POLL_RUNNING_MAX: Duration = Duration::from_secs(8);
+
 struct TaskWatch {
     session_id: String,
     task_id: Option<String>,
     last: Option<BackgroundTasksSnapshot>,
+    delay: Duration,
 }
 
 impl TaskWatch {
     async fn fetch(
+        control: &mut DaemonControl,
         socket: &std::path::Path,
         session_id: &str,
         task_id: Option<&str>,
     ) -> Result<BackgroundTasksSnapshot> {
         Ok(serde_json::from_value(
-            daemon_background_tasks(socket, session_id, task_id, false).await?,
+            control
+                .background_tasks(socket, session_id, task_id, false)
+                .await?,
         )?)
     }
 
@@ -129,6 +101,25 @@ impl TaskWatch {
             session_id: self.session_id.clone(),
             snapshot,
         })
+    }
+
+    fn next_delay(&mut self, changed: bool) -> Duration {
+        self.delay = if changed {
+            TASK_POLL_MIN
+        } else {
+            let running = self.last.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .tasks
+                    .iter()
+                    .any(|task| task.status == jcode_harness_api::BackgroundTaskStatus::Running)
+            });
+            (self.delay * 2).min(if running {
+                TASK_POLL_RUNNING_MAX
+            } else {
+                TASK_POLL_QUIET_MAX
+            })
+        };
+        self.delay
     }
 }
 
@@ -179,42 +170,6 @@ async fn daemon_draft_models(socket: &std::path::Path) -> ApiEvent {
             code: ErrorCode::Internal,
             message: "Draft model catalog timed out".into(),
         },
-    }
-}
-
-/// Fresh source-daemon connections. A disposable Ping never subscribes,
-/// resumes, or creates a session. Failed snapshots clear connection presence.
-async fn daemon_user_connections(socket: &std::path::Path) -> std::collections::HashSet<String> {
-    let probe = async {
-        let mut stream = Stream::connect(socket)
-            .await
-            .context("connect presence probe")?;
-        write_json_line(&mut stream, &serde_json::json!({"type":"ping", "id":0})).await?;
-        let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-        read_frame(&mut reader, &mut line).await?;
-        let reply: Value = serde_json::from_str(&line).context("parse presence pong")?;
-        if reply["type"] != "pong" || reply["id"] != 0 {
-            anyhow::bail!("presence probe received an uncorrelated reply");
-        }
-        // Older daemons do not advertise connection presence.
-        if reply["user_connected_session_ids"].is_null() {
-            return Ok(std::collections::HashSet::new());
-        }
-        let ids: Vec<String> = serde_json::from_value(reply["user_connected_session_ids"].clone())
-            .context("parse connected session IDs")?;
-        Ok::<_, anyhow::Error>(ids.into_iter().filter(|id| !id.is_empty()).collect())
-    };
-    match tokio::time::timeout(std::time::Duration::from_millis(500), probe).await {
-        Ok(Ok(ids)) => ids,
-        Ok(Err(error)) => {
-            eprintln!("Harness presence snapshot unavailable: {error:#}");
-            std::collections::HashSet::new()
-        }
-        Err(_) => {
-            eprintln!("Harness presence probe timed out, clearing connection presence");
-            std::collections::HashSet::new()
-        }
     }
 }
 
@@ -538,9 +493,12 @@ where
         .await
         .with_context(|| format!("connect legacy socket {}", legacy_socket.display()))?;
     let daemon_connected = hello_at.elapsed();
-    let daemon_caps = daemon_capabilities(&legacy_socket)
+    let mut control = DaemonControl::default();
+    let daemon_caps = control
+        .capabilities(&legacy_socket)
         .await
         .unwrap_or_default();
+    let control = Arc::new(tokio::sync::Mutex::new(control));
     let mut openrig_host_cap = None;
     if daemon_caps
         .iter()
@@ -722,8 +680,8 @@ where
     let mut legacy_frame = Vec::new();
     let mut task_watch: Option<TaskWatch> = None;
     let mut task_poll = None;
-    let mut task_tick = tokio::time::interval(std::time::Duration::from_secs(2));
-    task_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let task_tick = tokio::time::sleep(TASK_POLL_MIN);
+    tokio::pin!(task_tick);
     loop {
         tokio::select! {
             // A busy daemon can keep the legacy socket continuously readable.
@@ -772,7 +730,7 @@ where
                 // before dispatch, without reattaching or replaying anything on
                 // the live session stream.
                 if request["req"] == "runtime_command" && !state.runtime_commands_supported {
-                    match daemon_capabilities(&legacy_socket).await {
+                    match DaemonControl::default().capabilities(&legacy_socket).await {
                         Some(capabilities) => {
                             state.runtime_commands_supported = capabilities.iter().any(|cap| cap == "runtime_commands");
                         }
@@ -818,10 +776,12 @@ where
                     write_json_line(&mut write_half, &ServerFrame::reply(id, event)).await?;
                     continue;
                 }
-                if request["req"] == "list_sessions" {
-                    state.user_connected_sessions = if user_connections_supported {
-                        daemon_user_connections(&legacy_socket).await
-                    } else { Default::default() };
+                // Never wait on a task poll here: it is driven by this same
+                // select loop. Use the last presence snapshot until it finishes.
+                if request["req"] == "list_sessions" && user_connections_supported
+                    && let Ok(mut control) = control.try_lock()
+                {
+                    state.user_connected_sessions = control.user_connections(&legacy_socket).await;
                 }
                 if request["req"] == "list_draft_models" {
                     let id = request["id"].as_u64().unwrap_or(0);
@@ -837,11 +797,11 @@ where
                             Ok(ApiRequest::WatchBackgroundTasks { session_id, task_id }) if
                                 state.session_id.as_ref().is_none_or(|attached| attached == &session_id) => {
                                 task_poll = None;
-                                let mut watch = TaskWatch { session_id, task_id, last: None };
-                                let event = TaskWatch::fetch(&legacy_socket, &watch.session_id, watch.task_id.as_deref()).await
+                                let mut watch = TaskWatch { session_id, task_id, last: None, delay: TASK_POLL_MIN };
+                                let event = TaskWatch::fetch(&mut *control.lock().await, &legacy_socket, &watch.session_id, watch.task_id.as_deref()).await
                                     .map(|snapshot| watch.accept(snapshot, true).expect("forced snapshot"));
                                 task_watch = Some(watch);
-                                task_tick.reset();
+                                task_tick.as_mut().reset(tokio::time::Instant::now() + TASK_POLL_MIN);
                                 match event {
                                     Ok(event) => event,
                                     Err(error) => ApiEvent::Error { code: ErrorCode::Internal, message: error.to_string() },
@@ -849,7 +809,7 @@ where
                             }
                             Ok(ApiRequest::CancelBackgroundTask { session_id, task_id }) if
                                 state.session_id.as_ref().is_none_or(|attached| attached == &session_id) => {
-                                match daemon_background_tasks(&legacy_socket, &session_id, Some(&task_id), true).await {
+                                match DaemonControl::default().background_tasks(&legacy_socket, &session_id, Some(&task_id), true).await {
                                     Ok(_) => ApiEvent::Ok,
                                     Err(error) => ApiEvent::Error { code: ErrorCode::Internal, message: error.to_string() },
                                 }
@@ -897,23 +857,26 @@ where
                     allocator::trim();
                 }
             }
-            _ = task_tick.tick(), if task_watch.is_some() && task_poll.is_none() => {
+            _ = &mut task_tick, if task_watch.is_some() && task_poll.is_none() => {
                 if let Some(watch) = &task_watch {
                     let socket = legacy_socket.clone();
                     let session_id = watch.session_id.clone();
                     let task_id = watch.task_id.clone();
+                    let control = Arc::clone(&control);
                     task_poll = Some(Box::pin(async move {
-                        TaskWatch::fetch(&socket, &session_id, task_id.as_deref()).await
+                        TaskWatch::fetch(&mut *control.lock().await, &socket, &session_id, task_id.as_deref()).await
                     }));
                 }
             }
             snapshot = async { task_poll.as_mut().expect("pending task poll").await }, if task_poll.is_some() => {
                 task_poll = None;
-                if let Some(watch) = &mut task_watch
-                    && let Ok(snapshot) = snapshot
-                    && let Some(event) = watch.accept(snapshot, false)
-                {
-                    write_json_line(&mut write_half, &ServerFrame::event(event)).await?;
+                if let Some(watch) = &mut task_watch {
+                    let event = snapshot.ok().and_then(|snapshot| watch.accept(snapshot, false));
+                    let delay = watch.next_delay(event.is_some());
+                    task_tick.as_mut().reset(tokio::time::Instant::now() + delay);
+                    if let Some(event) = event {
+                        write_json_line(&mut write_half, &ServerFrame::event(event)).await?;
+                    }
                 }
             }
             n = read_frame_bytes(&mut legacy_reader, &mut legacy_frame) => {

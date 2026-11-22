@@ -151,6 +151,9 @@ pub enum Request {
         task_id: Option<String>,
         #[serde(default)]
         cancel: bool,
+        /// Keep a dedicated read-only control stream open for subsequent snapshots.
+        #[serde(default)]
+        keep_open: bool,
     },
 
     /// Queue a user prompt with a stable caller id. Acknowledged only after

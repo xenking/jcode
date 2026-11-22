@@ -84,7 +84,7 @@ pub const API_VERSION_MINOR: u32 = 23;
 
 pub use jcode_background_types::{
     BACKGROUND_TASKS_CAPABILITY, BackgroundTaskOutput, BackgroundTaskStatus, BackgroundTaskSummary,
-    BackgroundTasksSnapshot, format_progress_summary,
+    BackgroundTasksSnapshot, PERSISTENT_BACKGROUND_TASKS_CAPABILITY, format_progress_summary,
 };
 
 /// Envelope wrapping every client-to-server frame.

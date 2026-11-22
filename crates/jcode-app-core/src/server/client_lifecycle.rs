@@ -258,6 +258,7 @@ pub(super) async fn handle_client(
                     session_id,
                     task_id,
                     cancel,
+                    keep_open,
                 } = request
                 {
                     let reply = super::background_task_inspection::handle(
@@ -267,7 +268,11 @@ pub(super) async fn handle_client(
                         cancel,
                     )
                     .await;
-                    return write_direct_event(&writer, &reply).await;
+                    write_direct_event(&writer, &reply).await?;
+                    if keep_open && !cancel {
+                        continue;
+                    }
+                    return Ok(());
                 }
                 if !request.is_lightweight_control_request() {
                     crate::logging::info(&format!(
