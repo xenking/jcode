@@ -1245,7 +1245,7 @@ impl Tool for TodoTool {
                             },
                             "waiting_on": {
                                 "type": ["object", "null"],
-                                "description": "Pause while this session's background/await_members tasks run; wakes on completion. null clears.",
+                                "description": "Pause for own background/await_members tasks. Completion wakes. Null clears.",
                                 "required": ["ids", "reason"],
                                 "additionalProperties": false,
                                 "properties": {
@@ -1255,7 +1255,7 @@ impl Tool for TodoTool {
                             },
                             "requires_user_auth": {
                                 "type": ["object", "null"],
-                                "description": "Pause until the user completes an authentication you have no access to, such as a login, 2FA prompt, or credential. Approvals, decisions, retries, and waits on other agents (use waiting_on) do not qualify; a todo with neither pause stays yours to continue. null clears.",
+                                "description": "Pause only for user login, 2FA or credentials. Not for approvals, decisions, retries or worker waits. Without a pause, keep working. Null clears.",
                                 "required": ["reason"],
                                 "additionalProperties": false,
                                 "properties": {
@@ -1376,15 +1376,15 @@ impl Tool for TodoTool {
         schema["properties"]["todos"]["items"]["properties"]["lane_dependencies"] = json!({
             "type": ["array", "null"], "minItems": 1, "uniqueItems": true,
             "items": {"type": "string", "minLength": 1},
-            "description": "Earlier-phase prerequisite task names. Updates whole lane; null restores phase barrier."
+            "description": "Earlier-phase task names for whole lane. Null restores phase barrier."
         });
         schema["properties"]["todos"]["items"]["properties"]["lane_owner"] = json!({
             "type": "string", "enum": ["self", "worker"],
-            "description": "Who runs the lane. worker: a swarm worker auto-spawns when the lane is ready. Updates whole lane."
+            "description": "Whole-lane owner. worker auto-spawns when ready."
         });
         schema["properties"]["todos"]["items"]["properties"]["lane_speed"] = json!({
             "type": ["string", "null"], "enum": ["standard", "fast", "ultrafast", null],
-            "description": "Worker speed override for this lane. Null uses owner config. Accelerated speed requires owner approval."
+            "description": "Lane speed. Null inherits config. Faster modes require owner approval."
         });
         let mut add_properties = schema["properties"]["todos"]["items"]["properties"].clone();
         add_properties["after"] = json!({
@@ -1419,20 +1419,20 @@ impl Tool for TodoTool {
         }
         schema["properties"]["phases"] = json!({
             "type": "array",
-            "description": "Replace plan ([] clears). Then use update/add/cancel. Phases are sequential, lanes parallel, items ordered.",
+            "description": "Replace plan ([] clears). Then update/add/cancel. Sequential phases, parallel lanes, ordered items.",
             "items": {"type": "object", "required": ["phase", "lanes"], "additionalProperties": false,
                 "properties": {"phase": {"type": "integer", "minimum": 1}, "lanes": {
                     "type": "array", "minItems": 1, "items": {"type": "object", "required": ["lane", "items"], "additionalProperties": false,
-                        "properties": {"lane": {"type": "string", "minLength": 1, "description": "Short name for this workstream's work, e.g. parser. Not a placeholder like main."}, "dependencies": {
+                        "properties": {"lane": {"type": "string", "minLength": 1, "description": "Specific workstream name, e.g. parser."}, "dependencies": {
                             "type": ["array", "null"], "minItems": 1, "uniqueItems": true,
                             "items": {"type": "string", "minLength": 1},
-                            "description": "Earlier-phase prerequisite task names; replaces phase barrier. Omit/null for normal ordering."
+                            "description": "Earlier-phase task names. Omit/null for phase barrier."
                         }, "owner": {
                             "type": "string", "enum": ["self", "worker"],
-                            "description": "Default self. worker: a swarm worker auto-spawns when the lane is ready, no launch call."
+                            "description": "Default self. worker auto-spawns when ready."
                         }, "speed": {
                             "type": ["string", "null"], "enum": ["standard", "fast", "ultrafast", null],
-                            "description": "Requested worker speed for this lane. Accelerated speed requires owner approval."
+                            "description": "As lane_speed in add."
                         }, "items": {"type": "array", "minItems": 1, "items": item}}
                     }
                 }}}
@@ -1445,7 +1445,7 @@ impl Tool for TodoTool {
         let phase_items = &mut schema["properties"]["phases"]["items"]["properties"]["lanes"]["items"]
             ["properties"]["items"];
         phase_items["description"] = json!(
-            "Item fields as in add, except after and phase/lane membership (set on containers)."
+            "Fields as in add except after and phase/lane fields."
         );
         schema
     }

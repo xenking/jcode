@@ -911,7 +911,7 @@ impl Tool for CommunicateTool {
                 },
                 "speed": {
                     "type": "string", "enum": ["standard", "fast", "ultrafast"],
-                    "description": "Per-worker speed for spawn. Only set when the user requests it. Accelerated speed requires owner approval."
+                    "description": "Worker speed. Set only on user request. Faster modes require owner approval."
                 },
                 "session_ids": {
                     "type": "array",
