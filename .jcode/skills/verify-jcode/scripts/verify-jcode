@@ -142,10 +142,10 @@ def wait_for(predicate, description, timeout=45):
     raise RuntimeError(f"Timeout: {description}")
 
 
-def completed_turn(messages, token):
+def completed_turn(messages, token, reply=ACK):
     users = [i for i, message in enumerate(messages)
              if message.get("role") == "user" and token in json.dumps(message.get("content"))]
-    return bool(users) and any(message.get("role") == "assistant" and ACK in json.dumps(message.get("content"))
+    return bool(users) and any(message.get("role") == "assistant" and reply in json.dumps(message.get("content"))
                                for message in messages[users[-1] + 1:])
 
 
@@ -201,7 +201,8 @@ class TerminalJourney:
                 if token == self.first:
                     h.event(action="terminal-resize", cols=100, rows=32)
                     h.tmux("resize-window", "-t", "verify", "-x", "100", "-y", "32")
-                    wait_for(lambda: h.tmux("display-message", "-p", "-t", "verify", "#{pane_width}x#{pane_height}").strip() == "100x32", "terminal resize")
+                    wait_for(lambda: h.debug("client:frame").get("terminal_size") == [100, 32],
+                             "renderer acknowledged 100x32 terminal resize")
                     require("STAGEA_" + token in h.frame(self.label + "-resized"), "Stream vanished on resize")
                 else:
                     h.event(action="terminal-keys", keys=["Escape"], purpose="cancel streamed turn")
@@ -214,19 +215,20 @@ class TerminalJourney:
                     wait_for(lambda: "STAGEB_" + token in h.pane(), "streamed final chunk visible")
                     h.idle()
                     check_journey_capture(h.frame(self.label + "-first-complete"), token, True)
-            h.send(self.next)
+            h.send(f"[e2e:stream-next:{self.next}]")
             request = h.request_after(self.next, self.start)
             require(request["messages"][-1].get("role") == "user" and
                     self.next in json.dumps(request["messages"][-1]), "Wrong subsequent provider turn")
             require("STAGEB_" + self.first in json.dumps(request["messages"]),
                     "Completed streamed turn missing from subsequent provider context")
             h.idle()
-            saved = h.persisted(sid, self.next)
+            reply = "STAGEC_" + self.next
+            saved = h.persisted(sid, self.next, reply)
             require(h.observe("state")["remote_session_id"] == sid, "Journey changed session")
             text = h.frame(self.label + "-after")
             check_journey_capture(text, self.first, True)
             check_journey_capture(text, self.cancelled, False)
-            require(self.next in text and ACK in text, "Subsequent turn not visible")
+            require(text.count(reply) == 1, "Subsequent response missing or duplicated")
             for token in (self.first, self.cancelled, self.next):
                 matching = [r for r in h.records()[self.start:] if r.get("messages") and
                             token in json.dumps(r["messages"][-1])]
@@ -319,13 +321,13 @@ class Harness:
                                      if text in json.dumps(r["messages"])), None),
                         f"fresh HTTP provider request containing {text}")
 
-    def persisted(self, session_id, text):
+    def persisted(self, session_id, text, reply=ACK):
         path = self.root / "data/sessions" / f"{session_id}.json"
 
         def saved():
             try:
                 data = load_persisted(path)
-                return data if data and completed_turn(data.get("messages", []), text) else None
+                return data if data and completed_turn(data.get("messages", []), text, reply) else None
             except (FileNotFoundError, json.JSONDecodeError):
                 return None
         return wait_for(saved, f"persisted transcript {session_id}: {text}")

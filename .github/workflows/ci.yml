@@ -225,11 +225,11 @@ jobs:
           # artifacts produced before RUSTUP_TOOLCHAIN=stable pinned the job.
           key: ${{ matrix.os }}-stablepin
 
-      - name: Install mold linker (Linux)
+      - name: Install Linux test dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq mold
+          sudo apt-get install -y -qq mold tmux
 
       - name: Configure Linux linker
         if: runner.os == 'Linux'
@@ -442,6 +442,27 @@ jobs:
           # in the dedicated compile step above.
           python3 .github/scripts/run_with_timeout.py 600 \
             "$(rustup which cargo)" test --locked --target ${{ matrix.target }} --test e2e
+
+      - name: Verify interactive streaming in a terminal (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        timeout-minutes: 3
+        run: |
+          verify=.jcode/skills/verify-jcode/scripts/verify-jcode
+          evidence="$RUNNER_TEMP/jcode-terminal-journey"
+          trap '"$verify" cleanup --evidence "$evidence"' EXIT
+          "$verify" launch --binary "target/${{ matrix.target }}/debug/jcode" --evidence "$evidence"
+          "$verify" drive --evidence "$evidence" terminal-journey
+          "$verify" cleanup --evidence "$evidence"
+          trap - EXIT
+
+      - name: Upload terminal journey failure evidence
+        if: failure() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-terminal-journey
+          path: ${{ runner.temp }}/jcode-terminal-journey
+          if-no-files-found: ignore
 
       # Quality Guardrails already checks the Linux warning budget.
       - name: Enforce warning budget (macOS)

@@ -64,6 +64,8 @@ class H(BaseHTTPRequestHandler):
             prompt = text_of(msgs[last_user])
         has_tool_result = any(m.get("role") == "tool" for m in msgs[last_user + 1:])
         tool_calls = None
+        if CONTROL and (next_turn := re.search(r"\[e2e:stream-next:([a-z0-9_]+)\]", prompt)):
+            text = "STAGEC_" + next_turn.group(1)
         if CONTROL and "[e2e:verify-env]" in prompt:
             if has_tool_result:
                 text = text_of(next(m for m in reversed(msgs) if m.get("role") == "tool"))
