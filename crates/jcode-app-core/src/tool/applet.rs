@@ -113,6 +113,8 @@ struct AppletInput {
     #[serde(default)]
     view: Option<Value>,
     #[serde(default)]
+    express: Option<String>,
+    #[serde(default)]
     state: Option<Value>,
     #[serde(default)]
     assets: Option<Vec<AssetDecl>>,
@@ -200,6 +202,7 @@ impl Tool for AppletTool {
 
     fn description(&self) -> &str {
         "Show interactive native UI (an applet) in Jcode Desktop. By default the card replaces this tool call in the transcript. \
+For mount/update use either view or express, not both. Express example: root = ReviewChange(\"Review patch\", \"src/ui.rs\", \"change42\"). Built-in GreetingButton(label,event,recipient). \
 View is a tree of nodes, each {\"type\":...}. Layout: stack{direction:vertical|horizontal,gap,padding,align,children}, grid{min_column_width,children}, scroll{max_height,children}, card{title,children} (don't nest), tabs{bind,tabs:[{id,label,children}]}, spacer, divider. \
 Content: text{text,style:body|title|heading|caption|mono,tone,max_lines}, markdown{text}, code{text,language}, image{source:{url|data|asset},alt,aspect_ratio}, icon{name}, key_value{rows:[{key,value}]}, table{columns:[string],rows:[[string]]}, progress{value 0-1,label}, empty{title,detail}, error{message,retry}. \
 Controls (always pills): button{label,variant:primary|secondary|compact|danger,on_press}, chip{label,on_press}, toggle{label,bind}, input{bind,placeholder,multiline,on_submit}, select{bind,options:[{value,label}]}, list{children:[list_item{title,subtitle,meta,badges,on_press}]}. Escape hatch: html{source,height}. \
@@ -218,6 +221,7 @@ Use update to replace the document, patch for small changes (ops on /view, /stat
                 "instance": {"type":"string","description":"Instance id. Optional for mount (generated). Required otherwise."},
                 "title": {"type":"string"},
                 "view": {"type":"object","description":"Root view node, e.g. {\"type\":\"stack\",\"gap\":\"sm\",\"children\":[...]}."},
+                "express": {"type":"string","description":"Express source for mount/update instead of view, e.g. root = ReviewChange(\"Review patch\", \"src/ui.rs\", \"change42\"). Built-in GreetingButton(label,event,recipient)."},
                 "state": {"type":"object","description":"Initial values for bound controls."},
                 "assets": {"type":"array","items":{"type":"object"},"description":"Images: [{id,mime,data(base64)}], referenced as {\"asset\":id}."},
                 "placement": {"description":"Default: inline in place of this tool call. Shorthand: inline, end, panel, sidebar, overlay, composer. Or an object like {\"kind\":\"panel\"}.","anyOf":[{"type":"string"},{"type":"object"}]},
@@ -233,6 +237,12 @@ Use update to replace the document, patch for small changes (ops on /view, /stat
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: AppletInput = serde_json::from_value(input).context("invalid applet input")?;
         let action = params.action.as_deref().unwrap_or("mount");
+        if params.express.is_some() && !matches!(action, "mount" | "update") {
+            bail!("express is only supported for mount and update");
+        }
+        if params.express.is_some() && params.view.is_some() {
+            bail!("provide either view or express, not both");
+        }
         let sid = ctx.session_id.clone();
         let require_id = || {
             params
@@ -277,11 +287,14 @@ Use update to replace the document, patch for small changes (ops on /view, /stat
                 if action == "update" && prior.is_none() {
                     bail!("no applet instance `{id}` in this session; use mount");
                 }
-                let view = match params.view.clone() {
-                    Some(v) => parse_view(v)?,
-                    None => prior
+                let view = match (&params.view, &params.express) {
+                    (Some(v), None) => parse_view(v.clone())?,
+                    (None, Some(source)) => jcode_applet_types::compile_express(source)
+                        .map_err(|error| anyhow!("invalid express: {error}"))?,
+                    (None, None) => prior
                         .map(|p| p.document.view.clone())
-                        .ok_or_else(|| anyhow!("view is required for mount"))?,
+                        .ok_or_else(|| anyhow!("view or express is required for mount"))?,
+                    (Some(_), Some(_)) => unreachable!("rejected above"),
                 };
                 let title = params
                     .title

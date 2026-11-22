@@ -168,6 +168,101 @@ async fn mount_patch_wait_and_close() {
     );
 }
 
+#[tokio::test]
+async fn express_mount_update_and_wait_through_registry() {
+    let _guard = crate::storage::lock_test_env();
+    let _home = temp_home();
+    let registry = std::sync::Arc::new(crate::tool::Registry::empty());
+    registry.set_desktop_ui_enabled(true).await;
+    let definition = registry
+        .definitions(None)
+        .await
+        .into_iter()
+        .find(|definition| definition.name == "applet")
+        .unwrap();
+    assert!(definition.description.contains("ReviewChange"));
+    let mount = registry
+        .execute(
+            "functions.applet",
+            json!({
+                "instance":"express-test", "title":"Review", "state":{"answer":"yes"},
+                "express":"root = ReviewChange(\"Review patch\", \"src/ui.rs\", \"change42\")"
+            }),
+            context("express-session", "mount"),
+        )
+        .await
+        .unwrap();
+    assert!(mount.output.contains("revision 1"));
+    let before = crate::applets::snapshot_for_session("express-session").unwrap();
+    let original = before.get("express-test").unwrap();
+    assert_eq!(original.document.state, json!({"answer":"yes"}));
+    for args in [
+        json!({"action":"update","instance":"express-test","view":{"type":"text","text":"x"},"express":"root = Invalid()"}),
+        json!({"action":"update","instance":"express-test","express":"not valid express"}),
+        json!({"action":"patch","instance":"express-test","express":"root = Invalid()","ops":[]}),
+    ] {
+        assert!(
+            registry
+                .execute("applet", args, context("express-session", "bad"))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            crate::applets::snapshot_for_session("express-session")
+                .unwrap()
+                .get("express-test")
+                .unwrap()
+                .document
+                .revision,
+            1
+        );
+    }
+    let waiter_registry = registry.clone();
+    let waiter = tokio::spawn(async move {
+        waiter_registry
+            .execute(
+                "functions.applet",
+                json!({
+                    "action":"update", "instance":"express-test", "wait":true,
+                    "express":"root = GreetingButton(\"Go\", \"go\", \"Ada\")"
+                }),
+                context("express-session", "update"),
+            )
+            .await
+            .unwrap()
+    });
+    let mut delivered = false;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let snapshot = crate::applets::snapshot_for_session("express-session").unwrap();
+        let doc = &snapshot.get("express-test").unwrap().document;
+        if doc.revision == 2 {
+            assert_eq!(doc.state, json!({"answer":"yes"}));
+            let actions = doc.view.actions();
+            assert_eq!(actions.len(), 1);
+            assert_eq!(actions[0].action, "go");
+            assert_eq!(actions[0].args, json!({"recipient":"Ada"}));
+            let message = format_action_message(
+                "express-test",
+                &doc.title,
+                actions[0],
+                &doc.state,
+                doc.view.key.as_deref(),
+            );
+            if deliver_to_waiter("express-session", "express-test", message) {
+                delivered = true;
+                break;
+            }
+        }
+    }
+    assert!(delivered);
+    let output = waiter.await.unwrap().output;
+    assert!(
+        output.contains("revision 2") && output.contains("`go`") && output.contains("answer"),
+        "{output}"
+    );
+}
+
 #[test]
 fn action_message_is_compact() {
     let msg = format_action_message(
