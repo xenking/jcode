@@ -40,6 +40,8 @@ fn side_question_catalog_keeps_direct_children_and_stable_order_after_promotion(
     ordinary.save_prepared().unwrap();
     let mut older = Session::create_with_id("session_btw_older".into(), Some(parent.into()), None);
     older.created_at -= std::time::Duration::from_secs(3);
+    older.model = Some("gpt-5-btw-child".into());
+    older.reasoning_effort = Some("high".into());
     older.add_message(Role::User, Message::user("main topic context").content);
     older.save_new_side_question().unwrap();
     let mut newer = Session::create_with_id("session_btw_newer".into(), Some(parent.into()), None);
@@ -66,6 +68,10 @@ fn side_question_catalog_keeps_direct_children_and_stable_order_after_promotion(
         (legacy.id.clone(), None),
     ];
     assert_eq!(list(), expected);
+    let topics = Session::list_side_questions(parent).unwrap();
+    let context = topics[1].context.as_ref().unwrap();
+    assert_eq!(context.model.as_deref(), Some("gpt-5-btw-child"));
+    assert_eq!(context.reasoning_effort.as_deref(), Some("high"));
     assert_eq!(
         Session::list_side_questions(&older.id).unwrap()[0].session_id,
         nested.id

@@ -12,7 +12,7 @@ Check `side_questions_v1` in `hello_ok`. It requires support from both the bridg
 - To ask a follow-up, attach to `topic.session_id` and use the existing `send_message`. To branch from a topic, attach to that child and use `fork_side_question` with its ID as the parent.
 - `promote_side_question { session_id }` makes the existing child visible in the ordinary session catalog. Calling it twice does not create a second session or a turn.
 
-`SideQuestionTopic.message_start` is a raw persisted transcript offset, not an index into rendered history. Older TUI records with the original `hidden` marker still identify their parent, but their transcript boundary is unknown. Older Desktop forks and already-promoted legacy TUI forks cannot be distinguished reliably from normal forks. They are not inferred from prompt text. Older bridges return an unsupported-capability error from the SDK; they do not fall back to the normal catalog.
+`SideQuestionTopic.context`, when present, reports the child’s last persisted model and effort without attaching. `SideQuestionTopic.message_start` is a raw persisted transcript offset, not an index into rendered history. Older TUI records with the original `hidden` marker still identify their parent, but their transcript boundary is unknown. Older Desktop forks and already-promoted legacy TUI forks cannot be distinguished reliably from normal forks. They are not inferred from prompt text. Older bridges return an unsupported-capability error from the SDK; they do not fall back to the normal catalog.
 
 ## Session lineage is not a message tree
 
