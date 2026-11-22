@@ -242,12 +242,20 @@ async fn express_mount_update_and_wait_through_registry() {
             assert_eq!(actions.len(), 1);
             assert_eq!(actions[0].action, "go");
             assert_eq!(actions[0].args, json!({"recipient":"Ada"}));
+            let action = actions[0].clone();
+            let key = doc.view.key.clone();
+            let (_, updated) = crate::applets::set_state(
+                "express-session",
+                "express-test",
+                json!({"answer":"changed"}),
+            )
+            .unwrap();
             let message = format_action_message(
                 "express-test",
-                &doc.title,
-                actions[0],
-                &doc.state,
-                doc.view.key.as_deref(),
+                &updated.document.title,
+                &action,
+                &updated.document.state,
+                key.as_deref(),
             );
             if deliver_to_waiter("express-session", "express-test", message) {
                 delivered = true;
@@ -258,7 +266,7 @@ async fn express_mount_update_and_wait_through_registry() {
     assert!(delivered);
     let output = waiter.await.unwrap().output;
     assert!(
-        output.contains("revision 2") && output.contains("`go`") && output.contains("answer"),
+        output.contains("revision 2") && output.contains("`go`") && output.contains("changed"),
         "{output}"
     );
 }
