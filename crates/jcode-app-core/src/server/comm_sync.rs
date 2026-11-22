@@ -3,7 +3,8 @@ use super::{
     VersionedPlan, broadcast_swarm_plan, persist_swarm_state_for, record_swarm_event,
 };
 use crate::protocol::{
-    AgentStatusSnapshot, NotificationType, PlanGraphStatus, ServerEvent, SessionActivitySnapshot,
+    AgentStatusSnapshot, CommToolCallSnapshot, MAX_COMM_SUMMARY_TOOL_CALLS, NotificationType,
+    PlanGraphStatus, ServerEvent, SessionActivitySnapshot,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -217,34 +218,25 @@ pub(super) async fn handle_comm_summary(
         return;
     }
 
-    let limit = limit.unwrap_or(10);
-    let agent_sessions = sessions.read().await;
-    if let Some(agent) = agent_sessions.get(&target_session) {
-        let tool_calls = if let Ok(agent) = agent.try_lock() {
-            agent.get_tool_call_summaries(limit)
-        } else {
-            let _ = client_event_tx.send(ServerEvent::Error {
-                id,
-                message: format!(
-                    "Session '{}' is busy; try summary again shortly",
-                    target_session
-                ),
-                retry_after_secs: Some(1),
-            });
-            return;
-        };
-        let _ = client_event_tx.send(ServerEvent::CommSummaryResponse {
-            id,
-            session_id: target_session,
-            tool_calls,
-        });
-    } else {
-        let _ = client_event_tx.send(ServerEvent::CommSummaryResponse {
-            id,
-            session_id: target_session,
-            tool_calls: Vec::new(),
-        });
-    }
+    let limit = limit.unwrap_or(10).clamp(1, MAX_COMM_SUMMARY_TOOL_CALLS);
+    let snapshot = sessions
+        .turn_observer(&target_session)
+        .and_then(|observer| observer.recent_tool_calls(&target_session));
+    let (snapshot, tool_calls) = match snapshot {
+        Some(snapshot) => (
+            CommToolCallSnapshot::Available {
+                captured_at_secs: snapshot.captured_at_secs,
+            },
+            snapshot.calls[snapshot.calls.len().saturating_sub(limit)..].to_vec(),
+        ),
+        None => (CommToolCallSnapshot::Unavailable, Vec::new()),
+    };
+    let _ = client_event_tx.send(ServerEvent::CommSummaryResponse {
+        id,
+        session_id: target_session,
+        tool_calls,
+        snapshot: Some(snapshot),
+    });
 }
 
 #[expect(

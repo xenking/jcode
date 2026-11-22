@@ -432,6 +432,17 @@ pub struct ToolCallSummary {
     pub timestamp_secs: Option<u64>,
 }
 
+pub const MAX_COMM_SUMMARY_TOOL_CALLS: usize = 50;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum CommToolCallSnapshot {
+    /// The live runtime's stored tool uses, as of its last snapshot update.
+    Available { captured_at_secs: u64 },
+    /// No live runtime snapshot. A read-only summary does not restore it.
+    Unavailable,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwarmChannelInfo {
     pub channel: String,

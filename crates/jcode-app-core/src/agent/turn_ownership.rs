@@ -1,5 +1,5 @@
 //! Runtime-local ownership protects acceptance, execution and publication.
-use crate::protocol::TurnIdentity;
+use crate::protocol::{MAX_COMM_SUMMARY_TOOL_CALLS, ToolCallSummary, TurnIdentity};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -9,14 +9,31 @@ struct TurnState {
     active: Option<TurnIdentity>,
 }
 
-/// Read-only runtime identity snapshot, available while the Agent is locked.
+#[derive(Clone)]
+pub(crate) struct RecentToolCalls {
+    session_id: String,
+    pub(crate) captured_at_secs: u64,
+    pub(crate) calls: Vec<ToolCallSummary>,
+}
+
+/// Read-only runtime snapshots, available while the Agent is locked.
 #[derive(Clone)]
 pub(crate) struct TurnObserver {
     generation: Arc<str>,
     state: Arc<StdMutex<TurnState>>,
+    recent_tool_calls: Arc<StdMutex<Option<Arc<RecentToolCalls>>>>,
 }
 
 impl TurnObserver {
+    pub(crate) fn recent_tool_calls(&self, session_id: &str) -> Option<Arc<RecentToolCalls>> {
+        self.recent_tool_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|snapshot| snapshot.session_id == session_id)
+            .cloned()
+    }
+
     pub(crate) fn runtime_generation(&self) -> &str {
         &self.generation
     }
@@ -59,6 +76,7 @@ impl Default for TurnOwnership {
             observer: TurnObserver {
                 generation: uuid::Uuid::new_v4().to_string().into(),
                 state: Arc::new(StdMutex::new(TurnState::default())),
+                recent_tool_calls: Default::default(),
             },
         }
     }
@@ -130,6 +148,42 @@ impl TurnLease {
 }
 
 impl TurnOwnership {
+    pub(super) fn replace_tool_call_snapshot(&self, session_id: &str, calls: Vec<ToolCallSummary>) {
+        let snapshot = Arc::new(RecentToolCalls {
+            session_id: session_id.to_owned(),
+            captured_at_secs: chrono::Utc::now().timestamp().max(0) as u64,
+            calls,
+        });
+        *self
+            .observer
+            .recent_tool_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(snapshot);
+    }
+
+    pub(super) fn append_tool_call_snapshot(&self, session_id: &str, calls: Vec<ToolCallSummary>) {
+        if calls.is_empty() {
+            return;
+        }
+        let mut slot = self
+            .observer
+            .recent_tool_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(snapshot) = slot
+            .as_mut()
+            .filter(|snapshot| snapshot.session_id == session_id)
+        else {
+            return;
+        };
+        let snapshot = Arc::make_mut(snapshot);
+        let excess =
+            (snapshot.calls.len() + calls.len()).saturating_sub(MAX_COMM_SUMMARY_TOOL_CALLS);
+        snapshot.calls.drain(..excess);
+        snapshot.calls.extend(calls);
+        snapshot.captured_at_secs = chrono::Utc::now().timestamp().max(0) as u64;
+    }
+
     pub(super) fn observer(&self) -> TurnObserver {
         self.observer.clone()
     }

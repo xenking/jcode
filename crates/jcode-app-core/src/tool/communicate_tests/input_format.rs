@@ -183,6 +183,7 @@ fn format_tool_summary_includes_call_count() {
                 timestamp_secs: None,
             },
         ],
+        Some(crate::protocol::CommToolCallSnapshot::Available { captured_at_secs: 0 }),
     );
 
     assert!(
@@ -192,6 +193,25 @@ fn format_tool_summary_includes_call_count() {
     );
     assert!(output.output.contains("read — Read 20 lines"));
     assert!(output.output.contains("grep — Found 3 matches"));
+    assert!(output.output.contains("Live runtime snapshot updated"));
+}
+
+#[tokio::test]
+async fn swarm_summary_rejects_missing_target_or_aggregate_scope_before_dispatch() {
+    let tool = CommunicateTool::new();
+    for input in [
+        json!({"action":"summary"}),
+        json!({"action":"summary", "to_session":"  "}),
+        json!({"action":"summary", "mode":"all"}),
+        json!({"action":"summary", "mode":"all", "to_session":"session_1"}),
+        json!({"action":"summary", "session_ids":["session_1"]}),
+        json!({"action":"summary", "to_swarm":"another-swarm"}),
+    ] {
+        let error = tool.execute(input, test_ctx("no-dispatch", Path::new(".")))
+            .await.unwrap_err().to_string();
+        assert!(error.contains("to_session") && error.contains("list") && error.contains("plan_status"), "{error}");
+        assert!(!error.contains("target_session"), "{error}");
+    }
 }
 
 #[test]

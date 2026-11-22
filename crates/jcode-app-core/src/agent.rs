@@ -597,6 +597,7 @@ impl Agent {
         // An existing session keeps the inputs its prompt was built from.
         agent.adopt_recorded_prompt_inputs();
         agent.restore_pinned_skill();
+        agent.refresh_tool_call_snapshot();
         logging::info(&format!(
             "[TIMING] agent build_base: skills={skills_ms}ms, agents_md={agents_md_ms}ms, prompt_skills={}ms",
             t.elapsed().as_millis()
@@ -917,6 +918,7 @@ impl Agent {
     }
 
     fn reset_runtime_state_for_session_change(&mut self) {
+        self.refresh_tool_call_snapshot();
         self.restore_pinned_skill();
         self.last_upstream_provider = None;
         self.last_connection_type = None;

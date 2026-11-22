@@ -107,6 +107,178 @@ fn swarm_member(
     )
 }
 
+#[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "isolate the test home until the runtime has dropped"
+)]
+async fn swarm_summary_reads_a_busy_runtime_without_waiting() {
+    use crate::agent::Agent;
+    use crate::message::{ContentBlock, Message, Role, ToolDefinition};
+    use crate::protocol::{CommToolCallSnapshot, MAX_COMM_SUMMARY_TOOL_CALLS};
+    use crate::provider::{EventStream, Provider};
+    use crate::server::Server;
+    use crate::server::tests::ScopedEnvVar;
+    use crate::tool::{ToolContext, ToolExecutionMode};
+
+    struct NoRequests;
+    #[async_trait::async_trait]
+    impl Provider for NoRequests {
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<EventStream> {
+            panic!("summary must not call a provider")
+        }
+        fn name(&self) -> &str {
+            "comm-summary-test"
+        }
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self)
+        }
+    }
+
+    let _env = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let socket = home.path().join("j.sock");
+    let _home = ScopedEnvVar::set("JCODE_HOME", home.path());
+    let _runtime = ScopedEnvVar::set("JCODE_RUNTIME_DIR", home.path());
+    let _socket = ScopedEnvVar::set("JCODE_SOCKET", &socket);
+    let target = "session-summary-target";
+    let requester = "session-summary-requester";
+    let provider: Arc<dyn Provider> = Arc::new(NoRequests);
+    let server = Server::new(Arc::clone(&provider));
+    let sessions = Arc::clone(&server.sessions);
+    let registry = crate::tool::Registry::new(Arc::clone(&provider)).await;
+    let caller_tools = registry.clone();
+    let session = crate::session::Session::create_with_id(target.to_string(), None, None);
+    let agent = Arc::new(tokio::sync::Mutex::new(Agent::new_with_session(
+        provider, registry, session, None,
+    )));
+    sessions
+        .register_new(target.into(), Arc::clone(&agent))
+        .await
+        .unwrap();
+    let unavailable = "session-summary-no-runtime";
+    let outsider = "session-summary-other-swarm";
+    let mut other_swarm = swarm_member(outsider, "agent", false).0;
+    other_swarm.swarm_id = Some("other".into());
+    let members = Arc::clone(&server.swarm_state.members);
+    members.write().await.extend(HashMap::from([
+        (target.into(), swarm_member(target, "agent", true).0),
+        (
+            requester.into(),
+            swarm_member(requester, "coordinator", false).0,
+        ),
+        (
+            unavailable.into(),
+            swarm_member(unavailable, "agent", true).0,
+        ),
+        (outsider.into(), other_swarm),
+    ]));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let request = |from: &str, to: &str, limit| {
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            crate::server::comm_sync::handle_comm_summary(
+                1,
+                from.into(),
+                to.into(),
+                limit,
+                &sessions,
+                &members,
+                &tx,
+            ),
+        )
+    };
+
+    let mut busy = agent.lock().await;
+    let _turn = busy.claim_server_turn().unwrap();
+    request(requester, target, None).await.unwrap();
+    assert!(
+        matches!(rx.try_recv().unwrap(), ServerEvent::CommSummaryResponse {
+        tool_calls, snapshot: Some(CommToolCallSnapshot::Available { .. }), ..
+    } if tool_calls.is_empty())
+    );
+
+    busy.add_message(
+        Role::Assistant,
+        (0..MAX_COMM_SUMMARY_TOOL_CALLS + 2)
+            .map(|index| ContentBlock::ToolUse {
+                id: format!("call-{index}"),
+                name: "read".into(),
+                input: serde_json::json!(index),
+                thought_signature: None,
+            })
+            .collect::<Vec<_>>(),
+    );
+    request(requester, target, Some(1))
+        .await
+        .expect("summary must not wait for the agent lock");
+    let response = rx.try_recv().unwrap();
+    let roundtrip: ServerEvent =
+        serde_json::from_str(&serde_json::to_string(&response).unwrap()).unwrap();
+    assert!(
+        matches!(&roundtrip, ServerEvent::CommSummaryResponse {
+        tool_calls, snapshot: Some(CommToolCallSnapshot::Available { captured_at_secs }), ..
+    } if tool_calls.len() == 1 && tool_calls[0].tool_name == "read"
+        && tool_calls[0].brief_output == (MAX_COMM_SUMMARY_TOOL_CALLS + 1).to_string()
+        && tool_calls[0].timestamp_secs.is_some_and(|ts| *captured_at_secs >= ts)),
+        "{response:?}"
+    );
+
+    request(requester, target, Some(usize::MAX)).await.unwrap();
+    assert!(
+        matches!(rx.try_recv().unwrap(), ServerEvent::CommSummaryResponse { tool_calls, .. }
+        if tool_calls.len() == MAX_COMM_SUMMARY_TOOL_CALLS && tool_calls[0].brief_output == "2")
+    );
+
+    request(requester, unavailable, None).await.unwrap();
+    assert!(
+        matches!(rx.try_recv().unwrap(), ServerEvent::CommSummaryResponse {
+        tool_calls, snapshot: Some(CommToolCallSnapshot::Unavailable), ..
+    } if tool_calls.is_empty())
+    );
+    assert!(!sessions.read().await.contains_key(unavailable));
+
+    request(outsider, target, None).await.unwrap();
+    assert!(
+        matches!(rx.try_recv().unwrap(), ServerEvent::Error { message, retry_after_secs: None, .. }
+        if message.contains("not in the same swarm"))
+    );
+    assert!(rx.try_recv().is_err());
+
+    let runtime = server.runtime();
+    let listener =
+        runtime.spawn_main_accept_loop(crate::transport::Listener::bind(&socket).unwrap());
+    let output = tokio::time::timeout(Duration::from_secs(3), caller_tools.execute(
+        "swarm",
+        serde_json::json!({"action":"summary", "to_session":target, "limit":1, "intent":"Read a busy agent's latest recorded tool call"}),
+        ToolContext {
+            session_id: requester.into(),
+            message_id: "test-msg".into(),
+            tool_call_id: "test-summary".into(),
+            working_dir: Some(home.path().to_path_buf()),
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: ToolExecutionMode::Direct,
+        },
+    )).await;
+    runtime.shutdown().await;
+    listener.await.unwrap();
+    let output = output
+        .expect("private socket must not wait for the busy agent")
+        .unwrap()
+        .output;
+    assert!(
+        output.contains("(1 call)") && output.contains("Live runtime snapshot updated at "),
+        "{output}"
+    );
+}
+
 #[test]
 fn event_fanout_moves_payload_to_final_live_receiver() {
     let (first, mut first_rx) = mpsc::unbounded_channel();

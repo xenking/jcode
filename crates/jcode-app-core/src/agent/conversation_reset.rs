@@ -142,6 +142,7 @@ impl Agent {
             });
             // Truncation forces a full snapshot, including the pruned replay.
             self.session.truncate_messages(stored_len);
+            self.refresh_tool_call_snapshot();
         }
         self.rewind_undo_snapshot = Some(snapshot);
         self.session.updated_at = chrono::Utc::now();
@@ -173,6 +174,7 @@ impl Agent {
             self.session.replay_events.insert(index, event);
         }
         self.session.replace_messages(snapshot.messages);
+        self.refresh_tool_call_snapshot();
         self.provider_session_id = snapshot.provider_session_id;
         self.session.provider_session_id = snapshot.session_provider_session_id;
         self.session.updated_at = chrono::Utc::now();

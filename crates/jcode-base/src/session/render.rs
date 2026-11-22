@@ -349,47 +349,51 @@ pub fn summarize_tool_calls(
     session: &Session,
     limit: usize,
 ) -> Vec<crate::protocol::ToolCallSummary> {
-    let mut calls: Vec<crate::protocol::ToolCallSummary> = Vec::new();
-
-    for msg in session.messages.iter().rev() {
-        if calls.len() >= limit {
-            break;
-        }
-
-        let text_summary = msg
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text { text, .. } => Some(text.as_str()),
-                ContentBlock::OpenAICompaction { .. } => Some("[OpenAI native compaction]"),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        for block in &msg.content {
-            if calls.len() >= limit {
-                break;
-            }
-
-            if let ContentBlock::ToolUse { name, input, .. } = block {
-                let fallback = input.to_string();
-                let brief = if text_summary.trim().is_empty() {
-                    crate::util::truncate_str(&fallback, 200).to_string()
-                } else {
-                    crate::util::truncate_str(&text_summary, 200).to_string()
-                };
-                calls.push(crate::protocol::ToolCallSummary {
-                    tool_name: name.clone(),
-                    brief_output: brief,
-                    timestamp_secs: msg.timestamp.map(|ts| ts.timestamp().max(0) as u64),
-                });
-            }
-        }
-    }
-
+    let mut calls: Vec<_> = session
+        .messages
+        .iter()
+        .rev()
+        .flat_map(|msg| newest_message_tool_calls(msg).take(limit))
+        .take(limit)
+        .collect();
     calls.reverse();
     calls
+}
+
+pub fn summarize_message_tool_calls(
+    msg: &super::StoredMessage,
+    limit: usize,
+) -> Vec<crate::protocol::ToolCallSummary> {
+    let mut calls: Vec<_> = newest_message_tool_calls(msg).take(limit).collect();
+    calls.reverse();
+    calls
+}
+
+fn newest_message_tool_calls(
+    msg: &super::StoredMessage,
+) -> impl Iterator<Item = crate::protocol::ToolCallSummary> + '_ {
+    let mut brief = None::<Option<String>>;
+    msg.content.iter().rev().filter_map(move |block| {
+        let ContentBlock::ToolUse { name, input, .. } = block else {
+            return None;
+        };
+        let text = brief.get_or_insert_with(|| {
+            msg.content.iter().find_map(|block| match block {
+                ContentBlock::Text { text, .. } if !text.trim().is_empty() => {
+                    Some(crate::util::truncate_str(text, 200).to_string())
+                }
+                ContentBlock::OpenAICompaction { .. } => Some("[OpenAI native compaction]".into()),
+                _ => None,
+            })
+        });
+        Some(crate::protocol::ToolCallSummary {
+            tool_name: crate::util::truncate_str(name, 200).to_string(),
+            brief_output: text
+                .clone()
+                .unwrap_or_else(|| crate::util::truncate_str(&input.to_string(), 200).to_string()),
+            timestamp_secs: msg.timestamp.map(|ts| ts.timestamp().max(0) as u64),
+        })
+    })
 }
 
 /// Convert stored session messages into renderable messages (including tool output).

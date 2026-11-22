@@ -1,6 +1,16 @@
 use super::*;
 
 impl Agent {
+    pub(super) fn refresh_tool_call_snapshot(&self) {
+        self.turn_ownership.replace_tool_call_snapshot(
+            &self.session.id,
+            crate::session::summarize_tool_calls(
+                &self.session,
+                crate::protocol::MAX_COMM_SUMMARY_TOOL_CALLS,
+            ),
+        );
+    }
+
     /// Keep failed turns visible after reconnect without adding diagnostic text
     /// to the provider's conversation context.
     pub(crate) fn persist_turn_error(&mut self, message: &str) -> anyhow::Result<()> {
@@ -15,14 +25,7 @@ impl Agent {
         content: impl Into<crate::message::SharedContent>,
     ) -> String {
         let id = self.session.add_message(role, content);
-        let compaction = self.registry.compaction();
-        if let Ok(mut manager) = compaction.try_write() {
-            if let Some(message) = self.session.messages.last() {
-                manager.notify_message_added_blocks(&message.content);
-            } else {
-                manager.notify_message_added();
-            }
-        }
+        self.note_session_message_added();
         id
     }
 
@@ -35,14 +38,7 @@ impl Agent {
         let id = self
             .session
             .add_message_with_display_role(role, content, display_role);
-        let compaction = self.registry.compaction();
-        if let Ok(mut manager) = compaction.try_write() {
-            if let Some(message) = self.session.messages.last() {
-                manager.notify_message_added_blocks(&message.content);
-            } else {
-                manager.notify_message_added();
-            }
-        }
+        self.note_session_message_added();
         id
     }
 
@@ -55,14 +51,7 @@ impl Agent {
         let id = self
             .session
             .add_message_with_duration(role, content, duration_ms);
-        let compaction = self.registry.compaction();
-        if let Ok(mut manager) = compaction.try_write() {
-            if let Some(message) = self.session.messages.last() {
-                manager.notify_message_added_blocks(&message.content);
-            } else {
-                manager.notify_message_added();
-            }
-        }
+        self.note_session_message_added();
         id
     }
 
@@ -76,15 +65,29 @@ impl Agent {
         let id = self
             .session
             .add_message_ext(role, content, duration_ms, token_usage);
+        self.note_session_message_added();
+        id
+    }
+
+    fn note_session_message_added(&self) {
+        let message = self.session.messages.last();
+        if let Some(message) = message.filter(|message| message.role == Role::Assistant) {
+            self.turn_ownership.append_tool_call_snapshot(
+                &self.session.id,
+                crate::session::summarize_message_tool_calls(
+                    message,
+                    crate::protocol::MAX_COMM_SUMMARY_TOOL_CALLS,
+                ),
+            );
+        }
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
-            if let Some(message) = self.session.messages.last() {
+            if let Some(message) = message {
                 manager.notify_message_added_blocks(&message.content);
             } else {
                 manager.notify_message_added();
             }
         }
-        id
     }
 }
 

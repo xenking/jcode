@@ -11,8 +11,9 @@ use crate::comm_format::{
 };
 use crate::plan::PlanItem;
 use crate::protocol::{
-    AgentInfo, AgentStatusSnapshot, AwaitedMemberStatus, CommDeliveryMode, ContextEntry,
-    HistoryMessage, PlanGraphStatus, Request, ServerEvent, SwarmChannelInfo, ToolCallSummary,
+    AgentInfo, AgentStatusSnapshot, AwaitedMemberStatus, CommDeliveryMode, CommToolCallSnapshot,
+    ContextEntry, HistoryMessage, MAX_COMM_SUMMARY_TOOL_CALLS, PlanGraphStatus, Request,
+    ServerEvent, SwarmChannelInfo, ToolCallSummary,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -369,8 +370,40 @@ fn format_members(ctx: &ToolContext, members: &[AgentInfo]) -> ToolOutput {
     ToolOutput::new(format_comm_members(&ctx.session_id, members))
 }
 
-fn format_tool_summary(target: &str, calls: &[ToolCallSummary]) -> ToolOutput {
-    ToolOutput::new(format_comm_tool_summary(target, calls))
+fn format_tool_summary(
+    target: &str,
+    calls: &[ToolCallSummary],
+    snapshot: Option<CommToolCallSnapshot>,
+) -> ToolOutput {
+    let freshness = match snapshot {
+        Some(CommToolCallSnapshot::Available { captured_at_secs }) => {
+            let captured_at = i64::try_from(captured_at_secs)
+                .ok()
+                .and_then(|timestamp| chrono::DateTime::from_timestamp(timestamp, 0))
+                .map_or_else(
+                    || "unknown time".to_string(),
+                    |time| time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                );
+            format!(
+                "Live runtime snapshot updated at {captured_at}. Includes recorded tool calls, not completion status."
+            )
+        }
+        Some(CommToolCallSnapshot::Unavailable) => {
+            return ToolOutput::new(format!(
+                "Tool call snapshot unavailable for {target}. No live snapshot was published. Summary does not wake or restore sessions. Use `list` for agent status."
+            ));
+        }
+        None if calls.is_empty() => {
+            return ToolOutput::new(format!(
+                "No tool call data returned for {target}. This daemon does not distinguish empty from unavailable."
+            ));
+        }
+        None => "Snapshot freshness not reported by this daemon.".to_string(),
+    };
+    ToolOutput::new(format!(
+        "{}\n\n{freshness}",
+        format_comm_tool_summary(target, calls).trim_end()
+    ))
 }
 
 fn format_status_snapshot(snapshot: &AgentStatusSnapshot) -> ToolOutput {
@@ -830,7 +863,7 @@ impl Tool for CommunicateTool {
                 },
                 "to_session": {
                     "type": "string",
-                    "description": "Agent ID/unique name."
+                    "description": "Agent ID/unique name. summary requires one exact same-swarm session ID from list."
                 },
                 "to_swarm": {
                     "type": "string",
@@ -861,7 +894,8 @@ impl Tool for CommunicateTool {
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Max summary items."
+                    "maximum": MAX_COMM_SUMMARY_TOOL_CALLS,
+                    "description": "Maximum summary calls (default 10)."
                 },
                 "task_id": {
                     "type": "string",
@@ -879,7 +913,7 @@ impl Tool for CommunicateTool {
                 "mode": {
                     "type": "string",
                     "enum": ["all", "any"],
-                    "description": "await_members."
+                    "description": "Only for await_members. Not a summary scope."
                 },
                 "target_status": {
                     "type": "array",
@@ -1690,21 +1724,30 @@ impl Tool for CommunicateTool {
             }
 
             "summary" => {
-                let target = params.target_session.ok_or_else(|| {
-                    anyhow::anyhow!("'target_session' is required for summary action")
-                })?;
+                if params.mode.is_some()
+                    || params.session_ids.is_some()
+                    || params.to_swarm.is_some()
+                {
+                    anyhow::bail!(
+                        "`summary` does not aggregate. Use `list` for swarm members or `plan_status` for plan progress. For one agent, pass `to_session` with its exact ID from `list`, without `mode`, `session_ids`, or `to_swarm`."
+                    );
+                }
+                let target = params.to_session.as_deref().map(str::trim).filter(|id| !id.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!(r#"`summary` requires one `to_session` ID from `list`, e.g. {{"action":"summary","to_session":"session_123"}}. Use `list` or `plan_status` for the whole swarm."#))?;
 
                 let request = Request::CommSummary {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
-                    target_session: target.clone(),
+                    target_session: target.to_owned(),
                     limit: params.limit,
                 };
 
                 match send_request(request).await {
-                    Ok(ServerEvent::CommSummaryResponse { tool_calls, .. }) => {
-                        Ok(format_tool_summary(&target, &tool_calls))
-                    }
+                    Ok(ServerEvent::CommSummaryResponse {
+                        tool_calls,
+                        snapshot,
+                        ..
+                    }) => Ok(format_tool_summary(target, &tool_calls, snapshot)),
                     Ok(response) => {
                         ensure_success(&response)?;
                         Ok(ToolOutput::new("No tool call data returned."))

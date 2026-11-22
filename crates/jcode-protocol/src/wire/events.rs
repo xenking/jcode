@@ -1134,6 +1134,9 @@ pub enum ServerEvent {
         id: u64,
         session_id: String,
         tool_calls: Vec<ToolCallSummary>,
+        /// Missing only on older daemons, which did not distinguish empty from unavailable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        snapshot: Option<CommToolCallSnapshot>,
     },
 
     /// Response to comm_status request

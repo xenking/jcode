@@ -8,3 +8,8 @@ Missing lanes are created from `prompt` or `label`.
 Only the root session may spawn agents. Workers report back. The root owns the
 outcome: integrate reports, reassign idle workers, keep working yourself, and
 `await_members` before yielding while workers run. Stop unused workers when done.
+
+For swarm progress use `list` (members) or `plan_status` (plan). `summary` reads
+recent tool calls for one agent without waking it, e.g.
+`{"action":"summary","to_session":"session_123"}` using an exact ID from `list`.
+`mode: "all"` is only for `await_members`, not `summary`.

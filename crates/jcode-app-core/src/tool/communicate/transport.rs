@@ -83,7 +83,13 @@ pub(super) async fn send_request_with_timeout(
     timeout: Option<std::time::Duration>,
 ) -> Result<ServerEvent> {
     let path = crate::server::socket_path();
-    let stream = connect_swarm_socket(&path).await?;
+    let stream = if matches!(&request, Request::CommSummary { .. }) {
+        crate::server::connect_socket(&path)
+            .await
+            .map_err(map_socket_connection_error)?
+    } else {
+        connect_swarm_socket(&path).await?
+    };
     let (reader, mut writer) = stream.into_split();
 
     let request_id = request.id();
