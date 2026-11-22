@@ -73,6 +73,10 @@ class H(BaseHTTPRequestHandler):
                         "intent": "Read the isolated seat environment through real Bash",
                         "command": "echo \"$FOO_SEAT\"",
                     })}}]
+        elif CONTROL and "[e2e:read-window]" in prompt and not has_tool_result:
+            tool_calls = [{"id": "call_window", "type": "function", "function": {
+                "name": "read", "arguments": json.dumps({"file_path": "verify-large.txt", "start_line": 1,
+                    "limit": 1, "intent": "Read the first line of the large fixture"})}}]
         elif CONTROL and "[e2e:file-tools]" in prompt and not has_tool_result:
             read = {"file_path": "verify-window.txt", "limit": 1}
             calls = [("before", "read", read), ("past_eof", "read", dict(read, start_line=1000)),
