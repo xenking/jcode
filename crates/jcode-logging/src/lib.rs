@@ -798,7 +798,13 @@ mod tests {
         let old_other = write("notes-2000-01-01.txt", true);
         let oldest_recent = write("jcode-2099-01-01.log.001", false);
         let middle_recent = write("jcode-2099-01-01.log.002", false);
-        for (path, mb) in [(&oldest_recent, 120), (&middle_recent, 120), (&new_log, 40)] {
+        let oversized_recent = write("jcode-2099-01-01.log.003", false);
+        for (path, mb) in [
+            (&oldest_recent, 120),
+            (&middle_recent, 120),
+            (&oversized_recent, 300),
+            (&new_log, 40),
+        ] {
             OpenOptions::new()
                 .write(true)
                 .open(path)
@@ -816,6 +822,10 @@ mod tests {
         assert!(!old_desktop.exists(), "old desktop log should be deleted");
         assert!(new_log.exists(), "recent jcode log must survive");
         assert!(middle_recent.exists(), "newest archive must survive");
+        assert!(
+            !oversized_recent.exists(),
+            "an archive that cannot fit must not evict all others"
+        );
         assert!(
             !oldest_recent.exists(),
             "oldest archive must yield to the size budget"

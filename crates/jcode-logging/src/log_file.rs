@@ -169,8 +169,15 @@ fn prune(dir: &Path, day: NaiveDate, reserve: u64) {
         if expired {
             remove(&entry.path());
         } else if !desktop {
+            let is_archive = date != day || archive.is_some();
+            if is_archive && metadata.len() > TOTAL_BYTES - SEGMENT_BYTES {
+                // A legacy daily file may exceed the entire archive budget.
+                // Evict it before the size sweep, not after every smaller log.
+                remove(&entry.path());
+                continue;
+            }
             used = used.saturating_add(metadata.len());
-            if date != day || archive.is_some() {
+            if is_archive {
                 candidates.push((
                     date,
                     archive.unwrap_or(u64::MAX),
