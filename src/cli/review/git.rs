@@ -1,7 +1,9 @@
 use super::{PatchKind, ResolvedTarget, ReviewPatch, ReviewSnapshot, ReviewTarget};
 use anyhow::{Context, Result, anyhow, ensure};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
+
+use crate::git_inspection;
 
 pub(super) fn snapshot(cwd: &Path, target: ReviewTarget) -> Result<ReviewSnapshot> {
     let root = checked(git(cwd).args(["rev-parse", "--show-toplevel"]), false)
@@ -15,7 +17,7 @@ pub(super) fn snapshot(cwd: &Path, target: ReviewTarget) -> Result<ReviewSnapsho
                 Some(head) => head.clone(),
                 None => empty_tree(&root)?,
             };
-            let filters = disabled_filters(&root)?;
+            let filters = git_inspection::filter_overrides(&root)?;
             patches.extend(diff(
                 &root,
                 &filters,
@@ -53,7 +55,7 @@ pub(super) fn snapshot(cwd: &Path, target: ReviewTarget) -> Result<ReviewSnapsho
                 &checked(git(&root).args(["merge-base", &base, &head]), false)
                     .context("Git review base and HEAD do not have a merge base")?,
             )?;
-            let filters = disabled_filters(&root)?;
+            let filters = git_inspection::filter_overrides(&root)?;
             patches.extend(diff(
                 &root,
                 &filters,
@@ -79,7 +81,7 @@ pub(super) fn snapshot(cwd: &Path, target: ReviewTarget) -> Result<ReviewSnapsho
                 Some(parent) => parent.clone(),
                 None => empty_tree(&root)?,
             };
-            let filters = disabled_filters(&root)?;
+            let filters = git_inspection::filter_overrides(&root)?;
             patches.extend(diff(
                 &root,
                 &filters,
@@ -93,20 +95,8 @@ pub(super) fn snapshot(cwd: &Path, target: ReviewTarget) -> Result<ReviewSnapsho
 }
 
 fn git(cwd: &Path) -> Command {
-    let mut command = Command::new("git");
-    command
-        .current_dir(cwd)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_NO_REPLACE_OBJECTS", "1")
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .args([
-            "--no-pager",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.quotePath=false",
-        ])
-        .stdin(Stdio::null());
+    let mut command = git_inspection::command(cwd);
+    command.args(["-c", "core.quotePath=false"]);
     command
 }
 
@@ -169,33 +159,6 @@ fn oid(bytes: &[u8]) -> Result<String> {
         "invalid Git object ID"
     );
     Ok(text.to_owned())
-}
-
-fn disabled_filters(root: &Path) -> Result<Vec<String>> {
-    // --no-textconv does not prevent clean/process filters on working tree files.
-    let keys = checked(
-        git(root).args([
-            "config",
-            "-z",
-            "--name-only",
-            "--get-regexp",
-            r"^filter\..*\.(clean|process|required)$",
-        ]),
-        true,
-    )?;
-    Ok(std::str::from_utf8(&keys)?
-        .split_terminator('\0')
-        .map(|key| {
-            format!(
-                "{key}={}",
-                if key.ends_with(".required") {
-                    "false"
-                } else {
-                    ""
-                }
-            )
-        })
-        .collect())
 }
 
 fn diff(

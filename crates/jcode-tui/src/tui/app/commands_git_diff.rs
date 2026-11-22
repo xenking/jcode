@@ -4,6 +4,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use super::run_git_command;
+use crate::git_inspection;
 
 pub(in crate::tui) const GIT_DIFF_HEADING: &str = "/git diff (";
 const MAX_DIFF_BYTES: usize = 64 * 1024;
@@ -42,11 +43,12 @@ pub(super) fn build_diff(repo_dir: &Path, kind: GitDiffKind) -> Result<String, S
     let up = run_git_command(repo_dir, &["rev-parse", "--show-cdup"])
         .map_err(|error| format!("Unable to find the Git worktree: {}", display_text(&error)))?;
     let root = repo_dir.join(up);
+    let filters = git_inspection::filter_overrides(&root).map_err(|error| error.to_string())?;
     let mut patch = Vec::new();
     let mut truncated = false;
 
     if !matches!(kind, GitDiffKind::Untracked) {
-        let mut command = diff_command(&root);
+        let mut command = diff_command(&root, &filters);
         match kind {
             GitDiffKind::WorkingTree => {
                 if run_git_command(&root, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok() {
@@ -67,7 +69,7 @@ pub(super) fn build_diff(repo_dir: &Path, kind: GitDiffKind) -> Result<String, S
     }
 
     if !truncated && matches!(kind, GitDiffKind::WorkingTree | GitDiffKind::Untracked) {
-        truncated = append_untracked(&root, &mut patch)?;
+        truncated = append_untracked(&root, &filters, &mut patch)?;
     }
 
     let mut message = format!("{GIT_DIFF_HEADING}{})", kind.label());
@@ -85,7 +87,7 @@ pub(super) fn build_diff(repo_dir: &Path, kind: GitDiffKind) -> Result<String, S
     Ok(message)
 }
 
-fn append_untracked(root: &Path, patch: &mut Vec<u8>) -> Result<bool, String> {
+fn append_untracked(root: &Path, filters: &[String], patch: &mut Vec<u8>) -> Result<bool, String> {
     let mut paths = Vec::new();
     let truncated = append_git_output(
         git_command(root).args(["ls-files", "--others", "--exclude-standard", "-z"]),
@@ -115,7 +117,7 @@ fn append_untracked(root: &Path, patch: &mut Vec<u8>) -> Result<bool, String> {
         } else {
             path
         };
-        let mut command = diff_command(root);
+        let mut command = diff_command(root, filters);
         command.args(["--no-index", "--", "/dev/null"]).arg(path);
         if append_git_output(&mut command, "diff --no-index", patch, true)? {
             return Ok(true);
@@ -143,16 +145,16 @@ fn git_path(bytes: &[u8]) -> Result<&OsStr, String> {
 }
 
 fn git_command(root: &Path) -> Command {
-    let mut command = Command::new("git");
-    command
-        .args(["--no-pager", "-c", "core.quotePath=true"])
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .current_dir(root);
+    let mut command = git_inspection::command(root);
+    command.args(["-c", "core.quotePath=true"]);
     command
 }
 
-fn diff_command(root: &Path) -> Command {
+fn diff_command(root: &Path, filters: &[String]) -> Command {
     let mut command = git_command(root);
+    for filter in filters {
+        command.args(["-c", filter]);
+    }
     command.args([
         "diff",
         "--patch",

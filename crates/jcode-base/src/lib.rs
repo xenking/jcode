@@ -46,6 +46,7 @@ pub mod env;
 pub mod external_auth;
 pub mod gateway;
 pub mod generated_image;
+pub mod git_inspection;
 pub mod github;
 pub mod gmail;
 pub mod goal;
