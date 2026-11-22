@@ -3554,6 +3554,7 @@ fn swarm_agent_color(sender: &str) -> Color {
 
 struct CompactSwarmNotification<'a> {
     sender: &'a str,
+    sender_label: &'a str,
     marker: String,
     marker_before_icon: bool,
     text_color: Color,
@@ -3585,8 +3586,14 @@ fn compact_swarm_notification(title: &str) -> Option<CompactSwarmNotification<'_
             let sender = title.strip_prefix("Swarm · ")?;
             (sender, String::new(), false, false)
         };
-    let sender = sender.trim();
+    let sender_label = sender.trim();
+    let cross_swarm_sender = title
+        .starts_with("DM from ")
+        .then(|| crate::tui::cross_swarm_dm::split_identity(sender_label))
+        .flatten();
+    let sender = cross_swarm_sender.map_or(sender_label, |(sender, _)| sender);
     let sender = crate::id::extract_session_name(sender).unwrap_or(sender);
+    let sender_label = cross_swarm_sender.map_or(sender, |_| sender_label);
     let text_color = if title.starts_with("File conflict") {
         rgb(255, 190, 150)
     } else if file_activity {
@@ -3596,6 +3603,7 @@ fn compact_swarm_notification(title: &str) -> Option<CompactSwarmNotification<'_
     };
     (!sender.is_empty() || title == "File activity").then_some(CompactSwarmNotification {
         sender,
+        sender_label,
         marker,
         marker_before_icon,
         text_color,
@@ -3739,6 +3747,12 @@ pub(crate) fn is_collapsed_agent_dm(msg: &DisplayMessage) -> bool {
             .is_some_and(|parsed| parsed.expanded)
 }
 
+fn dm_icon_sender(identity: &str) -> &str {
+    let sender =
+        crate::tui::cross_swarm_dm::split_identity(identity).map_or(identity, |(sender, _)| sender);
+    crate::id::extract_session_name(sender).unwrap_or(sender)
+}
+
 pub(crate) fn render_agent_dm_run(messages: &[DisplayMessage], width: u16) -> Line<'static> {
     let chrome = Style::default().fg(dim_color());
     let mut icons = Vec::new();
@@ -3752,8 +3766,7 @@ pub(crate) fn render_agent_dm_run(messages: &[DisplayMessage], width: u16) -> Li
             crate::logging::warn("Skipping malformed agent DM in compact message group");
             continue;
         };
-        let sender = crate::id::extract_session_name(sender).unwrap_or(sender);
-        icons.push(crate::id::session_icon(sender));
+        icons.push(crate::id::session_icon(dm_icon_sender(sender)));
         total_tokens = total_tokens.saturating_add(swarm_notification_token_count(&msg.content));
     }
     let label = if icons.len() == 1 { "DM" } else { "DMs" };
@@ -3803,7 +3816,7 @@ fn render_compact_agent_notification(
         format!(
             "{} {} · ",
             crate::id::session_icon(notification.sender),
-            notification.sender
+            notification.sender_label
         )
     } else {
         format!("{} ", crate::id::session_icon(notification.sender))

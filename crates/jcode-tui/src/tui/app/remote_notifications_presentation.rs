@@ -20,6 +20,12 @@ pub(super) fn present_swarm_notification_inner(
                         message: task_body.to_string(),
                         status_notice: format!("Task assigned by {}", sender),
                     }
+                } else if let Some((identity, body)) = crate::tui::cross_swarm_dm::parse(trimmed) {
+                    SwarmNotificationPresentation {
+                        title: format!("DM from {identity}"),
+                        message: body.to_owned(),
+                        status_notice: format!("DM from {sender}"),
+                    }
                 } else {
                     SwarmNotificationPresentation {
                         title: format!("DM from {}", sender),
@@ -230,9 +236,8 @@ pub(in super::super) fn swarm_delivery_display_message(
             completion_notice_content(trimmed, None)
                 .unwrap_or_else(|| jcode_tui_messages::collapse_long_swarm_content(trimmed)),
         ));
-    } else if let Some(rest) = trimmed.strip_prefix("Cross-swarm DM from ") {
-        let (sender, body) = rest.split_once(": ")?;
-        (format!("DM from {}", sender.trim()), body)
+    } else if let Some((identity, body)) = crate::tui::cross_swarm_dm::parse(trimmed) {
+        (format!("DM from {identity}"), body)
     } else if let Some(rest) = trimmed.strip_prefix("DM from ") {
         let (sender, body) = rest.split_once(": ")?;
         if sender.contains(char::is_whitespace) {

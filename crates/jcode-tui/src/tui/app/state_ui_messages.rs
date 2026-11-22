@@ -210,6 +210,7 @@ impl App {
         }
         compact_display_messages_for_storage(&mut messages);
         self.display_messages = messages;
+        self.pending_cross_swarm_dm_receipts = Default::default();
         self.attempt_committed_assistant_messages = 0;
         self.sync_compacted_history_lazy_from_display_messages();
         self.bump_display_messages_version();
@@ -718,6 +719,7 @@ impl App {
     }
 
     pub(super) fn clear_display_messages(&mut self) {
+        self.pending_cross_swarm_dm_receipts = Default::default();
         self.compacted_history_lazy = CompactedHistoryLazyState::default();
         // The transcript is about to be discarded; forget where the live reasoning
         // block started so a stale offset can't slice the new stream.

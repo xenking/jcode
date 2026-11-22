@@ -3229,8 +3229,11 @@ fn handle_server_event_inner(
             } else if let Some(swarm) =
                 super::super::remote_notifications::swarm_delivery_display_message(&content)
             {
-                // Receipt and model delivery are distinct events.
-                app.push_display_message(swarm);
+                if crate::tui::cross_swarm_dm::parse(&content).is_none()
+                    || !app.pending_cross_swarm_dm_receipts.consume(&content)
+                {
+                    app.push_display_message(swarm);
+                }
             } else if let Some(reminder) =
                 super::super::turn::system_reminder::system_reminder_body(&content)
             {
@@ -3521,6 +3524,14 @@ fn handle_server_event_inner(
                 DisplayMessage::swarm(presentation.title.clone(), presentation.message.clone());
             swarm_message.duration_secs = since_last;
             app.push_display_message(swarm_message);
+            if matches!(
+                notification_type,
+                crate::protocol::NotificationType::Message { scope: Some(ref scope), .. }
+                    if scope == "dm"
+            ) && crate::tui::cross_swarm_dm::parse(&message).is_some()
+            {
+                app.pending_cross_swarm_dm_receipts.record(&message);
+            }
             persist_replay_display_message(
                 app,
                 "swarm",
