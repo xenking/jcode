@@ -27,10 +27,11 @@ impl Tool for AskTool {
     }
 
     fn description(&self) -> &str {
-        "Ask the user 1-4 multiple-choice questions, blocking until they answer. For a genuine \
+        "Ask the user 1-4 multiple-choice questions, blocking until they submit or decline. For a genuine \
          owner decision you cannot research, instead of a free-text question; never for facts you \
          can look up. Batch pending decisions into one call and label your recommended option \
-         \"(Recommended)\". A headless swarm worker without a client escalates the question to the \
+         \"(Recommended)\". The user may skip questions; do not treat a skip as a selection. \
+         A headless swarm worker without a client escalates the question to the \
          swarm root coordinator and waits for its answer."
     }
 
@@ -332,6 +333,28 @@ mod tests {
     async fn invalid_questions_are_rejected() {
         let bad = json!({"questions": [{"question": "Which?", "options": [{"label": "A"}]}]});
         assert!(AskTool.execute(bad, ctx(None)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn partial_reply_names_skipped_questions_without_assuming_recommendations() {
+        let mut input = input();
+        input["questions"].as_array_mut().unwrap().push(json!({
+            "question": "Where?", "options": [{"label": "Here (Recommended)"}, {"label": "There"}]
+        }));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(AskTool.execute(input, ctx(Some(tx))));
+        rx.recv()
+            .await
+            .unwrap()
+            .response_tx
+            .send(r#"{"answers":[{"selected":["B"]},{}]}"#.into())
+            .unwrap();
+
+        let result = task.await.unwrap().unwrap();
+        assert_eq!(
+            result.output,
+            "User answers:\n1. Which? -> B\n2. Where? -> unanswered (user skipped)\n"
+        );
     }
 
     #[tokio::test]

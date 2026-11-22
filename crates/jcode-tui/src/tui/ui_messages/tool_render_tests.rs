@@ -2,15 +2,15 @@
 use super::*;
 
 #[test]
-fn answered_ask_is_rendered_as_a_full_user_decision() {
+fn answered_ask_displays_selected_and_skipped_questions() {
     let msg = DisplayMessage::tool(
-        "User answers:\n1. Which database? -> Postgres (comment: reliable)\n2. When? -> Now\n",
+        "User answers:\n1. Which database? -> Postgres (comment: reliable)\n2. When? -> unanswered (user skipped)\n",
         crate::message::ToolCall {
             id: "ask-1".into(),
             name: "ask".into(),
             input: serde_json::json!({"questions": [
                 {"header":"Database", "question":"Which database?", "options":[{"label":"Postgres"},{"label":"SQLite"}]},
-                {"question":"When?", "options":[{"label":"Now"},{"label":"Later"}]}
+                {"question":"When?", "options":[{"label":"Now (Recommended)"},{"label":"Later"}]}
             ]}),
             intent: None,
             thought_signature: None,
@@ -27,6 +27,8 @@ fn answered_ask_is_rendered_as_a_full_user_decision() {
         "{text}"
     );
     assert!(text.contains("✓ Postgres"), "{text}");
+    assert!(text.contains("Unanswered (user skipped)"), "{text}");
+    assert!(!text.contains("Now (Recommended)"), "{text}");
     assert!(
         !text.contains("questions\":") && !text.contains("questions answered"),
         "{text}"

@@ -54,7 +54,8 @@ pub struct AskQuestion {
     pub allow_other: bool,
 }
 
-/// One question's answer: chosen labels plus optional free text.
+/// One question's answer: chosen labels plus optional free text. An empty
+/// answer at this question's position means the user skipped it.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AskAnswer {
     #[serde(default)]
@@ -73,6 +74,7 @@ pub struct AskAnswer {
 }
 
 /// Client reply. `answers` is `None` when the user declined (Esc/cancel).
+/// A submitted list is positional and may contain unanswered entries.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AskResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -153,10 +155,12 @@ pub fn format_ask_answers(questions: &[AskQuestion], response: &AskResponse) -> 
         {
             parts.push(format!("Other: {other}"));
         }
-        let text = if parts.is_empty() {
-            "(no answer)".to_string()
-        } else {
+        let text = if !parts.is_empty() {
             parts.join("; ")
+        } else if !answer.other_images.is_empty() {
+            "Other: (image attached)".to_string()
+        } else {
+            "unanswered (user skipped)".to_string()
         };
         out.push_str(&format!("{}. {} -> {}\n", i + 1, q.question, text));
     }
@@ -166,6 +170,25 @@ pub fn format_ask_answers(questions: &[AskQuestion], response: &AskResponse) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skipped_answers_are_explicit_in_model_output_and_history() {
+        let questions: Vec<AskQuestion> = serde_json::from_str(
+            r#"[{"question":"First?","options":[]},{"question":"Second?","options":[]}]"#,
+        )
+        .unwrap();
+        let response: AskResponse =
+            serde_json::from_str(r#"{"answers":[{},{"selected":["B"]}]}"#).unwrap();
+        let result = format_ask_answers(&questions, &response);
+        assert_eq!(
+            result,
+            "User answers:\n1. First? -> unanswered (user skipped)\n2. Second? -> B\n"
+        );
+        assert_eq!(
+            stored_ask_answer_text(&result).as_deref(),
+            Some("Q: First? → unanswered (user skipped)\nQ: Second? → B")
+        );
+    }
 
     #[test]
     fn selected_comments_are_rendered_for_the_model() {

@@ -555,7 +555,8 @@ pub enum ApiEvent {
     },
 
     /// The `ask` tool is blocked on the user answering these questions.
-    /// Reply with `AskResponse`; an empty response (no answers) declines.
+    /// Reply with `AskResponse`: omitted `answers` declines; an empty entry
+    /// in the positional answer list skips that question.
     AskRequest {
         session_id: String,
         request_id: String,

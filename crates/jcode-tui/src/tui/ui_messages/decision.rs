@@ -71,6 +71,12 @@ fn mark_choices(answer: &Answer, answered: bool) -> String {
     if !answered {
         return answer.text.clone();
     }
+    if matches!(
+        answer.text.as_str(),
+        "(no answer)" | "unanswered (user skipped)"
+    ) {
+        return "Unanswered (user skipped)".into();
+    }
     let mut parts = Vec::new();
     let mut start = 0;
     let mut depth = 0usize;
