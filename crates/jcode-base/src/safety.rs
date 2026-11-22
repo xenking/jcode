@@ -213,7 +213,11 @@ impl SafetySystem {
                 }
             }
             *q = retained;
-            let _ = persist_queue(&q);
+            // The ambient runner calls this on every client disconnect. Only a
+            // queue that actually lost a request needs a durable rewrite.
+            if !expired.is_empty() {
+                let _ = persist_queue(&q);
+            }
         }
 
         if expired.is_empty() {
@@ -542,6 +546,20 @@ mod tests {
         }
 
         result.unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+    }
+
+    #[test]
+    fn expiring_nothing_does_not_rewrite_the_queue_file() {
+        with_temp_home(|| {
+            let sys = SafetySystem::new();
+            let path = queue_path().expect("queue path");
+            assert!(sys.expire_dead_session_requests("test").unwrap().is_empty());
+            assert!(
+                !path.exists(),
+                "an empty sweep must not create or rewrite {}",
+                path.display()
+            );
+        });
     }
 
     #[test]

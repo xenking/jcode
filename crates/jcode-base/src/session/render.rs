@@ -750,17 +750,22 @@ fn render_messages_and_images_internal(
                         }
                         text.clear();
                         reasoning.clear();
-                        push_text_rows(&mut rendered, &mut text_boundaries, reasoning_len, RenderedMessage {
-                            attachments: Vec::new(),
-                            response_stats: None,
-                            tool_duration_ms: None,
-                            role: role.to_string(),
-                            content: combined,
-                            tool_calls: tool_calls.clone(),
-                            tool_data: None,
-                            stored_index: Some(stored_index),
-                            timestamp_ms: msg_timestamp_ms,
-                        });
+                        push_text_rows(
+                            &mut rendered,
+                            &mut text_boundaries,
+                            reasoning_len,
+                            RenderedMessage {
+                                attachments: Vec::new(),
+                                response_stats: None,
+                                tool_duration_ms: None,
+                                role: role.to_string(),
+                                content: combined,
+                                tool_calls: tool_calls.clone(),
+                                tool_data: None,
+                                stored_index: Some(stored_index),
+                                timestamp_ms: msg_timestamp_ms,
+                            },
+                        );
                     }
 
                     let tool_data = tool_map.get(tool_use_id).cloned().or_else(|| {
@@ -856,17 +861,22 @@ fn render_messages_and_images_internal(
                         let reasoning_len = reasoning.len();
                         text.clear();
                         reasoning.clear();
-                        push_text_rows(&mut rendered, &mut text_boundaries, reasoning_len, RenderedMessage {
-                            attachments: Vec::new(),
-                            response_stats: None,
-                            tool_duration_ms: None,
-                            role: role.to_string(),
-                            content: combined,
-                            tool_calls: std::mem::take(&mut tool_calls),
-                            tool_data: None,
-                            stored_index: Some(stored_index),
-                            timestamp_ms: msg_timestamp_ms,
-                        });
+                        push_text_rows(
+                            &mut rendered,
+                            &mut text_boundaries,
+                            reasoning_len,
+                            RenderedMessage {
+                                attachments: Vec::new(),
+                                response_stats: None,
+                                tool_duration_ms: None,
+                                role: role.to_string(),
+                                content: combined,
+                                tool_calls: std::mem::take(&mut tool_calls),
+                                tool_data: None,
+                                stored_index: Some(stored_index),
+                                timestamp_ms: msg_timestamp_ms,
+                            },
+                        );
                     }
                     let tool_data = tool_map.get(&display.id).cloned().unwrap_or_else(|| {
                         let input = display.input.clone().unwrap_or(serde_json::Value::Null);
@@ -913,21 +923,26 @@ fn render_messages_and_images_internal(
             } else {
                 format!("{}{}", reasoning, text)
             };
-            push_text_rows(&mut rendered, &mut text_boundaries, reasoning_len, RenderedMessage {
-                attachments: msg
-                    .attachment_data
-                    .as_ref()
-                    .map(|metadata| metadata.items.clone())
-                    .unwrap_or_default(),
-                response_stats: None,
-                tool_duration_ms: None,
-                role: role.to_string(),
-                content: combined,
-                tool_calls,
-                tool_data: None,
-                stored_index: Some(stored_index),
-                timestamp_ms: msg_timestamp_ms,
-            });
+            push_text_rows(
+                &mut rendered,
+                &mut text_boundaries,
+                reasoning_len,
+                RenderedMessage {
+                    attachments: msg
+                        .attachment_data
+                        .as_ref()
+                        .map(|metadata| metadata.items.clone())
+                        .unwrap_or_default(),
+                    response_stats: None,
+                    tool_duration_ms: None,
+                    role: role.to_string(),
+                    content: combined,
+                    tool_calls,
+                    tool_data: None,
+                    stored_index: Some(stored_index),
+                    timestamp_ms: msg_timestamp_ms,
+                },
+            );
         } else if !pending_prompt_image_indices.is_empty() {
             // The message carried images but produced no rendered user prompt;
             // drop the anchor so these images fall back to the transcript tail
