@@ -63,7 +63,8 @@ def exercise(binary, evidence, server, root):
                JCODE_NO_TELEMETRY="1", JCODE_TELEMETRY="off", JCODE_NO_AUTO_UPDATE="1", NO_COLOR="1",
                GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=str(root / "empty-gitconfig"),
                GIT_OPTIONAL_LOCKS="0", OPENAI_COMPAT_API_KEY="fixture-only",
-               JCODE_OPENAI_COMPAT_DEFAULT_MODEL="fake-model")
+               HTTPS_PROXY="http://127.0.0.1:1", HTTP_PROXY="http://127.0.0.1:1",
+               NO_PROXY="127.0.0.1", JCODE_OPENAI_COMPAT_DEFAULT_MODEL="fake-model")
 
     def git(*args):
         return subprocess.check_output(["git", "-c", "user.name=Review Fixture", "-c",
@@ -83,7 +84,7 @@ def exercise(binary, evidence, server, root):
         invocation = [str(binary), "--no-update", "--no-selfdev", *socket_args,
                       "--provider", "openai-compatible", "--model", "fake-model", *prefix, "review", *target]
         result = subprocess.run(invocation, cwd=repo, timeout=45, capture_output=True, env=dict(env,
-            OPENAI_COMPAT_API_BASE=f"http://127.0.0.1:{server.server_port}/{case}/v1"))
+            JCODE_OPENAI_COMPAT_API_BASE=f"http://127.0.0.1:{server.server_port}/{case}/v1"))
         (evidence / f"{case}.stdout").write_bytes(result.stdout)
         (evidence / f"{case}.stderr").write_bytes(result.stderr)
         (evidence / f"{case}.json").write_text(json.dumps({"argv": invocation, "exit": result.returncode}))
@@ -123,7 +124,7 @@ def exercise(binary, evidence, server, root):
     user = next(message["content"] for message in reversed(request["messages"]) if message["role"] == "user")
     if isinstance(user, list):
         user = "".join(block.get("text", "") for block in user)
-    snapshot, _ = json.JSONDecoder().raw_decode(user.lstrip())
+    snapshot, _ = json.JSONDecoder().raw_decode(user[user.index('{'):])
     assert snapshot["target"]["head"] == head, snapshot
     assert [patch["kind"] for patch in snapshot["patches"]] == ["staged", "unstaged", "untracked"], snapshot
     assert "+staged-probe" in snapshot["patches"][0]["diff"]
