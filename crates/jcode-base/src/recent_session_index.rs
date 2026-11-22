@@ -168,6 +168,23 @@ pub fn upsert_session(session: &Session) -> Result<()> {
     index_session(session, fingerprint.as_ref(), false)
 }
 
+/// An unchanged save need not fingerprint or rewrite a healthy index row,
+/// but should still repopulate one that was explicitly invalidated or dropped.
+pub(crate) fn ensure_resume_entry(session: &Session) -> Result<()> {
+    let indexed = with_connection(|connection| {
+        Ok(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM recent_sessions
+                           WHERE session_id = ?1 AND resume_fingerprint IS NOT NULL)",
+            [&session.id],
+            |row| row.get::<_, bool>(0),
+        )?)
+    })?;
+    if !indexed {
+        upsert_session(session)?;
+    }
+    Ok(())
+}
+
 // A backfill must not overwrite a newer concurrent save. Its supplied
 // fingerprint is the one captured around the authoritative metadata read.
 pub(crate) fn backfill_resume_session(

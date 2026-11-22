@@ -49,7 +49,7 @@ impl Agent {
         };
         let Some(saved) = tool_surface_path(self.session_id())
             .ok()
-            .and_then(|path| crate::storage::read_json::<ToolSurface>(&path).ok())
+            .and_then(|path| crate::storage::read_json_sidecar::<ToolSurface>(&path).ok())
             .filter(|saved| saved.scope == scope)
         else {
             return;
@@ -96,7 +96,7 @@ impl Agent {
         };
         let path = tool_surface_path(self.session_id())?;
         crate::storage::assert_not_real_home(&path);
-        crate::storage::write_json_secret(&path, &surface)?;
+        crate::storage::write_json_secret_sidecar(&path, &surface)?;
         self.sent_tool_surface = Some(surface);
         Ok(tools)
     }
@@ -118,7 +118,7 @@ impl Agent {
 
 pub(super) fn saved_context_tools(session: &Session) -> Option<Vec<ToolDefinition>> {
     let path = tool_surface_path(&session.id).ok()?;
-    let saved = crate::storage::read_json::<ToolSurface>(&path).ok()?;
+    let saved = crate::storage::read_json_sidecar::<ToolSurface>(&path).ok()?;
     (saved.scope.working_dir == session.working_dir && saved.scope.canary == session.is_canary)
         .then_some(saved.tools)
 }

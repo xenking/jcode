@@ -1595,6 +1595,7 @@ impl Server {
                                     idle_duration / 60
                                 ));
                                 let _ = crate::registry::unregister_server(&idle_server_name).await;
+                                lifecycle::flush_deferred_persistence().await;
                                 std::process::exit(EXIT_IDLE_TIMEOUT);
                             }
                         }

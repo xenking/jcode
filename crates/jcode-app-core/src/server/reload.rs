@@ -306,6 +306,7 @@ pub(super) async fn await_reload_signal(
         crate::background::global()
             .drain_opaque_tasks_for_reload()
             .await;
+        super::lifecycle::flush_deferred_persistence().await;
         super::reload_trace::record_value(
             &signal.request_id,
             "opaque_background_tasks_drained",

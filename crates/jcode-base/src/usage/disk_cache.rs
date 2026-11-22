@@ -227,9 +227,15 @@ fn update(key: &str, change: impl FnOnce(&mut Entry)) -> Entry {
         return entry;
     };
     let mut map = load();
+    let size_before = map.len();
+    let had_entry = map.contains_key(key);
     let entry = map.entry(key.to_string()).or_default();
+    let previous = entry.clone();
     change(entry);
     let result = entry.clone();
+    if result == previous {
+        return result;
+    }
     // Drop logins whose only data is long expired.
     map.retain(|_, entry| {
         entry.adaptive_interval_secs > 0
@@ -243,7 +249,11 @@ fn update(key: &str, change: impl FnOnce(&mut Entry)) -> Entry {
                 .error_unix_ms
                 .is_some_and(|at| age(at) < RATE_LIMIT_BACKOFF)
     });
-    let _ = crate::storage::write_json_secret(&path, &map);
+    // An update to a previously absent account can be immediately pruned.
+    // Do not publish an unchanged map just because its temporary entry changed.
+    if had_entry || map.len() != size_before || map.contains_key(key) {
+        let _ = crate::storage::write_json_secret_cache(&path, &map);
+    }
     result
 }
 
@@ -419,33 +429,39 @@ pub(super) fn store_response_limits(
         // Retain a separately observed window only briefly. The negative
         // sentinel represents an unknown ratio and is never displayed.
         let previous = entry.last_good.as_ref();
-        let five_time = five
-            .as_ref()
-            .map(|_| now_ms())
-            .or_else(|| previous.map(|good| good.five_observed_ms.unwrap_or(good.fetched_unix_ms)));
-        let seven_time = seven.as_ref().map(|_| now_ms()).or_else(|| {
-            previous.map(|good| good.seven_observed_ms.unwrap_or(good.fetched_unix_ms))
+        let observed_at = now_ms();
+        let five_time = five.as_ref().map(|_| observed_at).or_else(|| {
+            let previous = previous?;
+            let observed = previous
+                .five_observed_ms
+                .unwrap_or(previous.fetched_unix_ms);
+            (previous.five_hour_resets_at.is_some() && age(observed) < ANTHROPIC_CACHE_DURATION)
+                .then_some(observed)
+        });
+        let seven_time = seven.as_ref().map(|_| observed_at).or_else(|| {
+            let previous = previous?;
+            let observed = previous
+                .seven_observed_ms
+                .unwrap_or(previous.fetched_unix_ms);
+            (previous.seven_day_resets_at.is_some() && age(observed) < ANTHROPIC_CACHE_DURATION)
+                .then_some(observed)
         });
         let five = five.or_else(|| {
-            previous
-                .filter(|_| five_time.is_some_and(|at| age(at) < ANTHROPIC_CACHE_DURATION))
-                .and_then(|good| {
-                    good.five_hour_resets_at
-                        .clone()
-                        .map(|reset| (good.five_hour, reset))
-                })
+            previous.filter(|_| five_time.is_some()).and_then(|good| {
+                good.five_hour_resets_at
+                    .clone()
+                    .map(|reset| (good.five_hour, reset))
+            })
         });
         let seven = seven.or_else(|| {
-            previous
-                .filter(|_| seven_time.is_some_and(|at| age(at) < ANTHROPIC_CACHE_DURATION))
-                .and_then(|good| {
-                    good.seven_day_resets_at
-                        .clone()
-                        .map(|reset| (good.seven_day, reset))
-                })
+            previous.filter(|_| seven_time.is_some()).and_then(|good| {
+                good.seven_day_resets_at
+                    .clone()
+                    .map(|reset| (good.seven_day, reset))
+            })
         });
-        entry.last_good = Some(Snapshot {
-            fetched_unix_ms: now_ms(),
+        let snapshot = Snapshot {
+            fetched_unix_ms: observed_at,
             five_hour: five.as_ref().map_or(-1.0, |value| value.0),
             five_hour_resets_at: five.map(|value| value.1),
             five_observed_ms: five_time,
@@ -454,7 +470,28 @@ pub(super) fn store_response_limits(
             seven_observed_ms: seven_time,
             extra_usage_enabled,
             ..Default::default()
+        };
+        // Genuine changes remain immediately visible to other processes; an
+        // equivalent response only needs to refresh the expiry clock occasionally.
+        let timestamp_only = previous.is_some_and(|previous| {
+            (0..10_000).contains(&observed_at.saturating_sub(previous.fetched_unix_ms))
+                && snapshot.five_hour == previous.five_hour
+                && snapshot.five_hour_resets_at == previous.five_hour_resets_at
+                && snapshot.seven_day == previous.seven_day
+                && snapshot.seven_day_resets_at == previous.seven_day_resets_at
+                && snapshot.five_observed_ms.is_some() == previous.five_observed_ms.is_some()
+                && snapshot.seven_observed_ms.is_some() == previous.seven_observed_ms.is_some()
+                && previous.seven_day_opus.is_none()
+                && previous.model_scoped.is_empty()
         });
+        if !timestamp_only {
+            entry.last_good = Some(snapshot);
+            // The first header establishes the deadline in the same write.
+            // The next identical header then doesn't need a second write.
+            if entry.retry_not_before_ms.is_none() {
+                entry.retry_not_before_ms = deadline(entry);
+            }
+        }
         entry.error = None;
         entry.error_unix_ms = None;
         // Headers neither observe nor refresh reset eligibility.
@@ -925,6 +962,45 @@ mod tests {
             None => crate::env::remove_var("JCODE_HOME"),
         }
         result
+    }
+
+    #[test]
+    fn write_amp_unchanged_quota_updates_do_not_replace_the_cache() {
+        with_home(|| {
+            let key = "label:write-amp";
+            store_success(key, &sample());
+            let path = path().unwrap();
+            let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+            for _ in 0..20 {
+                update(key, |_| {});
+            }
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().modified().unwrap(),
+                before
+            );
+            assert!(!path.with_extension("bak").exists());
+            assert_eq!(fresh(key).unwrap().five_hour, 0.4);
+        });
+    }
+
+    #[test]
+    fn write_amp_equivalent_response_burst_keeps_one_write_but_updates_changed_quota() {
+        with_home(|| {
+            let key = "label:write-amp-headers";
+            let reset = "2999-01-01T00:00:00Z";
+            store_response_limits(key, Some((0.4, reset.into())), None);
+            let path = path().unwrap();
+            let first = std::fs::metadata(&path).unwrap().modified().unwrap();
+            let first_deadline = load()[key].retry_not_before_ms;
+            for _ in 0..20 {
+                store_response_limits(key, Some((0.4, reset.into())), None);
+            }
+            assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), first);
+            assert_eq!(load()[key].retry_not_before_ms, first_deadline);
+            store_response_limits(key, Some((0.5, reset.into())), None);
+            assert_eq!(fresh(key).unwrap().five_hour, 0.5);
+            assert!(!path.with_extension("bak").exists());
+        });
     }
 
     fn sample() -> UsageData {

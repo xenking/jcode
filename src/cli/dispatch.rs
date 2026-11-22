@@ -138,6 +138,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 server_new_ms,
                 serve_start.elapsed().as_millis()
             ));
+            let _persistence = crate::persistence_batch::start_daemon();
             server.run().await?;
         }
         Some(Command::Acp { session_env }) => {

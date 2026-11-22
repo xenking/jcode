@@ -1,9 +1,12 @@
 //! Session-addressed provider context measurements for read-only resume previews.
 //! No credentials, cumulative token counts, or process-global account state.
+use crate::persistence_batch::{Batch, keep_latest};
 use crate::session::Session;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::sync::Arc;
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SessionTelemetry {
     pub session_id: String,
     pub model: Option<String>,
@@ -25,6 +28,30 @@ pub struct SessionTelemetry {
     pub account_usage: Option<jcode_protocol::AccountUsageSnapshot>,
     #[serde(default)]
     pub context_policy: Option<jcode_session_types::ContextMeter>,
+}
+
+static WRITES: Batch<Arc<SessionTelemetry>> = Batch::new(persist_context, keep_latest);
+
+pub(crate) fn flush_pending() {
+    WRITES.flush();
+}
+
+fn persist_context(path: &Path, snapshot: &Arc<SessionTelemetry>) -> anyhow::Result<()> {
+    if let Some(mut previous) = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<SessionTelemetry>(&bytes).ok())
+    {
+        // Match identical measurements without manufacturing a write solely
+        // for the timestamp. Still refresh age-based quota previews once a minute.
+        let elapsed = snapshot.measured_at - previous.measured_at;
+        if elapsed >= chrono::TimeDelta::zero() && elapsed < chrono::TimeDelta::minutes(1) {
+            previous.measured_at = snapshot.measured_at;
+            if &previous == snapshot.as_ref() {
+                return Ok(());
+            }
+        }
+    }
+    crate::storage::write_json_cache(path, snapshot.as_ref())
 }
 
 fn path(session_id: &str) -> Option<std::path::PathBuf> {
@@ -105,7 +132,7 @@ pub fn save_context(
         context_policy,
     };
     // Best-effort UI metadata must never fail a provider turn.
-    if let Err(error) = crate::storage::write_json_fast(&path, &snapshot) {
+    if let Err(error) = WRITES.submit(path, Arc::new(snapshot)) {
         crate::logging::warn(&format!("Could not save session telemetry: {error:#}"));
     }
 }
@@ -115,7 +142,16 @@ pub fn load_context(session: &Session) -> Option<SessionTelemetry> {
 }
 
 pub fn read_context(session_id: &str) -> Option<SessionTelemetry> {
-    let bytes = match std::fs::read(path(session_id)?) {
+    let path = path(session_id)?;
+    WRITES.inspect(&path, |pending| {
+        pending
+            .map(|value| value.as_ref().clone())
+            .or_else(|| read_persisted_context(&path, session_id))
+    })
+}
+
+fn read_persisted_context(path: &Path, session_id: &str) -> Option<SessionTelemetry> {
+    let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
         Err(error) => {
@@ -147,22 +183,48 @@ impl SessionTelemetry {
 mod tests {
     use super::*;
 
+    struct HomeGuard(Option<std::ffi::OsString>);
+
+    impl HomeGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let old = Self(std::env::var_os("JCODE_HOME"));
+            crate::env::set_var("JCODE_HOME", path);
+            old
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            if let Some(home) = &self.0 {
+                crate::env::set_var("JCODE_HOME", home);
+            } else {
+                crate::env::remove_var("JCODE_HOME");
+            }
+        }
+    }
+
+    #[test]
+    fn write_amp_identical_observations_keep_existing_telemetry() {
+        let _lock = crate::storage::lock_test_env();
+        let directory = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(directory.path());
+        let session = Session::create_with_id("telemetry-write-amp".into(), None, None);
+        let path = path(&session.id).unwrap();
+        let observe = || save_context(&session, 1234, Some(200_000), "OpenAI", None, None, None);
+        observe();
+        let first = std::fs::read(&path).unwrap();
+        for _ in 0..20 {
+            observe();
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), first);
+        assert!(!path.with_extension("bak").exists());
+    }
+
     #[test]
     fn durable_measurement_roundtrips_and_rejects_changed_identity() {
         let _lock = crate::storage::lock_test_env();
-        struct HomeGuard(Option<std::ffi::OsString>);
-        impl Drop for HomeGuard {
-            fn drop(&mut self) {
-                if let Some(home) = &self.0 {
-                    crate::env::set_var("JCODE_HOME", home);
-                } else {
-                    crate::env::remove_var("JCODE_HOME");
-                }
-            }
-        }
-        let _home = HomeGuard(std::env::var_os("JCODE_HOME"));
         let directory = tempfile::tempdir().unwrap();
-        crate::env::set_var("JCODE_HOME", directory.path());
+        let _home = HomeGuard::set(directory.path());
         let mut session = Session::create_with_id("telemetry-test".into(), None, None);
         session.model = Some("future-model".into());
         session.provider_key = Some("openai".into());

@@ -24,6 +24,19 @@ pub(crate) async fn drain_session_saves_before_exit() {
     if !drained {
         crate::logging::warn("Shutdown: a session save was still running after 5s; exiting anyway");
     }
+    flush_deferred_persistence().await;
+}
+
+pub(super) async fn flush_deferred_persistence() {
+    let flush = tokio::task::spawn_blocking(crate::persistence_batch::finish_daemon);
+    if tokio::time::timeout(Duration::from_secs(5), flush)
+        .await
+        .is_err()
+    {
+        crate::logging::warn(
+            "Shutdown: deferred persistence did not flush after 5s; exiting anyway",
+        );
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -293,6 +306,7 @@ async fn shutdown_temporary_server(
     // Same for the build-hash sidecar the registry publisher writes next to
     // the socket: an ephemeral server must leave nothing behind.
     let _ = std::fs::remove_file(format!("{}.hash", socket_path.display()));
+    flush_deferred_persistence().await;
     std::process::exit(TEMP_SERVER_EXIT_CODE);
 }
 

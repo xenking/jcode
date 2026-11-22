@@ -25,6 +25,7 @@
 
 #[path = "provider_activity_oauth.rs"]
 mod oauth_usage;
+pub(crate) use oauth_usage::flush_oauth_usage;
 pub use oauth_usage::{
     anthropic_oauth_usage_summary, openai_oauth_usage_summary, record_anthropic_oauth_usage,
     record_openai_oauth_usage,

@@ -469,6 +469,19 @@ pub fn describe_miss(reason: MissReason, ctx: &MissContext<'_>) -> String {
     }
 }
 
+use crate::persistence_batch::{Batch, keep_latest};
+use std::{path::Path, sync::Arc};
+
+static CHECKPOINTS: Batch<Arc<Baseline>> = Batch::new(persist_checkpoint, keep_latest);
+
+pub(crate) fn flush_checkpoints() {
+    CHECKPOINTS.flush();
+}
+
+fn persist_checkpoint(path: &Path, baseline: &Arc<Baseline>) -> anyhow::Result<()> {
+    crate::storage::write_json_secret_cache(path, baseline.as_ref())
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct Baseline {
     route: RequestRoute,
@@ -501,7 +514,8 @@ struct Pending {
 /// intentionally replaced (compaction, rewind, clear).
 #[derive(Debug, Clone, Default)]
 pub struct KvCacheMonitor {
-    baseline: Option<Baseline>,
+    baseline: Option<Arc<Baseline>>,
+    checkpoint_dirty: bool,
     pending: Option<Pending>,
 }
 
@@ -512,22 +526,34 @@ impl KvCacheMonitor {
 
     pub fn reset(&mut self) {
         self.baseline = None;
+        self.checkpoint_dirty = false;
         self.pending = None;
     }
 
     /// Read only on session restoration. Within a process, intentional resets
     /// must not bring an old baseline back on the next request.
     pub fn restore_checkpoint(&mut self, session_id: &str) {
-        self.baseline = baseline_path(session_id)
-            .ok()
-            .and_then(|path| crate::storage::read_json::<Baseline>(&path).ok());
+        self.baseline = baseline_path(session_id).ok().and_then(|path| {
+            CHECKPOINTS.inspect(&path, |pending| {
+                pending.or_else(|| {
+                    let file = std::fs::File::open(&path).ok()?;
+                    serde_json::from_reader(std::io::BufReader::new(file))
+                        .ok()
+                        .map(Arc::new)
+                })
+            })
+        });
+        self.checkpoint_dirty = false;
     }
 
-    pub fn save_checkpoint(&self, session_id: &str) -> anyhow::Result<()> {
-        if let Some(baseline) = &self.baseline {
+    pub fn save_checkpoint(&mut self, session_id: &str) -> anyhow::Result<()> {
+        if self.checkpoint_dirty
+            && let Some(baseline) = &self.baseline
+        {
             let path = baseline_path(session_id)?;
             crate::storage::assert_not_real_home(&path);
-            crate::storage::write_json_secret(&path, baseline)?;
+            CHECKPOINTS.submit(path, Arc::clone(baseline))?;
+            self.checkpoint_dirty = false;
         }
         Ok(())
     }
@@ -611,7 +637,7 @@ impl KvCacheMonitor {
             .as_ref()
             .and_then(|baseline| classify(baseline, &pending, prefix_tokens, read_tokens));
         if reusable_cache_tokens > 0 {
-            self.baseline = Some(Baseline {
+            self.baseline = Some(Arc::new(Baseline {
                 route: pending.route,
                 signature: pending.signature,
                 canonical_input: pending.canonical_input,
@@ -620,7 +646,8 @@ impl KvCacheMonitor {
                 completed_at: SystemTime::now(),
                 completed_in_process: Some(Instant::now()),
                 utc_day: pending.utc_day,
-            });
+            }));
+            self.checkpoint_dirty = true;
         }
         miss
     }
@@ -961,6 +988,28 @@ mod tests {
     }
 
     include!("kv_cache_monitor_tests.rs");
+
+    #[test]
+    fn write_amp_kv_checkpoint_cannot_replace_session_backup() -> anyhow::Result<()> {
+        let home = tempfile::tempdir()?;
+        let snapshot = home.path().join("session_test.json");
+        crate::storage::write_json_fast(&snapshot, &"original transcript")?;
+        crate::storage::write_json_fast(&snapshot, &"current transcript")?;
+        let backup = snapshot.with_extension("bak");
+        let original = std::fs::read(&backup)?;
+        let checkpoint = snapshot.with_extension("kv-cache");
+        let mut monitor = KvCacheMonitor::new();
+        for cached in [4096, 8192] {
+            monitor.begin_request(route(), sig(&[1, 2]));
+            monitor.finish_request(cached, Some(cached));
+            persist_checkpoint(&checkpoint, monitor.baseline.as_ref().unwrap())?;
+        }
+        let saved = std::fs::File::open(&checkpoint)?;
+        let baseline: Baseline = serde_json::from_reader(saved)?;
+        assert_eq!(baseline.reusable_cache_tokens, 8192);
+        assert_eq!(std::fs::read(backup)?, original);
+        Ok(())
+    }
 
     #[test]
     fn canonical_options_and_response_chain_distinguish_partial_read() {

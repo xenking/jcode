@@ -541,18 +541,35 @@ pub fn upsert_env_file_value(path: &Path, env_key: &str, value: Option<&str>) ->
 }
 
 pub fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
-    write_json_inner(path, value, true, false)
+    write_json_inner(path, value, true, false, true)
 }
 
 pub fn write_json_secret<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
-    write_json_inner(path, value, true, true)
+    write_json_inner(path, value, true, true, true)
+}
+
+/// Durable secret JSON sidecar with a backup named by appending .bak to the
+/// complete filename, so sibling files cannot share a backup.
+pub fn write_json_secret_sidecar<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
+    let backup = path.with_added_extension("bak");
+    write_json_with_backup(path, value, true, true, Some(&backup))
 }
 
 /// Fast JSON write: atomic rename but no fsync. Good for frequent saves where
 /// durability on power loss is not critical (e.g., session saves during tool execution).
 /// Data is still safe against process crashes (atomic rename protects against partial writes).
 pub fn write_json_fast<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
-    write_json_inner(path, value, false, false)
+    write_json_inner(path, value, false, false, true)
+}
+
+/// Atomically replace regenerable JSON without syncing or keeping a backup.
+pub fn write_json_cache<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
+    write_json_inner(path, value, false, false, false)
+}
+
+/// Like write_json_cache, but protect account-scoped data with owner-only permissions.
+pub fn write_json_secret_cache<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
+    write_json_inner(path, value, false, true, false)
 }
 
 /// Atomically write raw bytes to `path` (temp file + rename), fsync'd for
@@ -567,18 +584,31 @@ fn write_json_inner<T: Serialize + ?Sized>(
     value: &T,
     durable: bool,
     secret: bool,
+    keep_backup: bool,
+) -> Result<()> {
+    let backup = keep_backup.then(|| path.with_extension("bak"));
+    write_json_with_backup(path, value, durable, secret, backup.as_deref())
+}
+
+fn write_json_with_backup<T: Serialize + ?Sized>(
+    path: &Path,
+    value: &T,
+    durable: bool,
+    secret: bool,
+    backup: Option<&Path>,
 ) -> Result<()> {
     // Serialize directly into the atomic temporary file. Materializing the
     // entire JSON document first duplicates large transcripts and picker indexes
     // on every save and leaves those transient allocations in allocator arenas.
-    write_atomic_inner(path, durable, secret, |writer| {
+    write_atomic_inner(path, durable, secret, backup, |writer| {
         serde_json::to_writer(writer, value)?;
         Ok(())
     })
 }
 
 fn write_bytes_inner(path: &Path, bytes: &[u8], durable: bool, secret: bool) -> Result<()> {
-    write_atomic_inner(path, durable, secret, |writer| {
+    let backup = path.with_extension("bak");
+    write_atomic_inner(path, durable, secret, Some(&backup), |writer| {
         writer.write_all(bytes)?;
         Ok(())
     })
@@ -588,6 +618,7 @@ fn write_atomic_inner(
     path: &Path,
     durable: bool,
     secret: bool,
+    backup: Option<&Path>,
     write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> Result<()>,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -620,8 +651,7 @@ fn write_atomic_inner(
             file.sync_all()?;
         }
 
-        if path.exists() {
-            let bak_path = path.with_extension("bak");
+        if let Some(bak_path) = backup.filter(|_| path.exists()) {
             if secret {
                 jcode_core::fs::set_permissions_owner_only(path)?;
             }
@@ -635,19 +665,19 @@ fn write_atomic_inner(
             // self-dev build requests "disappearing" from the queue.)
             #[cfg(unix)]
             {
-                let _ = std::fs::remove_file(&bak_path);
-                let _ = std::fs::hard_link(path, &bak_path);
+                let _ = std::fs::remove_file(bak_path);
+                let _ = std::fs::hard_link(path, bak_path);
             }
             // On Windows, rename fails when the destination exists, so the
             // primary must be moved away first; the brief missing window is
             // unavoidable without platform-specific replace APIs.
             #[cfg(not(unix))]
             {
-                let _ = std::fs::remove_file(&bak_path);
-                let _ = std::fs::rename(path, &bak_path);
+                let _ = std::fs::remove_file(bak_path);
+                let _ = std::fs::rename(path, bak_path);
             }
             if secret && bak_path.exists() {
-                jcode_core::fs::set_permissions_owner_only(&bak_path)?;
+                jcode_core::fs::set_permissions_owner_only(bak_path)?;
             }
         }
 
@@ -688,7 +718,16 @@ pub enum StorageRecoveryEvent<'a> {
 }
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    read_json_with_recovery_handler(path, |event| match event {
+    read_json_with_logged_recovery(path, &path.with_extension("bak"))
+}
+
+/// Read a sidecar written by write_json_secret_sidecar, using only its own backup.
+pub fn read_json_sidecar<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    read_json_with_logged_recovery(path, &path.with_added_extension("bak"))
+}
+
+fn read_json_with_logged_recovery<T: DeserializeOwned>(path: &Path, backup: &Path) -> Result<T> {
+    read_json_at(path, backup, |event| match event {
         StorageRecoveryEvent::CorruptPrimary { path, error } => {
             eprintln!(
                 "Corrupt JSON at {}, trying backup: {}",
@@ -702,7 +741,15 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     })
 }
 
-pub fn read_json_with_recovery_handler<T, F>(path: &Path, mut on_recovery: F) -> Result<T>
+pub fn read_json_with_recovery_handler<T, F>(path: &Path, on_recovery: F) -> Result<T>
+where
+    T: DeserializeOwned,
+    F: FnMut(StorageRecoveryEvent<'_>),
+{
+    read_json_at(path, &path.with_extension("bak"), on_recovery)
+}
+
+fn read_json_at<T, F>(path: &Path, backup: &Path, mut on_recovery: F) -> Result<T>
 where
     T: DeserializeOwned,
     F: FnMut(StorageRecoveryEvent<'_>),
@@ -711,16 +758,15 @@ where
     match serde_json::from_str(&data) {
         Ok(val) => Ok(val),
         Err(e) => {
-            let bak_path = path.with_extension("bak");
-            if bak_path.exists() {
+            if backup.exists() {
                 on_recovery(StorageRecoveryEvent::CorruptPrimary { path, error: &e });
-                let bak_data = std::fs::read_to_string(&bak_path)?;
+                let bak_data = std::fs::read_to_string(backup)?;
                 match serde_json::from_str(&bak_data) {
                     Ok(val) => {
                         on_recovery(StorageRecoveryEvent::RecoveredFromBackup {
-                            backup_path: &bak_path,
+                            backup_path: backup,
                         });
-                        let _ = std::fs::copy(&bak_path, path);
+                        let _ = std::fs::copy(backup, path);
                         Ok(val)
                     }
                     Err(bak_err) => Err(anyhow::anyhow!(

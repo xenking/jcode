@@ -841,6 +841,12 @@ impl Session {
             current_meta.updated_at = previous.updated_at;
             if &current_meta == previous {
                 self.updated_at = previous.updated_at;
+                if let Err(error) = crate::recent_session_index::ensure_resume_entry(self) {
+                    crate::logging::debug(&format!(
+                        "Could not repair recent-session metadata for {}: {error}",
+                        self.id
+                    ));
+                }
                 return Ok(());
             }
         }
