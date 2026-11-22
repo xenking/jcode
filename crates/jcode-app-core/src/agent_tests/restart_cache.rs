@@ -441,7 +441,9 @@ async fn restart_cache_monitor_attributes_idle_manual_compaction() {
         .note_canonical_input(after.clone());
     let miss = restored.finish_kv_cache_monitor_request(0, Some(1_000), Some(19_000));
     assert!(
-        matches!(&miss, Some(ServerEvent::KvCacheMiss { reason, harness_caused: false, .. }) if reason == "compaction"),
+        matches!(&miss, Some(ServerEvent::KvCacheMiss { reason, harness_caused: false, documented_cause, message, .. })
+            if reason == "compaction" && documented_cause.as_deref() == Some("session_compaction")
+                && message.starts_with("KV cache refresh [session_compaction]")),
         "{miss:?}"
     );
 
@@ -491,6 +493,23 @@ async fn restart_cache_monitor_reports_first_changed_canonical_item() {
             .finish_kv_cache_monitor_request(0, Some(10_000), Some(10_000))
             .is_none()
     );
+    let method = crate::session::CACHE_COLD_DIVIDER_METHOD;
+    agent.session.record_compaction_event(
+        &crate::compaction::CompactionEvent {
+            trigger: "cache_expiry".into(),
+            method: Some(method.into()),
+            pre_tokens: Some(20_000),
+            post_tokens: Some(20_000),
+            tokens_saved: Some(0),
+            duration_ms: None,
+            messages_dropped: None,
+            messages_compacted: None,
+            summary_chars: None,
+            active_messages: None,
+        },
+        Some(method),
+        None,
+    );
     agent.session.save().unwrap();
     let id = agent.session.id.clone();
     drop(agent);
@@ -503,7 +522,7 @@ async fn restart_cache_monitor_reports_first_changed_canonical_item() {
         .note_canonical_input(canonical(21));
     let miss = restored.finish_kv_cache_monitor_request(0, Some(1_000), Some(19_000));
     assert!(
-        matches!(&miss, Some(ServerEvent::KvCacheMiss { reason, message, .. })
+        matches!(&miss, Some(ServerEvent::KvCacheMiss { reason, harness_caused: true, message, .. })
         if reason == "prefix_changed" && message.contains("canonical input item index 1")),
         "{miss:?}"
     );

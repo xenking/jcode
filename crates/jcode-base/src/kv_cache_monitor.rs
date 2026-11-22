@@ -314,7 +314,7 @@ impl MissReason {
             Self::ProviderCachePartial => {
                 "provider reported partial cache on an unchanged continuation"
             }
-            Self::Compaction => "provider automatically compacted the context",
+            Self::Compaction => "context was compacted",
             Self::ZeroRead => "provider reported no cache read",
             Self::LowRead => "provider read only part of the cache",
         }
@@ -359,8 +359,10 @@ impl KvCacheMiss {
     /// One-line summary suitable for any client to display.
     pub fn message(&self) -> String {
         if self.reason == MissReason::Compaction {
+            let cause = self.documented_cause.as_deref().unwrap_or(self.reason.id());
             return format!(
-                "KV cache refresh [provider_auto_compaction]: provider compacted the context; rebuilding cache is expected (previous reusable prefix ~{} tokens, cache read {}).",
+                "KV cache refresh [{cause}]: {}; rebuilding cache is expected (previous reusable prefix ~{} tokens, cache read {}).",
+                self.reason.detail(),
                 format_token_count(self.expected_tokens),
                 format_token_count(self.read_tokens)
             );
@@ -550,7 +552,7 @@ pub fn describe_miss(reason: MissReason, ctx: &MissContext<'_>) -> String {
             }
             None => "an earlier message was modified".to_string(),
         },
-        MissReason::Compaction => "provider automatically compacted the context".to_string(),
+        MissReason::Compaction => reason.detail().to_string(),
         MissReason::RequestOptionsChanged => {
             "effective provider request settings outside input, instructions and tools changed"
                 .to_string()
@@ -623,6 +625,7 @@ struct Pending {
 #[derive(Debug, Clone, Default)]
 pub struct KvCacheMonitor {
     baseline: Option<Arc<Baseline>>,
+    checkpoint_predates_compaction: bool,
     checkpoint_dirty: bool,
     pending: Option<Pending>,
     tail: TailGapModel,
@@ -635,6 +638,7 @@ impl KvCacheMonitor {
 
     pub fn reset(&mut self) {
         self.baseline = None;
+        self.checkpoint_predates_compaction = false;
         self.checkpoint_dirty = false;
         self.pending = None;
         self.tail.reset();
@@ -642,8 +646,10 @@ impl KvCacheMonitor {
 
     /// Read only on session restoration. Within a process, intentional resets
     /// must not bring an old baseline back on the next request.
-    pub fn restore_checkpoint(&mut self, session_id: &str) {
-        self.baseline = baseline_path(session_id).ok().and_then(|path| {
+    pub fn restore_checkpoint(&mut self, session: &crate::session::Session) {
+        use crate::session::{CACHE_COLD_DIVIDER_METHOD, StoredReplayEventKind};
+
+        self.baseline = baseline_path(&session.id).ok().and_then(|path| {
             CHECKPOINTS.inspect(&path, |pending| {
                 pending.or_else(|| {
                     let file = std::fs::File::open(&path).ok()?;
@@ -651,6 +657,15 @@ impl KvCacheMonitor {
                         .ok()
                         .map(Arc::new)
                 })
+            })
+        });
+        // The replay record is persisted with the rewritten transcript, even
+        // when no request has since replaced the old cache checkpoint.
+        self.checkpoint_predates_compaction = self.baseline.as_ref().is_some_and(|baseline| {
+            session.replay_events.iter().rev().any(|event| {
+                matches!(&event.kind, StoredReplayEventKind::Compaction { method, .. }
+                    if method.as_deref() != Some(CACHE_COLD_DIVIDER_METHOD))
+                    && SystemTime::from(event.timestamp) > baseline.completed_at
             })
         });
         self.checkpoint_dirty = false;
@@ -743,7 +758,14 @@ impl KvCacheMonitor {
     ) -> Option<KvCacheMiss> {
         let pending = self.pending.take()?;
         let miss = self.baseline.as_ref().and_then(|baseline| {
-            classify(baseline, &pending, prefix_tokens, read_tokens, &self.tail)
+            classify(
+                baseline,
+                &pending,
+                prefix_tokens,
+                read_tokens,
+                &self.tail,
+                self.checkpoint_predates_compaction,
+            )
         });
         if let (Some(baseline), Some(read)) = (self.baseline.as_ref(), read_tokens) {
             self.tail.observe(
@@ -764,6 +786,7 @@ impl KvCacheMonitor {
                 completed_in_process: Some(Instant::now()),
                 utc_day: pending.utc_day,
             }));
+            self.checkpoint_predates_compaction = false;
             self.checkpoint_dirty = true;
         }
         miss
@@ -843,6 +866,7 @@ fn classify(
     prefix_tokens: Option<u64>,
     read_tokens: Option<u64>,
     tail: &TailGapModel,
+    checkpoint_predates_compaction: bool,
 ) -> Option<KvCacheMiss> {
     let read_tokens = read_tokens?;
     if baseline.reusable_cache_tokens == 0 {
@@ -856,7 +880,13 @@ fn classify(
     };
     let missed = expected.saturating_sub(read_tokens);
     let canonical_change = canonical_change(baseline, pending);
-    let reason = reason(baseline, pending, read_tokens, canonical_change)?;
+    let reason = reason(
+        baseline,
+        pending,
+        read_tokens,
+        canonical_change,
+        checkpoint_predates_compaction,
+    )?;
     let low_read = matches!(
         reason,
         MissReason::LowRead | MissReason::ZeroRead | MissReason::ProviderCachePartial
@@ -885,7 +915,12 @@ fn classify(
         return None;
     }
     let documented_cause = if reason == MissReason::Compaction {
-        Some("provider_auto_compaction".to_string())
+        let cause = if pending.provider_compaction {
+            "provider_auto_compaction"
+        } else {
+            "session_compaction"
+        };
+        Some(cause.to_string())
     } else if reason == MissReason::DailyRollover {
         Some("provider_daily_rollover".to_string())
     } else {
@@ -992,6 +1027,7 @@ fn reason(
     pending: &Pending,
     read: u64,
     canonical_change: Option<CanonicalChange>,
+    checkpoint_predates_compaction: bool,
 ) -> Option<MissReason> {
     let (old, new) = (&baseline.route, &pending.route);
     if old.provider != new.provider {
@@ -1044,7 +1080,11 @@ fn reason(
     if (allow_projected_reason && !cur.extends(prev))
         || matches!(canonical_change, Some(CanonicalChange::Item(_)))
     {
-        return Some(MissReason::PrefixChanged);
+        return Some(if checkpoint_predates_compaction {
+            MissReason::Compaction
+        } else {
+            MissReason::PrefixChanged
+        });
     }
     let options_match = match (
         baseline.canonical_input.as_ref(),

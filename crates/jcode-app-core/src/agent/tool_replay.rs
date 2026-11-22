@@ -44,7 +44,7 @@ impl Agent {
     }
 
     pub(super) fn restore_cache_sidecars(&mut self) {
-        self.kv_cache_monitor.restore_checkpoint(&self.session.id);
+        self.kv_cache_monitor.restore_checkpoint(&self.session);
         let Some(scope) = self.tool_surface_scope() else {
             return;
         };
