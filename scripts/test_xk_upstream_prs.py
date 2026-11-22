@@ -202,6 +202,14 @@ class Workflow(unittest.TestCase):
 
     def test_sync_exact_port_reconciles_once_without_rewriting_history(self):
         landed, port, worktree = self.setup_merge(False)
+        open_fixture = self.fixtures / "jcode-open.json"
+        current_pages = open_fixture.read_bytes()
+        pages = json.loads(current_pages)
+        before_merge = json.loads((self.fixtures / "jcode-1789.json").read_bytes())
+        pages[-1].append(dict(before_merge, state="open", merged_at=None))
+        open_fixture.write_text(json.dumps(pages))
+        self.assertNotIn("[jcode#1789]", self.cli("status"))
+        open_fixture.write_bytes(current_pages)
         report = self.sync()
         self.assertIn("Ported, merged upstream (1)", report)
         self.assertIn(f"jcode#1789: kept upstream (upstream {landed})", report)
