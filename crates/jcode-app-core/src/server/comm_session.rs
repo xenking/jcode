@@ -1162,10 +1162,12 @@ pub(super) async fn handle_comm_stop(
         }
 
         let background = crate::background::global();
-        for task in background.list().await.into_iter().filter(|task| {
-            tree.contains_key(&task.session_id)
-                && task.status == crate::bus::BackgroundTaskStatus::Running
-        }) {
+        for task in background
+            .list_recent(None, 0)
+            .await
+            .into_iter()
+            .filter(|task| tree.contains_key(&task.session_id))
+        {
             background.cancel(&task.task_id).await?;
         }
 

@@ -4,47 +4,18 @@ use crate::protocol::ServerEvent;
 use jcode_background_types::{
     BackgroundTaskOutput, BackgroundTaskStatus, BackgroundTaskSummary, BackgroundTasksSnapshot,
 };
-use std::collections::HashMap;
 use std::path::Path;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio::sync::Mutex;
 
-type Catalog = HashMap<String, Vec<TaskStatusFile>>;
-// Desktop may watch many panels. Share the disk census across all of them.
-static CATALOG: Mutex<Option<(Instant, Catalog)>> = Mutex::const_new(None);
-const CENSUS_INTERVAL: Duration = Duration::from_secs(3);
+const RECENT_FINISHED_TASKS: usize = 12;
 const OUTPUT_BYTES: u64 = 16 * 1024;
 const PREVIEW_BYTES: u64 = 1024;
 
 async fn catalog(manager: &BackgroundTaskManager, session_id: &str) -> Vec<TaskStatusFile> {
-    let mut cache = CATALOG.lock().await;
-    if let Some((at, tasks)) = cache.as_ref()
-        && at.elapsed() < CENSUS_INTERVAL
-    {
-        return tasks.get(session_id).cloned().unwrap_or_default();
-    }
-    let mut grouped = Catalog::new();
-    for status in manager.list().await {
-        grouped
-            .entry(status.session_id.clone())
-            .or_default()
-            .push(status);
-    }
-    for statuses in grouped.values_mut() {
-        statuses.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-        let mut finished = 0;
-        statuses.retain(|task| {
-            if task.status == BackgroundTaskStatus::Running {
-                return true;
-            }
-            finished += 1;
-            finished <= 12
-        });
-    }
-    let result = grouped.get(session_id).cloned().unwrap_or_default();
-    *cache = Some((Instant::now(), grouped));
-    result
+    manager
+        .list_recent(Some(session_id), RECENT_FINISHED_TASKS)
+        .await
 }
 
 pub(super) async fn handle(
@@ -78,10 +49,7 @@ pub(super) async fn handle(
             return error("This session does not own a cancellable task with that id");
         };
         return match manager.cancel(&task.task_id).await {
-            Ok(true) => {
-                *CATALOG.lock().await = None;
-                ServerEvent::Done { id }
-            }
+            Ok(true) => ServerEvent::Done { id },
             Ok(false) => error("The background task is no longer cancellable"),
             Err(error_msg) => error(&error_msg.to_string()),
         };
@@ -217,6 +185,39 @@ fn last_log_line(tail: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn catalog_keeps_all_running_and_recent_finished_in_requested_session()
+    -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let manager = BackgroundTaskManager::with_output_dir(dir.path().to_owned());
+        for (i, session, state) in (0..14)
+            .map(|i| (i, "mine", BackgroundTaskStatus::Completed))
+            .chain([
+                (14, "mine", BackgroundTaskStatus::Running),
+                (15, "other", BackgroundTaskStatus::Running),
+            ])
+        {
+            let id = format!("task{i:02}");
+            std::fs::write(
+                manager.status_path_for(&id),
+                serde_json::to_vec(&serde_json::json!({
+                    "task_id": id,
+                    "tool_name": "bash",
+                    "session_id": session,
+                    "status": state,
+                    "started_at": format!("2026-11-20T01:{i:02}:00Z"),
+                }))?,
+            )?;
+        }
+        let rows = catalog(&manager, "mine").await;
+        assert_eq!(rows.len(), 13);
+        assert_eq!(rows[0].task_id, "task14");
+        assert_eq!(rows[12].task_id, "task02");
+        assert!(rows.iter().all(|row| row.session_id == "mine"));
+        assert!(manager.status("task00").await.is_some());
+        Ok(())
+    }
 
     #[tokio::test]
     async fn running_preview_reads_only_the_log_tail_and_ignores_controls() {

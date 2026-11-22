@@ -13,10 +13,7 @@ pub(super) async fn capture_runtime_memory_common_sample(
     let process =
         crate::process_memory::snapshot_with_source(format!("server:runtime-log:{source}"));
     let connected_count = *client_count.read().await;
-    // `sweep` rather than `list().len()`: listing re-reads every finished
-    // task's status file, which woke the runtime thousands of times per
-    // heartbeat on a long-lived machine.
-    let background_task_count = crate::background::global().sweep().await;
+    let background_task_count = crate::background::global().task_count().await;
     let embedder_stats = crate::embedding::stats();
     let embedding_model_available = crate::embedding::is_model_available();
 

@@ -448,19 +448,31 @@ fn wait_reason_label(reason: background::BackgroundTaskWaitReason) -> &'static s
     }
 }
 
+const RECENT_FINISHED_PER_SESSION: usize = 12;
+const RECENT_FINISHED_TOTAL: usize = 200;
+
 async fn filtered_tasks(
     manager: &background::BackgroundTaskManager,
     ctx: &ToolContext,
     params: &BgInput,
-    default_session_only: bool,
+    listing: bool,
 ) -> Vec<background::TaskStatusFile> {
-    let mut tasks = manager.list().await;
-    let session_only = params.session_only.unwrap_or(default_session_only);
+    let session = params
+        .session_only
+        .unwrap_or(!listing)
+        .then_some(ctx.session_id.as_str());
+    let (per_session, total) = if listing {
+        (RECENT_FINISHED_PER_SESSION, RECENT_FINISHED_TOTAL)
+    } else {
+        let latest = usize::from(params.latest.unwrap_or(false));
+        (latest, latest)
+    };
     let filter = parse_status_filter(params.status_filter.as_ref());
-    tasks.retain(|task| {
-        (!session_only || task.session_id == ctx.session_id) && task_matches_filter(task, &filter)
-    });
-    tasks
+    manager
+        .list_recent_matching(session, per_session, total, move |task| {
+            task_matches_filter(task, &filter)
+        })
+        .await
 }
 
 async fn resolve_task_ids(
@@ -485,7 +497,7 @@ async fn resolve_task_ids(
         return Ok(vec![task_id]);
     }
 
-    let mut tasks = filtered_tasks(manager, ctx, params, true).await;
+    let mut tasks = filtered_tasks(manager, ctx, params, false).await;
     if params.latest.unwrap_or(false) {
         return tasks
             .first()
@@ -774,13 +786,15 @@ impl Tool for BgTool {
 
         match action.as_str() {
             "list" => {
-                let tasks = filtered_tasks(manager, &ctx, &params, false).await;
+                let tasks = filtered_tasks(manager, &ctx, &params, true).await;
                 if tasks.is_empty() {
                     return Ok(ToolOutput::new("No matching background tasks found.")
                         .with_title("bg list"));
                 }
 
-                let mut output = String::from("Background Tasks:\n\n");
+                let mut output = format!(
+                    "Background Tasks (all matching running tasks and up to {RECENT_FINISHED_PER_SESSION} recent finished tasks per session, {RECENT_FINISHED_TOTAL} finished total):\n\n"
+                );
                 output.push_str(&format!(
                     "{:<12} {:<28} {:<10} {:<12} {:<10} {:<28} {}\n",
                     "TASK_ID", "NAME", "TOOL", "STATUS", "DURATION", "PROGRESS", "SESSION"
@@ -1287,6 +1301,34 @@ mod tests {
             graceful_shutdown_signal: None,
             execution_mode: crate::tool::ToolExecutionMode::Direct,
         }
+    }
+
+    #[tokio::test]
+    async fn list_applies_status_filter_before_recent_limit() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let manager = background::BackgroundTaskManager::with_output_dir(dir.path().into());
+        let ctx = test_ctx("filter-session");
+        for i in 0..15 {
+            let id = format!("task{i:02}");
+            std::fs::write(
+                manager.status_path_for(&id),
+                serde_json::to_vec(&json!({
+                    "task_id": id,
+                    "tool_name": "bash",
+                    "session_id": ctx.session_id,
+                    "status": if i == 0 { BackgroundTaskStatus::Failed } else { BackgroundTaskStatus::Completed },
+                    "started_at": format!("2026-11-20T01:{i:02}:00Z"),
+                }))?,
+            )?;
+        }
+        let mut input: BgInput =
+            serde_json::from_value(json!({"intent": "list tasks", "action": "list"}))?;
+        assert_eq!(filtered_tasks(&manager, &ctx, &input, true).await.len(), 12);
+        input.status_filter = Some(json!("failed"));
+        let rows = filtered_tasks(&manager, &ctx, &input, true).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].task_id, "task00");
+        Ok(())
     }
 
     #[tokio::test]

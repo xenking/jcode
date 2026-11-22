@@ -889,16 +889,6 @@ impl Server {
         });
         lane_dispatch::spawn_startup_scan(Duration::from_secs(5));
         let temporary_server = lifecycle::temporary_server_enabled();
-        // Every resume History asks whether the session has persisted
-        // background tasks. The first ask after a reload scans the whole task
-        // directory (~250ms) while clients are reconnecting; build the index
-        // now, off the async workers, so the storm only sees cache hits.
-        if !temporary_server {
-            std::thread::spawn(|| {
-                let _ =
-                    crate::background::global().persisted_detached_running_tasks_for_session("");
-            });
-        }
         let registry_info = self.build_registry_info();
 
         let runtime = self.runtime();
@@ -973,13 +963,34 @@ impl Server {
         // which leaves phantom entries in `bg list` and blocks `bg wait`
         // until timeout. Detached tasks are untouched (they survive reloads
         // and reconcile via their real pid).
+        let run_retention = !cfg!(test)
+            && temporary_server_policy.is_none()
+            && std::env::var_os("JCODE_TEST_SESSION").as_deref() != Some(std::ffi::OsStr::new("1"));
         tokio::spawn(async move {
-            let reconciled = crate::background::global().reconcile_orphaned_tasks().await;
+            let manager = crate::background::global();
+            let reconciled = manager.reconcile_orphaned_tasks().await;
             if reconciled > 0 {
                 crate::logging::info(&format!(
                     "Marked {} orphaned background task(s) from a previous server process as failed",
                     reconciled
                 ));
+            }
+            let period = Duration::from_secs(60);
+            let mut sweep = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut retain = tokio::time::interval(Duration::from_secs(86_400));
+            retain.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = sweep.tick() => { manager.sweep().await; }
+                    _ = retain.tick(), if run_retention => {
+                        let days = crate::config::config().server.background_task_retention_days;
+                        let expired = manager.apply_retention(days).await;
+                        if expired > 0 {
+                            crate::logging::info(&format!("Expired {expired} finished background task(s) older than {days} days"));
+                        }
+                    }
+                }
             }
         });
 

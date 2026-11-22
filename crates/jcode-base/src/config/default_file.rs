@@ -661,6 +661,9 @@ cross_provider_failover = "countdown"
 # never starts a turn or injects into a running turn.
 # Env override: JCODE_WAKE_MODE
 wake_mode = "internal"
+# Keep finished background tasks and their output for 7 days. Set to 0 to
+# disable automatic cleanup. Running tasks are never expired by this policy.
+# background_task_retention_days = 7
 
 [agents]
 # Swarm root settings and defaults for helper agents (workers, subagents, sidecars).

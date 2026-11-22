@@ -771,7 +771,7 @@ impl WakeMode {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
     /// Ownership model for autonomous wake requests.
@@ -779,6 +779,18 @@ pub struct ServerConfig {
     /// Send mobile push notifications through the Jcode API when an account
     /// key is available. `None` means enabled; set `false` to opt out.
     pub mobile_push: Option<bool>,
+    /// Days to keep finished background tasks and their output. Zero disables cleanup.
+    pub background_task_retention_days: u64,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            wake_mode: WakeMode::default(),
+            mobile_push: None,
+            background_task_retention_days: 7,
+        }
+    }
 }
 
 /// Agent Client Protocol adapter configuration.

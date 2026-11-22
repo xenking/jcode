@@ -186,10 +186,12 @@ pub(super) async fn maybe_handle_server_state_command(
     }
 
     if cmd == "background" || cmd == "background:tasks" {
-        let tasks = crate::background::global().list().await;
+        let manager = crate::background::global();
+        let tasks = manager.list_recent_matching(None, 12, 200, |_| true).await;
         return Ok(Some(
             serde_json::json!({
-                "count": tasks.len(),
+                "count": manager.task_count().await,
+                "listed_count": tasks.len(),
                 "tasks": tasks,
             })
             .to_string(),
@@ -724,7 +726,7 @@ async fn build_server_memory_payload(
     soft_interrupt_queues: &SessionInterruptQueues,
 ) -> serde_json::Value {
     let process = crate::process_memory::snapshot_with_source("server:memory");
-    let background_tasks = crate::background::global().list().await;
+    let background_task_count = crate::background::global().task_count().await;
     let embedder_stats = crate::embedding::stats();
     let (search_index_count, search_index_entries, search_index_bytes) =
         crate::tool::session_search_index::cache_memory_stats();
@@ -1014,12 +1016,6 @@ async fn build_server_memory_payload(
     }
     drop(soft_queues);
 
-    let background_task_count = background_tasks.len();
-    let background_task_json_bytes: usize = background_tasks
-        .iter()
-        .map(crate::process_memory::estimate_json_bytes)
-        .sum();
-
     serde_json::json!({
         "server": {
             "id": server_identity.id,
@@ -1100,7 +1096,6 @@ async fn build_server_memory_payload(
         },
         "background": {
             "task_count": background_task_count,
-            "tasks_json_bytes": background_task_json_bytes,
         },
         "embeddings": {
             "model_available": embedding_model_available,

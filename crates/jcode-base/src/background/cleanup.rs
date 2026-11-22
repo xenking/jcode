@@ -69,7 +69,7 @@ impl BackgroundTaskManager {
 
                 result.matched_files += 1;
                 if !dry_run {
-                    fs::remove_file(&path).await?;
+                    self.remove_indexed_file(path).await?;
                     result.removed_files += 1;
                 }
             }

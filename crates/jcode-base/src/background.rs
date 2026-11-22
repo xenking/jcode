@@ -20,6 +20,8 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant as TokioInstant, MissedTickBehavior};
 
 mod elapsed_review;
+#[path = "background/index.rs"]
+mod index;
 mod model;
 #[path = "background/stall_watchdog.rs"]
 mod stall_watchdog;
@@ -46,9 +48,10 @@ pub struct BackgroundTaskManager {
     /// fires a [`BusEvent::BackgroundTaskStalled`] after its task produces no
     /// output bytes and no progress events for the configured window.
     stall_watchdogs: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
-    /// Status files already seen in a terminal state by [`Self::sweep`]. A
-    /// finished task never runs again, so the periodic sweep skips them.
-    settled: Arc<Mutex<std::collections::HashSet<PathBuf>>>,
+    status_index: Arc<std::sync::Mutex<index::StatusIndex>>,
+    status_index_io: Arc<Mutex<()>>,
+    #[cfg(test)]
+    status_reads: Arc<std::sync::atomic::AtomicUsize>,
     output_dir: PathBuf,
 }
 
@@ -67,7 +70,10 @@ impl BackgroundTaskManager {
             tasks: Arc::new(RwLock::new(HashMap::new())),
             progress_updates: Arc::new(Mutex::new(())),
             stall_watchdogs: Arc::new(RwLock::new(HashMap::new())),
-            settled: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            status_index: Arc::default(),
+            status_index_io: Arc::default(),
+            #[cfg(test)]
+            status_reads: Arc::default(),
             output_dir,
         }
     }
@@ -141,23 +147,12 @@ impl BackgroundTaskManager {
         })
     }
 
-    async fn read_status_file(&self, path: &std::path::Path) -> Option<TaskStatusFile> {
-        let content = fs::read_to_string(path).await.ok()?;
-        serde_json::from_str(&content).ok()
-    }
-
     async fn write_status_file(&self, path: &std::path::Path, status: &TaskStatusFile) {
-        if status.detached {
-            if let Err(error) = Self::save_detached_status(path, status).await {
-                crate::logging::warn(&format!(
-                    "Could not save background task {}: {error:#}",
-                    status.task_id
-                ));
-            }
-            return;
-        }
-        if let Ok(json) = serde_json::to_string_pretty(status) {
-            let _ = fs::write(path, json).await;
+        if let Err(error) = self.save_status_file(path, status).await {
+            crate::logging::warn(&format!(
+                "Could not save background task {}: {error:#}",
+                status.task_id
+            ));
         }
     }
 
@@ -255,7 +250,7 @@ impl BackgroundTaskManager {
             terminal_event_record(final_status.clone(), exit_code, final_error.as_deref()),
         );
 
-        if let Err(error) = Self::save_detached_status(status_path, &status).await {
+        if let Err(error) = self.save_status_file(status_path, &status).await {
             crate::logging::warn(&format!(
                 "Could not save detached task {}: {error:#}",
                 status.task_id
@@ -308,19 +303,9 @@ impl BackgroundTaskManager {
     /// An owner can attach after the supervisor completed, including during
     /// exec. Re-submit only its unacknowledged completions to the normal bus.
     pub async fn replay_detached_completions_for(&self, session_id: &str) {
-        let Ok(mut entries) = fs::read_dir(&self.output_dir).await else {
-            return;
-        };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "json")
-                && let Some(status) = self.read_status_file(&path).await
-                && status.session_id == session_id
-                && status.completion_delivered == Some(false)
-            {
-                let output = self.output(&status.task_id).await.unwrap_or_default();
-                self.publish_detached_completion(&status, output);
-            }
+        for status in self.unacknowledged_completions(session_id).await {
+            let output = self.output(&status.task_id).await.unwrap_or_default();
+            self.publish_detached_completion(&status, output);
         }
     }
 
@@ -431,25 +416,20 @@ impl BackgroundTaskManager {
     /// reconciled.
     pub async fn reconcile_orphaned_tasks(&self) -> usize {
         let mut reconciled = 0;
-        let Ok(mut entries) = fs::read_dir(&self.output_dir).await else {
-            return reconciled;
-        };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                continue;
-            }
+        for id in self.indexed_running(None, false).await {
+            let path = self.status_path_for(&id);
             let Some(status) = self.read_status_file(&path).await else {
                 continue;
             };
-            if !Self::status_is_reconcilable_orphan(&status) {
-                continue;
+            if Self::status_is_reconcilable_orphan(&status)
+                && self
+                    .finalize_orphaned_status_if_needed(status, &path)
+                    .await
+                    .status
+                    != BackgroundTaskStatus::Running
+            {
+                reconciled += 1;
             }
-            if self.tasks.read().await.contains_key(&status.task_id) {
-                continue;
-            }
-            self.finalize_orphaned_status_if_needed(status, &path).await;
-            reconciled += 1;
         }
         reconciled
     }
@@ -505,7 +485,7 @@ impl BackgroundTaskManager {
             event_history: Vec::new(),
             stall_wake_seconds: None,
         };
-        Self::save_detached_status(&info.status_file, &status).await?;
+        self.save_status_file(&info.status_file, &status).await?;
         self.arm_elapsed_review(tool_name, &info.task_id);
         Self::publish_task_started_activity(
             &info.task_id,
@@ -521,34 +501,15 @@ impl BackgroundTaskManager {
     /// Unlike `list`, this does not finalize a command that finished during exec.
     pub async fn detached_tasks_for_monitoring(&self) -> Vec<TaskStatusFile> {
         let mut tasks = Vec::new();
-        let Ok(mut entries) = fs::read_dir(&self.output_dir).await else {
-            return tasks;
-        };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "json")
-                && let Some(status) = self.read_status_file(&path).await
-                && status.status == BackgroundTaskStatus::Running
+        for id in self.indexed_running(None, false).await {
+            if let Some(status) = self.read_status_file(&self.status_path_for(&id)).await
                 && status.detached
+                && status.status == BackgroundTaskStatus::Running
             {
                 tasks.push(status);
             }
         }
         tasks
-    }
-
-    async fn save_detached_status(path: &std::path::Path, status: &TaskStatusFile) -> Result<()> {
-        let temporary = path.with_extension(format!(
-            "tmp.{}.{}",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
-        fs::write(&temporary, serde_json::to_vec(status)?).await?;
-        if let Err(error) = fs::rename(&temporary, path).await {
-            let _ = fs::remove_file(&temporary).await;
-            return Err(error.into());
-        }
-        Ok(())
     }
 
     /// Spawn a background task
@@ -615,9 +576,7 @@ impl BackgroundTaskManager {
             event_history: Vec::new(),
             stall_wake_seconds: None,
         };
-        if let Ok(json) = serde_json::to_string_pretty(&initial_status) {
-            let _ = std::fs::write(&status_path, json);
-        }
+        self.write_status_file(&status_path, &initial_status).await;
         Self::publish_task_started_activity(
             &task_id,
             tool_name,
@@ -635,7 +594,7 @@ impl BackgroundTaskManager {
         let started_at = Instant::now();
         let started_at_rfc3339_for_task = started_at_rfc3339.clone();
         let (delivery_flags_tx, delivery_flags_rx) = watch::channel((notify, wake));
-        let status_updates = Arc::clone(&self.progress_updates);
+        let manager = self.clone();
         let tasks_for_prune = Arc::clone(&self.tasks);
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -658,12 +617,9 @@ impl BackgroundTaskManager {
                 Err(e) => (BackgroundTaskStatus::Failed, None, Some(e.to_string())),
             };
 
-            let status_guard = status_updates.lock().await;
+            let status_guard = manager.progress_updates.lock().await;
             let (notify_flag, wake_flag) = *delivery_flags_rx.borrow();
-            let prior_status = tokio::fs::read_to_string(&status_path_clone)
-                .await
-                .ok()
-                .and_then(|content| serde_json::from_str::<TaskStatusFile>(&content).ok());
+            let prior_status = manager.read_status_file(&status_path_clone).await;
             let prior_progress = prior_status
                 .as_ref()
                 .and_then(|status| status.progress.clone());
@@ -698,9 +654,9 @@ impl BackgroundTaskManager {
                 &mut final_status,
                 terminal_event_record(status.clone(), exit_code, error.as_deref()),
             );
-            if let Ok(json) = serde_json::to_string_pretty(&final_status) {
-                let _ = tokio::fs::write(&status_path_clone, json).await;
-            }
+            manager
+                .write_status_file(&status_path_clone, &final_status)
+                .await;
 
             // Drop this task from the live map now that its terminal status is
             // persisted. Order matters: pruning only after the status-file
@@ -840,9 +796,7 @@ impl BackgroundTaskManager {
             event_history: Vec::new(),
             stall_wake_seconds: None,
         };
-        if let Ok(json) = serde_json::to_string_pretty(&initial_status) {
-            let _ = std::fs::write(&status_path, json);
-        }
+        self.write_status_file(&status_path, &initial_status).await;
         Self::publish_task_started_activity(
             &task_id,
             tool_name,
@@ -860,7 +814,7 @@ impl BackgroundTaskManager {
         let started_at_rfc3339 = initial_status.started_at.clone();
         let display_name_owned = initial_status.display_name.clone();
         let (delivery_flags_tx, delivery_flags_rx) = watch::channel((notify, wake));
-        let status_updates = Arc::clone(&self.progress_updates);
+        let manager = self.clone();
         let tasks_for_prune = Arc::clone(&self.tasks);
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
         let wrapper_handle = tokio::spawn(runtime_activity.scope(async move {
@@ -892,12 +846,9 @@ impl BackgroundTaskManager {
                 let _ = file.write_all(output_text.as_bytes()).await;
             }
 
-            let status_guard = status_updates.lock().await;
+            let status_guard = manager.progress_updates.lock().await;
             let (notify_flag, wake_flag) = *delivery_flags_rx.borrow();
-            let prior_status = tokio::fs::read_to_string(&status_path_clone)
-                .await
-                .ok()
-                .and_then(|content| serde_json::from_str::<TaskStatusFile>(&content).ok());
+            let prior_status = manager.read_status_file(&status_path_clone).await;
             let prior_progress = prior_status
                 .as_ref()
                 .and_then(|status| status.progress.clone());
@@ -931,9 +882,9 @@ impl BackgroundTaskManager {
                 &mut final_status,
                 terminal_event_record(status.clone(), exit_code, error.as_deref()),
             );
-            if let Ok(json) = serde_json::to_string_pretty(&final_status) {
-                let _ = tokio::fs::write(&status_path_clone, json).await;
-            }
+            manager
+                .write_status_file(&status_path_clone, &final_status)
+                .await;
 
             // Prune the live-map entry only after the terminal status file is
             // persisted (and after registration below, so instant completions
@@ -999,102 +950,11 @@ impl BackgroundTaskManager {
         }
     }
 
-    /// Periodic maintenance pass: reconcile tasks that may still be running
-    /// and return the number of status files on disk.
-    ///
-    /// `list` opens, parses and reconciles every status file through tokio's
-    /// blocking pool, which costs several thread wakeups per file, and the
-    /// task directory keeps thousands of finished tasks. A once-a-minute
-    /// caller (the runtime memory heartbeat) made that the server's largest
-    /// source of idle wakeups. This lists the directory in one blocking call
-    /// and only reads files not yet seen in a terminal state, so a quiet
-    /// server reads nothing after the first pass.
-    ///
-    /// Reconciliation is kept because it is what finalizes a detached task,
-    /// and publishes its completion, when the task outlived the server that
-    /// started it and no one is waiting on it. The count is by file
-    /// extension, so an unparseable status file is included.
+    /// Discover tasks written by other processes, then reconcile only running
+    /// tasks. Terminal status bodies are not revisited by maintenance.
     pub async fn sweep(&self) -> usize {
-        let dir = self.output_dir.clone();
-        let scan = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<PathBuf>> {
-            let entries = match std::fs::read_dir(dir) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-                Err(error) => return Err(error),
-            };
-            let mut paths = Vec::new();
-            for entry in entries {
-                let path = entry?.path();
-                if path.extension().is_some_and(|e| e == "json") {
-                    paths.push(path);
-                }
-            }
-            Ok(paths)
-        })
-        .await;
-        let paths = match scan {
-            Ok(Ok(paths)) => paths,
-            Ok(Err(error)) => {
-                crate::logging::warn(&format!("Cannot scan background tasks: {error}"));
-                return 0;
-            }
-            Err(error) => {
-                crate::logging::warn(&format!("Background task scan failed: {error}"));
-                return 0;
-            }
-        };
-
-        let pending: Vec<PathBuf> = {
-            let mut settled = self.settled.lock().await;
-            // Drop entries for files that were cleaned up.
-            if settled.len() > paths.len() {
-                let present: std::collections::HashSet<&PathBuf> = paths.iter().collect();
-                settled.retain(|path| present.contains(path));
-            }
-            paths
-                .iter()
-                .filter(|path| !settled.contains(*path))
-                .cloned()
-                .collect()
-        };
-
-        for path in pending {
-            let Some(status) = self.read_status_file(&path).await else {
-                continue;
-            };
-            let status = self.finalize_detached_status_if_needed(status, &path).await;
-            let status = self.finalize_orphaned_status_if_needed(status, &path).await;
-            if status.status != BackgroundTaskStatus::Running {
-                self.settled.lock().await.insert(path);
-            }
-        }
-
-        paths.len()
-    }
-
-    /// List all tasks (both running and completed from disk)
-    pub async fn list(&self) -> Vec<TaskStatusFile> {
-        let mut results = Vec::new();
-
-        // Read all status files from disk
-        if let Ok(mut entries) = fs::read_dir(&self.output_dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.path();
-                if path.extension().map(|e| e == "json").unwrap_or(false)
-                    && let Some(status) = self.read_status_file(&path).await
-                {
-                    let reconciled = self.finalize_detached_status_if_needed(status, &path).await;
-                    let reconciled = self
-                        .finalize_orphaned_status_if_needed(reconciled, &path)
-                        .await;
-                    results.push(reconciled);
-                }
-            }
-        }
-
-        // Sort by task_id (which includes timestamp)
-        results.sort_by(|a, b| b.task_id.cmp(&a.task_id));
-        results
+        self.reconcile_indexed_running(None, true).await;
+        self.task_count().await
     }
 
     /// Get status of a specific task
@@ -1123,7 +983,9 @@ impl BackgroundTaskManager {
         let output_path = self.output_path_for(task_id);
         let output = fs::read(&output_path).await.ok()?;
         let text = String::from_utf8_lossy(&output);
-        let status = self.read_status_file(&self.status_path_for(task_id)).await;
+        let status = self
+            .read_status_summary(self.status_path_for(task_id))
+            .await;
         if status.is_some_and(|status| status.detached && status.tool_name == "bash") {
             Some(
                 text.split_inclusive('\n')
@@ -1477,9 +1339,8 @@ impl BackgroundTaskManager {
                 &mut final_status,
                 terminal_event_record(event_status, event_exit_code, event_error.as_deref()),
             );
-            if let Ok(json) = serde_json::to_string_pretty(&final_status) {
-                let _ = fs::write(&task.status_path, json).await;
-            }
+            self.write_status_file(&task.status_path, &final_status)
+                .await;
 
             Ok(true)
         } else {
@@ -1650,9 +1511,7 @@ impl BackgroundTaskManager {
 
         let mut rows: Vec<RunningBackgroundProgress> = Vec::new();
         for task in tasks.values() {
-            let status = std::fs::read_to_string(&task.status_path)
-                .ok()
-                .and_then(|content| serde_json::from_str::<TaskStatusFile>(&content).ok());
+            let status = self.running_status_snapshot(&task.task_id);
             let progress = status.as_ref().and_then(|status| status.progress.clone());
             let label = status
                 .as_ref()
@@ -1676,89 +1535,6 @@ impl BackgroundTaskManager {
             rows.iter().map(|row| row.label.clone()).collect(),
             latest,
         )
-    }
-
-    /// Best-effort synchronous lookup of detached tasks that are still running
-    /// for a specific session.
-    ///
-    /// This is primarily used during self-dev reload recovery, where the new
-    /// process needs to remind the agent that a previous `bash` command was
-    /// persisted into the background instead of being interrupted.
-    pub fn persisted_detached_running_tasks_for_session(
-        &self,
-        session_id: &str,
-    ) -> Vec<TaskStatusFile> {
-        // The task directory accumulates thousands of status files and every
-        // History bootstrap asks this question, so a reconnect storm re-read,
-        // re-parsed, and re-stat'ed all of them per client. Keep one index of
-        // running detached tasks, rebuilt only when the directory changes
-        // (its mtime moves when a status file is created, renamed, or removed;
-        // status files are replaced atomically) or after a short TTL.
-        struct Index {
-            dir_mtime: Option<std::time::SystemTime>,
-            built_at: Instant,
-            running: Vec<TaskStatusFile>,
-        }
-        static INDEX: std::sync::LazyLock<std::sync::Mutex<Option<Index>>> =
-            std::sync::LazyLock::new(Default::default);
-        // New tasks create a status file (moving the dir mtime), and tasks that
-        // finished are dropped below by the pid liveness filter, so the TTL
-        // only bounds exotic in-place edits. Keep it long enough that the index
-        // prewarmed at server start covers a whole reconnect storm.
-        const TTL: std::time::Duration = std::time::Duration::from_secs(30);
-
-        let dir_mtime = std::fs::metadata(&self.output_dir)
-            .and_then(|meta| meta.modified())
-            .ok();
-        let mut guard = INDEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let fresh = guard.as_ref().is_some_and(|index| {
-            index.dir_mtime.is_some()
-                && index.dir_mtime == dir_mtime
-                && index.built_at.elapsed() < TTL
-        });
-        if !fresh {
-            let mut running = Vec::new();
-            if let Ok(entries) = std::fs::read_dir(&self.output_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                        continue;
-                    }
-                    let Some(status) = std::fs::read_to_string(&path)
-                        .ok()
-                        .and_then(|content| serde_json::from_str::<TaskStatusFile>(&content).ok())
-                    else {
-                        continue;
-                    };
-                    if status.status == BackgroundTaskStatus::Running && status.detached {
-                        running.push(status);
-                    }
-                }
-            }
-            *guard = Some(Index {
-                dir_mtime,
-                built_at: Instant::now(),
-                running,
-            });
-        }
-        let mut matches: Vec<TaskStatusFile> = guard
-            .as_ref()
-            .map(|index| {
-                index
-                    .running
-                    .iter()
-                    .filter(|status| status.session_id == session_id)
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
-        drop(guard);
-        matches.retain(|status| status.pid.is_some_and(crate::platform::is_process_running));
-
-        matches.sort_by(|a, b| a.task_id.cmp(&b.task_id));
-        matches
     }
 }
 

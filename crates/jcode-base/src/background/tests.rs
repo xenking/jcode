@@ -4,6 +4,215 @@ use anyhow::anyhow;
 use tempfile::tempdir;
 use tokio::time::{Duration, sleep};
 
+fn write_finished_population(manager: &BackgroundTaskManager, count: usize) -> Result<()> {
+    for i in 0..count {
+        let mut status = running_status_fixture(&format!("task{i:04}"), "status-index-test");
+        status.status = BackgroundTaskStatus::Completed;
+        status.completed_at = Some("2026-11-20T01:00:00Z".into());
+        push_task_event(
+            &mut status,
+            terminal_event_record(BackgroundTaskStatus::Completed, Some(0), None),
+        );
+        std::fs::write(
+            manager.status_path_for(&status.task_id),
+            serde_json::to_vec_pretty(&status)?,
+        )?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn indexed_list_and_status_do_not_read_history_again() -> Result<()> {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().into());
+    write_finished_population(&manager, 2_000)?;
+    assert_eq!(manager.list().await.len(), 2_000);
+    let after_load = manager.status_reads.load(Relaxed);
+    for _ in 0..4 {
+        assert_eq!(manager.list().await.len(), 2_000);
+        assert_eq!(
+            manager
+                .status("task0000")
+                .await
+                .unwrap()
+                .event_history
+                .len(),
+            1
+        );
+    }
+    let reads = manager.status_reads.load(Relaxed) - after_load;
+    assert!(reads <= 1, "warm list/status read {reads} files");
+    Ok(())
+}
+
+#[tokio::test]
+async fn indexed_status_sees_external_replacements_and_progress_writes() -> Result<()> {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().into());
+    let mut status = running_status_fixture("detached", "detached-session");
+    status.detached = true;
+    write_status_fixture(&manager, &status).await;
+    assert_eq!(
+        manager.list().await[0].status,
+        BackgroundTaskStatus::Running
+    );
+    let reads = manager.status_reads.load(Relaxed);
+
+    // Same process only for the fixture: this write bypasses the manager and
+    // atomically replaces the file just as a separate process would.
+    status.status = BackgroundTaskStatus::Completed;
+    status.exit_code = Some(0);
+    status.completed_at = Some(Utc::now().to_rfc3339());
+    let path = manager.status_path_for(&status.task_id);
+    let replacement = path.with_extension("external-tmp");
+    std::fs::write(&replacement, serde_json::to_vec(&status)?)?;
+    std::fs::rename(replacement, path)?;
+
+    assert_eq!(
+        manager.list_recent(Some("detached-session"), 1).await[0].status,
+        BackgroundTaskStatus::Completed
+    );
+    assert_eq!(manager.status("detached").await.unwrap().exit_code, Some(0));
+    assert_eq!(manager.status_reads.load(Relaxed), reads + 1);
+
+    // Manager writes update the indexed value without any new status read.
+    let mut live = running_status_fixture("managed", "detached-session");
+    manager
+        .save_status_file(&manager.status_path_for("managed"), &live)
+        .await?;
+    live.exit_code = Some(12);
+    manager
+        .save_status_file(&manager.status_path_for("managed"), &live)
+        .await?;
+    assert_eq!(manager.status("managed").await.unwrap().exit_code, Some(12));
+    assert_eq!(manager.status_reads.load(Relaxed), reads + 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn recent_list_limits_finished_per_session_and_keeps_running() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().into());
+    for (id, session, started, state) in [
+        (
+            "zzold",
+            "a",
+            "2026-11-20T01:00:00Z",
+            BackgroundTaskStatus::Completed,
+        ),
+        (
+            "aanew",
+            "a",
+            "2026-11-20T01:00:00.500Z",
+            BackgroundTaskStatus::Failed,
+        ),
+        (
+            "live",
+            "a",
+            "2026-11-19T01:00:00Z",
+            BackgroundTaskStatus::Running,
+        ),
+        (
+            "other",
+            "b",
+            "2026-11-20T01:00:00Z",
+            BackgroundTaskStatus::Completed,
+        ),
+    ] {
+        let mut status = running_status_fixture(id, session);
+        status.status = state;
+        status.started_at = started.into();
+        write_status_fixture(&manager, &status).await;
+    }
+    let ids = |tasks: Vec<TaskStatusFile>| {
+        tasks
+            .into_iter()
+            .map(|task| task.task_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        ids(manager.list_recent(None, 1).await),
+        ["aanew", "other", "live"]
+    );
+    assert_eq!(
+        ids(manager.list_recent(Some("a"), 1).await),
+        ["aanew", "live"]
+    );
+    assert_eq!(ids(manager.list_recent(None, 0).await), ["live"]);
+    assert_eq!(
+        ids(manager
+            .list_recent_matching(Some("a"), 1, 1, |task| task.status
+                == BackgroundTaskStatus::Completed)
+            .await),
+        ["zzold"]
+    );
+    assert_eq!(manager.task_count().await, 4);
+    assert!(manager.status("zzold").await.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn retention_only_expires_old_terminal_task_artifacts() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().into());
+    let now = Utc::now();
+    for (id, age_days, state) in [
+        ("expired", 8, BackgroundTaskStatus::Failed),
+        ("recent", 6, BackgroundTaskStatus::Completed),
+        ("active", 30, BackgroundTaskStatus::Running),
+    ] {
+        let mut status = running_status_fixture(id, "retention");
+        status.status = state;
+        status.started_at = (now - chrono::Duration::days(age_days + 1)).to_rfc3339();
+        if status.status != BackgroundTaskStatus::Running {
+            status.completed_at = Some((now - chrono::Duration::days(age_days)).to_rfc3339());
+        }
+        write_status_fixture(&manager, &status).await;
+        let output = manager.output_path_for(id);
+        std::fs::write(output.with_extension("exit"), "receipt")?;
+        std::fs::write(output, "output")?;
+    }
+    let unrelated = tmp.path().join("unrelated.output");
+    std::fs::write(&unrelated, "no status file")?;
+    assert_eq!(manager.apply_retention(0).await, 0);
+    assert_eq!(manager.task_count().await, 3);
+    assert_eq!(manager.apply_retention(7).await, 1);
+    assert_eq!(manager.task_count().await, 2);
+    assert!(!manager.status_path_for("expired").exists());
+    assert!(!manager.output_path_for("expired").exists());
+    assert!(
+        !manager
+            .output_path_for("expired")
+            .with_extension("exit")
+            .exists()
+    );
+    assert!(manager.output_path_for("recent").is_file());
+    assert!(manager.output_path_for("active").is_file());
+    assert!(unrelated.is_file());
+    assert_eq!(manager.apply_retention(7).await, 0);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "manual 6000-file list benchmark"]
+async fn benchmark_background_list_6000() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().into());
+    write_finished_population(&manager, 6_000)?;
+    let mut samples = Vec::new();
+    for _ in 0..8 {
+        let start = Instant::now();
+        assert_eq!(manager.list().await.len(), 6_000);
+        samples.push(start.elapsed());
+    }
+    eprintln!("list 6000: cold={:?}, warm={:?}", samples[0], &samples[1..]);
+    Ok(())
+}
+
 #[tokio::test]
 async fn silent_background_task_still_publishes_started_activity() {
     let mut events = Bus::global().subscribe();
@@ -1046,7 +1255,8 @@ async fn disarm_stall_watchdog_clears_state() -> Result<()> {
 }
 
 #[tokio::test]
-async fn sweep_counts_tasks_and_skips_settled_files() -> Result<()> {
+async fn sweep_counts_tasks_and_skips_finished_status_bodies() -> Result<()> {
+    use std::sync::atomic::Ordering::Relaxed;
     let tmp = tempdir()?;
     let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
     assert_eq!(manager.sweep().await, 0);
@@ -1061,20 +1271,18 @@ async fn sweep_counts_tasks_and_skips_settled_files() -> Result<()> {
 
     assert_eq!(manager.sweep().await, manager.list().await.len());
     assert_eq!(manager.sweep().await, 1);
-    // A running task is re-examined on every pass.
-    assert!(manager.settled.lock().await.is_empty());
-
     manager.cancel(&info.task_id).await?;
+    let reads = manager.status_reads.load(Relaxed);
     assert_eq!(manager.sweep().await, 1);
     assert_eq!(
-        manager.settled.lock().await.len(),
-        1,
+        manager.status_reads.load(Relaxed),
+        reads,
         "a finished task must not be read again"
     );
 
     // Cleaned-up files leave the cache instead of growing it forever.
     std::fs::remove_file(&info.status_file)?;
     assert_eq!(manager.sweep().await, 0);
-    assert!(manager.settled.lock().await.is_empty());
+    assert_eq!(manager.task_count().await, 0);
     Ok(())
 }
