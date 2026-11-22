@@ -164,6 +164,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: python3 scripts/test_check_idle_load.py
 
+      - name: Test build admission reclaim-and-retry
+        if: ${{ !cancelled() }}
+        run: python3 scripts/test_build_admission_reclaim.py
+
       - name: Test fork CI routing policy
         if: ${{ !cancelled() && github.repository == 'xenking/jcode' }}
         run: python3 scripts/test_fork_ci.py

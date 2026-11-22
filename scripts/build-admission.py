@@ -34,6 +34,45 @@ class Blocked(Exception):
     pass
 
 
+class Short(Blocked):
+    """Free space is below the request. Reclaiming build litter may fix it."""
+
+    def __init__(self, message, free, needed):
+        super().__init__(message)
+        self.free, self.needed = free, needed
+
+
+def reclaim(short):
+    """Ask the host's build-litter collector for space once, outside the gate.
+
+    `JCODE_BUILD_RECLAIM` names the command (empty disables). Without it the
+    user-level `rust-disk-gc --guard <free GiB>` runs when installed. The
+    collector only removes regenerable, lock-free build state.
+    """
+    configured = os.environ.get("JCODE_BUILD_RECLAIM")
+    if configured == "":
+        return False
+    free_gib = short.free // GIB
+    if configured:
+        argv = [configured]
+    else:
+        default = Path.home() / ".local/bin/rust-disk-gc"
+        if not os.access(default, os.X_OK):
+            return False
+        argv = [str(default), "--guard", str(free_gib)]
+    env = {**os.environ, "JCODE_BUILD_FREE_GIB": str(free_gib),
+           "JCODE_BUILD_NEEDED_GIB": str(-(-short.needed // GIB))}
+    print(f"build admission: {free_gib} GiB free, {-(-short.needed // GIB)} GiB needed; "
+          f"reclaiming build litter with {argv[0]}", file=sys.stderr)
+    try:
+        subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, stdout=sys.stderr,
+                       timeout=int(os.environ.get("JCODE_BUILD_RECLAIM_TIMEOUT", "900")), check=False)
+    except (OSError, subprocess.SubprocessError) as error:
+        print(f"build admission: reclaim failed: {error}", file=sys.stderr)
+        return False
+    return True
+
+
 def bounded_output(argv, env=None):
     result = subprocess.run(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             stdin=subprocess.DEVNULL, timeout=10, check=False)
@@ -217,9 +256,9 @@ def reserve(state, requested, owner):
             if free < floor + reserved + amount:
                 owners = ", ".join(f"{x['owner']} (lease pid {x['pid']}, {x['claims'][pool]['amount']} B)"
                                    for x in competitors) or "none"
-                raise Blocked(f"paths={list(demand['paths'])} pool={pool} free={free} B "
-                              f"floor={floor} B request={amount} B reserved={reserved} B "
-                              f"active owners: {owners}")
+                raise Short(f"paths={list(demand['paths'])} pool={pool} free={free} B "
+                            f"floor={floor} B request={amount} B reserved={reserved} B "
+                            f"active owners: {owners}", free, floor + reserved + amount)
         lease_id = str(uuid.uuid4())
         path = state / f"lease-{lease_id}.json"
         fd = file_fd(path, os.O_RDWR | os.O_CREAT | os.O_EXCL)
@@ -303,7 +342,16 @@ def main():
         elif args.check_inherited:
             raise Blocked("no inherited build lease")
         else:
-            reserve(state, requested, args.owner)
+            try:
+                reserve(state, requested, args.owner)
+            except Short as short:
+                # Reclaim runs without the admission gate held: it can take
+                # minutes, and competing reservations must stay responsive.
+                if not reclaim(short):
+                    raise
+                policy = read_policy(state)
+                requested = demands(args.path, auxiliary, policy, args.kind, args.units)
+                reserve(state, requested, args.owner)
         if not args.check_inherited:
             execute(command)
     except (Blocked, OSError, ValueError, KeyError, IndexError, StopIteration, AttributeError, TypeError,
