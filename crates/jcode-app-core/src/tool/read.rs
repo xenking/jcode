@@ -10,6 +10,7 @@ use std::path::Path;
 
 const DEFAULT_LIMIT: usize = 5000;
 const MAX_LINE_LEN: usize = 2000;
+const MAX_TEXT_OUTPUT: usize = 256 * 1024;
 
 pub struct ReadTool;
 
@@ -47,12 +48,97 @@ struct NormalizedReadRange {
 
 impl NormalizedReadRange {
     fn next_offset(self) -> usize {
-        self.offset + self.limit
+        self.offset.saturating_add(self.limit)
     }
+}
 
-    fn next_start_line(self) -> usize {
-        self.next_offset() + 1
+struct TextWindow {
+    output: String,
+    total_lines: usize,
+    truncated_lines: usize,
+    next_line: Option<usize>,
+}
+
+fn read_text_window(
+    mut reader: impl std::io::Read,
+    range: NormalizedReadRange,
+) -> Result<TextWindow> {
+    use std::fmt::Write;
+    let mut output = String::new();
+    let mut total_lines = 0usize;
+    let mut truncated_lines = 0usize;
+    let mut next_line = None;
+    let mut prefix = Vec::with_capacity(MAX_LINE_LEN + 4);
+    let mut line_len = 0usize;
+    let mut last = 0u8;
+    let mut buffer = [0u8; 8196];
+    let mut pending = 0usize;
+    let mut finish_line = |terminated: bool, prefix: &mut Vec<u8>, line_len: usize, last: u8| {
+        let index = total_lines;
+        total_lines += 1;
+        if index >= range.offset && index < range.next_offset() {
+            let len = line_len - usize::from(terminated && last == b'\r');
+            if next_line.is_some()
+                || output.len().saturating_add(len.min(MAX_LINE_LEN) + 32) > MAX_TEXT_OUTPUT
+            {
+                next_line.get_or_insert(index);
+                prefix.clear();
+                return;
+            }
+            let shown = len.min(MAX_LINE_LEN);
+            let mut end = shown.min(prefix.len());
+            while std::str::from_utf8(&prefix[..end]).is_err() {
+                end -= 1;
+            }
+            let text = std::str::from_utf8(&prefix[..end]).expect("valid prefix");
+            if len > MAX_LINE_LEN {
+                truncated_lines += 1;
+                let _ = writeln!(output, "{:>5}\t{}...", index + 1, text);
+            } else {
+                let _ = writeln!(output, "{:>5}\t{}", index + 1, text);
+            }
+        }
+        prefix.clear();
+    };
+    loop {
+        let n = reader.read(&mut buffer[pending..])?;
+        if n == 0 {
+            if pending != 0 {
+                anyhow::bail!("stream did not contain valid UTF-8");
+            }
+            break;
+        }
+        let available = pending + n;
+        let valid = match std::str::from_utf8(&buffer[..available]) {
+            Ok(_) => available,
+            Err(err) if err.error_len().is_none() => err.valid_up_to(),
+            Err(_) => anyhow::bail!("stream did not contain valid UTF-8"),
+        };
+        for &byte in &buffer[..valid] {
+            if byte == b'\n' {
+                finish_line(true, &mut prefix, line_len, last);
+                line_len = 0;
+                last = 0;
+            } else {
+                if prefix.len() < MAX_LINE_LEN + 4 {
+                    prefix.push(byte);
+                }
+                line_len = line_len.saturating_add(1);
+                last = byte;
+            }
+        }
+        pending = available - valid;
+        buffer.copy_within(valid..available, 0);
     }
+    if line_len != 0 {
+        finish_line(false, &mut prefix, line_len, last);
+    }
+    Ok(TextWindow {
+        output,
+        total_lines,
+        truncated_lines,
+        next_line,
+    })
 }
 
 fn normalize_read_range(params: &ReadInput) -> Result<NormalizedReadRange> {
@@ -203,41 +289,18 @@ Image #{ordinal}"
             )));
         }
 
-        // Read file
-        let content = tokio::fs::read_to_string(&path).await?;
-
-        // Single-pass: count lines while building output
-        let mut output = String::with_capacity(range.limit.min(2000) * 80);
-        let mut total_lines = 0usize;
-        let mut truncated_line_count = 0usize;
-        let end_exclusive = range.offset + range.limit;
-        {
-            use std::fmt::Write;
-            for (i, line) in content.lines().enumerate() {
-                total_lines = i + 1;
-                if i < range.offset {
-                    continue;
-                }
-                if i >= end_exclusive {
-                    // Still need to count remaining lines
-                    continue;
-                }
-                let line_num = i + 1;
-                if line.len() > MAX_LINE_LEN {
-                    truncated_line_count += 1;
-                    let _ = writeln!(
-                        output,
-                        "{:>5}\t{}...",
-                        line_num,
-                        crate::util::truncate_str(line, MAX_LINE_LEN)
-                    );
-                } else {
-                    let _ = writeln!(output, "{:>5}\t{}", line_num, line);
-                }
-            }
-        }
-
-        let end = end_exclusive.min(total_lines);
+        let read_path = path.clone();
+        let window = tokio::task::spawn_blocking(move || {
+            read_text_window(std::fs::File::open(read_path)?, range)
+        })
+        .await??;
+        let TextWindow {
+            mut output,
+            total_lines,
+            truncated_lines: truncated_line_count,
+            next_line,
+        } = window;
+        let end = next_line.unwrap_or_else(|| range.next_offset().min(total_lines));
 
         // Publish file touch event for swarm coordination
         Bus::global().publish(BusEvent::FileTouch(FileTouch {
@@ -249,7 +312,7 @@ Image #{ordinal}"
             removed: 0,
             summary: Some(format!(
                 "read lines {}-{} of {}",
-                range.offset + 1,
+                range.offset.saturating_add(1),
                 end,
                 total_lines
             )),
@@ -262,7 +325,7 @@ Image #{ordinal}"
                 params.file_path,
                 ctx.session_id,
                 ctx.tool_call_id,
-                range.offset + 1,
+                range.offset.saturating_add(1),
                 end,
                 total_lines,
                 truncated_line_count
@@ -272,8 +335,8 @@ Image #{ordinal}"
         // Add metadata
         if end < total_lines {
             let continuation_hint = match range.style {
-                ReadRangeStyle::OffsetLimit => format!("offset={}", range.next_offset()),
-                ReadRangeStyle::StartEnd => format!("start_line={}", range.next_start_line()),
+                ReadRangeStyle::OffsetLimit => format!("offset={end}"),
+                ReadRangeStyle::StartEnd => format!("start_line={}", end.saturating_add(1)),
             };
             output.push_str(&format!(
                 "\n... {} more lines (use {} to continue)\n",
@@ -282,11 +345,16 @@ Image #{ordinal}"
             ));
         }
 
-        if output.is_empty() {
-            Ok(ToolOutput::new("(empty file)"))
-        } else {
-            Ok(ToolOutput::new(output))
+        if total_lines == 0 {
+            output.push_str("(empty file)");
+        } else if range.offset >= total_lines {
+            output.push_str("(requested range is beyond EOF)");
+        } else if truncated_line_count > 0 {
+            output.push_str(&format!("\n({truncated_line_count} line(s) truncated)\n"));
+        } else if range.offset == 0 && end == total_lines {
+            output.push_str("\n(Complete file)\n");
         }
+        Ok(ToolOutput::new(output))
     }
 }
 

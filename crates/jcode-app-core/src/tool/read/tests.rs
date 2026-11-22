@@ -2,6 +2,141 @@ use super::*;
 use crate::tool::{ToolContext, ToolExecutionMode};
 use serde_json::json;
 
+#[tokio::test]
+async fn read_text_reports_window_and_completeness_truthfully() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sample.txt");
+    let ctx = make_ctx(temp.path().to_path_buf());
+    let tool = ReadTool::new();
+    std::fs::write(&path, "").unwrap();
+    let read = |args| tool.execute(args, ctx.clone());
+    assert!(
+        read(json!({"file_path":"sample.txt"}))
+            .await
+            .unwrap()
+            .output
+            .contains("empty file")
+    );
+    std::fs::write(&path, "one\r\n\r\nтри").unwrap();
+    let full = read(json!({"file_path":"sample.txt"}))
+        .await
+        .unwrap()
+        .output;
+    assert!(
+        full.contains("1\tone\n") && full.contains("2\t\n") && full.contains("3\tтри\n"),
+        "{full:?}"
+    );
+    assert!(full.contains("Complete file"), "{full:?}");
+    let partial = read(json!({"file_path":"sample.txt", "start_line":2, "limit":1}))
+        .await
+        .unwrap()
+        .output;
+    assert!(
+        partial.contains("start_line=3") && !partial.contains("Complete file"),
+        "{partial:?}"
+    );
+    let tail = read(json!({"file_path":"sample.txt", "start_line":3}))
+        .await
+        .unwrap()
+        .output;
+    assert!(!tail.contains("Complete file"), "{tail:?}");
+    let beyond = read(json!({"file_path":"sample.txt", "start_line":9}))
+        .await
+        .unwrap()
+        .output;
+    assert!(
+        beyond.contains("EOF") && !beyond.contains("empty file"),
+        "{beyond:?}"
+    );
+    std::fs::write(&path, format!("{}\n", "é".repeat(100_000))).unwrap();
+    let long = read(json!({"file_path":"sample.txt"}))
+        .await
+        .unwrap()
+        .output;
+    assert!(
+        long.contains("truncated") && !long.contains("Complete file"),
+        "{long:?}"
+    );
+}
+
+#[tokio::test]
+async fn read_text_rejects_invalid_utf8_after_window() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("bad.txt"), b"one\ntwo\n\xff").unwrap();
+    assert!(
+        ReadTool::new()
+            .execute(
+                json!({"file_path":"bad.txt", "limit":1}),
+                make_ctx(temp.path().to_path_buf())
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn read_text_limits_output_and_resumes_at_first_omitted_line() {
+    let temp = tempfile::tempdir().unwrap();
+    let lines = format!("{}\n", "x".repeat(1900)).repeat(200);
+    std::fs::write(temp.path().join("many.txt"), lines).unwrap();
+    let ctx = make_ctx(temp.path().to_path_buf());
+    let output = ReadTool::new()
+        .execute(json!({"file_path":"many.txt"}), ctx.clone())
+        .await
+        .unwrap()
+        .output;
+    assert!(
+        !output.contains("Complete file") && output.len() < MAX_TEXT_OUTPUT + 200,
+        "{}",
+        output.len()
+    );
+    let next = output
+        .split("offset=")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse::<usize>()
+        .unwrap();
+    let continued = ReadTool::new()
+        .execute(
+            json!({"file_path":"many.txt", "offset":next, "limit":1}),
+            ctx,
+        )
+        .await
+        .unwrap()
+        .output;
+    assert!(
+        continued.contains(&format!("{}\t", next + 1)),
+        "{continued}"
+    );
+}
+
+#[test]
+fn read_text_stream_handles_utf8_split_and_huge_lines() {
+    struct TinyReads<'a>(&'a [u8]);
+    impl std::io::Read for TinyReads<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.0.len().min(buf.len()).min(3);
+            buf[..n].copy_from_slice(&self.0[..n]);
+            self.0 = &self.0[n..];
+            Ok(n)
+        }
+    }
+    let text = format!("{}\r\nlast", "😀".repeat(250_000));
+    let range = NormalizedReadRange {
+        offset: 0,
+        limit: 2,
+        style: ReadRangeStyle::OffsetLimit,
+    };
+    let result = read_text_window(TinyReads(text.as_bytes()), range).unwrap();
+    assert_eq!(result.total_lines, 2);
+    assert_eq!(result.truncated_lines, 1);
+    assert!(result.output.contains("2\tlast"));
+    assert!(result.output.len() < MAX_LINE_LEN + 100);
+}
+
 fn make_ctx(working_dir: std::path::PathBuf) -> ToolContext {
     ToolContext {
         session_id: "test-session".to_string(),
