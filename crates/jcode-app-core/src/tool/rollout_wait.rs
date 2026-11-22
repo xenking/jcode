@@ -29,14 +29,14 @@ impl Tool for RolloutWait {
     }
 
     fn description(&self) -> &str {
-        "Wait for an already-submitted jcode rollout by transaction ID and exact pinned SHAs. Call alone, not inside batch or codemode. This wait does not block that rollout's drain, survives daemon reload, and never starts or cancels a rollout."
+        "Wait for a submitted rollout. Call alone, never via batch or codemode."
     }
 
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "rollout_id": {"type": "string", "description": "Durable rollout transaction ID, not a prep ID"},
+                "rollout_id": {"type": "string", "description": "Transaction ID, not prep ID. Wait survives reload without blocking drain."},
                 "cli_sha": {"type": "string", "description": "The transaction's full CLI SHA"},
                 "desktop_sha": {"type": "string", "description": "The transaction's pinned Desktop SHA"}
             },
