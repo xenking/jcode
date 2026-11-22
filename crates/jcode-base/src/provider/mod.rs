@@ -607,15 +607,12 @@ impl MultiProvider {
                     bound_label
                 );
             }
-            if let Some(reason) =
-                models::provider_unavailability_detail_for_account_label(key, Some(&bound_label))
-                    .or_else(|| {
-                        account_failover::multi_account_provider_kind(active)
-                            .filter(|kind| {
-                                crate::usage::account_known_exhausted(*kind, &bound_label)
-                            })
-                            .map(|_| "OAuth usage exhausted".to_string())
-                    })
+            if let Some(reason) = models::bound_account_quota_cooldown(key, &bound_label)
+                .or_else(|| {
+                    account_failover::multi_account_provider_kind(active)
+                        .filter(|kind| crate::usage::account_known_exhausted(*kind, &bound_label))
+                        .map(|_| "OAuth usage exhausted".to_string())
+                })
                 && !self
                     .try_auto_banked_reset(active, &reason, messages, tools, mode)
                     .await?

@@ -521,6 +521,63 @@ fn bind_fixture_account(
 }
 
 #[test]
+fn bound_claude_retries_after_403_but_still_skips_exhausted_quota() {
+    with_clean_provider_test_env(|| {
+        enter_test_runtime().block_on(async {
+            use futures::StreamExt;
+
+            let label = auth::claude::upsert_account(auth::claude::AnthropicAccount {
+                label: "claude-recovery".into(),
+                access: "fake-access".into(),
+                refresh: "fake-refresh".into(),
+                expires: chrono::Utc::now().timestamp_millis() + 86_400_000,
+                email: None,
+                subscription_type: Some("max".into()),
+                scopes: vec![],
+            })
+            .unwrap();
+            let provider = test_multi_provider_with_openai();
+            provider.set_active_provider(ActiveProvider::Claude);
+            let attempts = Arc::new(Mutex::new(Vec::new()));
+            *provider.anthropic.write().unwrap() = Some(Arc::new(BoundAccountRoutingProvider {
+                attempts: attempts.clone(),
+                failures: HashMap::new(),
+                label: Mutex::new(label.clone()),
+                mode: Mutex::new(CredentialMode::OAuth),
+            }));
+
+            models::record_provider_unavailable_for_account_label(
+                "claude",
+                Some(&label),
+                "Anthropic API error (403 Forbidden): Request not allowed",
+            );
+            let mut stream = provider
+                .complete_split(&[], &[], "static", "dynamic", None)
+                .await
+                .expect("a transient 403 must not block the next request");
+            assert!(matches!(
+                stream.next().await,
+                Some(Ok(crate::message::StreamEvent::TextDelta(text))) if text == format!("served by {label}")
+            ));
+            assert!(
+                models::provider_unavailability_detail_for_account_label("claude", Some(&label))
+                    .is_none()
+            );
+
+            models::record_provider_unavailable_for_account_label(
+                "claude",
+                Some(&label),
+                "Anthropic API error (429): weekly limit reached",
+            );
+            let blocked = provider.complete(&[], &[], "system", None).await;
+            models::clear_claude_provider_unavailability_for_account_label(Some(&label));
+            assert!(blocked.is_err(), "weekly quota must still block the request");
+            assert_eq!(*attempts.lock().unwrap(), [label]);
+        });
+    });
+}
+
+#[test]
 fn pinned_complete_can_cross_pool_boundary_for_context_or_disabled_same_provider() {
     with_clean_provider_test_env(|| {
         enter_test_runtime().block_on(async {

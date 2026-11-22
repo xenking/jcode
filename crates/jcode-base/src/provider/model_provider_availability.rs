@@ -196,6 +196,19 @@ pub fn provider_unavailability_detail_for_account_label(
     Some(format_provider_unavailability_detail(entry))
 }
 
+// A bound login can prove that auth or transport recovered only by retrying.
+// Other routes still consult all cooldowns when choosing an account.
+pub(in crate::provider) fn bound_account_quota_cooldown(
+    provider: &str,
+    account_label: &str,
+) -> Option<String> {
+    let key = provider_runtime_scope_key(provider, Some(account_label));
+    let entry = runtime_provider_unavailability_for_key(&key)?;
+    (is_quota_failure(&entry.reason)
+        || jcode_provider_core::failover::is_definitive_usage_exhaustion(&entry.reason))
+    .then(|| format_provider_unavailability_detail(entry))
+}
+
 pub(super) fn format_provider_unavailability_detail(
     entry: RuntimeProviderUnavailability,
 ) -> String {
