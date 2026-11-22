@@ -20,6 +20,7 @@ from turn_activity_daemon import Connection, eventually
 
 
 A, B = "gpt-5.6-sol", "gpt-5.4"
+FIRST, SECOND = "sk-fixture-only", "sk-second-fixture-only"
 
 
 def send_frame(stream, opcode, payload):
@@ -52,10 +53,10 @@ class Responses(ThreadingHTTPServer):
         self.handshakes = 0
         self.closed = []
 
-    def respond(self, request, connection):
+    def respond(self, request, connection, token):
         with self.lock:
-            previous = next((obj for _, obj in reversed(self.wires) if obj.get("generate") is not False), None)
-            self.wires.append((connection, request))
+            previous = next((obj for _, obj, key in reversed(self.wires) if key == token and obj.get("generate") is not False), None)
+            self.wires.append((connection, request, token))
             response_id = f"resp_{len(self.wires)}"
         fields = ("model", "prompt_cache_key", "instructions", "tools", "reasoning", "service_tier")
         cached = previous is not None and all(request.get(field) == previous.get(field) for field in fields) and (
@@ -93,11 +94,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         assert self.path == "/v1/responses", self.path
-        assert self.headers["Authorization"] == "Bearer sk-fixture-only"
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        events = self.server.respond(request, None)
+        events = self.server.respond(request, None, self.token())
         body = "".join(f"data: {json.dumps(event)}\n\n" for event in events).encode()
         self.write_body("text/event-stream", body)
+
+    def token(self):
+        token = self.headers["Authorization"].removeprefix("Bearer ")
+        assert token in (FIRST, SECOND)
+        return token
 
     def do_GET(self):
         if self.path == "/v1/models":
@@ -106,7 +111,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/v1/responses" or self.headers.get("Upgrade", "").lower() != "websocket":
             self.write_body("application/json", b"{}", 404)
             return
-        assert self.headers["Authorization"] == "Bearer sk-fixture-only"
+        token = self.token()
         with self.server.lock:
             self.server.handshakes += 1
             connection = self.server.handshakes
@@ -125,7 +130,7 @@ class Handler(BaseHTTPRequestHandler):
                 if opcode == 9:
                     send_frame(self.wfile, 10, payload)
                 elif opcode == 1:
-                    for event in self.server.respond(json.loads(payload), connection):
+                    for event in self.server.respond(json.loads(payload), connection, token):
                         send_frame(self.wfile, 1, json.dumps(event).encode())
                 else:
                     assert opcode == 10, opcode
@@ -141,6 +146,10 @@ def scenario(binary, root, transport):
     jhome, runtime = root / "jcode", root / "run"
     for path in (jhome, runtime):
         path.mkdir()
+    credentials = jhome / "config/jcode/openai.env"
+    credentials.parent.mkdir(parents=True)
+    credentials.write_text(f"OPENAI_API_KEY={FIRST}\n")
+    credentials.chmod(0o600)
     path = runtime / "browse.sock"
     provider = Responses()
     thread = threading.Thread(target=provider.serve_forever, daemon=True)
@@ -152,7 +161,7 @@ def scenario(binary, root, transport):
         "XDG_RUNTIME_DIR": str(runtime), "TMPDIR": str(runtime),
         "JCODE_TEST_SESSION": "1", "JCODE_NO_TELEMETRY": "1", "JCODE_NO_AUTO_UPDATE": "1",
         "JCODE_PROVIDER": "openai-api", "JCODE_MODEL": A, "JCODE_OPENAI_MODEL": A,
-        "JCODE_OPENAI_TRANSPORT": transport, "OPENAI_API_KEY": "sk-fixture-only",
+        "JCODE_OPENAI_TRANSPORT": transport,
         "JCODE_OPENAI_API_BASE": f"http://127.0.0.1:{provider.server_port}/v1",
     }
     with (root / "daemon.log").open("w+") as log:
@@ -188,7 +197,7 @@ def scenario(binary, root, transport):
                 assert applied.get("effort") == effort and not applied.get("error"), applied
 
             def wires():
-                return [(connection, request) for connection, request in provider.wires if request.get("generate") is not False]
+                return [(connection, request, token) for connection, request, token in provider.wires if request.get("generate") is not False]
 
             call("subscribe", 1, working_dir=str(root))
             call("rename_session", 2, title="Model picker cache fixture")
@@ -196,7 +205,8 @@ def scenario(binary, root, transport):
             call("message", 12, content="Warm the fixture prefix.")
             assert len(wires()) == 1, wires()
             count, handshakes = len(provider.wires), provider.handshakes
-            connection, initial = wires()[0]
+            connection, initial, token = wires()[0]
+            assert token == FIRST
             assert initial["model"] == A and initial["prompt_cache_key"] and initial["reasoning"]["effort"] == "medium", initial
             select(A, 20, structured=False)
             select(B, 22, effort="high", structured=False)
@@ -208,7 +218,8 @@ def scenario(binary, root, transport):
             resume_events = []
             call("message", 26, observed=resume_events, content="Resume the fixture prefix.")
             assert len(wires()) == 2, wires()
-            kept_connection, resumed = wires()[1]
+            kept_connection, resumed, token = wires()[1]
+            assert token == FIRST
             assert all(initial.get(field) == resumed.get(field) for field in ("model", "reasoning", "instructions", "tools", "prompt_cache_key"))
             if transport == "websocket":
                 assert connection is not None and kept_connection is not None, "not a WebSocket run"
@@ -224,11 +235,22 @@ def scenario(binary, root, transport):
             select(B, 30)
             call("message", 32, content="Send once on the changed model.")
             assert len(wires()) == 3, wires()
-            changed_connection, changed = wires()[2]
+            changed_connection, changed, token = wires()[2]
+            assert token == FIRST
             assert changed["model"] == B and not changed.get("previous_response_id")
             if transport == "websocket":
                 assert changed_connection is not None and changed_connection != kept_connection
-            print(f"{transport}: no inference or prewarm on selection, same affinity, changed model isolated")
+            credentials.write_text(f"OPENAI_API_KEY={SECOND}\n")
+            count = len(provider.wires)
+            select(B, 34)
+            call("message", 36, content="Send once with a different fixture credential.")
+            assert len(wires()) == 4 and len(provider.wires) == count + 1, wires()
+            new_connection, new_request, token = wires()[3]
+            assert token == SECOND and new_request["model"] == B and not new_request.get("previous_response_id")
+            assert new_request["prompt_cache_key"] == changed["prompt_cache_key"]
+            if transport == "websocket":
+                assert new_connection is not None and new_connection != changed_connection
+            print(f"{transport}: zero inference or prewarm on selection, same affinity, model and credential changes isolated")
             wire.close()
         except Exception:
             log.seek(0)
