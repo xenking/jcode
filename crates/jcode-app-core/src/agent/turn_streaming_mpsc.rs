@@ -1546,6 +1546,7 @@ impl Agent {
             let mut malformed_calls: Vec<MalformedToolCallInfo> = Vec::new();
             let mut executed_valid_call = false;
             let mut tool_results_dirty = false;
+            let mut parallel_reads = super::parallel_reads::ParallelReads::default();
             for tool_index in 0..tool_count {
                 // === INJECTION POINT C (before): Check for urgent abort before each tool (except first) ===
                 if tool_index > 0 && self.has_urgent_interrupt() {
@@ -1589,6 +1590,16 @@ impl Agent {
                 let message_id = assistant_message_id
                     .clone()
                     .unwrap_or_else(|| self.session.id.clone());
+
+                if parallel_reads.is_empty() {
+                    parallel_reads = self
+                        .start_parallel_reads(
+                            &tool_calls[tool_index..],
+                            &sdk_tool_results,
+                            &message_id,
+                        )
+                        .await;
+                }
 
                 if let Some(error_msg) = tc.validation_error() {
                     malformed_calls.push(MalformedToolCallInfo {
@@ -1679,26 +1690,33 @@ impl Agent {
                 if sole_rollout_wait {
                     self.persist_session_now()?;
                 }
-                let tool_handle =
-                    crate::runtime_activity::spawn_session(&self.session.id, async move {
-                        let execution = tool_handoff::run_tool(
-                            registry_clone,
-                            tool_name_for_spawn,
-                            tool_input_for_spawn,
-                            ctx,
-                            bash_handoff_for_tool,
-                        );
-                        if sole_rollout_wait {
-                            crate::tool::rollout_wait::SOLE_CALL
-                                .scope((), execution)
-                                .await
-                        } else {
-                            execution.await
-                        }
-                    })
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("Session transfer in progress; tool not accepted")
-                    })?;
+                let (tool_handle, started) =
+                    if let Some((handle, started)) = parallel_reads.take(&tc.id) {
+                        (handle, Some(started))
+                    } else {
+                        (
+                            crate::runtime_activity::spawn_session(&self.session.id, async move {
+                                let execution = tool_handoff::run_tool(
+                                    registry_clone,
+                                    tool_name_for_spawn,
+                                    tool_input_for_spawn,
+                                    ctx,
+                                    bash_handoff_for_tool,
+                                );
+                                if sole_rollout_wait {
+                                    crate::tool::rollout_wait::SOLE_CALL
+                                        .scope((), execution)
+                                        .await
+                                } else {
+                                    execution.await
+                                }
+                            })
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("Session transfer in progress; tool not accepted")
+                            })?,
+                            None,
+                        )
+                    };
 
                 // Reset background signal before waiting
                 self.background_tool_signal.reset();
@@ -1708,7 +1726,10 @@ impl Agent {
                 let bg_signal = self.background_tool_signal.clone();
                 let shutdown_signal = self.graceful_shutdown.clone();
                 let foreground_budget = tool_handoff::foreground_budget();
-                let handoff = tool_handoff::handoff_budget(&tc.name, &tc.input, foreground_budget);
+                let handoff = tool_handoff::handoff_budget(&tc.name, &tc.input, foreground_budget)
+                    .map(|budget| {
+                        started.map_or(budget, |started| budget.saturating_sub(started.elapsed()))
+                    });
                 let allow_reload_handoff = tc.name == "bash";
                 let tool_result;
                 let mut automatic_background = false;

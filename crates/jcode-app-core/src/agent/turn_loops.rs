@@ -1105,10 +1105,21 @@ impl Agent {
             let mut executed_valid_call = false;
             let mut tool_results_dirty = false;
             let mut ambient_cycle_ended = false;
-            for tc in tool_calls {
+            let mut parallel_reads = super::parallel_reads::ParallelReads::default();
+            for (tool_index, tc) in tool_calls.iter().cloned().enumerate() {
                 let message_id = assistant_message_id
                     .clone()
                     .unwrap_or_else(|| self.session.id.clone());
+
+                if parallel_reads.is_empty() {
+                    parallel_reads = self
+                        .start_parallel_reads(
+                            &tool_calls[tool_index..],
+                            &sdk_tool_results,
+                            &message_id,
+                        )
+                        .await;
+                }
 
                 if let Some(error_msg) = tc.validation_error() {
                     malformed_calls.push(MalformedToolCallInfo {
@@ -1242,13 +1253,24 @@ impl Agent {
                     model: Some(self.provider.model()),
                 }));
 
-                let result = super::turn_streaming_mpsc::execute_with_background(
-                    self.registry.clone(),
-                    tc.name.clone(),
-                    tc.input.clone(),
-                    ctx,
-                )
-                .await;
+                let result = if let Some((handle, started)) = parallel_reads.take(&tc.id) {
+                    super::turn_streaming_mpsc::tool_handoff::wait_for_started_read(
+                        tc.name.clone(),
+                        tc.input.clone(),
+                        ctx,
+                        started,
+                        handle,
+                    )
+                    .await
+                } else {
+                    super::turn_streaming_mpsc::execute_with_background(
+                        self.registry.clone(),
+                        tc.name.clone(),
+                        tc.input.clone(),
+                        ctx,
+                    )
+                    .await
+                };
                 crate::telemetry::record_tool_call();
                 self.unlock_tools_if_needed(&tc.name);
                 let tool_elapsed = tool_start.elapsed();

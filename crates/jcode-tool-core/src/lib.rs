@@ -163,6 +163,12 @@ fn parent_tool_call_id(tool_call_id: &str) -> Option<&str> {
     Some(parent)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutionClass {
+    ParallelRead,
+    Barrier,
+}
+
 /// A tool that can be executed by the agent.
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -185,6 +191,10 @@ pub trait Tool: Send + Sync {
 
     /// JSON Schema for the input parameters.
     fn parameters_schema(&self) -> Value;
+
+    fn execution_class(&self, _input: &Value, _ctx: &ToolContext) -> ExecutionClass {
+        ExecutionClass::Barrier
+    }
 
     /// Execute the tool with the given input.
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput>;

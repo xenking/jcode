@@ -58,6 +58,8 @@ mod open;
 mod panel;
 mod patch;
 mod read;
+#[cfg(test)]
+pub(crate) use read::set_test_read_gate;
 pub mod remote_exec;
 pub(crate) mod sdk;
 pub mod selfdev;
@@ -444,6 +446,32 @@ mod registry_touched_paths;
 mod registry_lifecycle;
 
 impl Registry {
+    pub(crate) async fn parallel_read_allowed(
+        &self,
+        name: &str,
+        input: &Value,
+        ctx: &ToolContext,
+    ) -> bool {
+        let resolved = Self::resolve_tool_name_for_session(&ctx.session_id, name);
+        let hooks = &crate::config::config().hooks;
+        if sdk::custom(&ctx.session_id, resolved)
+            || remote_exec::routes(resolved)
+            || hooks
+                .pre_tool_transform
+                .as_ref()
+                .is_some_and(|v| v.iter().any(|s| !s.trim().is_empty()))
+            || ["pre_tool", "post_tool", "post_tool_feedback"]
+                .iter()
+                .any(|event| crate::hooks::hook_configured(event))
+        {
+            return false;
+        }
+        let tools = self.tools.read().await;
+        tools.get(resolved).is_some_and(|tool| {
+            tool.execution_class(input, ctx) == jcode_tool_core::ExecutionClass::ParallelRead
+        })
+    }
+
     /// A view for a *tool* sub-call (`batch`, `codemode`): same tool map, same
     /// session compaction state.
     ///
@@ -847,6 +875,25 @@ impl Registry {
 
     /// Execute a tool by name
     pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        self.execute_inner(name, input, ctx, false).await
+    }
+
+    pub(crate) async fn execute_parallel_read(
+        &self,
+        name: &str,
+        input: Value,
+        ctx: ToolContext,
+    ) -> Result<ToolOutput> {
+        self.execute_inner(name, input, ctx, true).await
+    }
+
+    async fn execute_inner(
+        &self,
+        name: &str,
+        input: Value,
+        ctx: ToolContext,
+        parallel_read: bool,
+    ) -> Result<ToolOutput> {
         let _runtime_activity =
             crate::runtime_activity::global().try_enter_session(&ctx.session_id)?;
         // Mark this call in-flight for the whole execution so the missing
@@ -931,6 +978,15 @@ impl Registry {
 
         // Drop the lock before executing
         drop(tools);
+
+        if parallel_read
+            && (is_custom
+                || tool.execution_class(&input, &ctx)
+                    != jcode_tool_core::ExecutionClass::ParallelRead
+                || !self.parallel_read_allowed(name, &input, &ctx).await)
+        {
+            anyhow::bail!("Parallel read eligibility changed before execution");
+        }
 
         let working_dir = ctx
             .working_dir

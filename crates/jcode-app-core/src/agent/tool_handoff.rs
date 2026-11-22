@@ -93,17 +93,73 @@ pub(crate) async fn execute_with_background_budget(
     ctx: ToolContext,
     budget: Duration,
 ) -> Result<crate::tool::ToolOutput> {
-    let handoff = handoff_budget(&name, &input, budget);
     let session_id = ctx.session_id.clone();
     let tool_name = name.clone();
-    let display_name = handoff_display_name(&input);
-    let mut shutdown = ctx.graceful_shutdown_signal.clone();
     let bash_handoff = BashHandoff::for_tool(&name);
     let bash_handoff_for_tool = bash_handoff.clone();
-    let mut work = crate::runtime_activity::spawn_session(&session_id, async move {
+    let shutdown = ctx.graceful_shutdown_signal.clone();
+    let handoff_input = input.clone();
+    let work = crate::runtime_activity::spawn_session(&session_id, async move {
         run_tool(registry, tool_name, input, ctx, bash_handoff_for_tool).await
     })
     .ok_or_else(|| anyhow::anyhow!("Session transfer in progress; tool not accepted"))?;
+    wait_for_started_tool(
+        name,
+        handoff_input,
+        session_id,
+        shutdown,
+        budget,
+        Duration::ZERO,
+        bash_handoff,
+        work,
+    )
+    .await
+}
+
+pub(in crate::agent) async fn wait_for_started_read(
+    name: String,
+    input: serde_json::Value,
+    ctx: ToolContext,
+    started: Instant,
+    work: tokio::task::JoinHandle<Result<crate::tool::ToolOutput>>,
+) -> Result<crate::tool::ToolOutput> {
+    struct AbortOnDrop(Option<tokio::task::AbortHandle>);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            if let Some(handle) = self.0.take() {
+                handle.abort();
+            }
+        }
+    }
+    let mut guard = AbortOnDrop(Some(work.abort_handle()));
+    let result = wait_for_started_tool(
+        name,
+        input,
+        ctx.session_id,
+        ctx.graceful_shutdown_signal,
+        foreground_budget(),
+        started.elapsed(),
+        None,
+        work,
+    )
+    .await;
+    guard.0 = None;
+    result
+}
+
+async fn wait_for_started_tool(
+    name: String,
+    input: serde_json::Value,
+    session_id: String,
+    mut shutdown: Option<InterruptSignal>,
+    budget: Duration,
+    elapsed: Duration,
+    bash_handoff: Option<BashHandoff>,
+    mut work: tokio::task::JoinHandle<Result<crate::tool::ToolOutput>>,
+) -> Result<crate::tool::ToolOutput> {
+    let handoff =
+        handoff_budget(&name, &input, budget).map(|budget| budget.saturating_sub(elapsed));
+    let display_name = handoff_display_name(&input);
     let shutdown_requested = async {
         match shutdown.as_mut() {
             Some(signal) => signal.notified().await,
@@ -150,7 +206,7 @@ pub(crate) async fn execute_with_background_budget(
     }
 }
 
-pub(super) async fn run_tool(
+pub(in crate::agent) async fn run_tool(
     registry: Registry,
     name: String,
     input: serde_json::Value,

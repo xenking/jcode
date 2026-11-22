@@ -13,6 +13,7 @@ mod interrupts;
 mod messages;
 #[cfg(test)]
 mod model_usage_tests;
+mod parallel_reads;
 mod prompting;
 pub(crate) mod provider;
 mod reload_resume;

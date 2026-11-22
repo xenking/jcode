@@ -13,6 +13,29 @@ const MAX_LINE_LEN: usize = 2000;
 const MAX_TEXT_OUTPUT: usize = 256 * 1024;
 const EXACT_LINE_COUNT_MAX_BYTES: u64 = 1024 * 1024;
 
+#[cfg(test)]
+fn test_gates() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, std::sync::Arc<tokio::sync::Barrier>>,
+> {
+    static GATES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Barrier>>>,
+    > = std::sync::OnceLock::new();
+    GATES.get_or_init(Default::default)
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_read_gate(
+    session: &str,
+    gate: Option<std::sync::Arc<tokio::sync::Barrier>>,
+) {
+    let mut gates = test_gates().lock().unwrap();
+    if let Some(gate) = gate {
+        gates.insert(session.to_string(), gate);
+    } else {
+        gates.remove(session);
+    }
+}
+
 pub struct ReadTool;
 
 impl ReadTool {
@@ -230,6 +253,47 @@ fn normalize_read_range(params: &ReadInput) -> Result<NormalizedReadRange> {
 
 #[async_trait]
 impl Tool for ReadTool {
+    fn execution_class(&self, input: &Value, ctx: &ToolContext) -> jcode_tool_core::ExecutionClass {
+        use jcode_tool_core::ExecutionClass::{Barrier, ParallelRead};
+        let Some(object) = input.as_object() else {
+            return Barrier;
+        };
+        if object.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "file_path"
+                    | "intent"
+                    | "start_line"
+                    | "end_line"
+                    | "offset"
+                    | "limit"
+                    | "accept_large_output"
+            )
+        }) {
+            return Barrier;
+        }
+        let Ok(params) = serde_json::from_value::<ReadInput>(input.clone()) else {
+            return Barrier;
+        };
+        if normalize_read_range(&params).is_err() {
+            return Barrier;
+        }
+        let Some(file_path) = object.get("file_path").and_then(Value::as_str) else {
+            return Barrier;
+        };
+        if file_path.contains("://") {
+            return Barrier;
+        }
+        let path = ctx.resolve_path(Path::new(file_path));
+        if is_image_file(&path)
+            || is_pdf_file(&path)
+            || !std::fs::metadata(&path).is_ok_and(|m| m.is_file())
+        {
+            return Barrier;
+        }
+        ParallelRead
+    }
+
     fn name(&self) -> &str {
         "read"
     }
@@ -261,6 +325,13 @@ impl Tool for ReadTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        #[cfg(test)]
+        {
+            let gate = test_gates().lock().unwrap().get(&ctx.session_id).cloned();
+            if let Some(gate) = gate {
+                gate.wait().await;
+            }
+        }
         let params: ReadInput = super::parse_tool_args(
             input,
             "await tools.read({file_path: 'Cargo.toml', start_line: 1, limit: 10})",

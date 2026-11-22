@@ -820,7 +820,7 @@ mod malformed_tool_call_recovery_tests {
     }
 
     #[tokio::test]
-    async fn native_read_write_read_keeps_request_order_in_both_turn_loops() {
+    async fn native_read_edit_read_keeps_request_order_in_both_turn_loops() {
         let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
         for streaming in [false, true] {
             let directory = tempfile::tempdir().unwrap();
@@ -831,9 +831,9 @@ mod malformed_tool_call_recovery_tests {
             for (id, name, input) in [
                 ("read-before", "read", json!({"file_path": path})),
                 (
-                    "write",
-                    "write",
-                    json!({"file_path": path, "content": "after\n"}),
+                    "edit",
+                    "edit",
+                    json!({"file_path": path, "old_string": "before", "new_string": "after"}),
                 ),
                 ("read-after", "read", json!({"file_path": path})),
             ] {
@@ -880,11 +880,69 @@ mod malformed_tool_call_recovery_tests {
                 .collect();
             assert_eq!(
                 results.iter().map(|r| r.0).collect::<Vec<_>>(),
-                ["read-before", "write", "read-after"]
+                ["read-before", "edit", "read-after"]
             );
             assert!(results.iter().all(|r| r.2 != Some(true)), "{results:?}");
             assert!(results[0].1.contains("before"), "{results:?}");
             assert!(results[2].1.contains("after"), "{results:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn native_reads_overlap_in_both_turn_loops() {
+        let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        for streaming in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("parallel.txt");
+            std::fs::write(&path, "value\n").unwrap();
+            let mut round = Vec::new();
+            for id in ["first", "second"] {
+                round.push(StreamEvent::ToolUseStart {
+                    id: id.into(),
+                    name: "read".into(),
+                });
+                round.push(StreamEvent::ToolInputDeltaFor {
+                    id: id.into(),
+                    delta: json!({"file_path": path}).to_string(),
+                });
+                round.push(StreamEvent::ToolUseEndFor { id: id.into() });
+            }
+            round.push(StreamEvent::MessageEnd {
+                stop_reason: Some("tool_use".into()),
+            });
+            let provider: Arc<dyn Provider> = Arc::new(MalformedScriptProvider {
+                rounds: Arc::new(Mutex::new(vec![round, final_text_round()])),
+                session_ids: Arc::new(Mutex::new(Vec::new())),
+            });
+            let registry = Registry::new(provider.clone()).await;
+            let mut agent = Agent::new(provider, registry);
+            agent.add_message(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "test".into(),
+                    cache_control: None,
+                }],
+            );
+            let session = agent.session.id.clone();
+            crate::tool::set_test_read_gate(&session, Some(Arc::new(tokio::sync::Barrier::new(2))));
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                run_scripted_turn(&mut agent, streaming),
+            )
+            .await;
+            crate::tool::set_test_read_gate(&session, None);
+            result.expect("reads did not overlap").unwrap();
+            let ids: Vec<_> = agent
+                .session
+                .messages
+                .iter()
+                .flat_map(|m| &m.content)
+                .filter_map(|block| match block {
+                    ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(ids, ["first", "second"]);
         }
     }
 
