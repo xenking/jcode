@@ -37,4 +37,5 @@ Record the feature ID, exact user entry point, action, resulting frame/response,
 | [Headless swarm worker restart](worker-reload.md) | `drive worker-reload`: idle DM and interrupted worker turn | exec reload, coordinator-less workers, explicit retry |
 | [Premium swarm worker approval](premium-spawn.md) | `launch --premium-spawn`, `drive premium-spawn`: owner deny and allow | synthetic Astra via loopback; Fable, saved consent, and todo lane covered by app-core tests |
 | [Provider route and auth boundaries](provider-route.md) | `drive cli --mode json` for the synthetic route | multi-route picker, forced catalog refresh, real vendor auth and token refresh |
+| [Native OpenAI compaction](provider-route.md#driving-native-openai-compaction) | `native-compaction` compares pre-fix and current native Responses requests and meters | real vendor OAuth and server-side compaction execution |
 | [Coordinated cloud migration](cloud-group-return.md) | `cloud-group-return` using two isolated Linux daemons | managed control plane, real SSH, real account credentials |

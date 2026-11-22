@@ -32,3 +32,18 @@ Preconditions: Launch and doctor passed. Only the synthetic fixture key exists i
 - `crates/jcode-tui/src/tui/app/remote/key_handling.rs` handles `/model` and explicit catalog refresh.
 - `crates/jcode-tui/src/tui/app/auth_account_commands.rs` handles account management.
 - `crates/jcode-base/src/auth` and the provider runtime crates own vendor credential behavior.
+
+## Driving native OpenAI compaction
+
+Use the standalone journey with a build from before the fix and a build from
+the current checkout. No `launch`, tmux, or vendor credentials are needed.
+
+```bash
+"$V" native-compaction --baseline "$OLD_BINARY" --binary "$BINARY" --evidence "$E"
+```
+
+The isolated `openai-api` route calls a local Responses fixture. The journey
+checks the outgoing `compact_threshold`, reads the saved meter after restart,
+reattaches without inference, and checks the live meter and next saved policy.
+It retains the requests, meter payloads, CLI replies, and cleanup receipt.
+It does not contact OpenAI OAuth or test server-side compaction execution.
