@@ -476,7 +476,10 @@ async fn fetch_awaited_member_reports(
     members: &[AwaitedMemberStatus],
 ) -> HashMap<String, String> {
     let mut reports = HashMap::new();
-    for member in members.iter().filter(|member| member.done) {
+    for member in members
+        .iter()
+        .filter(|member| member.done && member.completion_report.is_none())
+    {
         let request = Request::CommReadContext {
             id: REQUEST_ID,
             session_id: ctx.session_id.clone(),

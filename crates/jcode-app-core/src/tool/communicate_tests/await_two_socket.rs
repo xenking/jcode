@@ -116,3 +116,83 @@ async fn await_two_running_members_over_private_socket() {
     }
     server_task.abort();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn await_members_only_reads_history_for_done_workers_without_a_report() {
+    let _env_lock = crate::storage::lock_test_env();
+    let runtime_dir = tempfile::TempDir::new().unwrap();
+    let socket_path = runtime_dir.path().join("jcode.sock");
+    let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
+    let listener = tokio::net::UnixListener::bind(socket_path).unwrap();
+    let server = tokio::spawn(async move {
+        let mut history_requests = Vec::new();
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut line = String::new();
+            BufReader::new(&mut stream)
+                .read_line(&mut line)
+                .await
+                .unwrap();
+            let response = match serde_json::from_str::<Request>(&line).unwrap() {
+                Request::CommAwaitMembers { id, .. } => {
+                    let member =
+                        |session_id: &str, done, report: Option<&str>| AwaitedMemberStatus {
+                            session_id: session_id.into(),
+                            friendly_name: None,
+                            status: if done { "ready" } else { "running" }.into(),
+                            done,
+                            completion_report: report.map(str::to_owned),
+                        };
+                    ServerEvent::CommAwaitMembersResponse {
+                        id,
+                        completed: true,
+                        members: vec![
+                            member("retained", true, Some("retained report")),
+                            member("missing", true, None),
+                            member("running", false, None),
+                        ],
+                        summary: "Snapshot".into(),
+                        background_started: false,
+                    }
+                }
+                Request::CommReadContext {
+                    id, target_session, ..
+                } => {
+                    history_requests.push(target_session.clone());
+                    ServerEvent::CommContextHistory {
+                        id,
+                        session_id: target_session.clone(),
+                        messages: vec![serde_json::from_value(json!({
+                            "role": "assistant", "content": format!("history for {target_session}")
+                        })).unwrap()],
+                    }
+                }
+                Request::Ping { .. } => break history_requests,
+                other => panic!("unexpected request: {other:?}"),
+            };
+            stream
+                .write_all((serde_json::to_string(&response).unwrap() + "\n").as_bytes())
+                .await
+                .unwrap();
+        }
+    });
+
+    let result = CommunicateTool::new()
+        .execute(
+            json!({"action": "await_members"}),
+            test_ctx("owner", runtime_dir.path()),
+        )
+        .await
+        .unwrap();
+    assert!(result.output.contains("retained report"));
+    assert!(result.output.contains("history for missing"));
+    let mut stream = tokio::net::UnixStream::connect(crate::server::socket_path())
+        .await
+        .unwrap();
+    stream
+        .write_all(b"{\"type\":\"ping\",\"id\":17}\n")
+        .await
+        .unwrap();
+    assert_eq!(server.await.unwrap(), ["missing"]);
+}
