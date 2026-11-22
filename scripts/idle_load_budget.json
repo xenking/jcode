@@ -1,0 +1,21 @@
+{
+  "accepted_connections_per_minute": 55,
+  "log_bytes_per_minute": 18000,
+  "daemon_cpu_seconds_per_minute": 2,
+  "unlisted_path_rewrites_per_minute": 1,
+  "rewrites_per_minute": {
+    "safety/queue.json": 0,
+    "safety/queue.bak": 0,
+    "session-metadata-v1.sqlite3-wal": 32,
+    "openai_oauth_usage.json": 21,
+    "openai_oauth_usage.bak": 21,
+    "anthropic_usage_cache.json": 5,
+    "anthropic_usage_cache.bak": 5,
+    "sessions/*.json": 8,
+    "sessions/*.bak": 8,
+    "sessions/*.journal.jsonl": 8,
+    "sessions/*.kv-cache": 8,
+    "state/session-telemetry/*.json": 8,
+    "state/session-telemetry/*.bak": 8
+  }
+}

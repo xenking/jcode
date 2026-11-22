@@ -160,6 +160,10 @@ jobs:
           python3 scripts/test_check_catalog_fanout.py
           python3 scripts/check_catalog_fanout.py
 
+      - name: Test idle-load measurement and budget accounting
+        if: ${{ !cancelled() }}
+        run: python3 scripts/test_check_idle_load.py
+
       - name: Test fork CI routing policy
         if: ${{ !cancelled() && github.repository == 'xenking/jcode' }}
         run: python3 scripts/test_fork_ci.py
@@ -411,6 +415,14 @@ jobs:
           python3 .github/scripts/run_with_timeout.py 900 \
             "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
             --test provider_matrix --test e2e --no-run
+
+      - name: Enforce daemon idle-load budget (Linux)
+        if: runner.os == 'Linux'
+        # Fork pushes skip the release build. Cargo already built a runnable
+        # debug CLI for the integration tests (CARGO_BIN_EXE_jcode).
+        env:
+          PROFILE: ${{ github.repository == 'xenking/jcode' && github.event_name == 'push' && 'debug' || 'release' }}
+        run: python3 scripts/check_idle_load.py "target/${{ matrix.target }}/$PROFILE/jcode"
 
       - name: Run provider matrix tests
         shell: bash

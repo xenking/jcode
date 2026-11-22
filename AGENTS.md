@@ -22,6 +22,7 @@
 | Header, status and info-widget measurements use display cells and shared truncation | `python3 scripts/check_tui_chrome.py` (zero scalar-width budget) |
 | Quota bar glyphs have one owner, distinct from task-progress glyphs | `python3 scripts/check_usage_bar_owner.py` (no copied builders) |
 | Every runtime slot and compatible endpoint participates in cached and forced catalog refresh | `python3 scripts/check_catalog_fanout.py` (derived slot census and shared consumer) |
+| An idle Desktop-like client stays within daemon connection, state rewrite, log, and CPU budgets | `python3 scripts/check_idle_load.py <built-jcode>` (isolated 60-second runtime check, also run in Linux CI) |
 
 - **Commit and push as you go** - Make small, scoped commits and push them to
   the current branch's remote as meaningful work is completed, rather than
