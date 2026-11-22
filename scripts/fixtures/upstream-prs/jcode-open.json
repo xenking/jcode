@@ -1,0 +1,42 @@
+[
+  [
+    {
+      "number": 2274,
+      "title": "provider: replay signed thinking on Claude route",
+      "body": "Closes #2265\n\n### Problem\nOn the default Claude route (Anthropic OAuth or API key through `MultiProvider`), Claude's extended thinking wasn't being preserved or echoed back on subsequent turns.\n\nThis happened because:\n- `MultiProvider::name()` returns `\"Claude\"` for `Ac",
+      "state": "open",
+      "head": {
+        "sha": "01021d63c73e16b3c8f6353336c7392a4f5a56c3"
+      },
+      "updated_at": "2026-11-21T19:49:48Z",
+      "merged_at": null,
+      "merge_commit_sha": "09c96356d18e4d0a4312bf8b62ebcfdc601e717f"
+    }
+  ],
+  [
+    {
+      "number": 2273,
+      "title": "macos: detect kitty terminal for hotkey and in-app spawns",
+      "body": "Closes #1125\n\n### Problem\nOn macOS, Kitty isn't detected as a known terminal emulator. Because Kitty does not set `TERM_PROGRAM` by default (it sets `KITTY_WINDOW_ID`, `KITTY_PID`, and `TERM=xterm-kitty`), `detect_macos_terminal()` falls through to `MacTerminalKind::Unk",
+      "state": "open",
+      "head": {
+        "sha": "299a2e105dcac22dd634b84be536e7aee483c52c"
+      },
+      "updated_at": "2026-11-21T18:18:45Z",
+      "merged_at": null,
+      "merge_commit_sha": "83be0562cb85e957e1ae849b23fafcae7783064d"
+    },
+    {
+      "number": 2271,
+      "title": "fix(background): publish a silent completion when a task is cancelled",
+      "body": "Closes #2270\n\n### Problem\nCancel wrote terminal status without publishing `BackgroundTaskCompleted`, leaving the client status row stuck as Running.\n\n### Change\n- After recording cancellation, `cancel_with_grace` publishes `BackgroundTaskCompleted` with `status=Failed`,",
+      "state": "open",
+      "head": {
+        "sha": "c1b828d5550522ca2c30f1f76134dd8fe751cd98"
+      },
+      "updated_at": "2026-11-21T11:42:04Z",
+      "merged_at": null,
+      "merge_commit_sha": "76b04d9cf3916dd6824562da66c5cd2d1ccda25e"
+    }
+  ]
+]

@@ -1,0 +1,16 @@
+[
+  [
+    {
+      "number": 29,
+      "title": "feat(transcript): render reasoning in italic, matching the CLI",
+      "body": "## Render reasoning in italic, matching the CLI\n\nReasoning is currently distinguished from the answer only by a smaller, dimmer color. In long turns the two blur together, especially on themes where the dimmed color sits close to the answer text.\n\nThe CLI already render",
+      "state": "open",
+      "head": {
+        "sha": "14b74c5f5ab4214c402856884e8e27606a01f163"
+      },
+      "updated_at": "2026-11-19T21:16:27Z",
+      "merged_at": null,
+      "merge_commit_sha": "d6589d7b2056c8dc6988542e6d33f9aaeeea6faa"
+    }
+  ]
+]
