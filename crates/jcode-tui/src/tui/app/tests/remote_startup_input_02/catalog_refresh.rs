@@ -9,6 +9,7 @@ fn test_favorite_hotkey_does_not_confirm_remote_placeholder_without_matching_fav
         app.remote_available_entries = vec![model.to_string()];
         app.remote_model_options = vec![crate::provider::ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: model.to_string(),
             provider: "Some Server".to_string(),
             api_method: "remote-catalog".to_string(),
@@ -39,6 +40,7 @@ fn test_catalog_update_rebuilds_open_model_picker_with_real_routes() {
         app.remote_available_entries = vec![model.to_string()];
         app.remote_model_options = vec![crate::provider::ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: model.to_string(),
             provider: "OpenAI".to_string(),
             api_method: "remote-catalog".to_string(),
@@ -53,6 +55,7 @@ fn test_catalog_update_rebuilds_open_model_picker_with_real_routes() {
 
         app.remote_model_options = vec![crate::provider::ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: model.to_string(),
             provider: "OpenAI".to_string(),
             api_method: "openai-api".to_string(),

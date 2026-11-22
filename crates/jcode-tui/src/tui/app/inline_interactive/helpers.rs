@@ -165,6 +165,7 @@ pub(super) fn picker_route_selection(
 ) -> crate::provider::RouteSelection {
     crate::provider::RouteSelection::from_model_route(&crate::provider::ModelRoute {
         speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: model_entry_base_name(entry),
         provider: route.provider.clone(),
         api_method: route.api_method.clone(),

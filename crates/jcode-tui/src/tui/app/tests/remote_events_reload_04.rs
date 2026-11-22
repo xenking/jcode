@@ -604,6 +604,7 @@ fn test_guardrail_reroute_prefers_native_anthropic_route() {
         openai_oauth_route("gpt-5.5"),
         crate::provider::ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "claude-opus-4-8".to_string(),
             provider: "OpenRouter".to_string(),
             api_method: "openrouter".to_string(),

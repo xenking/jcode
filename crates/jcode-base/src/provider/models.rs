@@ -20,7 +20,7 @@ pub use catalog_refresh::{
 
 use anyhow::Result;
 #[cfg(test)]
-pub(crate) use catalog::parse_anthropic_model_catalog;
+pub(crate) use catalog::{parse_anthropic_model_catalog, parse_openai_model_catalog};
 pub use catalog::{
     AnthropicModelCatalog, ModelCatalogHttpStatus, OpenAIModelCatalog,
     fetch_anthropic_model_catalog, fetch_anthropic_model_catalog_oauth,
@@ -254,6 +254,7 @@ pub fn format_account_model_availability_detail(
 #[path = "models/model_catalog_state.rs"]
 mod model_catalog_state;
 pub(crate) use model_catalog_state::normalize_model_id;
+pub(crate) use model_catalog_state::openai_oauth_route_capabilities;
 pub(crate) use model_catalog_state::openai_route_context_limit_resolver;
 pub use model_catalog_state::{
     anthropic_catalog_scope_for_route, cached_anthropic_model_ids,
@@ -267,8 +268,8 @@ pub use model_catalog_state::{
     populate_account_models_for_scope, populate_anthropic_models,
     populate_anthropic_models_for_scope, populate_context_limits,
     populate_context_limits_from_config, populate_context_limits_from_config_value,
-    record_model_unavailable_for_account, record_model_unavailable_for_scope,
-    refresh_openai_model_catalog_in_background,
+    publish_openai_model_catalog_refresh, record_model_unavailable_for_account,
+    record_model_unavailable_for_scope, refresh_openai_model_catalog_in_background,
     refresh_openai_model_catalog_in_background_for_scope,
 };
 use model_catalog_state::{

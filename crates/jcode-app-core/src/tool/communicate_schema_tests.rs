@@ -386,6 +386,7 @@ fn format_swarm_model_list_renders_routes_and_default() {
     let routes = vec![
         jcode_provider_core::ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "gpt-5.5".to_string(),
             provider: "OpenAI".to_string(),
             api_method: "openai-api-key".to_string(),
@@ -396,6 +397,7 @@ fn format_swarm_model_list_renders_routes_and_default() {
         },
         jcode_provider_core::ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "claude-fable-5".to_string(),
             provider: "Anthropic".to_string(),
             api_method: "anthropic-api-key".to_string(),

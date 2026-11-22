@@ -338,6 +338,7 @@ mod tests {
         let mut full = snapshot("one");
         full.model_routes = vec![crate::provider::ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "one".into(),
             provider: "test".into(),
             api_method: "test".into(),

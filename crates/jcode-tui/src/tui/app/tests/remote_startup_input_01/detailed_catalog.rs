@@ -32,6 +32,7 @@ fn test_detailed_catalog_replaces_placeholder_routes_after_names_only_update() {
                 available_models: vec!["claude-opus-4.6".to_string()],
                 available_model_routes: vec![crate::provider::ModelRoute {
                     speed_options: Vec::new(),
+                    reasoning_efforts: None,
                     model: "claude-opus-4.6".to_string(),
                     provider: "Copilot".to_string(),
                     api_method: "copilot".to_string(),

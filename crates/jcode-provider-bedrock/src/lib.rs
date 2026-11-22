@@ -1452,6 +1452,7 @@ impl Provider for BedrockProvider {
                 }
                 ModelRoute {
                     speed_options: Vec::new(),
+                    reasoning_efforts: None,
                     model: model.clone(),
                     provider: "AWS Bedrock".to_string(),
                     api_method: "bedrock".to_string(),

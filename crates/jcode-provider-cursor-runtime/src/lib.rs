@@ -665,6 +665,7 @@ impl Provider for CursorCliProvider {
             .into_iter()
             .map(|model| jcode_provider_core::ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model,
                 provider: "Cursor".to_string(),
                 api_method: "cursor".to_string(),

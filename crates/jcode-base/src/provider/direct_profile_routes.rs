@@ -87,6 +87,7 @@ pub(super) fn direct_openai_compatible_profile_routes(
 
         routes.push(ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model,
             provider: provider.clone(),
             api_method: api_method.clone(),

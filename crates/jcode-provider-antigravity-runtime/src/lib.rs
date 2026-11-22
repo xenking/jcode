@@ -939,6 +939,7 @@ impl Provider for AntigravityProvider {
                 .into_iter()
                 .map(|model| jcode_provider_core::ModelRoute {
                     speed_options: Vec::new(),
+                    reasoning_efforts: None,
                     model: model.id.clone(),
                     provider: "Antigravity".to_string(),
                     api_method: "https".to_string(),
@@ -954,6 +955,7 @@ impl Provider for AntigravityProvider {
             .into_iter()
             .map(|model| jcode_provider_core::ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model,
                 provider: "Antigravity".to_string(),
                 api_method: "https".to_string(),

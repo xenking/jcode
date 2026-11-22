@@ -644,10 +644,10 @@ pub(super) async fn handle_set_reasoning_effort(
             // restore the old effort. The durable pending slot carries it: the
             // next request boundary or a restored agent saves it. This also
             // replaces any older unapplied choice.
-            match current.as_deref() {
-                Some(current) => crate::session_effort::queue_pending_effort(session_id, current),
-                None => crate::session_effort::clear_pending_effort(session_id),
-            }
+            crate::session_effort::queue_pending_effort(
+                session_id,
+                current.as_deref().unwrap_or(""),
+            );
             crate::session_effort::record_session_effort(session_id, current.as_deref());
             let agent = Arc::clone(agent);
             crate::runtime_activity::spawn(async move {
@@ -676,7 +676,8 @@ pub(super) async fn handle_set_reasoning_effort(
         // pending slot: the turn applies it before its next provider request,
         // and a restored agent adopts it. The lock-waiting task below covers an
         // idle-after-turn agent; whichever runs first takes the slot.
-        crate::session_effort::record_session_effort(session_id, Some(&effort));
+        let current = (!effort.trim().is_empty()).then_some(effort.as_str());
+        crate::session_effort::record_session_effort(session_id, current);
         crate::session_effort::queue_pending_effort(session_id, &effort);
         spawn_deferred_agent_mutation(
             "set_reasoning_effort",
@@ -690,7 +691,7 @@ pub(super) async fn handle_set_reasoning_effort(
                 agent_guard.apply_pending_reasoning_effort();
             },
         );
-        send_reasoning_effort_result(id, Ok(Some(effort)), client_event_tx);
+        send_reasoning_effort_result(id, Ok(current.map(str::to_owned)), client_event_tx);
         return;
     };
 

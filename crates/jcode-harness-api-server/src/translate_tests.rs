@@ -2197,6 +2197,38 @@ fn model_usage_before_catalog_is_retained_and_legacy_routes_stay_optional() {
     );
 }
 
+#[test]
+fn route_capability_metadata_preserves_explicit_and_omitted_effort() {
+    let mut state = state_with_session();
+    state.legacy_event_to_api(&json!({
+        "type":"available_models_updated", "available_model_routes":[
+            {"model":"m","provider":"OpenAI","api_method":"openai-oauth@one",
+             "reasoning_efforts":["none","high"],"speed_options":[{"mode":"ultrafast","availability":"available"}]},
+            {"model":"m","provider":"OpenAI","api_method":"openai-oauth@two","reasoning_efforts":[]},
+            {"model":"m","provider":"OpenAI","api_method":"openai-oauth@three"}
+        ]
+    }));
+    let ApiEvent::RuntimeInfo { routes, .. } = state.runtime_info() else {
+        unreachable!()
+    };
+    assert_eq!(
+        routes[0].reasoning_efforts,
+        Some(vec!["none".into(), "high".into()])
+    );
+    assert_eq!(routes[1].reasoning_efforts, Some(vec![]));
+    assert_eq!(routes[2].reasoning_efforts, None);
+    assert_eq!(
+        routes[0].speed_options[0].availability,
+        jcode_harness_api::SpeedAvailability::Available
+    );
+
+    for effort in ["", "none"] {
+        let out = state
+            .api_request_to_legacy(&json!({"id": 9,"req":"set_reasoning_effort","effort":effort}));
+        assert!(matches!(&out[..], [Outbound::Legacy(value)] if value["effort"] == effort));
+    }
+}
+
 /// A client can ask before the catalog lands. Answering "no models" then would
 /// be a lie that empties its picker, so the request waits for the real answer.
 #[test]

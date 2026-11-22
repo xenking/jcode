@@ -2022,6 +2022,7 @@ fn run_wiring_checks_for_contract(
         .iter()
         .map(|model| ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: model.clone(),
             provider: contract.route_provider.clone(),
             api_method: api_method.clone(),

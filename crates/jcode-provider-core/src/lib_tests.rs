@@ -463,6 +463,7 @@ impl Provider for SnapshotTestProvider {
     fn model_routes(&self) -> Vec<ModelRoute> {
         vec![ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "snapshot-model".to_string(),
             provider: "Snapshot".to_string(),
             api_method: "snapshot-api".to_string(),
@@ -511,6 +512,7 @@ fn runtime_key_distinguishes_openrouter_from_direct_compatible_profile() {
 fn route_selection_preserves_runtime_identity_from_model_route() {
     let selection = RouteSelection::from_model_route(&ModelRoute {
         speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: "openrouter/owl-alpha".to_string(),
         provider: "OpenRouter".to_string(),
         api_method: "openrouter".to_string(),
@@ -525,6 +527,7 @@ fn route_selection_preserves_runtime_identity_from_model_route() {
 
     let selection = RouteSelection::from_model_route(&ModelRoute {
         speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: "nvidia/example".to_string(),
         provider: "NVIDIA NIM".to_string(),
         api_method: "openai-compatible:nvidia-nim".to_string(),
@@ -546,6 +549,7 @@ fn route_selection_preserves_runtime_identity_from_model_route() {
 fn grok_build_route_selection_is_a_first_class_runtime() {
     let selection = RouteSelection::from_model_route(&ModelRoute {
         speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: "grok-4.6".to_string(),
         provider: "Grok Build".to_string(),
         api_method: "grok-build-acp".to_string(),
@@ -560,6 +564,7 @@ fn grok_build_route_selection_is_a_first_class_runtime() {
 
     let prefixed = RouteSelection::from_model_route(&ModelRoute {
         speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: "grok-build:grok-4.6".to_string(),
         provider: "Grok Build".to_string(),
         api_method: "grok-build-acp".to_string(),

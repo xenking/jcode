@@ -898,6 +898,7 @@ impl Provider for StubExternalRuntime {
             .into_iter()
             .map(|model| ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model,
                 provider: self.provider_label.to_string(),
                 api_method: self.api_method.to_string(),

@@ -177,7 +177,7 @@ pub(crate) fn parse_openai_model_catalog(data: &serde_json::Value) -> OpenAIMode
                     efforts.push(effort.to_string());
                 }
             }
-            if !efforts.is_empty() {
+            if values.is_empty() || !efforts.is_empty() {
                 reasoning_efforts.insert(slug, efforts);
             }
         }

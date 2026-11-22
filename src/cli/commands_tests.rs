@@ -201,6 +201,8 @@ fn explicit_generic_provider_maps_to_generic_auth_target() {
 fn collect_cli_model_names_prefers_available_routes_and_dedupes() {
     let routes = vec![
         ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "gpt-5.4".to_string(),
             provider: "OpenAI".to_string(),
             api_method: "openai-oauth".to_string(),
@@ -210,6 +212,8 @@ fn collect_cli_model_names_prefers_available_routes_and_dedupes() {
             usage: None,
         },
         ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "gpt-5.4".to_string(),
             provider: "auto".to_string(),
             api_method: "openrouter".to_string(),
@@ -219,6 +223,8 @@ fn collect_cli_model_names_prefers_available_routes_and_dedupes() {
             usage: None,
         },
         ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "openrouter models".to_string(),
             provider: "—".to_string(),
             api_method: "openrouter".to_string(),
@@ -239,6 +245,8 @@ fn collect_cli_model_names_prefers_available_routes_and_dedupes() {
 
 fn test_route(model: &str, provider: &str, api_method: &str) -> ModelRoute {
     ModelRoute {
+        speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: model.to_string(),
         provider: provider.to_string(),
         api_method: api_method.to_string(),
@@ -1264,6 +1272,8 @@ async fn auth_test_choice_plan_skips_local_custom_compat_endpoint_without_models
 #[test]
 fn collect_cli_model_names_falls_back_when_no_routes_are_available() {
     let routes = vec![ModelRoute {
+        speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: "claude-opus-4-6".to_string(),
         provider: "Anthropic".to_string(),
         api_method: "claude-oauth".to_string(),

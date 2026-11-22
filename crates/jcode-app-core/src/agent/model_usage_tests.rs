@@ -15,6 +15,7 @@ impl UsageProvider {
             .into_iter()
             .map(|model| crate::provider::ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: model.into(),
                 provider: "OpenAI".into(),
                 api_method: "openai-api-key".into(),

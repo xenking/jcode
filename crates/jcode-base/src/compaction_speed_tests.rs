@@ -42,6 +42,7 @@ impl Provider for SlowDecisionsProvider {
     fn model_routes(&self) -> Vec<jcode_provider_core::ModelRoute> {
         vec![jcode_provider_core::ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "claude-haiku-5-5".into(),
             provider: "test".into(),
             api_method: "current".into(),

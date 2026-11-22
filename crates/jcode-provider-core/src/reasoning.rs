@@ -34,6 +34,39 @@ pub fn canonical_reasoning_effort(value: &str) -> Option<&'static str> {
     }
 }
 
+/// Explicit provider efforts for a native OpenAI route, if known. Account
+/// catalog metadata wins except for values the model is documented to reject.
+pub fn openai_reasoning_efforts(
+    model: &str,
+    advertised: Option<&[String]>,
+) -> Option<Vec<&'static str>> {
+    let model = crate::model_id::canonical(model);
+    let model = crate::model_id::slash_base(&model);
+    let is_62 = ["gpt-6.2-astra", "gpt-6.2-sol"].iter().any(|family| {
+        model == *family
+            || model.strip_prefix(family).is_some_and(|suffix| {
+                suffix.len() == 11 && suffix.bytes().all(|c| c == b'-' || c.is_ascii_digit())
+            })
+    });
+    if let Some(advertised) = advertised {
+        return Some(
+            advertised
+                .iter()
+                .filter_map(|effort| canonical_reasoning_effort(effort))
+                .filter(|effort| !is_62 || !matches!(*effort, "none" | "minimal"))
+                .collect(),
+        );
+    }
+    if crate::is_openai_api_only_pro_model(model) {
+        return Some(if model.starts_with("gpt-5-pro") {
+            vec!["high"]
+        } else {
+            vec!["medium", "high", "xhigh"]
+        });
+    }
+    is_62.then(|| vec!["low", "medium", "high", "xhigh", "max"])
+}
+
 /// Rungs of the canonical effort ladder, weakest first, as `(level, glyph)`.
 ///
 /// The glyph is a filling circle (omp's status-line ladder): the UI shows the
@@ -127,6 +160,10 @@ pub fn inferred_reasoning_efforts(
 
     let is_openai = provider.contains("openai") || provider.contains("codex") || is_openai_model;
     if is_openai {
+        if let Some(mut efforts) = openai_reasoning_efforts(&model, None) {
+            efforts.push("swarm");
+            return efforts;
+        }
         return OPENAI_SELECTABLE_EFFORTS.to_vec();
     }
 

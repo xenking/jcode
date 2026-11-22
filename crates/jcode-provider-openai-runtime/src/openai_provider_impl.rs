@@ -1056,27 +1056,14 @@ impl Provider for OpenAIProvider {
 
     fn available_efforts(&self) -> Vec<&'static str> {
         let model = jcode_provider_core::model_id::canonical(&self.model());
-        // Platform-API-only GPT Pro models never appear in the Codex catalog,
-        // so their ladders are pinned from live Responses API behavior:
-        // gpt-5-pro accepts only `high`; newer pro generations accept
-        // medium/high/xhigh.
-        if jcode_provider_core::is_openai_api_only_pro_model(&model) {
-            return if model.starts_with("gpt-5-pro") {
-                vec!["high", "swarm"]
-            } else {
-                vec!["medium", "high", "xhigh", "swarm"]
-            };
-        }
-        let advertised = self
+        let efforts = self
             .model_reasoning_efforts
             .read()
-            .map(|efforts| efforts.get(&model).cloned())
-            .unwrap_or_else(|poisoned| poisoned.into_inner().get(&model).cloned());
-        if let Some(advertised) = advertised {
-            let mut efforts: Vec<&'static str> = advertised
-                .iter()
-                .filter_map(|effort| jcode_provider_core::canonical_reasoning_effort(effort))
-                .collect();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let advertised = efforts.get(&model).map(Vec::as_slice);
+        if let Some(mut efforts) =
+            jcode_provider_core::reasoning::openai_reasoning_efforts(&model, advertised)
+        {
             efforts.push("swarm");
             return efforts;
         }
@@ -1150,11 +1137,23 @@ impl Provider for OpenAIProvider {
     }
 
     fn available_service_tiers(&self) -> Vec<&'static str> {
-        let model = self.model();
-        ["priority", "ultrafast", "flex"]
+        use jcode_provider_core::SpeedMode;
+        let Ok(credentials) = self.credentials.try_read() else {
+            return vec![];
+        };
+        let oauth = Self::is_chatgpt_mode(&credentials);
+        let mut tiers: Vec<_> = self
+            .scope_speed_options(&self.model(), &credentials)
             .into_iter()
-            .filter(|tier| self.supports_service_tier(&model, tier))
-            .collect()
+            .filter(|option| speed::selectable_speed(option.availability, oauth))
+            .filter_map(|option| match option.mode {
+                SpeedMode::Standard => None,
+                SpeedMode::Fast => Some("priority"),
+                SpeedMode::Ultrafast => Some("ultrafast"),
+            })
+            .collect();
+        tiers.push("flex");
+        tiers
     }
 
     fn transport(&self) -> Option<String> {

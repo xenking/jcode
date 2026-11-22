@@ -121,6 +121,13 @@ pub fn speed_tier_ladder_with_capabilities(
 ) -> Vec<&'static str> {
     let mut ladder = speed_tier_ladder(provider_name, model_name);
     if let Some(available) = available {
+        let native_openai = provider_name.is_some_and(|provider| {
+            let provider = provider.to_ascii_lowercase();
+            provider.contains("openai") && !provider.contains("compatible")
+        });
+        if native_openai && !ladder.is_empty() {
+            ladder = STANDARD_FAST_ULTRAFAST.to_vec();
+        }
         ladder.retain(|tier| {
             *tier == SPEED_TIER_STANDARD
                 || available
@@ -292,6 +299,28 @@ mod tests {
             Some((0, "off", false))
         );
     }
+
+    #[test]
+    fn codex_ultrafast_requires_that_routes_advertisement() {
+        use SpeedAvailability::{Available, Unavailable, Unknown};
+
+        let with_ultrafast = ["priority".into(), "ultrafast".into()];
+        let fast_only = ["priority".into()];
+        for (tiers, expected) in [
+            (Some(with_ultrafast.as_slice()), Available),
+            (Some(fast_only.as_slice()), Unavailable),
+            (Some(&[][..]), Unavailable),
+            (None, Unknown),
+        ] {
+            let options = openai_speed_options("gpt-6.2-sol", true, tiers);
+            let ultrafast = options
+                .iter()
+                .find(|o| o.mode == SpeedMode::Ultrafast)
+                .unwrap();
+            assert_eq!(ultrafast.availability, expected);
+            assert_eq!(ultrafast.reason.is_some(), expected != Available);
+        }
+    }
 }
 use crate::{SpeedAvailability, SpeedMode, SpeedOption};
 
@@ -361,22 +390,30 @@ pub fn openai_speed_options(
             public_ultrafast.into_iter().any(matches_model),
         ),
     ] {
-        let supported = if oauth {
-            advertised.is_some_and(|tiers| tiers.iter().any(|tier| ids.contains(&tier.as_str())))
-        } else {
-            api_support
-        };
-        let (availability, reason) = if !supported {
+        let (availability, reason) = if oauth {
+            match advertised {
+                Some(tiers) if tiers.iter().any(|tier| ids.contains(&tier.as_str())) => {
+                    (SpeedAvailability::Available, None)
+                }
+                Some(_) => (
+                    SpeedAvailability::Unavailable,
+                    Some(
+                        "The Codex catalog for this account does not advertise this speed for the model",
+                    ),
+                ),
+                None => (
+                    SpeedAvailability::Unknown,
+                    Some(
+                        "This account's Codex catalog did not report speeds for this model. Refresh the model list to check",
+                    ),
+                ),
+            }
+        } else if !api_support {
             (
                 SpeedAvailability::Unavailable,
-                Some(if oauth {
-                    "The Codex catalog for this account does not advertise this speed for the model"
-                } else {
-                    "The OpenAI API does not document this speed for the model"
-                }),
+                Some("The OpenAI API does not document this speed for the model"),
             )
-        } else if !oauth
-            && mode == SpeedMode::Ultrafast
+        } else if mode == SpeedMode::Ultrafast
             && ["gpt-6-astra", "gpt-6.1-sol"]
                 .into_iter()
                 .any(matches_model)
@@ -386,7 +423,7 @@ pub fn openai_speed_options(
             (
                 SpeedAvailability::Unknown,
                 Some(
-                    "The model supports this speed, but account entitlement and quota are not verified",
+                    "Uses premium OpenAI API rates. Project access and quota have not been verified",
                 ),
             )
         };

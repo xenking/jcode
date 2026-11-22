@@ -892,6 +892,7 @@ mod tests {
         fn model_routes(&self) -> Vec<ModelRoute> {
             vec![ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "claude-opus-5-5".into(),
                 provider: "Claude".into(),
                 api_method: "anthropic-api".into(),
@@ -1029,6 +1030,7 @@ mod tests {
         fn model_routes(&self) -> Vec<ModelRoute> {
             vec![ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "gpt-6.1-sol".into(),
                 provider: "OpenAI".into(),
                 api_method: "openai-api".into(),

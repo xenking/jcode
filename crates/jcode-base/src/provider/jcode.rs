@@ -61,6 +61,7 @@ impl JcodeProvider {
         Self::entitled_models_for(tier)
             .map(|model| ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: model.id.to_string(),
                 provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
                 api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),

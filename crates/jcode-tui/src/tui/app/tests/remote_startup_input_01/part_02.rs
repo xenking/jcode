@@ -9,6 +9,7 @@ fn test_handle_server_event_available_models_updated_replaces_remote_model_catal
     app.remote_available_entries = vec!["old-model".to_string()];
     app.remote_model_options = vec![crate::provider::ModelRoute {
         speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: "old-model".to_string(),
         provider: "OldProvider".to_string(),
         api_method: "old-api".to_string(),
@@ -25,6 +26,7 @@ fn test_handle_server_event_available_models_updated_replaces_remote_model_catal
             available_models: vec!["new-model".to_string(), "second-model".to_string()],
             available_model_routes: vec![crate::provider::ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "new-model".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: "openai-oauth".to_string(),
@@ -130,6 +132,7 @@ fn test_remote_available_models_updated_after_refresh_shows_summary_and_updates_
         vec!["old-model".to_string()],
         vec![crate::provider::ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "old-model".to_string(),
             provider: "OpenAI".to_string(),
             api_method: "responses".to_string(),
@@ -148,6 +151,7 @@ fn test_remote_available_models_updated_after_refresh_shows_summary_and_updates_
             available_model_routes: vec![
                 crate::provider::ModelRoute {
                     speed_options: Vec::new(),
+                    reasoning_efforts: None,
                     model: "old-model".to_string(),
                     provider: "OpenAI".to_string(),
                     api_method: "responses".to_string(),
@@ -158,6 +162,7 @@ fn test_remote_available_models_updated_after_refresh_shows_summary_and_updates_
                 },
                 crate::provider::ModelRoute {
                     speed_options: Vec::new(),
+                    reasoning_efforts: None,
                     model: "new-model".to_string(),
                     provider: "OpenRouter".to_string(),
                     api_method: "chat".to_string(),

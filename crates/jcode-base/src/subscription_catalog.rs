@@ -472,6 +472,7 @@ mod tests {
         assert_eq!(model.min_tier, JcodeTier::Plus);
         let route = crate::provider::ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: model.id.to_string(),
             provider: JCODE_PROVIDER_DISPLAY_NAME.to_string(),
             api_method: JCODE_ROUTE_API_METHOD.to_string(),

@@ -986,6 +986,9 @@ pub struct NativeCompactionResult {
 pub struct ModelRoute {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub speed_options: Vec<SpeedOption>,
+    /// Explicit provider values for this route. An omitted list is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_efforts: Option<Vec<String>>,
     pub model: String,
     pub provider: String,
     pub api_method: String,

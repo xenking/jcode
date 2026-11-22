@@ -1320,6 +1320,7 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         .cloned()
         .map(|model| crate::provider::ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model,
             provider: "OpenAI".to_string(),
             api_method: "openai-oauth".to_string(),
@@ -1331,6 +1332,7 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         .collect();
     app.remote_model_options.push(crate::provider::ModelRoute {
         speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: "claude-opus-4-8".to_string(),
         provider: "Anthropic".to_string(),
         api_method: "claude-oauth".to_string(),
@@ -1341,6 +1343,7 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
     });
     app.remote_model_options.push(crate::provider::ModelRoute {
         speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: "claude-opus-4-8".to_string(),
         provider: "Anthropic".to_string(),
         api_method: "claude-api".to_string(),
@@ -1352,6 +1355,7 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
     for api_method in ["claude-oauth", "claude-api"] {
         app.remote_model_options.push(crate::provider::ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: jcode_provider_core::DEFAULT_CLAUDE_MODEL.to_string(),
             provider: "Anthropic".to_string(),
             api_method: api_method.to_string(),
@@ -1371,6 +1375,7 @@ fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
     app.remote_model_options = vec![
         crate::provider::ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "anthropic/claude-sonnet-4".to_string(),
             provider: "auto".to_string(),
             api_method: "openrouter".to_string(),
@@ -1381,6 +1386,7 @@ fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
         },
         crate::provider::ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "anthropic/claude-sonnet-4".to_string(),
             provider: "Fireworks".to_string(),
             api_method: "openrouter".to_string(),
@@ -1391,6 +1397,7 @@ fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
         },
         crate::provider::ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "anthropic/claude-sonnet-4".to_string(),
             provider: "OpenAI".to_string(),
             api_method: "openrouter".to_string(),

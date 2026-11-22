@@ -31,6 +31,7 @@ impl Provider for QualityFirstOpenAiProvider {
         vec![
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: jcode_provider_core::DEFAULT_CLAUDE_MODEL.to_string(),
                 provider: "Anthropic".to_string(),
                 api_method: "claude-oauth".to_string(),
@@ -41,6 +42,7 @@ impl Provider for QualityFirstOpenAiProvider {
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "gpt-5.1".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: "openai-api-key".to_string(),
@@ -51,6 +53,7 @@ impl Provider for QualityFirstOpenAiProvider {
             },
             crate::provider::ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: jcode_provider_core::DEFAULT_OPENAI_MODEL.to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: "openai-api-key".to_string(),
@@ -1574,10 +1577,10 @@ fn import_summary_choose_pill_opens_checkbox_list() {
             } => assert!(prompt.choosing),
             other => panic!("expected Login welcome with import prompt, got {other:?}"),
         }
+include!("onboarding_recent_project_tests.rs");
     });
 }
 
-include!("onboarding_recent_project_tests.rs");
 
 
 

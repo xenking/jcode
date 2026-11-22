@@ -873,6 +873,7 @@ impl App {
         {
             routes.push(crate::provider::ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: model.id.to_string(),
                 provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
                 api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
@@ -1554,6 +1555,7 @@ impl App {
         let routes = if routes.is_empty() && is_remote && current_model != "unknown" {
             vec![crate::provider::ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: current_model.clone(),
                 provider: remote_provider_name
                     .clone()

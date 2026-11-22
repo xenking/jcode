@@ -227,6 +227,7 @@ async fn account_switch_cross_provider_uses_target_oauth_catalog() {
     let provider = Arc::new(AuthChangeMockProvider::new());
     *provider.state.routes_override.write().unwrap() = Some(vec![ModelRoute {
         speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: "future-target-model".into(),
         provider: "Claude".into(),
         api_method: "claude-oauth@work".into(),
@@ -346,6 +347,7 @@ impl Provider for AuthChangeMockProvider {
             .into_iter()
             .map(|model| ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model,
                 provider: provider.clone(),
                 api_method: api_method.clone(),
@@ -1052,6 +1054,7 @@ async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
     *provider.state.routes_override.write().unwrap() = Some(vec![
         ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "claude-fable-5".to_string(),
             provider: "Anthropic".to_string(),
             api_method: "claude-oauth".to_string(),
@@ -1062,6 +1065,7 @@ async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
         },
         ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "gpt-5.5".to_string(),
             provider: "OpenAI".to_string(),
             api_method: "openai-api-key".to_string(),
@@ -1072,6 +1076,7 @@ async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
         },
         ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "gpt-5.6-sol".to_string(),
             provider: "OpenAI".to_string(),
             api_method: "openai-api-key".to_string(),

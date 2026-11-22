@@ -228,6 +228,7 @@ impl Provider for GrokBuildProvider {
             .into_iter()
             .map(|model| ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model,
                 provider: "Grok Build".to_string(),
                 api_method: ROUTE_API_METHOD.to_string(),

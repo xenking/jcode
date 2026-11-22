@@ -405,6 +405,7 @@ impl Provider for GeminiProvider {
             .into_iter()
             .map(|model| jcode_provider_core::ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model,
                 provider: "Gemini".to_string(),
                 api_method: "code-assist-oauth".to_string(),

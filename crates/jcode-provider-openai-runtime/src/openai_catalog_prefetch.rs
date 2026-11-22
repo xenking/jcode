@@ -20,9 +20,10 @@ impl OpenAIProvider {
                 self.selected_catalog_scope_for(&creds),
             )
         };
+        let started = std::time::Instant::now();
         let catalog = if is_chatgpt_mode {
             let access_token =
-                openai_access_token(self.refresh_account_label(), &self.credentials).await?;
+                openai_access_token(account_label.clone(), &self.credentials).await?;
             match jcode_base::provider::fetch_openai_model_catalog(&access_token).await {
                 Ok(catalog) => catalog,
                 // The server can reject a token that still looks fresh by its
@@ -34,6 +35,11 @@ impl OpenAIProvider {
                 Err(err) if catalog_error_is_auth_rejection(&err) => {
                     let refresh_token = {
                         let creds = self.credentials.read().await;
+                        if Self::catalog_credential_identity(&creds) != credential_identity
+                            || self.refresh_account_label() != account_label
+                        {
+                            return Ok(());
+                        }
                         creds.refresh_token.clone()
                     };
                     if refresh_token.is_empty() {
@@ -61,11 +67,8 @@ impl OpenAIProvider {
         } else {
             jcode_base::provider::fetch_openai_api_key_model_catalog(&access_token).await?
         };
-        let current_credential_identity = {
-            let credentials = self.credentials.read().await;
-            Self::catalog_credential_identity(&credentials)
-        };
-        if current_credential_identity != credential_identity
+        let credentials = self.credentials.read().await;
+        if Self::catalog_credential_identity(&credentials) != credential_identity
             || self.refresh_account_label() != account_label
         {
             jcode_base::logging::info(
@@ -73,26 +76,24 @@ impl OpenAIProvider {
             );
             return Ok(());
         }
-        match self.model_reasoning_efforts.write() {
-            Ok(mut efforts) => *efforts = catalog.reasoning_efforts.clone(),
-            Err(poisoned) => *poisoned.into_inner() = catalog.reasoning_efforts.clone(),
-        }
-        *self
-            .model_service_tiers
-            .write()
-            .unwrap_or_else(|p| p.into_inner()) = catalog.service_tiers.clone();
+        jcode_base::provider::publish_openai_model_catalog_refresh(
+            &scope,
+            started,
+            catalog,
+            |catalog| {
+                *self
+                    .model_reasoning_efforts
+                    .write()
+                    .unwrap_or_else(|p| p.into_inner()) = catalog.reasoning_efforts.clone();
+                *self
+                    .model_service_tiers
+                    .write()
+                    .unwrap_or_else(|p| p.into_inner()) = catalog.service_tiers.clone();
+            },
+        );
+        drop(credentials);
         self.warn_unsupported_service_tier();
         self.revalidate_reasoning_effort();
-        jcode_base::provider::persist_openai_model_catalog_for_scope(&scope, &catalog);
-        if !catalog.context_limits.is_empty() {
-            jcode_base::provider::populate_context_limits(catalog.context_limits);
-        }
-        if !catalog.available_models.is_empty() {
-            jcode_base::provider::populate_account_models_for_scope(
-                &scope,
-                catalog.available_models,
-            );
-        }
         Ok(())
     }
 }

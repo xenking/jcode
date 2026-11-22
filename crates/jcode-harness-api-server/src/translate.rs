@@ -1535,16 +1535,15 @@ impl BridgeState {
                 )]
             }
             "set_reasoning_effort" => {
-                let effort = request["effort"].as_str().unwrap_or("");
-                if effort.is_empty() {
+                let Some(effort) = request["effort"].as_str() else {
                     return vec![Outbound::Reply(ServerFrame::reply(
                         api_id,
                         ApiEvent::Error {
                             code: ErrorCode::InvalidRequest,
-                            message: "set_reasoning_effort needs a non-empty `effort`".into(),
+                            message: "set_reasoning_effort needs a string `effort`".into(),
                         },
                     ))];
-                }
+                };
                 let id = self.legacy_id();
                 self.pending_simple
                     .push((id, api_id, SimpleKind::ReasoningEffort));
@@ -3162,8 +3161,8 @@ impl BridgeState {
                 let id = event["id"].as_u64().unwrap_or(0);
                 // Remember the new effort even when the change was requested by
                 // another client, so later identity events stay truthful.
-                // A success without `effort` means the provider now runs with
-                // none (e.g. `none` normalised away), which is also a change.
+                // A success without `effort` means provider default. The wire
+                // value "none" is a separate explicit setting.
                 let changed = event["error"].as_str().is_none() && {
                     let effort = event["effort"].as_str().map(str::to_string);
                     let moved = self.current_effort != effort;
@@ -3788,6 +3787,10 @@ impl BridgeState {
                         detail: route["detail"].as_str().unwrap_or("").to_string(),
                         speed_options: serde_json::from_value(route["speed_options"].clone())
                             .unwrap_or_default(),
+                        reasoning_efforts: serde_json::from_value(
+                            route["reasoning_efforts"].clone(),
+                        )
+                        .unwrap_or_default(),
                         usage: serde_json::from_value(route["usage"].clone()).unwrap_or(None),
                     })
                 })

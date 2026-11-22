@@ -46,6 +46,7 @@ pub(super) fn available_models_dedup_key(event: &ServerEvent) -> String {
                 usage,
                 cheapness,
                 speed_options,
+                reasoning_efforts,
             } = route;
             (
                 model,
@@ -56,6 +57,7 @@ pub(super) fn available_models_dedup_key(event: &ServerEvent) -> String {
                 usage,
                 cheapness,
                 speed_options,
+                reasoning_efforts,
             )
         })
         .collect();

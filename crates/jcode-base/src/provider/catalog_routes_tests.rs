@@ -52,6 +52,7 @@ fn saved_account_catalogs_keep_work_personal_and_named_accounts_separate() {
         build_anthropic_oauth_route("claude-sonnet-4-6", true, ""),
         ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "claude-sonnet-4-6".into(),
             provider: "Anthropic".into(),
             api_method: "claude-api".into(),
@@ -159,6 +160,81 @@ fn saved_account_expiry_requires_login_only_without_refresh_credentials() {
     let mut missing = build_anthropic_oauth_route("claude-sonnet-4-6", true, "");
     apply_saved_account_status(&mut missing, "claude", "missing-test", false, false, false);
     assert!(!missing.available);
+}
+
+#[test]
+fn codex_route_capabilities_do_not_cross_accounts_or_mix_catalog_snapshots() {
+    use jcode_provider_core::{SpeedAvailability, SpeedMode};
+    let _guard = EnvGuard::new();
+    let catalog = |efforts: &[&str], tiers: &[&str]| {
+        let efforts = efforts
+            .iter()
+            .map(|effort| serde_json::json!({"effort":effort}))
+            .collect::<Vec<_>>();
+        let tiers = tiers
+            .iter()
+            .map(|id| serde_json::json!({"id":id}))
+            .collect::<Vec<_>>();
+        super::super::models::parse_openai_model_catalog(&serde_json::json!({
+            "models": [{"slug": "gpt-6.2-sol", "supported_reasoning_levels": efforts,
+                "service_tiers": tiers}]
+        }))
+    };
+    let persist = super::super::persist_openai_model_catalog_for_scope;
+    let old_catalog = catalog(&["none", "low"], &["priority", "ultrafast"]);
+    persist("work", &old_catalog);
+    persist("personal", &catalog(&[], &["priority"]));
+    let before = super::super::models::openai_oauth_route_capabilities();
+    // The UI can retain a rendered snapshot while a refresh completes. Each
+    // snapshot must continue to describe the account it was built for.
+    let older = std::time::Instant::now();
+    let newer = older + std::time::Duration::from_millis(1);
+    super::super::publish_openai_model_catalog_refresh(
+        "work",
+        newer,
+        catalog(&["medium"], &[]),
+        |_| {},
+    );
+    super::super::publish_openai_model_catalog_refresh("work", older, old_catalog, |_| {
+        panic!("A late catalog must not update the runtime")
+    });
+    let after = super::super::models::openai_oauth_route_capabilities();
+    for ((efforts, options), expected_efforts, expected_speed) in [
+        (
+            before("gpt-6.2-sol", "openai-oauth@work"),
+            &(["low"])[..],
+            SpeedAvailability::Available,
+        ),
+        (
+            before("gpt-6.2-sol", "openai-oauth@personal"),
+            &[][..],
+            SpeedAvailability::Unavailable,
+        ),
+        (
+            after("gpt-6.2-sol", "openai-oauth@work"),
+            &(["medium"])[..],
+            SpeedAvailability::Unavailable,
+        ),
+        (
+            after("gpt-6.2-sol", "openai-oauth@missing"),
+            &(["low", "medium", "high", "xhigh", "max"])[..],
+            SpeedAvailability::Unknown,
+        ),
+    ] {
+        assert_eq!(efforts.unwrap(), expected_efforts);
+        let speed = options
+            .iter()
+            .find(|o| o.mode == SpeedMode::Ultrafast)
+            .unwrap();
+        assert_eq!(speed.availability, expected_speed);
+        assert!(
+            !speed
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Anthropic")
+        );
+    }
 }
 
 struct EnvGuard {

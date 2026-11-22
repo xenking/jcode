@@ -252,7 +252,8 @@ pub use self::models::{
     get_best_available_openai_model_for_scope, known_openai_model_ids_for_scope,
     model_availability_for_scope, openai_catalog_scope_for_credential,
     persist_openai_model_catalog_for_scope, populate_account_models_for_scope,
-    record_model_unavailable_for_scope, refresh_openai_model_catalog_in_background_for_scope,
+    publish_openai_model_catalog_refresh, record_model_unavailable_for_scope,
+    refresh_openai_model_catalog_in_background_for_scope,
     should_refresh_openai_model_catalog_for_scope,
 };
 pub use self::selection::DefaultModelSelection;
@@ -3189,6 +3190,7 @@ mod bedrock_placeholder_default_tests {
     fn route(model: &str, available: bool) -> ModelRoute {
         ModelRoute {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: model.to_string(),
             provider: "AWS Bedrock".to_string(),
             api_method: "bedrock".to_string(),

@@ -369,6 +369,29 @@ pub fn cached_openai_service_tiers_for_scope(scope: &str) -> Option<HashMap<Stri
     Some(store.scopes.remove(scope)?.service_tiers)
 }
 
+/// Read both capabilities from one snapshot when rendering a catalog. A
+/// concurrent refresh must not mix old speed metadata with new efforts.
+pub(crate) fn openai_oauth_route_capabilities()
+-> impl Fn(&str, &str) -> (Option<Vec<String>>, Vec<jcode_provider_core::SpeedOption>) {
+    use jcode_provider_core::{
+        reasoning::openai_reasoning_efforts, service_tier::openai_speed_options,
+    };
+    let store = load_persisted_model_catalog_store(OPENAI_MODEL_CATALOG_CACHE_FILE);
+    let active_scope = current_openai_account_scope();
+    move |model, api_method| {
+        let scope = jcode_provider_core::oauth_account_label(api_method).unwrap_or(&active_scope);
+        let snapshot = store.as_ref().and_then(|store| store.scopes.get(scope));
+        let key = normalize_model_id(model);
+        let efforts = snapshot.and_then(|snapshot| snapshot.reasoning_efforts.get(&key));
+        let tiers = snapshot.and_then(|snapshot| snapshot.service_tiers.get(&key));
+        (
+            openai_reasoning_efforts(model, efforts.map(Vec::as_slice))
+                .map(|efforts| efforts.into_iter().map(str::to_owned).collect()),
+            openai_speed_options(model, true, tiers.map(Vec::as_slice)),
+        )
+    }
+}
+
 /// Snapshot credential-scoped capacity once for a failover search. The legacy
 /// process-wide context cache contains Codex limits and must not constrain a
 /// platform API route (or a different saved Codex account).
@@ -408,6 +431,32 @@ pub fn persist_openai_model_catalog_for_scope(scope: &str, catalog: &OpenAIModel
         &catalog.service_tiers,
         SystemTime::now(),
     );
+}
+
+/// Apply only fresh, usable catalog responses. An older in-flight fetch may
+/// finish after a forced refresh, but must not overwrite its capabilities.
+pub fn publish_openai_model_catalog_refresh(
+    scope: &str,
+    started: std::time::Instant,
+    catalog: OpenAIModelCatalog,
+    update_runtime: impl FnOnce(&OpenAIModelCatalog),
+) {
+    static PUBLISHED: std::sync::LazyLock<std::sync::Mutex<HashMap<String, std::time::Instant>>> =
+        std::sync::LazyLock::new(Default::default);
+    if catalog.available_models.is_empty() {
+        return;
+    }
+    let mut published = PUBLISHED.lock().unwrap_or_else(|err| err.into_inner());
+    if published.get(scope).is_some_and(|last| *last > started) {
+        return;
+    }
+    update_runtime(&catalog);
+    persist_openai_model_catalog_for_scope(scope, &catalog);
+    published.insert(scope.to_owned(), started);
+    if !catalog.context_limits.is_empty() {
+        populate_context_limits(catalog.context_limits);
+    }
+    populate_account_models_for_scope(scope, catalog.available_models);
 }
 
 pub fn persist_anthropic_model_catalog(catalog: &AnthropicModelCatalog) {
@@ -616,6 +665,7 @@ pub fn refresh_openai_model_catalog_in_background_for_scope(
 
     let use_platform_api = !is_chatgpt_mode;
 
+    let started = std::time::Instant::now();
     tokio::spawn(async move {
         let refresh_result = if use_platform_api {
             fetch_openai_api_key_model_catalog(&access_token).await
@@ -637,13 +687,7 @@ pub fn refresh_openai_model_catalog_in_background_for_scope(
                     catalog.available_models.len(),
                     catalog.context_limits.len()
                 ));
-                persist_openai_model_catalog_for_scope(&scope, &catalog);
-                if !catalog.context_limits.is_empty() {
-                    populate_context_limits(catalog.context_limits);
-                }
-                if !catalog.available_models.is_empty() {
-                    populate_account_models_for_scope(&scope, catalog.available_models);
-                }
+                publish_openai_model_catalog_refresh(&scope, started, catalog, |_| {});
             }
             Ok(_) => {
                 crate::logging::info(&format!(

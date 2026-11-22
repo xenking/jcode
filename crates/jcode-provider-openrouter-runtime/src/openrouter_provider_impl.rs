@@ -674,6 +674,7 @@ impl Provider for OpenRouterProvider {
                 };
                 jcode_provider_core::ModelRoute {
                     speed_options: Vec::new(),
+                    reasoning_efforts: None,
                     model,
                     provider: provider_label.clone(),
                     api_method: api_method.clone(),

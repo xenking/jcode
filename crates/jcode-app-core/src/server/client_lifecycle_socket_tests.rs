@@ -1387,6 +1387,7 @@ impl Provider for TerminalSocketProvider {
             .into_iter()
             .map(|model| crate::provider::ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model,
                 provider: "fixture".into(),
                 api_method: "fixture".into(),

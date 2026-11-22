@@ -569,6 +569,7 @@ mod tests {
         let routes = vec![
             ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "m".to_string(),
                 provider: "p".to_string(),
                 api_method: "a".to_string(),
@@ -579,6 +580,7 @@ mod tests {
             },
             ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "m".to_string(),
                 provider: "p".to_string(),
                 api_method: "a".to_string(),
@@ -589,6 +591,7 @@ mod tests {
             },
             ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "m".to_string(),
                 provider: "p".to_string(),
                 api_method: "b".to_string(),
@@ -609,6 +612,7 @@ mod tests {
         let routes = vec![
             ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "qwen".to_string(),
                 provider: "Cerebras".to_string(),
                 api_method: "openai-compatible".to_string(),
@@ -619,6 +623,7 @@ mod tests {
             },
             ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "qwen".to_string(),
                 provider: "Cerebras".to_string(),
                 api_method: "openai-compatible:cerebras".to_string(),
@@ -629,6 +634,7 @@ mod tests {
             },
             ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "qwen".to_string(),
                 provider: "OtherDirect".to_string(),
                 api_method: "openai-compatible:other".to_string(),
@@ -639,6 +645,7 @@ mod tests {
             },
             ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "qwen".to_string(),
                 provider: "Cerebras".to_string(),
                 api_method: "openai-compatible:cerebras-alt".to_string(),
@@ -692,6 +699,7 @@ mod tests {
             let a = api_methods[(seed >> 27) as usize % api_methods.len()];
             routes.push(ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: m.to_string(),
                 provider: p.to_string(),
                 api_method: a.to_string(),

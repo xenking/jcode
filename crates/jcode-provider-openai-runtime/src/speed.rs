@@ -127,10 +127,9 @@ impl OpenAIProvider {
             .scope_speed_options(model, credentials)
             .into_iter()
             .find(|option| option.mode == mode);
-        if !option
-            .as_ref()
-            .is_some_and(|option| option.availability != SpeedAvailability::Unavailable)
-        {
+        if !option.as_ref().is_some_and(|option| {
+            selectable_speed(option.availability, Self::is_chatgpt_mode(credentials))
+        }) {
             anyhow::bail!(
                 "OpenAI {mode:?} speed is unavailable for {model}: {}",
                 option
@@ -167,6 +166,16 @@ impl OpenAIProvider {
             Some(speed_wire_tier(choice.mode, Self::is_chatgpt_mode(credentials)).into()),
             Some(choice.route),
         ))
+    }
+}
+
+pub(super) fn selectable_speed(availability: SpeedAvailability, oauth: bool) -> bool {
+    match availability {
+        SpeedAvailability::Available => true,
+        SpeedAvailability::Unavailable => false,
+        // API project access is checked at request time. A Codex login must
+        // advertise the tier before the user can select it.
+        SpeedAvailability::Unknown => !oauth,
     }
 }
 

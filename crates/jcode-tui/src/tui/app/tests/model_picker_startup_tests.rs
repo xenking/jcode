@@ -96,6 +96,7 @@ fn test_large_remote_model_picker_builds_off_ui_thread_then_caches() {
             .cloned()
             .map(|model| crate::provider::ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model,
                 provider: "OpenRouter".to_string(),
                 api_method: "openrouter".to_string(),
@@ -239,6 +240,7 @@ fn test_model_picker_picks_model_then_reasoning_effort() {
             .cloned()
             .map(|model| crate::provider::ModelRoute {
                 speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model,
                 provider: "OpenAI".to_string(),
                 api_method: "openai-oauth".to_string(),

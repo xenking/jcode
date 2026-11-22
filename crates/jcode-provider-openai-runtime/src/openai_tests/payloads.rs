@@ -626,6 +626,20 @@ fn gpt_6_2_places_stable_instructions_before_conversation() {
 }
 
 #[tokio::test]
+async fn openai_62_default_omits_effort_without_allowing_explicit_none() {
+    let provider = OpenAIProvider::new_browser_only();
+    for model in ["gpt-6.2-sol", "gpt-6.2-astra"] {
+        *provider.model.write().await = model.into();
+        let payload = || provider.response_request_with_tier(model, &[][..], &[], "", true, None);
+        assert!(provider.set_reasoning_effort("none").is_err());
+        provider.set_reasoning_effort("high").unwrap();
+        assert_eq!(payload()["reasoning"]["effort"], "high");
+        provider.set_reasoning_effort("").unwrap();
+        assert!(payload()["reasoning"].get("effort").is_none());
+    }
+}
+
+#[tokio::test]
 async fn configured_swarm_root_effort_resolves_without_changing_stored_mode() {
     let provider = OpenAIProvider::new_browser_only();
     *provider.model.write().await = "gpt-5.6".to_string();

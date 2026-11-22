@@ -931,6 +931,10 @@ pub struct ModelRouteInfo {
     pub detail: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub speed_options: Vec<crate::SpeedOption>,
+    /// Explicit effort values for this route, separate from the provider default.
+    /// Missing means unknown. An empty list means no explicit choices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_efforts: Option<Vec<String>>,
     /// Tracked turns and prior picker selections, when supplied by the runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::ModelUsage>,

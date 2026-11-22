@@ -86,6 +86,7 @@ fn ga_runtime_and_file_methods_map_requests_and_typed_replies() {
     let routes = vec![
         ModelRouteInfo {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             usage: Some(jcode_sdk::ModelUsage {
                 count: 7,
                 last_used_unix_secs: Some(100),
@@ -101,6 +102,7 @@ fn ga_runtime_and_file_methods_map_requests_and_typed_replies() {
         },
         ModelRouteInfo {
             speed_options: Vec::new(),
+            reasoning_efforts: None,
             usage: None,
             model: "gemini".to_string(),
             provider: "google".to_string(),
