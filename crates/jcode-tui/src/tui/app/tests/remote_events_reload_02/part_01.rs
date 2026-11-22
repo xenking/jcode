@@ -9,6 +9,7 @@ fn test_remote_poke_defers_to_daemon_when_turn_is_in_progress() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_speed: None,
                 lane_after: None,
                 lane_owner: None,
                 stage: None,
@@ -55,6 +56,7 @@ fn test_remote_poke_defers_to_daemon_when_turn_is_in_progress() {
             &app.session.id,
             &[
                 crate::todo::TodoItem {
+                    lane_speed: None,
                     lane_after: None,
                     lane_owner: None,
                     stage: None,
@@ -74,6 +76,7 @@ fn test_remote_poke_defers_to_daemon_when_turn_is_in_progress() {
                     waiting_on: Vec::new(),
                 },
                 crate::todo::TodoItem {
+                    lane_speed: None,
                     lane_after: None,
                     lane_owner: None,
                     stage: None,
@@ -192,6 +195,7 @@ fn test_remote_interrupted_does_not_schedule_client_poke() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_speed: None,
                 lane_after: None,
                 lane_owner: None,
                 stage: None,

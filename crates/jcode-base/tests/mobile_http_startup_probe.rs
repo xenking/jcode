@@ -5,6 +5,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 #[cfg(target_os = "linux")]
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(target_os = "linux")]
 use std::time::Instant;
 
 struct Counting;

@@ -1164,6 +1164,8 @@ fn compact_labels_fit_cells_and_status_never_contains_newlines() {
 #[test]
 fn overscroll_omits_duplicate_trailing_effort_suffix_but_keeps_swarm() {
     let mut facts = OverscrollFacts {
+        account_windows: None,
+        cache: None,
         machine: None,
         dir: None,
         branch: None,

@@ -990,6 +990,7 @@ mod tests {
         completion_confidence: Option<u8>,
     ) -> TodoItem {
         TodoItem {
+            lane_speed: None,
             id: id.to_string(),
             content: content.to_string(),
             status: status.to_string(),

@@ -63,6 +63,7 @@ fn test_improve_status_summarizes_current_todos() {
             &app.session.id,
             &[
                 crate::todo::TodoItem {
+                    lane_speed: None,
                     lane_after: None,
                     lane_owner: None,
                     stage: None,
@@ -82,6 +83,7 @@ fn test_improve_status_summarizes_current_todos() {
                     waiting_on: Vec::new(),
                 },
                 crate::todo::TodoItem {
+                    lane_speed: None,
                     lane_after: None,
                     lane_owner: None,
                     stage: None,
@@ -182,6 +184,7 @@ fn test_improve_resume_uses_saved_mode_and_current_todos() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_speed: None,
                 lane_after: None,
                 lane_owner: None,
                 stage: None,

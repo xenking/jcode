@@ -227,7 +227,7 @@ fn decoded_image_needs_change(media_type: &str, data_b64: &str, max_edge: u32) -
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(super) fn preflight_probe(media: &str, data: Option<&str>, baseline: bool) -> bool {
     let Some(data) = data else { return false };
     data.len() > IMAGE_BASE64_BYTE_LIMIT

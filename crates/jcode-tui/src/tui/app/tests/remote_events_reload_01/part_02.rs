@@ -85,6 +85,7 @@ fn test_remote_done_settles_visible_timer_without_client_poke() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_speed: None,
                 lane_after: None,
                 lane_owner: None,
                 stage: None,
@@ -145,6 +146,7 @@ fn test_remote_done_leaves_confidence_spike_challenge_to_daemon() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_speed: None,
                 lane_after: None,
                 lane_owner: None,
                 stage: None,
@@ -206,6 +208,7 @@ fn test_remote_done_leaves_completion_confidence_gate_to_daemon() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_speed: None,
                 lane_after: None,
                 lane_owner: None,
                 stage: None,
@@ -263,6 +266,7 @@ fn test_remote_poke_status_and_off_update_state() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_speed: None,
                 lane_after: None,
                 lane_owner: None,
                 stage: None,

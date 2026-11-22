@@ -117,6 +117,7 @@ fn quota_wait_notice_names_route_window_reset_and_action() {
     app.remote_provider_name = Some("OpenAI".into());
     app.remote_provider_model = Some("future-model".into());
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "retry me".into(),
         images: vec![],
         is_system: false,
@@ -2739,7 +2740,6 @@ fn resumed_history_restores_last_provider_reported_context_usage() {
 #[path = "remote_events_reload_04_additional_tests.rs"]
 mod additional_test_remote_fast_status_tracks_history_tier_including_explicit_off;
 
-#[test]
 #[test]
 fn test_server_waiting_for_network_connection_phase_sets_status_and_exempts_stall_guard() {
     let mut app = create_test_app();

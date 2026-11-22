@@ -311,6 +311,7 @@ async fn idle_waiting_session_precompacts_and_persists_a_divider() -> Result<()>
         // A worker that never finishes: the coordinator is idle but waiting.
         client
             .send(serde_json::to_value(Request::CommSpawn {
+                speed: None,
                 id: 2,
                 session_id: session_id.clone(),
                 lane_id: None,

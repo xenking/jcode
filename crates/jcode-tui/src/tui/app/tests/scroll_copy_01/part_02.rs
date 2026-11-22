@@ -511,6 +511,7 @@ fn test_remote_escape_interrupt_disables_auto_poke_while_processing() {
     app.queued_messages
         .push(super::commands::build_poke_message(&[
             crate::todo::TodoItem {
+                lane_speed: None,
                 lane_after: None,
                 lane_owner: None,
                 stage: None,

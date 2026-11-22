@@ -1603,9 +1603,10 @@ fn import_summary_choose_pill_opens_checkbox_list() {
             } => assert!(prompt.choosing),
             other => panic!("expected Login welcome with import prompt, got {other:?}"),
         }
-include!("onboarding_recent_project_tests.rs");
     });
 }
+
+include!("onboarding_recent_project_tests.rs");
 
 
 

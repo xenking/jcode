@@ -1343,6 +1343,8 @@ fn test_antigravity_individual_quota_429_immediately_auto_fails_over_without_rat
             app.session.route_api_method = initial_route_api_method.clone();
             app.remote_model_options = vec![
                 crate::provider::ModelRoute {
+                    reasoning_efforts: None,
+                    speed_options: Vec::new(),
                     model: "gemini-4-neon-high".into(),
                     provider: "Antigravity".into(),
                     api_method: "https".into(),
@@ -1352,6 +1354,8 @@ fn test_antigravity_individual_quota_429_immediately_auto_fails_over_without_rat
                     cheapness: None,
                 },
                 crate::provider::ModelRoute {
+                    reasoning_efforts: None,
+                    speed_options: Vec::new(),
                     model: "gpt-5.4".into(),
                     provider: "OpenAI".into(),
                     api_method: "openai-oauth@openai-fox".into(),

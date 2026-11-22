@@ -340,6 +340,8 @@ fn antigravity_remote_effort_helpers_and_event_sync_sibling_model() {
         app.remote_provider_name = Some("antigravity".to_string());
         app.remote_provider_model = Some("gemini-4-neon-low".to_string());
         let route = |model: &str| crate::provider::ModelRoute {
+            reasoning_efforts: None,
+            speed_options: Vec::new(),
             model: model.to_string(),
             provider: "Antigravity".to_string(),
             api_method: "antigravity-https".to_string(),

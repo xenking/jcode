@@ -89,6 +89,7 @@ fn session_menu_item_title_prefers_generated_title_then_persisted_todo_title() {
     crate::todo::save_todos(
         session_id,
         &[crate::todo::TodoItem {
+            lane_speed: None,
             content: "Use todo context in the menu bar".to_string(),
             status: "in_progress".to_string(),
             priority: "high".to_string(),

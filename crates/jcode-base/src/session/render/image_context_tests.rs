@@ -188,6 +188,7 @@ fn thread_cpu_ns() -> u64 {
     );
     t.tv_sec as u64 * 1_000_000_000 + t.tv_nsec as u64
 }
+#[cfg(target_os = "linux")]
 fn allocations(f: fn(&Session) -> Output, s: &Session) -> (usize, usize) {
     CALLS.with(|n| n.set(0));
     BYTES.with(|n| n.set(0));

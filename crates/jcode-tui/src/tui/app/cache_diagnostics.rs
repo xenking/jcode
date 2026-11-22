@@ -28,18 +28,29 @@ impl App {
             return;
         };
         let missed_tokens = expected_tokens.saturating_sub(read_tokens);
-        if missed_tokens < Self::kv_cache_min_missed_tokens(&request.provider) {
-            return;
-        }
-
         let optimal_pct = ratio_pct(read_tokens, expected_tokens);
         let reason =
             self.classify_kv_cache_miss_reason(request, baseline, read_tokens, optimal_pct);
-        if reason == KvCacheMissReason::LowRead
-            && Self::kv_cache_warm_read_shortfall(request, baseline, read_tokens)
-        {
-            // The daemon still reports any request-only suffix change that the
-            // local projection cannot see.
+        let low_read = matches!(
+            reason,
+            KvCacheMissReason::LowRead | KvCacheMissReason::ZeroRead
+        );
+        let flagged = if low_read {
+            self.kv_cache
+                .kv_cache_tail
+                .is_miss(&request.provider, expected_tokens, read_tokens)
+                && !Self::kv_cache_warm_read_shortfall(request, baseline, read_tokens)
+        } else {
+            missed_tokens
+                >= crate::kv_cache_monitor::min_missed_tokens_for_provider(&request.provider)
+        };
+        self.kv_cache.kv_cache_tail.observe(
+            &request.provider,
+            expected_tokens,
+            read_tokens,
+            flagged,
+        );
+        if !flagged {
             return;
         }
 

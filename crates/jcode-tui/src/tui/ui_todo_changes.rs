@@ -498,6 +498,7 @@ mod tests {
 
     fn todo(id: &str, content: &str, status: &str) -> TodoItem {
         TodoItem {
+            lane_speed: None,
             id: id.to_string(),
             content: content.to_string(),
             status: status.to_string(),
