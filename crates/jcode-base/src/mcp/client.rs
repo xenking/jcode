@@ -107,11 +107,27 @@ impl McpHandle {
 
     /// Call a tool
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<ToolCallResult> {
-        let arguments = if arguments.is_null() {
+        let mut arguments = if arguments.is_null() {
             Value::Object(serde_json::Map::new())
         } else {
             arguments
         };
+        // `intent` is a jcode display note unless declared by the MCP tool.
+        // Use the live schema, which is available even on connect-on-first-call.
+        if let Some(object) = arguments.as_object_mut()
+            && object.contains_key("intent")
+        {
+            let tools = self.tools.read().unwrap_or_else(|error| error.into_inner());
+            let declares_intent = tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .and_then(|tool| tool.input_schema.get("properties"))
+                .and_then(Value::as_object)
+                .is_some_and(|properties| properties.contains_key("intent"));
+            if !declares_intent {
+                object.remove("intent");
+            }
+        }
         let params = ToolCallParams {
             name: name.to_string(),
             arguments,

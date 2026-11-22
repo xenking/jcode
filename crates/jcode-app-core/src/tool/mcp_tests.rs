@@ -139,6 +139,64 @@ async fn unified_registry() -> crate::tool::Registry {
     registry
 }
 
+#[cfg(unix)]
+async fn call_strict_mcp_tool(tool: &str, expected: Value) {
+    let script = r#"
+while IFS= read -r line; do
+    id=${line#*'"id":'}
+    id=${id%%,*}
+    case "$line" in
+        *'"initialize"'*)
+            result='{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}}';;
+        *'"tools/list"'*)
+            result='{"tools":[{"name":"strict","inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"additionalProperties":false}},{"name":"with_intent","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"intent":{"type":"string"}},"required":["intent"],"additionalProperties":false}}]}';;
+        *'"tools/call"'*)
+            escaped=$(printf '%s' "$line" | /usr/bin/sed 's/"/\\"/g')
+            result=$(printf '{"content":[{"type":"text","text":"%s"}]}' "$escaped");;
+        *) continue;;
+    esac
+    printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$id" "$result"
+done
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let server_name = dir.path().file_name().unwrap().to_str().unwrap();
+    let config = serde_json::from_value(json!({
+        "servers": { (server_name): {
+            "command": "/bin/sh", "args": ["-c", script], "timeout_secs": 3
+        } }
+    }))
+    .unwrap();
+    let manager = Arc::new(RwLock::new(McpManager::with_config(config)));
+    assert!(manager.read().await.connected_servers().await.is_empty());
+    let wrapper = McpCallTool::new(manager.clone());
+    let unified = McpManagementTool::new(manager.clone());
+    for entry in [&wrapper as &dyn Tool, &unified as &dyn Tool] {
+        let output = entry
+            .execute(
+                json!({"action":"call","server":server_name,"tool":tool,"intent":"display",
+                    "arguments":{"query":"crates","intent":"nested"}}),
+                create_test_context(),
+            )
+            .await
+            .unwrap();
+        let request = serde_json::from_str::<Value>(&output.output).unwrap();
+        assert_eq!(request["params"]["arguments"], expected);
+    }
+    manager.read().await.disconnect_all().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn mcp_call_strips_undeclared_intent_on_the_wire() {
+    call_strict_mcp_tool("strict", json!({"query":"crates"})).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn mcp_call_preserves_declared_intent_on_the_first_call() {
+    call_strict_mcp_tool("with_intent", json!({"query":"crates","intent":"nested"})).await;
+}
+
 #[tokio::test]
 async fn unified_mcp_hides_alias_schemas_but_preserves_execution() {
     let registry = unified_registry().await;

@@ -56,18 +56,6 @@ impl Tool for McpTool {
         } else {
             input
         };
-        // `intent` is a jcode-injected display-only parameter (see
-        // ensure_intent_in_schema). Strip it before forwarding unless the
-        // MCP server's own schema declares an `intent` property.
-        let server_declares_intent = self
-            .tool_def
-            .input_schema
-            .get("properties")
-            .and_then(|p| p.as_object())
-            .is_some_and(|p| p.contains_key("intent"));
-        if !server_declares_intent && let Some(object) = input.as_object_mut() {
-            object.remove("intent");
-        }
         // The escape hatch is jcode's, not the server's: read it, never forward it.
         let accept_large_output = take_accept_large_output(&mut input);
         let manager = self.manager.read().await;
