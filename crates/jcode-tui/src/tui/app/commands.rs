@@ -1248,35 +1248,7 @@ fn disconnect_ssh_remote(app: &mut App, name: &str) {
     }
 }
 
-pub(super) fn handle_btw_command(app: &mut App, trimmed: &str) -> bool {
-    if trimmed != "/btw" && !trimmed.starts_with("/btw ") {
-        return false;
-    }
-
-    let question = trimmed.strip_prefix("/btw").unwrap_or_default().trim();
-    if app.btw_turn_is_active() {
-        app.set_status_notice("Finish the current side question first");
-        return true;
-    }
-    if question.is_empty() {
-        app.show_btw_history();
-        return true;
-    }
-    if let Some(selection) = question.strip_prefix('#') {
-        let (number, follow_up) = selection
-            .split_once(char::is_whitespace)
-            .unwrap_or((selection, ""));
-        if !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()) {
-            app.open_btw_history_topic(number, follow_up.trim());
-            return true;
-        }
-    }
-
-    if app.start_btw(question) {
-        app.pending_btw_turn = true;
-    }
-    true
-}
+pub(super) use super::btw::handle_btw_command;
 
 /// `/fork [prompt]` and `/split`: fork the current session into a new window.
 /// With a prompt, the forked session starts by answering it.

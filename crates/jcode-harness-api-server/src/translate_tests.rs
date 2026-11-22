@@ -522,14 +522,14 @@ fn jcode_protocol_like_kv_miss() -> Value {
     })
 }
 
-struct ScopedJcodeHome {
+pub(super) struct ScopedJcodeHome {
     path: PathBuf,
     previous: Option<OsString>,
     _guard: MutexGuard<'static, ()>,
 }
 
 impl ScopedJcodeHome {
-    fn new(label: &str) -> Self {
+    pub(super) fn new(label: &str) -> Self {
         let guard = jcode_home_test_lock();
         let previous = std::env::var_os("JCODE_HOME");
         let unique = SystemTime::now()
@@ -641,7 +641,7 @@ fn metadata_display_title_prefers_generated_title_over_todo_lane_label() {
     assert_eq!(metadata.display_title().as_deref(), Some("session-titles"));
 }
 
-fn only_reply_event(outbound: Vec<Outbound>) -> ApiEvent {
+pub(super) fn only_reply_event(outbound: Vec<Outbound>) -> ApiEvent {
     assert_eq!(outbound.len(), 1, "expected exactly one reply");
     match outbound.into_iter().next().expect("one outbound") {
         Outbound::Reply(frame) => frame.event,
@@ -2908,95 +2908,6 @@ fn user_connections_are_global_independent_and_fresh_in_list_metadata() {
     let legacy: SessionInfo =
         serde_json::from_value(json!({"session_id":"legacy","status":"idle"})).unwrap();
     assert!(!legacy.user_connected);
-}
-
-#[test]
-fn side_question_fork_never_falls_back_to_an_ordinary_split() {
-    let request = json!({"req": "fork_side_question", "id": 1, "session_id": "parent"});
-    let mut old = BridgeState::default();
-    old.session_id = Some("parent".into());
-    assert!(matches!(
-        only_reply_event(old.api_request_to_legacy(&request)),
-        ApiEvent::Error {
-            code: ErrorCode::UnknownRequest,
-            ..
-        }
-    ));
-
-    let mut current = BridgeState::default();
-    current.session_id = Some("parent".into());
-    current.side_questions_supported = true;
-    // A capable backend must use the distinct durable side-question fork.
-    let output = current.api_request_to_legacy(&request);
-    assert!(
-        matches!(&output[..], [Outbound::Legacy(frame)] if frame["type"] == "split_side_question")
-    );
-}
-
-#[test]
-fn side_question_catalog_keeps_direct_children_and_stable_order_after_promotion() {
-    use jcode_base::{
-        message::{Message, Role},
-        session::{Session, load_side_question_history},
-    };
-
-    let _home = ScopedJcodeHome::new("side-question-lineage");
-    let parent = "session_btw_parent";
-    let mut ordinary =
-        Session::create_with_id("session_ordinary".into(), Some(parent.into()), None);
-    ordinary.save_prepared().unwrap();
-    let mut older = Session::create_with_id("session_btw_older".into(), Some(parent.into()), None);
-    older.created_at -= std::time::Duration::from_secs(3);
-    older.add_message(Role::User, Message::user("main topic context").content);
-    older.save_new_side_question().unwrap();
-    let mut newer = Session::create_with_id("session_btw_newer".into(), Some(parent.into()), None);
-    newer.save_new_side_question().unwrap();
-    let mut nested =
-        Session::create_with_id("session_btw_nested".into(), Some(older.id.clone()), None);
-    nested.save_new_side_question().unwrap();
-    let mut legacy =
-        Session::create_with_id("session_btw_legacy".into(), Some(parent.into()), None);
-    legacy.created_at -= std::time::Duration::from_secs(10);
-    legacy.hidden = true;
-    legacy.save_prepared().unwrap();
-
-    let list = || {
-        Session::list_side_questions(parent)
-            .unwrap()
-            .into_iter()
-            .map(|topic| (topic.session_id, topic.message_start))
-            .collect::<Vec<_>>()
-    };
-    let expected = [
-        (newer.id.clone(), Some(0)),
-        (older.id.clone(), Some(1)),
-        (legacy.id.clone(), None),
-    ];
-    assert_eq!(list(), expected);
-    assert_eq!(
-        Session::list_side_questions(&older.id).unwrap()[0].session_id,
-        nested.id
-    );
-    assert!(load_side_question_history(&legacy.id).is_err());
-    assert!(load_side_question_history(&ordinary.id).is_err());
-    assert!(load_side_question_history(&older.id).unwrap().is_empty());
-
-    older.add_message(Role::User, Message::user("side topic question").content);
-    older.add_message(Role::Assistant, Message::user("side topic answer").content);
-    older.save_prepared().unwrap();
-    let messages = load_side_question_history(&older.id).unwrap();
-    assert_eq!(
-        messages
-            .iter()
-            .map(|message| message.content.as_str())
-            .collect::<Vec<_>>(),
-        ["side topic question", "side topic answer"]
-    );
-    assert!(BridgeState::hidden_side_question_ids().contains(&older.id));
-    Session::promote_side_question(&older.id).unwrap();
-    Session::promote_side_question(&older.id).unwrap();
-    assert!(!BridgeState::hidden_side_question_ids().contains(&older.id));
-    assert_eq!(list(), expected);
 }
 
 #[test]

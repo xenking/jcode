@@ -238,7 +238,7 @@ impl App {
                 }
                 // A closed card stops its turn and drops the connection; the
                 // hidden session stays on disk until the user promotes it.
-                if btw_conn.is_some() && !self.btw_open() && !self.btw_detached_turn {
+                if btw_conn.is_some() && !self.btw_open() && !self.btw_ui.draining {
                     if let Some(mut connection) = btw_conn.take()
                         && let Err(error) = connection.cancel().await
                     {

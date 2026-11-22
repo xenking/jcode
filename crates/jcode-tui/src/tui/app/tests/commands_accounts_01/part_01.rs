@@ -492,8 +492,8 @@ fn test_help_topic_shows_btw_command_details() {
         msg.content
     );
     assert!(
-        msg.content.contains("ctrl+p"),
-        "the help lists the key that opens the answer as a fork: {}",
+        msg.content.contains("Ctrl+p") && msg.content.contains("/btw #N"),
+        "the help lists promotion and history controls: {}",
         msg.content
     );
 }
@@ -1021,23 +1021,6 @@ fn test_test_command_queues_layered_verification_prompt() {
     assert!(queued.contains("Static analysis"));
     assert!(queued.contains("fault injection/chaos"));
     assert!(queued.contains("Final proof packet"));
-}
-
-#[test]
-fn test_btw_empty_command_lists_topics_instead_of_sending() {
-    with_temp_jcode_home(|| {
-        let mut app = create_test_app();
-        app.input = "/btw".to_string();
-        app.submit_input();
-
-        let view = app
-            .inline_view_state
-            .as_ref()
-            .expect("side-question history");
-        assert_eq!(view.title, "Side-question history");
-        assert!(view.lines[0].contains("No side questions yet"));
-        assert!(!app.pending_btw_turn);
-    });
 }
 
 #[test]

@@ -245,7 +245,7 @@ const TS_ONLY: &[(&str, &str)] = &[("close", "Rust closes through Drop")];
 
 fn rust_client_source() -> String {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    ["client.rs", "structured.rs"]
+    ["client.rs", "client/side_questions.rs", "structured.rs"]
         .into_iter()
         .map(|file| {
             std::fs::read_to_string(root.join(file)).unwrap_or_else(|error| {

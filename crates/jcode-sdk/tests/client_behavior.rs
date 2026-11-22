@@ -1,10 +1,4 @@
-//! Client behavior against a fake harness.
-//!
-//! The correlation logic is the part of an SDK that fails silently: a reply
-//! delivered to the wrong waiter, or a stream event swallowed by a request
-//! that happened to be in flight, produces a hang rather than an error. None
-//! of that is visible from a passing `cargo build`, so it is driven here
-//! against a scripted server on a real socket pair.
+//! Client request correlation against a scripted harness on a real socket pair.
 
 #![cfg(unix)]
 
@@ -26,6 +20,8 @@ mod protocol_partial_disconnect;
 mod search_sessions;
 #[path = "client_behavior/swarm_status.rs"]
 mod swarm_status;
+#[path = "client_behavior/side_questions.rs"]
+mod side_questions;
 
 /// A socket-pair transport, so the test drives the client over the same code
 /// path a real connection uses.
@@ -113,26 +109,6 @@ fn reply(frame: &ClientFrame, event: ApiEvent, writer: &mut dyn Write) {
         event,
     };
     write_frame(&mut { writer }, &out).expect("reply");
-}
-
-#[test]
-fn side_questions_on_an_old_bridge_are_unsupported_without_touching_the_session() {
-    let client = fake_harness(|frame, writer| {
-        assert!(matches!(frame.request, ApiRequest::Ping));
-        reply(frame, ApiEvent::Pong, writer);
-    });
-    for error in [
-        client.fork_side_question("parent").unwrap_err(),
-        client.list_side_questions("parent").unwrap_err(),
-        client.get_side_question_history("child").unwrap_err(),
-        client.promote_side_question("child").unwrap_err(),
-    ] {
-        assert_eq!(error.kind, jcode_sdk::ErrorKind::UnsupportedCapability);
-    }
-    assert!(matches!(
-        client.request(ApiRequest::Ping).unwrap().event,
-        ApiEvent::Pong
-    ));
 }
 
 fn push(event: ApiEvent, writer: &mut dyn Write) {

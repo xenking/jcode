@@ -7,6 +7,35 @@ use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
 use super::Session;
 
 impl Session {
+    /// Append a model-visible notice telling the agent this session is a fork
+    /// of `parent_session_id`'s conversation.
+    ///
+    /// Forking happens when the user splits a window mid-conversation (often
+    /// while the parent agent is still streaming) and points the new window at
+    /// a clone of the transcript. Without this notice the forked agent assumes
+    /// it owns the in-flight request, duplicating the parent's work. The
+    /// notice is wrapped in `<system-reminder>` so it stays out of the visible
+    /// transcript while still reaching the model on the next turn.
+    pub fn append_fork_notice(&mut self, parent_session_id: &str, parent_display_name: &str) {
+        let text = format!(
+            "<system-reminder>\nThis session was forked (split) from session {parent} ({parent_id}) by the user. \
+The full conversation above is inherited from that session, but the original agent in {parent} \
+is still active and will continue handling whatever request or work was in progress there. \
+Do NOT continue or duplicate that in-flight work here. Treat the next user message as a fresh \
+request in this new forked session, using the inherited conversation only as context.\n</system-reminder>",
+            parent = parent_display_name,
+            parent_id = parent_session_id,
+        );
+        self.add_message_with_display_role(
+            super::Role::User,
+            vec![super::ContentBlock::Text {
+                text,
+                cache_control: None,
+            }],
+            Some(super::StoredDisplayRole::System),
+        );
+    }
+
     /// Mark a new child after copying its inherited messages, before its first turn.
     pub fn mark_side_question(&mut self) {
         debug_assert!(self.parent_id.is_some());

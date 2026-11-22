@@ -28,6 +28,12 @@ pub(crate) struct BtwCard {
     pub error: Option<String>,
 }
 
+#[derive(Default)]
+pub(super) struct BtwUi {
+    history_ids: Option<(String, Vec<String>)>,
+    pub(super) draining: bool,
+}
+
 impl BtwCard {
     fn status_line(&self) -> &'static str {
         if self.error.is_some() {
@@ -84,9 +90,39 @@ mod socket_tests {
     }
 }
 
+pub(super) fn handle_btw_command(app: &mut App, trimmed: &str) -> bool {
+    if trimmed != "/btw" && !trimmed.starts_with("/btw ") {
+        return false;
+    }
+
+    let question = trimmed.strip_prefix("/btw").unwrap_or_default().trim();
+    if app.btw_turn_is_active() {
+        app.set_status_notice("Finish the current side question first");
+        return true;
+    }
+    if question.is_empty() {
+        app.show_btw_history();
+        return true;
+    }
+    if let Some(selection) = question.strip_prefix('#') {
+        let (number, follow_up) = selection
+            .split_once(char::is_whitespace)
+            .unwrap_or((selection, ""));
+        if !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()) {
+            app.open_btw_history_topic(number, follow_up.trim());
+            return true;
+        }
+    }
+
+    if app.start_btw(question) {
+        app.pending_btw_turn = true;
+    }
+    true
+}
+
 impl App {
     pub(super) fn btw_turn_is_active(&self) -> bool {
-        self.btw_detached_turn
+        self.btw_ui.draining
             || self.pending_btw_turn
             || self
                 .btw
@@ -126,7 +162,7 @@ impl App {
         if lines.is_empty() {
             lines.push("No side questions yet. Start one with /btw <question>.".into());
         }
-        self.btw_history_ids = Some((
+        self.btw_ui.history_ids = Some((
             parent,
             topics
                 .iter()
@@ -148,7 +184,7 @@ impl App {
             .ok()
             .and_then(|index| index.checked_sub(1))
             .and_then(|index| {
-                let (listed_parent, ids) = self.btw_history_ids.as_ref()?;
+                let (listed_parent, ids) = self.btw_ui.history_ids.as_ref()?;
                 (listed_parent == &parent).then(|| ids.get(index)).flatten()
             })
             .cloned()
@@ -200,7 +236,6 @@ impl App {
             waiting: !restored && !self.is_remote && self.is_processing,
             ..BtwCard::default()
         });
-        self.btw_cancel = false;
         self.pending_btw_turn = !restored;
         self.sync_btw_card();
     }
@@ -247,7 +282,6 @@ impl App {
             waiting,
             ..BtwCard::default()
         });
-        self.btw_cancel = false;
         self.sync_btw_card();
         self.set_status_notice("Side question");
         true
@@ -261,7 +295,6 @@ impl App {
         }
         self.btw = None;
         self.pending_btw_turn = false;
-        self.btw_cancel = true;
         if self.inline_view_is_btw {
             self.inline_view_state = None;
             self.inline_view_is_btw = false;
@@ -316,7 +349,7 @@ impl App {
             }
         };
         self.close_btw();
-        self.btw_detached_turn = streaming;
+        self.btw_ui.draining = streaming;
         match super::spawn_in_new_terminal(&exe, &child, &cwd, socket.as_deref()) {
             Ok(true) => {
                 self.push_display_message(DisplayMessage::system(format!(
@@ -599,8 +632,8 @@ impl App {
                 crate::protocol::ServerEvent::Done { .. }
                     | crate::protocol::ServerEvent::Error { .. }
             );
-            self.btw_detached_turn &= !finished;
-            return finished || !self.btw_detached_turn;
+            self.btw_ui.draining &= !finished;
+            return finished || !self.btw_ui.draining;
         };
         let mut finished = false;
         let mut failed = false;
@@ -676,7 +709,7 @@ impl App {
 
     /// Record a failed start or transport without losing the question.
     pub(super) fn fail_btw(&mut self, error: impl std::fmt::Display) {
-        self.btw_detached_turn = false;
+        self.btw_ui.draining = false;
         if let Some(card) = self.btw.as_mut() {
             card.waiting = false;
             card.streaming = false;
@@ -714,7 +747,6 @@ pub(super) async fn process_btw_with_input(
         card.waiting = false;
         card.streaming = true;
     }
-    app.btw_cancel = false;
     app.sync_btw_card();
     status_spinner_renderer.draw_full(app, terminal)?;
 

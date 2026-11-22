@@ -750,39 +750,7 @@ impl BridgeState {
                 }
                 vec![Outbound::Legacy(message)]
             }
-            "fork_session" => {
-                let id = self.legacy_id();
-                self.pending_fork_id = Some((id, api_id));
-                vec![Outbound::Legacy(json!({"type": "split", "id": id}))]
-            }
-            "fork_side_question" => {
-                let Some(parent) = request["session_id"].as_str().filter(|id| !id.is_empty())
-                else {
-                    return Self::error_reply(
-                        api_id,
-                        ErrorCode::InvalidRequest,
-                        "Missing parent session ID",
-                    );
-                };
-                if self.session_id.as_deref() != Some(parent) {
-                    return Self::error_reply(
-                        api_id,
-                        ErrorCode::UnknownSession,
-                        "Attach to the parent session before asking a side question.",
-                    );
-                }
-                let id = self.legacy_id();
-                self.pending_side_question_forks
-                    .insert(id, (api_id, parent.to_string()));
-                vec![Outbound::Legacy(
-                    json!({"type": "split_side_question", "id": id}),
-                )]
-            }
-            "transfer_session" => {
-                let id = self.legacy_id();
-                self.pending_fork_id = Some((id, api_id));
-                vec![Outbound::Legacy(json!({"type": "transfer", "id": id}))]
-            }
+            "fork_session" | "fork_side_question" | "transfer_session" => self.translate_fork_request(req, api_id, request),
             "cancel" => {
                 let id = self.legacy_id();
                 self.pending_simple.push((id, api_id, SimpleKind::Ok));
@@ -2673,78 +2641,7 @@ impl BridgeState {
                     vec![]
                 }
             }
-            "side_question_forked" => {
-                let id = event["id"].as_u64().unwrap_or(0);
-                let Some((api_id, parent)) = self.pending_side_question_forks.remove(&id) else {
-                    return vec![];
-                };
-                match serde_json::from_value::<jcode_harness_api::SideQuestionTopic>(
-                    event["topic"].clone(),
-                ) {
-                    Ok(topic) if topic.parent_session_id == parent => vec![ServerFrame::reply(
-                        api_id,
-                        ApiEvent::SideQuestionForked { topic },
-                    )],
-                    Ok(_) => Self::invalid_daemon_event(
-                        Some(api_id),
-                        "Side-question fork returned a different parent".into(),
-                    ),
-                    Err(error) => Self::invalid_daemon_event(Some(api_id), error.to_string()),
-                }
-            }
-            "split_response" => {
-                let id = event["id"].as_u64().unwrap_or(0);
-                let Some((_, api_id)) = self
-                    .pending_fork_id
-                    .take()
-                    .filter(|(legacy_id, _)| *legacy_id == id)
-                else {
-                    return vec![];
-                };
-                let session_id = event["new_session_id"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
-                let metadata = Self::resolve_session_metadata(&session_id);
-                vec![ServerFrame::reply(
-                    api_id,
-                    ApiEvent::SessionForked {
-                        session: SessionInfo {
-                            user_connected: self.user_connected_sessions.contains(&session_id),
-                            edit_stats: None,
-                            context: None,
-                            parent_session_id: None,
-                            agent_label: None,
-                            swarm_status: None,
-                            transcript_bytes: Self::transcript_bytes(&session_id),
-                            saved: metadata.as_ref().is_some_and(|value| value.saved),
-                            updated_at_ms: Self::session_modified_ms(&session_id)
-                                .map(|value| value as i64),
-                            last_active_at_ms: metadata
-                                .as_ref()
-                                .and_then(|value| value.last_active_at_ms),
-                            session_id,
-                            working_dir: metadata
-                                .as_ref()
-                                .and_then(|value| value.working_dir.clone()),
-                            title: event["new_session_name"]
-                                .as_str()
-                                .map(str::to_string)
-                                .or_else(|| {
-                                    metadata
-                                        .as_ref()
-                                        .and_then(PersistedSessionMetadata::display_title)
-                                }),
-                            status: "idle".into(),
-                            archived: false,
-                            archived_at_ms: None,
-                            save_label: metadata
-                                .as_ref()
-                                .and_then(PersistedSessionMetadata::save_label),
-                        },
-                    },
-                )]
-            }
+            "side_question_forked" | "split_response" => self.translate_fork_reply(event),
             "pong" => self
                 .take_simple(event["id"].as_u64().unwrap_or(0), SimpleKind::Ping)
                 .map(|api_id| vec![ServerFrame::reply(api_id, ApiEvent::Pong)])
@@ -4253,29 +4150,6 @@ impl BridgeState {
         let _ = transaction.commit();
     }
 
-    fn hidden_side_question_ids() -> BTreeSet<String> {
-        let Some(home) = Self::jcode_home() else {
-            return BTreeSet::new();
-        };
-        let path = home
-            .join("state")
-            .join(jcode_session_types::SIDE_QUESTION_VISIBILITY_DIR);
-        std::fs::read_dir(path)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|entry| {
-                let path = entry.path();
-                if path.extension()?.to_str()? != "json"
-                    || !std::fs::read(&path).is_ok_and(|bytes| bytes == b"true")
-                {
-                    return None;
-                }
-                Some(path.file_stem()?.to_str()?.to_owned())
-            })
-            .collect()
-    }
-
     fn stored_session_ids(limit: Option<usize>) -> Vec<String> {
         let indexed = Self::recent_session_index_entries();
         if !indexed.is_empty() && limit.is_some_and(|limit| indexed.len() >= limit) {
@@ -4500,6 +4374,10 @@ impl BridgeState {
 mod tests;
 
 #[cfg(test)]
+#[path = "side_question_tests.rs"]
+mod side_question_tests;
+
+#[cfg(test)]
 #[path = "session_image_bridge_tests.rs"]
 mod session_image_bridge_tests;
 
@@ -4509,3 +4387,4 @@ mod user_response_capability_tests;
 
 #[path = "translate/session_files.rs"]
 mod session_files;
+mod session_forks;

@@ -318,6 +318,23 @@ fn btw_promote_unhides_the_hidden_fork_instead_of_asking_again() {
 }
 
 #[test]
+fn test_btw_empty_command_lists_topics_instead_of_sending() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.input = "/btw".to_string();
+        app.submit_input();
+
+        let view = app
+            .inline_view_state
+            .as_ref()
+            .expect("side-question history");
+        assert_eq!(view.title, "Side-question history");
+        assert!(view.lines[0].contains("No side questions yet"));
+        assert!(!app.pending_btw_turn);
+    });
+}
+
+#[test]
 fn btw_history_reopens_without_a_turn_and_queues_follow_up_in_the_same_child() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();

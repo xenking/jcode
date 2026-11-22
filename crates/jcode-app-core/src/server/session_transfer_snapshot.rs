@@ -10,7 +10,7 @@ pub(super) fn clone_split_session(
     Ok((child.id.clone(), child.display_name().to_string()))
 }
 
-pub(super) fn snapshot_child_session(
+fn snapshot_child_session(
     parent_session_id: &str,
     live_parent: Option<&Session>,
     side_question: bool,
@@ -55,6 +55,31 @@ pub(super) fn snapshot_child_session(
 
     crate::session_env::inherit_session_env(parent_session_id, &child.id);
     Ok(child)
+}
+
+pub(in crate::server) fn handle_split_side_question(
+    id: u64,
+    parent_session_id: &str,
+    agent: &Arc<Mutex<Agent>>,
+) -> ServerEvent {
+    let idle_agent = agent.try_lock().ok();
+    match snapshot_child_session(
+        parent_session_id,
+        idle_agent.as_ref().map(|agent| agent.session_for_split()),
+        true,
+    ) {
+        Ok(child) => ServerEvent::SideQuestionForked {
+            id,
+            topic: child
+                .side_question_topic()
+                .expect("new side-question child"),
+        },
+        Err(error) => ServerEvent::Error {
+            id,
+            message: format!("Could not fork side question: {error:#}"),
+            retry_after_secs: None,
+        },
+    }
 }
 
 pub(super) fn transfer_active_messages(session: &Session) -> Vec<crate::message::Message> {
